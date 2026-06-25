@@ -1,6 +1,6 @@
 # RMNG
 
-> **Hardware-accelerated, fleet-scale cloud desktops for the agent era.**
+> **Hardware-accelerated, fleet-scale cloud desktops for the agentic era.**
 
 ![RMNG — a cloud GNOME desktop streamed to a native multi-monitor viewer](docs/hero.webp)
 
@@ -59,7 +59,7 @@ template and provisions clones itself — carrying even the patched gnome-shell 
 | [frontend](frontend/README.md) | web app | React Router 7 management UI, ts-rs types from `wire`, served by the control-server |
 | [gnome-patch](gnome-patch/README.md) | tooling | builds the patched gnome-shell `.deb` (hide screen-share indicator + enable `Eval` for window-mgmt) embedded in the control-server |
 
-The per-clone **agent-wrapper** (Bun, Claude Agent SDK) lives at `../agent-wrapper`; the
+The per-clone **agent-wrapper** (Bun, Claude Agent SDK) is vendored at `agent-wrapper/`; the
 control-server embeds + deploys it and proxies chat to it. Its `desktop` MCP points at the
 clone-daemon (`http://127.0.0.1:9004`).
 
