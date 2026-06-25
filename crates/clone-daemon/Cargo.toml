@@ -1,0 +1,50 @@
+[package]
+name = "clone-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Thin in-clone pipe: RecordVirtual monitors + dmabuf capture + RemoteDesktop input. GPU/GNOME; runs on a clone CT."
+
+[[bin]]
+name = "rmng-clone-daemon"
+path = "src/main.rs"
+
+[dependencies]
+wire.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+# Per-node computer-use MCP over HTTP (served from inside the clone).
+axum.workspace = true
+# On-demand screenshots: GPU VPP dmabuf → PNG (shared with control-server).
+media.workspace = true
+# Needs-human detector (wait-for-stuck): HTTP to the inference server + the local MCP,
+# multipart upload to /api/detector-feedback, PNG decode + JPEG cell encode.
+reqwest = { workspace = true, features = ["multipart"] }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Mutter D-Bus (ScreenCast / RemoteDesktop / DisplayConfig) — pure Rust.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# dmabuf capture via GStreamer pipewiresrc -> appsink (the PoC-validated path).
+# v1_24 exposes VideoInfoDmaDrm (DMA_DRM caps → fourcc/modifier/plane layout).
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = { version = "0.23", features = ["v1_24"] }
+gstreamer-allocators = "0.23"
+# SCM_RIGHTS fd passing on the unix socket to control-server.
+nix = { version = "0.29", features = ["socket", "uio", "fs"] }
+libc = "0.2"
+# Raw PipeWire capture (dmabuf + SPA_META_Cursor) — GStreamer pipewiresrc doesn't
+# expose the cursor metadata, so the client-drawn cursor needs the raw stream.
+# v0_3_77 unlocks PropertyFlags::DONT_FIXATE + VideoFlags::MODIFIER (needed for
+# DMABUF modifier negotiation); the build/runtime hosts ship libpipewire >= 1.x.
+pipewire = { version = "0.10", features = ["v0_3_77"] }
+
+[[bin]]
+name = "capture-pw-test"
+path = "src/bin/capture_pw_test.rs"

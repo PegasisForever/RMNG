@@ -1,0 +1,6 @@
+/target
+**/target/
+node_modules/
+frontend/build/
+crates/control-server/embedded-bin/*.gz
+*.tmp.*

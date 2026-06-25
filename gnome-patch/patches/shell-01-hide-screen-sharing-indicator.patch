@@ -1,0 +1,15 @@
+--- a/js/ui/status/remoteAccess.js
++++ b/js/ui/status/remoteAccess.js
+@@ -168,7 +168,11 @@
+     }
+
+     _onNewHandle(handle) {
+-        if (handle.isRecording)
++        // kasm patch: do not surface the screen-sharing indicator for
++        // remote-desktop (RDP) sessions.
++        return;
++
++        if (handle.isRecording) // eslint-disable-line no-unreachable
+             return;
+
+         this._handles.add(handle);

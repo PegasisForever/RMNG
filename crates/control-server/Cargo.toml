@@ -1,0 +1,38 @@
+[package]
+name = "control-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The 4-port control-server: web API/SSE + media + per-clone MCP + global MCP + orchestration."
+
+[[bin]]
+name = "rmng-control-server"
+path = "src/main.rs"
+
+[dependencies]
+wire.workspace = true
+# Port-1 video plane (GStreamer/VA-API) + dmabuf fd handling. The control-server
+# builds + runs on the GPU host, so these are unconditional.
+media.workspace = true
+nix = { version = "0.29", features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = { workspace = true, features = ["multipart"] }
+tower.workspace = true
+tower-http.workspace = true
+notify.workspace = true
+reqwest.workspace = true
+# Decompress the gzipped embedded binaries (clone-daemon, agent-wrapper).
+flate2 = "1"
+# Embed the built frontend (frontend/build/client) into the binary → self-contained.
+# debug-embed: actually embed in debug too (default only embeds in release), so a
+# copied binary is self-contained regardless of profile.
+rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path", "debug-embed"] }

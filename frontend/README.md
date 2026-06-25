@@ -1,0 +1,73 @@
+# frontend
+
+The web app — the **management UI** (port 2). It is the existing React Router 7 dashboard
+(`../../control-server/app`) kept and extended with a Settings page, built to a static
+bundle and **served by the Rust control-server**.
+
+It is **management only**: host selection, clone orchestration, Claude accounts, chat,
+notes, and settings. **The live monitor viewer is not here** — viewing is the native GTK
+[viewer](../crates/viewer/README.md) on port 1. There is **no `MonitorViewer`, no WebRTC,
+no signaling** in this app.
+
+## What's reused (≈99% of the current UI)
+
+- Sidebar host list + selection, drag-reorder (`SidebarHost`, dnd-kit).
+- `CloneModal` (existing/new/plain ticket + Claude account picker).
+- `ClaudeAccountsPanel` (5h/7d usage bars).
+- `ChatPanel` (per-host agent chat over `/api/chat/:id/events`).
+- `HostEditor` (notes/BlockNote + uploads).
+- `OperationProgress` (clone/delete progress).
+- SSE subscription to `/events` → `ControlState`.
+
+The two-pane layout stays Notes/Chat (`pane: "notes" | "chat"`) — the planned third
+"monitor" pane is dropped.
+
+## What's new
+
+- **`Settings.tsx`** — per-section forms for **all** configuration (Proxmox SSH, Linear
+  workspace keys, Claude + clone-account tokens, template build parameters, monitor
+  defaults, the four listen ports), replacing hand-edited `config.json`. Secret fields are
+  masked/write-only with **Test connection** buttons (`POST /api/config/test`); saves go to
+  `PUT /api/config` and apply live. cloneAccounts are add/remove rows (ties into
+  `ClaudeAccountsPanel`). Reads the redacted `GET /api/config` — plaintext secrets never
+  reach the browser.
+- A **"Build/Update template"** affordance (`POST /api/template/bootstrap` / `/rebuild`),
+  with progress shown via the existing `OperationProgress`.
+- **Clone-from-zero** option in `CloneModal`: choose **CoW** (fast, from the golden template)
+  or **from-zero bootstrap** (full install + configure) — both stream as an `Operation`.
+- **Claude account controls** (extending `ClaudeAccountsPanel` + the per-host card): show the
+  assigned account, **hot-swap** a running clone's token to another account (`POST
+  /api/claude/swap`), and a per-host/global **auto-swap** toggle (swap when usage is
+  exhausted). Usage bars drive both the recommendation and the auto-swap trigger.
+
+## Types
+
+TypeScript types are **generated from the `wire` crate via ts-rs** (replacing the
+hand-maintained `app/lib/types.ts`), so `ControlState`/`Host`/`Operation`/etc. cannot drift
+from the Rust backend.
+
+## Build & serve
+
+- Build with Vite/Bun to a static bundle (`frontend/build` or similar).
+- The Rust control-server serves the bundle + `/uploads` on port 2; no Bun runtime in
+  production.
+- Dev: Vite dev server proxying `/api` + `/events` to the Rust backend.
+
+## Backend contract (preserved by the Rust port)
+
+- `GET /events` → full `ControlState` JSON, `data: …\n\n` frames, `: ping` heartbeats.
+- `POST /api/{activate,reorder,clone,delete}`, `/api/claude/{import,refresh,recommended}`,
+  `/api/notes/:id`, `/api/upload`, `/api/chat/:id` (+ `/events`, `/abort`).
+- **New**: `/api/config` (GET/PUT), `/api/config/test`, `/api/template/*`,
+  `/api/claude/swap` (hot-swap a clone's token); `/api/clone` takes a CoW-vs-from-zero mode.
+
+## Tests
+
+- Type-check against generated `wire` types.
+- Selection + clone/chat/claude flows work against the Rust backend (parity with Bun).
+- Settings: redacted read, write-only secrets, live-apply, "Test connection".
+
+## Open questions
+
+- Whether to keep React Router 7 + Bun build or simplify to a plain Vite SPA (the backend
+  serves it either way).

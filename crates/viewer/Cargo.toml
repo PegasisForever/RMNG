@@ -1,0 +1,33 @@
+[package]
+name = "viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native GTK4 viewer (GUI + headless): port-1 connect, VA-API H.264 decode, dmabuf render, input + clipboard."
+
+[[bin]]
+name = "rmng-viewer"
+path = "src/main.rs"
+
+[dependencies]
+wire.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# VA-API H.264 decode via GStreamer (vah264dec). The GUI sink (GdkDmabufTexture)
+# adds gtk4 in the next increment; the decode/transport core is toolkit-free so
+# the headless test mode needs no display.
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = { version = "0.23", features = ["v1_24"] }
+gstreamer-allocators = "0.23"
+gtk4 = { version = "0.9", package = "gtk4", features = ["v4_14"] }
+serde_json.workspace = true
+# Pointer-lock / relative mouse for games (Minecraft): drive the Wayland
+# pointer-constraints + relative-pointer protocols over GTK's own connection.
+# `wayland_crate` re-exports a version-matched wayland-client (0.31, matching gtk4 0.9).
+gdk4-wayland = { version = "0.9", features = ["wayland_crate"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }

@@ -1,0 +1,335 @@
+//! Linear integration for ticket-driven cloning — Rust port of `linear.server.ts`.
+//! Talks to `api.linear.app/graphql` with a per-workspace personal API key
+//! (`Authorization: <key>`, no "Bearer"). The ticket-id prefix (WE/DEV/HH/PER)
+//! selects both the workspace key and the team.
+
+use serde_json::{Value, json};
+use wire::{LinearConfig, LinearWorkspace};
+
+const LINEAR_API: &str = "https://api.linear.app/graphql";
+const ISSUE_FIELDS: &str =
+    "id identifier title url branchName state { id name type } labels { nodes { name } }";
+
+#[derive(Debug)]
+pub struct LinearError(pub String);
+impl std::fmt::Display for LinearError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for LinearError {}
+
+pub fn team_key(ws: LinearWorkspace) -> &'static str {
+    match ws {
+        LinearWorkspace::We => "WE",
+        LinearWorkspace::Dev => "DEV",
+        LinearWorkspace::Hh => "HH",
+        LinearWorkspace::Per => "PER",
+    }
+}
+
+pub fn prefix_from_str(s: &str) -> Option<LinearWorkspace> {
+    match s.to_ascii_lowercase().as_str() {
+        "we" => Some(LinearWorkspace::We),
+        "dev" => Some(LinearWorkspace::Dev),
+        "hh" => Some(LinearWorkspace::Hh),
+        "per" => Some(LinearWorkspace::Per),
+        _ => None,
+    }
+}
+
+fn key_for(cfg: &LinearConfig, ws: LinearWorkspace) -> Option<&str> {
+    match ws {
+        LinearWorkspace::We => cfg.we.as_deref(),
+        LinearWorkspace::Dev => cfg.dev.as_deref(),
+        LinearWorkspace::Hh => cfg.hh.as_deref(),
+        LinearWorkspace::Per => cfg.per.as_deref(),
+    }
+    .filter(|k| !k.is_empty())
+}
+
+#[derive(Debug, Clone)]
+pub struct TicketRef {
+    pub prefix: LinearWorkspace,
+    pub team_key: String,
+    pub number: u64,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssueInfo {
+    pub prefix: LinearWorkspace,
+    pub id: String,
+    pub identifier: String,
+    pub title: String,
+    pub url: String,
+    pub branch: String,
+    pub state_type: String,
+    pub label: String,
+}
+
+/// Pull a `WE-142`-style ref out of a pasted link or bare id (no regex crate).
+pub fn parse_ticket_ref(input: &str) -> Result<TicketRef, LinearError> {
+    let t = input.trim();
+    let b = t.as_bytes();
+    for start in 0..b.len() {
+        if start > 0 && b[start - 1].is_ascii_alphanumeric() {
+            continue; // not a word boundary
+        }
+        let mut i = start;
+        while i < b.len() && b[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        if i - start < 2 || i >= b.len() || b[i] != b'-' {
+            continue;
+        }
+        let ds = i + 1;
+        let mut j = ds;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j == ds || (j < b.len() && b[j].is_ascii_alphanumeric()) {
+            continue;
+        }
+        let team_key = t[start..i].to_uppercase();
+        let Some(prefix) = prefix_from_str(&team_key) else {
+            return Err(LinearError(format!(
+                "unsupported workspace \"{}\" — expected one of WE, DEV, HH, PER",
+                &t[start..i]
+            )));
+        };
+        let number: u64 = t[ds..j].parse().map_err(|_| LinearError("bad ticket number".into()))?;
+        return Ok(TicketRef {
+            prefix,
+            team_key: team_key.clone(),
+            number,
+            identifier: format!("{team_key}-{number}"),
+        });
+    }
+    Err(LinearError(format!("could not find a ticket id (like WE-142) in \"{input}\"")))
+}
+
+async fn gql(
+    http: &reqwest::Client,
+    key: &str,
+    query: &str,
+    variables: Value,
+) -> Result<Value, LinearError> {
+    if key.is_empty() {
+        return Err(LinearError("no Linear API key configured for that workspace".into()));
+    }
+    let resp = http
+        .post(LINEAR_API)
+        .header("content-type", "application/json")
+        .header("authorization", key)
+        .json(&json!({ "query": query, "variables": variables }))
+        .send()
+        .await
+        .map_err(|e| LinearError(format!("Linear API unreachable: {e}")))?;
+    let status = resp.status();
+    let body: Value = resp.json().await.map_err(|e| LinearError(format!("Linear API bad JSON: {e}")))?;
+    if let Some(errs) = body.get("errors").and_then(Value::as_array) {
+        if !errs.is_empty() {
+            let msg = errs
+                .iter()
+                .filter_map(|e| e.get("message").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(LinearError(msg));
+        }
+    }
+    if !status.is_success() {
+        return Err(LinearError(format!("Linear API error (HTTP {})", status.as_u16())));
+    }
+    body.get("data").cloned().ok_or_else(|| LinearError("Linear API returned no data".into()))
+}
+
+fn to_issue_info(prefix: LinearWorkspace, n: &Value) -> IssueInfo {
+    let s = |k: &str| n.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    IssueInfo {
+        prefix,
+        id: s("id"),
+        identifier: s("identifier"),
+        title: s("title"),
+        url: s("url"),
+        branch: s("branchName"),
+        state_type: n
+            .get("state")
+            .and_then(|st| st.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        label: n
+            .pointer("/labels/nodes/0/name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+/// Fetch an existing issue by team key + number.
+pub async fn fetch_issue(
+    http: &reqwest::Client,
+    cfg: &LinearConfig,
+    r: &TicketRef,
+) -> Result<IssueInfo, LinearError> {
+    let key = key_for(cfg, r.prefix).ok_or_else(|| LinearError("no Linear API key configured".into()))?;
+    let query = format!(
+        "query($team: String!, $num: Float!) {{ issues(filter: {{ team: {{ key: {{ eq: $team }} }}, number: {{ eq: $num }} }}, first: 1) {{ nodes {{ {ISSUE_FIELDS} }} }} }}"
+    );
+    let data = gql(http, key, &query, json!({ "team": r.team_key, "num": r.number })).await?;
+    let node = data.pointer("/issues/nodes/0").cloned().filter(|v| !v.is_null());
+    match node {
+        Some(n) => Ok(to_issue_info(r.prefix, &n)),
+        None => Err(LinearError(format!("ticket {} not found in Linear", r.identifier))),
+    }
+}
+
+/// Create a new issue in the workspace's team.
+pub async fn create_issue(
+    http: &reqwest::Client,
+    cfg: &LinearConfig,
+    prefix: LinearWorkspace,
+    title: &str,
+    description: &str,
+) -> Result<IssueInfo, LinearError> {
+    let key = key_for(cfg, prefix).ok_or_else(|| LinearError("no Linear API key configured".into()))?;
+    let tk = team_key(prefix);
+    let team_data = gql(
+        http,
+        key,
+        "query($team: String!) { teams(filter: { key: { eq: $team } }, first: 1) { nodes { id } } }",
+        json!({ "team": tk }),
+    )
+    .await?;
+    let team_id = team_data
+        .pointer("/teams/nodes/0/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LinearError(format!("team {tk} not found")))?
+        .to_string();
+    let mutation = format!(
+        "mutation($teamId: String!, $title: String!, $description: String!) {{ issueCreate(input: {{ teamId: $teamId, title: $title, description: $description }}) {{ success issue {{ {ISSUE_FIELDS} }} }} }}"
+    );
+    let created = gql(
+        http,
+        key,
+        &mutation,
+        json!({ "teamId": team_id, "title": title, "description": description }),
+    )
+    .await?;
+    let ok = created.pointer("/issueCreate/success").and_then(Value::as_bool).unwrap_or(false);
+    let node = created.pointer("/issueCreate/issue").cloned().filter(|v| !v.is_null());
+    match (ok, node) {
+        (true, Some(n)) => Ok(to_issue_info(prefix, &n)),
+        _ => Err(LinearError(format!("failed to create ticket in {tk}"))),
+    }
+}
+
+/// Move the issue to "In Progress" unless already started (no backwards drag).
+pub async fn ensure_in_progress(
+    http: &reqwest::Client,
+    cfg: &LinearConfig,
+    issue: &IssueInfo,
+) -> Result<(), LinearError> {
+    if issue.state_type == "started" {
+        return Ok(());
+    }
+    let key = key_for(cfg, issue.prefix).ok_or_else(|| LinearError("no Linear API key configured".into()))?;
+    let tk = team_key(issue.prefix);
+    let data = gql(
+        http,
+        key,
+        "query($team: String!) { teams(filter: { key: { eq: $team } }, first: 1) { nodes { states { nodes { id name type } } } } }",
+        json!({ "team": tk }),
+    )
+    .await?;
+    let states = data
+        .pointer("/teams/nodes/0/states/nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let target = states
+        .iter()
+        .find(|s| s.get("name").and_then(Value::as_str) == Some("In Progress"))
+        .or_else(|| states.iter().find(|s| s.get("type").and_then(Value::as_str) == Some("started")))
+        .and_then(|s| s.get("id").and_then(Value::as_str))
+        .ok_or_else(|| LinearError(format!("no \"In Progress\" state found for team {tk}")))?
+        .to_string();
+    let upd = gql(
+        http,
+        key,
+        "mutation($id: String!, $state: String!) { issueUpdate(id: $id, input: { stateId: $state }) { success } }",
+        json!({ "id": issue.id, "state": target }),
+    )
+    .await?;
+    if upd.pointer("/issueUpdate/success").and_then(Value::as_bool) != Some(true) {
+        return Err(LinearError(format!("failed to move {} to In Progress", issue.identifier)));
+    }
+    Ok(())
+}
+
+/// Sanitize the configurable hostname prefix to DNS-label-safe chars: lowercase,
+/// keep `[a-z0-9-]`, drop a leading `-` (a trailing one like `pega-` is intended).
+pub fn clean_prefix(prefix: &str) -> String {
+    let s: String = prefix
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    s.trim_start_matches('-').to_string()
+}
+
+/// `(pega-, My cool task!)` → `pega-my-cool-task` (a DNS label; start_clone re-validates).
+pub fn plain_hostname_base(prefix: &str, title: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for c in title.to_ascii_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').chars().take(40).collect::<String>();
+    let slug = slug.trim_matches('-').to_string();
+    let prefix = clean_prefix(prefix);
+    if slug.is_empty() { format!("{prefix}host") } else { format!("{prefix}{slug}") }
+}
+
+/// `(pega-, DEV-123)` → `pega-dev-123`.
+pub fn ticket_hostname_base(prefix: &str, identifier: &str) -> String {
+    format!("{}{}", clean_prefix(prefix), identifier.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ticket_refs() {
+        let r = parse_ticket_ref("https://linear.app/x/issue/WE-142/foo").unwrap();
+        assert_eq!(r.identifier, "WE-142");
+        assert_eq!(r.prefix, LinearWorkspace::We);
+        assert_eq!(parse_ticket_ref("dev-7").unwrap().identifier, "DEV-7");
+        assert!(parse_ticket_ref("XX-1").is_err()); // unsupported workspace
+        assert!(parse_ticket_ref("nope").is_err());
+    }
+
+    #[test]
+    fn plain_slug() {
+        assert_eq!(plain_hostname_base("pega-", "My cool task!"), "pega-my-cool-task");
+        assert_eq!(plain_hostname_base("pega-", "!!!"), "pega-host");
+        // custom + sanitized prefixes
+        assert_eq!(plain_hostname_base("clone-", "My task"), "clone-my-task");
+        assert_eq!(plain_hostname_base("", "My task"), "my-task");
+        assert_eq!(plain_hostname_base("-Bad_Pre-", "X"), "badpre-x"); // leading '-' dropped, '_' stripped, lowercased
+    }
+
+    #[test]
+    fn ticket_base() {
+        assert_eq!(ticket_hostname_base("pega-", "DEV-123"), "pega-dev-123");
+        assert_eq!(ticket_hostname_base("", "WE-7"), "we-7");
+    }
+}

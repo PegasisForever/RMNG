@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wire",
+    "crates/control-server",
+    "crates/media",
+    "crates/clone-daemon",
+    "crates/viewer",
+    "crates/control-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+# in-tree
+wire = { path = "crates/wire" }
+media = { path = "crates/media" }
+
+# core
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `no-serde-warnings`: ts-rs can't parse serde serialization-only attrs like
+# `skip_serializing_if` (they don't affect the generated TS type) and otherwise
+# prints a "failed to parse serde attribute" pseudo-warning per field.
+ts-rs = { version = "10", features = ["no-serde-warnings"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+
+# async / server
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+notify = "6"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

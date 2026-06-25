@@ -1,0 +1,14 @@
+[package]
+name = "wire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared boundary types for rmng: control state, config, socket + viewer protocols, MCP DTOs."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]

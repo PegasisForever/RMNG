@@ -1,0 +1,220 @@
+# Protocol, config & internals reference
+
+Everything below the HTTP/MCP layer: the port-1 viewer wire protocol, the clone↔server
+unix socket, the config schema, every environment variable, the clone-daemon CLI, and each
+crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src/socket.rs),
+[viewer.rs](../crates/wire/src/viewer.rs), [config.rs](../crates/wire/src/config.rs),
+[control-server/src/mediaplane.rs](../crates/control-server/src/mediaplane.rs),
+[clone-daemon/src/transport.rs](../crates/clone-daemon/src/transport.rs),
+[media/src/sock.rs](../crates/media/src/sock.rs).
+
+## Ports & sockets
+
+| Name | Default | Override | Listener | Connected by | Transport |
+|---|---|---|---|---|---|
+| video | `9001` | `listen.video` | control-server mediaplane | native viewer | framed H.264/JSON over TCP |
+| web | `9000` | `listen.web` | control-server web | browser / control-client | HTTP + SSE |
+| per-clone MCP | `9002` | `listen.clone_mcp` | control-server mcp | in-clone agent-wrapper | HTTP JSON-RPC (IP-routed) |
+| fleet MCP | `9003` | `listen.global_mcp` | control-server mcp | operator / fleet agents | HTTP JSON-RPC |
+| daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agent-wrapper + fleet MCP proxy | HTTP JSON-RPC |
+| agent-wrapper | `4096` | `agent_port` (config) / `AGENT_PORT` | agent-wrapper (in clone) | control-server chat proxy | HTTP + SSE |
+| clone socket | `/srv/rmng-sock/clones.sock` | `RMNG_CLONE_SOCKET` (server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
+
+---
+
+## Port-1 viewer protocol (viewer ⇄ control-server)
+
+One TCP connection. Every frame is `[u8 tag][…]`. This is the **verified on-wire framing**
+(the `ToViewer`/`FromViewer` enums in `wire/viewer.rs` are the logical model; the live media
+path uses this compact framing carrying `socket.rs` types).
+
+**Server → viewer:**
+
+| Tag | Name | Frame |
+|---|---|---|
+| `0` | video | `[0][u32be monitor_id][u32be len][AnnexB access-unit]` |
+| `1` | clipboard | `[1][u32be len][JSON ClipboardMsg]` |
+| `2` | cursor | `[2][u32be len][JSON CursorMeta]` |
+| `3` | layout | `[3][u32be len][JSON MonitorPlacement[]]` |
+
+**Viewer → server:** `[u8 tag][u32be len][JSON body]`, body cap 1 MiB.
+
+| Tag | Body | Meaning |
+|---|---|---|
+| `0` | `InputMsg` | an input event for the **selected** clone (note: upstream tag 0 carries input, not video) |
+| `1` | `ClipboardMsg` | the viewer's clipboard offer/request/data (brokered to clones) |
+
+`InputMsg` ([socket.rs](../crates/wire/src/socket.rs), serde tag `kind`, snake_case):
+
+| Variant | Fields | Use |
+|---|---|---|
+| `pointer_move` | `monitor_id`, `x`, `y` (f64) | absolute pointer in monitor-pixel space |
+| `pointer_relative` | `dx`, `dy` (f64) | unaccelerated delta — pointer-lock / games |
+| `button` | `button` (evdev: `0x110`/`0x111`/`0x112`), `pressed` | mouse button |
+| `axis` | `axis` (0=vert,1=horiz), `step` (±1) | discrete scroll |
+| `key` | `keysym` (X11), `pressed` | text/modifier key (MCP `key` path) |
+| `key_code` | `keycode` (evdev = GTK `hardware_keycode − 8`), `pressed` | physical-key identity (games) |
+
+The viewer sends `pointer_move`/`button`/`axis`/`key` from normal GTK input; `key_code` for
+physical keys; `pointer_relative` while pointer-lock is engaged (Ctrl+Alt+G). When the server
+sends a `CursorMeta{warp:true}` (an MCP-driven move) the viewer snaps the drawn remote cursor
+and **suppresses local `pointer_move`/`pointer_relative` for ~0.5 s** so the operator's mouse
+doesn't fight the agent.
+
+---
+
+## Clone socket protocol (clone-daemon ⇄ control-server)
+
+A unix `SOCK_SEQPACKET` socket (one JSON message per datagram). dmabuf file descriptors ride
+out-of-band via `SCM_RIGHTS` in the same datagram, in plane order — never in the JSON. The
+daemon connects to `RMNG_SOCKET`; the server listens on `RMNG_CLONE_SOCKET`. The path
+is a **host-bind-mounted** dir (`/srv/rmng-sock`, *not* under `/run` — the CT tmpfs would
+shadow it), `chmod 0777` so cross-uid clones connect.
+
+**Handshake:** the daemon's first message is `DaemonMsg::Hello { clone_id }`.
+
+`DaemonMsg` (daemon → server), serde tag `t`:
+
+| Variant | Payload | Meaning |
+|---|---|---|
+| `hello` | `{clone_id}` | register the clone |
+| `frame` | `FrameMsg` | one captured monitor frame; dmabuf fds attached via SCM_RIGHTS |
+| `cursor` | `CursorMeta` | cursor position (+shape on change, +`warp` if MCP-driven) |
+| `layout` | `{monitors: MonitorPlacement[]}` | the actual applied monitor layout |
+| `clipboard_offer` / `clipboard_request` / `clipboard_data` | resp. types | clipboard bridge |
+
+`ServerMsg` (server → daemon), serde tag `t`: `subscribe {stream:bool}` (start/stop the
+continuous feed), `frame_request {monitor_id}` (one-shot, screenshot path), `ack
+{monitor_id, seq}` (flow control — the daemon waits for the ack before the next frame),
+`input(InputMsg)`, and the three `clipboard_*` messages.
+
+`FrameMsg`: `monitor_id`, `fourcc` (DRM, e.g. `0x34325241` "AR24"), `modifier` (DRM format
+modifier), `width`, `height`, `planes: [{offset, stride}]`, `seq` (echoed in `ack`).
+
+### CursorMeta
+```rust
+struct CursorMeta {
+    monitor_id: u32, x: i32, y: i32,
+    shape: Option<CursorShape>,   // only on shape change; positions carry None
+    warp: bool,                   // #[serde(default)] — true = server/MCP-initiated warp
+}
+struct CursorShape { width, height, hotspot_x, hotspot_y, rgba: Vec<u8> /* base64 in JSON */ }
+```
+Captured out-of-band as `SPA_META_Cursor` (cursor-mode METADATA, via the raw-PipeWire path
+since GStreamer `pipewiresrc` can't surface it) and drawn client-side. `warp:true` triggers
+the viewer's 0.5 s local-motion suppression.
+
+### Clipboard (rich + lazy)
+`ClipboardOffer {serial, mime_types[]}` advertises types (no bytes). `ClipboardRequest
+{serial, mime_type}` asks for one. `ClipboardData {serial, mime_type, bytes /* b64 */}`
+transfers. `ClipboardMsg` (serde tag `k`: `offer`/`request`/`data`) is the port-1 viewer-side
+envelope. The control-server is the **broker**: it tracks the owner, fans each offer to the
+viewer + every other clone, routes a paste's request to the owner, and routes bytes back to
+the requester. The clone-daemon bridges via Mutter `RemoteDesktop` selection
+(`SelectionRead`/`SelectionWrite`); the viewer via the GTK clipboard.
+
+---
+
+## Config schema
+
+`AppConfig` loads from `RMNG_CONFIG` (else `config.json`); written at `0600`. The web API
+returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../crates/wire/src/config.rs).
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `listen` | `ListenConfig` | see below | the 5 ports |
+| `agent_port` | u16 | `4096` | agent-wrapper port on each clone |
+| `data_dir` | string | `"data"` | state/notes/uploads/chats/feedback root |
+| `static_dir` | string | `"frontend/build/client"` | disk frontend (else embedded) |
+| `monitors` | `MonitorSpec[]` | `[]` → one 1080p primary | desired global layout |
+| `proxmox` | `ProxmoxConfig` | — | node SSH + clone subnet |
+| `linear` | `LinearConfig` | — | per-workspace API keys (**secret**) |
+| `claude` | `ClaudeConfig` | — | usage polling config |
+| `clone_accounts` | `CloneAccount[]` | `[]` | Claude accounts for clones (**secret tokens**) |
+| `template` | `TemplateConfig` | — | golden-template build params |
+
+- **`ListenConfig`**: `web 9000`, `video 9001`, `clone_mcp 9002`, `global_mcp 9003`,
+  `daemon_mcp 9004`.
+- **`ProxmoxConfig`**: `ssh` (e.g. `root@10.0.0.100`, **secret**), `mac_prefix`
+  (`"BC:24:11"` — clone.sh regenerates a CoW clone's MAC with this OUI to avoid colliding
+  with the template's; config-only, not in the Settings UI), `hostname_prefix` (`"pega-"`,
+  editable in Settings → prepended to derived clone hostnames).
+- **`LinearConfig`**: `we`/`dev`/`hh`/`per` optional API keys.
+- **`ClaudeConfig`**: `poll_secs` (`600`, floored 15), `pinned_email?`, `template_host_id`
+  (`"pega-dev-template"`), `swap_data_subpath` (`".local/share/claude-swap"`),
+  `auto_swap_on_exhaustion` (bool).
+- <a id="cloneaccount"></a>**`CloneAccount`**: `email`, `long_lived_token` (installed into the
+  clone's `~/.claude/.credentials.json` as the token that *runs* Claude Code — **secret**),
+  `refresh_token` (short-lived+refresh, used server-side **only to poll 5h/7d usage** —
+  **secret**). Writing the long-lived token with the refresh emptied lets a *running* clone be
+  hot-swapped without restart.
+- **`TemplateConfig`**: `base_image` (`local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst`),
+  `cores`, `memory_mb`, `disk_gb`.
+- **`MonitorSpec`**: `width`, `height`, `x`, `y`, `primary`.
+
+---
+
+## Environment variables
+
+**control-server:** `RMNG_CONFIG` (config path), `RMNG_CLONE_SOCKET`
+(`/srv/rmng-sock/clones.sock`), `RMNG_STATIC_DIR` (serve frontend from disk),
+`RUST_LOG` (`info,tower_http=warn`).
+
+**clone-daemon:** `RMNG_SOCKET` (media socket; **absent → capture self-test mode**),
+`RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (layout CSV, below),
+`RMNG_DAEMON_MCP_PORT` (`9004`), `RMNG_EMBEDDED_CURSOR` (composite cursor into frames
+instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NUDGE`
+(oscillate cursor to force damage — test only), `RUST_LOG`.
+
+**viewer:** `RMNG_VIDEO` (`host:port` of the control-server video port, default
+`127.0.0.1:9001`), `RMNG_DUMP=frame.png` (headless: dump one decoded frame and exit),
+`RMNG_NO_GRAB` (disable pointer grab), `RMNG_NO_POINTER_LOCK` (disable pointer-lock).
+
+---
+
+## clone-daemon CLI
+
+Source: [clone-daemon/src/main.rs](../crates/clone-daemon/src/main.rs).
+
+**Shipping mode (default, no subcommand):** if `RMNG_SOCKET` is set, connect to the media
+socket, RecordVirtual the `RMNG_MONITORS`, ship dmabuf frames + cursor, inject input, and
+serve the daemon MCP on `:9004`. With no socket it runs a capture-fps self-test.
+
+**`RMNG_MONITORS` format:** comma-separated `WxH+X+Y[*]` (offset optional; trailing `*` =
+primary; first is primary if none marked). E.g. `1920x1080+0+0*,1280x1024+1920+0`. Empty →
+one 1920×1080 primary. The unique `WxH` sizes also seed `MUTTER_DEBUG_DUMMY_MODE_SPECS`.
+
+**`rmng-clone-daemon wait-for-stuck`** — the needs-human detector. Pulls screenshots from the
+local MCP, tiles them, asks the inference LLM, exits 0 when stuck. Flags: `--inference-url
+<url>` (default the built-in inference CT), `--ignore-reason <str>` (repeatable),
+`--interval <secs>` (60), `--timeout <secs>` (1200).
+
+**`clone-daemon report-detection`** — POST a wrong-verdict record to the control-server's
+`/api/detector-feedback`. Flags: `--kind false-positive|false-negative` (required), `--note
+<str>`, `--control <url>`. (These two subcommands replace the retired `computer-use` binary;
+the agent-wrapper spawns `wait-for-stuck` for monitoring.)
+
+---
+
+## Per-crate public API
+
+**`wire`** ([lib.rs](../crates/wire/src/lib.rs)) — pure types, no I/O. Modules: `config`
+(`AppConfig` & friends, `AppConfigRedacted`), `control` (`ControlState`, `Host`, `Operation`,
+`Chat`/`ChatMessage`, `ClaudeUsage`, `MonitorSpec`, the enums), `socket` (clone-socket
+protocol), `viewer` (port-1 logical types), `mcp` (MCP arg DTOs). control + config types
+derive `ts_rs::TS` and export to `frontend/app/lib/wire/`.
+
+**`media`** ([lib.rs](../crates/media/src/lib.rs)) — the GPU + socket plane:
+- `init() -> Result<()>` — init GStreamer once.
+- `Encoder::new(on_au: FnMut(Vec<u8>, bool))` / `.push(fd, fourcc, modifier, w, h)` /
+  `.force_idr()` — one VA-API H.264 encoder per monitor (`vapostproc ! vah264enc ! h264parse`,
+  Annex-B AUs to the callback).
+- `screenshot_png(fd, fourcc, modifier, w, h) -> Vec<u8>` — one-shot dmabuf→PNG.
+- `Listener::bind(path)` / `.accept() -> Conn`; `Conn::recv() -> (DaemonMsg, Vec<OwnedFd>)` /
+  `.send(&ServerMsg)` — the clone-socket transport (SCM_RIGHTS).
+
+**`control-client`** ([lib.rs](../crates/control-client/src/lib.rs)) — `Client::new(base)`,
+`Client::state_once() -> ControlState`: a thin reqwest+SSE client for integration tests.
+
+**`clone-daemon`, `control-server`, `viewer`** are binaries (no library API); their internal
+modules are described in their crate READMEs.

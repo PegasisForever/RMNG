@@ -1,0 +1,17 @@
+--- a/js/ui/shellDBus.js
++++ b/js/ui/shellDBus.js
+@@ -69,10 +69,10 @@
+      * @returns {void}
+      */
+     async EvalAsync(params, invocation) {
+-        if (!global.context.unsafe_mode) {
+-            invocation.return_value(new GLib.Variant('(bs)', [false, '']));
+-            return;
+-        }
++        // kasm patch: allow org.gnome.Shell.Eval without unsafe_mode so the
++        // computer-use MCP server can drive window control (list/move/tile)
++        // through gnome-shell over D-Bus. Deliberate privilege grant for a
++        // headless RDP automation host; do NOT ship on a shared desktop.
+
+         const [code] = params;
+         let returnValue;

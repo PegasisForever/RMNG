@@ -1,0 +1,18 @@
+{
+  "name": "agent-wrapper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Small HTTP wrapper around the Claude Agent SDK. Runs inside each RDP container (replacing opencode serve on :4096); the control-server drives a persistent per-host chat through it. The agent controls the desktop via the computer-use MCP.",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.7.0"
+  }
+}

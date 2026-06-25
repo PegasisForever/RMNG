@@ -1,0 +1,3 @@
+# Build artifacts staged here by cs-build-ct.sh before the control-server build:
+#   clone-daemon.gz, agent-wrapper.gz  (embedded into the binary via rust-embed)
+*.gz
