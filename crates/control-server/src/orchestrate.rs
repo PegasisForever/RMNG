@@ -147,6 +147,8 @@ pub async fn clone_ct(
     cfg: &ProxmoxConfig,
     source_id: &str,
     new_hostname: &str,
+    username: &str,
+    env: &[wire::EnvVar],
     on_progress: impl FnMut(&str, &str),
 ) -> Result<(u32, String)> {
     if !is_dns_label(source_id) {
@@ -155,10 +157,15 @@ pub async fn clone_ct(
     if !is_dns_label(new_hostname) {
         bail!("new hostname must be a DNS label");
     }
+    // Chosen env preset → base64 KEY=VALUE lines that clone.sh writes into the clone's
+    // ~/.config/environment.d/30-rmng-preset.conf BEFORE first boot (no session restart).
+    let env_content: String =
+        env.iter().filter(|v| !v.key.is_empty()).map(|v| format!("{}={}\n", v.key, v.value)).collect();
+    let env_b64 = b64_encode(env_content.as_bytes());
     let result = run_remote(
         &cfg.ssh,
         CLONE_SCRIPT,
-        &[source_id, new_hostname, &cfg.mac_prefix],
+        &[source_id, new_hostname, &cfg.mac_prefix, username, &env_b64],
         on_progress,
     )
     .await?;

@@ -32,7 +32,7 @@ export type ClonePayload = (
       | { create: { workspace: string; title: string; description: string } }
     ) & { agentInstructions?: string; claudeInstructions?: string })
   | { plain: { title: string; message: string } }
-) & { claudeAccount?: string };
+) & { claudeAccount?: string; envPreset?: string };
 
 export const activate = (id: string | null) =>
   postJson("/api/activate", { id });

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 
-import { recommendedClaudeAccount, type ClonePayload } from "~/lib/api";
+import { getConfig, recommendedClaudeAccount, type ClonePayload } from "~/lib/api";
 import type { ClaudeUsage } from "~/lib/types";
+import type { EnvPreset } from "~/lib/wire/EnvPreset";
 import {
   parseTicketInput,
   WORKSPACE_BADGE,
@@ -51,6 +52,17 @@ export function CloneModal({
   // still change it). The recommendation is fetched, not decided at clone time.
   const [account, setAccount] = useState(() => accounts[0]?.email ?? "");
   const [recommended, setRecommended] = useState<string | null>(null);
+  // Env-var presets (from config) + the chosen one ("" = none).
+  const [presets, setPresets] = useState<EnvPreset[]>([]);
+  const [envPreset, setEnvPreset] = useState("");
+
+  useEffect(() => {
+    getConfig()
+      .then((c) => setPresets(c.envPresets))
+      .catch(() => {
+        // Config unreachable — just no preset options.
+      });
+  }, []);
 
   useEffect(() => {
     if (accounts.length === 0) return;
@@ -84,6 +96,7 @@ export function CloneModal({
       onClone({
         plain: { title: title.trim(), message: message.trim() },
         claudeAccount: account,
+        envPreset: envPreset || undefined,
       });
       return;
     }
@@ -94,12 +107,18 @@ export function CloneModal({
     if (claudeInstructions.trim())
       extra.claudeInstructions = claudeInstructions.trim();
     if (mode === "existing")
-      onClone({ ticket: ticket.trim(), ...extra, claudeAccount: account });
+      onClone({
+        ticket: ticket.trim(),
+        ...extra,
+        claudeAccount: account,
+        envPreset: envPreset || undefined,
+      });
     else
       onClone({
         create: { workspace, title: title.trim(), description },
         ...extra,
         claudeAccount: account,
+        envPreset: envPreset || undefined,
       });
   }
 
@@ -254,6 +273,24 @@ export function CloneModal({
                 <option key={a.id} value={a.email}>
                   {accountLabel(a)}
                   {a.email === recommended ? " · recommended" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+
+        {presets.length > 0 ? (
+          <label className="mt-3 block text-xs font-medium text-slate-500">
+            Env preset
+            <select
+              value={envPreset}
+              onChange={(e) => setEnvPreset(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
+            >
+              <option value="">None</option>
+              {presets.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.name} ({p.vars.length} var{p.vars.length === 1 ? "" : "s"})
                 </option>
               ))}
             </select>

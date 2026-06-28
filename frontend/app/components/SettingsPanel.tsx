@@ -142,6 +142,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   // Editable form state. Secrets (proxmoxSsh, linear) start blank = "unchanged".
   const [monitors, setMonitors] = useState<Mon[]>([]);
+  const [envPresets, setEnvPresets] =
+    useState<{ name: string; vars: { key: string; value: string }[] }[]>([]);
   const [template, setTemplate] = useState({ baseImage: "", cores: 4, memoryMb: 8192, diskGb: 40 });
   const [proxmoxSsh, setProxmoxSsh] = useState("");
   const [hostnamePrefix, setHostnamePrefix] = useState("");
@@ -172,6 +174,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     setAgentPort(c.agentPort);
     setDataDir(c.dataDir);
     setStaticDir(c.staticDir);
+    setEnvPresets(c.envPresets.map((p) => ({ name: p.name, vars: p.vars.map((v) => ({ ...v })) })));
   }
 
   useEffect(() => {
@@ -198,6 +201,22 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       return next;
     });
 
+  // Env-var preset editors.
+  const addPreset = () => setEnvPresets((ps) => [...ps, { name: "", vars: [{ key: "", value: "" }] }]);
+  const rmPreset = (i: number) => setEnvPresets((ps) => ps.filter((_, j) => j !== i));
+  const setPresetName = (i: number, name: string) =>
+    setEnvPresets((ps) => ps.map((p, j) => (j === i ? { ...p, name } : p)));
+  const addVar = (i: number) =>
+    setEnvPresets((ps) => ps.map((p, j) => (j === i ? { ...p, vars: [...p.vars, { key: "", value: "" }] } : p)));
+  const rmVar = (i: number, k: number) =>
+    setEnvPresets((ps) => ps.map((p, j) => (j === i ? { ...p, vars: p.vars.filter((_, m) => m !== k) } : p)));
+  const setVar = (i: number, k: number, field: "key" | "value", v: string) =>
+    setEnvPresets((ps) =>
+      ps.map((p, j) =>
+        j === i ? { ...p, vars: p.vars.map((vv, m) => (m === k ? { ...vv, [field]: v } : vv)) } : p,
+      ),
+    );
+
   async function save() {
     setSaving(true);
     setError(null);
@@ -219,6 +238,12 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
         agentPort,
         dataDir,
         staticDir,
+        envPresets: envPresets
+          .filter((p) => p.name.trim())
+          .map((p) => ({
+            name: p.name.trim(),
+            vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
+          })),
       };
       const next = await putConfig(patch);
       load(next); // re-seed from the server's redacted view; clears write-only inputs
@@ -378,6 +403,78 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                 <span className="text-xs text-slate-500">
                   {applyMsg ?? "Saves the layout, then restarts each running clone's desktop to apply it."}
                 </span>
+              </div>
+            </Section>
+
+            {/* Environment variable presets — named env sets pickable at clone time. */}
+            <Section
+              title="Environment variable presets"
+              hint="Named sets of env vars; pick one in the clone dialog. Written to the clone's session env at creation. Vars that must always be present (e.g. XDG_CURRENT_DESKTOP) are baked into every clone, not here."
+            >
+              <div className="space-y-3">
+                {envPresets.length === 0 ? <p className="text-xs text-slate-400">No presets.</p> : null}
+                {envPresets.map((p, i) => (
+                  <div key={i} className="rounded border border-slate-200 p-3">
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={p.name}
+                        onChange={(e) => setPresetName(i, e.target.value)}
+                        placeholder="preset name"
+                        className={input}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => rmPreset(i)}
+                        className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="mt-2 space-y-1.5">
+                      {p.vars.map((v, k) => (
+                        <div key={k} className="flex items-center gap-2">
+                          <input
+                            value={v.key}
+                            onChange={(e) => setVar(i, k, "key", e.target.value)}
+                            placeholder="KEY"
+                            spellCheck={false}
+                            className="w-2/5 rounded border border-slate-300 px-2 py-1 font-mono text-xs focus:border-slate-400 focus:outline-none"
+                          />
+                          <span className="text-slate-400">=</span>
+                          <input
+                            value={v.value}
+                            onChange={(e) => setVar(i, k, "value", e.target.value)}
+                            placeholder="value"
+                            spellCheck={false}
+                            className="flex-1 rounded border border-slate-300 px-2 py-1 font-mono text-xs focus:border-slate-400 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => rmVar(i, k)}
+                            title="remove variable"
+                            className="shrink-0 rounded px-2 py-1 text-xs text-slate-400 hover:bg-slate-100"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => addVar(i)}
+                      className="mt-2 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                    >
+                      + Add variable
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={addPreset}
+                  className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                >
+                  + Add preset
+                </button>
               </div>
             </Section>
 

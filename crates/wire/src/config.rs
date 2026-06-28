@@ -36,6 +36,29 @@ impl Default for ListenConfig {
     }
 }
 
+/// One environment variable in a preset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct EnvVar {
+    pub key: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+/// A named set of environment variables, applied to a clone's session when chosen at
+/// clone time (written to `~/.config/environment.d/30-rmng-preset.conf`). Vars that must
+/// ALWAYS be present (e.g. `XDG_CURRENT_DESKTOP`) are NOT presets — they're baked into the
+/// template's base session env by `provision-clone.sh`, inherited by every clone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct EnvPreset {
+    pub name: String,
+    #[serde(default)]
+    pub vars: Vec<EnvVar>,
+}
+
 /// A Claude account credential pair (both fields secret). The refresh token (+ a
 /// cached short-lived access token) is used **only** to read usage; the long-lived
 /// token is installed into a clone's `~/.claude/.credentials.json` to run Claude Code.
@@ -182,6 +205,9 @@ pub struct AppConfig {
     pub clone_accounts: Vec<CloneAccount>,
     #[serde(default)]
     pub template: TemplateConfig,
+    /// Named environment-variable presets the operator picks from at clone time.
+    #[serde(default)]
+    pub env_presets: Vec<EnvPreset>,
 }
 
 impl Default for AppConfig {
@@ -197,6 +223,7 @@ impl Default for AppConfig {
             claude: ClaudeConfig::default(),
             clone_accounts: Vec::new(),
             template: TemplateConfig::default(),
+            env_presets: Vec::new(),
         }
     }
 }
@@ -252,6 +279,7 @@ impl AppConfig {
                 })
                 .collect(),
             template: self.template.clone(),
+            env_presets: self.env_presets.clone(),
         }
     }
 }
@@ -292,6 +320,7 @@ pub struct AppConfigRedacted {
     pub claude: ClaudeConfig,
     pub clone_accounts: Vec<CloneAccountRedacted>,
     pub template: TemplateConfig,
+    pub env_presets: Vec<EnvPreset>,
 }
 
 #[cfg(test)]

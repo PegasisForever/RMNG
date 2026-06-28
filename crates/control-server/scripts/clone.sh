@@ -5,7 +5,7 @@
 # Args: SRC_ID NEWHOST MACPREFIX
 # Emits: "P <step> <message>" progress lines, "RESULT <newid> <ip>" on success.
 set -euo pipefail
-SRC_ID="$1"; NEWHOST="$2"; MACPREFIX="$3"
+SRC_ID="$1"; NEWHOST="$2"; MACPREFIX="$3"; USER="${4:-rmng}"; ENV_B64="${5:-}"
 prog(){ echo "P $1 ${*:2}"; }
 die(){ echo "$*" >&2; exit 1; }
 
@@ -65,6 +65,16 @@ if [ -f "$MNT/var/lib/dbus/machine-id" ] && [ ! -L "$MNT/var/lib/dbus/machine-id
   : > "$MNT/var/lib/dbus/machine-id" 2>/dev/null || true
 fi
 [ -f "$MNT/etc/hostname" ] && echo "$NEWHOST" > "$MNT/etc/hostname"
+# Chosen env preset → the clone's session env BEFORE first boot (no session restart).
+# Owner is read from /home/$USER so the file gets the container-mapped uid (idmap-safe
+# for unprivileged CTs). systemd --user reads environment.d → all user units + the session.
+if [ -n "$ENV_B64" ] && [ -d "$MNT/home/$USER" ]; then
+  OWNER="$(stat -c '%u:%g' "$MNT/home/$USER")"
+  install -d -o "${OWNER%:*}" -g "${OWNER#*:}" "$MNT/home/$USER/.config/environment.d"
+  printf '%s' "$ENV_B64" | base64 -d > "$MNT/home/$USER/.config/environment.d/30-rmng-preset.conf"
+  chown "$OWNER" "$MNT/home/$USER/.config/environment.d/30-rmng-preset.conf"
+  prog identity "wrote env preset → 30-rmng-preset.conf"
+fi
 umount "$MNT"; rmdir "$MNT"; MNT=""
 
 prog config "writing container config for CT ${NEWID}"

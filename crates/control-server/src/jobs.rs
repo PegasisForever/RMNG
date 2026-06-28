@@ -51,6 +51,8 @@ pub struct CloneSpec {
     pub first_message: Option<String>,
     pub agent_instructions: Option<String>,
     pub claude_instructions: Option<String>,
+    /// Resolved env-preset vars to write into the clone's session env at creation.
+    pub env: Vec<wire::EnvVar>,
 }
 
 fn now_ms() -> i64 {
@@ -222,7 +224,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         }
     };
 
-    let (ctid, ip) = match clone_ct(&cfg.proxmox, &spec.source_id, &spec.new_hostname, progress).await {
+    let (ctid, ip) =
+        match clone_ct(&cfg.proxmox, &spec.source_id, &spec.new_hostname, "rmng", &spec.env, progress).await {
         Ok(v) => v,
         Err(e) => return fail_op(&app, &op_id, e.to_string()),
     };

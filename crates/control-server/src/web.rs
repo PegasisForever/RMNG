@@ -162,6 +162,18 @@ async fn clone(
     let cfg = app.config();
     let prefix = cfg.proxmox.hostname_prefix.clone();
 
+    // Resolve the chosen env-var preset (by name) to its vars; written into the clone's
+    // session env at creation. Empty/absent = no preset; an unknown name is an error.
+    let env_vars = match str_field("envPreset").filter(|s| !s.is_empty()) {
+        Some(name) => cfg
+            .env_presets
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.vars.clone())
+            .ok_or_else(|| bad(format!("unknown env preset '{name}'")))?,
+        None => Vec::new(),
+    };
+
     // suffix-aware display name (duplicate ticket → "title (a)").
     let derive = |app: &App, base: &str, title: &str| -> (String, String) {
         let hostname = jobs::next_free_hostname(app, base);
@@ -186,6 +198,7 @@ async fn clone(
             first_message: Some(message).filter(|m| !m.is_empty()),
             agent_instructions,
             claude_instructions,
+            env: env_vars,
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
         return Ok(Json(json!({ "ok": true, "op": op })));
@@ -214,6 +227,7 @@ async fn clone(
         first_message: None,
         agent_instructions,
         claude_instructions,
+        env: env_vars,
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
