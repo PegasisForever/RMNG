@@ -69,14 +69,19 @@ fn is_text_mime(m: &str) -> bool {
     m.starts_with("text/plain") || m == "UTF8_STRING" || m == "TEXT"
 }
 
-/// Latest cursor state per monitor (client-drawn cursor). The shape persists across
-/// position-only updates; `version` bumps on shape change so the GUI re-textures lazily.
+/// Latest cursor state per monitor. The native OS cursor is shown normally; the synthetic
+/// overlay is drawn ONLY while the remote agent is driving the pointer, i.e. while
+/// `warp_until` is in the future (set/refreshed by each `warp:true` update). The shape
+/// persists across position-only updates; `version` bumps on shape change so the GUI
+/// re-textures lazily.
 #[derive(Default, Clone)]
 struct CursorEntry {
     x: i32,
     y: i32,
     shape: Option<CursorShape>,
     version: u64,
+    /// Draw the synthetic cursor on this monitor until this instant (agent-driven move).
+    warp_until: Option<Instant>,
 }
 type Cursors = Arc<Mutex<HashMap<u32, CursorEntry>>>;
 
@@ -88,6 +93,11 @@ type Cursors = Arc<Mutex<HashMap<u32, CursorEntry>>>;
 type WarpSuppress = Arc<Mutex<Option<Instant>>>;
 /// How long to suppress local motion after a warp.
 const WARP_SUPPRESS: Duration = Duration::from_millis(500);
+/// How long the synthetic cursor stays drawn after an agent-driven (warp) move on a
+/// monitor. Normally only the native OS cursor is shown; the overlay is drawn ONLY while
+/// the agent drives the pointer, so the operator can see where it goes. Refreshed by each
+/// warp, so it persists through a multi-step agent glide and hides this long after the last.
+const AGENT_CURSOR_SHOW: Duration = Duration::from_millis(1000);
 
 /// One monitor's place in the desktop layout (unified-desktop px). Populated from the
 /// server's reported layout (the clone's real positions); falls back to a computed
@@ -148,15 +158,20 @@ fn run_gui() -> Result<()> {
                                         *reported.lock().unwrap() = l;
                                     }
                                 } else if let Ok(c) = serde_json::from_slice::<CursorMeta>(&body) {
+                                    let now = Instant::now();
                                     if c.warp {
-                                        // Agent-driven move: snap the drawn cursor (below) and
-                                        // hold off local motion sends for WARP_SUPPRESS (debounced).
-                                        *warp.lock().unwrap() = Some(Instant::now() + WARP_SUPPRESS);
+                                        // Agent-driven move: draw the synthetic cursor on this
+                                        // monitor (below) and hold off local motion sends for
+                                        // WARP_SUPPRESS (both debounced — refreshed by each warp).
+                                        *warp.lock().unwrap() = Some(now + WARP_SUPPRESS);
                                     }
                                     let mut map = cursors.lock().unwrap();
                                     let e = map.entry(c.monitor_id).or_default();
                                     e.x = c.x;
                                     e.y = c.y;
+                                    if c.warp {
+                                        e.warp_until = Some(now + AGENT_CURSOR_SHOW);
+                                    }
                                     if c.shape.is_some() {
                                         e.shape = c.shape;
                                         e.version += 1;
@@ -216,6 +231,11 @@ struct MonitorWindow {
     appsrc: AppSrc,
     paintable: gdk::Paintable,
     last_version: u64,
+    /// Native OS cursor built from the latest remote `CursorShape` (set on `video` so the
+    /// operator's own pointer takes the remote shape — I-beam, hand, resize, …).
+    native_cursor: Option<gdk::Cursor>,
+    /// Whether `video`'s cursor is currently hidden (pointer-lock / relative mode).
+    cursor_hidden: bool,
 }
 
 type Windows = Rc<RefCell<HashMap<u32, MonitorWindow>>>;
@@ -291,21 +311,53 @@ fn build_ui(
                     *layout.borrow_mut() = compute_layout(&mut mons);
                 }
             }
-            // Cursor: position (+ re-texture on shape change) per window.
-            let csnap: Vec<(u32, CursorEntry)> =
-                cursors.lock().unwrap().iter().map(|(m, e)| (*m, e.clone())).collect();
-            for (mid, e) in csnap {
-                let mut w = windows.borrow_mut();
-                let Some(win) = w.get_mut(&mid) else { continue };
-                let (scale, off_x, off_y) = letterbox(&win.video, &win.paintable);
-                if e.version != win.last_version {
-                    win.last_version = e.version;
-                    if let Some(shape) = &e.shape {
-                        if let Some(tex) = cursor_texture(shape) {
-                            win.cursor.set_paintable(Some(&tex));
+            // Cursor: (1) the native OS cursor over the video takes the remote's shape
+            // (rebuilt from CursorShape on change), hidden only in pointer-lock; (2) the
+            // synthetic overlay is drawn on top ONLY while the remote agent drives the
+            // pointer (this monitor's warp window), so the operator sees the agent's target.
+            let locked = pointer_lock.as_ref().is_some_and(|p| p.is_engaged());
+            let now = Instant::now();
+            let csnap: HashMap<u32, CursorEntry> = cursors.lock().unwrap().clone();
+            for (mid, win) in windows.borrow_mut().iter_mut() {
+                let entry = csnap.get(mid);
+                // Rebuild the cursor texture + native gdk cursor when the remote shape changes.
+                if let Some(e) = entry {
+                    if e.version != win.last_version {
+                        win.last_version = e.version;
+                        if let Some(shape) = &e.shape {
+                            if let Some(tex) = cursor_texture(shape) {
+                                win.cursor.set_paintable(Some(&tex)); // overlay texture
+                                let fallback = gdk::Cursor::from_name("default", None);
+                                win.native_cursor = Some(gdk::Cursor::from_texture(
+                                    &tex,
+                                    shape.hotspot_x as i32,
+                                    shape.hotspot_y as i32,
+                                    fallback.as_ref(),
+                                ));
+                                if !locked {
+                                    win.video.set_cursor(win.native_cursor.as_ref());
+                                }
+                            }
                         }
                     }
                 }
+                // Native cursor: hide for pointer-lock, else show the remote-shaped cursor.
+                if locked != win.cursor_hidden {
+                    if locked {
+                        win.video.set_cursor_from_name(Some("none"));
+                    } else {
+                        win.video.set_cursor(win.native_cursor.as_ref());
+                    }
+                    win.cursor_hidden = locked;
+                }
+                // Overlay: only while the agent is driving this monitor's pointer.
+                let show = !locked && entry.is_some_and(|e| e.warp_until.is_some_and(|d| now < d));
+                if !show {
+                    win.cursor.set_visible(false);
+                    continue;
+                }
+                let e = entry.unwrap();
+                let (scale, off_x, off_y) = letterbox(&win.video, &win.paintable);
                 if let Some(shape) = &e.shape {
                     win.cursor.set_size_request(
                         (shape.width as f64 * scale).round() as i32,
@@ -315,9 +367,7 @@ fn build_ui(
                 let (hx, hy) = e.shape.as_ref().map(|s| (s.hotspot_x as i32, s.hotspot_y as i32)).unwrap_or((0, 0));
                 win.cursor.set_margin_start((off_x + (e.x - hx) as f64 * scale).round().max(0.0) as i32);
                 win.cursor.set_margin_top((off_y + (e.y - hy) as f64 * scale).round().max(0.0) as i32);
-                if win.cursor.paintable().is_some() {
-                    win.cursor.set_visible(true);
-                }
+                win.cursor.set_visible(win.cursor.paintable().is_some());
             }
             glib::ControlFlow::Continue
         });
@@ -343,7 +393,9 @@ fn make_monitor_window(
     video.set_halign(gtk4::Align::Fill);
     video.set_valign(gtk4::Align::Fill);
     video.set_size_request(480, 270);
-    video.set_cursor_from_name(Some("none")); // we render the remote cursor ourselves
+    // Native OS cursor is shown over the video by default; the synthetic overlay below is
+    // drawn only while the remote agent drives the pointer. Pointer-lock hides the native
+    // cursor at its engage site (relative-motion / game mode).
 
     let cursor = gtk4::Picture::new();
     cursor.set_can_shrink(true);
@@ -397,7 +449,7 @@ fn make_monitor_window(
     install_keyboard(&window, writer, &state, pointer_lock);
     window.present();
 
-    MonitorWindow { video, cursor, appsrc, paintable, last_version: 0 }
+    MonitorWindow { video, cursor, appsrc, paintable, last_version: 0, native_cursor: None, cursor_hidden: false }
 }
 
 /// Toggle a window between fullscreen and normal (F11 / header button).
@@ -695,6 +747,7 @@ fn install_keyboard(
                         pl.engage(&surface);
                     }
                 }
+                // The tick hides/restores the video cursor from `is_engaged()`.
                 return glib::Propagation::Stop;
             }
             if ctrl_alt && (keyval == gdk::Key::p || keyval == gdk::Key::P) {

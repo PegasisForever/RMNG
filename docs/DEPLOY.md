@@ -30,29 +30,57 @@ clone-account tokens, template build params, monitor defaults, and the listen po
 provision seeds only the Proxmox SSH target + the orchestration key. Secrets are write-only
 and redacted on read. See [SCRIPTS.md](SCRIPTS.md) for each script's args/env.
 
-## The dev loop (build CT)
+## The dev loop
 
-Only `wire` builds on a plain laptop; `media`/`viewer`/`clone-daemon`/`control-server` need
-GStreamer/VA/libdrm/pipewire/GTK4, so the supported loop is *edit locally, build on the GPU
-CT* (`rmng-build`, see [INFRA.md](INFRA.md)):
+**Staging vs. production, and build vs. run.** `provision-build-ct.sh` makes the build CT a
+**staging control-server**: the *same* runtime as the production deploy CT (it runs
+`cs-deploy-ct.sh`, orchestrating **real Proxmox clones**), plus the build toolchain so you can
+rebuild + restart in place. The control-server CT does **not** run GNOME/capture itself — the
+**clones** do. As for crates: the *entire* workspace compiles on any Linux dev box with the
+desktop media/GUI dev libs (the [Prerequisites](../README.md#prerequisites): GStreamer + GTK4 +
+PipeWire + libdrm + `clang`); a bare laptop without them builds only `wire`. What needs a GPU is
+*running* the pipeline — the control-server's VA-API **encode** (staging/deploy CT) and the
+**capture** side (PipeWire `RecordVirtual`, the pinned W6800 DRM modifier, headless GNOME) which
+runs **on each clone**. The **`viewer` is the exception: it builds *and* runs locally**
+(client-side VA-API **decode** only — Intel iGPU decode is validated against AMD-encoded streams).
+
+### Local (on your laptop)
+
+Everything below runs entirely on your machine — no CT, no rsync (`<staging-ip>` = the build CT):
+
+| You changed | Build & run locally | See the result |
+|---|---|---|
+| **`viewer`** (decode / render / input) | `RMNG_VIDEO=<staging-ip>:9001 cargo run -p viewer` | GUI window streaming the staging CT's *selected clone* |
+| **`viewer`**, no display | `RMNG_VIDEO=<staging-ip>:9001 RMNG_DUMP=frame.png cargo run -p viewer -- --headless` | per-monitor fps in the logs; `frame.png` = one decoded frame |
+| **frontend** (React UI) | `cd frontend && bun run dev` | Vite dev server + HMR; proxies `/api` + `/events` to a running backend |
+| **`wire`** types / DTOs | `cargo test -p wire` | compiles + regenerates the frontend's ts-rs types |
+| pure logic in **any** crate | `cargo build -p <crate>` · `cargo test -p <crate>` | the whole workspace *compiles* locally, so the compiler + unit tests are a local loop |
+| **`control-server` / `media` / `clone-daemon`** runtime behavior | builds locally, but must **run** on the staging CT ↓ | — |
+
+### On the staging control-server CT
+
+The loop is *edit locally → rebuild on the staging CT → restart the unit → drive real clones*:
 
 ```sh
-rsync -az --exclude target --exclude frontend/node_modules ./ root@10.0.0.31:/root/RMNG/
-ssh root@10.0.0.31 'cd /root/RMNG && cargo build --workspace'      # or -p <crate>
-cargo test -p wire -p control-server                                    # ~42 tests, on the CT
+rsync -az --exclude target --exclude frontend/node_modules ./ root@<staging-ip>:/root/RMNG/
+# Re-runs the build (re-embeds clone-daemon/agent-wrapper/frontend) + installs the binary:
+ssh root@<staging-ip> 'bash /root/RMNG/scripts/cs-build-ct.sh && systemctl restart rmng-control-server'
+cargo test -p wire -p control-server                               # ~42 tests, on the CT
 ```
 
-GPU bins run as the CT's session user (`pega`) with a headless GNOME session:
+For a control-server-only change, skip the re-embed:
 ```sh
-XDG_RUNTIME_DIR=/run/user/$(id -u pega) \
-DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u pega)/bus \
-WAYLAND_DISPLAY=wayland-0  <bin>
+ssh root@<staging-ip> 'cd /root/RMNG && cargo build --release -p control-server \
+  && install -m755 target/release/rmng-control-server /usr/local/bin/ && systemctl restart rmng-control-server'
 ```
-- **Decode driver:** `rmng-viewer --headless` connects to a control-server port-1 and logs
-  per-monitor fps; `RMNG_DUMP=frame.png` dumps a decoded frame.
-- **Persistent local stack:** `scripts/run-localstack.sh` brings up control-server +
-  clone-daemon as systemd units so a real viewer (e.g. from your laptop) can hit
-  `10.0.0.31:9001`.
+
+- **Clones** are real CTs the control-server provisions (`POST /api/template/bootstrap`, then
+  `POST /api/clone`); each runs headless GNOME + `clone-daemon` + `agent-wrapper` and connects
+  back over the `/srv/rmng-sock` media socket. Select one in the dashboard; the viewer streams it.
+- **Redeploy a clone's binaries** after a `clone-daemon`/`agent-wrapper` change without
+  reprovisioning (~10 s): `POST /api/clone/redeploy {id, daemonOnly?}`.
+- **Decode driver:** `RMNG_VIDEO=<staging-ip>:9001 rmng-viewer --headless` logs per-monitor fps;
+  add `RMNG_DUMP=frame.png` to dump one decoded frame.
 
 ## The self-contained binary (embed)
 

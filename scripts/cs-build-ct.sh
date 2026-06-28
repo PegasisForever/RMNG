@@ -9,22 +9,24 @@
 #   cs-build-ct.sh [src-dir]
 set -euo pipefail
 SRC="${1:-/root/RMNG}"
-DEV_USER="${RMNG_DEV_USER:-dev}"
+cd "$SRC"   # all cargo builds below are workspace-relative (the first embed build runs before any other cd)
 export DEBIAN_FRONTEND=noninteractive
 
-echo "[build-ct] installing toolchain + runtime + GPU test stack" >&2
+echo "[build-ct] installing build toolchain + control-server runtime (no capture/GNOME)" >&2
 apt-get update -qq
+# Two concerns only: (1) BUILD deps for the workspace — the *-dev libs clone-daemon/
+# viewer/media link against, plus sassc/dpkg-dev for the patched gnome-shell deb; and
+# (2) the control-server's VA-API *encode* runtime (it ingests clones' dmabufs and
+# encodes them). NO capture/session stack: the build CT does NOT run a GNOME desktop —
+# real clones do. The patched gnome-shell deb is *built* here (apt build-dep + download/
+# source gnome-shell below), but gnome-shell itself is never installed or run.
 apt-get install -y -qq \
   build-essential pkg-config clang git curl ca-certificates unzip sudo \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libva-dev libdrm-dev \
   libpipewire-0.3-dev libgtk-4-dev \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-tools gstreamer1.0-pipewire \
-  libva2 libva-drm2 va-driver-all libdrm2 \
-  pipewire pipewire-pulse wireplumber dbus-user-session \
-  gnome-shell gnome-session-bin gnome-settings-daemon \
-  xdg-desktop-portal xdg-desktop-portal-gnome sshfs \
-  sassc dpkg-dev >&2
+  gstreamer1.0-tools libva2 libva-drm2 va-driver-all libdrm2 \
+  openssh-client sshfs sassc dpkg-dev >&2
 # NOTE on the VA plugin: vah264enc / vah264dec / vapostproc come from
 # gstreamer1.0-plugins-bad (the `va` plugin). `gstreamer1.0-va` is NOT a package on
 # 24.04, and `gstreamer1.0-vaapi` is the unrelated legacy plugin — don't use either.
@@ -94,34 +96,13 @@ cd "$SRC"
 cargo build --release >&2
 install -m755 target/release/rmng-control-server /usr/local/bin/rmng-control-server
 
-echo "[build-ct] dev/test user '$DEV_USER' + headless GNOME + PipeWire" >&2
-id "$DEV_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$DEV_USER"
-usermod -aG render,video "$DEV_USER" 2>/dev/null || true
-loginctl enable-linger "$DEV_USER"
-uid="$(id -u "$DEV_USER")"
-UDIR="/home/$DEV_USER/.config/systemd/user"
-install -d -o "$DEV_USER" -g "$DEV_USER" "$UDIR"
-cat > "$UDIR/gnome-headless.service" <<UNIT
-[Unit]
-Description=headless gnome-shell (Mutter ScreenCast/RemoteDesktop backend for tests)
-[Service]
-ExecStart=/usr/bin/gnome-shell --headless --wayland
-Restart=on-failure
-[Install]
-WantedBy=default.target
-UNIT
-chown -R "$DEV_USER:$DEV_USER" "$UDIR"
-# Give the user session a moment to come up, then enable PipeWire + the GNOME session.
-runuser -u "$DEV_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
-  systemctl --user daemon-reload 2>/dev/null || true
-runuser -u "$DEV_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
-  systemctl --user enable --now pipewire.socket pipewire-pulse.socket wireplumber.service gnome-headless.service 2>/dev/null || true
-
 cat >&2 <<DONE
-[build-ct] dev/test env ready.
-  control-server binary: /usr/local/bin/rmng-control-server  (frontend embedded)
-  run the server:        /usr/local/bin/rmng-control-server   (or target/release/rmng-control-server)
-  GPU bins (clone-daemon/viewer/capture) run as '$DEV_USER' with:
-      XDG_RUNTIME_DIR=/run/user/$uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus WAYLAND_DISPLAY=wayland-0
-  rebuild after syncing new source:  re-run this script (deps are cached).
+[build-ct] build complete — NO GNOME/capture on the build CT (real clones run those).
+  control-server binary: /usr/local/bin/rmng-control-server
+    (embeds the frontend + gzipped clone-daemon + agent-wrapper + patched gnome-shell deb)
+  provision-build-ct.sh runs cs-deploy-ct.sh next → the build CT becomes a STAGING
+    control-server that orchestrates real Proxmox clones, identical to the production
+    deploy CT but with the build toolchain still present.
+  rebuild after syncing new source: re-run this script (apt/Rust/bun deps are cached),
+    then restart the unit: systemctl restart rmng-control-server.
 DONE

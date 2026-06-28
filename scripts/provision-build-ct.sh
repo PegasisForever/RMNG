@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# Provision a BUILD/development CT on a Proxmox node and build the control-server in
-# it. Runs LOCALLY; ships this repo's rmng/ to the node, creates an Ubuntu CT
-# with the full dev toolchain (Rust + bun + GStreamer/VA *-dev*) and the GPU render
-# node passed through (so you can also run/test there), then builds the binary.
+# Provision the STAGING control-server CT on a Proxmox node. Runs LOCALLY; ships this
+# repo to the node, creates an Ubuntu CT with the full build toolchain (Rust + bun +
+# GStreamer/VA/GTK *-dev*) + GPU render passthrough, builds the self-contained
+# control-server, then runs cs-deploy-ct.sh so the CT comes up as a control-server that
+# orchestrates REAL Proxmox clones — identical to the production deploy CT, just with
+# the build toolchain. The build CT does NOT run GNOME/capture; real clones do.
+#
+# Think "staging vs production": same runtime (both run cs-deploy-ct.sh), and the build
+# CT additionally carries the toolchain so you can rebuild + restart in place.
 #
 #   ./provision-build-ct.sh <proxmox-ssh-target> [hostname]
 #   e.g. ./provision-build-ct.sh root@10.0.0.100 rmng-build
 #
-# Output: the build CT's id + ip; the binary lands at /usr/local/bin/rmng-control-server
-# inside it. provision-deploy-ct.sh copies that binary into a lean runtime CT.
+# Output: the CT's id + ip; binary at /usr/local/bin/rmng-control-server, dashboard on
+# :9000. The lean production deploy CT is a separate provision-deploy-ct.sh run.
 #
 # NOTE: real provisioning + a ~10-min in-CT build; operator-supervised on first run.
 set -euo pipefail
@@ -18,10 +23,13 @@ HOSTNAME="${2:-rmng-build}"
 STORAGE="${RMNG_STORAGE:-local-lvm}"
 BRIDGE="${RMNG_BRIDGE:-vmbr0}"
 TEMPLATE="${RMNG_TEMPLATE:-ubuntu-26.04-standard_26.04-1_amd64.tar.zst}"
-# Build CT is also the dev/test box (full stack incl. headless GNOME) → roomy.
+# Build CT compiles the whole workspace + runs the control-server → roomy.
 CORES="${RMNG_CORES:-8}"
 MEMORY="${RMNG_MEMORY:-12288}"
 ROOTFS_GB="${RMNG_ROOTFS_GB:-40}"
+SOCK_HOST_DIR="${RMNG_SOCK_DIR:-/srv/rmng-sock}"   # host dir bind-mounted (clone media socket)
+# SSH target the control-server uses to reach the node from inside the CT (for `pct`).
+PROXMOX_FROM_CT="${RMNG_PROXMOX_FROM_CT:-root@${PROXMOX#*@}}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # the RMNG project root
 say(){ printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -37,11 +45,14 @@ tar czf "$TAR" -C "$here" \
 say "copying source to $PROXMOX"
 scp -q "$TAR" "$PROXMOX:/tmp/rmng-src.tar.gz"
 rm -f "$TAR"
+say "copying deploy setup script to $PROXMOX"
+scp -q "$here/scripts/cs-deploy-ct.sh" "$PROXMOX:/tmp/cs-deploy-ct.sh"
 
 say "creating build CT + building (this takes ~10 min)…"
 ssh "$PROXMOX" \
   HOSTNAME="$HOSTNAME" STORAGE="$STORAGE" BRIDGE="$BRIDGE" TEMPLATE="$TEMPLATE" \
   CORES="$CORES" MEMORY="$MEMORY" ROOTFS_GB="$ROOTFS_GB" \
+  SOCK_HOST_DIR="$SOCK_HOST_DIR" PROXMOX_FROM_CT="$PROXMOX_FROM_CT" \
   'bash -s' <<'NODE'
 set -euo pipefail
 prog(){ printf '\033[1;32mP\033[0m %s\n' "$*" >&2; }
@@ -57,14 +68,20 @@ ID="$(pvesh get /cluster/nextid 2>/dev/null || true)"
 [ -n "$ID" ] || { for i in $(seq 200 999); do pct status "$i" >/dev/null 2>&1 || { ID=$i; break; }; done; }
 [ -n "$ID" ] || { echo "no free CT id" >&2; exit 1; }
 
+# World-writable socket dir so uid-mapped clone CTs can connect to the media socket here.
+mkdir -p "$SOCK_HOST_DIR"; chmod 0777 "$SOCK_HOST_DIR"
 prog "pct create $ID ($HOSTNAME)"
 pct create "$ID" "$TMPL" \
   --hostname "$HOSTNAME" --unprivileged 1 --features nesting=1,keyctl=1,fuse=1 \
   --cores "$CORES" --memory "$MEMORY" --swap 2048 --rootfs "$STORAGE:$ROOTFS_GB" \
   --net0 "name=eth0,bridge=$BRIDGE,ip=dhcp" --onboot 1 >&2
-# GPU render node passthrough (so the build CT can also run/test) + apparmor opt-out.
-{ echo 'dev0: /dev/dri/renderD128,gid=993,mode=0666'; echo 'lxc.apparmor.profile: unconfined'; } \
-  >> "/etc/pve/lxc/$ID.conf"
+# GPU render node (VA-API encode) + apparmor opt-out + the shared clone-socket dir
+# bind-mounted at the SAME path (not under /run — the CT's tmpfs would shadow it).
+{
+  echo 'dev0: /dev/dri/renderD128,gid=993,mode=0666'
+  echo 'lxc.apparmor.profile: unconfined'
+  echo "mp0: $SOCK_HOST_DIR,mp=$SOCK_HOST_DIR"
+} >> "/etc/pve/lxc/$ID.conf"
 
 prog "starting CT $ID"
 pct start "$ID" >&2
@@ -89,9 +106,24 @@ pct exec "$ID" -- bash -c 'rm -rf /root/RMNG && mkdir -p /root/RMNG && tar xzf /
 prog "building (cs-build-ct.sh)"
 pct exec "$ID" -- bash /root/RMNG/scripts/cs-build-ct.sh >&2
 rm -f /tmp/rmng-src.tar.gz
+
+prog "configuring as staging control-server (cs-deploy-ct.sh)"
+pct push "$ID" /tmp/cs-deploy-ct.sh /root/cs-deploy-ct.sh >&2
+pct exec "$ID" -- bash /root/cs-deploy-ct.sh "$PROXMOX_FROM_CT" >&2
+rm -f /tmp/cs-deploy-ct.sh
+
+prog "authorizing the control-server's orchestration key on the node"
+PUB="$(pct exec "$ID" -- cat /root/.ssh/id_ed25519.pub)"
+install -d -m700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
+grep -qF "$PUB" /root/.ssh/authorized_keys || echo "$PUB" >> /root/.ssh/authorized_keys
+
 echo "RESULT $ID $IP"
 NODE
 
-say "build CT ready (RESULT <id> <ip> above). Next:"
-echo "  ./provision-deploy-ct.sh $PROXMOX        # creates the runtime CT + copies the binary"
-echo "  (to rebuild later: re-sync source + re-run cs-build-ct.sh in the CT)"
+say "staging control-server ready (RESULT <id> <ip> above)."
+echo "  Dashboard:    http://<ip>:9000   → Settings for Linear/Claude/cloneAccounts (optional)."
+echo "  Real clones:  POST http://<ip>:9000/api/template/bootstrap  then  POST /api/clone (CoW)."
+echo "  Viewer:       RMNG_VIDEO=<ip>:9001 cargo run -p viewer   (once a clone is selected)."
+echo "  Rebuild:      rsync source + re-run cs-build-ct.sh in the CT, then"
+echo "                systemctl restart rmng-control-server."
+echo "  Production deploy CT (lean, no toolchain): ./provision-deploy-ct.sh $PROXMOX"

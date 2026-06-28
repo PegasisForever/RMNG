@@ -1,13 +1,13 @@
 # Scripts reference
 
-Three families: **developer build/deploy** scripts (run by hand from your workstation),
+Two families: **developer build/deploy** scripts (run by hand from your workstation) and
 **control-server orchestration** scripts (embedded in the binary via `include_str!` and run
-over SSH at runtime), and **local test harnesses**. Plus the gnome-patch build.
+over SSH at runtime). Plus the gnome-patch build.
 
 | Script | Runs where | Invoked by | Purpose |
 |---|---|---|---|
-| `scripts/provision-build-ct.sh` | workstation → node | operator | Create the build/dev CT + build the binary |
-| `scripts/cs-build-ct.sh` | inside build CT | provision-build-ct.sh | Install toolchain, embed binaries+deb, build workspace |
+| `scripts/provision-build-ct.sh` | workstation → node | operator | Create the **staging** control-server CT: build the binary, then run it (cs-deploy-ct.sh) |
+| `scripts/cs-build-ct.sh` | inside build CT | provision-build-ct.sh | Install toolchain, embed binaries+deb, build workspace (no GNOME/capture) |
 | `scripts/provision-deploy-ct.sh` | workstation → node | operator | Create the lean runtime CT, copy + run the binary |
 | `scripts/cs-deploy-ct.sh` | inside deploy CT | provision-deploy-ct.sh | Runtime deps + config + SSH key + systemd unit |
 | `crates/control-server/scripts/bootstrap.sh` | node (SSH) | `orchestrate::bootstrap_template` | Build a fresh template/clone CT from base image |
@@ -18,7 +18,6 @@ over SSH at runtime), and **local test harnesses**. Plus the gnome-patch build.
 | `crates/control-server/scripts/apply-monitors.sh` | node (SSH) | `orchestrate::apply_monitors` | Re-apply a monitor layout to a running clone |
 | `crates/control-server/scripts/apply-credentials.sh` | inside running clone (SSH) | `claude::apply_clone_token` | Install/hot-swap a Claude token |
 | `gnome-patch/build-shell-deb.sh` | inside build CT | cs-build-ct.sh | Build the patched gnome-shell `.deb` |
-| `scripts/run-localstack.sh` | build CT | operator | Persistent control-server + clone-daemon for the viewer to hit |
 
 The orchestration scripts are baked into the control-server binary at compile time
 ([orchestrate.rs:14-19](../crates/control-server/src/orchestrate.rs), [claude.rs:36](../crates/control-server/src/claude.rs))
@@ -31,22 +30,27 @@ on the node. They emit `P <step> <msg>` progress lines and a final `RESULT …` 
 ## Developer build/deploy
 
 ### `provision-build-ct.sh <proxmox-ssh> [hostname=rmng-build]`
-Runs locally. Packs `RMNG/` + `../agent-wrapper`, ships them to the node, creates an
-unprivileged Ubuntu CT (nesting/keyctl/fuse, render-node passthrough, apparmor unconfined),
-then runs `cs-build-ct.sh` inside it. Env: `RMNG_STORAGE` (`local-lvm`), `RMNG_BRIDGE` (`vmbr0`),
-`RMNG_TEMPLATE` (Ubuntu 26.04), `RMNG_CORES` (8), `RMNG_MEMORY` (12288), `RMNG_ROOTFS_GB` (40).
-Prints `RESULT <ctid> <ip>`.
+Runs locally. Provisions the **staging** control-server CT. Packs `RMNG/` (incl. the vendored
+`agent-wrapper`), ships it to the node, creates an unprivileged Ubuntu CT (nesting/keyctl/fuse,
+render-node passthrough, apparmor unconfined, the `/srv/rmng-sock` clone-socket bind-mount),
+runs `cs-build-ct.sh` to build the binary, then runs `cs-deploy-ct.sh` and authorizes the CT's
+orchestration key on the node — so the CT comes up as a control-server orchestrating **real
+clones**, exactly like the production deploy CT but with the toolchain. The build CT does **not**
+run GNOME/capture. Env: `RMNG_STORAGE` (`local-lvm`), `RMNG_BRIDGE` (`vmbr0`), `RMNG_TEMPLATE`
+(Ubuntu 26.04), `RMNG_CORES` (8), `RMNG_MEMORY` (12288), `RMNG_ROOTFS_GB` (40), `RMNG_SOCK_DIR`
+(`/srv/rmng-sock`), `RMNG_PROXMOX_FROM_CT`. Prints `RESULT <ctid> <ip>`; dashboard at `:9000`.
 
-### `cs-build-ct.sh [src-dir=/root/ng/RMNG]`
-Runs inside the build CT (also the dev/test box). Installs the full toolchain (Rust, bun,
-GStreamer/VA/PipeWire/GTK4 dev + runtime, headless GNOME) and the gnome-shell build-deps
-(deb-src + `apt build-dep gnome-shell` + `sassc dpkg-dev`). Then: builds `clone-daemon`
-(gzip → `embedded-bin/`), `bun build --compile`s the `agent-wrapper` (gzip → `embedded-bin/`),
-builds the patched gnome-shell deb via `gnome-patch/build-shell-deb.sh` (gzip →
-`embedded-bin/gnome-shell-deb.gz`), builds the frontend (`bun run build`), then builds the
-whole workspace `--release` — `rust-embed` bakes the frontend + the three gzipped artifacts
-into `control-server`. Installs it to `/usr/local/bin/rmng-control-server`. Idempotent. Env:
-`RMNG_DEV_USER` (`dev`).
+### `cs-build-ct.sh [src-dir=/root/RMNG]`
+Runs inside the build CT. **Build only — installs no GNOME/capture session.** Installs the
+toolchain (Rust, bun, GStreamer/VA/PipeWire/GTK4 *-dev*, plus the control-server's VA-API
+*encode* runtime) and the gnome-shell build-deps (deb-src + `apt build-dep gnome-shell` +
+`sassc dpkg-dev`). Then: builds `clone-daemon` (gzip → `embedded-bin/`), `bun build --compile`s
+the `agent-wrapper` (gzip → `embedded-bin/`), builds the patched gnome-shell deb via
+`gnome-patch/build-shell-deb.sh` (gzip → `embedded-bin/gnome-shell-deb.gz` — the deb is *built*;
+gnome-shell is never installed), builds the frontend (`bun run build`), then builds the whole
+workspace `--release` — `rust-embed` bakes the frontend + the three gzipped artifacts into
+`control-server`. Installs it to `/usr/local/bin/rmng-control-server`. Idempotent.
+`provision-build-ct.sh` runs `cs-deploy-ct.sh` afterward to start it as a control-server.
 
 ### `provision-deploy-ct.sh <proxmox-ssh> [hostname=rmng-control] [build-ct=rmng-build]`
 Runs locally. Creates a **lean** runtime CT (runtime libs only, render passthrough, the
@@ -106,13 +110,3 @@ Inside the build CT. Repack approach: applies shell-01 + shell-03 to the gnome-s
 rebuilds only `libshell-<N>.so` (meson/ninja), swaps it into the stock `.deb`, bumps the
 version `+ngshell1`. Prints `DEB=<path>`. Cached (skips if the deb is newer than the patches;
 `FORCE=1` rebuilds). See [gnome-patch/README.md](../gnome-patch/README.md).
-
----
-
-## Local dev stack (build CT)
-
-### `run-localstack.sh`
-Brings up control-server + clone-daemon as transient systemd units
-(`rmng-control-server`/`rmng-clone-daemon`) against the CT's headless GNOME, host seeded
-`@127.0.0.1`, so a real viewer (e.g. from your laptop) can connect to `<ct-ip>:9001`.
-Idempotent (re-running restarts both). Env: `RMNG_USER` (`pega`).

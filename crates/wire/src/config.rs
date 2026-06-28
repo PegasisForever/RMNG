@@ -212,10 +212,14 @@ fn default_static_dir() -> String {
 }
 
 impl AppConfig {
-    /// Default monitor layout if none configured (single 1080p).
+    /// Default monitor layout if none configured: dual 2560×1440 side-by-side,
+    /// primary on the right (monitor 0 at x=2560, monitor 1 at x=0).
     pub fn effective_monitors(&self) -> Vec<MonitorSpec> {
         if self.monitors.is_empty() {
-            vec![MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }]
+            vec![
+                MonitorSpec { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
+                MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: false },
+            ]
         } else {
             self.monitors.clone()
         }
@@ -300,7 +304,12 @@ mod tests {
         assert_eq!(c.listen.web, 9000);
         assert_eq!(c.listen.video, 9001);
         assert_eq!(c.agent_port, 4096);
-        assert_eq!(c.effective_monitors().len(), 1);
+        let mons = c.effective_monitors();
+        assert_eq!(mons.len(), 2);
+        assert_eq!((mons[0].width, mons[0].height, mons[0].x), (2560, 1440, 2560));
+        assert!(mons[0].primary);
+        assert_eq!(mons[1].x, 0);
+        assert!(!mons[1].primary);
     }
 
     #[test]

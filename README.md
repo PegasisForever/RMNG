@@ -93,6 +93,7 @@ Open `http://<ip>:9000` → **Settings** for Linear/Claude credentials. Full flo
 Rust (edition 2024), `bun`, `clang`/`libclang`; `libpipewire-0.3-dev`, `libva-dev` + AMD VA-API
 (radeonsi/Mesa), `libdrm-dev`, GStreamer + **`gstreamer1.0-plugins-bad`** (the `va` elements —
 *not* `gstreamer1.0-va`), GTK4; a GPU render node (`/dev/dri/renderD128`) on the control-server
-host *and* every clone. Only `wire` builds on a plain laptop — everything else needs the GPU box
-(edit locally, build on a GPU CT; see [docs/DEPLOY.md](docs/DEPLOY.md)). **Use the Ubuntu 26.04
-CT template.**
+host *and* every clone. With those dev libs the **whole workspace compiles on a plain laptop**
+(a bare box without them builds only `wire`); the GPU box is only needed to *run* the
+capture/encode/server side — the **`viewer` builds *and* runs locally** (client-side decode).
+See the [dev loop](docs/DEPLOY.md#the-dev-loop). **Use the Ubuntu 26.04 CT template.**

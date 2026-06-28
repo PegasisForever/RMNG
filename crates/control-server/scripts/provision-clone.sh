@@ -45,6 +45,14 @@ apt-get install -y -qq \
   pipewire wireplumber gstreamer1.0-pipewire \
   fonts-cantarell adwaita-icon-theme network-manager >/dev/null
 
+# Mask ModemManager. It's pulled in by network-manager but its unit has
+# ConditionVirtualization=!container, so it never starts in an LXC — yet its D-Bus
+# activation file still asks systemd to start it, so the bus name never appears and
+# any client (gnome-control-center / Settings) blocks ~25s per call (a ~1-min freeze).
+# Masking makes the activation fail instantly instead of timing out.
+say "mask ModemManager (won't run in a container; its D-Bus activation otherwise hangs Settings)"
+systemctl mask ModemManager.service >/dev/null 2>&1 || true
+
 # Patched gnome-shell (shell-01 hide screen-sharing indicator + shell-03 enable
 # org.gnome.Shell.Eval for the clone-daemon window-management MCP tools), if the
 # control-server pushed it. Installs over the stock shell just apt-installed above;

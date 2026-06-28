@@ -19,19 +19,23 @@ client) proved the approach; this crate re-implements it fresh.
    decode noise — a Phase-0 polish item).
 3. **Render** via GTK4: import each decoded dmabuf as a `Gdk::DmabufTexture`, paint with a
    frame-clock tick callback (latest-wins, no display FIFO). One surface/area per monitor.
-4. **Client-drawn cursor**: the video has no baked-in cursor (server captures METADATA); draw
-   the cursor client-side from `CursorMeta` (RGBA shape + hotspot) at the local pointer for
-   zero-lag movement; hide the OS cursor over the video. On a server-sent **`warp:true`**
-   update (an MCP-driven move) snap the drawn cursor to the target and **suppress local
-   pointer motion for ~0.5 s** so the operator's mouse doesn't fight the agent.
+4. **Cursor**: the video has no baked-in cursor (server captures METADATA). The **native OS
+   cursor is shown** over the video and **takes the remote cursor's shape** — each `CursorMeta`
+   `CursorShape` (BGRA bitmap + hotspot) becomes a `gdk::Cursor` set on the video widget, so the
+   operator's own pointer turns into the I-beam / hand / resize cursor the remote shows (zero-lag
+   movement; shape updated on change). The **synthetic overlay** is drawn on top **only while the
+   remote agent drives the pointer** — on a server-sent **`warp:true`** update (an MCP-driven
+   move) it's drawn at the agent's target for ~1 s (per-monitor, refreshed by each warp) so the
+   operator sees where the agent moved, while their own native cursor keeps showing. A warp also
+   **suppresses local pointer motion for ~0.5 s** so the operator's mouse doesn't fight the agent.
 5. **Capture input** → `InputMsg` to the server: absolute pointer (per-monitor scaled),
    buttons, scroll, and the keyboard. Normal keys go as **X11 keysyms** (GTK `keyval`, no
    DOM→keysym keymap); physical keys also go as **evdev keycodes** (`hardware_keycode − 8`)
    for games. Pointer motion is coalesced (latest-wins, ~120 Hz).
 6. **Pointer-lock / relative mouse** (games, e.g. Minecraft mouse-look): toggle with
-   **Ctrl+Alt+G** (Ctrl+Alt+P releases / unsticks all input). While engaged it hides the
-   local cursor and sends unaccelerated `pointer_relative` deltas (raw `wayland-client` +
-   `gdk4-wayland` pointer-constraints). Opt out with `RMNG_NO_POINTER_LOCK`.
+   **Ctrl+Alt+G** (Ctrl+Alt+P releases / unsticks all input). While engaged it **hides the
+   native cursor** (the only mode that does) and sends unaccelerated `pointer_relative` deltas
+   (raw `wayland-client` + `gdk4-wayland` pointer-constraints). Opt out with `RMNG_NO_POINTER_LOCK`.
 7. **Window chrome**: a HeaderBar per monitor window, **F11** fullscreen toggle, and an
    in-GUI **FPS** readout (paintable invalidate count, 1 s timer).
 8. **Clipboard**: bridge the GTK clipboard to the server's broker (rich + lazy) — offer on

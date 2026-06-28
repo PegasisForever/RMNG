@@ -55,5 +55,5 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now control-server >&2
+systemctl enable --now rmng-control-server >&2
 echo "[deploy-ct] enabled" >&2
