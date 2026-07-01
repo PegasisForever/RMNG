@@ -88,7 +88,7 @@ pub struct ClaudeStore {
 
 impl ClaudeStore {
     pub fn load(data_dir: &str) -> Self {
-        let path = std::env::var_os("KASM_CLAUDE_ACCOUNTS_FILE")
+        let path = std::env::var_os("RMNG_CLAUDE_ACCOUNTS_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(data_dir).join("claude-accounts.json"));
         let accounts = std::fs::read_to_string(&path)

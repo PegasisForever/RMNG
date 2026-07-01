@@ -81,10 +81,9 @@ mod tests {
     }
 }
 
-/// Resolve the state.json path: `KASM_STATE_FILE` override (matches the Bun
-/// server) else `<data_dir>/state.json`.
+/// Resolve the state.json path: `RMNG_STATE_FILE` override else `<data_dir>/state.json`.
 pub fn state_path(cfg: &AppConfig) -> PathBuf {
-    if let Some(p) = std::env::var_os("KASM_STATE_FILE") {
+    if let Some(p) = std::env::var_os("RMNG_STATE_FILE") {
         return PathBuf::from(p);
     }
     Path::new(&cfg.data_dir).join("state.json")

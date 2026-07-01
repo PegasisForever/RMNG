@@ -288,7 +288,7 @@ fn run_gui() -> Result<()> {
         });
     }
 
-    let app = gtk4::Application::builder().application_id("dev.kasm.rmng-viewer").build();
+    let app = gtk4::Application::builder().application_id("dev.rmng.viewer").build();
     app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &reported, &warp, &addr));
     let empty: [&str; 0] = [];
     app.run_with_args(&empty);

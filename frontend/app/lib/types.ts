@@ -1,6 +1,6 @@
 // Shared types for the control plane.
 //
-// `ControlState` is a superset of the Rust `kasm_shared::ControlState`
+// `ControlState` is a superset of the legacy Rust `ControlState`
 // (`{selected, hosts, monitors}`). The native RDP client deserializes the SSE
 // payload as that Rust struct, and serde ignores unknown fields — so the extra
 // `operations` field (and the per-host `ctid`/`source` extras) ride along

@@ -3,8 +3,8 @@
 //! The JSON shape is a **byte-for-byte superset** of the current
 //! `control-server/app/lib/types.ts` so the React frontend (and, during cutover,
 //! the legacy Rust client) keep parsing it unchanged. Note `Host` mixes casing:
-//! the original `kasm_shared` fields stay snake_case (`gdm_username`) while the
-//! server-only extras are camelCase (`claudeAccountEmail`).
+//! the fields inherited from the legacy control server stay snake_case
+//! (`gdm_username`) while the server-only extras are camelCase (`claudeAccountEmail`).
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -83,7 +83,7 @@ pub struct Host {
     pub password: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
-    // The two GDM fields keep snake_case JSON (legacy `kasm_shared` names). ts-rs
+    // The two GDM fields keep snake_case JSON (legacy field names). ts-rs
     // can't parse the combined serde attr, so pin the TS name explicitly too.
     #[serde(
         default,
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn parses_legacy_shared_example() {
-        // The exact shape the legacy `kasm_shared::ControlState` test used.
+        // The exact shape the legacy `ControlState` test used.
         let json = r#"{
             "selected": "host-a",
             "hosts": [

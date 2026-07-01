@@ -5,7 +5,7 @@
 
      _onNewHandle(handle) {
 -        if (handle.isRecording)
-+        // kasm patch: do not surface the screen-sharing indicator for
++        // rmng patch: do not surface the screen-sharing indicator for
 +        // remote-desktop (RDP) sessions.
 +        return;
 +

@@ -49,7 +49,7 @@ function ClientOnly({ children }: { children: React.ReactNode }) {
 }
 
 export function meta() {
-  return [{ title: "kasm control" }];
+  return [{ title: "rmng control" }];
 }
 
 // SPA mode (ssr:false): the live EventSource("/events") delivers the initial full
@@ -164,7 +164,7 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
           </svg>
         </button>
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800">
-          {selectedHost ? selectedHost.id : "kasm control"}
+          {selectedHost ? selectedHost.id : "rmng control"}
         </span>
         {/* Notes/Chat toggle lives here on mobile — the only header < lg. */}
         {selectedHost ? (
@@ -213,7 +213,7 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
         >
           <div className="flex items-center justify-between px-1">
             <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-              kasm control
+              rmng control
             </span>
             <button
               type="button"

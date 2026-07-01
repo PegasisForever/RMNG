@@ -10,7 +10,7 @@ import type { Route } from "./+types/root";
 import "./app.css";
 
 export function meta() {
-  return [{ title: "kasm control" }];
+  return [{ title: "rmng control" }];
 }
 
 export function Layout({ children }: { children: React.ReactNode }) {
