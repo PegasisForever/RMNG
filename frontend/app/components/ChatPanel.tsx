@@ -81,7 +81,7 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
       const res = await fetch(`/api/chat/${hostId}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ text }),
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };

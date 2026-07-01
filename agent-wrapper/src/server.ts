@@ -25,9 +25,15 @@
 //
 // Session id is in memory only: a CoW clone boots a fresh wrapper and starts a
 // brand-new conversation. Auth = the container's logged-in `claude` subscription.
-import { readFileSync } from "node:fs";
-
 import { query, type McpServerConfig, type Options, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+
+// The agent's instructions are embedded at BUILD time via Bun text imports. This
+// wrapper ships as a `bun build --compile` single-exec, so a runtime read
+// (`readFileSync(new URL("../foo.md", import.meta.url))`) resolves into the bunfs
+// virtual filesystem and fails with ENOENT — the instructions never reach the agent.
+// A `with { type: "text" }` import is inlined as a string constant, so it always ships.
+import OPERATING_NOTES_RAW from "../operating-notes.md" with { type: "text" };
+import TICKET_PROCEDURE_RAW from "../ticket-procedure.md" with { type: "text" };
 
 import { CONFIG } from "./config";
 
@@ -35,27 +41,13 @@ import { CONFIG } from "./config";
 // injected as a system-prompt append (below), NOT placed in ~/.claude/CLAUDE.md —
 // otherwise the Claude Code running inside Cursor (which the agent types
 // `implement <link>` into) would also read it and recursively try to open Cursor.
-const TICKET_PROCEDURE = (() => {
-  try {
-    return readFileSync(new URL("../ticket-procedure.md", import.meta.url), "utf8").trim();
-  } catch (e) {
-    console.warn(`could not read ticket-procedure.md: ${(e as Error).message}`);
-    return "";
-  }
-})();
+const TICKET_PROCEDURE = TICKET_PROCEDURE_RAW.trim();
 
 // General operating notes (sandbox, coordinates, launching GUIs, app quirks). Injected
 // from code as a system-prompt append — the SDK does NOT read ~/.claude/CLAUDE.md from
 // disk (settingSources is empty in buildOptions), so a clone needs no deployed memory
 // file; the instructions ship inside the wrapper.
-const OPERATING_NOTES = (() => {
-  try {
-    return readFileSync(new URL("../operating-notes.md", import.meta.url), "utf8").trim();
-  } catch (e) {
-    console.warn(`could not read operating-notes.md: ${(e as Error).message}`);
-    return "";
-  }
-})();
+const OPERATING_NOTES = OPERATING_NOTES_RAW.trim();
 
 // The full system-prompt append: operating notes first, then the ticket procedure.
 const SYSTEM_APPEND = [OPERATING_NOTES, TICKET_PROCEDURE].filter(Boolean).join("\n\n");
@@ -161,6 +153,10 @@ function buildOptions(): Options {
   return {
     model: CONFIG.model,
     executable: CONFIG.executable,
+    // The clone's standalone Claude Code (native binary). Required because this
+    // wrapper is a bun-compiled single-exec: the SDK can't resolve its own cli.js
+    // from the bunfs, so without this it throws "Native CLI binary … not found".
+    pathToClaudeCodeExecutable: CONFIG.claudeExecutable,
     // Adaptive thinking (model decides when/how much to think) at high effort —
     // set explicitly rather than relying on the CLI defaults.
     thinking: { type: "adaptive" },

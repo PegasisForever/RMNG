@@ -40,11 +40,16 @@ ln -sf /usr/share/zoneinfo/America/Toronto /etc/localtime; echo America/Toronto 
 mkdir -p /etc/sysctl.d && echo 'net.ipv4.ping_group_range = 0 65534' > /etc/sysctl.d/99-ping.conf
 
 say "headless GNOME + Mutter + VA-API + PipeWire (NO gdm/g-r-d)"
+# The desktop-MCP `screenshot` tool encodes a captured dmabuf via
+# `appsrc ! vapostproc ! videoconvert ! pngenc`: vapostproc is the `va` plugin in
+# gstreamer1.0-plugins-bad, pngenc is in -good, videoconvert/app in -base. Without
+# these the tool fails with `no element "vapostproc"` and the agent can't see the screen.
 apt-get install -y -qq \
-  gnome-session gnome-shell mutter ptyxis nautilus gnome-text-editor \
+  gnome-session gnome-shell mutter ptyxis nautilus gnome-text-editor loupe \
   dbus-user-session xwayland \
   mesa-va-drivers libva2 va-driver-all vainfo \
   pipewire wireplumber gstreamer1.0-pipewire \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   fonts-cantarell adwaita-icon-theme network-manager >/dev/null
 
 # Default terminal → Ptyxis (installed above in place of gnome-console; gnome-shell doesn't
@@ -255,41 +260,47 @@ if [ -n "$FISH_SH" ]; then
   for u in "$USERNAME" root; do chsh -s "$FISH_SH" "$u" 2>/dev/null || usermod -s "$FISH_SH" "$u" || say "WARN: set fish shell for $u"; done
 fi
 
-# ~/.local/bin on PATH for interactive shells. Claude Code (and other user-local tools)
-# install to ~/.local/bin, but neither fish (the clones' default shell, set above) nor a
-# non-login bash puts it on PATH — so `claude` isn't found in a terminal, even though the
-# agent-wrapper unit hardcodes it. Cover every fish shell (conf.d), login sh/bash
-# (profile.d), and non-login interactive bash (/etc/bash.bashrc). Guards keep it
-# idempotent and skip the dir until the claude installer creates it.
-say "PATH: add ~/.local/bin for interactive fish + bash"
+# ~/.local/bin + ~/.cargo/bin on PATH for interactive shells. User-local tools install
+# there — Claude Code / uv → ~/.local/bin, rustup/cargo → ~/.cargo/bin — but neither fish
+# (the clones' default shell, set above) nor a non-login bash puts them on PATH, so the
+# tools aren't found in a terminal even though the agent-wrapper unit hardcodes ~/.local/bin.
+# Cover every fish shell (conf.d), login sh/bash (profile.d), and non-login interactive
+# bash (/etc/bash.bashrc). Guards keep it idempotent and skip dirs until they're created.
+say "PATH: add ~/.local/bin + ~/.cargo/bin for interactive fish + bash"
 install -d -m0755 /etc/fish/conf.d
 cat > /etc/fish/conf.d/rmng-local-bin.fish <<'FISH'
-if test -d "$HOME/.local/bin"; and not contains -- "$HOME/.local/bin" $PATH
-    set -gx PATH "$HOME/.local/bin" $PATH
+for d in "$HOME/.local/bin" "$HOME/.cargo/bin"
+    if test -d "$d"; and not contains -- "$d" $PATH
+        set -gx PATH "$d" $PATH
+    end
 end
 FISH
 cat > /etc/profile.d/rmng-local-bin.sh <<'SH'
-# Claude Code + other user-local tools install to ~/.local/bin.
-if [ -d "$HOME/.local/bin" ]; then
+# User-local tools: Claude Code / uv → ~/.local/bin, rustup/cargo → ~/.cargo/bin.
+for d in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+  [ -d "$d" ] || continue
   case ":$PATH:" in
-    *":$HOME/.local/bin:"*) : ;;
-    *) PATH="$HOME/.local/bin:$PATH" ;;
+    *":$d:"*) : ;;
+    *) PATH="$d:$PATH" ;;
   esac
-fi
+done
 SH
-if ! grep -q 'rmng-local-bin' /etc/bash.bashrc 2>/dev/null; then
-  cat >> /etc/bash.bashrc <<'SH'
-
-# rmng-local-bin: user-local tools (Claude Code) install to ~/.local/bin; add it for
-# non-login interactive bash (login shells get it via /etc/profile.d/rmng-local-bin.sh).
-if [ -d "$HOME/.local/bin" ]; then
+# Non-login interactive bash sources /etc/bash.bashrc (not profile.d). Delete any prior
+# rmng block (marker-delimited) then re-append, so re-provisioning stays idempotent.
+sed -i '/# >>> rmng-local-bin >>>/,/# <<< rmng-local-bin <<</d' /etc/bash.bashrc 2>/dev/null || true
+cat >> /etc/bash.bashrc <<'SH'
+# >>> rmng-local-bin >>>
+# user-local tools (Claude Code / uv → ~/.local/bin, rustup/cargo → ~/.cargo/bin); add for
+# non-login interactive bash (login shells get these via /etc/profile.d/rmng-local-bin.sh).
+for d in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+  [ -d "$d" ] || continue
   case ":$PATH:" in
-    *":$HOME/.local/bin:"*) : ;;
-    *) PATH="$HOME/.local/bin:$PATH" ;;
+    *":$d:"*) : ;;
+    *) PATH="$d:$PATH" ;;
   esac
-fi
+done
+# <<< rmng-local-bin <<<
 SH
-fi
 
 # Passwordless GNOME keyring. The headless session has no login password to unlock a
 # keyring, so the first Secret Service client (Chrome, VS Code, etc.) pops a "Choose
@@ -332,6 +343,34 @@ install -m755 /root/agent-wrapper "$BINDIR/agent-wrapper" 2>/dev/null || \
 # Claude Code installs standalone (self-contained binary, no system node) → ~/.local/bin/claude.
 runuser -u "$USERNAME" -- bash -lc 'command -v claude >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash' 2>/dev/null || \
   say "WARN: standalone claude CLI install failed; install it later"
+
+# uv + nvm + fish-nvm, all installed as the clone user (per-user, like claude above).
+# Subshell cd's to the user's home so fisher can getcwd (root's cwd isn't readable by
+# the user → fisher would otherwise spew "Unable to open the current working directory").
+say "user tools: uv (Astral) + nvm + fish-nvm"
+( cd "/home/$USERNAME" 2>/dev/null || cd /
+  # uv — Astral's Python package/venv manager → ~/.local/bin/uv (already on PATH via the
+  # shell files written above). UV_NO_MODIFY_PATH: PATH is ours, don't let it touch profiles.
+  runuser -u "$USERNAME" -- bash -lc 'command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh' \
+    || say "WARN: uv install failed; install it later"
+  # rustup + latest stable Rust → ~/.cargo + ~/.rustup. --no-modify-path: we own PATH (the
+  # rmng-local-bin files above put ~/.cargo/bin on it). Default profile (rustc/cargo/clippy/
+  # rustfmt/std). </dev/null so the installer never blocks on this script's stdin.
+  runuser -u "$USERNAME" -- bash -lc 'command -v rustup >/dev/null 2>&1 || curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable --profile default' </dev/null \
+    || say "WARN: rustup install failed; install it later"
+  # nvm → ~/.nvm. Force PROFILE=~/.bashrc so its loader lands in bash: the user's default
+  # shell is fish, which nvm's installer can't detect and would otherwise skip the profile.
+  # (|| true keeps the substitution from tripping set -e/pipefail when the tag lookup fails.)
+  NVM_TAG="$(curl -fsSL https://api.github.com/repos/nvm-sh/nvm/releases/latest 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  : "${NVM_TAG:=v0.40.1}"
+  runuser -u "$USERNAME" -- bash -lc "[ -s \"\$HOME/.nvm/nvm.sh\" ] || { export PROFILE=\"\$HOME/.bashrc\"; curl -o- 'https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_TAG/install.sh' | bash; }" \
+    || say "WARN: nvm install failed; install it later"
+  # fish-nvm — makes nvm/node/npm/npx/yarn work in fish (the default shell) by lazily
+  # sourcing nvm via bass. Bootstrap fisher, then install it + its bass + fish-nvm deps.
+  # </dev/null: fisher must not inherit this script's stdin (it would consume later lines).
+  runuser -u "$USERNAME" -- fish -c 'curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher edc/bass FabioAntunes/fish-nvm' </dev/null \
+    || say "WARN: fish-nvm install failed; install it later"
+)
 
 say "systemd --user units: headless gnome-shell + clone-daemon"
 UDIR="/home/$USERNAME/.config/systemd/user"
