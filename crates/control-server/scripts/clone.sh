@@ -9,6 +9,40 @@ SRC_ID="$1"; NEWHOST="$2"; MACPREFIX="$3"; USER="${4:-rmng}"; ENV_B64="${5:-}"
 prog(){ echo "P $1 ${*:2}"; }
 die(){ echo "$*" >&2; exit 1; }
 
+# A preset PATH needs more than environment.d: interactive shells rewrite PATH on startup
+# (login bash re-runs /etc/profile, which hard-resets PATH; fish rebuilds $PATH), so the
+# inherited value reaches GUI apps but not a terminal — every OTHER preset var survives.
+# Mirror the template's rmng-local-bin blocks: prepend the preset's dirs inside fish
+# (conf.d), login sh/bash (profile.d), and non-login interactive bash (/etc/bash.bashrc).
+# We always PREPEND (never replace) so the shell keeps its system dirs even if the preset
+# set PATH outright, and drop any $PATH token; dirs are reversed so the listed order wins
+# (each is prepended in turn). Args: <mnt> <decoded-preset-text> <etc-owner uid:gid>.
+write_preset_path_rc(){
+  mnt="$1"; env_text="$2"; owner="$3"
+  path_val="$(printf '%s\n' "$env_text" | sed -n 's/^PATH=//p' | tail -1)"
+  [ -n "$path_val" ] || return 0
+  rev=""; OLDIFS="$IFS"; IFS=':'
+  for seg in $path_val; do
+    case "$seg" in ''|'$PATH'|'${PATH}') continue ;; esac
+    rev="\"$seg\" $rev"
+  done
+  IFS="$OLDIFS"
+  [ -n "$rev" ] || return 0
+  install -d "$mnt/etc/fish/conf.d"
+  printf 'for d in %s\n    if not contains -- "$d" $PATH\n        set -gx PATH "$d" $PATH\n    end\nend\n' "$rev" \
+    > "$mnt/etc/fish/conf.d/rmng-preset-path.fish"
+  printf '# rmng env preset: prepend the preset PATH dirs for login sh/bash.\nfor d in %s; do\n  case ":$PATH:" in\n    *":$d:"*) : ;;\n    *) PATH="$d:$PATH" ;;\n  esac\ndone\n' "$rev" \
+    > "$mnt/etc/profile.d/rmng-preset-path.sh"
+  chown "$owner" "$mnt/etc/fish/conf.d/rmng-preset-path.fish" "$mnt/etc/profile.d/rmng-preset-path.sh"
+  brc="$mnt/etc/bash.bashrc"
+  if [ -f "$brc" ]; then
+    sed -i '/# >>> rmng-preset-path >>>/,/# <<< rmng-preset-path <<</d' "$brc" 2>/dev/null || true
+    printf '# >>> rmng-preset-path >>>\n# rmng env preset: prepend preset PATH dirs for non-login interactive bash.\nfor d in %s; do\n  case ":$PATH:" in\n    *":$d:"*) : ;;\n    *) PATH="$d:$PATH" ;;\n  esac\ndone\n# <<< rmng-preset-path <<<\n' "$rev" \
+      >> "$brc"
+  fi
+  prog identity "preset PATH → shell rc (fish conf.d + profile.d + bash.bashrc)"
+}
+
 prog locate "looking up source container ${SRC_ID}"
 SRC_CONF="$(grep -ls "^hostname: ${SRC_ID}\$" /etc/pve/lxc/*.conf 2>/dev/null | head -1 || true)"
 [ -n "$SRC_CONF" ] || die "no container has hostname '${SRC_ID}'"
@@ -71,6 +105,7 @@ if [ -n "$ENV_B64" ] && [ -d "$MNT/home/$USER" ]; then
   printf '%s' "$ENV_B64" | base64 -d > "$MNT/home/$USER/.config/environment.d/30-rmng-preset.conf"
   chown "$OWNER" "$MNT/home/$USER/.config/environment.d/30-rmng-preset.conf"
   prog identity "wrote env preset → 30-rmng-preset.conf"
+  write_preset_path_rc "$MNT" "$(printf '%s' "$ENV_B64" | base64 -d)" "$(stat -c '%u:%g' "$MNT/etc")"
 fi
 umount "$MNT"; rmdir "$MNT"; MNT=""
 
