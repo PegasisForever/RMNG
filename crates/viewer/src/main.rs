@@ -18,6 +18,8 @@
 //! and editable at runtime via the main window's title-bar Settings button (see
 //! [`config`]); `RMNG_VIDEO` only seeds the default on first run, before any config
 //! file exists. Headless mode (`--headless`) still reads `RMNG_VIDEO` directly.
+//! A startup window with the same Settings button is shown from launch until the
+//! first monitor window exists, so the address can be fixed without a connection.
 //!
 //!   viewer [--headless]
 //!
@@ -67,7 +69,9 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                // `clip` (the clipboard bridge) logs debug by default: copy/paste-driven
+                // only (sparse), and the go-to trail for cross-machine clipboard issues.
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,clip=debug")),
         )
         .init();
     gst::init()?;
@@ -345,15 +349,6 @@ fn build_ui(
     warp: &WarpSuppress,
     addr: &ServerAddr,
 ) {
-    // Hold the app alive until the first monitor's window exists — windows are
-    // built lazily (on each monitor's first AU), so with zero windows GTK would
-    // quit the moment `activate` returns. The hold is dropped once the first
-    // window is built (see the tick below); from then on GTK's own window
-    // tracking owns the app's lifetime, so closing the last window stops the
-    // program. (This previously used `mem::forget`, leaking the hold forever, so
-    // closing every window never quit the process.)
-    let hold = Rc::new(RefCell::new(Some(app.hold())));
-
     // Black background behind every letterboxed video (applies to all windows).
     // Pointer-lock (games): one instance per display, shared across monitor windows;
     // None on X11 / when the compositor lacks the protocols / RMNG_NO_POINTER_LOCK.
@@ -397,11 +392,21 @@ fn build_ui(
         pointer_lock = PointerLock::new(&display, writer.clone()).map(Rc::new);
     }
 
+    // A window exists from launch, before any connection: monitor windows are built
+    // lazily on each monitor's first video AU, so a wrong/unset server address used
+    // to mean no window at all — and with it no Settings button to fix the address.
+    // This startup window carries that button (plus a connection status) until the
+    // first monitor window appears, and doubles as the app's keep-alive (GTK quits
+    // an app with zero windows, which an explicit `app.hold()` used to prevent);
+    // closing it while it's still the only window quits the viewer, as expected.
+    let startup: Rc<RefCell<Option<gtk4::ApplicationWindow>>> =
+        Rc::new(RefCell::new(Some(make_startup_window(app, addr, writer))));
+
     let windows: Windows = Rc::new(RefCell::new(HashMap::new()));
     let layout: SharedLayout = Rc::new(RefCell::new(Vec::new()));
 
     {
-        let (aus, srcs, writer, cursors, windows, layout, app, reported, warp, pointer_lock, hold, addr) = (
+        let (aus, srcs, writer, cursors, windows, layout, app, reported, warp, pointer_lock, startup, addr) = (
             aus.clone(),
             srcs.clone(),
             writer.clone(),
@@ -412,7 +417,7 @@ fn build_ui(
             reported.clone(),
             warp.clone(),
             pointer_lock.clone(),
-            hold.clone(),
+            startup.clone(),
             addr.clone(),
         );
         // ~8 ms tick: drain AUs → window per monitor (created lazily here, on the main
@@ -445,9 +450,13 @@ fn build_ui(
                     let win = w.entry(mid).or_insert_with(|| {
                         let win = make_monitor_window(&app, mid, &layout, &writer, &addr, &pointer_lock, &warp, primary);
                         srcs.insert(mid, win.appsrc.clone());
-                        // First window exists: hand the app's lifetime to GTK's window
-                        // tracking, so closing the last window quits the program.
-                        hold.borrow_mut().take();
+                        // First monitor window exists: the pre-connection startup window
+                        // has served its purpose. `destroy` (not `close`) skips the
+                        // close-request path, and the monitor window built just above
+                        // keeps the app alive.
+                        if let Some(s) = startup.borrow_mut().take() {
+                            s.destroy();
+                        }
                         win
                     });
                     let _ = win.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
@@ -665,6 +674,69 @@ fn make_monitor_window(
     window.present();
 
     MonitorWindow { video, cursor, appsrc, paintable, last_version: 0, native_cursor: None, cursor_hidden: false }
+}
+
+/// The pre-connection window, shown from launch until the first monitor window
+/// exists (then destroyed by the tick in [`build_ui`]). Its point is the Settings
+/// button: monitor windows only appear once video flows, so with a wrong server
+/// address this is the only place left to fix it. Shows live connection status.
+fn make_startup_window(app: &gtk4::Application, addr: &ServerAddr, writer: &Writer) -> gtk4::ApplicationWindow {
+    let window = gtk4::ApplicationWindow::builder()
+        .application(app)
+        .title("RMNG viewer")
+        .default_width(480)
+        .default_height(270)
+        .build();
+
+    // Same Settings button as the primary monitor window's title bar.
+    let header = gtk4::HeaderBar::new();
+    let settings = gtk4::Button::from_icon_name("network-server-symbolic");
+    settings.set_tooltip_text(Some("Server address"));
+    {
+        let (win, addr, writer) = (window.clone(), addr.clone(), writer.clone());
+        settings.connect_clicked(move |_| show_server_addr_dialog(&win, &addr, &writer));
+    }
+    header.pack_end(&settings);
+    window.set_titlebar(Some(&header));
+
+    let spinner = gtk4::Spinner::new();
+    spinner.set_spinning(true);
+    spinner.set_size_request(24, 24);
+    let status = gtk4::Label::new(Some(&format!("Connecting to {}…", addr.lock().unwrap())));
+    let hint = gtk4::Label::new(Some("Change the server address with the title-bar button."));
+    hint.add_css_class("dim-label");
+
+    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    content.set_valign(gtk4::Align::Center);
+    content.set_halign(gtk4::Align::Center);
+    content.append(&spinner);
+    content.append(&status);
+    content.append(&hint);
+    window.set_child(Some(&content));
+
+    // Keep the status live: the address changes via Settings and the net thread
+    // connects/retries underneath us. Ends itself once the window is gone.
+    {
+        let weak = window.downgrade();
+        let (addr, writer) = (addr.clone(), writer.clone());
+        glib::timeout_add_local(Duration::from_millis(500), move || {
+            if weak.upgrade().is_none() {
+                return glib::ControlFlow::Break;
+            }
+            let text = if writer.lock().unwrap().is_some() {
+                "Connected — waiting for video…".to_string()
+            } else {
+                format!("Connecting to {}…", addr.lock().unwrap())
+            };
+            if status.text() != text {
+                status.set_text(&text);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    window.present();
+    window
 }
 
 /// Settings dialog (main window only): edit the server `host:port` and persist it to
@@ -1014,7 +1086,7 @@ fn install_pointer(
             // the case where the pointer was already over the video when the window
             // activated, so no `enter` fired).
             video2.grab_focus();
-            let b = evdev_button(g.current_button());
+            let Some(b) = evdev_button(g.current_button()) else { return };
             state.buttons.borrow_mut().insert(b);
             send(&w, format!(r#"{{"kind":"button","button":{b},"pressed":true}}"#));
         });
@@ -1028,7 +1100,7 @@ fn install_pointer(
             if let Some((tmid, mx, my)) = drag_target(&video2, &paintable2, mid, &layout.borrow(), x, y) {
                 send(&w, format!(r#"{{"kind":"pointer_move","monitor_id":{tmid},"x":{mx:.1},"y":{my:.1}}}"#));
             }
-            let b = evdev_button(g.current_button());
+            let Some(b) = evdev_button(g.current_button()) else { return };
             state.buttons.borrow_mut().remove(&b);
             send(&w, format!(r#"{{"kind":"button","button":{b},"pressed":false}}"#));
         });
@@ -1187,16 +1259,21 @@ fn cursor_texture(shape: &CursorShape) -> Option<gdk::Texture> {
     Some(tex.upcast())
 }
 
-/// Pick the richest MIME we'd want from an offer: image first, then HTML, then text.
-fn pick_mime(mimes: &[String]) -> Option<String> {
-    let pref = |m: &str| {
-        if m.starts_with("image/png") { 0 }
-        else if m.starts_with("image/") { 1 }
-        else if m == "text/html" { 2 }
-        else if is_text_mime(m) { 3 }
-        else { 4 }
-    };
-    mimes.iter().min_by_key(|m| pref(m)).cloned()
+/// Pick the MIMEs to fetch from an offer — up to one per category: best image,
+/// `text/html`, best plain text. Plain text must be fetched *alongside* the rich
+/// type: Chromium apps (VSCode) offer `text/html` + `text/plain` together, and a
+/// local clipboard holding only html can't paste into plain-text targets.
+fn pick_mimes(mimes: &[String]) -> Vec<String> {
+    let image = mimes.iter().find(|m| m.starts_with("image/png"))
+        .or_else(|| mimes.iter().find(|m| m.starts_with("image/")));
+    let html = mimes.iter().find(|m| *m == "text/html");
+    let text = mimes.iter().find(|m| m.starts_with("text/plain;charset=utf-8"))
+        .or_else(|| mimes.iter().find(|m| is_text_mime(m)));
+    let mut out: Vec<String> = [image, html, text].into_iter().flatten().cloned().collect();
+    if out.is_empty() {
+        out.extend(mimes.first().cloned()); // unknown-only offer: mirror it as-is
+    }
+    out
 }
 
 /// Bidirectional **rich + lazy** clipboard over the broker protocol (display-wide, shared
@@ -1209,28 +1286,72 @@ fn install_clipboard(clipboard: &gdk::Clipboard, writer: &Writer, inbox: &ClipIn
     {
         let (clipboard, inbox, writer, applying) =
             (clipboard.clone(), inbox.clone(), writer.clone(), applying.clone());
+        // The remote offer currently being mirrored: its serial + the per-MIME bytes
+        // collected so far. Rebuilt into a union provider as each Data reply lands,
+        // so rich types and plain text are both pasteable locally.
+        let mut cur_serial: u64 = 0;
+        let mut collected: Vec<(String, Vec<u8>)> = Vec::new();
         glib::timeout_add_local(Duration::from_millis(80), move || {
             let msgs: Vec<ClipboardMsg> = inbox.lock().unwrap().drain(..).collect();
             for msg in msgs {
                 match msg {
                     ClipboardMsg::Offer(o) => {
-                        if let Some(mime) = pick_mime(&o.mime_types) {
-                            let req = ClipboardRequest { serial: o.serial, mime_type: mime };
+                        cur_serial = o.serial;
+                        collected.clear();
+                        let wanted = pick_mimes(&o.mime_types);
+                        tracing::debug!(target: "clip",
+                            "remote offer serial={} mimes={:?} -> requesting {wanted:?}",
+                            o.serial, o.mime_types);
+                        for mime_type in wanted {
+                            let req = ClipboardRequest { serial: o.serial, mime_type };
                             if let Ok(json) = serde_json::to_string(&ClipboardMsg::Request(req)) {
                                 send_tagged(&writer, 1, json);
                             }
                         }
                     }
                     ClipboardMsg::Data(d) => {
+                        if d.serial != cur_serial {
+                            tracing::debug!(target: "clip",
+                                "dropping stale data serial={} mime={} (current serial {cur_serial})",
+                                d.serial, d.mime_type);
+                            continue;
+                        }
+                        if d.bytes.is_empty() {
+                            tracing::warn!(target: "clip",
+                                "empty data for mime={} serial={} (remote read failed?)",
+                                d.mime_type, d.serial);
+                            continue;
+                        }
+                        tracing::debug!(target: "clip",
+                            "data serial={} mime={} ({} bytes)", d.serial, d.mime_type, d.bytes.len());
+                        collected.retain(|(m, _)| m != &d.mime_type);
+                        collected.push((d.mime_type, d.bytes));
+                        let providers: Vec<gdk::ContentProvider> = collected
+                            .iter()
+                            .map(|(mime, bytes)| {
+                                // Text goes in as a GValue string so GDK advertises the
+                                // full set of text targets (what set_text does), not
+                                // just the one exact MIME string.
+                                if is_text_mime(mime) {
+                                    if let Ok(text) = std::str::from_utf8(bytes) {
+                                        return gdk::ContentProvider::for_value(&glib::Value::from(text));
+                                    }
+                                }
+                                let bytes = glib::Bytes::from(bytes.as_slice());
+                                gdk::ContentProvider::for_bytes(mime, &bytes)
+                            })
+                            .collect();
+                        let provider = match providers.as_slice() {
+                            [single] => single.clone(),
+                            many => gdk::ContentProvider::new_union(many),
+                        };
                         applying.set(true);
-                        if is_text_mime(&d.mime_type) {
-                            if let Ok(text) = String::from_utf8(d.bytes) {
-                                clipboard.set_text(&text);
-                            }
+                        if let Err(e) = clipboard.set_content(Some(&provider)) {
+                            applying.set(false);
+                            tracing::warn!(target: "clip", "set_content failed: {e}");
                         } else {
-                            let bytes = glib::Bytes::from_owned(d.bytes);
-                            let provider = gdk::ContentProvider::for_bytes(&d.mime_type, &bytes);
-                            let _ = clipboard.set_content(Some(&provider));
+                            tracing::debug!(target: "clip", "local clipboard set: {:?}",
+                                collected.iter().map(|(m, b)| format!("{m} ({}B)", b.len())).collect::<Vec<_>>());
                         }
                     }
                     ClipboardMsg::Request(r) => serve_request(&clipboard, &writer, r),
@@ -1250,6 +1371,7 @@ fn install_clipboard(clipboard: &gdk::Clipboard, writer: &Writer, inbox: &ClipIn
             if mimes.is_empty() {
                 return;
             }
+            tracing::debug!(target: "clip", "local copy: offering {mimes:?}");
             let offer = ClipboardOffer { serial: serial.fetch_add(1, Ordering::Relaxed), mime_types: mimes };
             if let Ok(json) = serde_json::to_string(&ClipboardMsg::Offer(offer)) {
                 send_tagged(&writer, 1, json);
@@ -1261,9 +1383,11 @@ fn install_clipboard(clipboard: &gdk::Clipboard, writer: &Writer, inbox: &ClipIn
 /// Serve a remote `Request` by reading the local clipboard for the MIME and replying.
 fn serve_request(clipboard: &gdk::Clipboard, writer: &Writer, r: ClipboardRequest) {
     let (serial, mime) = (r.serial, r.mime_type);
+    tracing::debug!(target: "clip", "remote requests local clipboard: serial={serial} mime={mime}");
     let reply = {
         let writer = writer.clone();
         move |mime: String, bytes: Vec<u8>| {
+            tracing::debug!(target: "clip", "serving serial={serial} mime={mime} ({} bytes)", bytes.len());
             let data = ClipboardData { serial, mime_type: mime, bytes };
             if let Ok(json) = serde_json::to_string(&ClipboardMsg::Data(data)) {
                 send_tagged(&writer, 1, json);
@@ -1327,12 +1451,15 @@ fn send(writer: &Writer, json: String) {
     send_tagged(writer, 0, json);
 }
 
-/// GTK/X button number → evdev code.
-fn evdev_button(n: u32) -> i32 {
+/// GTK/X button number → evdev code. 8/9 are the thumb back/forward buttons;
+/// anything else unknown must NOT fall back to BTN_LEFT (a phantom left click).
+fn evdev_button(n: u32) -> Option<i32> {
     match n {
-        1 => 0x110, // BTN_LEFT
-        2 => 0x112, // BTN_MIDDLE
-        3 => 0x111, // BTN_RIGHT
-        _ => 0x110,
+        1 => Some(0x110), // BTN_LEFT
+        2 => Some(0x112), // BTN_MIDDLE
+        3 => Some(0x111), // BTN_RIGHT
+        8 => Some(0x113), // BTN_SIDE  (back)
+        9 => Some(0x114), // BTN_EXTRA (forward)
+        _ => None,
     }
 }
