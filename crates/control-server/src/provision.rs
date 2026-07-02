@@ -798,7 +798,10 @@ async fn run_user_systemctl(app: &App, container: &str, uid: &str, args: &[&str]
 // --- monitors -------------------------------------------------------------------------
 
 /// Progress step → percentage for apply-monitors (coarse; the script itself streams `[ct]`
-/// lines that set the op message).
+/// lines that set the op message). Retained as provision's public step-table surface even
+/// though `apply_monitors` currently streams `[ct]` lines directly (web.rs's monitors-apply
+/// isn't an Operation, so it has no op-progress table to feed) — see `monitors_step_pct`.
+#[allow(dead_code)]
 fn monitors_pct(step: &str) -> Option<f64> {
     Some(match step {
         "queued" => 0.0,
@@ -878,7 +881,10 @@ pub fn step_pct(kind: wire::OperationKind, step: &str) -> Option<f64> {
     }
 }
 
-/// The apply-monitors step→pct table (not an `OperationKind`, so exposed separately).
+/// The apply-monitors step→pct table (not an `OperationKind`, so exposed separately). Kept
+/// as public surface for a future monitors-as-Operation flow; today web.rs applies monitors
+/// without an Operation (streaming `[ct]` lines directly), so nothing in-crate calls it yet.
+#[allow(dead_code)]
 pub fn monitors_step_pct(step: &str) -> Option<f64> {
     monitors_pct(step)
 }

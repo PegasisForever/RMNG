@@ -227,7 +227,10 @@ impl DockerCtl {
         Ok(Self { docker, subnet: cfg.subnet.clone(), env: RwLock::new(EnvReport::default()) })
     }
 
-    /// The raw bollard client, for callers that need an operation not wrapped here.
+    /// The raw bollard client, for callers that need an operation not wrapped here. Public
+    /// escape hatch; no in-crate caller today (every flow goes through the wrapped
+    /// primitives), so it's marked to keep the zero-warning build.
+    #[allow(dead_code)]
     pub fn client(&self) -> &Docker {
         &self.docker
     }
@@ -811,6 +814,9 @@ impl DockerCtl {
     }
 
     /// The container's IPv4 on the rmng network, or `None` if not attached / not running.
+    /// Public primitive kept for reconciliation flows; `provision` allocates + tracks IPs via
+    /// `state.json` today, so nothing in-crate calls it yet.
+    #[allow(dead_code)]
     pub async fn inspect_ip(&self, id: &str) -> Result<Option<String>> {
         let info = self
             .docker

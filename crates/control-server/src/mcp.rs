@@ -133,9 +133,9 @@ fn tools_for(scope: Scope) -> Value {
         tools.push(tool("select", "Select the host shown in the viewer", clone_arg.clone(), json!(["clone"])));
         tools.push(tool(
             "clone",
-            "Clone a source host (CoW)",
-            json!({ "source": { "type": "string" }, "hostname": { "type": "string" } }),
-            json!(["source", "hostname"]),
+            "Create a clone from a source image (rmng/template:<name>)",
+            json!({ "image": { "type": "string", "description": "clone-source image reference" }, "hostname": { "type": "string" } }),
+            json!(["image", "hostname"]),
         ));
         tools.push(tool("delete", "Delete a host", clone_arg.clone(), json!(["clone"])));
         tools.push(tool(
@@ -256,9 +256,9 @@ async fn call_tool(st: &McpState, peer_ip: String, name: &str, args: Value) -> R
             Ok(text(format!("selected {clone}")))
         }
         "clone" => {
-            let source = args.get("source").and_then(Value::as_str).ok_or("source required")?.to_string();
+            let image = args.get("image").and_then(Value::as_str).ok_or("image required")?.to_string();
             let hostname = args.get("hostname").and_then(Value::as_str).ok_or("hostname required")?.to_string();
-            let op = jobs::start_clone(app, CloneSpec { source_id: source, new_hostname: hostname, ..Default::default() })
+            let op = jobs::start_clone(app, CloneSpec { source_image: image, new_hostname: hostname, ..Default::default() })
                 .map_err(|e| e.to_string())?;
             Ok(text(format!("clone started: op {}", op.id)))
         }
@@ -271,10 +271,9 @@ async fn call_tool(st: &McpState, peer_ip: String, name: &str, args: Value) -> R
             let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
             let daemon_only = args.get("daemonOnly").and_then(Value::as_bool).unwrap_or(false);
             let host = app.store.get().hosts.into_iter().find(|h| h.id == clone).ok_or("unknown clone")?;
-            let ctid = host.ctid.ok_or("clone has no container")?;
-            let cfg = app.config();
-            crate::orchestrate::redeploy_clone(&cfg, ctid, "pega", daemon_only, |step, msg| {
-                tracing::info!("redeploy CT {ctid} {step}: {msg}");
+            let container = host.container.as_deref().ok_or("clone has no container")?;
+            crate::provision::redeploy_clone(app, container, daemon_only, |step, msg| {
+                tracing::info!("redeploy {clone} ({container}) {step}: {msg}");
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -287,25 +286,25 @@ async fn call_tool(st: &McpState, peer_ip: String, name: &str, args: Value) -> R
             let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
             let account = args.get("account").and_then(Value::as_str).unwrap_or("auto");
             let host = app.store.get().hosts.into_iter().find(|h| h.id == clone).ok_or("unknown clone")?;
-            let ctid = host.ctid.ok_or("clone has no container")?;
+            let container = host.container.clone().ok_or("clone has no container")?;
             let assignment = crate::claude::resolve_assignment(app, Some(account)).ok_or("no imported Claude accounts")?;
             let selection = crate::claude::normalize_selection(Some(account));
             let (group, email) = match assignment {
                 crate::claude::Assignment::None => {
-                    crate::claude::clear_clone_token(&app.config().proxmox.ssh, ctid)
+                    crate::claude::clear_clone_token(app, &container)
                         .await
                         .map_err(|e| e.to_string())?;
                     app.claude.forget_pushed(&host.id);
                     (None, None)
                 }
                 crate::claude::Assignment::Group { name, initial } => {
-                    crate::claude::push_account_to_clone(app, &host.id, ctid, &initial)
+                    crate::claude::push_account_to_clone(app, &host.id, &container, &initial)
                         .await
                         .map_err(|e| e.to_string())?;
                     (Some(name), Some(initial))
                 }
                 crate::claude::Assignment::Account(a) => {
-                    crate::claude::push_account_to_clone(app, &host.id, ctid, &a)
+                    crate::claude::push_account_to_clone(app, &host.id, &container, &a)
                         .await
                         .map_err(|e| e.to_string())?;
                     (None, Some(a))

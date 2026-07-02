@@ -41,6 +41,21 @@ async fn main() -> Result<()> {
 
     let app = app::App::new(store, cfg);
 
+    // Probe the Docker environment (daemon reachable, self-container detection, sock mount,
+    // render node) and cache the report so `GET /api/setup/env` + the wizard can render it.
+    // Non-fatal: a down daemon / failed check must NOT stop the server booting — the wizard
+    // is exactly where the operator fixes those. `ensure_network` only runs here once setup
+    // is latched complete (the network is lazy).
+    {
+        let setup_complete = app.config().setup_complete;
+        if !app.docker.self_setup(setup_complete).await.required_ok() {
+            tracing::error!(
+                "Docker self-setup reported failing required checks; the server is up so the \
+                 setup wizard can show the details (GET /api/setup/env)"
+            );
+        }
+    }
+
     // Background loops: Claude usage poller, group-rotation loop, per-host agent-state
     // poller. (The Proxmox-era sshfs host-mount reconciler is gone with the Docker port —
     // clone homes live in named volumes on the same daemon, not on a remote SSH node.)

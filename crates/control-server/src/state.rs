@@ -43,8 +43,15 @@ impl StateStore {
         }
         let state = read_from_disk(&path);
         let serialized_file = to_file(&state);
+        // Hosts with no `container` are legacy/unmanaged rows (an old Proxmox-era
+        // `state.json` whose `ctid` serde dropped, or hand-added plain hosts): they carry
+        // no managed Docker clone and are just deletable UI rows. Surface the count so an
+        // operator migrating from the LXC backend sees at a glance how many rows won't have
+        // a live container behind them.
+        let unmanaged = state.hosts.iter().filter(|h| h.container.is_none()).count();
         tracing::info!(
             hosts = state.hosts.len(),
+            unmanaged,
             selected = ?state.selected,
             "state loaded"
         );
@@ -186,6 +193,27 @@ mod tests {
         let st = reloaded.get();
         assert_eq!(st.hosts.len(), 1);
         assert_eq!(st.selected.as_deref(), Some("h1"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_state_loads_hosts_as_unmanaged() {
+        // A Proxmox-era state.json (hosts carry the retired `ctid`, plus a top-level
+        // `templates` list) loads with every host `container: None` — serde drops the
+        // stale keys, so these are plain unmanaged rows. Guards the state-store load path
+        // (the wire crate covers the serde drop; this covers our fixture-through-load).
+        let path = temp_path();
+        let legacy = r#"{
+            "hosts": [
+                { "id": "pega-old", "host": "10.0.0.9", "username": "u", "password": "p", "ctid": 5 }
+            ],
+            "templates": ["rmng-template"]
+        }"#;
+        std::fs::write(&path, legacy).unwrap();
+        let store = StateStore::load(path.clone()).unwrap();
+        let st = store.get();
+        assert_eq!(st.hosts.len(), 1);
+        assert_eq!(st.hosts[0].container, None); // legacy ctid dropped → unmanaged
         let _ = std::fs::remove_file(&path);
     }
 

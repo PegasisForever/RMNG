@@ -13,7 +13,7 @@ const MAX_UPLOAD_BYTES: usize = 15 * 1024 * 1024;
 
 /// A host/note id is a DNS label (path-traversal guard).
 pub fn is_safe_id(id: &str) -> bool {
-    crate::orchestrate::is_dns_label(id)
+    crate::provision::is_dns_label(id)
 }
 
 /// 16 random bytes as hex, from `/dev/urandom` (Linux). Used for upload/feedback ids.

@@ -1,12 +1,12 @@
-//! Operation lifecycle — wraps the Proxmox SSH calls in an `Operation` persisted
-//! into `ControlState` and streamed to the UI over SSE. Ported from
-//! `jobs.server.ts`. Jobs run in the background: the API creates the op and
-//! returns its id immediately; updates flow over `/events`.
+//! Operation lifecycle — wraps the Docker clone/bootstrap/commit/delete flows in an
+//! `Operation` persisted into `ControlState` and streamed to the UI over SSE. Ported from
+//! `jobs.server.ts`; the backend is now `provision.rs` (bollard), not the retired SSH+`pct`
+//! path. Jobs run in the background: the API creates the op and returns its id immediately;
+//! updates flow over `/events`.
 //!
-//! Difference from the legacy flow: there is **no `wait-swap`** step — rmng
-//! clones have no g-r-d holder handing a desktop to an RDP client; a clone is
-//! ready once its CT is up and registered. (Account assignment + agent kickoff
-//! hooks are wired as Phases 2's Claude/chat modules land.)
+//! The coarse step→pct mapping lives in `provision` (its `step_pct` tables), so a streamed
+//! step key maps to the same percentage the backend intends. This file owns the `Operation`
+//! record + the progress→op-log plumbing; the flows themselves live in `provision`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,7 +14,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use wire::{Host, Operation, OperationKind, OperationStatus};
 
 use crate::app::App;
-use crate::orchestrate::{clone_ct, control_env_vars, delete_ct, is_dns_label};
+use crate::provision::{
+    self, bootstrap_base_image, clone_container, commit_clone_image, control_env_vars,
+    delete_clone, is_dns_label,
+};
 
 const LOG_LIMIT: usize = 200;
 const PRUNE_DONE_MS: u64 = 8_000;
@@ -44,7 +47,8 @@ pub struct LinearMeta {
 /// Everything the API hands to `start_clone`.
 #[derive(Debug, Clone, Default)]
 pub struct CloneSpec {
-    pub source_id: String,
+    /// The clone-source image reference (`rmng/template:<name>`) or id to clone from.
+    pub source_image: String,
     pub new_hostname: String,
     pub linear: Option<LinearMeta>,
     /// Requested Claude account: an email, `"auto"`, or `None` (= auto).
@@ -67,37 +71,11 @@ fn new_op_id() -> String {
     format!("op_{:08x}", (t as u64).wrapping_add(n.wrapping_mul(0x9E3779B97F4A7C15)) & 0xFFFF_FFFF)
 }
 
-fn clone_pct(step: &str) -> Option<f64> {
-    Some(match step {
-        "queued" => 0.0,
-        "locate" => 8.0,
-        "storage" => 15.0,
-        "allocate" => 22.0,
-        "sync" => 32.0,
-        "snapshot" => 48.0,
-        "identity" => 66.0,
-        "config" => 74.0,
-        "start-clone" => 84.0,
-        "wait-lease" => 92.0,
-        "done" => 100.0,
-        _ => return None,
-    })
-}
-
-fn delete_pct(step: &str) -> Option<f64> {
-    Some(match step {
-        "queued" => 0.0,
-        "check" => 15.0,
-        "stop" => 45.0,
-        "destroy" => 80.0,
-        "done" => 100.0,
-        _ => return None,
-    })
-}
-
 fn make_op(kind: OperationKind, target: &str, source: Option<&str>) -> Operation {
     let message = match kind {
         OperationKind::Clone => format!("queued clone of {}", source.unwrap_or("?")),
+        OperationKind::Bootstrap => format!("queued base-image build {target}"),
+        OperationKind::Commit => format!("queued commit of {}", source.unwrap_or("?")),
         OperationKind::Delete => format!("queued delete of {target}"),
     };
     Operation {
@@ -110,7 +88,7 @@ fn make_op(kind: OperationKind, target: &str, source: Option<&str>) -> Operation
         pct: 0.0,
         message,
         log: Vec::new(),
-        ctid: None,
+        container: None,
         started_at: now_ms(),
         finished_at: None,
     }
@@ -142,6 +120,31 @@ fn schedule_prune(app: App, op_id: String, delay_ms: u64) {
     });
 }
 
+/// A progress callback for op `op_id` of `kind`: maps a streamed `(step, message)` onto the
+/// operation record — the coarse pct from `provision`'s step→pct table for `kind`, the
+/// message, and a capped rolling log. `provision` may emit a sub-progress pct inline in the
+/// message (e.g. `"57% installing …"` during the long bootstrap phase); we keep the coarse
+/// table pct here and let the message carry the fine detail.
+fn op_progress(app: &App, op_id: &str, kind: OperationKind) -> impl FnMut(&str, &str) {
+    let app = app.clone();
+    let op_id = op_id.to_string();
+    move |step: &str, msg: &str| {
+        let pct = provision::step_pct(kind, step);
+        patch_op(&app, &op_id, |op| {
+            op.step = step.to_string();
+            if let Some(p) = pct {
+                op.pct = p;
+            }
+            op.message = msg.to_string();
+            op.log.push(format!("{step}: {msg}"));
+            if op.log.len() > LOG_LIMIT {
+                let drop = op.log.len() - LOG_LIMIT;
+                op.log.drain(0..drop);
+            }
+        });
+    }
+}
+
 /// Pick a free host id for a ticket base name (`base`, then `base a..z`). Race-free
 /// when called immediately before `start_clone` (single state snapshot).
 pub fn next_free_hostname(app: &App, base: &str) -> String {
@@ -164,10 +167,12 @@ pub fn next_free_hostname(app: &App, base: &str) -> String {
     base.to_string()
 }
 
-/// Validate + register a clone op, then drive it in the background.
+/// Validate + register a clone op, then drive it in the background. Images clone
+/// concurrently (nothing on the source to lock), so there is no source-busy check — only the
+/// hostname's validity + uniqueness are gated.
 pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
-    if !is_dns_label(&spec.source_id) {
-        return Err(JobError("source id must be a DNS label".into()));
+    if spec.source_image.trim().is_empty() {
+        return Err(JobError("a source image is required".into()));
     }
     if !is_dns_label(&spec.new_hostname) {
         return Err(JobError(
@@ -175,24 +180,14 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
         ));
     }
     let st = app.store.get();
-    if !st.hosts.iter().any(|h| h.id == spec.source_id) {
-        return Err(JobError(format!("unknown source host '{}'", spec.source_id)));
-    }
     if st.hosts.iter().any(|h| h.id == spec.new_hostname) {
         return Err(JobError(format!("a host named '{}' already exists", spec.new_hostname)));
     }
     if st.operations.iter().any(|o| o.status == OperationStatus::Running && o.target == spec.new_hostname) {
         return Err(JobError(format!("'{}' is already being created", spec.new_hostname)));
     }
-    if st.operations.iter().any(|o| {
-        o.status == OperationStatus::Running
-            && o.kind == OperationKind::Clone
-            && o.source.as_deref() == Some(spec.source_id.as_str())
-    }) {
-        return Err(JobError(format!("source '{}' is busy with another clone", spec.source_id)));
-    }
 
-    let op = make_op(OperationKind::Clone, &spec.new_hostname, Some(&spec.source_id));
+    let op = make_op(OperationKind::Clone, &spec.new_hostname, Some(&spec.source_image));
     let op_for_return = op.clone();
     let op_id = op.id.clone();
     app.store.mutate(|s| s.operations.push(op));
@@ -203,51 +198,30 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
 }
 
 async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
-    let cfg = app.config();
-    let progress = {
-        let app = app.clone();
-        let op_id = op_id.clone();
-        move |step: &str, msg: &str| {
-            let pct = clone_pct(step);
-            patch_op(&app, &op_id, |op| {
-                op.step = step.to_string();
-                if let Some(p) = pct {
-                    op.pct = p;
-                }
-                op.message = msg.to_string();
-                op.log.push(format!("{step}: {msg}"));
-                if op.log.len() > LOG_LIMIT {
-                    let drop = op.log.len() - LOG_LIMIT;
-                    op.log.drain(0..drop);
-                }
-            });
-        }
-    };
+    let progress = op_progress(&app, &op_id, OperationKind::Clone);
 
     // The clone→control-server + inference URLs (auto-detected) go into the clone's session
     // env first; the operator's chosen preset follows (so a preset key can still override).
-    let mut env = control_env_vars(&cfg);
+    let mut env = control_env_vars(&app).await;
     env.extend(spec.env.iter().cloned());
-    let (ctid, ip) =
-        match clone_ct(&cfg.proxmox, &spec.source_id, &spec.new_hostname, "rmng", &env, progress).await {
-        Ok(v) => v,
-        Err(e) => return fail_op(&app, &op_id, e.to_string()),
-    };
+    let (container, ip) =
+        match clone_container(&app, &spec.source_image, &spec.new_hostname, &env, progress).await {
+            Ok(v) => v,
+            Err(e) => return fail_op(&app, &op_id, e.to_string()),
+        };
 
-    // Register the new host (inheriting credentials from the source) and complete.
+    // Register the new managed host. Clones ship with fixed `rmng`/`rmng` credentials baked
+    // into the base image (the old Proxmox credential-inheritance from a source host is gone —
+    // images have no per-host credentials to inherit). RDP port stays 3389 for the media path.
     app.store.mutate(|s| {
-        let src = s.hosts.iter().find(|h| h.id == spec.source_id).cloned();
         let mut host = Host {
             id: spec.new_hostname.clone(),
             host: ip.clone(),
-            port: src.as_ref().map(|h| h.port).unwrap_or(3389),
-            username: src.as_ref().map(|h| h.username.clone()).unwrap_or_default(),
-            password: src.as_ref().map(|h| h.password.clone()).unwrap_or_default(),
-            domain: src.as_ref().and_then(|h| h.domain.clone()),
-            gdm_username: src.as_ref().and_then(|h| h.gdm_username.clone()),
-            gdm_password: src.as_ref().and_then(|h| h.gdm_password.clone()),
-            ctid: Some(ctid),
-            source: Some(spec.source_id.clone()),
+            port: 3389,
+            username: "rmng".into(),
+            password: "rmng".into(),
+            container: Some(container.clone()),
+            source: Some(spec.source_image.clone()),
             ..Default::default()
         };
         if let Some(m) = &spec.linear {
@@ -260,11 +234,11 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         }
         s.hosts.push(host);
         if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
-            op.ctid = Some(ctid);
+            op.container = Some(container.clone());
             op.status = OperationStatus::Done;
             op.step = "done".into();
             op.pct = 100.0;
-            op.message = format!("CT {ctid} ready at {ip}");
+            op.message = format!("clone {} ready at {ip}", spec.new_hostname);
             op.finished_at = Some(now_ms());
         }
     });
@@ -275,7 +249,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // the account's current access token into the clone's ~/.claude/.credentials.json
     // (the server refreshes + re-pushes it thereafter). A group-bound clone records its
     // group; the rotator re-balances it. "none" installs no token — the clone keeps
-    // whatever (if anything) it inherited from the template.
+    // whatever (if anything) it inherited from the image.
     if let Some(assignment) = crate::claude::resolve_assignment(&app, spec.claude_account.as_deref()) {
         let selection = crate::claude::normalize_selection(spec.claude_account.as_deref());
         let (group, account) = match assignment {
@@ -301,7 +275,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
                     Some(g) => format!("{email} (group {g})"),
                     None => email.clone(),
                 };
-                match crate::claude::push_account_to_clone(&app, &spec.new_hostname, ctid, &email).await {
+                match crate::claude::push_account_to_clone(&app, &spec.new_hostname, &container, &email).await {
                     Ok(()) => patch_op(&app, &op_id, |op| op.log.push(format!("account: assigned {label}"))),
                     Err(e) => {
                         tracing::warn!("push_account_to_clone({}) failed: {e}", spec.new_hostname);
@@ -335,130 +309,148 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     }
 }
 
-/// Bootstrap a template/clone from the fixed base image (from-zero). Registers the
-/// result as a template (clonable). Drives a clone-kind Operation with no source.
-pub fn start_bootstrap(
-    app: &App,
-    hostname: &str,
-    res: crate::orchestrate::BootstrapResources,
-) -> Result<Operation, JobError> {
-    if !is_dns_label(hostname) {
-        return Err(JobError("hostname must be a DNS label".into()));
-    }
-    if res.cores == 0 || res.memory_mb == 0 || res.disk_gb == 0 {
-        return Err(JobError("cores, memoryMb and diskGb must all be > 0".into()));
+/// Bootstrap the wizard base image `rmng/template:<name>` from the fixed base OS
+/// (from-zero). Drives a `Bootstrap`-kind Operation with the image name as its target; no
+/// Host is registered (an image is not a host).
+pub fn start_bootstrap(app: &App, name: &str) -> Result<Operation, JobError> {
+    if !is_dns_label(name) {
+        return Err(JobError(
+            "image name must be a DNS label (lowercase letters, digits, hyphens)".into(),
+        ));
     }
     let st = app.store.get();
-    if st.hosts.iter().any(|h| h.id == hostname) {
-        return Err(JobError(format!("a host named '{hostname}' already exists")));
+    if st.operations.iter().any(|o| o.status == OperationStatus::Running && o.target == name) {
+        return Err(JobError(format!("'{name}' is already being built")));
     }
-    if st.operations.iter().any(|o| o.status == OperationStatus::Running && o.target == hostname) {
-        return Err(JobError(format!("'{hostname}' is already being created")));
-    }
-    let op = make_op(OperationKind::Clone, hostname, None);
+    let op = make_op(OperationKind::Bootstrap, name, None);
     let (ret, op_id) = (op.clone(), op.id.clone());
     app.store.mutate(|s| s.operations.push(op));
-    let (app2, host) = (app.clone(), hostname.to_string());
-    tokio::spawn(async move { run_bootstrap(app2, op_id, host, res).await });
+    let (app2, name) = (app.clone(), name.to_string());
+    tokio::spawn(async move { run_bootstrap(app2, op_id, name).await });
     Ok(ret)
 }
 
-async fn run_bootstrap(
-    app: App,
-    op_id: String,
-    hostname: String,
-    res: crate::orchestrate::BootstrapResources,
-) {
-    let cfg = app.config();
-    let progress = {
-        let (app, op_id) = (app.clone(), op_id.clone());
-        move |step: &str, msg: &str| {
-            let pct = clone_pct(step);
-            patch_op(&app, &op_id, |op| {
-                op.step = step.to_string();
-                if let Some(p) = pct {
-                    op.pct = p;
-                }
-                op.message = msg.to_string();
-                op.log.push(format!("{step}: {msg}"));
-                if op.log.len() > LOG_LIMIT {
-                    let drop = op.log.len() - LOG_LIMIT;
-                    op.log.drain(0..drop);
-                }
-            });
-        }
-    };
-    let (ctid, ip) = match crate::orchestrate::bootstrap_template(&cfg, &hostname, res, progress).await {
-        Ok(v) => v,
+async fn run_bootstrap(app: App, op_id: String, name: String) {
+    let progress = op_progress(&app, &op_id, OperationKind::Bootstrap);
+    let reference = match bootstrap_base_image(&app, &name, progress).await {
+        Ok(r) => r,
         Err(e) => return fail_op(&app, &op_id, e.to_string()),
     };
-    app.store.mutate(|s| {
-        s.hosts.push(Host { id: hostname.clone(), host: ip.clone(), port: 3389, ctid: Some(ctid), ..Default::default() });
-        if !s.templates.iter().any(|t| t == &hostname) {
-            s.templates.push(hostname.clone()); // bootstrapped CT is a clonable template
-        }
-        if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
-            op.ctid = Some(ctid);
-            op.status = OperationStatus::Done;
-            op.step = "done".into();
-            op.pct = 100.0;
-            op.message = format!("template {hostname} (CT {ctid}) ready at {ip}");
-            op.finished_at = Some(now_ms());
-        }
+    patch_op(&app, &op_id, |op| {
+        op.status = OperationStatus::Done;
+        op.step = "done".into();
+        op.pct = 100.0;
+        op.message = format!("base image {reference} ready");
+        op.finished_at = Some(now_ms());
     });
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
 }
 
-/// Validate + register a delete op, then drive it in the background.
+/// Validate + register a commit-from-clone op, then drive it in the background. Guards:
+/// the host is a managed clone (has a container), the target tag is free (no existing image
+/// AND no in-flight commit racing for it), and the host has no operation already in flight.
+pub fn start_commit(app: &App, host_id: &str, name: &str) -> Result<Operation, JobError> {
+    if !is_dns_label(name) {
+        return Err(JobError(
+            "image name must be a DNS label (lowercase letters, digits, hyphens)".into(),
+        ));
+    }
+    let st = app.store.get();
+    let host = st
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .cloned()
+        .ok_or_else(|| JobError(format!("unknown host '{host_id}'")))?;
+    let Some(container) = host.container.clone() else {
+        return Err(JobError(format!("'{host_id}' has no container — only managed clones can be committed")));
+    };
+    let reference = format!("{}:{}", crate::docker::IMAGE_REPO, name);
+    // Reject a tag already targeted by another running commit/bootstrap (a race the pure
+    // `image_exists` check in provision can't see yet). The existing-image check happens in
+    // provision (needs the daemon); here we only guard the in-flight duplicate.
+    if st.operations.iter().any(|o| {
+        o.status == OperationStatus::Running
+            && matches!(o.kind, OperationKind::Commit | OperationKind::Bootstrap)
+            && o.target == name
+    }) {
+        return Err(JobError(format!("an image named '{name}' is already being built")));
+    }
+    if st.operations.iter().any(|o| o.status == OperationStatus::Running && o.target == host_id) {
+        return Err(JobError(format!("'{host_id}' already has an operation in flight")));
+    }
+
+    // Target = the image name (what's being produced); source = the host it's committed from.
+    let mut op = make_op(OperationKind::Commit, name, Some(host_id));
+    op.container = Some(container.clone());
+    let (ret, op_id) = (op.clone(), op.id.clone());
+    app.store.mutate(|s| s.operations.push(op));
+
+    let app2 = app.clone();
+    let (name, source) = (name.to_string(), host.source.clone().unwrap_or_default());
+    tokio::spawn(async move { run_commit(app2, op_id, container, name, source, reference).await });
+    Ok(ret)
+}
+
+async fn run_commit(
+    app: App,
+    op_id: String,
+    container: String,
+    name: String,
+    source: String,
+    reference: String,
+) {
+    let progress = op_progress(&app, &op_id, OperationKind::Commit);
+    if let Err(e) = commit_clone_image(&app, &container, &name, &source, progress).await {
+        return fail_op(&app, &op_id, e.to_string());
+    }
+    patch_op(&app, &op_id, |op| {
+        op.status = OperationStatus::Done;
+        op.step = "done".into();
+        op.pct = 100.0;
+        op.message = format!("image {reference} ready");
+        op.finished_at = Some(now_ms());
+    });
+    schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+}
+
+/// Validate + register a delete op, then drive it in the background. A managed clone
+/// (`container: Some`) is torn down through `provision::delete_clone`; an unmanaged row
+/// (`container: None` — a legacy/plain host) is simply removed from state.
 pub fn start_delete(app: &App, host_id: &str) -> Result<Operation, JobError> {
     let st = app.store.get();
     let host = st.hosts.iter().find(|h| h.id == host_id).cloned();
     let Some(host) = host else {
         return Err(JobError(format!("unknown host '{host_id}'")));
     };
-    if st.templates.iter().any(|t| t == host_id) {
-        return Err(JobError(format!("'{host_id}' is a template and cannot be deleted")));
-    }
     if st.operations.iter().any(|o| o.status == OperationStatus::Running && o.target == host_id) {
         return Err(JobError(format!("'{host_id}' already has an operation in flight")));
     }
 
     let mut op = make_op(OperationKind::Delete, host_id, None);
-    op.ctid = host.ctid;
+    op.container = host.container.clone();
     let op_for_return = op.clone();
     let op_id = op.id.clone();
     app.store.mutate(|s| s.operations.push(op));
 
     let app2 = app.clone();
     let host_id = host_id.to_string();
-    tokio::spawn(async move { run_delete(app2, op_id, host_id, host.ctid).await });
+    let container = host.container.clone();
+    tokio::spawn(async move { run_delete(app2, op_id, host_id, container).await });
     Ok(op_for_return)
 }
 
-async fn run_delete(app: App, op_id: String, host_id: String, ctid: Option<u32>) {
-    let cfg = app.config();
-    if let Some(ctid) = ctid {
-        let progress = {
-            let app = app.clone();
-            let op_id = op_id.clone();
-            move |step: &str, msg: &str| {
-                let pct = delete_pct(step);
-                patch_op(&app, &op_id, |op| {
-                    op.step = step.to_string();
-                    if let Some(p) = pct {
-                        op.pct = p;
-                    }
-                    op.message = msg.to_string();
-                    op.log.push(format!("{step}: {msg}"));
-                });
-            }
-        };
-        if let Err(e) = delete_ct(&cfg.proxmox, ctid, progress).await {
+async fn run_delete(app: App, op_id: String, host_id: String, container: Option<String>) {
+    if let Some(container) = &container {
+        let progress = op_progress(&app, &op_id, OperationKind::Delete);
+        if let Err(e) = delete_clone(&app, container, &host_id, progress).await {
             return fail_op(&app, &op_id, e.to_string());
         }
     } else {
+        // Unmanaged row: nothing to tear down, just unregister it.
         patch_op(&app, &op_id, |op| {
-            op.step = "destroy".into();
+            op.step = "remove".into();
+            op.pct = 75.0;
             op.message = "unregistering host (no container)".into();
         });
     }
@@ -472,8 +464,8 @@ async fn run_delete(app: App, op_id: String, host_id: String, ctid: Option<u32>)
             op.status = OperationStatus::Done;
             op.step = "done".into();
             op.pct = 100.0;
-            op.message = match ctid {
-                Some(c) => format!("CT {c} destroyed"),
+            op.message = match &container {
+                Some(_) => format!("clone {host_id} destroyed"),
                 None => "host removed".into(),
             };
             op.finished_at = Some(now_ms());
