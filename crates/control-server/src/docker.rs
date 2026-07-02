@@ -90,6 +90,10 @@ pub struct EnvReport {
     pub daemon_ok: bool,
     /// Daemon version string (`Version`/`ApiVersion`), for the detail line.
     pub daemon_version: Option<String>,
+    /// Why the daemon row failed (client build / connect error), when `!daemon_ok` —
+    /// e.g. "Socket not found: /var/run/docker.sock" on a bare `docker run` without the
+    /// sock bind. Rendered by the wizard via `GET /api/setup/env`.
+    pub daemon_detail: Option<String>,
     /// The control-server's own container id (full 64-hex) when running inside Docker;
     /// `None` = dev mode (running on the host directly).
     pub self_container: Option<String>,
@@ -117,7 +121,10 @@ impl EnvReport {
         let daemon_detail = match (&self.daemon_ok, &self.daemon_version) {
             (true, Some(v)) => format!("Docker {v}"),
             (true, None) => "reachable".to_string(),
-            (false, _) => "cannot reach the Docker daemon over the configured socket".to_string(),
+            (false, _) => self
+                .daemon_detail
+                .clone()
+                .unwrap_or_else(|| "cannot reach the Docker daemon over the configured socket".to_string()),
         };
         let self_detail = match &self.self_container {
             Some(id) => format!("container {}", short_id(id)),
@@ -168,7 +175,14 @@ impl EnvReport {
 /// The bollard client + the latest self-setup verdict. Cheap to `clone` the `Arc` around
 /// it; `App` holds one `Arc<DockerCtl>` for the process lifetime.
 pub struct DockerCtl {
-    docker: Docker,
+    /// The bollard client, or the client-build error (e.g. the socket file doesn't
+    /// exist — bollard checks the path in `connect_with_unix`). [`Self::daemon`] retries
+    /// on every call, so the server boots without Docker (bare `docker run`, no sock
+    /// bind) and a socket that appears later (dev: dockerd restart) heals without a
+    /// server restart. std (not tokio) lock: never held across an await.
+    client: std::sync::RwLock<Result<Docker, String>>,
+    /// The resolved daemon socket path (config `docker.socket`, default applied).
+    socket: String,
     /// The user-configured subnet (validated `/16`–`/24` IPv4 CIDR at config merge).
     subnet: String,
     env: RwLock<EnvReport>,
@@ -211,28 +225,48 @@ pub struct TarEntry {
 }
 
 impl DockerCtl {
-    /// Build the bollard client from config. Pure — no daemon I/O happens here (the
-    /// server must still boot the wizard even when Docker is down); every call surfaces
-    /// its own connection failure. `connect_with_unix` only checks the socket path
-    /// exists, so a stale/missing socket is caught up-front with a clear message.
-    pub fn connect(cfg: &DockerConfig) -> Result<Self> {
+    /// Build the client holder from config. Infallible and I/O-free — the server must
+    /// boot the wizard even when Docker is absent entirely (bare `docker run` without
+    /// the sock bind). A failed client build (missing socket file) is stored; every
+    /// daemon-touching call surfaces it via [`Self::daemon`], and `self_setup` reports
+    /// it as the failing `dockerDaemon` env row.
+    pub fn connect(cfg: &DockerConfig) -> Self {
         let socket = cfg.socket.trim();
-        let socket = if socket.is_empty() { "/var/run/docker.sock" } else { socket };
-        let docker = Docker::connect_with_unix(
+        let socket = if socket.is_empty() { "/var/run/docker.sock" } else { socket }.to_string();
+        let client = build_client(&socket).map_err(|e| {
+            tracing::warn!(target: "docker", "{e:#} — booting anyway; the setup wizard shows the failure");
+            format!("{e:#}")
+        });
+        Self {
+            client: std::sync::RwLock::new(client),
             socket,
-            120,
-            bollard::API_DEFAULT_VERSION,
-        )
-        .with_context(|| format!("connecting to the Docker daemon at {socket}"))?;
-        Ok(Self { docker, subnet: cfg.subnet.clone(), env: RwLock::new(EnvReport::default()) })
+            subnet: cfg.subnet.clone(),
+            env: RwLock::new(EnvReport::default()),
+        }
     }
 
-    /// The raw bollard client, for callers that need an operation not wrapped here. Public
-    /// escape hatch; no in-crate caller today (every flow goes through the wrapped
-    /// primitives), so it's marked to keep the zero-warning build.
-    #[allow(dead_code)]
-    pub fn client(&self) -> &Docker {
-        &self.docker
+    /// The bollard client (cheap `Arc` clone), rebuilding it first if the initial build
+    /// failed — so a socket that appears after boot starts working without a restart.
+    /// All daemon-touching methods go through this; the `Err` carries the build failure.
+    fn daemon(&self) -> Result<Docker> {
+        if let Ok(d) = &*self.client.read().unwrap() {
+            return Ok(d.clone());
+        }
+        let mut slot = self.client.write().unwrap();
+        if let Ok(d) = &*slot {
+            return Ok(d.clone()); // another caller won the retry race
+        }
+        match build_client(&self.socket) {
+            Ok(d) => {
+                tracing::info!(target: "docker", "Docker client connected at {}", self.socket);
+                *slot = Ok(d.clone());
+                Ok(d)
+            }
+            Err(e) => {
+                *slot = Err(format!("{e:#}"));
+                Err(e)
+            }
+        }
     }
 
     /// The latest self-setup verdict (a clone of the internal report).
@@ -271,8 +305,13 @@ impl DockerCtl {
     pub async fn self_setup(&self, setup_complete: bool) -> EnvReport {
         let mut report = EnvReport::default();
 
-        // 1. daemon reachable?
-        match self.docker.version().await {
+        // 1. daemon reachable? (`daemon()` also covers "client never built" — e.g. the
+        // socket file doesn't exist at all on a bare `docker run` without the bind.)
+        let version = match self.daemon() {
+            Ok(d) => d.version().await.map_err(anyhow::Error::from),
+            Err(e) => Err(e),
+        };
+        match version {
             Ok(v) => {
                 report.daemon_ok = true;
                 report.daemon_version = match (v.version, v.api_version) {
@@ -283,10 +322,11 @@ impl DockerCtl {
                 };
             }
             Err(e) => {
-                tracing::warn!(target: "docker", "daemon unreachable: {e}");
+                tracing::warn!(target: "docker", "daemon unreachable: {e:#}");
                 // Nothing else can be probed against a dead daemon; still fill the
                 // static bits (control IP from config, DRI from the fs) so the wizard
                 // shows what it can.
+                report.daemon_detail = Some(format!("{e:#}"));
                 report.control_ip = SubnetPlan::parse(&self.subnet).ok().map(|p| p.gateway().to_string());
                 report.dri_ok = std::path::Path::new("/dev/dri/renderD128").exists();
                 report.sock_mount_detail = "Docker daemon unreachable".into();
@@ -342,13 +382,18 @@ impl DockerCtl {
     /// scanning `/proc/self/mountinfo` for `/var/lib/docker/containers/<64hex>/`. Returns
     /// `None` on the host (dev mode).
     async fn detect_self_container(&self) -> Option<String> {
+        // Best-effort client: only called after the daemon check, but degrade to the
+        // unconfirmed mountinfo fallback rather than aborting if it's gone.
+        let docker = self.daemon().ok();
         // Hostname == short container id under Docker's default config.
         if let Ok(host) = std::env::var("HOSTNAME").or_else(|_| read_hostname()) {
             let host = host.trim();
             if host.len() >= 12 && host.bytes().all(|b| b.is_ascii_hexdigit()) {
-                if let Ok(info) = self.docker.inspect_container(host, None::<bollard::query_parameters::InspectContainerOptions>).await {
-                    if let Some(id) = info.id {
-                        return Some(id);
+                if let Some(d) = &docker {
+                    if let Ok(info) = d.inspect_container(host, None::<bollard::query_parameters::InspectContainerOptions>).await {
+                        if let Some(id) = info.id {
+                            return Some(id);
+                        }
                     }
                 }
             }
@@ -357,9 +402,11 @@ impl DockerCtl {
         if let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") {
             if let Some(id) = extract_container_id_from_mountinfo(&mountinfo) {
                 // Confirm the id is real before trusting it.
-                if let Ok(info) = self.docker.inspect_container(&id, None::<bollard::query_parameters::InspectContainerOptions>).await {
-                    if let Some(cid) = info.id {
-                        return Some(cid);
+                if let Some(d) = &docker {
+                    if let Ok(info) = d.inspect_container(&id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+                        if let Some(cid) = info.id {
+                            return Some(cid);
+                        }
                     }
                 }
                 return Some(id);
@@ -382,7 +429,11 @@ impl DockerCtl {
                 (true, "dev mode — clone socket materialized at runtime".into())
             };
         };
-        match self.docker.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+        let docker = match self.daemon() {
+            Ok(d) => d,
+            Err(e) => return (false, format!("could not inspect self container: {e:#}")),
+        };
+        match docker.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
             Ok(info) => {
                 let found = info.mounts.unwrap_or_default().into_iter().find(|m| {
                     matches!(m.typ, Some(MountPointTypeEnum::VOLUME) | Some(MountPointTypeEnum::BIND))
@@ -416,7 +467,7 @@ impl DockerCtl {
                 ..Default::default()
             }),
         };
-        match self.docker.connect_network(NETWORK, cfg).await {
+        match self.daemon()?.connect_network(NETWORK, cfg).await {
             Ok(()) => Ok(()),
             // 403 = already connected; treat as success.
             Err(BollardError::DockerResponseServerError { status_code: 403, .. }) => Ok(()),
@@ -433,7 +484,7 @@ impl DockerCtl {
     pub async fn ensure_network(&self) -> Result<()> {
         let plan = SubnetPlan::parse(&self.subnet)?;
         // Already present? Verify its subnet matches.
-        match self.docker.inspect_network(NETWORK, None::<bollard::query_parameters::InspectNetworkOptions>).await {
+        match self.daemon()?.inspect_network(NETWORK, None::<bollard::query_parameters::InspectNetworkOptions>).await {
             Ok(net) => {
                 let existing = net
                     .ipam
@@ -476,7 +527,7 @@ impl DockerCtl {
             labels: Some(HashMap::from([(LABEL_MANAGED.to_string(), "1".to_string())])),
             ..Default::default()
         };
-        self.docker.create_network(req).await.with_context(|| format!("creating the {NETWORK} network"))?;
+        self.daemon()?.create_network(req).await.with_context(|| format!("creating the {NETWORK} network"))?;
         tracing::info!(target: "docker", "created the {NETWORK} bridge with subnet {}", plan.cidr());
         Ok(())
     }
@@ -491,7 +542,7 @@ impl DockerCtl {
         let plan = SubnetPlan::parse(&self.subnet)?;
         let mut taken: std::collections::BTreeSet<Ipv4Addr> = std::collections::BTreeSet::new();
         // From the live network (endpoints + explicit IPAM allocations).
-        if let Ok(net) = self.docker.inspect_network(NETWORK, None::<bollard::query_parameters::InspectNetworkOptions>).await {
+        if let Ok(net) = self.daemon()?.inspect_network(NETWORK, None::<bollard::query_parameters::InspectNetworkOptions>).await {
             for c in net.containers.into_iter().flatten().map(|(_, v)| v) {
                 if let Some(addr) = c.ipv4_address.as_deref().and_then(parse_cidr_ip) {
                     taken.insert(addr);
@@ -517,7 +568,8 @@ impl DockerCtl {
     pub async fn pull_image(&self, reference: &str, mut on_progress: impl FnMut(&str, &str)) -> Result<()> {
         let (image, tag) = split_reference(reference);
         let opts = CreateImageOptionsBuilder::new().from_image(&image).tag(&tag).build();
-        let mut stream = self.docker.create_image(Some(opts), None, None);
+        let docker = self.daemon()?;
+        let mut stream = docker.create_image(Some(opts), None, None);
         // Track the last status emitted per layer so we don't spam a line per byte.
         let mut last: HashMap<String, String> = HashMap::new();
         while let Some(item) = stream.next().await {
@@ -539,7 +591,7 @@ impl DockerCtl {
 
     /// True if a local image with this reference/id exists.
     pub async fn image_exists(&self, reference: &str) -> Result<bool> {
-        match self.docker.inspect_image(reference).await {
+        match self.daemon()?.inspect_image(reference).await {
             Ok(_) => Ok(true),
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
             Err(e) => Err(anyhow!("inspecting image {reference}: {e}")),
@@ -554,7 +606,7 @@ impl DockerCtl {
         let filters: HashMap<String, Vec<String>> =
             HashMap::from([("label".to_string(), vec![format!("{LABEL_IMAGE}=1")])]);
         let opts = ListImagesOptionsBuilder::new().all(false).filters(&filters).build();
-        let summaries = self.docker.list_images(Some(opts)).await.context("listing rmng images")?;
+        let summaries = self.daemon()?.list_images(Some(opts)).await.context("listing rmng images")?;
         let mut out: Vec<ImageInfo> = summaries
             .into_iter()
             .map(|s| {
@@ -616,7 +668,7 @@ impl DockerCtl {
         }
 
         let res = self
-            .docker
+            .daemon()?
             .commit_container(opts, config)
             .await
             .with_context(|| format!("committing {container} to {IMAGE_REPO}:{name}"))?;
@@ -628,7 +680,7 @@ impl DockerCtl {
     /// container) is surfaced verbatim so the operator sees why.
     pub async fn remove_image(&self, reference: &str) -> Result<()> {
         let opts = RemoveImageOptionsBuilder::new().force(false).build();
-        match self.docker.remove_image(reference, Some(opts), None).await {
+        match self.daemon()?.remove_image(reference, Some(opts), None).await {
             Ok(_) => Ok(()),
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {
                 Ok(()) // already gone
@@ -717,7 +769,7 @@ impl DockerCtl {
 
         let opts = CreateContainerOptionsBuilder::new().name(&spec.name).build();
         let res = self
-            .docker
+            .daemon()?
             .create_container(Some(opts), body)
             .await
             .with_context(|| format!("creating clone container {}", spec.name))?;
@@ -742,7 +794,7 @@ impl DockerCtl {
         };
         let opts = CreateContainerOptionsBuilder::new().name(name).build();
         let res = self
-            .docker
+            .daemon()?
             .create_container(Some(opts), body)
             .await
             .with_context(|| format!("creating build container {name}"))?;
@@ -757,14 +809,14 @@ impl DockerCtl {
             labels: Some(HashMap::from([(LABEL_MANAGED.to_string(), "1".to_string())])),
             ..Default::default()
         };
-        self.docker.create_volume(opts).await.with_context(|| format!("creating volume {name}"))?;
+        self.daemon()?.create_volume(opts).await.with_context(|| format!("creating volume {name}"))?;
         Ok(())
     }
 
     /// Start a container. bollard treats 304 (already started) as success, so this is a
     /// no-op when it's already running.
     pub async fn start_container(&self, id: &str) -> Result<()> {
-        match self.docker.start_container(id, None::<bollard::query_parameters::StartContainerOptions>).await {
+        match self.daemon()?.start_container(id, None::<bollard::query_parameters::StartContainerOptions>).await {
             Ok(()) => Ok(()),
             Err(e) => Err(anyhow!("starting container {id}: {e}")),
         }
@@ -774,7 +826,7 @@ impl DockerCtl {
     /// (already stopped) to success; 404 (already gone) is tolerated here.
     pub async fn stop_container(&self, id: &str) -> Result<()> {
         let opts = StopContainerOptionsBuilder::new().t(STOP_TIMEOUT_SECS).build();
-        match self.docker.stop_container(id, Some(opts)).await {
+        match self.daemon()?.stop_container(id, Some(opts)).await {
             Ok(()) => Ok(()),
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
             Err(e) => Err(anyhow!("stopping container {id}: {e}")),
@@ -786,7 +838,7 @@ impl DockerCtl {
     /// [`DockerCtl::remove_volume`] for that.
     pub async fn remove_container(&self, id: &str) -> Result<()> {
         let opts = RemoveContainerOptionsBuilder::new().force(true).build();
-        match self.docker.remove_container(id, Some(opts)).await {
+        match self.daemon()?.remove_container(id, Some(opts)).await {
             Ok(()) => Ok(()),
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
             Err(e) => Err(anyhow!("removing container {id}: {e}")),
@@ -797,7 +849,7 @@ impl DockerCtl {
     /// surfaced so the caller knows to remove the container first.
     pub async fn remove_volume(&self, name: &str) -> Result<()> {
         let opts = RemoveVolumeOptionsBuilder::new().force(true).build();
-        match self.docker.remove_volume(name, Some(opts)).await {
+        match self.daemon()?.remove_volume(name, Some(opts)).await {
             Ok(()) => Ok(()),
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
             Err(BollardError::DockerResponseServerError { status_code: 409, message }) => {
@@ -819,7 +871,7 @@ impl DockerCtl {
     #[allow(dead_code)]
     pub async fn inspect_ip(&self, id: &str) -> Result<Option<String>> {
         let info = self
-            .docker
+            .daemon()?
             .inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>)
             .await
             .with_context(|| format!("inspecting container {id}"))?;
@@ -834,7 +886,7 @@ impl DockerCtl {
     /// Whether a container is currently running. `false` (not an error) if it doesn't
     /// exist.
     pub async fn is_running(&self, id: &str) -> Result<bool> {
-        match self.docker.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+        match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
             Ok(info) => Ok(info.state.and_then(|s| s.running).unwrap_or(false)),
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
             Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
@@ -852,7 +904,14 @@ impl DockerCtl {
             .stderr(true)
             .tail(&n.to_string())
             .build();
-        let mut stream = self.docker.logs(id, Some(opts));
+        let docker = match self.daemon() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!(target: "docker", "logs tail for {id}: {e:#}");
+                return String::new();
+            }
+        };
+        let mut stream = docker.logs(id, Some(opts));
         let mut lines: Vec<String> = Vec::new();
         while let Some(item) = stream.next().await {
             match item {
@@ -886,7 +945,7 @@ impl DockerCtl {
     /// they extract relative to `/`.
     pub async fn upload_tar(&self, container: &str, entries: Vec<TarEntry>) -> Result<()> {
         let archive = build_tar(&entries).context("building upload tar")?;
-        self.docker
+        self.daemon()?
             .upload_to_container(
                 container,
                 Some(
@@ -908,7 +967,7 @@ impl DockerCtl {
     /// exit is NOT an error here; the caller inspects `code`.
     pub async fn exec_capture(&self, container: &str, cmd: &[&str]) -> Result<(i64, String)> {
         let exec = self
-            .docker
+            .daemon()?
             .create_exec(
                 container,
                 CreateExecOptions {
@@ -923,14 +982,14 @@ impl DockerCtl {
 
         let mut out = String::new();
         if let StartExecResults::Attached { mut output, .. } =
-            self.docker.start_exec(&exec.id, None).await?
+            self.daemon()?.start_exec(&exec.id, None).await?
         {
             while let Some(chunk) = output.next().await {
                 let chunk = chunk?;
                 out.push_str(&String::from_utf8_lossy(chunk.as_ref()));
             }
         }
-        let code = self.docker.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
+        let code = self.daemon()?.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
         Ok((code, out))
     }
 
@@ -957,7 +1016,7 @@ impl DockerCtl {
         let env_lines: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
         let exec = self
-            .docker
+            .daemon()?
             .create_exec(
                 container,
                 CreateExecOptions {
@@ -973,7 +1032,7 @@ impl DockerCtl {
             .with_context(|| format!("creating script exec in {container}"))?;
 
         let StartExecResults::Attached { mut output, mut input } =
-            self.docker.start_exec(&exec.id, None).await?
+            self.daemon()?.start_exec(&exec.id, None).await?
         else {
             bail!("exec started detached unexpectedly");
         };
@@ -1029,9 +1088,16 @@ impl DockerCtl {
             }
         }
 
-        let code = self.docker.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
+        let code = self.daemon()?.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
         Ok(code)
     }
+}
+
+/// Build a bollard client for `socket`. No daemon I/O — bollard only validates that the
+/// socket path exists, which is exactly the failure [`DockerCtl::daemon`] retries on.
+fn build_client(socket: &str) -> Result<Docker> {
+    Docker::connect_with_unix(socket, 120, bollard::API_DEFAULT_VERSION)
+        .with_context(|| format!("connecting to the Docker daemon at {socket}"))
 }
 
 // --- Pure helpers ---------------------------------------------------------------------
@@ -1264,6 +1330,25 @@ impl LineSplitter {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    // --- client construction ----------------------------------------------------------
+
+    /// A missing socket FILE must not prevent construction (the no-socket boot path:
+    /// bare `docker run` without the sock bind). The build error is deferred to
+    /// `daemon()`, which carries the socket path in its message for the env row.
+    #[test]
+    fn connect_without_socket_defers_the_error() {
+        let cfg = DockerConfig {
+            socket: "/nonexistent/rmng-test-docker.sock".into(),
+            ..Default::default()
+        };
+        let ctl = DockerCtl::connect(&cfg); // must not panic
+        let err = format!("{:#}", ctl.daemon().expect_err("daemon() must fail without a socket"));
+        assert!(
+            err.contains("/nonexistent/rmng-test-docker.sock"),
+            "error should name the socket path: {err}"
+        );
+    }
 
     // --- IP allocator ---------------------------------------------------------------
 
@@ -1503,6 +1588,7 @@ mod tests {
         let report = EnvReport {
             daemon_ok: true,
             daemon_version: Some("29.0.1 (API 1.51)".into()),
+            daemon_detail: None,
             self_container: None,
             control_ip: Some("10.99.0.1".into()),
             sock_mount_ok: true,
@@ -1527,6 +1613,16 @@ mod tests {
         let down = EnvReport { daemon_ok: false, ..report };
         assert!(!down.required_ok());
         assert!(!down.to_setup_env().rows.iter().find(|r| r.id == "dockerDaemon").unwrap().ok);
+
+        // A stored client-build error (the no-socket boot path) becomes the row detail.
+        let dead = EnvReport {
+            daemon_detail: Some("Socket not found: /var/run/docker.sock".into()),
+            ..down
+        };
+        let env = dead.to_setup_env();
+        let row = env.rows.iter().find(|r| r.id == "dockerDaemon").unwrap();
+        assert!(!row.ok);
+        assert!(row.detail.contains("Socket not found"), "detail: {}", row.detail);
     }
 
     #[test]

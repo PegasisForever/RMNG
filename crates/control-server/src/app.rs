@@ -31,11 +31,10 @@ pub struct App {
 impl App {
     pub fn new(store: Arc<StateStore>, cfg: AppConfig) -> Self {
         let claude = Arc::new(ClaudeStore::load(&cfg.data_dir));
-        // `DockerCtl::connect` is pure (only validates the socket path); a down daemon is
-        // reported per-call, never here, so the server can always reach the setup wizard.
-        let docker = Arc::new(
-            DockerCtl::connect(&cfg.docker).expect("building the Docker client from config"),
-        );
+        // `DockerCtl::connect` is infallible and I/O-free: even a missing socket FILE
+        // (bare `docker run` without the sock bind) boots the server — the failure is
+        // surfaced per call and by `self_setup`'s env report, so the wizard shows it.
+        let docker = Arc::new(DockerCtl::connect(&cfg.docker));
         Self {
             store,
             cfg: Arc::new(RwLock::new(cfg)),
