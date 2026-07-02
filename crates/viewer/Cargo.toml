@@ -29,8 +29,10 @@ gstreamer-gl = { version = "0.23", features = ["v1_24"] }
 gtk4 = { version = "0.9", package = "gtk4", features = ["v4_14"] }
 serde.workspace = true
 serde_json.workspace = true
-# Pointer-lock / relative mouse for games (Minecraft): drive the Wayland
-# pointer-constraints + relative-pointer protocols over GTK's own connection.
+
+# Pointer-lock / relative mouse (Wayland only; gdk4-wayland links a C lib that
+# does not exist on macOS).  The pointer_lock module is gated by the same cfg.
+[target.'cfg(target_os = "linux")'.dependencies]
 # `wayland_crate` re-exports a version-matched wayland-client (0.31, matching gtk4 0.9).
 gdk4-wayland = { version = "0.9", features = ["wayland_crate"] }
 wayland-client = "0.31"

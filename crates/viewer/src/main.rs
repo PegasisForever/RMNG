@@ -29,7 +29,32 @@
 mod config;
 mod glunpack;
 mod headless;
+// The Wayland pointer-lock implementation only compiles (and links) on Linux.
+// On other platforms the stub below exposes the same public surface so every
+// call site in this file compiles unchanged; the real macOS twin comes in §4.5.
+#[cfg(target_os = "linux")]
 mod pointer_lock;
+#[cfg(not(target_os = "linux"))]
+mod pointer_lock {
+    use std::net::TcpStream;
+    use std::sync::{Arc, Mutex};
+
+    use gtk4::gdk;
+
+    /// Stub for non-Linux builds: always returns `None` from `new`.
+    pub struct PointerLock;
+
+    impl PointerLock {
+        pub fn new(_display: &gdk::Display, _writer: Arc<Mutex<Option<TcpStream>>>) -> Option<Self> {
+            None
+        }
+        pub fn is_engaged(&self) -> bool {
+            false
+        }
+        pub fn engage(&self, _surface: &gdk::Surface) {}
+        pub fn release(&self) {}
+    }
+}
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -63,6 +88,8 @@ fn main() -> Result<()> {
     // Empirically confirmed on this Intel/Mesa box: cairo=clean(slow), ngl/vulkan=stale, gl=clean.
     // Pin `gl` unless the user overrides. Must be set before GTK realizes its first surface; we're
     // still single-threaded here so set_var is sound.
+    // macOS: the legacy `gl` renderer was removed in GTK ≥ 4.18; the pin is Linux-only.
+    #[cfg(target_os = "linux")]
     if std::env::var_os("GSK_RENDERER").is_none() {
         unsafe { std::env::set_var("GSK_RENDERER", "gl") };
     }
@@ -1020,12 +1047,18 @@ fn install_pointer(
             // no-ops until the following crossing. Bouncing through a *named* cursor takes
             // GDK's cursor-shape path (clearing the attached flag), and restoring the
             // texture cursor then forces a full set_cursor with the current enter serial.
+            // Wayland-specific; gated so macOS doesn't get the unnecessary bounce.
+            #[cfg(target_os = "linux")]
             if !pl.as_ref().is_some_and(|p| p.is_engaged()) {
                 if let Some(cur) = video2.cursor() {
                     video2.set_cursor_from_name(Some("default"));
                     video2.set_cursor(Some(&cur));
                 }
             }
+            // On non-Linux `pl` is captured by the closure but used only in the Linux
+            // block above; suppress the unused-variable warning without a rename.
+            #[cfg(not(target_os = "linux"))]
+            let _ = &pl;
         });
     }
     {
