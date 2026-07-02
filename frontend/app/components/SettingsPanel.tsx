@@ -10,8 +10,8 @@ const input =
 
 /** When a changed setting takes effect. Placed on section headers / fields to set
  *  expectations: `immediate` applies on save, `restart` needs a control-server
- *  restart (ports, cloneSocket, staticDir, chroma), `one-time` is baked in at
- *  first-run provision and can't change afterwards. */
+ *  restart (ports, staticDir, chroma), `one-time` is baked in at first-run provision
+ *  and can't change afterwards (dataDir, storage, bridge, cloneSocket). */
 function EffectBadge({ effect }: { effect: "immediate" | "restart" | "one-time" }) {
   const style =
     effect === "immediate"
@@ -559,10 +559,10 @@ export function SettingsPanel({
               </div>
             </Section>
 
-            {/* Claude groups (named account pools; a group-bound clone rotates every 10 min). */}
+            {/* Claude groups (named account pools; sticky — a clone moves only when its account exhausts). */}
             <Section
               title="Claude groups"
-              hint="A pool of accounts. A clone bound to a group rotates among its members every 10 minutes, skipping any over 90% 5h usage."
+              hint="A pool of accounts. A clone bound to a group keeps its account (preserving its prompt cache) until that account passes 90% 5h usage, then moves to the least-used member."
             >
               <div className="space-y-3">
                 {claudeGroups.length === 0 ? (
@@ -717,19 +717,27 @@ export function SettingsPanel({
                       </p>
                     ) : null}
                   </div>
-                  {/* The unix socket clone-daemons connect to → wired at startup → restart. */}
+                  {/* The unix socket clone-daemons connect to → baked into the template at
+                      provision → one-time (editable only during first-run setup; a pre-latch
+                      edit is restart-required because the old path is bound at startup). */}
                   <div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-medium text-slate-500">Clone socket</span>
-                      <EffectBadge effect="restart" />
+                      <EffectBadge effect="one-time" />
                     </div>
                     <input
                       value={cloneSocket}
                       onChange={(e) => setCloneSocket(e.target.value)}
+                      disabled={cfg.setupComplete}
                       placeholder="/srv/rmng-sock/clones.sock"
                       spellCheck={false}
-                      className={`mt-0.5 ${input}`}
+                      className={`mt-0.5 ${input} disabled:bg-slate-50 disabled:text-slate-400`}
                     />
+                    {cfg.setupComplete ? (
+                      <p className="mt-0.5 text-xs text-slate-400">
+                        set during first-run setup — cannot be changed
+                      </p>
+                    ) : null}
                   </div>
                   <div className="col-span-2">
                     <div className="flex items-center gap-2">

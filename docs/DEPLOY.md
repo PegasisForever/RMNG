@@ -16,8 +16,9 @@ redeploys, monitor layouts) is driven from the running server's dashboard/API.
 #    gnome-shell deb all embedded).
 ./scripts/provision-build-ct.sh   root@<proxmox>            # → rmng-build
 
-# 2. Deploy CT — runtime libs only; copies the ONE binary, writes minimal config (just the
-#    Proxmox SSH target), generates + authorizes the orchestration SSH key, starts the unit.
+# 2. Deploy CT — runtime libs only; copies the ONE binary, writes minimal config (Proxmox SSH
+#    target + one-time storage/bridge/cloneSocket prefilled), generates + authorizes the
+#    orchestration SSH key, starts the unit.
 ./scripts/provision-deploy-ct.sh  root@<proxmox>            # → rmng-control, http://<ip>:9000
 
 # 3. Clones are provisioned BY the running control-server. Bootstrap the golden template
@@ -29,12 +30,13 @@ Then open `http://<deploy-ip>:9000`. A fresh deploy ships `config.json` with
 `"setupComplete": false`, so the web UI opens the **first-run setup wizard** (4 steps:
 Proxmox + connection test → server settings + monitors → first template provision →
 finish) instead of the dashboard; the provision has already prefilled the Proxmox SSH
-target. The one-time fields (`dataDir`, `proxmox.storage` default `local-lvm`,
-`proxmox.bridge` default `vmbr0`) are set here and lock once the wizard latches
-`setupComplete: true`. Afterward, use **Settings** to create presets (Linear key + labels
-+ env vars), Claude settings, monitor defaults, and the listen ports. Claude accounts are
-imported from a signed-in clone, not entered here. Secrets are write-only and redacted on
-read. See [SCRIPTS.md](SCRIPTS.md) for each script's args/env.
+target, storage, bridge, and clone socket (the deploy CT prefills them from its provisioning
+flags). The one-time fields (`dataDir`, `proxmox.storage` default `local-lvm`, `proxmox.bridge`
+default `vmbr0`, `cloneSocket` default `/srv/rmng-sock/clones.sock`) are confirmed here and
+lock once the wizard latches `setupComplete: true`. Afterward, use **Settings** to create
+presets (Linear key + labels + env vars), Claude settings, monitor defaults, and the listen
+ports. Claude accounts are imported from a signed-in clone, not entered here. Secrets are
+write-only and redacted on read. See [SCRIPTS.md](SCRIPTS.md) for each script's args.
 
 ## The dev loop
 

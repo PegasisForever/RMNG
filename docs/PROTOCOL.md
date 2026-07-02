@@ -68,7 +68,8 @@ doesn't fight the agent.
 A unix `SOCK_SEQPACKET` socket (one JSON message per datagram). dmabuf file descriptors ride
 out-of-band via `SCM_RIGHTS` in the same datagram, in plane order — never in the JSON. The
 daemon connects to `RMNG_SOCKET`; the server listens on the `cloneSocket` config path
-(default `/srv/rmng-sock/clones.sock`, restart-required). The path
+(default `/srv/rmng-sock/clones.sock`, one-time — set in the setup wizard, baked into the
+template at provision; a pre-latch edit is restart-required). The path
 is a **host-bind-mounted** dir (`/srv/rmng-sock`, *not* under `/run` — the CT tmpfs would
 shadow it), `chmod 0777` so cross-uid clones connect.
 
@@ -129,7 +130,7 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`); `PUT /api/config` retur
 | `agent_port` | u16 | `4096` | agent-wrapper port on each clone |
 | `data_dir` | string | `"data"` | state/notes/uploads/chats/feedback root; `state.json` and the `claude-accounts.json` secret store live here. **One-time** (set in the setup wizard) |
 | `static_dir` | string | `""` (embedded) | empty serves the frontend embedded in the binary; a non-empty disk path serves the bundle from there. Set in Settings → Advanced. **Restart-required** |
-| `clone_socket` | string | `/srv/rmng-sock/clones.sock` | media-plane unix socket the clone-daemons connect to. **Restart-required** |
+| `clone_socket` | string | `/srv/rmng-sock/clones.sock` | media-plane unix socket the clone-daemons connect to; baked into the template at provision. Set in the setup wizard. **One-time** (a pre-latch edit is **restart-required** — the old path is bound at startup) |
 | `chroma` | `ChromaMode` | `4:2:0` | viewer video chroma subsampling. Settings → Video. **Restart-required** |
 | `setup_complete` | bool | `false` | latched `true` by the first-run setup wizard; gates the frontend to the wizard until then |
 | `monitors` | `MonitorSpec[]` | `[]` → dual 1440p | desired global layout |
@@ -152,7 +153,8 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`); `PUT /api/config` retur
   false`, so the web UI shows a 4-step wizard (Proxmox + connection test → server settings
   + monitors → first template provision → finish) instead of the dashboard; finishing
   latches `setupComplete: true`, after which the one-time fields (`data_dir`,
-  `proxmox.storage`, `proxmox.bridge`) are locked. Pre-wizard installs are grandfathered:
+  `proxmox.storage`, `proxmox.bridge`, `clone_socket`) are locked. Pre-wizard installs are
+  grandfathered:
   a `config.json` with no `setupComplete` key but a `proxmox.ssh` already set is treated as
   complete on first load and the file is rewritten.
 - <a id="preset"></a>**`Preset`**: `name`, `labels` (Linear ticket labels that auto-select
@@ -173,8 +175,9 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`); `PUT /api/config` retur
   expiry), re-pushed to every assigned clone whenever a refresh rotates it — so a *running*
   clone hot-swaps without restart (written via the Proxmox node's `pct exec`).
 - **`CloneGroup`**: `name`, `accounts` (member emails). A clone bound to a group
-  (`Host.claude_group`) is re-balanced across the group's members every 10 min (rotator),
-  skipping any over 90% 5h usage; selected at clone/swap time as `group:<name>`.
+  (`Host.claude_group`) sticks to its account (preserving its prompt cache) until that
+  account passes 90% 5h usage or leaves the group; the 10-min rotator then moves it to
+  the least-loaded / least-used member. Selected at clone/swap time as `group:<name>`.
 - **`MonitorSpec`**: `width`, `height`, `x`, `y`, `primary`.
 
 Template build params are not config: the base image is fixed in code
@@ -187,10 +190,11 @@ per bootstrap in the "New template" modal (`POST /api/template/bootstrap`).
 ## Environment variables
 
 **control-server:** reads **no `RMNG_*` env vars** — all config is `./config.json` in the
-working directory (the systemd unit sets `WorkingDirectory=/var/lib/rmng`). The clone
-socket, disk-frontend path, and chroma are the `cloneSocket` / `staticDir` / `chroma`
-config fields (restart-required, along with the four listen ports). Only `RUST_LOG`
-(`info,tower_http=warn`) is read.
+working directory (the systemd unit sets `WorkingDirectory=/var/lib/rmng`). The disk-frontend
+path and chroma are the `staticDir` / `chroma` config fields (restart-required, along with
+the four listen ports); the clone socket is the `cloneSocket` config field (**one-time** —
+baked into the template at provision — but a pre-latch edit is still restart-required, since
+the old path is bound at startup). Only `RUST_LOG` (`info,tower_http=warn`) is read.
 
 **clone-daemon:** `RMNG_SOCKET` (media socket; **absent → capture self-test mode**),
 `RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (layout CSV, below),

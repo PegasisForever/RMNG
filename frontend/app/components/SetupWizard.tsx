@@ -68,6 +68,7 @@ export function SetupWizard({
 
   // --- Step 2: Server ---
   const [dataDir, setDataDir] = useState(initialConfig.dataDir);
+  const [cloneSocket, setCloneSocket] = useState(initialConfig.cloneSocket);
   const [hostnamePrefix, setHostnamePrefix] = useState(initialConfig.proxmoxHostnamePrefix);
   const [monitors, setMonitors] = useState<Mon[]>(
     initialConfig.monitors.length
@@ -154,6 +155,7 @@ export function SetupWizard({
     } else if (step === 1) {
       const ok = await persist({
         dataDir,
+        cloneSocket,
         proxmox: { hostnamePrefix },
         monitors: monitorsPatch(),
         chroma,
@@ -342,6 +344,21 @@ export function SetupWizard({
                 />
               </Field>
 
+              <OneTimeWarning>
+                The clone media socket is baked into the template at provision time — it{" "}
+                <strong>cannot be changed after setup</strong>. Changing it here requires restarting
+                the control-server before provisioning the template.
+              </OneTimeWarning>
+              <Field label="Clone media socket">
+                <input
+                  value={cloneSocket}
+                  onChange={(e) => setCloneSocket(e.target.value)}
+                  placeholder="/srv/rmng-sock/clones.sock"
+                  spellCheck={false}
+                  className={input}
+                />
+              </Field>
+
               <Field label="Clone hostname prefix">
                 <input
                   value={hostnamePrefix}
@@ -506,6 +523,7 @@ export function SetupWizard({
                     ["Storage pool", storage || "—"],
                     ["Bridge", bridge || "—"],
                     ["Data dir", dataDir || "—"],
+                    ["Clone media socket", cloneSocket || "—"],
                     ["Clone hostname prefix", hostnamePrefix || "(none)"],
                     ["Monitors", `${monitors.length} monitor(s)`],
                     ["Chroma", chroma],

@@ -29,16 +29,19 @@ on the node. They emit `P <step> <msg>` progress lines and a final `RESULT …` 
 
 ## Developer build/deploy
 
-### `provision-build-ct.sh <proxmox-ssh> [hostname=rmng-build]`
+### `provision-build-ct.sh [flags] <proxmox-ssh> [hostname=rmng-build]`
 Runs locally. Provisions the **staging** control-server CT. Packs `RMNG/` (incl. the vendored
 `agent-wrapper`), ships it to the node, creates an unprivileged Ubuntu CT (nesting/keyctl/fuse,
 render-node passthrough, apparmor unconfined, the `/srv/rmng-sock` clone-socket bind-mount),
 runs `cs-build-ct.sh` to build the binary, then runs `cs-deploy-ct.sh` and authorizes the CT's
 orchestration key on the node — so the CT comes up as a control-server orchestrating **real
 clones**, exactly like the production deploy CT but with the toolchain. The build CT does **not**
-run GNOME/capture. Env: `RMNG_STORAGE` (`local-lvm`), `RMNG_BRIDGE` (`vmbr0`), `RMNG_TEMPLATE`
-(Ubuntu 26.04), `RMNG_CORES` (8), `RMNG_MEMORY` (12288), `RMNG_ROOTFS_GB` (40), `RMNG_SOCK_DIR`
-(`/srv/rmng-sock`), `RMNG_PROXMOX_FROM_CT`. Prints `RESULT <ctid> <ip>`; dashboard at `:9000`.
+run GNOME/capture. Flags (all optional, before the positionals): `--storage` (`local-lvm`),
+`--bridge` (`vmbr0`), `--template` (Ubuntu 26.04), `--cores` (8), `--memory` (12288),
+`--rootfs-gb` (40), `--sock-dir` (`/srv/rmng-sock`), `--proxmox-from-ct`. `--storage`/`--bridge`/
+`--sock-dir` are passed on to `cs-deploy-ct.sh`, which prefills them (and `cloneSocket =
+<sock-dir>/clones.sock`) into the CT's `config.json` so the first-run wizard matches the real
+infra. Prints `RESULT <ctid> <ip>`; dashboard at `:9000`.
 
 ### `cs-build-ct.sh [src-dir=/root/RMNG]`
 Runs inside the build CT. **Build only — installs no GNOME/capture session.** Installs the
@@ -52,18 +55,23 @@ workspace `--release` — `rust-embed` bakes the frontend + the three gzipped ar
 `control-server`. Installs it to `/usr/local/bin/rmng-control-server`. Idempotent.
 `provision-build-ct.sh` runs `cs-deploy-ct.sh` afterward to start it as a control-server.
 
-### `provision-deploy-ct.sh <proxmox-ssh> [hostname=rmng-control] [build-ct=rmng-build]`
+### `provision-deploy-ct.sh [flags] <proxmox-ssh> [hostname=rmng-control] [build-ct=rmng-build]`
 Runs locally. Creates a **lean** runtime CT (runtime libs only, render passthrough, the
 `/srv/rmng-sock` host dir bind-mounted for the clone socket), copies `control-server` from the
 build CT, runs `cs-deploy-ct.sh` inside, and authorizes the CT's orchestration key on the
-node. Env: same `RMNG_*` sizing (defaults 4 cores / 4 GB / 12 GB), `RMNG_SOCK_DIR`
-(`/srv/rmng-sock`), `RMNG_PROXMOX_FROM_CT`. Prints `RESULT <ctid> <ip>`; dashboard at `:9000`.
+node. Flags (all optional, before the positionals): same as `provision-build-ct.sh` —
+`--storage`/`--bridge`/`--template`/`--cores`/`--memory`/`--rootfs-gb`/`--sock-dir`/
+`--proxmox-from-ct` (sizing defaults 4 cores / 4 GB / 12 GB; `--sock-dir` `/srv/rmng-sock`).
+`--storage`/`--bridge`/`--sock-dir` are prefilled into the CT's config via `cs-deploy-ct.sh`.
+Prints `RESULT <ctid> <ip>`; dashboard at `:9000`.
 
-### `cs-deploy-ct.sh <proxmox-ssh-from-ct>`
+### `cs-deploy-ct.sh <proxmox-ssh-from-ct> [sock-dir=/srv/rmng-sock] [storage=local-lvm] [bridge=vmbr0]`
 Runs inside the deploy CT. Installs runtime deps, writes a minimal `config.json` (the
-Proxmox SSH target plus `setupComplete: false`), generates the `~/.ssh/id_ed25519`
-orchestration key, and installs +
-starts the `control-server` systemd unit.
+Proxmox SSH target + the one-time infra settings — `proxmox.storage`, `proxmox.bridge`, and
+`cloneSocket = <sock-dir>/clones.sock` — **prefilled** from the args so the first-run wizard
+shows values matching the CT that was created, plus `setupComplete: false`), generates the
+`~/.ssh/id_ed25519` orchestration key, and installs + starts the `control-server` systemd unit.
+The provision scripts pass args 2-4 through; run by hand they default to the values shown.
 
 ---
 
