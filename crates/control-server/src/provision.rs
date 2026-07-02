@@ -63,6 +63,20 @@ pub fn is_dns_label(s: &str) -> bool {
         && !s.ends_with('-')
 }
 
+/// A fresh random machine-id file body: 32 lowercase hex chars + newline, from
+/// `/dev/urandom` (the same format `systemd-machine-id-setup` writes). Injected per
+/// clone because systemd-in-docker won't persist one itself (see the caller).
+fn fresh_machine_id() -> Vec<u8> {
+    use std::io::Read;
+    let mut buf = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut buf);
+    }
+    let mut s: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    s.push('\n');
+    s.into_bytes()
+}
+
 /// Standard base64 (no line wrapping). Ported verbatim from `orchestrate.rs` — used to
 /// pass the credentials JSON to `claude-import.sh apply`.
 pub fn b64_encode(bytes: &[u8]) -> String {
@@ -219,8 +233,8 @@ fn clone_pct(step: &str) -> Option<f64> {
 /// dind volume so a retry isn't blocked by a stale same-named container (gotcha #7).
 ///
 /// `image` must be a clone source (`rmng.image=1`); `env` is the resolved control + preset
-/// env (control URLs first so a preset can still override). One `upload_tar` injects: an
-/// empty `/etc/machine-id` (always — a committed image carries a baked one), the preset
+/// env (control URLs first so a preset can still override). One `upload_tar` injects: a
+/// fresh random `/etc/machine-id` (always — a committed image carries a baked one), the preset
 /// `30-rmng-preset.conf` (uid 1000, home entries), and — when the preset sets `PATH` — the
 /// fish/profile preset-PATH rc (root-owned `/etc`). After start, when the preset set `PATH`,
 /// the bashrc marker block is appended via an exec (a plain tar can't append). wait-ready
@@ -345,9 +359,12 @@ async fn clone_container_after_create(
     let preset_conf = preset_env_conf(env);
     let path_rc = preset_path_rc(&preset_conf);
     let mut entries: Vec<TarEntry> = vec![
-        // Empty machine-id: a committed image bakes one in; clearing it makes systemd
-        // regenerate a fresh id on first boot so clones don't collide on D-Bus / journald.
-        TarEntry { path: "etc/machine-id".into(), data: Vec::new(), mode: 0o444, uid: 0, gid: 0 },
+        // Fresh random machine-id: a committed image bakes one in, and systemd-in-docker
+        // does NOT persist a generated id into an empty writable /etc/machine-id (it runs
+        // with a transient one; seen live in the E2E — hostnamectl broken, id unstable
+        // across restarts). Writing a unique id per clone gives stable, collision-free
+        // D-Bus/journald identity; commit truncates it again, so images never carry it.
+        TarEntry { path: "etc/machine-id".into(), data: fresh_machine_id(), mode: 0o444, uid: 0, gid: 0 },
         // Per-clone preset env (control URLs + preset vars), owned by the clone user.
         TarEntry {
             path: format!("home/{CLONE_USER}/.config/environment.d/30-rmng-preset.conf"),
