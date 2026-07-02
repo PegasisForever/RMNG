@@ -8,6 +8,7 @@ mod app;
 mod chat;
 mod claude;
 mod config;
+mod docker;
 mod embed;
 mod files;
 mod jobs;

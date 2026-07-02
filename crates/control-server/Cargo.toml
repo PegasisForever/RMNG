@@ -36,3 +36,8 @@ flate2 = "1"
 # debug-embed: actually embed in debug too (default only embeds in release), so a
 # copied binary is self-contained regardless of profile.
 rust-embed = { version = "8", features = ["mime-guess", "interpolate-folder-path", "debug-embed"] }
+# Docker orchestration substrate (src/docker.rs): the unix-socket daemon client that
+# replaced the retired SSH/pct Proxmox path. `tar` builds the in-memory archives
+# `upload_tar` PUTs into containers.
+bollard = "0.19"
+tar = "0.4"
