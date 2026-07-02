@@ -97,8 +97,11 @@ pub fn spawn(app: App) {
     }
     let cfg = app.config();
     let video_port = cfg.listen.video;
-    let sock_path =
-        std::env::var("RMNG_CLONE_SOCKET").unwrap_or_else(|_| "/srv/rmng-sock/clones.sock".into());
+    let sock_path = cfg.clone_socket.clone();
+    // Chroma mode is global + fixed at launch (restart-required); snapshot it once for
+    // the accept loop so every viewer connect uses the same value the encoders were
+    // built with, rather than re-reading it live per connect.
+    let chroma = cfg.chroma;
     let handle = app.media.clone();
     let viewer: Viewer = Arc::new(Mutex::new(None));
     let encoders: Encoders = Arc::new(Mutex::new(HashMap::new()));
@@ -108,6 +111,7 @@ pub fn spawn(app: App) {
     {
         let (viewer, handle, app, encoders) = (viewer.clone(), handle.clone(), app.clone(), encoders.clone());
         std::thread::spawn(move || match TcpListener::bind(("0.0.0.0", video_port)) {
+            // (chroma is captured from the spawn-time snapshot above)
             Ok(l) => {
                 tracing::info!("port 1 (video) listening on 0.0.0.0:{video_port}");
                 for stream in l.incoming().flatten() {
@@ -122,7 +126,6 @@ pub fn spawn(app: App) {
                     }
                     tracing::info!("viewer connected: {:?}", stream.peer_addr());
                     if let Ok(input_sock) = stream.try_clone() {
-                        let chroma = app.config().chroma;
                         *viewer.lock().unwrap() = Some(stream);
                         // Mode handshake FIRST — the viewer must know the chroma mode
                         // before the first AU so it builds the right decode pipeline.
@@ -173,7 +176,6 @@ pub fn spawn(app: App) {
                         if viewer.lock().unwrap().is_none() {
                             continue;
                         }
-                        let chroma = app.config().chroma;
                         force_idr_all(&encoders);
                         prime_viewer(&handle, &encoders, &viewer, sel, chroma);
                     }

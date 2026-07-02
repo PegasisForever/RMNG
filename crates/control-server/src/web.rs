@@ -42,7 +42,7 @@ async fn static_handler(uri: Uri) -> Response {
         None => (StatusCode::NOT_FOUND, "frontend not embedded").into_response(),
     }
 }
-use wire::{AppConfigRedacted, ControlState, Operation};
+use wire::{AppConfigRedacted, ConfigPutResponse, ControlState, Operation};
 
 use crate::app::App;
 use crate::config;
@@ -76,14 +76,19 @@ pub fn router(app: App) -> Router {
         .route("/api/chat/:id/events", get(chat_events))
         .route("/api/chat/:id/abort", post(chat_abort));
 
-    // Frontend: embedded by default (self-contained binary). `RMNG_STATIC_DIR`
-    // serves from disk instead, for dev hot-reload without a rebuild.
-    let routes = match std::env::var("RMNG_STATIC_DIR") {
-        Ok(dir) if !dir.is_empty() => {
-            let index = Path::new(&dir).join("index.html");
-            routes.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(index)))
+    // Frontend: embedded by default (self-contained binary). A non-empty
+    // `static_dir` serves from disk instead, for dev hot-reload without a rebuild.
+    // The router is built once at startup, so `static_dir` is restart-required by
+    // construction — no live re-read needed.
+    let dir = app.config().static_dir;
+    let routes = if !dir.is_empty() && Path::new(&dir).is_dir() {
+        let index = Path::new(&dir).join("index.html");
+        routes.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(index)))
+    } else {
+        if !dir.is_empty() {
+            tracing::warn!("static_dir '{dir}' is not a directory; serving the embedded frontend");
         }
-        _ => routes.fallback(static_handler),
+        routes.fallback(static_handler)
     };
 
     routes.layer(TraceLayer::new_for_http()).with_state(app)
@@ -514,16 +519,20 @@ async fn config_get(State(app): State<App>) -> Json<AppConfigRedacted> {
     Json(app.config().redacted())
 }
 
-/// `PUT /api/config` — merge a partial update, persist (0600), apply live.
+/// `PUT /api/config` — merge a partial update, persist (0600), apply live. The
+/// response reports whether the change touched a restart-required setting so the UI
+/// can prompt for a restart.
 async fn config_put(
     State(app): State<App>,
     Json(incoming): Json<serde_json::Value>,
-) -> Result<Json<AppConfigRedacted>, (StatusCode, String)> {
-    let merged = config::merge_update(&app.config(), incoming)
+) -> Result<Json<ConfigPutResponse>, (StatusCode, String)> {
+    let old = app.config();
+    let merged = config::merge_update(&old, incoming)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     config::save(&merged).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let restart_required = config::restart_required(&old, &merged);
     *app.cfg.write().unwrap() = merged.clone();
-    Ok(Json(merged.redacted()))
+    Ok(Json(ConfigPutResponse { restart_required, config: merged.redacted() }))
 }
 
 #[derive(Deserialize)]

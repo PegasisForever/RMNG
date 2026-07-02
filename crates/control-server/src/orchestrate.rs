@@ -18,6 +18,11 @@ const PROVISION_SCRIPT: &str = include_str!("../scripts/provision-clone.sh");
 const REDEPLOY_SCRIPT: &str = include_str!("../scripts/redeploy.sh");
 const APPLY_MONITORS_SCRIPT: &str = include_str!("../scripts/apply-monitors.sh");
 
+/// OUI prefix for freshly-generated clone MACs, e.g. `BC:24:11`. A CoW clone inherits
+/// the template's MAC, so `clone.sh` regenerates one with this prefix to avoid a
+/// collision on the shared bridge.
+const MAC_PREFIX: &str = "BC:24:11";
+
 /// The monitor layout as the clone-daemon's `RMNG_MONITORS` env: CSV of `WxH+X+Y[*]`
 /// (position in the unified desktop, `*` = primary).
 pub fn monitors_csv(cfg: &AppConfig) -> String {
@@ -46,21 +51,14 @@ async fn scp_to_node(ssh_target: &str, local: &str, remote: &str) -> Result<()> 
 
 /// Stage an **embedded** binary on the node for bootstrap.sh to push into the new
 /// CT. Decompresses `<name>.gz` from the control-server, writes it to a temp file,
-/// scp's it to `node_path`. Returns the node path if delivered, else `""`.
-/// (Falls back to a dev on-disk path via `RMNG_<NAME>_BIN` if not embedded.)
+/// scp's it to `node_path`. Returns the node path if delivered, else `""` (not
+/// embedded → the caller skips pushing it).
 async fn stage_binary(ssh_target: &str, name: &str, node_path: &str) -> Result<String> {
     let bytes = match crate::embed::embedded_binary(name) {
         Some(b) => b,
         None => {
-            // Dev fallback: an on-disk binary (e.g. cargo target) via env override.
-            let env = format!("RMNG_{}_BIN", name.to_uppercase().replace('-', "_"));
-            match std::env::var(&env) {
-                Ok(p) if std::path::Path::new(&p).exists() => {
-                    scp_to_node(ssh_target, &p, node_path).await?;
-                    return Ok(node_path.to_string());
-                }
-                _ => return Ok(String::new()), // not embedded, no override → skip
-            }
+            tracing::warn!("{name} not embedded; skipping");
+            return Ok(String::new());
         }
     };
     let tmp = std::env::temp_dir().join(format!("rmng-{name}-{}", std::process::id()));
@@ -162,15 +160,10 @@ pub async fn clone_ct(
     let env_content: String =
         env.iter().filter(|v| !v.key.is_empty()).map(|v| format!("{}={}\n", v.key, v.value)).collect();
     let env_b64 = b64_encode(env_content.as_bytes());
-    // OUI prefix for freshly-generated clone MACs, e.g. `BC:24:11`. A CoW clone inherits
-    // the template's MAC, so `clone.sh` regenerates one with this prefix to avoid a
-    // collision on the shared bridge. TODO(task-3): Task 2 removed `ProxmoxConfig.mac_prefix`
-    // and inlined this literal so the workspace keeps compiling; re-wire the real source.
-    let mac_prefix = "BC:24:11";
     let result = run_remote(
         &cfg.ssh,
         CLONE_SCRIPT,
-        &[source_id, new_hostname, mac_prefix, username, &env_b64],
+        &[source_id, new_hostname, MAC_PREFIX, username, &env_b64],
         on_progress,
     )
     .await?;
@@ -274,8 +267,8 @@ pub async fn bootstrap_template(
         ssh,
         BOOTSTRAP_SCRIPT,
         &[
-            hostname, BASE_IMAGE, "local-lvm", "vmbr0", &prov_b64, &cd_arg, &aw_arg, &mons,
-            &shell_arg, &cores, &mem, &disk,
+            hostname, BASE_IMAGE, &cfg.proxmox.storage, &cfg.proxmox.bridge, &prov_b64, &cd_arg,
+            &aw_arg, &mons, &shell_arg, &cores, &mem, &disk,
         ],
         on_progress,
     )
