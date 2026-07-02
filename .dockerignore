@@ -16,8 +16,10 @@ node_modules/
 **/node_modules/
 frontend/build/
 
-# Gzipped embedded binaries — rebuilt in-stage before control-server compiles
-crates/control-server/embedded-bin/*.gz
+# Dev payload staging dir (plain clone-daemon / agent-wrapper / gnome-shell.deb for
+# `cargo run` — assets.rs's dev fallback). The image build never consumes it (payloads
+# are built in-stage), and staged binaries would add ~117MB to the context via COPY . .
+crates/control-server/embedded-bin/
 
 # VCS + tooling metadata
 .git/
