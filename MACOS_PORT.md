@@ -285,8 +285,8 @@ expected; verify visually.
    2D path. `RMNG_GL_DEBUG=1` logs FBO status/GL errors on trouble. **Also rerun on Linux** if
    you changed the shader dialect selection — the Intel dev box must stay at err ≤ 1.
 3. **Headless vs staging server**: the deployed control-server on the LAN is
-   `RMNG_VIDEO=10.0.0.79:9001` (chroma mode is a *server-side* setting, `RMNG_CHROMA=yuv444` on
-   the server; the viewer learns it from the tag-4 handshake). Run
+   `RMNG_VIDEO=10.0.0.79:9001` (chroma mode is a *server-side* setting — chroma set to 4:4:4 in
+   Settings → Video, restart-required; the viewer learns it from the tag-4 handshake). Run
    `RMNG_VIDEO=10.0.0.79:9001 RMNG_DUMP=frame.png rmng-viewer --headless` in both server modes.
    Yuv444 pass = crisp colored text (chroma preserved), correct colors/orientation.
    The headless log prints the first decoded frame's caps

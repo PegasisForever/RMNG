@@ -18,7 +18,7 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 | fleet MCP | `9003` | `listen.global_mcp` | control-server mcp | operator / fleet agents | HTTP JSON-RPC |
 | daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agent-wrapper + fleet MCP proxy | HTTP JSON-RPC |
 | agent-wrapper | `4096` | `agent_port` (config) / `AGENT_PORT` | agent-wrapper (in clone) | control-server chat proxy | HTTP + SSE |
-| clone socket | `/srv/rmng-sock/clones.sock` | `RMNG_CLONE_SOCKET` (server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
+| clone socket | `/srv/rmng-sock/clones.sock` | `cloneSocket` config (server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
 
 ---
 
@@ -67,7 +67,8 @@ doesn't fight the agent.
 
 A unix `SOCK_SEQPACKET` socket (one JSON message per datagram). dmabuf file descriptors ride
 out-of-band via `SCM_RIGHTS` in the same datagram, in plane order — never in the JSON. The
-daemon connects to `RMNG_SOCKET`; the server listens on `RMNG_CLONE_SOCKET`. The path
+daemon connects to `RMNG_SOCKET`; the server listens on the `cloneSocket` config path
+(default `/srv/rmng-sock/clones.sock`, restart-required). The path
 is a **host-bind-mounted** dir (`/srv/rmng-sock`, *not* under `/run` — the CT tmpfs would
 shadow it), `chmod 0777` so cross-uid clones connect.
 
@@ -117,27 +118,43 @@ the requester. The clone-daemon bridges via Mutter `RemoteDesktop` selection
 
 ## Config schema
 
-`AppConfig` loads from `RMNG_CONFIG` (else `config.json`); written at `0600`. The web API
-returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../crates/wire/src/config.rs).
+`AppConfig` loads from `./config.json` in the working directory (no env override — the
+systemd unit sets `WorkingDirectory=/var/lib/rmng`); written at `0600`. The web API
+returns `AppConfigRedacted` (secrets → `*_set: bool`); `PUT /api/config` returns
+`{ config: AppConfigRedacted, restartRequired: bool }`. Source: [config.rs](../crates/wire/src/config.rs).
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `listen` | `ListenConfig` | see below | the 5 ports |
 | `agent_port` | u16 | `4096` | agent-wrapper port on each clone |
-| `data_dir` | string | `"data"` | state/notes/uploads/chats/feedback root |
-| `static_dir` | string | `"frontend/build/client"` | disk frontend (else embedded) |
-| `monitors` | `MonitorSpec[]` | `[]` → one 1080p primary | desired global layout |
-| `proxmox` | `ProxmoxConfig` | — | node SSH + clone subnet |
+| `data_dir` | string | `"data"` | state/notes/uploads/chats/feedback root; `state.json` and the `claude-accounts.json` secret store live here. **One-time** (set in the setup wizard) |
+| `static_dir` | string | `""` (embedded) | empty serves the frontend embedded in the binary; a non-empty disk path serves the bundle from there. Set in Settings → Advanced. **Restart-required** |
+| `clone_socket` | string | `/srv/rmng-sock/clones.sock` | media-plane unix socket the clone-daemons connect to. **Restart-required** |
+| `chroma` | `ChromaMode` | `4:2:0` | viewer video chroma subsampling. Settings → Video. **Restart-required** |
+| `setup_complete` | bool | `false` | latched `true` by the first-run setup wizard; gates the frontend to the wizard until then |
+| `monitors` | `MonitorSpec[]` | `[]` → dual 1440p | desired global layout |
+| `proxmox` | `ProxmoxConfig` | — | node SSH + storage/bridge + hostname prefix |
 | `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select labels (**key secret**) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
 | `clone_groups` | `CloneGroup[]` | `[]` | named account pools for rotation (not secret) |
+| `detector_inference_url` | string | `http://10.0.0.42:8080` | vision-LLM the needs-human detector polls; injected into clones as `RMNG_INFERENCE_URL` |
 
 - **`ListenConfig`**: `web 9000`, `video 9001`, `clone_mcp 9002`, `global_mcp 9003`,
   `daemon_mcp 9004`.
-- **`ProxmoxConfig`**: `ssh` (e.g. `root@10.0.0.100`, **secret**), `mac_prefix`
-  (`"BC:24:11"` — clone.sh regenerates a CoW clone's MAC with this OUI to avoid colliding
-  with the template's; config-only, not in the Settings UI), `hostname_prefix` (`"pega-"`,
-  editable in Settings → prepended to derived clone hostnames).
+- **`ProxmoxConfig`**: `ssh` (e.g. `root@10.0.0.100`, **secret**), `storage`
+  (`"local-lvm"` — storage pool backing new CT volumes) and `bridge` (`"vmbr0"` — network
+  bridge clone NICs attach to), both **one-time** (baked in at provision, set only in the
+  first-run setup wizard), `hostname_prefix` (`"pega-"`, editable in Settings → prepended
+  to derived clone hostnames). The CoW clone MAC OUI is no longer configurable — it's the
+  compiled-in const `BC:24:11` (clone.sh regenerates a clone's MAC with it to avoid
+  colliding with the template's).
+- **First-run setup wizard**: a fresh deploy ships `config.json` with `"setupComplete":
+  false`, so the web UI shows a 4-step wizard (Proxmox + connection test → server settings
+  + monitors → first template provision → finish) instead of the dashboard; finishing
+  latches `setupComplete: true`, after which the one-time fields (`data_dir`,
+  `proxmox.storage`, `proxmox.bridge`) are locked. Pre-wizard installs are grandfathered:
+  a `config.json` with no `setupComplete` key but a `proxmox.ssh` already set is treated as
+  complete on first load and the file is rewritten.
 - <a id="preset"></a>**`Preset`**: `name`, `labels` (Linear ticket labels that auto-select
   this preset when cloning from a ticket — case-insensitive, first match in config order
   wins), `linear_key` (personal API key, **secret** — fetches/creates tickets server-side
@@ -169,9 +186,10 @@ per bootstrap in the "New template" modal (`POST /api/template/bootstrap`).
 
 ## Environment variables
 
-**control-server:** `RMNG_CONFIG` (config path), `RMNG_CLONE_SOCKET`
-(`/srv/rmng-sock/clones.sock`), `RMNG_STATIC_DIR` (serve frontend from disk),
-`RUST_LOG` (`info,tower_http=warn`).
+**control-server:** reads **no `RMNG_*` env vars** — all config is `./config.json` in the
+working directory (the systemd unit sets `WorkingDirectory=/var/lib/rmng`). The clone
+socket, disk-frontend path, and chroma are the `cloneSocket` / `staticDir` / `chroma`
+config fields (each restart-required). Only `RUST_LOG` (`info,tower_http=warn`) is read.
 
 **clone-daemon:** `RMNG_SOCKET` (media socket; **absent → capture self-test mode**),
 `RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (layout CSV, below),

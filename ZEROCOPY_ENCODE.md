@@ -20,8 +20,8 @@ text), RMNG uses the **RDP AVC444 trick in a single double-height stream**: pack
 luma + a base chroma into the **top** half of a `W×2H` NV12 frame, and the *dropped* chroma into
 the **bottom** half, then H.264-encode that one `W×2H` frame. The viewer reassembles 4:4:4.
 
-This is gated by a server-wide config toggle `chroma: Yuv420|Yuv444` (default `Yuv420`;
-env override `RMNG_CHROMA=yuv420|yuv444`). In `Yuv444` the encoder emits the `W×2H` stream.
+This is gated by a server-wide config toggle `chroma: Yuv420|Yuv444` (default `Yuv420`), set
+in Settings → Video → chroma (restart-required). In `Yuv444` the encoder emits the `W×2H` stream.
 
 ### What already exists (working, tested)
 - **The packing contract** — [crates/wire/src/avc444.rs](crates/wire/src/avc444.rs): pure
@@ -171,8 +171,8 @@ for any `gst-launch` experiments (the in-process `media::init` already sets them
 **Validation ladder:**
 1. **`glupload` source import — already verified** (§3 `*`): the `AR24:0x0200000020801b03` import is
    proven zero-copy on this hardware, so this is no longer a gating blocker. Just do a final live
-   confirm: bring up a clone feeding the control-server with `RMNG_CHROMA=yuv444` and watch the
-   `decode[]`/encoder logs for negotiation errors.
+   confirm: set chroma to 4:4:4 in Settings → Video (restart-required), bring up a clone feeding
+   the control-server, and watch the `decode[]`/encoder logs for negotiation errors.
 2. **Pixel correctness vs the oracle**: extend [crates/media/src/bin/avc444_e2e.rs](crates/media/src/bin/avc444_e2e.rs)
    (it already does pack→`vah264enc`→`vah264dec`→unpack and reports chroma error + dumps PNGs).
    Add a path that runs *your GL pack* instead of `avc444::pack` and assert the same ~0 chroma
@@ -186,7 +186,7 @@ for any `gst-launch` experiments (the in-process `media::init` already sets them
 ---
 
 ## 7. Definition of done
-- `RMNG_CHROMA=yuv444` encode runs the §3 zero-copy pipeline; `Yuv420` unchanged.
+- `chroma: Yuv444` (Settings → Video, restart-required) encode runs the §3 zero-copy pipeline; `Yuv420` unchanged.
 - GL pack output matches `wire::avc444` (oracle) within H.264 tolerance (avc444_e2e ≈ 0 chroma error).
 - `gldownload→vapostproc` confirmed `memory:DMABuf`; no full-frame host copies per frame.
 - `glupload` importing the AMD-tiled capture dmabuf — already verified zero-copy (§3 `*`); confirm once live.

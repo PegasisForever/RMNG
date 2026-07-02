@@ -164,8 +164,8 @@ dev box has; the existing `Yuv420` path already uses `glupload`). `cargo build -
 
 **Validation ladder:**
 1. **Get a `Yuv444` stream to decode.** Two options:
-   - Point the viewer (`RMNG_VIDEO=<host:9001>`) at a control-server running `RMNG_CHROMA=yuv444`
-     (the encoder agent / a live clone), **or**
+   - Point the viewer (`RMNG_VIDEO=<host:9001>`) at a control-server with chroma set to 4:4:4
+     in Settings → Video (restart-required) (the encoder agent / a live clone), **or**
    - Generate a stacked stream offline: synthesize a `W×H` image → `wire::avc444::pack_y444_to_stacked_nv12`
      → encode with a software/HW H.264 encoder → feed the viewer's appsrc. (See
      [crates/media/src/bin/avc444_e2e.rs](crates/media/src/bin/avc444_e2e.rs) for the pack+encode

@@ -22,9 +22,11 @@ apt-get install -y -qq \
 echo "[deploy-ct] config + ssh key + unit" >&2
 mkdir -p /var/lib/rmng /srv/rmng-sock
 # Minimal config: just the Proxmox SSH target so orchestration works out of the box.
-# Linear/Claude/subnet are entered later in the web UI; Claude accounts are imported from a clone.
+# `setupComplete: false` forces the first-run setup wizard even though ssh is prefilled;
+# storage/bridge/dataDir and the rest are entered there. Linear/Claude/subnet are entered
+# later in the web UI; Claude accounts are imported from a clone.
 cat > /var/lib/rmng/config.json <<CFG
-{ "proxmox": { "ssh": "$PROXMOX_FROM_CT" } }
+{ "proxmox": { "ssh": "$PROXMOX_FROM_CT" }, "setupComplete": false }
 CFG
 chmod 600 /var/lib/rmng/config.json
 
@@ -44,8 +46,6 @@ Wants=network-online.target
 [Service]
 ExecStart=/usr/local/bin/rmng-control-server
 WorkingDirectory=/var/lib/rmng
-Environment=RMNG_CONFIG=/var/lib/rmng/config.json
-Environment=RMNG_CLONE_SOCKET=/srv/rmng-sock/clones.sock
 Environment=RUST_LOG=info,tower_http=warn,clip=debug
 Restart=on-failure
 RestartSec=3

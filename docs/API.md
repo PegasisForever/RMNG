@@ -33,7 +33,7 @@ JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}` with
 | GET | `/uploads/:file` | Serve an uploaded image | 200 binary |
 | POST | `/api/detector-feedback` | Clone reports a wrong needs-human verdict (multipart) | 200 `{ok,id,host}` |
 | GET | `/api/config` | Current config, secrets redacted | 200 `AppConfigRedacted` |
-| PUT | `/api/config` | Merge a partial config update (persists 0600) | 200 `AppConfigRedacted` |
+| PUT | `/api/config` | Merge a partial config update (persists 0600) | 200 `{ config: AppConfigRedacted, restartRequired }` |
 | POST | `/api/config/test` | Test a setting (currently Proxmox SSH) | 200 `{ok,message}` |
 | POST | `/api/claude/import/check` | Check a clone is signed in via claude.ai | 200 `{ok,email,orgName,subscriptionType}` |
 | POST | `/api/claude/import` | Import a Claude account from a signed-in clone | 200 `{ok,email,cleared}` |
@@ -173,14 +173,17 @@ required), `detectorVerdict`, `detectorReason`, `actualState`, repeated `ignoreR
 
 ### `GET /api/config` → `AppConfigRedacted`
 The full config with secrets replaced by `*_set: bool` booleans (Proxmox SSH, preset
-Linear keys). Non-secret fields (ports, subnet, mac prefix, monitors, claude poll
-config, template params) are returned verbatim. See [PROTOCOL.md](PROTOCOL.md#config-schema)
-for the schema.
+Linear keys). Non-secret fields (ports, monitors, `proxmox` storage/bridge/hostname prefix,
+`staticDir`/`cloneSocket`/`chroma`, `setupComplete`, claude poll config) are returned
+verbatim. See [PROTOCOL.md](PROTOCOL.md#config-schema) for the schema.
 
-### `PUT /api/config` (partial merge) → `AppConfigRedacted`
+### `PUT /api/config` (partial merge) → `{ config: AppConfigRedacted, restartRequired }`
 Deep-merge a partial config over the stored one, persist to disk at `0600`, apply live.
+Returns the redacted config plus `restartRequired: boolean` — set when a restart-required
+field changed (`staticDir`, `cloneSocket`, `chroma`) so the UI can prompt for a restart.
 Secret-merge rules: an **empty string keeps** the stored secret; a non-empty string replaces
-it; `presets` rows merge by name (blank `linearKey` keeps the stored one).
+it; `presets` rows merge by name (blank `linearKey` keeps the stored one). One-time fields
+(`dataDir`, `proxmox.storage`, `proxmox.bridge`) are locked once `setupComplete` latches.
 
 ### `POST /api/config/test` — body `{ "what": "proxmox" }` → `{ ok, message }`
 Synchronously test a setting. Currently only `"proxmox"` (runs `ssh -o BatchMode=yes
@@ -225,5 +228,6 @@ default `:4096`), persisting history at `data/chats/{id}.json`.
 
 ### `GET /*`
 Serves the embedded React build (`frontend/build/client` via `rust-embed`); unknown paths
-fall back to `index.html` for client-side routing. Set `RMNG_STATIC_DIR=<dir>` to serve
-from disk instead (frontend hot-reload during dev).
+fall back to `index.html` for client-side routing. Set the `staticDir` config field
+(Settings → Advanced; empty = embedded, restart-required) to a disk path to serve from
+there instead (frontend hot-reload during dev).

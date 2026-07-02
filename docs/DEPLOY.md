@@ -25,11 +25,16 @@ redeploys, monitor layouts) is driven from the running server's dashboard/API.
 curl -X POST http://<deploy-ip>:9000/api/template/bootstrap -d '{"hostname":"rmng-template"}'
 ```
 
-Then open `http://<deploy-ip>:9000` → **Settings** to create presets (Linear key + labels
-+ env vars), Claude settings, template build params, monitor defaults, and the listen
-ports — the provision seeds only the Proxmox SSH target + the orchestration key. Claude
-accounts are imported from a signed-in clone, not entered here. Secrets are write-only
-and redacted on read. See [SCRIPTS.md](SCRIPTS.md) for each script's args/env.
+Then open `http://<deploy-ip>:9000`. A fresh deploy ships `config.json` with
+`"setupComplete": false`, so the web UI opens the **first-run setup wizard** (4 steps:
+Proxmox + connection test → server settings + monitors → first template provision →
+finish) instead of the dashboard; the provision has already prefilled the Proxmox SSH
+target. The one-time fields (`dataDir`, `proxmox.storage` default `local-lvm`,
+`proxmox.bridge` default `vmbr0`) are set here and lock once the wizard latches
+`setupComplete: true`. Afterward, use **Settings** to create presets (Linear key + labels
++ env vars), Claude settings, monitor defaults, and the listen ports. Claude accounts are
+imported from a signed-in clone, not entered here. Secrets are write-only and redacted on
+read. See [SCRIPTS.md](SCRIPTS.md) for each script's args/env.
 
 ## The dev loop
 
@@ -95,8 +100,9 @@ ssh root@<staging-ip> 'cd /root/RMNG && cargo build --release -p control-server 
 building control-server. At provision time `orchestrate.rs` decompresses each → temp file →
 `scp` to the node → `bootstrap.sh` `pct push`es them into the new CT → `provision-clone.sh`
 installs them. A plain `cargo build` with an empty `embedded-bin/` still works — it just
-carries nothing (orchestration falls back to `RMNG_*_BIN` on-disk paths). A clone needs
-only the standalone `claude` CLI at runtime.
+carries nothing (a not-embedded artifact is logged as a warning and skipped; the old on-disk
+`RMNG_*_BIN` dev fallbacks were removed). A clone needs only the standalone `claude` CLI at
+runtime.
 
 ## Patched gnome-shell
 
