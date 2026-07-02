@@ -1,4 +1,5 @@
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
+import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 
 // Client-side API wrappers. Each POSTs JSON; the server mutates state and
 // broadcasts, so the caller doesn't need the response beyond error handling —
@@ -107,9 +108,10 @@ async function putJson(url: string, body: unknown): Promise<unknown> {
 /** Current config (secrets shown as set/unset booleans). */
 export const getConfig = () => getJson("/api/config") as Promise<AppConfigRedacted>;
 /** Merge a partial config update (empty-string secrets are left unchanged), persist,
- *  apply live. Returns the new redacted config. */
+ *  apply live. Returns the new redacted config plus whether a restart is required to
+ *  apply restart-scoped settings (ports, cloneSocket, staticDir, chroma). */
 export const putConfig = (patch: unknown) =>
-  putJson("/api/config", patch) as Promise<AppConfigRedacted>;
+  putJson("/api/config", patch) as Promise<ConfigPutResponse>;
 /** Validate a setting (e.g. `proxmox` SSH reachability). */
 export const testConfig = (what: string) =>
   postJson("/api/config/test", { what }) as Promise<{ ok: boolean; message: string }>;

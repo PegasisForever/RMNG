@@ -2,32 +2,45 @@ import { useEffect, useState } from "react";
 
 import { applyMonitors, getConfig, putConfig, testConfig } from "~/lib/api";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
-
-type Mon = { width: number; height: number; x: number; y: number; primary: boolean };
-
-const PRESETS: { label: string; width: number; height: number }[] = [
-  { label: "1080p", width: 1920, height: 1080 },
-  { label: "1440p", width: 2560, height: 1440 },
-  { label: "4K", width: 3840, height: 2160 },
-];
+import type { ChromaMode } from "~/lib/wire/ChromaMode";
+import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
 
 const input =
   "w-full rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-400 focus:outline-none";
-const numInput =
-  "w-24 rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-400 focus:outline-none";
+
+/** When a changed setting takes effect. Placed on section headers / fields to set
+ *  expectations: `immediate` applies on save, `restart` needs a control-server
+ *  restart (ports, cloneSocket, staticDir, chroma), `one-time` is baked in at
+ *  first-run provision and can't change afterwards. */
+function EffectBadge({ effect }: { effect: "immediate" | "restart" | "one-time" }) {
+  const style =
+    effect === "immediate"
+      ? "bg-emerald-100 text-emerald-700"
+      : effect === "restart"
+        ? "bg-amber-100 text-amber-700"
+        : "bg-slate-100 text-slate-500";
+  return (
+    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${style}`}>{effect}</span>
+  );
+}
 
 function Section({
   title,
   hint,
+  effect,
   children,
 }: {
   title: string;
   hint?: string;
+  effect?: "immediate" | "restart" | "one-time";
   children: React.ReactNode;
 }) {
   return (
     <section className="border-t border-slate-100 pt-4">
-      <h3 className="text-sm font-semibold text-slate-800">{title}</h3>
+      <div className="flex items-center gap-2">
+        <h3 className="text-sm font-semibold text-slate-800">{title}</h3>
+        {effect ? <EffectBadge effect={effect} /> : null}
+      </div>
       {hint ? <p className="mb-2 mt-0.5 text-xs text-slate-400">{hint}</p> : <div className="mb-2" />}
       {children}
     </section>
@@ -78,58 +91,6 @@ function Secret({
   );
 }
 
-/** Graphical preview of the monitor arrangement (scaled to fit). Primary is highlighted. */
-function LayoutPreview({ monitors }: { monitors: Mon[] }) {
-  if (monitors.length === 0) return null;
-  const minX = Math.min(...monitors.map((m) => m.x));
-  const minY = Math.min(...monitors.map((m) => m.y));
-  const maxX = Math.max(...monitors.map((m) => m.x + m.width));
-  const maxY = Math.max(...monitors.map((m) => m.y + m.height));
-  const W = Math.max(1, maxX - minX);
-  const H = Math.max(1, maxY - minY);
-  const BOX_W = 380;
-  const BOX_H = 150;
-  const PAD = 10;
-  const scale = Math.min((BOX_W - 2 * PAD) / W, (BOX_H - 2 * PAD) / H);
-  const offX = (BOX_W - W * scale) / 2;
-  const offY = (BOX_H - H * scale) / 2;
-  return (
-    <svg
-      viewBox={`0 0 ${BOX_W} ${BOX_H}`}
-      className="mb-3 h-[150px] w-full rounded border border-slate-200 bg-slate-50"
-      role="img"
-      aria-label="monitor layout preview"
-    >
-      {monitors.map((m, i) => {
-        const x = offX + (m.x - minX) * scale;
-        const y = offY + (m.y - minY) * scale;
-        const w = m.width * scale;
-        const h = m.height * scale;
-        return (
-          <g key={i}>
-            <rect
-              x={x}
-              y={y}
-              width={Math.max(2, w)}
-              height={Math.max(2, h)}
-              rx={3}
-              strokeWidth={1.5}
-              className={m.primary ? "fill-emerald-100 stroke-emerald-500" : "fill-white stroke-slate-400"}
-            />
-            <text x={x + w / 2} y={y + h / 2 - 3} textAnchor="middle" className="fill-slate-600 text-[11px] font-semibold">
-              {i}
-              {m.primary ? " ★" : ""}
-            </text>
-            <text x={x + w / 2} y={y + h / 2 + 10} textAnchor="middle" className="fill-slate-400 text-[9px]">
-              {m.width}×{m.height}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
-
 export function SettingsPanel({
   accountEmails,
   onClose,
@@ -146,6 +107,9 @@ export function SettingsPanel({
   const [testMsg, setTestMsg] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
   const [applyMsg, setApplyMsg] = useState<string | null>(null);
+  // True after a save that touched a restart-required setting (ports / cloneSocket /
+  // staticDir / chroma) — surfaces a persistent banner until a later save clears it.
+  const [restartRequired, setRestartRequired] = useState(false);
 
   // Editable form state. Secrets (proxmoxSsh, preset linearKey) start blank = "unchanged".
   const [monitors, setMonitors] = useState<Mon[]>([]);
@@ -163,6 +127,8 @@ export function SettingsPanel({
   const [claudeGroups, setClaudeGroups] = useState<{ name: string; accounts: string[] }[]>([]);
   const [proxmoxSsh, setProxmoxSsh] = useState("");
   const [hostnamePrefix, setHostnamePrefix] = useState("");
+  const [proxmoxStorage, setProxmoxStorage] = useState("");
+  const [proxmoxBridge, setProxmoxBridge] = useState("");
   const [claude, setClaude] = useState({
     pollSecs: 600,
     pinnedEmail: "",
@@ -172,6 +138,9 @@ export function SettingsPanel({
   const [agentPort, setAgentPort] = useState(4096);
   const [dataDir, setDataDir] = useState("");
   const [staticDir, setStaticDir] = useState("");
+  const [cloneSocket, setCloneSocket] = useState("");
+  const [chroma, setChroma] = useState<ChromaMode>("yuv420");
+  const [detectorInferenceUrl, setDetectorInferenceUrl] = useState("");
 
   function load(c: AppConfigRedacted) {
     setCfg(c);
@@ -181,6 +150,8 @@ export function SettingsPanel({
         : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
     );
     setHostnamePrefix(c.proxmoxHostnamePrefix);
+    setProxmoxStorage(c.proxmoxStorage);
+    setProxmoxBridge(c.proxmoxBridge);
     setClaude({
       ...c.claude,
       pollSecs: Number(c.claude.pollSecs),
@@ -190,6 +161,9 @@ export function SettingsPanel({
     setAgentPort(c.agentPort);
     setDataDir(c.dataDir);
     setStaticDir(c.staticDir);
+    setCloneSocket(c.cloneSocket);
+    setChroma(c.chroma);
+    setDetectorInferenceUrl(c.detectorInferenceUrl);
     setPresets(
       c.presets.map((p) => ({
         name: p.name,
@@ -208,23 +182,6 @@ export function SettingsPanel({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-
-  const setMon = (i: number, k: "width" | "height" | "x" | "y", v: number) =>
-    setMonitors((ms) => ms.map((m, j) => (j === i ? { ...m, [k]: v } : m)));
-  const setPrimary = (i: number) =>
-    setMonitors((ms) => ms.map((m, j) => ({ ...m, primary: j === i })));
-  // New monitor: append at the right edge of the current layout (primary if it's the first).
-  const addMon = (p: { width: number; height: number }) =>
-    setMonitors((ms) => {
-      const x = ms.reduce((mx, m) => Math.max(mx, m.x + m.width), 0);
-      return [...ms, { width: p.width, height: p.height, x, y: 0, primary: ms.length === 0 }];
-    });
-  const rmMon = (i: number) =>
-    setMonitors((ms) => {
-      const next = ms.filter((_, j) => j !== i);
-      if (next.length && !next.some((m) => m.primary)) next[0] = { ...next[0], primary: true };
-      return next;
-    });
 
   // Preset editors.
   const addPreset = () =>
@@ -278,12 +235,15 @@ export function SettingsPanel({
           y: Math.max(0, m.y),
           primary: m.primary,
         })),
-        proxmox: { ssh: proxmoxSsh, hostnamePrefix },
+        proxmox: { ssh: proxmoxSsh, hostnamePrefix, storage: proxmoxStorage, bridge: proxmoxBridge },
         claude: { ...claude, pinnedEmail: claude.pinnedEmail || null },
         listen,
         agentPort,
         dataDir,
         staticDir,
+        cloneSocket,
+        chroma,
+        detectorInferenceUrl,
         presets: presets
           .filter((p) => p.name.trim())
           .map((p) => ({
@@ -296,8 +256,9 @@ export function SettingsPanel({
           .filter((g) => g.name.trim())
           .map((g) => ({ name: g.name.trim(), accounts: [...new Set(g.accounts)] })),
       };
-      const next = await putConfig(patch);
-      load(next); // re-seed from the server's redacted view; clears write-only inputs
+      const res = await putConfig(patch);
+      load(res.config); // re-seed from the server's redacted view; clears write-only inputs
+      setRestartRequired(res.restartRequired); // shows/clears the restart banner
       setProxmoxSsh("");
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -377,6 +338,12 @@ export function SettingsPanel({
           </div>
         ) : null}
 
+        {restartRequired ? (
+          <div className="mb-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            Restart the control-server to apply the changed port/socket/video settings.
+          </div>
+        ) : null}
+
         {!cfg ? (
           <p className="py-8 text-center text-sm text-slate-400">Loading…</p>
         ) : (
@@ -384,82 +351,23 @@ export function SettingsPanel({
             {/* Monitors — size, position + primary per monitor, with a live preview. */}
             <Section
               title="Monitors"
+              effect="immediate"
               hint="Set each monitor's size, position (x,y in the unified desktop) and which is primary. Applies to newly provisioned clones; restart an existing clone's daemon to pick up changes."
             >
-              <LayoutPreview monitors={monitors} />
-              <div className="space-y-1.5">
-                <div className="flex items-center gap-2 px-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">
-                  <span className="w-5">#</span>
-                  <span className="w-[4.5rem]">width</span>
-                  <span className="w-[4.5rem]">height</span>
-                  <span className="w-[4.5rem]">x</span>
-                  <span className="w-[4.5rem]">y</span>
-                  <span>primary</span>
-                </div>
-                {monitors.map((m, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <span className="w-5 text-xs text-slate-400">{i}</span>
-                    {(["width", "height", "x", "y"] as const).map((k) => (
-                      <input
-                        key={k}
-                        type="number"
-                        value={m[k]}
-                        min={k === "width" || k === "height" ? 1 : 0}
-                        onChange={(e) => setMon(i, k, Number(e.target.value) || 0)}
-                        className="w-[4.5rem] rounded border border-slate-300 px-1.5 py-1 text-sm focus:border-slate-400 focus:outline-none"
-                      />
-                    ))}
-                    <input
-                      type="radio"
-                      name="primaryMonitor"
-                      checked={m.primary}
-                      onChange={() => setPrimary(i)}
-                      title="set as primary"
-                      className="ml-1 accent-emerald-600"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => rmMon(i)}
-                      disabled={monitors.length <= 1}
-                      className="ml-auto rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 disabled:opacity-40"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {PRESETS.map((p) => (
-                  <button
-                    key={p.label}
-                    type="button"
-                    onClick={() => addMon(p)}
-                    className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                  >
-                    + {p.label} ({p.width}×{p.height})
-                  </button>
-                ))}
-              </div>
-              {/* Apply to running clones (saves + restarts each clone's desktop). */}
-              <div className="mt-3 flex items-center gap-3 border-t border-slate-100 pt-3">
-                <button
-                  type="button"
-                  onClick={applyNow}
-                  disabled={applying}
-                  className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-                >
-                  {applying ? "Applying…" : "Apply to running clones"}
-                </button>
-                <span className="text-xs text-slate-500">
-                  {applyMsg ?? "Saves the layout, then restarts each running clone's desktop to apply it."}
-                </span>
-              </div>
+              <MonitorsEditor
+                monitors={monitors}
+                onChange={setMonitors}
+                onApply={applyNow}
+                applying={applying}
+                applyMsg={applyMsg}
+              />
             </Section>
 
             {/* Presets — Linear identity (key + auto-select labels) + env vars, picked
                 (or label-matched) at clone time. */}
             <Section
               title="Presets"
+              effect="immediate"
               hint="A preset = Linear API key + the ticket labels that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by label; other clones require an explicit pick."
             >
               <div className="space-y-3">
@@ -490,21 +398,13 @@ export function SettingsPanel({
                         className="w-full rounded border border-slate-300 px-2 py-1 text-xs focus:border-slate-400 focus:outline-none"
                       />
                     </div>
-                    <div className="mt-1.5 flex items-center gap-2">
-                      <input
-                        type="password"
+                    <div className="mt-1.5">
+                      <Secret
+                        label="Linear API key"
+                        set={p.keySet}
                         value={p.linearKey}
-                        placeholder={p.keySet ? "•••••••• (set — leave blank to keep)" : "lin_api_… (Linear API key)"}
-                        onChange={(e) => setPresetField(i, "linearKey", e.target.value)}
-                        className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-400 focus:outline-none"
+                        onChange={(v) => setPresetField(i, "linearKey", v)}
                       />
-                      <span
-                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                          p.keySet ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"
-                        }`}
-                      >
-                        key {p.keySet ? "set" : "unset"}
-                      </span>
                     </div>
                     <div className="mt-2 space-y-1.5">
                       {p.vars.map((v, k) => (
@@ -576,20 +476,57 @@ export function SettingsPanel({
                 </div>
                 {testMsg ? <p className="text-xs text-slate-500">{testMsg}</p> : null}
                 <div>
-                  <Field label="Clone hostname prefix">
-                    <input
-                      value={hostnamePrefix}
-                      onChange={(e) => setHostnamePrefix(e.target.value)}
-                      placeholder="pega-"
-                      className={input}
-                    />
-                  </Field>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500">Clone hostname prefix</span>
+                    <EffectBadge effect="immediate" />
+                  </div>
+                  <input
+                    value={hostnamePrefix}
+                    onChange={(e) => setHostnamePrefix(e.target.value)}
+                    placeholder="pega-"
+                    className={`mt-0.5 ${input}`}
+                  />
                   <p className="mt-0.5 text-xs text-slate-400">
                     Prepended to derived clone hostnames — e.g. <code>{hostnamePrefix || "pega-"}</code>dev-123 /{" "}
                     <code>{hostnamePrefix || "pega-"}</code>my-task. Lowercased + sanitized to a DNS label; blank keeps
                     the current value.
                   </p>
                 </div>
+                {/* Storage pool + bridge are baked into CT volumes/NICs at provision, so
+                    they're one-time: editable only during first-run setup. */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-slate-500">Storage pool</span>
+                      <EffectBadge effect="one-time" />
+                    </div>
+                    <input
+                      value={proxmoxStorage}
+                      onChange={(e) => setProxmoxStorage(e.target.value)}
+                      disabled={cfg.setupComplete}
+                      placeholder="local-lvm"
+                      className={`mt-0.5 ${input} disabled:bg-slate-50 disabled:text-slate-400`}
+                    />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-slate-500">Bridge</span>
+                      <EffectBadge effect="one-time" />
+                    </div>
+                    <input
+                      value={proxmoxBridge}
+                      onChange={(e) => setProxmoxBridge(e.target.value)}
+                      disabled={cfg.setupComplete}
+                      placeholder="vmbr0"
+                      className={`mt-0.5 ${input} disabled:bg-slate-50 disabled:text-slate-400`}
+                    />
+                  </div>
+                </div>
+                {cfg.setupComplete ? (
+                  <p className="text-xs text-slate-400">
+                    Storage pool + bridge were set during first-run setup — cannot be changed.
+                  </p>
+                ) : null}
               </div>
             </Section>
 
@@ -678,6 +615,37 @@ export function SettingsPanel({
               </div>
             </Section>
 
+            {/* Video — chroma subsampling for the viewer stream (server-wide, chosen at launch). */}
+            <Section
+              title="Video"
+              effect="restart"
+              hint="Chroma subsampling for the port-1 viewer stream, server-wide. 4:4:4 recovers full chroma via AVC444 packing (a double-height stream reassembled on the GPU); keep monitors ≤1440p in that mode."
+            >
+              <Field label="Chroma mode">
+                <select value={chroma} onChange={(e) => setChroma(e.target.value as ChromaMode)} className={input}>
+                  <option value="yuv420">4:2:0 (default)</option>
+                  <option value="yuv444">4:4:4 (AVC444, ≤1440p/monitor)</option>
+                </select>
+              </Field>
+            </Section>
+
+            {/* Detector — the window/element detector inference endpoint. */}
+            <Section
+              title="Detector"
+              effect="immediate"
+              hint="Base URL of the detector inference service the fleet queries for on-screen element detection."
+            >
+              <Field label="Inference URL">
+                <input
+                  value={detectorInferenceUrl}
+                  onChange={(e) => setDetectorInferenceUrl(e.target.value)}
+                  placeholder="http://…"
+                  spellCheck={false}
+                  className={input}
+                />
+              </Field>
+            </Section>
+
             {/* Advanced (ports + dirs; need a full control-server restart). */}
             <Section title="Advanced">
               <button
@@ -689,31 +657,92 @@ export function SettingsPanel({
               </button>
               {advanced ? (
                 <div className="mt-2 grid grid-cols-2 gap-3">
-                  {(["web", "video", "cloneMcp", "globalMcp", "daemonMcp"] as const).map((k) => (
-                    <Field key={k} label={`Port: ${k}`}>
+                  {/* web/video/cloneMcp/globalMcp are wired once at startup → restart-required.
+                      daemonMcp applies live, but must match what templates bake in. */}
+                  {(["web", "video", "cloneMcp", "globalMcp"] as const).map((k) => (
+                    <div key={k}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium text-slate-500">Port: {k}</span>
+                        <EffectBadge effect="restart" />
+                      </div>
                       <input
                         type="number"
                         value={listen[k]}
                         onChange={(e) => setListen({ ...listen, [k]: Number(e.target.value) || 0 })}
-                        className={input}
+                        className={`mt-0.5 ${input}`}
                       />
-                    </Field>
+                    </div>
                   ))}
-                  <Field label="Agent-wrapper port">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-slate-500">Port: daemonMcp</span>
+                      <EffectBadge effect="immediate" />
+                    </div>
+                    <input
+                      type="number"
+                      value={listen.daemonMcp}
+                      onChange={(e) => setListen({ ...listen, daemonMcp: Number(e.target.value) || 0 })}
+                      className={`mt-0.5 ${input}`}
+                    />
+                    <p className="mt-0.5 text-xs text-slate-400">must match what templates bake in: 9004</p>
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-slate-500">Agent-wrapper port</span>
+                      <EffectBadge effect="immediate" />
+                    </div>
                     <input
                       type="number"
                       value={agentPort}
                       onChange={(e) => setAgentPort(Number(e.target.value) || 0)}
-                      className={input}
+                      className={`mt-0.5 ${input}`}
                     />
-                  </Field>
-                  <Field label="Data dir">
-                    <input value={dataDir} onChange={(e) => setDataDir(e.target.value)} className={input} />
-                  </Field>
+                    <p className="mt-0.5 text-xs text-slate-400">must match what templates bake in: 4096</p>
+                  </div>
+                  {/* Data dir is baked into the on-disk layout at first-run setup → one-time. */}
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-slate-500">Data dir</span>
+                      <EffectBadge effect="one-time" />
+                    </div>
+                    <input
+                      value={dataDir}
+                      onChange={(e) => setDataDir(e.target.value)}
+                      disabled={cfg.setupComplete}
+                      className={`mt-0.5 ${input} disabled:bg-slate-50 disabled:text-slate-400`}
+                    />
+                    {cfg.setupComplete ? (
+                      <p className="mt-0.5 text-xs text-slate-400">
+                        set during first-run setup — cannot be changed
+                      </p>
+                    ) : null}
+                  </div>
+                  {/* The unix socket clone-daemons connect to → wired at startup → restart. */}
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-slate-500">Clone socket</span>
+                      <EffectBadge effect="restart" />
+                    </div>
+                    <input
+                      value={cloneSocket}
+                      onChange={(e) => setCloneSocket(e.target.value)}
+                      placeholder="/srv/rmng-sock/clones.sock"
+                      spellCheck={false}
+                      className={`mt-0.5 ${input}`}
+                    />
+                  </div>
                   <div className="col-span-2">
-                    <Field label="Static (frontend) dir">
-                      <input value={staticDir} onChange={(e) => setStaticDir(e.target.value)} className={input} />
-                    </Field>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-slate-500">Static (frontend) dir</span>
+                      <EffectBadge effect="restart" />
+                    </div>
+                    <input
+                      value={staticDir}
+                      onChange={(e) => setStaticDir(e.target.value)}
+                      spellCheck={false}
+                      className={`mt-0.5 ${input}`}
+                    />
+                    <p className="mt-0.5 text-xs text-slate-400">empty = built-in (embedded) frontend</p>
                   </div>
                 </div>
               ) : null}
