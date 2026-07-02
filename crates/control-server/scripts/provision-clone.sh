@@ -73,12 +73,12 @@ update-alternatives --set x-terminal-emulator /usr/bin/ptyxis 2>/dev/null || tru
 # fresh on first boot and dbus follows.
 ln -sf /etc/machine-id /var/lib/dbus/machine-id
 
-# Mask ModemManager. NetworkManager (its usual pull-in) is deliberately NOT installed —
-# Docker owns eth0/resolv.conf/hosts — but if any desktop package drags ModemManager in,
-# its unit has ConditionVirtualization=!container: it never starts in a container, yet
-# its D-Bus activation file still asks systemd for it, so the bus name never appears and
-# any client (gnome-control-center / Settings) blocks ~25s per call (a ~1-min freeze).
-# Masking makes the activation fail instantly instead of timing out.
+# Mask ModemManager. The desktop's Recommends chain drags it in (via NetworkManager);
+# both get purged in the strip step below, but the mask stays as a backstop for any
+# future package that reintroduces it: its unit has ConditionVirtualization=!container,
+# so it never starts in a container, yet its D-Bus activation file still asks systemd
+# for it — the bus name never appears and any client (gnome-control-center / Settings)
+# blocks ~25s per call (a ~1-min freeze). Masking makes the activation fail instantly.
 say "mask ModemManager (never starts in a container; its D-Bus activation otherwise hangs Settings)"
 systemctl mask ModemManager.service >/dev/null 2>&1 || true
 
@@ -106,14 +106,19 @@ fi
 
 # The header's "NO gdm3 / NO gnome-remote-desktop" isn't free: gnome-shell *Recommends*
 # gdm3 and the desktop pulls gnome-remote-desktop, so the recommends-on install above
-# drags both back in. We run gnome-shell headless under linger (below) with no display
-# manager and bypass g-r-d entirely — so strip them. gdm otherwise sits idle as the
-# registered display-manager.service (graphical.target pulls it in); g-r-d only adds an
-# unused VA-API encoder + a FreeRDP/TSS2 stack. autoremove then sweeps their orphaned
-# deps. (The explicitly-installed VA/PipeWire packages above are apt-marked manual, so
-# autoremove leaves them — Mesa VA-API decode stays intact.)
-say "strip unused gdm3 + gnome-remote-desktop (pulled in as Recommends); go DM-less"
-apt-get purge -y -qq gdm3 gnome-remote-desktop >/dev/null 2>&1 || true
+# drags both back in. Same story for NetworkManager (+ its ModemManager recommend):
+# nothing here lists it, but the desktop's Recommends chain (gnome-control-center →
+# nm-connection-editor → network-manager) reinstalls it — and Docker owns
+# eth0/resolv.conf/hosts, so an NM that ever decided to manage eth0 would DHCP the
+# container's IP into oblivion. Purge all four; GNOME Settings degrades gracefully to
+# a "NetworkManager not running" network panel (verified live). Keep iproute2 — it
+# arrived as a dependency of that chain and autoremove would sweep `ip` out of the
+# toolbox with it. autoremove then sweeps the rest of the orphaned deps. (The
+# explicitly-installed VA/PipeWire packages above are apt-marked manual, so autoremove
+# leaves them — Mesa VA-API decode stays intact.)
+say "strip gdm3 + gnome-remote-desktop + NetworkManager/ModemManager (Recommends pull-ins); go DM-less"
+apt-get purge -y -qq gdm3 gnome-remote-desktop network-manager modemmanager >/dev/null 2>&1 || true
+apt-mark manual iproute2 >/dev/null 2>&1 || true
 apt-get autoremove --purge -y -qq >/dev/null 2>&1 || true
 # No display manager → default to multi-user.target. The headless GNOME user unit starts
 # via linger, independent of graphical.target / any DM.
