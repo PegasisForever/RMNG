@@ -65,16 +65,19 @@ pub fn is_dns_label(s: &str) -> bool {
 
 /// A fresh random machine-id file body: 32 lowercase hex chars + newline, from
 /// `/dev/urandom` (the same format `systemd-machine-id-setup` writes). Injected per
-/// clone because systemd-in-docker won't persist one itself (see the caller).
-fn fresh_machine_id() -> Vec<u8> {
+/// clone because systemd-in-docker won't persist one itself (see the caller). Errors
+/// instead of degrading: a silent all-zero fallback would hand every clone the SAME
+/// id — exactly the collision this exists to prevent.
+fn fresh_machine_id() -> Result<Vec<u8>> {
+    use anyhow::Context as _;
     use std::io::Read;
     let mut buf = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
-    }
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .context("reading /dev/urandom for a fresh clone machine-id")?;
     let mut s: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     s.push('\n');
-    s.into_bytes()
+    Ok(s.into_bytes())
 }
 
 /// Standard base64 (no line wrapping). Ported verbatim from `orchestrate.rs` — used to
@@ -279,7 +282,6 @@ pub async fn clone_container(
     // in the E2E). On that specific failure re-allocate — the winner is attached by then,
     // so the next inspect skips its IP — and retry with a fresh container.
     const IP_RACE_ATTEMPTS: usize = 3;
-    let mut last_err: Option<anyhow::Error> = None;
     for attempt in 1..=IP_RACE_ATTEMPTS {
         // Allocate the lowest free clone IP, reserving IPs already claimed in state.json
         // (they may not yet appear in the live network inspect).
@@ -320,15 +322,17 @@ pub async fn clone_container(
                 docker.remove_volume(&crate::docker::DockerCtl::dind_volume_name(hostname)).await.ok();
                 docker.remove_volume(&crate::docker::DockerCtl::ctd_volume_name(hostname)).await.ok();
                 if attempt < IP_RACE_ATTEMPTS && is_address_in_use(&e) {
-                    tracing::warn!("clone {hostname}: IP {ip} lost to a concurrent clone; retrying (attempt {attempt}/{IP_RACE_ATTEMPTS})");
-                    last_err = Some(e);
+                    let note = format!("IP {ip} lost to a concurrent clone; retrying (attempt {attempt}/{IP_RACE_ATTEMPTS})");
+                    tracing::warn!("clone {hostname}: {note}");
+                    on_progress("allocate", &note);
                     continue;
                 }
                 return Err(e);
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("clone {hostname}: out of IP-allocation attempts")))
+    // Every loop iteration returns (success, non-race error, or final-attempt error).
+    unreachable!("clone_container retry loop always returns")
 }
 
 /// True when a container-start failure is Docker's static-IP collision ("failed to set up
@@ -364,7 +368,7 @@ async fn clone_container_after_create(
         // with a transient one; seen live in the E2E — hostnamectl broken, id unstable
         // across restarts). Writing a unique id per clone gives stable, collision-free
         // D-Bus/journald identity; commit truncates it again, so images never carry it.
-        TarEntry { path: "etc/machine-id".into(), data: fresh_machine_id(), mode: 0o444, uid: 0, gid: 0 },
+        TarEntry { path: "etc/machine-id".into(), data: fresh_machine_id()?, mode: 0o444, uid: 0, gid: 0 },
         // Per-clone preset env (control URLs + preset vars), owned by the clone user.
         TarEntry {
             path: format!("home/{CLONE_USER}/.config/environment.d/30-rmng-preset.conf"),

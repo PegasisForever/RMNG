@@ -648,9 +648,24 @@ async fn config_put(
     // wizard can show it (the network also gets re-ensured on the first clone).
     let mut network_warning: Option<String> = None;
     if !old.setup_complete && merged.setup_complete {
-        if let Some(detail) = app.docker.self_setup(true).await.network_detail {
-            tracing::warn!("self_setup network/self-attach at wizard finish failed: {detail}");
-            network_warning = Some(detail);
+        // Bounded: the shared bollard client tolerates 1 h requests (commits); a wedged
+        // daemon must not hang this PUT for that long.
+        match tokio::time::timeout(std::time::Duration::from_secs(60), app.docker.self_setup(true))
+            .await
+        {
+            Ok(report) => {
+                if let Some(detail) = report.network_detail {
+                    tracing::warn!("self_setup network/self-attach at wizard finish failed: {detail}");
+                    network_warning = Some(detail);
+                }
+            }
+            Err(_) => {
+                let detail = "Docker self-setup timed out after 60s (daemon unresponsive?); \
+                              the rmng network will be re-ensured on the first clone"
+                    .to_string();
+                tracing::warn!("{detail}");
+                network_warning = Some(detail);
+            }
         }
     }
     *app.cfg.write().unwrap() = merged.clone();

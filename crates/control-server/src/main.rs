@@ -47,13 +47,26 @@ async fn main() -> Result<()> {
     // Non-fatal: a down daemon / failed check must NOT stop the server booting — the wizard
     // is exactly where the operator fixes those. `ensure_network` only runs here once setup
     // is latched complete (the network is lazy).
+    // Bounded: the shared bollard client's request timeout is 1 h (a base-image commit
+    // legitimately runs that long), so a wedged-but-connectable daemon would otherwise
+    // block THIS await — and with it the whole server boot — for up to an hour.
     {
         let setup_complete = app.config().setup_complete;
-        if !app.docker.self_setup(setup_complete).await.required_ok() {
-            tracing::error!(
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            app.docker.self_setup(setup_complete),
+        )
+        .await
+        {
+            Ok(report) if report.required_ok() => {}
+            Ok(_) => tracing::error!(
                 "Docker self-setup reported failing required checks; the server is up so the \
                  setup wizard can show the details (GET /api/setup/env)"
-            );
+            ),
+            Err(_) => tracing::error!(
+                "Docker self-setup timed out after 30s (daemon connected but unresponsive?); \
+                 booting anyway — retry via the wizard's env checklist"
+            ),
         }
     }
 
