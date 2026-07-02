@@ -916,9 +916,9 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable)> {
 /// texture zero-copy. The returned appsrc/paintable match the 4:2:0 path's interface (intrinsic
 /// size `W×H`), so the rest of the viewer (letterbox, cursor overlay, fps) is unchanged.
 ///
-/// Do **not** put a `glcolorconvert`/`videoconvert` between `glupload` and `rmngavc444unpack`:
-/// that would 4:2:0-upsample the packed chroma and destroy the auxiliary view. The element reads
-/// the raw Y/UV textures.
+/// Do **not** put a `glcolorconvert`/`videoconvert` between the decoder (`glupload` on Linux,
+/// `vtdec_hw` on macOS) and `rmngavc444unpack`: that would 4:2:0-upsample the packed chroma and
+/// destroy the auxiliary view. The element reads the raw Y/UV textures.
 fn make_decoder_yuv444(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable)> {
     glunpack::register()?;
     // Plain `gtk4paintablesink sync=false` (present on arrival, no audio to clock-sync to) — same as

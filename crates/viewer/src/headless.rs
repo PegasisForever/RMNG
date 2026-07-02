@@ -24,9 +24,9 @@ static CHROMA: AtomicU8 = AtomicU8::new(0);
 
 /// Build a decode pipeline for one monitor; returns its appsrc. The appsink counts frames (and, in
 /// dump mode, writes the first one to PNG + exits). In Yuv444 the decoded stream is a stacked
-/// `W×2H` NV12 carrying full 4:4:4 — reconstruct it on the GPU via `glupload ! rmngavc444unpack`
-/// (the same zero-copy element the GUI uses); `gldownload` is only added to land sysmem for the
-/// PNG dump.
+/// `W×2H` NV12 carrying full 4:4:4 — reconstruct it on the GPU via `rmngavc444unpack` (fed by
+/// `glupload` on Linux, directly by `vtdec_hw` on macOS) (the same zero-copy element the GUI uses);
+/// `gldownload` is only added to land sysmem for the PNG dump.
 fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) -> Result<AppSrc> {
     let yuv444 = CHROMA.load(Ordering::Relaxed) == 1;
     // Per-OS pipeline selection (cfg! evaluates at compile time; dead branch is eliminated).
@@ -36,7 +36,8 @@ fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) 
     //     rectangle GLMemory via IOSurface; glupload has no IOSurface path and drops out).
     //   - 4:2:0 dump: need glcolorconvert before gldownload — vtdec_hw emits rectangle textures;
     //     glcolorconvert converts rectangle→2D + NV12→RGBA so gldownload produces sysmem RGBA
-    //     that videoconvert/pngenc can consume. On Linux vah264dec outputs sysmem directly.
+    //     that videoconvert/pngenc can consume. On Linux the vah264dec output is consumable by
+    //     videoconvert directly.
     //   - 4:2:0 plain (appsink, no caps): vtdec_hw output feeds appsink directly (no cap filter).
     //   - 4:4:4 paths: no glcolorconvert before rmngavc444unpack (invariant). gldownload from
     //     rmngavc444unpack's RGBA 2D output works fine on macOS (plain glReadPixels-style).
