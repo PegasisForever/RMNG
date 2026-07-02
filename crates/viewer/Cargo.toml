@@ -37,3 +37,15 @@ serde_json.workspace = true
 gdk4-wayland = { version = "0.9", features = ["wayland_crate"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+
+# macOS pointer-lock via CGAssociateMouseAndMouseCursorPosition + NSEvent local monitor.
+# No TCC permission required for local monitors.
+[target.'cfg(target_os = "macos")'.dependencies]
+# CGAssociateMouseAndMouseCursorPosition, CGDisplayHideCursor, kCGDirectMainDisplay.
+core-graphics = "0.25"
+# NSEvent (local monitor API + deltaX/deltaY), NSCursor (hide/unhide), NSEventMask.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "NSCursor"] }
+# Block closures for the addLocalMonitorForEventsMatchingMask:handler: callback.
+block2 = "0.6"

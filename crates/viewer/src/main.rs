@@ -30,18 +30,21 @@ mod config;
 mod glunpack;
 mod headless;
 // The Wayland pointer-lock implementation only compiles (and links) on Linux.
-// On other platforms the stub below exposes the same public surface so every
-// call site in this file compiles unchanged; the real macOS twin comes in §4.5.
+// The macOS twin lives in pointer_lock_macos.rs (§4.5).
+// Other platforms get a no-op stub.
 #[cfg(target_os = "linux")]
 mod pointer_lock;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+#[path = "pointer_lock_macos.rs"]
+mod pointer_lock;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod pointer_lock {
     use std::net::TcpStream;
     use std::sync::{Arc, Mutex};
 
     use gtk4::gdk;
 
-    /// Stub for non-Linux builds: always returns `None` from `new`.
+    /// Stub for non-Linux/macOS builds: always returns `None` from `new`.
     pub struct PointerLock;
 
     impl PointerLock {
