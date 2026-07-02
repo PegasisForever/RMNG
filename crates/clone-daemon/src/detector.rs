@@ -11,8 +11,10 @@
 //!
 //! It screenshots every interval, splits each monitor into independently-judged
 //! cells, asks a local vision-LLM (OpenAI-compatible `/v1/chat/completions`) per
-//! cell, and combines with "still-working wins". On a needs-human transition it
-//! prints `desktop-state: needs-human — <reason>`; on `--timeout` it prints `timeout`.
+//! cell, and combines so that a confident live-working cue anywhere keeps us quiet
+//! while everything else (idle / finished / blank / unsure) defaults to needs-human —
+//! a deliberate bias toward flagging rather than missing a stuck agent. On a needs-human
+//! transition it prints `desktop-state: needs-human — <reason>`; on `--timeout` it prints `timeout`.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -105,9 +107,12 @@ fn load_detection() -> Result<(Vec<u8>, LastDetection)> {
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum TileState {
+    /// A concrete, live AGENT cue is visible (stop-square, spinner/gerund status,
+    /// ticking timer, "Queue another message", "esc to interrupt", a build printing).
     Working,
+    /// The agent is waiting on a person, OR is idle/finished/blank. Everything that
+    /// is not a confident `Working` folds here — we prefer flagging when unsure.
     NeedsHuman,
-    Nothing,
 }
 
 #[derive(Deserialize)]
@@ -232,7 +237,11 @@ async fn check_once(
     Ok(Some((needs_human, reason, composite)))
 }
 
-/// "Still-working wins": any working cell ⇒ still working; else trust a needs-human cell.
+/// "A confident live cue wins": if ANY cell shows a genuine agent-working cue we stay
+/// quiet (don't interrupt a running agent — even across monitors). Otherwise a human is
+/// needed. Critically, the fall-through defaults to **needs-human**, not "working": an
+/// all-blank / all-ambiguous screen means the agent has stopped, so we flag it. This is
+/// the deliberate bias — prefer a false "needs-human" over silently missing a stuck one.
 fn combine(verdicts: &[TileVerdict]) -> (bool, String) {
     if let Some(v) = verdicts.iter().find(|v| v.state == TileState::Working) {
         let r = v.reason.trim();
@@ -245,49 +254,47 @@ fn combine(verdicts: &[TileVerdict]) -> (bool, String) {
     {
         return (true, v.reason.clone());
     }
-    (false, "nothing on screen yet".into())
+    (true, "no active task detected".into())
 }
 
 const SYSTEM_PROMPT: &str = "\
-You are a vigilant monitor watching a Linux desktop that is running an automated \
-task — typically an AI coding assistant such as Claude Code inside an editor like \
-Cursor or VS Code. You are shown a CROP of part of the screen. Judge ONLY what is \
-visible in this crop and classify it as exactly one of: working, needs_human, nothing.
+You watch a CROP of part of a Linux desktop where an AI coding agent (Claude Code / \
+Cursor / VS Code, a terminal, or the Claude web app) may be running. Judge ONLY this \
+crop and answer one question: is an agent GENERATING output right now, or is it stopped \
+and a person is needed? Classify as exactly one of: working, needs_human.
 
-WORKING — something in this crop is actively making progress ON ITS OWN right now. \
-Concrete cues, any one is enough:
-- An AI agent is running: a red or orange filled SQUARE stop button where a send \
-button would be (the single most reliable cue); a live spinner or animated status \
-word (\"Vibing\", \"Implementing\", \"Coalescing\", \"Garnishing\", \"Pondering\", \
-\"Musing\", \"Sussing\", \"Deciphering\", \"Working\", \"Thinking\", \"Generating\", \
-\"Running … command\"); a ticking elapsed-time or token counter; the text \"esc to \
-interrupt\"; or a chat input whose placeholder reads \"Queue another message\" (an \
-editor shows this ONLY while its agent is running, because you queue a message to \
-run after the current one).
-- A page is loading (spinner / progress bar / half-rendered), or a build, compile, \
-test, install, download or upload is in progress / printing output.
-The LIVE status line and the send button win over the transcript: a log full of \
-finished steps, \"Done\", checkmarks or past-tense summaries above still counts as \
-WORKING if the bottom shows a stop button, a spinner, a ticking counter, or \"Queue \
-another message\".
+Classify as working if the LIVE control of an agent panel — its chat input box, the \
+status line just above it, or a terminal's last line — shows ANY of:
+- the input placeholder is exactly \"Queue another message\". THIS ALWAYS MEANS THE \
+AGENT IS RUNNING — answer working. It is NOT an idle or inviting placeholder; it appears \
+only while the agent generates. (Ignore whether the send button looks like a plain arrow.)
+- a filled SQUARE stop button (often red or orange) where the send button would be;
+- a live status word with a moving \"…\", spinner, or ticking timer/token count \
+(\"Thinking\", \"Generating\", \"Running <command>\", \"Pondering\", \"Deciphering\"…) \
+shown as the CURRENT status — not as text inside the transcript;
+- the terminal's LAST line is actively advancing a build / test / install / download (a \
+live progress bar or streaming output), not a finished command back at a prompt.
 
-NEEDS_HUMAN — there is NO active progress in this crop AND a person is required to \
-move forward:
-- A coding assistant that FINISHED and sits at an idle prompt: the send button is a \
-plain triangular ARROW (not a stop square), there is no spinner/timer, and the \
-placeholder invites a NEW task (e.g. \"Write a message\", \"Plan, search, build \
-anything\", \"ctrl esc to focus or unfocus\"); or it posted a final summary / \
-\"ready whenever you give the go-ahead\".
-- A dialog awaiting a decision (save/discard, authentication, permission, \
-confirmation), a question awaiting an answer, an error/crash blocking progress, or \
-a paused installer/wizard.
+Otherwise classify as needs_human. Do NOT call it working because of:
+- a browser or window TAB TITLE, a file name, a heading, or a URL;
+- a gerund / \"running\" / \"…\" / \"esc to interrupt\" that appears as TEXT INSIDE the \
+transcript, a log, or a past step;
+- a busy-looking transcript, checkmarks, a diff, or a past-tense summary;
+- a chat box whose placeholder invites a NEW task (\"Write a message\", \"How can I \
+help\", \"ctrl esc to focus\"), or an EMPTY input box — but remember \"Queue another \
+message\" is NOT one of these; it means working;
+- a browser page that is merely loading.
 
-NOTHING — this crop has no relevant signal: blank wallpaper, an empty area, or just \
-a file tree / code with no agent activity and no waiting dialog.
+Also classify as needs_human whenever the agent is clearly WAITING on a person — a \
+permission/confirmation dialog, a plan or diff shown for approval, a question with \
+options to pick, a login/auth prompt, or an error — UNLESS the same panel's input shows \
+\"Queue another message\" or a stop square (then it is still working).
 
-Respond ONLY with JSON matching {\"state\": \"working\"|\"needs_human\"|\"nothing\", \
-\"reason\": string}. reason is short and specific — what is in progress, or what a \
-human is being waited on for.";
+When you are genuinely unsure, choose needs_human.
+
+Respond ONLY with JSON matching {\"state\": \"working\"|\"needs_human\", \"reason\": \
+string}. reason is short and specific — name the exact live control you saw (for working) \
+or what a person must do (for needs_human).";
 
 fn build_request(data_url: &str, ignore_reasons: &[String]) -> Value {
     let mut user_text = String::from("Here is a crop of part of the desktop. Classify what is visible in it.");
@@ -318,7 +325,7 @@ fn build_request(data_url: &str, ignore_reasons: &[String]) -> Value {
                 "name": "tile_verdict", "strict": true,
                 "schema": {
                     "type": "object",
-                    "properties": { "state": { "type": "string", "enum": ["working", "needs_human", "nothing"] }, "reason": { "type": "string" } },
+                    "properties": { "state": { "type": "string", "enum": ["working", "needs_human"] }, "reason": { "type": "string" } },
                     "required": ["state", "reason"], "additionalProperties": false
                 }
             }
