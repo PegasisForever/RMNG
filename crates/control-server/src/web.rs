@@ -638,14 +638,19 @@ async fn config_put(
     config::save(&merged).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let restart_required = config::restart_required(&old, &merged);
     // A wizard-finish flip (`setupComplete` false → true) is where the lazy `rmng` network is
-    // first materialized. Do it here so a clone create later doesn't have to; a failure is
-    // NON-fatal (the config is already saved) — surface it as `networkWarning` in the response
-    // so the wizard can show it (the network also gets created on the first clone).
+    // first materialized AND the control-server attaches itself at `.2` — both live in
+    // `self_setup` (gated on `setup_complete`, which was still false at startup, so this flip
+    // is the first run that does either). Re-running it here means a clone create later finds
+    // the network up and the baked `.2` control URL already resolving. A failure is NON-fatal
+    // (the config is already saved); `self_setup` records only a genuine network / self-attach
+    // failure in `network_detail` (failing *required* env rows were already gated by the env
+    // step and are not a wizard-finish failure), which we surface as `networkWarning` so the
+    // wizard can show it (the network also gets re-ensured on the first clone).
     let mut network_warning: Option<String> = None;
     if !old.setup_complete && merged.setup_complete {
-        if let Err(e) = app.docker.ensure_network().await {
-            tracing::warn!("ensure_network at wizard finish failed: {e}");
-            network_warning = Some(e.to_string());
+        if let Some(detail) = app.docker.self_setup(true).await.network_detail {
+            tracing::warn!("self_setup network/self-attach at wizard finish failed: {detail}");
+            network_warning = Some(detail);
         }
     }
     *app.cfg.write().unwrap() = merged.clone();

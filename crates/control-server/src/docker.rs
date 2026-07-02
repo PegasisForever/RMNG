@@ -99,6 +99,11 @@ pub struct EnvReport {
     pub self_container: Option<String>,
     /// The control-server's IP on the rmng network (subnet `.2`; dev mode = gateway `.1`).
     pub control_ip: Option<String>,
+    /// Why the `rmng` network setup / self-attach step failed, when it did (only attempted
+    /// once `setup_complete`). `None` = succeeded or not attempted. Non-fatal to the report
+    /// (it's not in [`required_ok`]); the wizard-finish path surfaces it as a `networkWarning`
+    /// so a fresh deploy learns its clones' baked `.2` control URL won't resolve yet.
+    pub network_detail: Option<String>,
     /// The shared clone-socket mount is present on our own container (required).
     pub sock_mount_ok: bool,
     /// Detail for the sock-mount row (the discovered source path, or why it's missing).
@@ -301,7 +306,10 @@ impl DockerCtl {
     /// 6. `dri_ok` = `/dev/dri/renderD128` exists.
     ///
     /// Never bails on a down daemon — it records the failure in the report so the wizard
-    /// can render it. `setup_complete` is passed in by the caller (`App` reads config).
+    /// can render it. `setup_complete` is passed in by the caller (`App` reads config). A
+    /// step 3/4 failure is non-fatal too — recorded in `report.network_detail` (not in
+    /// [`EnvReport::required_ok`]) so the wizard-finish caller can surface it as a warning
+    /// while the remaining steps still run.
     pub async fn self_setup(&self, setup_complete: bool) -> EnvReport {
         let mut report = EnvReport::default();
 
@@ -342,6 +350,7 @@ impl DockerCtl {
         if setup_complete {
             if let Err(e) = self.ensure_network().await {
                 tracing::warn!(target: "docker", "ensure_network failed during self_setup: {e}");
+                report.network_detail = Some(format!("{e}"));
             }
         }
 
@@ -354,7 +363,11 @@ impl DockerCtl {
                     // RMNG_CONTROL_URLs resolve. Only meaningful once the network exists.
                     if setup_complete {
                         if let Err(e) = self.connect_self_to_network(id, &plan.control_server().to_string()).await {
-                            tracing::debug!(target: "docker", "connect self to {NETWORK}: {e}");
+                            tracing::warn!(target: "docker", "connect self to {NETWORK} at .2 failed: {e}");
+                            // Don't clobber an earlier ensure_network failure (it's the root cause).
+                            report.network_detail.get_or_insert_with(|| {
+                                format!("attaching the control-server to the {NETWORK} network at .2 failed: {e}")
+                            });
                         }
                     }
                 } else {
@@ -1604,6 +1617,7 @@ mod tests {
             daemon_detail: None,
             self_container: None,
             control_ip: Some("10.99.0.1".into()),
+            network_detail: None,
             sock_mount_ok: true,
             sock_mount_detail: "dev".into(),
             dri_ok: true,
@@ -1611,6 +1625,12 @@ mod tests {
         assert!(report.required_ok());
         let env = report.to_setup_env();
         assert_eq!(env.rows.len(), 4);
+
+        // A network / self-attach failure is non-fatal: it doesn't fail the required checks
+        // (the wizard-finish caller surfaces `network_detail` as a warning) and adds no row.
+        let net_fail = EnvReport { network_detail: Some("connect self to rmng failed".into()), ..report.clone() };
+        assert!(net_fail.required_ok());
+        assert_eq!(net_fail.to_setup_env().rows.len(), 4);
         let by = |id: &str| env.rows.iter().find(|r| r.id == id).unwrap();
         assert!(by("dockerDaemon").ok && by("dockerDaemon").required);
         // self-container info row: not required, ok even in dev mode.
