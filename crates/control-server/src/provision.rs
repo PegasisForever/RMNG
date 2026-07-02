@@ -665,6 +665,10 @@ pub async fn commit_clone_image(
     let labels = vec![
         (crate::docker::LABEL_IMAGE.to_string(), "1".to_string()),
         (crate::docker::LABEL_CREATED_FROM.to_string(), source.to_string()),
+        // `docker commit` INHERITS the parent image's labels, so a clone descended from
+        // the wizard base carries `rmng.base=1` — explicitly override it or every user
+        // commit wears the base badge and steals the picker preselect (found in E2E).
+        (crate::docker::LABEL_BASE.to_string(), "0".to_string()),
     ];
     docker.commit(container, name, /*set_boot_config=*/ true, /*pause=*/ true, &labels).await?;
 
