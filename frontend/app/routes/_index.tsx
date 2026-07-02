@@ -22,18 +22,21 @@ import { ImportAccountModal } from "~/components/ImportAccountModal";
 import { NewTemplateModal } from "~/components/NewTemplateModal";
 import { OperationProgress } from "~/components/OperationProgress";
 import { SettingsPanel } from "~/components/SettingsPanel";
+import { SetupWizard } from "~/components/SetupWizard";
 import { SidebarHost } from "~/components/SidebarHost";
 import {
   activate,
   bootstrapTemplate,
   cloneHost,
   deleteHost,
+  getConfig,
   redeployClone,
   refreshClaudeUsage,
   reorder,
   swapClaudeAccount,
 } from "~/lib/api";
 import { type ControlState, type Host, emptyState } from "~/lib/types";
+import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
 import type { Route } from "./+types/_index";
 
@@ -75,8 +78,38 @@ function useLiveState(initial: ControlState) {
   return state;
 }
 
-export default function Dashboard({ loaderData }: Route.ComponentProps) {
+export default function Home({ loaderData }: Route.ComponentProps) {
+  // The live SSE state powers both the wizard (template-provision progress) and the
+  // dashboard, so it lives here at the gate.
   const state = useLiveState(loaderData);
+  // First-run gate: hold the config (null while loading). Render a minimal centered
+  // "Loading…" until it resolves so the dashboard never flashes before the wizard
+  // decision; render the wizard INSTEAD of the dashboard while setup isn't complete.
+  const [cfg, setCfg] = useState<AppConfigRedacted | null>(null);
+  const refetchConfig = () => {
+    getConfig()
+      .then(setCfg)
+      .catch(() => setCfg(null));
+  };
+  useEffect(() => {
+    refetchConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!cfg) {
+    return (
+      <div className="flex h-screen items-center justify-center text-sm text-slate-400">
+        Loading…
+      </div>
+    );
+  }
+  if (!cfg.setupComplete) {
+    return <SetupWizard state={state} initialConfig={cfg} onDone={refetchConfig} />;
+  }
+  return <Dashboard state={state} />;
+}
+
+function Dashboard({ state }: { state: ControlState }) {
   const [error, setError] = useState<string | null>(null);
   const [cloneSource, setCloneSource] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
