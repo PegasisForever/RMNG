@@ -29,18 +29,53 @@ static CHROMA: AtomicU8 = AtomicU8::new(0);
 /// PNG dump.
 fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) -> Result<AppSrc> {
     let yuv444 = CHROMA.load(Ordering::Relaxed) == 1;
+    // Per-OS pipeline selection (cfg! evaluates at compile time; dead branch is eliminated).
+    //
+    // macOS substitutions vs. Linux:
+    //   - `vah264dec ! glupload` → `vtdec_hw` (vtdec_hw is its own GL producer: emits NV12
+    //     rectangle GLMemory via IOSurface; glupload has no IOSurface path and drops out).
+    //   - 4:2:0 dump: need glcolorconvert before gldownload — vtdec_hw emits rectangle textures;
+    //     glcolorconvert converts rectangle→2D + NV12→RGBA so gldownload produces sysmem RGBA
+    //     that videoconvert/pngenc can consume. On Linux vah264dec outputs sysmem directly.
+    //   - 4:2:0 plain (appsink, no caps): vtdec_hw output feeds appsink directly (no cap filter).
+    //   - 4:4:4 paths: no glcolorconvert before rmngavc444unpack (invariant). gldownload from
+    //     rmngavc444unpack's RGBA 2D output works fine on macOS (plain glReadPixels-style).
+    //   Linux strings are byte-identical to today's originals.
     let desc = match (yuv444, dump.is_some()) {
-        (true, true) => "appsrc name=src is-live=true format=time do-timestamp=true ! \
+        (true, true) => if cfg!(target_os = "macos") {
+            "appsrc name=src is-live=true format=time do-timestamp=true ! \
+             h264parse ! vtdec_hw ! rmngavc444unpack ! gldownload ! \
+             videoconvert ! pngenc ! appsink name=out emit-signals=true max-buffers=2 sync=false"
+        } else {
+            "appsrc name=src is-live=true format=time do-timestamp=true ! \
              h264parse ! vah264dec ! glupload ! rmngavc444unpack ! gldownload ! \
-             videoconvert ! pngenc ! appsink name=out emit-signals=true max-buffers=2 sync=false",
-        (true, false) => "appsrc name=src is-live=true format=time do-timestamp=true ! \
+             videoconvert ! pngenc ! appsink name=out emit-signals=true max-buffers=2 sync=false"
+        },
+        (true, false) => if cfg!(target_os = "macos") {
+            "appsrc name=src is-live=true format=time do-timestamp=true ! \
+             h264parse ! vtdec_hw ! rmngavc444unpack ! \
+             appsink name=out emit-signals=true max-buffers=4 sync=false"
+        } else {
+            "appsrc name=src is-live=true format=time do-timestamp=true ! \
              h264parse ! vah264dec ! glupload ! rmngavc444unpack ! \
-             appsink name=out emit-signals=true max-buffers=4 sync=false",
-        (false, true) => "appsrc name=src is-live=true format=time do-timestamp=true ! \
+             appsink name=out emit-signals=true max-buffers=4 sync=false"
+        },
+        (false, true) => if cfg!(target_os = "macos") {
+            "appsrc name=src is-live=true format=time do-timestamp=true ! \
+             h264parse ! vtdec_hw ! glcolorconvert ! gldownload ! videoconvert ! pngenc ! \
+             appsink name=out emit-signals=true max-buffers=2 sync=false"
+        } else {
+            "appsrc name=src is-live=true format=time do-timestamp=true ! \
              h264parse ! vah264dec ! videoconvert ! pngenc ! \
-             appsink name=out emit-signals=true max-buffers=2 sync=false",
-        (false, false) => "appsrc name=src is-live=true format=time do-timestamp=true ! \
-             h264parse ! vah264dec ! appsink name=out emit-signals=true max-buffers=4 sync=false",
+             appsink name=out emit-signals=true max-buffers=2 sync=false"
+        },
+        (false, false) => if cfg!(target_os = "macos") {
+            "appsrc name=src is-live=true format=time do-timestamp=true ! \
+             h264parse ! vtdec_hw ! appsink name=out emit-signals=true max-buffers=4 sync=false"
+        } else {
+            "appsrc name=src is-live=true format=time do-timestamp=true ! \
+             h264parse ! vah264dec ! appsink name=out emit-signals=true max-buffers=4 sync=false"
+        },
     };
     let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     let appsrc = pipeline.by_name("src").context("appsrc")?.downcast::<AppSrc>().map_err(|_| anyhow!("not appsrc"))?;

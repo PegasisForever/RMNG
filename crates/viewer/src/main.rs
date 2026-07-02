@@ -864,8 +864,16 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable)> {
     // lowest latency for a live, latest-wins paintable (no audio to sync to). It also makes
     // the sink immune to any reorder/DPB latency the decoder declares in a LATENCY query, so
     // the only display delay left is the next vsync. Matches the 444 path (make_decoder_yuv444).
+    //
+    // macOS: vtdec_hw emits NV12 GLMemory with texture-target=rectangle (IOSurface/CGL); the sink
+    // only accepts RGBA/RGB 2D GLMemory, so glcolorconvert converts rectangle→2D + NV12→RGBA in
+    // one GPU pass. glupload drops out (vtdec_hw is its own GL producer). Linux string unchanged.
+    #[cfg(not(target_os = "macos"))]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vah264dec ! glupload ! gtk4paintablesink name=sink sync=false";
+    #[cfg(target_os = "macos")]
+    let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
+         h264parse ! vtdec_hw ! glcolorconvert ! gtk4paintablesink name=sink sync=false";
     let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
@@ -917,8 +925,16 @@ fn make_decoder_yuv444(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable)> {
     // the 4:2:0 path. The "old frame from a few back when downscaling" bug was NOT a sink backlog
     // (the sink is latest-wins); it was GTK's `ngl`/`vulkan` GSK renderer caching a recycled
     // GdkTexture — fixed by pinning `GSK_RENDERER=gl` in main().
+    // macOS: vtdec_hw replaces vah264dec + glupload (vtdec_hw is its own GL producer, outputs
+    // NV12 rectangle GLMemory). Do NOT insert glcolorconvert here: rmngavc444unpack reads the raw
+    // Y/UV textures; a prior colorconvert would 4:2:0-upsample the packed auxiliary chroma and
+    // destroy the AVC444 reconstruction. Rectangle→2D conversion is Task 3. Linux string unchanged.
+    #[cfg(not(target_os = "macos"))]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vah264dec ! glupload ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false";
+    #[cfg(target_os = "macos")]
+    let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
+         h264parse ! vtdec_hw ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false";
     let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
