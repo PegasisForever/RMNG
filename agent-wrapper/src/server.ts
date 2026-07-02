@@ -137,16 +137,14 @@ function mcpServers(): Record<string, McpServerConfig> {
     "control-server": { type: "http", url: CONFIG.controlMcpUrl },
   };
 
-  const linear: Array<[string, string]> = [
-    ["linear-we", CONFIG.linear.we],
-    ["linear-dev", CONFIG.linear.dev],
-    ["linear-hh", CONFIG.linear.hh],
-    ["linear-per", CONFIG.linear.per],
-  ];
-  for (const [name, key] of linear) {
-    if (key) {
-      servers[name] = { type: "http", url: "https://mcp.linear.app/mcp", headers: { Authorization: `Bearer ${key}` } };
-    }
+  // The clone's preset Linear identity (LINEAR_API_KEY, injected at clone creation).
+  // Interactive `claude` gets the same server from ~/.claude.json (user scope).
+  if (CONFIG.linearApiKey) {
+    servers.linear = {
+      type: "http",
+      url: "https://mcp.linear.app/mcp",
+      headers: { Authorization: `Bearer ${CONFIG.linearApiKey}` },
+    };
   }
   return servers;
 }

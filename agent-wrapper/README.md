@@ -47,7 +47,7 @@ Code CLI under `node` (`AGENT_EXECUTABLE`).
 | `AGENT_CONTROL_MCP_URL` | `http://10.60.0.1:9000/mcp` | control-server MCP (`set_state`) |
 | `COMPUTER_USE_BIN` | `/usr/local/bin/computer-use` | desktop MCP binary |
 | `COMPUTER_USE_MAX_WIDTH` / `_HEIGHT` | unset | override the desktop MCP's screenshot cap; unset ⇒ its built-in 1080p default |
-| `LINEAR_{WE,DEV,HH,PER}_API_KEY` | unset | per-workspace Linear hosted MCP; empty key ⇒ that server is skipped |
+| `LINEAR_API_KEY` | unset | Linear hosted MCP (registered as `linear`); injected per-clone from the chosen preset; empty ⇒ skipped |
 
 The agent's instructions come in two layers:
 

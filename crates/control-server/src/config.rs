@@ -17,17 +17,14 @@ pub fn load() -> Result<AppConfig> {
     let path = config_path();
     let mut cfg = match std::fs::read_to_string(&path) {
         Ok(s) => {
-            let cfg: AppConfig = serde_json::from_str(&s)
+            let mut cfg: AppConfig = serde_json::from_str(&s)
                 .with_context(|| format!("parsing {}", path.display()))?;
-            // Legacy `cloneAccounts` (long-lived tokens, pre single-token model): the
-            // field is gone from AppConfig, so rewrite the file once to scrub the
-            // now-dead secrets from disk rather than leaving them until the next save.
-            let had_legacy = serde_json::from_str::<serde_json::Value>(&s)
-                .ok()
-                .and_then(|v| v.get("cloneAccounts").and_then(|a| a.as_array().map(|a| !a.is_empty())))
-                .unwrap_or(false);
-            if had_legacy {
-                tracing::info!("scrubbing legacy cloneAccounts (long-lived tokens) from {}", path.display());
+            // Legacy fields (serde ignores them at parse): fold what's still useful
+            // into the current shape and rewrite the file once, so dead secrets
+            // (long-lived clone tokens, per-workspace Linear keys) don't linger on disk.
+            let raw = serde_json::from_str::<serde_json::Value>(&s).unwrap_or_default();
+            if migrate_legacy(&raw, &mut cfg) {
+                tracing::info!("migrating legacy config fields in {}", path.display());
                 save(&cfg)?;
             }
             cfg
@@ -46,6 +43,40 @@ pub fn load() -> Result<AppConfig> {
         }
     }
     Ok(cfg)
+}
+
+/// Fold legacy config fields into the current shape; true = the file must be
+/// rewritten. Legacy `envPresets` (env-only presets, pre Linear unification) seed
+/// `presets` (no labels/key — the operator adds those in Settings). Legacy `linear`
+/// workspace keys (now per-preset) and `cloneAccounts` long-lived tokens (dead since
+/// the single-token model) are dropped; the rewrite scrubs them from disk.
+fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
+    let non_empty = |k: &str| match raw.get(k) {
+        Some(serde_json::Value::Array(a)) => !a.is_empty(),
+        Some(serde_json::Value::Object(o)) => !o.is_empty(),
+        _ => false,
+    };
+    if cfg.presets.is_empty() {
+        if let Some(rows) = raw.get("envPresets").and_then(|v| v.as_array()) {
+            for r in rows {
+                let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
+                let vars = r
+                    .get("vars")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                cfg.presets.push(wire::Preset {
+                    name: name.to_string(),
+                    labels: Vec::new(),
+                    linear_key: String::new(),
+                    vars,
+                });
+            }
+        }
+    }
+    if non_empty("linear") {
+        tracing::info!("dropping legacy per-workspace Linear keys (now per-preset — re-enter in Settings)");
+    }
+    non_empty("envPresets") || non_empty("linear") || non_empty("cloneAccounts")
 }
 
 #[cfg(test)]
@@ -70,29 +101,61 @@ mod tests {
     }
 
     #[test]
-    fn merge_linear_keys_by_name() {
-        use wire::{LinearConfig, LinearKey};
+    fn merge_presets_by_name() {
+        use wire::{EnvVar, Preset};
         let mut base = AppConfig::default();
-        base.linear = LinearConfig(vec![
-            LinearKey { name: "we".into(), key: "OLD-WE".into() },
-            LinearKey { name: "dev".into(), key: "OLD-DEV".into() },
-        ]);
-        // UI sends the full list: blank key = unchanged, new row = added,
-        // omitted row ("dev") = deleted. Names are normalized to lowercase.
+        base.presets = vec![
+            Preset { name: "med".into(), linear_key: "OLD-MED".into(), ..Default::default() },
+            Preset { name: "gone".into(), linear_key: "OLD-GONE".into(), ..Default::default() },
+        ];
+        // UI sends the full list: blank linearKey = keep stored, new row = added,
+        // omitted row ("gone") = deleted (with its key). Labels/vars replace.
         let incoming = serde_json::json!({
-            "linear": [
-                { "name": "we", "key": "" },
-                { "name": "OPS", "key": "NEW-OPS" },
+            "presets": [
+                { "name": "med", "labels": [" Backend ", ""], "linearKey": "",
+                  "vars": [{ "key": "A", "value": "1" }] },
+                { "name": "new", "labels": [], "linearKey": "NEW-KEY", "vars": [] },
             ],
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.linear.names(), vec!["we", "ops"]);
-        assert_eq!(merged.linear.key_for("we"), Some("OLD-WE")); // blank kept stored
-        assert_eq!(merged.linear.key_for("ops"), Some("NEW-OPS"));
-        assert_eq!(merged.linear.key_for("dev"), None); // omitted → deleted
-        // No `linear` field at all → unchanged.
+        assert_eq!(merged.presets.len(), 2);
+        assert_eq!(merged.presets[0].linear_key, "OLD-MED"); // blank kept stored
+        assert_eq!(merged.presets[0].labels, vec!["Backend"]); // trimmed, blanks dropped
+        assert_eq!(merged.presets[0].vars, vec![EnvVar { key: "A".into(), value: "1".into() }]);
+        assert_eq!(merged.presets[1].name, "new");
+        assert_eq!(merged.presets[1].linear_key, "NEW-KEY");
+        assert!(!merged.presets.iter().any(|p| p.name == "gone")); // omitted → deleted
+        // No `presets` field at all → unchanged.
         let untouched = merge_update(&base, serde_json::json!({})).unwrap();
-        assert_eq!(untouched.linear, base.linear);
+        assert_eq!(untouched.presets, base.presets);
+    }
+
+    #[test]
+    fn migrate_legacy_folds_old_fields() {
+        // envPresets seed presets (no labels/key); linear + cloneAccounts just flag a rewrite.
+        let raw = serde_json::json!({
+            "envPresets": [{ "name": "old", "vars": [{ "key": "A", "value": "1" }] }],
+            "linear": [{ "name": "we", "key": "K" }],
+        });
+        let mut cfg = AppConfig::default();
+        assert!(migrate_legacy(&raw, &mut cfg));
+        assert_eq!(cfg.presets.len(), 1);
+        assert_eq!(cfg.presets[0].name, "old");
+        assert!(cfg.presets[0].labels.is_empty() && cfg.presets[0].linear_key.is_empty());
+        assert_eq!(cfg.presets[0].vars[0].key, "A");
+
+        // Legacy object-shaped `linear` also counts; existing presets are never clobbered.
+        let raw = serde_json::json!({ "linear": { "we": "K1" }, "envPresets": [{ "name": "x" }] });
+        let mut cfg = AppConfig::default();
+        cfg.presets = vec![wire::Preset { name: "kept".into(), ..Default::default() }];
+        assert!(migrate_legacy(&raw, &mut cfg));
+        assert_eq!(cfg.presets.len(), 1);
+        assert_eq!(cfg.presets[0].name, "kept");
+
+        // Fully-migrated file → no rewrite.
+        let raw = serde_json::json!({ "presets": [{ "name": "p" }] });
+        let mut cfg = AppConfig::default();
+        assert!(!migrate_legacy(&raw, &mut cfg));
     }
 
     #[test]
@@ -142,39 +205,56 @@ pub fn save(cfg: &AppConfig) -> Result<()> {
 
 /// Merge a partial config update onto `base`, returning the new config. Rules:
 /// non-secret fields are replaced; **empty-string scalars are treated as
-/// "unchanged"** (so the redacted UI can send back blank secrets without wiping
-/// them); `linear` merges by workspace name (a blank key keeps the stored one).
+/// "unchanged"** (so the redacted UI can send back blanks without wiping stored
+/// values); `presets` merge by name (a blank `linearKey` keeps the stored one).
 pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<AppConfig> {
     let mut cur = serde_json::to_value(base)?;
     // Pull the secret-bearing list aside for key-wise merge (generic merge would replace).
-    let incoming_linear = incoming.get("linear").cloned();
+    let incoming_presets = incoming.get("presets").cloned();
     deep_merge(&mut cur, &incoming);
     let mut merged: AppConfig = serde_json::from_value(cur)?;
-    if let Some(serde_json::Value::Array(rows)) = incoming_linear {
-        merged.linear = merge_linear_keys(&base.linear, &rows);
+    if let Some(serde_json::Value::Array(rows)) = incoming_presets {
+        merged.presets = merge_presets(&base.presets, &rows);
     }
     Ok(merged)
 }
 
-/// Merge the UI's Linear-key rows by workspace name: a blank key keeps the stored
-/// one (write-only secret); a row absent from the list deletes that workspace.
-fn merge_linear_keys(base: &wire::LinearConfig, rows: &[serde_json::Value]) -> wire::LinearConfig {
-    let mut keys: Vec<wire::LinearKey> = Vec::new();
+/// Merge the UI's preset rows by name: a blank `linearKey` keeps the stored key of
+/// the same-named preset (write-only secret); labels/vars are replaced from the row;
+/// a preset absent from the list is deleted (along with its key).
+fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire::Preset> {
+    let mut out: Vec<wire::Preset> = Vec::new();
     for r in rows {
         let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
-        let name = name.trim().to_ascii_lowercase();
-        if name.is_empty() || keys.iter().any(|k| k.name == name) {
+        let name = name.trim().to_string();
+        if name.is_empty() || out.iter().any(|p| p.name == name) {
             continue;
         }
-        let sent = r.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        let key = if sent.is_empty() {
-            base.key_for(&name).unwrap_or_default().to_string()
+        let labels = r
+            .get("labels")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let vars: Vec<wire::EnvVar> = r
+            .get("vars")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let sent = r.get("linearKey").and_then(|v| v.as_str()).unwrap_or("");
+        let linear_key = if sent.is_empty() {
+            base.iter().find(|p| p.name == name).map(|p| p.linear_key.clone()).unwrap_or_default()
         } else {
             sent.to_string()
         };
-        keys.push(wire::LinearKey { name, key });
+        out.push(wire::Preset { name, labels, linear_key, vars });
     }
-    wire::LinearConfig(keys)
+    out
 }
 
 /// Overlay `src` onto `dst`. Objects merge recursively; arrays + scalars replace —

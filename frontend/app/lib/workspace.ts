@@ -1,6 +1,6 @@
-// Client-side helpers for Linear workspaces (ticket prefixes). The set of
-// workspaces is config (Settings → Linear API keys), not a constant — callers
-// pass the configured names in.
+// Client-side helpers for Linear ticket prefixes. Any `XX-123`-style id parses —
+// whether a preset's API key can actually reach the ticket is decided server-side
+// at clone time.
 
 /**
  * Badge palette — literal strings so the Tailwind compiler keeps them (no
@@ -33,16 +33,13 @@ export function workspaceBadge(prefix: string): string {
   return PALETTE[h % PALETTE.length];
 }
 
-/** Extract a `WE-142`-style ref from a pasted Linear link or bare id. Valid
- *  prefixes are the configured workspace names (lowercase). */
+/** Extract a `WE-142`-style ref from a pasted Linear link or bare id. */
 export function parseTicketInput(
   input: string,
-  workspaces: readonly string[],
 ): { identifier: string; prefix: string; hostname: string } | null {
   const m = /\b([A-Za-z]{2,})-(\d+)\b/.exec(input.trim());
   if (!m) return null;
   const prefix = m[1].toLowerCase();
-  if (!workspaces.includes(prefix)) return null;
   return {
     identifier: `${m[1].toUpperCase()}-${m[2]}`,
     prefix,

@@ -128,7 +128,7 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../
 | `static_dir` | string | `"frontend/build/client"` | disk frontend (else embedded) |
 | `monitors` | `MonitorSpec[]` | `[]` → one 1080p primary | desired global layout |
 | `proxmox` | `ProxmoxConfig` | — | node SSH + clone subnet |
-| `linear` | `LinearKey[]` | `[]` | per-workspace API keys, editable list (**secret**) |
+| `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select labels (**key secret**) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
 | `clone_groups` | `CloneGroup[]` | `[]` | named account pools for rotation (not secret) |
 
@@ -138,10 +138,14 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../
   (`"BC:24:11"` — clone.sh regenerates a CoW clone's MAC with this OUI to avoid colliding
   with the template's; config-only, not in the Settings UI), `hostname_prefix` (`"pega-"`,
   editable in Settings → prepended to derived clone hostnames).
-- **`LinearKey`**: `name` (lowercase ticket prefix, doubles as the Linear team key —
-  `we` ↔ `WE-142`), `key` (personal API key, **secret**). The workspace set is this list,
-  not an enum; the legacy fixed `{we,dev,hh,per}` object shape still parses. `PUT
-  /api/config` merges rows by name (blank key keeps the stored one; omitted row deletes).
+- <a id="preset"></a>**`Preset`**: `name`, `labels` (Linear ticket labels that auto-select
+  this preset when cloning from a ticket — case-insensitive, first match in config order
+  wins), `linear_key` (personal API key, **secret** — fetches/creates tickets server-side
+  and is injected into the clone as `LINEAR_API_KEY`, authing its `linear` MCP), `vars`
+  (env vars written to the clone's session env). `PUT /api/config` merges rows by name
+  (blank `linearKey` keeps the stored one; omitted row deletes). One-shot migration at
+  load: legacy `envPresets` seed `presets` (no labels/keys); legacy per-workspace `linear`
+  keys are dropped (re-enter per preset in Settings).
 - **`ClaudeConfig`**: `poll_secs` (`600`, floored 15), `pinned_email?`,
   `auto_swap_on_exhaustion` (bool).
 - <a id="claude-accounts"></a>**Claude accounts** live outside config, in the server's 0600

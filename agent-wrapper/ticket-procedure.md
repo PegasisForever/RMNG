@@ -89,7 +89,7 @@ yourself.
    appear after a few seconds. Re-screenshot while waiting; do not type until the
    input box is visible.
 5. **Give it the task.** Fetch the ticket first if it helps you phrase the task (the
-   `linear-per` MCP — the in-terminal Claude Code also has it). Then click the input
+   `linear` MCP — the in-terminal Claude Code also has it). Then click the input
    box and type a clear, **single-line** prompt stating what the ticket requires and
    including the ticket link, e.g. *"Do what this Linear ticket requires: `<ticket
    link>`. Don't commit, push, or reply to the Linear ticket unless explicitly told

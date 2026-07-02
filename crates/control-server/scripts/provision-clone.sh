@@ -50,7 +50,7 @@ apt-get install -y -qq \
   mesa-va-drivers libva2 va-driver-all vainfo \
   pipewire wireplumber gstreamer1.0-pipewire \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  fonts-cantarell adwaita-icon-theme network-manager >/dev/null
+  fonts-cantarell adwaita-icon-theme network-manager jq >/dev/null
 
 # Default terminal → Ptyxis (installed above in place of gnome-console; gnome-shell doesn't
 # Recommend Console, so dropping it from the list is enough — nothing pulls it back).
@@ -388,6 +388,22 @@ guessing or thrashing. A precise question beats a confident wrong turn.
 CLAUDEMD
 chown "$USERNAME:$USERNAME" "$CLAUDE_DIR/CLAUDE.md"
 chmod 644 "$CLAUDE_DIR/CLAUDE.md"
+
+# User-scope `linear` MCP for every `claude` on the clone (interactive shell, inner
+# Cursor agent; the agent-wrapper registers the same server programmatically).
+# mcpServers lives in ~/.claude.json — a top-level key; settings.json does NOT
+# support it. ${LINEAR_API_KEY} stays literal here (single-quoted jq arg): claude
+# expands it at runtime from the session env, where clone.sh's 30-rmng-preset.conf
+# put the chosen preset's key. No key in the env (e.g. on the template itself) ⇒
+# claude skips the server with a "missing environment variables" warning.
+say "user-scope linear MCP → ~/.claude.json"
+CLAUDE_JSON="/home/$USERNAME/.claude.json"
+[ -s "$CLAUDE_JSON" ] || echo '{}' > "$CLAUDE_JSON"
+jq --arg auth 'Bearer ${LINEAR_API_KEY}' \
+  '.mcpServers.linear = {"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":$auth}}' \
+  "$CLAUDE_JSON" > "$CLAUDE_JSON.tmp" && mv "$CLAUDE_JSON.tmp" "$CLAUDE_JSON"
+chown "$USERNAME:$USERNAME" "$CLAUDE_JSON"
+chmod 600 "$CLAUDE_JSON"
 
 # uv + nvm + fish-nvm, all installed as the clone user (per-user, like claude above).
 # Subshell cd's to the user's home so fisher can getcwd (root's cwd isn't readable by

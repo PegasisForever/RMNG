@@ -43,16 +43,19 @@ ClaudeUsage { id, email, provider, active, assignable?, error?, stale?,
 MonitorSpec { width, height }
 
 # configuration (edited via the Settings UI, not hand-edited files)
-AppConfig { proxmox{ssh}, linear{we,dev,hh,per},
+AppConfig { proxmox{ssh},
+            presets: [{name, labels: [label], linear_key, vars: [{key, value}]}],
             claude{poll, pinnedEmail, swap..., auto_swap_on_exhaustion: bool},
             clone_groups: [{name, accounts: [email]}],
             template{base_image, cores, memory, disk, devstack...},
             monitors: [MonitorSpec], listen{video, web, clone_mcp, global_mcp}, agent{port} }
+# A preset's `labels` auto-select it when cloning from a Linear ticket; `linear_key`
+# fetches/creates tickets server-side and is injected into the clone as LINEAR_API_KEY.
 # Claude account tokens are NOT config: each account's OAuth pair lives in the server's
 # 0600 `claude-accounts.json`; the server refreshes it and pushes the current short-lived
 # access token into assigned clones' ~/.claude/.credentials.json (see control-server).
 AppConfigRedacted   # GET /api/config shape: secrets → set/unset or last-4, never plaintext
-# Secret fields (linear keys, proxmox ssh) are write-only: redacted on read,
+# Secret fields (preset linear keys, proxmox ssh) are write-only: redacted on read,
 # omitted-keeps-stored on write, and NEVER placed in ControlState/SSE.
 
 # socket protocol (clone-daemon ⇄ control-server, SOCK_SEQPACKET + SCM_RIGHTS)

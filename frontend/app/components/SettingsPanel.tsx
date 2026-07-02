@@ -147,16 +147,22 @@ export function SettingsPanel({
   const [applying, setApplying] = useState(false);
   const [applyMsg, setApplyMsg] = useState<string | null>(null);
 
-  // Editable form state. Secrets (proxmoxSsh, linear) start blank = "unchanged".
+  // Editable form state. Secrets (proxmoxSsh, preset linearKey) start blank = "unchanged".
   const [monitors, setMonitors] = useState<Mon[]>([]);
-  const [envPresets, setEnvPresets] =
-    useState<{ name: string; vars: { key: string; value: string }[] }[]>([]);
+  // Presets: labels edited as a comma-separated string; linearKey is write-only
+  // (blank = keep stored), keySet mirrors whether the server holds one.
+  const [presets, setPresets] = useState<
+    {
+      name: string;
+      labels: string;
+      linearKey: string;
+      keySet: boolean;
+      vars: { key: string; value: string }[];
+    }[]
+  >([]);
   const [claudeGroups, setClaudeGroups] = useState<{ name: string; accounts: string[] }[]>([]);
   const [proxmoxSsh, setProxmoxSsh] = useState("");
   const [hostnamePrefix, setHostnamePrefix] = useState("");
-  // Linear workspaces: editable rows. `key` is write-only (blank = keep stored);
-  // `set` mirrors whether the server holds one.
-  const [linearKeys, setLinearKeys] = useState<{ name: string; key: string; set: boolean }[]>([]);
   const [claude, setClaude] = useState({
     pollSecs: 600,
     pinnedEmail: "",
@@ -184,9 +190,16 @@ export function SettingsPanel({
     setAgentPort(c.agentPort);
     setDataDir(c.dataDir);
     setStaticDir(c.staticDir);
-    setEnvPresets(c.envPresets.map((p) => ({ name: p.name, vars: p.vars.map((v) => ({ ...v })) })));
+    setPresets(
+      c.presets.map((p) => ({
+        name: p.name,
+        labels: p.labels.join(", "),
+        linearKey: "",
+        keySet: p.linearKeySet,
+        vars: p.vars.map((v) => ({ ...v })),
+      })),
+    );
     setClaudeGroups(c.cloneGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })));
-    setLinearKeys(c.linearKeys.map((k) => ({ name: k.name, key: "", set: k.set })));
   }
 
   useEffect(() => {
@@ -213,17 +226,21 @@ export function SettingsPanel({
       return next;
     });
 
-  // Env-var preset editors.
-  const addPreset = () => setEnvPresets((ps) => [...ps, { name: "", vars: [{ key: "", value: "" }] }]);
-  const rmPreset = (i: number) => setEnvPresets((ps) => ps.filter((_, j) => j !== i));
-  const setPresetName = (i: number, name: string) =>
-    setEnvPresets((ps) => ps.map((p, j) => (j === i ? { ...p, name } : p)));
+  // Preset editors.
+  const addPreset = () =>
+    setPresets((ps) => [
+      ...ps,
+      { name: "", labels: "", linearKey: "", keySet: false, vars: [{ key: "", value: "" }] },
+    ]);
+  const rmPreset = (i: number) => setPresets((ps) => ps.filter((_, j) => j !== i));
+  const setPresetField = (i: number, field: "name" | "labels" | "linearKey", v: string) =>
+    setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, [field]: v } : p)));
   const addVar = (i: number) =>
-    setEnvPresets((ps) => ps.map((p, j) => (j === i ? { ...p, vars: [...p.vars, { key: "", value: "" }] } : p)));
+    setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, vars: [...p.vars, { key: "", value: "" }] } : p)));
   const rmVar = (i: number, k: number) =>
-    setEnvPresets((ps) => ps.map((p, j) => (j === i ? { ...p, vars: p.vars.filter((_, m) => m !== k) } : p)));
+    setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, vars: p.vars.filter((_, m) => m !== k) } : p)));
   const setVar = (i: number, k: number, field: "key" | "value", v: string) =>
-    setEnvPresets((ps) =>
+    setPresets((ps) =>
       ps.map((p, j) =>
         j === i ? { ...p, vars: p.vars.map((vv, m) => (m === k ? { ...vv, [field]: v } : vv)) } : p,
       ),
@@ -262,18 +279,17 @@ export function SettingsPanel({
           primary: m.primary,
         })),
         proxmox: { ssh: proxmoxSsh, hostnamePrefix },
-        linear: linearKeys
-          .filter((k) => k.name.trim())
-          .map((k) => ({ name: k.name.trim().toLowerCase(), key: k.key })),
         claude: { ...claude, pinnedEmail: claude.pinnedEmail || null },
         listen,
         agentPort,
         dataDir,
         staticDir,
-        envPresets: envPresets
+        presets: presets
           .filter((p) => p.name.trim())
           .map((p) => ({
             name: p.name.trim(),
+            labels: p.labels.split(",").map((s) => s.trim()).filter(Boolean),
+            linearKey: p.linearKey, // "" = keep the stored key
             vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
           })),
         cloneGroups: claudeGroups
@@ -440,19 +456,20 @@ export function SettingsPanel({
               </div>
             </Section>
 
-            {/* Environment variable presets — named env sets pickable at clone time. */}
+            {/* Presets — Linear identity (key + auto-select labels) + env vars, picked
+                (or label-matched) at clone time. */}
             <Section
-              title="Environment variable presets"
-              hint="Named sets of env vars; pick one in the clone dialog. Written to the clone's session env at creation. Vars that must always be present (e.g. XDG_CURRENT_DESKTOP) are baked into every clone, not here."
+              title="Presets"
+              hint="A preset = Linear API key + the ticket labels that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by label; other clones require an explicit pick."
             >
               <div className="space-y-3">
-                {envPresets.length === 0 ? <p className="text-xs text-slate-400">No presets.</p> : null}
-                {envPresets.map((p, i) => (
+                {presets.length === 0 ? <p className="text-xs text-slate-400">No presets.</p> : null}
+                {presets.map((p, i) => (
                   <div key={i} className="rounded border border-slate-200 p-3">
                     <div className="flex items-center gap-2">
                       <input
                         value={p.name}
-                        onChange={(e) => setPresetName(i, e.target.value)}
+                        onChange={(e) => setPresetField(i, "name", e.target.value)}
                         placeholder="preset name"
                         className={input}
                       />
@@ -463,6 +480,31 @@ export function SettingsPanel({
                       >
                         Remove
                       </button>
+                    </div>
+                    <div className="mt-2">
+                      <input
+                        value={p.labels}
+                        onChange={(e) => setPresetField(i, "labels", e.target.value)}
+                        placeholder="Linear ticket labels, comma-separated (auto-selects this preset)"
+                        spellCheck={false}
+                        className="w-full rounded border border-slate-300 px-2 py-1 text-xs focus:border-slate-400 focus:outline-none"
+                      />
+                    </div>
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <input
+                        type="password"
+                        value={p.linearKey}
+                        placeholder={p.keySet ? "•••••••• (set — leave blank to keep)" : "lin_api_… (Linear API key)"}
+                        onChange={(e) => setPresetField(i, "linearKey", e.target.value)}
+                        className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-400 focus:outline-none"
+                      />
+                      <span
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                          p.keySet ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"
+                        }`}
+                      >
+                        key {p.keySet ? "set" : "unset"}
+                      </span>
                     </div>
                     <div className="mt-2 space-y-1.5">
                       {p.vars.map((v, k) => (
@@ -548,59 +590,6 @@ export function SettingsPanel({
                     the current value.
                   </p>
                 </div>
-              </div>
-            </Section>
-
-            {/* Linear (write-only keys, editable workspace list). */}
-            <Section
-              title="Linear API keys"
-              hint="One row per workspace. The name is the ticket prefix / Linear team key (e.g. we → WE-142). Leave a key blank to keep the stored one; removing a row deletes the workspace."
-            >
-              <div className="space-y-1.5">
-                {linearKeys.length === 0 ? <p className="text-xs text-slate-400">No workspaces.</p> : null}
-                {linearKeys.map((k, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <input
-                      value={k.name}
-                      onChange={(e) =>
-                        setLinearKeys((ks) => ks.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
-                      }
-                      placeholder="name"
-                      spellCheck={false}
-                      className="w-24 rounded border border-slate-300 px-2 py-1 font-mono text-xs lowercase focus:border-slate-400 focus:outline-none"
-                    />
-                    <input
-                      type="password"
-                      value={k.key}
-                      placeholder={k.set ? "•••••••• (set — leave blank to keep)" : "lin_api_…"}
-                      onChange={(e) =>
-                        setLinearKeys((ks) => ks.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))
-                      }
-                      className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-400 focus:outline-none"
-                    />
-                    <span
-                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                        k.set ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"
-                      }`}
-                    >
-                      {k.set ? "set" : "unset"}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setLinearKeys((ks) => ks.filter((_, j) => j !== i))}
-                      className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => setLinearKeys((ks) => [...ks, { name: "", key: "", set: false }])}
-                  className="mt-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
-                >
-                  + Add workspace
-                </button>
               </div>
             </Section>
 

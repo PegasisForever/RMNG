@@ -4,15 +4,16 @@ import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { getConfig, recommendedClaudeAccount, type ClonePayload } from "~/lib/api";
 import type { ClaudeUsage } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
-import type { EnvPreset } from "~/lib/wire/EnvPreset";
+import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import { parseTicketInput, workspaceBadge } from "~/lib/workspace";
 
 /**
- * Clone dialog. Three modes: paste an existing Linear ticket (link or `WE-142`),
- * create a new one (workspace + title + description), or a plain no-ticket clone
- * (just a container title + an optional first agent message). For the ticket
- * modes the hostname is derived from the ticket id (`WE-142` → `pega-we-142`); for
- * the plain mode it's derived from the title slug. All resolved server-side.
+ * Clone dialog. Three modes: paste an existing Linear ticket (link or `WE-142`) —
+ * the preset is auto-selected from the ticket's labels unless overridden; create a
+ * new ticket (preset + team + title + description — the preset's Linear key creates
+ * it); or a plain no-ticket clone (title + optional first message; a preset must be
+ * picked when any are configured). The hostname derives from the ticket id
+ * (`WE-142` → `pega-we-142`) or the title slug. All resolved server-side.
  */
 export function CloneModal({
   source,
@@ -30,9 +31,8 @@ export function CloneModal({
 }) {
   const [mode, setMode] = useState<"existing" | "create" | "plain">("existing");
   const [ticket, setTicket] = useState("");
-  // Configured Linear workspaces (names with a stored key, from config).
-  const [workspaces, setWorkspaces] = useState<string[]>([]);
-  const [workspace, setWorkspace] = useState("");
+  // Linear team key for created tickets (e.g. "we" → WE-…).
+  const [team, setTeam] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [message, setMessage] = useState("");
@@ -47,23 +47,29 @@ export function CloneModal({
   const [recommended, setRecommended] = useState<string | null>(null);
   // Account groups (from config), for the group options in the picker.
   const [groups, setGroups] = useState<CloneGroup[]>([]);
-  // Env-var presets (from config) + the chosen one ("" = none).
-  const [presets, setPresets] = useState<EnvPreset[]>([]);
-  const [envPreset, setEnvPreset] = useState("");
+  // Presets (from config) + the chosen one ("" = auto-by-ticket-labels; create/plain
+  // require an explicit pick, defaulted to the first preset below).
+  const [presets, setPresets] = useState<PresetRedacted[]>([]);
+  const [preset, setPreset] = useState("");
 
   useEffect(() => {
     getConfig()
       .then((c) => {
-        setPresets(c.envPresets);
+        setPresets(c.presets);
         setGroups(c.cloneGroups);
-        const ws = c.linearKeys.filter((k) => k.set).map((k) => k.name);
-        setWorkspaces(ws);
-        setWorkspace((w) => w || ws[0] || "");
       })
       .catch(() => {
-        // Config unreachable — just no preset/group/workspace options.
+        // Config unreachable — just no preset/group options.
       });
   }, []);
+
+  // Create/plain mode need an explicit preset — default to the first one; back on
+  // the ticket tab "" means auto-by-labels, so leave whatever the operator chose.
+  useEffect(() => {
+    if (mode !== "existing" && preset === "" && presets.length > 0) {
+      setPreset(presets[0].name);
+    }
+  }, [mode, presets, preset]);
 
   useEffect(() => {
     if (accounts.length === 0) return;
@@ -86,12 +92,15 @@ export function CloneModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const parsed = parseTicketInput(ticket, workspaces);
-  // `create` needs a workspace + title; `plain` a title; `existing` a parseable ticket.
+  const parsed = parseTicketInput(ticket);
+  // `existing` needs a parseable ticket; `create` a preset (its key creates the
+  // ticket) + team + title; `plain` a title + a preset whenever any are configured.
   const valid =
     mode === "existing"
       ? !!parsed
-      : title.trim().length > 0 && (mode !== "create" || !!workspace);
+      : mode === "create"
+        ? title.trim().length > 0 && team.trim().length > 0 && !!preset
+        : title.trim().length > 0 && (presets.length === 0 || !!preset);
 
   function submit() {
     if (!valid || busy) return;
@@ -100,7 +109,7 @@ export function CloneModal({
       onClone({
         plain: { title: title.trim(), message: message.trim() },
         claudeAccount: account,
-        envPreset: envPreset || undefined,
+        preset: preset || undefined,
       });
       return;
     }
@@ -115,14 +124,14 @@ export function CloneModal({
         ticket: ticket.trim(),
         ...extra,
         claudeAccount: account,
-        envPreset: envPreset || undefined,
+        preset: preset || undefined, // "" ⇒ auto-select by ticket labels
       });
     else
       onClone({
-        create: { workspace, title: title.trim(), description },
+        create: { team: team.trim().toLowerCase(), title: title.trim(), description },
         ...extra,
         claudeAccount: account,
-        envPreset: envPreset || undefined,
+        preset: preset || undefined,
       });
   }
 
@@ -178,11 +187,7 @@ export function CloneModal({
             />
             {ticket && !parsed ? (
               <p className="mt-1 text-[11px] text-red-600">
-                {workspaces.length === 0
-                  ? "no Linear workspaces configured — add API keys in Settings"
-                  : `couldn’t find a supported ticket id (${workspaces
-                      .map((w) => `${w.toUpperCase()}-`)
-                      .join(", ")}…)`}
+                couldn’t find a ticket id (like WE-142) in that
               </p>
             ) : null}
             {parsed ? (
@@ -202,21 +207,18 @@ export function CloneModal({
         ) : mode === "create" ? (
           <div className="mt-3 space-y-3">
             <label className="block text-xs font-medium text-slate-500">
-              Workspace
-              <select
-                value={workspace}
-                onChange={(e) => setWorkspace(e.target.value)}
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
-              >
-                {workspaces.length === 0 ? (
-                  <option value="">no workspaces configured</option>
-                ) : null}
-                {workspaces.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
+              Team key
+              <input
+                value={team}
+                onChange={(e) => setTeam(e.target.value)}
+                placeholder="we"
+                spellCheck={false}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none"
+              />
+              <span className="mt-0.5 block text-[11px] font-normal text-slate-400">
+                The Linear team the ticket is created in (WE-… → “we”), using the
+                selected preset’s API key.
+              </span>
             </label>
             <label className="block text-xs font-medium text-slate-500">
               Title
@@ -286,20 +288,29 @@ export function CloneModal({
 
         {presets.length > 0 ? (
           <label className="mt-3 block text-xs font-medium text-slate-500">
-            Env preset
+            Preset
             <select
-              value={envPreset}
-              onChange={(e) => setEnvPreset(e.target.value)}
+              value={preset}
+              onChange={(e) => setPreset(e.target.value)}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
             >
-              <option value="">None</option>
+              {mode === "existing" ? (
+                <option value="">Auto (from ticket labels)</option>
+              ) : null}
               {presets.map((p) => (
                 <option key={p.name} value={p.name}>
-                  {p.name} ({p.vars.length} var{p.vars.length === 1 ? "" : "s"})
+                  {p.name}
+                  {p.labels.length > 0 ? ` · ${p.labels.join(", ")}` : ""} (
+                  {p.vars.length} var{p.vars.length === 1 ? "" : "s"})
                 </option>
               ))}
             </select>
           </label>
+        ) : mode === "create" ? (
+          <p className="mt-3 text-[11px] text-red-600">
+            Creating a ticket needs a preset with a Linear API key — add one in
+            Settings.
+          </p>
         ) : null}
 
         {mode !== "plain" ? (

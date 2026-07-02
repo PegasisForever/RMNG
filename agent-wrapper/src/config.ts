@@ -42,11 +42,7 @@ export const CONFIG = {
   runtimeDir,
   dbusAddress: process.env.DBUS_SESSION_BUS_ADDRESS ?? `unix:path=${runtimeDir}/bus`,
 
-  /** Linear hosted MCPs — one per workspace API key. Empty key => that server is skipped. */
-  linear: {
-    we: process.env.LINEAR_WE_API_KEY ?? "",
-    dev: process.env.LINEAR_DEV_API_KEY ?? "",
-    hh: process.env.LINEAR_HH_API_KEY ?? "",
-    per: process.env.LINEAR_PER_API_KEY ?? "",
-  },
+  /** Linear hosted MCP — one server; the key is the clone's preset Linear key,
+   * injected as LINEAR_API_KEY at clone creation. Empty => the server is skipped. */
+  linearApiKey: process.env.LINEAR_API_KEY ?? "",
 } as const;

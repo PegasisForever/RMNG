@@ -2,13 +2,12 @@
 import type { ChromaMode } from "./ChromaMode";
 import type { ClaudeConfig } from "./ClaudeConfig";
 import type { CloneGroup } from "./CloneGroup";
-import type { EnvPreset } from "./EnvPreset";
-import type { LinearKeyRedacted } from "./LinearKeyRedacted";
 import type { ListenConfig } from "./ListenConfig";
 import type { MonitorSpec } from "./MonitorSpec";
+import type { PresetRedacted } from "./PresetRedacted";
 
 /**
  * The shape `GET /api/config` returns: same structure as [`AppConfig`] but with
  * every secret replaced by a boolean "is set". Powers the Settings UI.
  */
-export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataDir: string, staticDir: string, monitors: Array<MonitorSpec>, proxmoxSshSet: boolean, proxmoxHostnamePrefix: string, linearKeys: Array<LinearKeyRedacted>, claude: ClaudeConfig, cloneGroups: Array<CloneGroup>, envPresets: Array<EnvPreset>, chroma: ChromaMode, detectorInferenceUrl: string, };
+export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataDir: string, staticDir: string, monitors: Array<MonitorSpec>, proxmoxSshSet: boolean, proxmoxHostnamePrefix: string, claude: ClaudeConfig, cloneGroups: Array<CloneGroup>, presets: Array<PresetRedacted>, chroma: ChromaMode, detectorInferenceUrl: string, };

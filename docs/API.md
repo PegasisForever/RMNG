@@ -102,14 +102,21 @@ Body (one of three task modes + optional account/instructions):
   "source": "rmng-template",          // required: source host id
   // -- pick ONE task mode --
   "ticket": "DEV-123",              // existing Linear ticket, OR
-  "create": { "workspace": "dev", "title": "...", "description": "..." }, // new ticket, OR
+  "create": { "team": "dev", "title": "...", "description": "..." },      // new ticket, OR
   "plain":  { "title": "quick task", "message": "do X" },                 // no ticket
   // -- optional --
+  "preset": "<name>" | "auto",      // clone preset (env + Linear key). Ticket mode:
+                                    //   absent/"auto" auto-selects by the ticket's labels
+                                    //   (400 listing them if nothing matches). Plain mode:
+                                    //   REQUIRED while any presets exist. Create mode:
+                                    //   REQUIRED (the preset's key creates the ticket).
   "claudeAccount": "user@anthropic.com" | "auto" | "group:<name>" | "none",
   "agentInstructions": "...",       // extra context for the agent-wrapper
   "claudeInstructions": "..."       // extra instructions for Claude Code
 }
 ```
+The selected preset's vars are written into the clone's session env, plus
+`LINEAR_API_KEY=<preset key>` (auths the clone's `linear` MCP).
 Hostname is derived (`pega-{ticket}` or a slug of the plain title, with a numeric suffix on
 collision). Returns `{ "ok": true, "op": Operation }` or `400 {error}`.
 
@@ -165,15 +172,15 @@ required), `detectorVerdict`, `detectorReason`, `actualState`, repeated `ignoreR
 ## Configuration
 
 ### `GET /api/config` → `AppConfigRedacted`
-The full config with secrets replaced by `*_set: bool` booleans (Proxmox SSH, Linear keys,
-clone-account tokens). Non-secret fields (ports, subnet, mac prefix, monitors, claude poll
+The full config with secrets replaced by `*_set: bool` booleans (Proxmox SSH, preset
+Linear keys). Non-secret fields (ports, subnet, mac prefix, monitors, claude poll
 config, template params) are returned verbatim. See [PROTOCOL.md](PROTOCOL.md#config-schema)
 for the schema.
 
 ### `PUT /api/config` (partial merge) → `AppConfigRedacted`
 Deep-merge a partial config over the stored one, persist to disk at `0600`, apply live.
 Secret-merge rules: an **empty string keeps** the stored secret; a non-empty string replaces
-it; `linear` rows merge by workspace name (blank key keeps the stored one).
+it; `presets` rows merge by name (blank `linearKey` keeps the stored one).
 
 ### `POST /api/config/test` — body `{ "what": "proxmox" }` → `{ ok, message }`
 Synchronously test a setting. Currently only `"proxmox"` (runs `ssh -o BatchMode=yes

@@ -24,9 +24,10 @@ The two-pane layout stays Notes/Chat (`pane: "notes" | "chat"`) — the planned 
 
 ## What's new
 
-- **`Settings.tsx`** — per-section forms for **all** configuration (Proxmox SSH, Linear
-  workspace keys, Claude polling/groups, template build parameters, monitor
-  defaults, the four listen ports), replacing hand-edited `config.json`. Secret fields are
+- **`Settings.tsx`** — per-section forms for **all** configuration (Proxmox SSH, presets
+  — Linear key + auto-select labels + env vars, Claude polling/groups, template build
+  parameters, monitor defaults, the four listen ports), replacing hand-edited
+  `config.json`. Secret fields are
   masked/write-only with **Test connection** buttons (`POST /api/config/test`); saves go to
   `PUT /api/config` and apply live. Claude accounts are imported from a signed-in clone
   (`ClaudeAccountsPanel`), not entered here. Reads the redacted `GET /api/config` —

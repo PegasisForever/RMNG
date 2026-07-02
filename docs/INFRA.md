@@ -5,7 +5,7 @@ The Proxmox node is **`pegaswarm`** — standalone (no cluster), PVE 9.2, the AM
 re-check with `ssh root@10.0.0.100 pct list`.
 
 > RMNG runs two CTs: **CT 106 `rmng-build`** — the *staging* control-server (build box **and**
-> control plane) — and **CT 115 `rmng-template`** — the golden template the control-server
+> control plane) — and **CT 105 `rmng-template`** — the golden template the control-server
 > CoW-clones from. The `pega-*` infra and clones below belong to the **old-stack** control-server
 > on CT 101 and coexist with RMNG. (The earlier `ng-*`/`poc-*`/`e2e*` rigs are gone.)
 
@@ -22,7 +22,7 @@ to a `provision-deploy-ct.sh` CT, just with the toolchain still present.
 
 | CT | Name | IP | GPU | onboot | /srv/rmng-sock | Role |
 |---|---|---|---|---|---|---|
-| **115** | **rmng-template** | 10.0.0.39 | ✓ | no | ✓ | The **golden template**: a full clone image (headless GNOME + `clone-daemon` + `agent-wrapper` + patched gnome-shell + standalone `claude` CLI), built by `POST /api/template/bootstrap`. CoW clones (`POST /api/clone`) snapshot it. Currently also registered as a selectable host (the first real clone). User `rmng`/`rmng` (passwordless sudo), timezone America/Toronto. |
+| **105** | **rmng-template** | 10.0.0.39 | ✓ | no | ✓ | The **golden template**: a full clone image (headless GNOME + `clone-daemon` + `agent-wrapper` + patched gnome-shell + standalone `claude` CLI), built by `POST /api/template/bootstrap`. CoW clones (`POST /api/clone`) snapshot it. Currently also registered as a selectable host (the first real clone). User `rmng`/`rmng` (passwordless sudo), timezone America/Toronto. |
 
 CoW clones the control-server provisions appear here too — single-NIC on `vmbr0`, GPU
 passthrough, the `/srv/rmng-sock` media-socket bind-mount. Each clone's `clone-daemon` connects
@@ -65,6 +65,6 @@ talktomedi-dashboard` — other projects/users; not part of this stack.
 ## CT roles by node config
 
 - **GPU passthrough** (`/dev/dri/renderD128`): every RMNG + `pega-*` CT (VA-API).
-- **`/srv/rmng-sock` bind-mount:** the RMNG control-server CT (106) + every RMNG clone (115, …).
+- **`/srv/rmng-sock` bind-mount:** the RMNG control-server CT (106) + every RMNG clone (105, …).
 - **Two NICs (`10.0.0.x` + `10.60.0.x`):** old-stack CTs behind the CT-101 subnet router;
   RMNG CTs are single-NIC on `vmbr0`.

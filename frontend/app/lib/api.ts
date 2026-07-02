@@ -21,18 +21,21 @@ async function getJson(url: string): Promise<unknown> {
   return data;
 }
 
-/** Clone payload: an existing ticket link/id, a new ticket to create, or a plain
- *  no-ticket clone (just a container title + an optional first agent message).
+/** Clone payload: an existing ticket link/id, a new ticket to create (in team
+ *  `team`, using the chosen preset's Linear key), or a plain no-ticket clone
+ *  (just a container title + an optional first agent message).
  *  The ticket modes also accept optional host-agent + Claude Code overrides.
  *  `claudeAccount` (all modes) picks the Claude account to run under — an email,
- *  "auto" (the default when omitted), "group:<name>", or "none" (install no token). */
+ *  "auto" (the default when omitted), "group:<name>", or "none" (install no token).
+ *  `preset` picks the clone preset (env vars + Linear key): omitted/"auto" means
+ *  auto-select by ticket labels (ticket mode); create/plain require a name. */
 export type ClonePayload = (
   | ((
       | { ticket: string }
-      | { create: { workspace: string; title: string; description: string } }
+      | { create: { team: string; title: string; description: string } }
     ) & { agentInstructions?: string; claudeInstructions?: string })
   | { plain: { title: string; message: string } }
-) & { claudeAccount?: string; envPreset?: string };
+) & { claudeAccount?: string; preset?: string };
 
 export const activate = (id: string | null) =>
   postJson("/api/activate", { id });

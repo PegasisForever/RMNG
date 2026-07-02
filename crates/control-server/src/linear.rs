@@ -1,11 +1,11 @@
 //! Linear integration for ticket-driven cloning — Rust port of `linear.server.ts`.
-//! Talks to `api.linear.app/graphql` with a per-workspace personal API key
-//! (`Authorization: <key>`, no "Bearer"). The ticket-id prefix (e.g. `WE-142` → `we`)
-//! selects both the workspace key and the team; the set of workspaces is config
-//! (`AppConfig.linear`), not a closed enum.
+//! Talks to `api.linear.app/graphql` with a personal API key (`Authorization: <key>`,
+//! no "Bearer"). Keys live on presets (`AppConfig.presets`), so a ticket is fetched by
+//! trying each preset's key ([`fetch_issue_any`]); the ticket's labels then pick the
+//! preset ([`pick_preset_by_labels`]). The ticket-id prefix (e.g. `WE-142` → `we`)
+//! names the team within whichever workspace the key can see.
 
 use serde_json::{Value, json};
-use wire::LinearConfig;
 
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 const ISSUE_FIELDS: &str =
@@ -19,16 +19,6 @@ impl std::fmt::Display for LinearError {
     }
 }
 impl std::error::Error for LinearError {}
-
-/// "no Linear API key configured…" error naming the configured workspaces.
-fn no_key_err(cfg: &LinearConfig, ws: &str) -> LinearError {
-    let names = cfg.names();
-    LinearError(if names.is_empty() {
-        format!("no Linear API key configured for workspace \"{ws}\" (none configured — add keys in Settings)")
-    } else {
-        format!("no Linear API key configured for workspace \"{ws}\" (configured: {})", names.join(", "))
-    })
-}
 
 #[derive(Debug, Clone)]
 pub struct TicketRef {
@@ -49,7 +39,8 @@ pub struct IssueInfo {
     pub url: String,
     pub branch: String,
     pub state_type: String,
-    pub label: String,
+    /// All ticket labels, in Linear's order (used for preset auto-selection).
+    pub labels: Vec<String>,
 }
 
 /// Pull a `WE-142`-style ref out of a pasted link or bare id (no regex crate).
@@ -137,21 +128,26 @@ fn to_issue_info(prefix: &str, n: &Value) -> IssueInfo {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        label: n
-            .pointer("/labels/nodes/0/name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        labels: n
+            .pointer("/labels/nodes")
+            .and_then(Value::as_array)
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .filter_map(|l| l.get("name").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
-/// Fetch an existing issue by team key + number.
+/// Fetch an existing issue by team key + number, with an explicit API key.
 pub async fn fetch_issue(
     http: &reqwest::Client,
-    cfg: &LinearConfig,
+    key: &str,
     r: &TicketRef,
 ) -> Result<IssueInfo, LinearError> {
-    let key = cfg.key_for(&r.prefix).ok_or_else(|| no_key_err(cfg, &r.prefix))?;
     let query = format!(
         "query($team: String!, $num: Float!) {{ issues(filter: {{ team: {{ key: {{ eq: $team }} }}, number: {{ eq: $num }} }}, first: 1) {{ nodes {{ {ISSUE_FIELDS} }} }} }}"
     );
@@ -163,15 +159,52 @@ pub async fn fetch_issue(
     }
 }
 
-/// Create a new issue in the workspace's team.
+/// Fetch an issue by trying each of `keys` in order (dedup'd); the first success
+/// wins. Returns the issue plus the key that fetched it — proven to have access, so
+/// callers reuse it for follow-up mutations like [`ensure_in_progress`].
+pub async fn fetch_issue_any(
+    http: &reqwest::Client,
+    keys: &[&str],
+    r: &TicketRef,
+) -> Result<(IssueInfo, String), LinearError> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut last_err: Option<LinearError> = None;
+    for key in keys {
+        if key.is_empty() || seen.contains(key) {
+            continue;
+        }
+        seen.push(key);
+        match fetch_issue(http, key, r).await {
+            Ok(issue) => return Ok((issue, key.to_string())),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        LinearError("no preset has a Linear API key configured — add one in Settings".into())
+    }))
+}
+
+/// The first preset whose labels intersect `issue_labels` (case-insensitive),
+/// in config order. Presets with no labels never auto-match.
+pub fn pick_preset_by_labels<'a>(
+    presets: &'a [wire::Preset],
+    issue_labels: &[String],
+) -> Option<&'a wire::Preset> {
+    presets.iter().find(|p| {
+        p.labels
+            .iter()
+            .any(|pl| issue_labels.iter().any(|il| il.eq_ignore_ascii_case(pl)))
+    })
+}
+
+/// Create a new issue in team `prefix`, with an explicit API key.
 pub async fn create_issue(
     http: &reqwest::Client,
-    cfg: &LinearConfig,
+    key: &str,
     prefix: &str,
     title: &str,
     description: &str,
 ) -> Result<IssueInfo, LinearError> {
-    let key = cfg.key_for(prefix).ok_or_else(|| no_key_err(cfg, prefix))?;
     let tk = prefix.to_uppercase();
     let team_data = gql(
         http,
@@ -205,15 +238,15 @@ pub async fn create_issue(
 
 
 /// Move the issue to "In Progress" unless already started (no backwards drag).
+/// `key` should be one proven to see the issue (e.g. the [`fetch_issue_any`] key).
 pub async fn ensure_in_progress(
     http: &reqwest::Client,
-    cfg: &LinearConfig,
+    key: &str,
     issue: &IssueInfo,
 ) -> Result<(), LinearError> {
     if issue.state_type == "started" {
         return Ok(());
     }
-    let key = cfg.key_for(&issue.prefix).ok_or_else(|| no_key_err(cfg, &issue.prefix))?;
     let tk = issue.prefix.to_uppercase();
     let data = gql(
         http,
@@ -299,12 +332,23 @@ mod tests {
     }
 
     #[test]
-    fn no_key_error_lists_configured_workspaces() {
-        use wire::{LinearConfig, LinearKey};
-        let cfg = LinearConfig(vec![LinearKey { name: "we".into(), key: "K".into() }]);
-        let msg = no_key_err(&cfg, "xx").to_string();
-        assert!(msg.contains("\"xx\"") && msg.contains("we"), "{msg}");
-        assert!(no_key_err(&LinearConfig::default(), "xx").to_string().contains("none configured"));
+    fn picks_preset_by_label_intersection() {
+        let p = |name: &str, labels: &[&str]| wire::Preset {
+            name: name.into(),
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let presets =
+            [p("front", &["Frontend", "UI"]), p("back", &["Backend"]), p("nolabel", &[])];
+        let labels = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Case-insensitive match.
+        assert_eq!(pick_preset_by_labels(&presets, &labels(&["backend"])).unwrap().name, "back");
+        // Multiple presets match → first in config order wins.
+        let both = labels(&["Backend", "ui"]);
+        assert_eq!(pick_preset_by_labels(&presets, &both).unwrap().name, "front");
+        // No intersection / labelless presets never auto-match.
+        assert!(pick_preset_by_labels(&presets, &labels(&["Docs"])).is_none());
+        assert!(pick_preset_by_labels(&presets, &[]).is_none());
     }
 
     #[test]

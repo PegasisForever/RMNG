@@ -146,10 +146,13 @@ async fn reorder(State(app): State<App>, Json(req): Json<ReorderReq>) -> Json<Co
 }
 
 /// `POST /api/clone` — start a CoW clone. Body is one of:
-///   `{ source, ticket }`                                    — existing ticket
-///   `{ source, create: { workspace, title, description } }` — create a ticket first
-///   `{ source, plain: { title, message } }`                 — no ticket, just a title
-/// plus optional `claudeAccount` / `agentInstructions` / `claudeInstructions`.
+///   `{ source, ticket }`                               — existing ticket (preset auto-selected
+///                                                        by the ticket's labels)
+///   `{ source, create: { team, title, description } }` — create a ticket first (preset required;
+///                                                        its Linear key creates the issue)
+///   `{ source, plain: { title, message } }`            — no ticket (preset required if any exist)
+/// plus optional `preset` (name; absent/"auto" = label auto-select in ticket mode) /
+/// `claudeAccount` / `agentInstructions` / `claudeInstructions`.
 async fn clone(
     State(app): State<App>,
     Json(body): Json<serde_json::Value>,
@@ -164,16 +167,16 @@ async fn clone(
     let cfg = app.config();
     let prefix = cfg.proxmox.hostname_prefix.clone();
 
-    // Resolve the chosen env-var preset (by name) to its vars; written into the clone's
-    // session env at creation. Empty/absent = no preset; an unknown name is an error.
-    let env_vars = match str_field("envPreset").filter(|s| !s.is_empty()) {
-        Some(name) => cfg
-            .env_presets
-            .iter()
-            .find(|p| p.name == name)
-            .map(|p| p.vars.clone())
-            .ok_or_else(|| bad(format!("unknown env preset '{name}'")))?,
-        None => Vec::new(),
+    // An explicitly chosen preset (by name); absent/"auto" means auto-select in
+    // ticket mode and "required, so error" in plain/create mode (checked per mode).
+    let explicit = match str_field("preset").map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != "auto") {
+        Some(name) => Some(
+            cfg.presets
+                .iter()
+                .find(|p| p.name == name)
+                .ok_or_else(|| bad(format!("unknown preset '{name}'")))?,
+        ),
+        None => None,
     };
 
     // suffix-aware display name (duplicate ticket → "title (a)").
@@ -184,13 +187,18 @@ async fn clone(
         (hostname, display)
     };
 
-    // Plain (no-ticket) clone.
+    // Plain (no-ticket) clone: a preset must be picked whenever any are configured.
     if let Some(plain) = body.get("plain").filter(|v| v.is_object()) {
         let title = plain.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let message = plain.get("message").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         if title.is_empty() {
             return Err(bad("plain.title is required".into()));
         }
+        let env = match explicit {
+            Some(p) => preset_env(p),
+            None if cfg.presets.is_empty() => Vec::new(),
+            None => return Err(bad(format!("a preset is required (configured: {})", preset_names(&cfg)))),
+        };
         let (hostname, display) = derive(&app, &linear::plain_hostname_base(&prefix, &title), &title);
         let spec = CloneSpec {
             source_id: source,
@@ -200,26 +208,27 @@ async fn clone(
             first_message: Some(message).filter(|m| !m.is_empty()),
             agent_instructions,
             claude_instructions,
-            env: env_vars,
+            env,
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
         return Ok(Json(json!({ "ok": true, "op": op })));
     }
 
-    // Ticket / create mode.
-    let issue = resolve_issue(&app, &cfg.linear, &body).await.map_err(bad)?;
-    if let Err(e) = linear::ensure_in_progress(&app.http, &cfg.linear, &issue).await {
+    // Ticket / create mode. `op_key` is the API key proven to reach the issue (used
+    // for the state mutation); the preset drives the clone's env + LINEAR_API_KEY.
+    let (issue, op_key, preset) = resolve_issue(&app, &cfg, explicit, &body).await.map_err(bad)?;
+    if let Err(e) = linear::ensure_in_progress(&app.http, &op_key, &issue).await {
         tracing::warn!("ensure_in_progress({}) failed: {e}", issue.identifier);
     }
     let base = linear::ticket_hostname_base(&prefix, &issue.identifier);
     let (hostname, display) = derive(&app, &base, &issue.title);
     let meta = LinearMeta {
-        workspace: Some(issue.prefix),
+        workspace: Some(issue.prefix.clone()),
         ticket: Some(issue.identifier.clone()),
         ticket_url: Some(issue.url.clone()),
         branch: Some(issue.branch.clone()),
         display_name: Some(display),
-        label: Some(issue.label.clone()),
+        label: issue.labels.first().cloned(),
     };
     let spec = CloneSpec {
         source_id: source,
@@ -229,44 +238,82 @@ async fn clone(
         first_message: None,
         agent_instructions,
         claude_instructions,
-        env: env_vars,
+        env: preset_env(&preset),
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
 }
 
-/// Resolve the clone body to a Linear issue (create one, or fetch an existing).
+/// The preset's env plus its Linear key as `LINEAR_API_KEY` (auths the clone's
+/// `linear` MCP). A `LINEAR_API_KEY` var set explicitly in the preset wins.
+fn preset_env(p: &wire::Preset) -> Vec<wire::EnvVar> {
+    let mut vars = p.vars.clone();
+    if !p.linear_key.is_empty() && !vars.iter().any(|v| v.key == "LINEAR_API_KEY") {
+        vars.push(wire::EnvVar { key: "LINEAR_API_KEY".into(), value: p.linear_key.clone() });
+    }
+    vars
+}
+
+fn preset_names(cfg: &wire::AppConfig) -> String {
+    cfg.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// Resolve the clone body to a Linear issue (create one, or fetch an existing), the
+/// API key proven to reach it, and the preset that drives the clone's env.
 async fn resolve_issue(
     app: &App,
-    lcfg: &wire::LinearConfig,
+    cfg: &wire::AppConfig,
+    explicit: Option<&wire::Preset>,
     body: &serde_json::Value,
-) -> Result<linear::IssueInfo, String> {
+) -> Result<(linear::IssueInfo, String, wire::Preset), String> {
     if let Some(create) = body.get("create").filter(|v| v.is_object()) {
-        let workspace = create.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
+        let team = create.get("team").and_then(|v| v.as_str()).unwrap_or("");
         let title = create.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
         let description = create.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let prefix = workspace.trim().to_ascii_lowercase();
-        if lcfg.key_for(&prefix).is_none() {
-            let names = lcfg.names();
-            return Err(if names.is_empty() {
-                "no Linear API keys configured — add workspaces in Settings".to_string()
-            } else {
-                format!("create.workspace must be one of the configured workspaces ({})", names.join(", "))
-            });
+        let Some(preset) = explicit else {
+            return Err("creating a ticket requires a preset (its Linear key creates the issue)".into());
+        };
+        if preset.linear_key.is_empty() {
+            return Err(format!("preset '{}' has no Linear API key — required to create a ticket", preset.name));
+        }
+        let prefix = team.trim().to_ascii_lowercase();
+        if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err("create.team must be a Linear team key like \"we\"".into());
         }
         if title.is_empty() {
             return Err("create.title is required".into());
         }
-        return linear::create_issue(&app.http, lcfg, &prefix, title, description)
+        let issue = linear::create_issue(&app.http, &preset.linear_key, &prefix, title, description)
             .await
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())?;
+        return Ok((issue, preset.linear_key.clone(), preset.clone()));
     }
     let ticket = body.get("ticket").and_then(|v| v.as_str()).unwrap_or("");
     if ticket.is_empty() {
         return Err("body must include { ticket } or { create }".into());
     }
     let r = linear::parse_ticket_ref(ticket).map_err(|e| e.to_string())?;
-    linear::fetch_issue(&app.http, lcfg, &r).await.map_err(|e| e.to_string())
+    // Key order: the explicitly chosen preset's key first, then every preset's key
+    // in config order (fetch_issue_any dedups + skips blanks).
+    let mut keys: Vec<&str> = Vec::new();
+    if let Some(p) = explicit {
+        keys.push(p.linear_key.as_str());
+    }
+    keys.extend(cfg.presets.iter().map(|p| p.linear_key.as_str()));
+    let (issue, op_key) =
+        linear::fetch_issue_any(&app.http, &keys, &r).await.map_err(|e| e.to_string())?;
+    let preset = match explicit {
+        Some(p) => p.clone(),
+        None => linear::pick_preset_by_labels(&cfg.presets, &issue.labels).cloned().ok_or_else(|| {
+            let labels = if issue.labels.is_empty() { "(none)".into() } else { issue.labels.join(", ") };
+            format!(
+                "no preset matches ticket {}'s labels [{labels}] — pick a preset explicitly (configured: {})",
+                issue.identifier,
+                preset_names(cfg),
+            )
+        })?,
+    };
+    Ok((issue, op_key, preset))
 }
 
 #[derive(Deserialize)]
