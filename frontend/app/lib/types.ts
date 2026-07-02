@@ -134,8 +134,8 @@ export interface ClaudeUsage {
   provider?: "claude" | "codex";
   /** True for the account claude-swap had active at import time. */
   active: boolean;
-  /** True if this account has a long-lived clone token (config.cloneAccounts) —
-   *  i.e. it can be picked when cloning a host. Codex accounts are never set. */
+  /** True if this account can be picked when cloning a host — every imported
+   *  Claude account (the server owns its token lifecycle). Codex accounts never. */
   assignable?: boolean;
   /** Set only when usage has NEVER been successfully fetched (no data to show). */
   error?: string;

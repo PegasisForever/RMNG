@@ -131,8 +131,8 @@ connect.
 Deploy the 4-port Rust control-server and retire the old g-r-d/Bun stack (CT 101 +
 `pega-*` clones, see [INFRA.md](INFRA.md)):
 
-1. **Deploy** the control-server (the three commands above) and enter Linear/Claude/
-   cloneAccounts in Settings.
+1. **Deploy** the control-server (the three commands above), enter Linear/Claude settings,
+   and import Claude accounts from a signed-in clone.
 2. Clone provisioning is already the RMNG fork (`provision-clone.sh`); the agent-wrapper's
    `desktop` MCP already points at the in-clone daemon MCP (`http://127.0.0.1:9004`).
 3. **Retire** the old native RDP client (`../core`/`../gtk`/`../headless`), the `../computer-use`

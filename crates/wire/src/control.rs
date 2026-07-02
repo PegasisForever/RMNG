@@ -205,6 +205,8 @@ pub struct ClaudeUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
     pub active: bool,
+    /// Whether the account can run a clone: true for every imported Claude
+    /// account (the server owns its token lifecycle); Codex accounts never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -71,10 +71,10 @@ export const checkClaudeImport = (host: string) =>
     orgName: string | null;
     subscriptionType: string | null;
   }>;
-/** Import a Claude account from a signed-in clone: stores the pasted long-lived token
- *  + the clone's short-lived OAuth pair, then clears the clone's credentials file. */
-export const importClaudeToken = (host: string, token: string) =>
-  postJson("/api/claude/import", { host, token }) as Promise<{ email: string; cleared: boolean }>;
+/** Import a Claude account from a signed-in clone: the server harvests the clone's
+ *  OAuth pair (and owns its refresh lifecycle), then clears the clone's credentials file. */
+export const importClaudeAccount = (host: string) =>
+  postJson("/api/claude/import", { host }) as Promise<{ email: string; cleared: boolean }>;
 /** The account the clone dialog should pre-select (scored by usage + load). */
 export const recommendedClaudeAccount = () =>
   getJson("/api/claude/recommended") as Promise<{ email: string | null }>;

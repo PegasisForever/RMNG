@@ -543,16 +543,15 @@ async fn claude_import_check(State(app): State<App>, Json(req): Json<ImportCheck
 #[derive(Deserialize)]
 struct ImportReq {
     host: String,
-    token: String,
 }
 
 /// `POST /api/claude/import` — import a Claude account from a signed-in clone: store
-/// the operator's long-lived token + the clone's short-lived OAuth pair, then clear
-/// the clone's credentials file. Kicks an immediate usage poll so it shows at once.
+/// the clone's OAuth pair (the server owns its refresh lifecycle from here on), then
+/// clear the clone's credentials file. Kicks an immediate usage poll so it shows at once.
 async fn claude_import(State(app): State<App>, Json(req): Json<ImportReq>) -> JsonResult {
     let host = host_by_id(&app, &req.host)
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, format!("unknown host '{}'", req.host)))?;
-    let res = crate::claude::import_clone_token(&app, &host, &req.token)
+    let res = crate::claude::import_clone_account(&app, &host)
         .await
         .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
     let _ = crate::claude::poll_once(&app).await;
@@ -567,7 +566,7 @@ async fn claude_refresh(State(app): State<App>) -> Json<serde_json::Value> {
 
 /// `GET /api/claude/recommended` — the account the clone dialog should pre-select.
 async fn claude_recommended(State(app): State<App>) -> Json<serde_json::Value> {
-    Json(json!({ "email": crate::claude::recommend(&app).map(|a| a.email) }))
+    Json(json!({ "email": crate::claude::recommend(&app) }))
 }
 
 #[derive(Deserialize)]
@@ -595,27 +594,27 @@ async fn claude_swap(
         .ctid
         .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("'{}' has no container", host.id)))?;
     let assignment = crate::claude::resolve_assignment(&app, Some(&req.account))
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "no clone accounts configured".into()))?;
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "no imported Claude accounts".into()))?;
     let selection = crate::claude::normalize_selection(Some(&req.account));
-    let ssh = app.config().proxmox.ssh;
     let (group, email) = match assignment {
         crate::claude::Assignment::None => {
-            crate::claude::clear_clone_token(&ssh, ctid)
+            crate::claude::clear_clone_token(&app.config().proxmox.ssh, ctid)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            app.claude.forget_pushed(&host.id);
             (None, None)
         }
         crate::claude::Assignment::Group { name, initial } => {
-            crate::claude::apply_clone_token(&ssh, ctid, &initial.long_lived_token)
+            crate::claude::push_account_to_clone(&app, &host.id, ctid, &initial)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-            (Some(name), Some(initial.email))
+            (Some(name), Some(initial))
         }
         crate::claude::Assignment::Account(a) => {
-            crate::claude::apply_clone_token(&ssh, ctid, &a.long_lived_token)
+            crate::claude::push_account_to_clone(&app, &host.id, ctid, &a)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-            (None, Some(a.email))
+            (None, Some(a))
         }
     };
     let (id, email_set, group_set, sel_set) =

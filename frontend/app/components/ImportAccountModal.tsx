@@ -1,12 +1,11 @@
 // Import a Claude account from a clone that's already signed in to Claude Code.
 // Flow: pick a clone → the server runs `claude auth status` to confirm it's a
-// claude.ai login and shows the account → you run `claude setup-token` in that
-// clone and paste the long-lived token → the server stores it alongside the
-// short-lived OAuth pair (read off the clone's disk) and clears the clone's
-// credentials file so its Claude Code can't rotate the refresh token we now poll.
+// claude.ai login and shows the account → the server harvests the clone's OAuth
+// pair (it owns the refresh lifecycle from then on) and clears the clone's
+// credentials file so its Claude Code can't rotate the refresh token.
 import { useEffect, useState } from "react";
 
-import { checkClaudeImport, importClaudeToken } from "~/lib/api";
+import { checkClaudeImport, importClaudeAccount } from "~/lib/api";
 import type { Host } from "~/lib/types";
 
 type Account = { email: string; orgName: string | null; subscriptionType: string | null };
@@ -14,7 +13,7 @@ type Account = { email: string; orgName: string | null; subscriptionType: string
 const input =
   "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none";
 
-export function ImportTokenModal({
+export function ImportAccountModal({
   hosts,
   onClose,
   onImported,
@@ -27,7 +26,6 @@ export function ImportTokenModal({
   const clones = hosts.filter((h) => h.ctid != null);
   const [hostId, setHostId] = useState(() => clones[0]?.id ?? "");
   const [account, setAccount] = useState<Account | null>(null);
-  const [token, setToken] = useState("");
   const [checking, setChecking] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,13 +46,13 @@ export function ImportTokenModal({
     };
   }, [hostId]);
 
-  const canImport = !!account && token.trim().length > 0 && !importing;
+  const canImport = !!account && !importing;
 
   function submit() {
     if (!canImport) return;
     setImporting(true);
     setError(null);
-    importClaudeToken(hostId, token.trim())
+    importClaudeAccount(hostId)
       .then((r) => onImported(r.email))
       .catch((e: Error) => {
         setError(e.message);
@@ -74,7 +72,7 @@ export function ImportTokenModal({
           if (e.key === "Escape") onClose();
         }}
       >
-        <h3 className="text-sm font-semibold text-slate-900">Import Claude token</h3>
+        <h3 className="text-sm font-semibold text-slate-900">Import Claude account</h3>
         <p className="mt-1 text-xs text-slate-500">
           Harvest a Claude account from a clone that's signed in to Claude Code via claude.ai.
         </p>
@@ -111,25 +109,6 @@ export function ImportTokenModal({
                 </span>
               ) : null}
             </div>
-
-            {/* Token step — only once we've confirmed a claude.ai login. */}
-            {account ? (
-              <label className="mt-3 block text-xs font-medium text-slate-600">
-                Long-lived token
-                <span className="mt-1 block font-normal text-slate-400">
-                  In this clone, run <code className="text-slate-600">claude setup-token</code> and
-                  paste the <code className="text-slate-600">sk-ant-…</code> token it prints.
-                </span>
-                <textarea
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  rows={3}
-                  placeholder="sk-ant-oat01-…"
-                  spellCheck={false}
-                  className={`${input} resize-y font-mono`}
-                />
-              </label>
-            ) : null}
           </>
         )}
 

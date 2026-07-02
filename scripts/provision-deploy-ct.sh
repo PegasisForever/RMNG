@@ -110,7 +110,7 @@ echo "RESULT $ID $IP"
 NODE
 
 say "deploy CT ready (RESULT <id> <ip> above)."
-echo "Dashboard: http://<ip>:9000  → open Settings to enter Linear / Claude / cloneAccounts."
+echo "Dashboard: http://<ip>:9000  → open Settings to enter Linear / Claude (import accounts from a signed-in clone)."
 echo
 echo "Clone-side reminder: each clone CT must bind-mount the same host dir so the"
 echo "clone-daemon finds the media socket —  mp0: $SOCK_HOST_DIR,mp=$SOCK_HOST_DIR"

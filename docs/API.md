@@ -173,7 +173,7 @@ for the schema.
 ### `PUT /api/config` (partial merge) → `AppConfigRedacted`
 Deep-merge a partial config over the stored one, persist to disk at `0600`, apply live.
 Secret-merge rules: an **empty string keeps** the stored secret; a non-empty string replaces
-it; `cloneAccounts` merge by `email` and blank tokens preserve stored ones.
+it; `linear` rows merge by workspace name (blank key keeps the stored one).
 
 ### `POST /api/config/test` — body `{ "what": "proxmox" }` → `{ ok, message }`
 Synchronously test a setting. Currently only `"proxmox"` (runs `ssh -o BatchMode=yes
@@ -186,14 +186,15 @@ Synchronously test a setting. Currently only `"proxmox"` (runs `ssh -o BatchMode
 | Endpoint | Body | Returns | Does |
 |---|---|---|---|
 | `POST /api/claude/import/check` | `{host}` | `{ok, email, orgName, subscriptionType}` | Run `claude auth status` in the clone; require a claude.ai login and return its identity |
-| `POST /api/claude/import` | `{host, token}` | `{ok, email, cleared}` | Store the operator's long-lived `token` + the clone's short-lived OAuth pair (read off its disk), then delete the clone's credentials file |
+| `POST /api/claude/import` | `{host}` | `{ok, email, cleared}` | Harvest the clone's OAuth pair (read off its disk) into the server's secret store, then delete the clone's credentials file |
 | `POST /api/claude/refresh` | — | `{ok, rateLimited}` | Force one usage poll; `rateLimited` if any account hit 429 |
 | `GET /api/claude/recommended` | — | `{email}` | Pinned account, else lowest-usage; `null` if none |
 | `POST /api/claude/swap` | `{host, account}` | `{ok, account, group, selection}` | Resolve `account` (email / `auto` / `group:<name>` / `none`) and write the clone's `~/.claude/.credentials.json` via the Proxmox node. A `group:` selection binds the clone to that group for rotation; `none` removes the credentials file (`account` null); the verbatim choice is echoed as `selection` and stored on the host (`502` if unreachable) |
 | `POST /api/claude/rotate` | — | `{ok}` | Run one group-rotation pass immediately (the rotator otherwise runs every 10 min): re-balance each group's bound clones across its members with 5h usage ≤ 90% |
 
-The two-token model (short-lived+refresh for usage polling; long-lived for running Claude
-Code) is described in [PROTOCOL.md](PROTOCOL.md#cloneaccount).
+The single-token model (the server owns each account's OAuth pair and pushes the current
+short-lived access token to assigned clones on every refresh) is described in
+[PROTOCOL.md](PROTOCOL.md#claude-accounts).
 
 ---
 

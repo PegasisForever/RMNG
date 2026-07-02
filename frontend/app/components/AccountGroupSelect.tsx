@@ -22,7 +22,7 @@ export function AccountGroupSelect({
   className,
 }: {
   groups: CloneGroup[];
-  /** Assignable accounts (those with a long-lived clone token). */
+  /** Assignable accounts (imported Claude accounts). */
   accounts: ClaudeUsage[];
   value: string;
   onChange: (value: string) => void;

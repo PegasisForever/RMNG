@@ -130,7 +130,14 @@ function LayoutPreview({ monitors }: { monitors: Mon[] }) {
   );
 }
 
-export function SettingsPanel({ onClose }: { onClose: () => void }) {
+export function SettingsPanel({
+  accountEmails,
+  onClose,
+}: {
+  /** Emails of the imported Claude accounts (from live state) — the pool a group can draw from. */
+  accountEmails: string[];
+  onClose: () => void;
+}) {
   const [cfg, setCfg] = useState<AppConfigRedacted | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -626,31 +633,6 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               </div>
             </Section>
 
-            {/* Clone accounts (read-only; managed via Import). */}
-            <Section
-              title="Clone Claude accounts"
-              hint="Imported from a signed-in clone (use Import in the sidebar). Tokens are write-only and never shown."
-            >
-              {cfg.cloneAccounts.length === 0 ? (
-                <p className="text-xs text-slate-400">None imported.</p>
-              ) : (
-                <ul className="space-y-1 text-xs">
-                  {cfg.cloneAccounts.map((a) => (
-                    <li key={a.email} className="flex items-center gap-2">
-                      <span className="text-slate-600">{a.email}</span>
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                          a.longLivedTokenSet ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"
-                        }`}
-                      >
-                        token {a.longLivedTokenSet ? "set" : "unset"}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Section>
-
             {/* Claude groups (named account pools; a group-bound clone rotates every 10 min). */}
             <Section
               title="Claude groups"
@@ -677,20 +659,20 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                         Remove
                       </button>
                     </div>
-                    {cfg.cloneAccounts.length === 0 ? (
+                    {accountEmails.length === 0 ? (
                       <p className="mt-2 text-xs text-slate-400">
                         Import some accounts first to add them to a group.
                       </p>
                     ) : (
                       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
-                        {cfg.cloneAccounts.map((a) => (
-                          <label key={a.email} className="flex items-center gap-1.5 text-xs text-slate-600">
+                        {accountEmails.map((email) => (
+                          <label key={email} className="flex items-center gap-1.5 text-xs text-slate-600">
                             <input
                               type="checkbox"
-                              checked={g.accounts.includes(a.email)}
-                              onChange={() => toggleGroupAccount(i, a.email)}
+                              checked={g.accounts.includes(email)}
+                              onChange={() => toggleGroupAccount(i, email)}
                             />
-                            {a.email}
+                            {email}
                           </label>
                         ))}
                       </div>

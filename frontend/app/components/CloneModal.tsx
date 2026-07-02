@@ -23,7 +23,7 @@ export function CloneModal({
 }: {
   source: string;
   busy: boolean;
-  /** Assignable Claude accounts (those with a clone token), for the picker. */
+  /** Assignable Claude accounts (imported accounts), for the picker. */
   accounts: ClaudeUsage[];
   onClose: () => void;
   onClone: (payload: ClonePayload) => void;

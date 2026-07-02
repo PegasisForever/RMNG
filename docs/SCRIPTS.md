@@ -16,8 +16,7 @@ over SSH at runtime). Plus the gnome-patch build.
 | `crates/control-server/scripts/redeploy.sh` | node (SSH) | `orchestrate::redeploy_clone` | Hot-swap a clone's daemon/agent binaries |
 | `crates/control-server/scripts/delete.sh` | node (SSH) | `orchestrate::delete_ct` | Destroy a CT + its snapshot |
 | `crates/control-server/scripts/apply-monitors.sh` | node (SSH) | `orchestrate::apply_monitors` | Re-apply a monitor layout to a running clone |
-| `crates/control-server/scripts/apply-credentials.sh` | inside running clone (SSH) | `claude::apply_clone_token` | Install/hot-swap a Claude token |
-| `crates/control-server/scripts/claude-import.sh` | clone via node (`pct exec`) | `claude::{check_clone_auth,import_clone_token}` | Read `claude auth status` / the credentials file, or clear it, when importing an account |
+| `crates/control-server/scripts/claude-import.sh` | clone via node (`pct exec`) | `claude::{check_clone_auth,import_clone_account,apply_clone_token}` | Read `claude auth status` / the credentials file, clear it, or install a token |
 | `gnome-patch/build-shell-deb.sh` | inside build CT | cs-build-ct.sh | Build the patched gnome-shell `.deb` |
 
 The orchestration scripts are baked into the control-server binary at compile time
@@ -98,9 +97,10 @@ binaries, restart. The daemon reconnects to the socket.
 clone's `RMNG_MONITORS` + dummy mode specs and restart its GNOME + daemon (re-creates the
 virtual monitors with new positions).
 
-### `apply-credentials.sh` (token via stdin)
-Inside a running clone over SSH. Writes `~/.claude/.credentials.json` (long-lived token,
-refresh emptied) and nudges the agent-wrapper — hot-swaps a clone's Claude account live.
+### `claude-import.sh <ctid> <user> status|read|clear|apply [b64]`
+On the node, `pct exec` into the clone. `apply` writes `~/.claude/.credentials.json`
+(the account's current short-lived access token, refresh emptied — the control-server
+refreshes and re-pushes it) — hot-swaps a clone's Claude account live, no restart.
 
 ---
 

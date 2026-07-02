@@ -16,8 +16,22 @@ pub fn config_path() -> PathBuf {
 pub fn load() -> Result<AppConfig> {
     let path = config_path();
     let mut cfg = match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s)
-            .with_context(|| format!("parsing {}", path.display()))?,
+        Ok(s) => {
+            let cfg: AppConfig = serde_json::from_str(&s)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            // Legacy `cloneAccounts` (long-lived tokens, pre single-token model): the
+            // field is gone from AppConfig, so rewrite the file once to scrub the
+            // now-dead secrets from disk rather than leaving them until the next save.
+            let had_legacy = serde_json::from_str::<serde_json::Value>(&s)
+                .ok()
+                .and_then(|v| v.get("cloneAccounts").and_then(|a| a.as_array().map(|a| !a.is_empty())))
+                .unwrap_or(false);
+            if had_legacy {
+                tracing::info!("scrubbing legacy cloneAccounts (long-lived tokens) from {}", path.display());
+                save(&cfg)?;
+            }
+            cfg
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!("no {} — using defaults", path.display());
             AppConfig::default()
@@ -37,30 +51,22 @@ pub fn load() -> Result<AppConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wire::{CloneAccount, CloneGroup};
+    use wire::CloneGroup;
 
     #[test]
     fn merge_preserves_blank_secrets_and_applies_changes() {
         let mut base = AppConfig::default();
         base.proxmox.ssh = "root@node".into();
-        base.clone_accounts = vec![CloneAccount {
-            email: "a@b".into(),
-            long_lived_token: "LONG".into(),
-            refresh_token: "REF".into(),
-        }];
         // The UI sends back blanks for unchanged secrets, plus a real change.
         let incoming = serde_json::json!({
             "listen": { "web": 9100 },
             "proxmox": { "ssh": "", "hostnamePrefix": "clone-" },
-            "cloneAccounts": [{ "email": "a@b", "longLivedToken": "", "refreshToken": "NEWREF" }],
         });
         let merged = merge_update(&base, incoming).unwrap();
         assert_eq!(merged.listen.web, 9100); // changed
         assert_eq!(merged.listen.video, 9001); // untouched (merge kept it)
         assert_eq!(merged.proxmox.ssh, "root@node"); // blank secret preserved
         assert_eq!(merged.proxmox.hostname_prefix, "clone-"); // non-secret changed
-        assert_eq!(merged.clone_accounts[0].long_lived_token, "LONG"); // blank kept
-        assert_eq!(merged.clone_accounts[0].refresh_token, "NEWREF"); // changed
     }
 
     #[test]
@@ -137,18 +143,13 @@ pub fn save(cfg: &AppConfig) -> Result<()> {
 /// Merge a partial config update onto `base`, returning the new config. Rules:
 /// non-secret fields are replaced; **empty-string scalars are treated as
 /// "unchanged"** (so the redacted UI can send back blank secrets without wiping
-/// them); `cloneAccounts` merge by email and `linear` by workspace name (a blank
-/// token/key keeps the stored one).
+/// them); `linear` merges by workspace name (a blank key keeps the stored one).
 pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<AppConfig> {
     let mut cur = serde_json::to_value(base)?;
-    // Pull the secret-bearing lists aside for key-wise merge (generic merge would replace).
-    let incoming_accounts = incoming.get("cloneAccounts").cloned();
+    // Pull the secret-bearing list aside for key-wise merge (generic merge would replace).
     let incoming_linear = incoming.get("linear").cloned();
     deep_merge(&mut cur, &incoming);
     let mut merged: AppConfig = serde_json::from_value(cur)?;
-    if let Some(serde_json::Value::Array(rows)) = incoming_accounts {
-        merged.clone_accounts = merge_clone_accounts(&base.clone_accounts, &rows);
-    }
     if let Some(serde_json::Value::Array(rows)) = incoming_linear {
         merged.linear = merge_linear_keys(&base.linear, &rows);
     }
@@ -194,35 +195,3 @@ fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
     }
 }
 
-fn merge_clone_accounts(
-    base: &[wire::CloneAccount],
-    rows: &[serde_json::Value],
-) -> Vec<wire::CloneAccount> {
-    rows.iter()
-        .filter_map(|r| {
-            let email = r.get("email")?.as_str()?.to_string();
-            let prev = base.iter().find(|a| a.email == email);
-            let pick = |key: &str| -> String {
-                let v = r.get(key).and_then(|x| x.as_str()).unwrap_or("");
-                if v.is_empty() {
-                    prev.map(|p| field(p, key)).unwrap_or_default()
-                } else {
-                    v.to_string()
-                }
-            };
-            Some(wire::CloneAccount {
-                email,
-                long_lived_token: pick("longLivedToken"),
-                refresh_token: pick("refreshToken"),
-            })
-        })
-        .collect()
-}
-
-fn field(a: &wire::CloneAccount, key: &str) -> String {
-    match key {
-        "longLivedToken" => a.long_lived_token.clone(),
-        "refreshToken" => a.refresh_token.clone(),
-        _ => String::new(),
-    }
-}

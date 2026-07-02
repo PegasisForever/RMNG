@@ -281,32 +281,34 @@ async fn call_tool(st: &McpState, peer_ip: String, name: &str, args: Value) -> R
             Ok(text(format!("redeployed {clone}{}", if daemon_only { " (daemon only)" } else { "" })))
         }
         "claude_recommended" => {
-            Ok(text(json!({ "email": crate::claude::recommend(app).map(|a| a.email) }).to_string()))
+            Ok(text(json!({ "email": crate::claude::recommend(app) }).to_string()))
         }
         "claude_swap" => {
             let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
             let account = args.get("account").and_then(Value::as_str).unwrap_or("auto");
             let host = app.store.get().hosts.into_iter().find(|h| h.id == clone).ok_or("unknown clone")?;
             let ctid = host.ctid.ok_or("clone has no container")?;
-            let assignment = crate::claude::resolve_assignment(app, Some(account)).ok_or("no clone accounts")?;
+            let assignment = crate::claude::resolve_assignment(app, Some(account)).ok_or("no imported Claude accounts")?;
             let selection = crate::claude::normalize_selection(Some(account));
-            let ssh = app.config().proxmox.ssh;
             let (group, email) = match assignment {
                 crate::claude::Assignment::None => {
-                    crate::claude::clear_clone_token(&ssh, ctid).await.map_err(|e| e.to_string())?;
+                    crate::claude::clear_clone_token(&app.config().proxmox.ssh, ctid)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    app.claude.forget_pushed(&host.id);
                     (None, None)
                 }
                 crate::claude::Assignment::Group { name, initial } => {
-                    crate::claude::apply_clone_token(&ssh, ctid, &initial.long_lived_token)
+                    crate::claude::push_account_to_clone(app, &host.id, ctid, &initial)
                         .await
                         .map_err(|e| e.to_string())?;
-                    (Some(name), Some(initial.email))
+                    (Some(name), Some(initial))
                 }
                 crate::claude::Assignment::Account(a) => {
-                    crate::claude::apply_clone_token(&ssh, ctid, &a.long_lived_token)
+                    crate::claude::push_account_to_clone(app, &host.id, ctid, &a)
                         .await
                         .map_err(|e| e.to_string())?;
-                    (None, Some(a.email))
+                    (None, Some(a))
                 }
             };
             let (id, email_set, group_set, sel_set) =

@@ -147,7 +147,7 @@ export function ClaudeAccountsPanel({
               type="button"
               onClick={() => onImport()}
               disabled={busy}
-              title="Import a Claude token from a clone"
+              title="Import a Claude account from a clone"
               className="rounded px-1 text-[12px] leading-none text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
             >
               +
@@ -170,7 +170,7 @@ export function ClaudeAccountsPanel({
           onClick={() => onImport()}
           className="mt-0.5 w-full rounded border border-dashed border-slate-300 px-2 py-1 text-[10px] text-slate-400 hover:bg-white"
         >
-          Import Claude token
+          Import Claude account
         </button>
       ) : (
         <div className="mt-0.5 divide-y divide-slate-200/70">

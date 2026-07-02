@@ -45,15 +45,15 @@ MonitorSpec { width, height }
 # configuration (edited via the Settings UI, not hand-edited files)
 AppConfig { proxmox{ssh}, linear{we,dev,hh,per},
             claude{poll, pinnedEmail, swap..., auto_swap_on_exhaustion: bool},
-            clone_accounts: [{email, long_lived_token, refresh_token}],  # see token roles
+            clone_groups: [{name, accounts: [email]}],
             template{base_image, cores, memory, disk, devstack...},
             monitors: [MonitorSpec], listen{video, web, clone_mcp, global_mcp}, agent{port} }
-# Token roles per Claude account: `refresh_token` (+ a cached short-lived access token) is
-# used server-side ONLY to read usage; `long_lived_token` (sk-ant-oat01-…) is what runs
-# Claude Code in a clone (installed into ~/.claude/.credentials.json — see control-server).
+# Claude account tokens are NOT config: each account's OAuth pair lives in the server's
+# 0600 `claude-accounts.json`; the server refreshes it and pushes the current short-lived
+# access token into assigned clones' ~/.claude/.credentials.json (see control-server).
 AppConfigRedacted   # GET /api/config shape: secrets → set/unset or last-4, never plaintext
-# Secret fields (linear keys, clone-account tokens, proxmox ssh) are write-only:
-# redacted on read, omitted-keeps-stored on write, and NEVER placed in ControlState/SSE.
+# Secret fields (linear keys, proxmox ssh) are write-only: redacted on read,
+# omitted-keeps-stored on write, and NEVER placed in ControlState/SSE.
 
 # socket protocol (clone-daemon ⇄ control-server, SOCK_SEQPACKET + SCM_RIGHTS)
 FrameMsg { monitor_id, fourcc, modifier, width, height, planes: [{stride, offset}], seq }

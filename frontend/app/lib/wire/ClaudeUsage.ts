@@ -10,4 +10,9 @@ export type ClaudeUsage = {
 /**
  * Stable id: claude `${email}|${orgUuid}`, codex `codex:<id>`.
  */
-id: string, email: string, provider: Provider | null, active: boolean, assignable: boolean | null, error: string | null, stale: boolean | null, lastUpdated: bigint, fiveHour: ClaudeUsageWindow | null, sevenDay: ClaudeUsageWindow | null, spend: ClaudeSpend | null, };
+id: string, email: string, provider: Provider | null, active: boolean, 
+/**
+ * Whether the account can run a clone: true for every imported Claude
+ * account (the server owns its token lifecycle); Codex accounts never.
+ */
+assignable: boolean | null, error: string | null, stale: boolean | null, lastUpdated: bigint, fiveHour: ClaudeUsageWindow | null, sevenDay: ClaudeUsageWindow | null, spend: ClaudeSpend | null, };

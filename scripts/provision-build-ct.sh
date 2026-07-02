@@ -121,7 +121,7 @@ echo "RESULT $ID $IP"
 NODE
 
 say "staging control-server ready (RESULT <id> <ip> above)."
-echo "  Dashboard:    http://<ip>:9000   → Settings for Linear/Claude/cloneAccounts (optional)."
+echo "  Dashboard:    http://<ip>:9000   → Settings for Linear/Claude (optional; import accounts from a clone)."
 echo "  Real clones:  POST http://<ip>:9000/api/template/bootstrap  then  POST /api/clone (CoW)."
 echo "  Viewer:       RMNG_VIDEO=<ip>:9001 cargo run -p viewer   (once a clone is selected)."
 echo "  Rebuild:      rsync source + re-run cs-build-ct.sh in the CT, then"

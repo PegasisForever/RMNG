@@ -9,8 +9,8 @@
 #     read   — contents of the clone's ~/.claude/.credentials.json (fails if absent)
 #     clear  — delete that credentials file, then print CLEARED
 #     apply  — write ~/.claude/.credentials.json from base64 arg $4 (the full JSON,
-#              long-lived token as accessToken, refreshToken empty), print OK. Does
-#              NOT restart agent-wrapper — Claude Code re-reads creds at request time.
+#              short-lived access token as accessToken, refreshToken empty), print OK.
+#              Does NOT restart agent-wrapper — Claude Code re-reads creds at request time.
 set -euo pipefail
 CTID="$1"; USER="${2:-rmng}"; OP="$3"
 # Force bash with an explicit PATH rather than the user's login shell: clones default

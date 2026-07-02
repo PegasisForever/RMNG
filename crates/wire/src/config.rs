@@ -89,18 +89,6 @@ pub struct EnvPreset {
     pub vars: Vec<EnvVar>,
 }
 
-/// A Claude account credential pair (both fields secret). The refresh token (+ a
-/// cached short-lived access token) is used **only** to read usage; the long-lived
-/// token is installed into a clone's `~/.claude/.credentials.json` to run Claude Code.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct CloneAccount {
-    pub email: String,
-    #[serde(default)]
-    pub long_lived_token: String,
-    #[serde(default)]
-    pub refresh_token: String,
-}
-
 /// A named pool of clone accounts (by email). A clone bound to a group has its
 /// account rotated among the group's members every cycle (by 5h usage). Carries no
 /// secrets — just a name + member emails — so it's TS-exported and shown verbatim in
@@ -261,10 +249,8 @@ pub struct AppConfig {
     pub linear: LinearConfig,
     #[serde(default)]
     pub claude: ClaudeConfig,
-    #[serde(default)]
-    pub clone_accounts: Vec<CloneAccount>,
     /// Named account pools a clone can be bound to for rotation (members are
-    /// `clone_accounts` emails).
+    /// emails of imported accounts, from the server's `claude-accounts.json`).
     #[serde(default)]
     pub clone_groups: Vec<CloneGroup>,
     /// Named environment-variable presets the operator picks from at clone time.
@@ -294,7 +280,6 @@ impl Default for AppConfig {
             proxmox: ProxmoxConfig::default(),
             linear: LinearConfig::default(),
             claude: ClaudeConfig::default(),
-            clone_accounts: Vec::new(),
             clone_groups: Vec::new(),
             env_presets: Vec::new(),
             chroma: ChromaMode::default(),
@@ -347,15 +332,6 @@ impl AppConfig {
                 .map(|k| LinearKeyRedacted { name: k.name.clone(), set: !k.key.is_empty() })
                 .collect(),
             claude: self.claude.clone(),
-            clone_accounts: self
-                .clone_accounts
-                .iter()
-                .map(|a| CloneAccountRedacted {
-                    email: a.email.clone(),
-                    long_lived_token_set: !a.long_lived_token.is_empty(),
-                    refresh_token_set: !a.refresh_token.is_empty(),
-                })
-                .collect(),
             clone_groups: self.clone_groups.clone(),
             env_presets: self.env_presets.clone(),
             chroma: self.chroma,
@@ -373,15 +349,6 @@ pub struct LinearKeyRedacted {
     pub set: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct CloneAccountRedacted {
-    pub email: String,
-    pub long_lived_token_set: bool,
-    pub refresh_token_set: bool,
-}
-
 /// The shape `GET /api/config` returns: same structure as [`AppConfig`] but with
 /// every secret replaced by a boolean "is set". Powers the Settings UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -397,7 +364,6 @@ pub struct AppConfigRedacted {
     pub proxmox_hostname_prefix: String,
     pub linear_keys: Vec<LinearKeyRedacted>,
     pub claude: ClaudeConfig,
-    pub clone_accounts: Vec<CloneAccountRedacted>,
     pub clone_groups: Vec<CloneGroup>,
     pub env_presets: Vec<EnvPreset>,
     pub chroma: ChromaMode,
@@ -473,23 +439,15 @@ mod tests {
                 LinearKey { name: "we".into(), key: "lin_api_secret".into() },
                 LinearKey { name: "ops".into(), key: String::new() },
             ]),
-            clone_accounts: vec![CloneAccount {
-                email: "a@b".into(),
-                long_lived_token: "sk-ant-oat01-x".into(),
-                refresh_token: "".into(),
-            }],
             ..Default::default()
         };
         let r = c.redacted();
         let json = serde_json::to_string(&r).unwrap();
-        assert!(!json.contains("sk-ant-oat01-x"));
         assert!(!json.contains("10.0.0.100"));
         assert!(!json.contains("lin_api_secret"));
         assert_eq!(r.linear_keys.len(), 2);
         assert!(r.linear_keys[0].set && r.linear_keys[0].name == "we");
         assert!(!r.linear_keys[1].set);
         assert!(r.proxmox_ssh_set);
-        assert!(r.clone_accounts[0].long_lived_token_set);
-        assert!(!r.clone_accounts[0].refresh_token_set);
     }
 }

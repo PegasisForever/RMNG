@@ -25,12 +25,12 @@ The two-pane layout stays Notes/Chat (`pane: "notes" | "chat"`) — the planned 
 ## What's new
 
 - **`Settings.tsx`** — per-section forms for **all** configuration (Proxmox SSH, Linear
-  workspace keys, Claude + clone-account tokens, template build parameters, monitor
+  workspace keys, Claude polling/groups, template build parameters, monitor
   defaults, the four listen ports), replacing hand-edited `config.json`. Secret fields are
   masked/write-only with **Test connection** buttons (`POST /api/config/test`); saves go to
-  `PUT /api/config` and apply live. cloneAccounts are add/remove rows (ties into
-  `ClaudeAccountsPanel`). Reads the redacted `GET /api/config` — plaintext secrets never
-  reach the browser.
+  `PUT /api/config` and apply live. Claude accounts are imported from a signed-in clone
+  (`ClaudeAccountsPanel`), not entered here. Reads the redacted `GET /api/config` —
+  plaintext secrets never reach the browser.
 - A **"Build/Update template"** affordance (`POST /api/template/bootstrap` / `/rebuild`),
   with progress shown via the existing `OperationProgress`.
 - **Clone-from-zero** option in `CloneModal`: choose **CoW** (fast, from the golden template)

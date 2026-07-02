@@ -20,7 +20,7 @@ gnome-shell `.deb` are all embedded). Full references: [API](../../docs/API.md) 
 routes + SSE + SPA) · `mediaplane` (port 1: clone-socket ingest → `media` encode → viewer;
 input routing; clipboard broker) · `mcp` (ports 3 + 4) · `orchestrate` (SSH `pct`/`lvcreate`
 scripts + Operation parse) · `jobs` (clone/delete/bootstrap Operation machine) · `linear` ·
-`claude` (two-token usage poll + assign/swap) · `chat` (agent-wrapper proxy + per-host SSE) ·
+`claude` (usage poll + token refresh/push + assign/swap) · `chat` (agent-wrapper proxy + per-host SSE) ·
 `monitor` (host poller) · `mounts` (sshfs) · `files` (notes/uploads/detector-feedback) ·
 `embed` (the gzipped clone-daemon/agent-wrapper/gnome-shell-deb).
 

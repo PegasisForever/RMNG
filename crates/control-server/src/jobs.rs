@@ -272,9 +272,10 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
 
     // Assign a Claude account/group (or explicitly none): record the operator's
     // selection + the resolved account in state (UI shows it immediately), then install
-    // the long-lived token into the clone's ~/.claude/.credentials.json. A group-bound
-    // clone records its group; the rotator re-balances it thereafter. "none" installs no
-    // token — the clone keeps whatever (if anything) it inherited from the template.
+    // the account's current access token into the clone's ~/.claude/.credentials.json
+    // (the server refreshes + re-pushes it thereafter). A group-bound clone records its
+    // group; the rotator re-balances it. "none" installs no token — the clone keeps
+    // whatever (if anything) it inherited from the template.
     if let Some(assignment) = crate::claude::resolve_assignment(&app, spec.claude_account.as_deref()) {
         let selection = crate::claude::normalize_selection(spec.claude_account.as_deref());
         let (group, account) = match assignment {
@@ -283,7 +284,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             crate::claude::Assignment::None => (None, None),
         };
         let id = spec.new_hostname.clone();
-        let (email, group_set) = (account.as_ref().map(|a| a.email.clone()), group.clone());
+        let (email, group_set) = (account.clone(), group.clone());
         app.store.mutate(|s| {
             if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
                 h.claude_selection = Some(selection.clone());
@@ -295,15 +296,15 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             None => patch_op(&app, &op_id, |op| {
                 op.log.push("account: none (no token installed)".into())
             }),
-            Some(account) => {
+            Some(email) => {
                 let label = match &group {
-                    Some(g) => format!("{} (group {g})", account.email),
-                    None => account.email.clone(),
+                    Some(g) => format!("{email} (group {g})"),
+                    None => email.clone(),
                 };
-                match crate::claude::apply_clone_token(&cfg.proxmox.ssh, ctid, &account.long_lived_token).await {
+                match crate::claude::push_account_to_clone(&app, &spec.new_hostname, ctid, &email).await {
                     Ok(()) => patch_op(&app, &op_id, |op| op.log.push(format!("account: assigned {label}"))),
                     Err(e) => {
-                        tracing::warn!("apply_clone_token({}) failed: {e}", spec.new_hostname);
+                        tracing::warn!("push_account_to_clone({}) failed: {e}", spec.new_hostname);
                         patch_op(&app, &op_id, |op| {
                             op.log.push(format!("account: failed to assign {label}: {e}"))
                         });

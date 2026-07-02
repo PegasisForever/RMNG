@@ -50,7 +50,7 @@ path uses this compact framing carrying `socket.rs` types).
 |---|---|---|
 | `pointer_move` | `monitor_id`, `x`, `y` (f64) | absolute pointer in monitor-pixel space |
 | `pointer_relative` | `dx`, `dy` (f64) | unaccelerated delta — pointer-lock / games |
-| `button` | `button` (evdev: `0x110`/`0x111`/`0x112`), `pressed` | mouse button |
+| `button` | `button` (evdev: `0x110`–`0x112` left/right/middle, `0x113`/`0x114` back/forward), `pressed` | mouse button |
 | `axis` | `axis` (0=vert,1=horiz), `step` (±1) | discrete scroll |
 | `key` | `keysym` (X11), `pressed` | text/modifier key (MCP `key` path) |
 | `key_code` | `keycode` (evdev = GTK `hardware_keycode − 8`), `pressed` | physical-key identity (games) |
@@ -130,7 +130,6 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../
 | `proxmox` | `ProxmoxConfig` | — | node SSH + clone subnet |
 | `linear` | `LinearKey[]` | `[]` | per-workspace API keys, editable list (**secret**) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
-| `clone_accounts` | `CloneAccount[]` | `[]` | Claude accounts for clones (**secret tokens**) |
 | `clone_groups` | `CloneGroup[]` | `[]` | named account pools for rotation (not secret) |
 
 - **`ListenConfig`**: `web 9000`, `video 9001`, `clone_mcp 9002`, `global_mcp 9003`,
@@ -145,11 +144,13 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../
   /api/config` merges rows by name (blank key keeps the stored one; omitted row deletes).
 - **`ClaudeConfig`**: `poll_secs` (`600`, floored 15), `pinned_email?`,
   `auto_swap_on_exhaustion` (bool).
-- <a id="cloneaccount"></a>**`CloneAccount`**: `email`, `long_lived_token` (installed into the
-  clone's `~/.claude/.credentials.json` as the token that *runs* Claude Code — **secret**),
-  `refresh_token` (short-lived+refresh, used server-side **only to poll 5h/7d usage** —
-  **secret**). Writing the long-lived token with the refresh emptied lets a *running* clone be
-  hot-swapped without restart (written via the Proxmox node's `pct exec`, no agent-wrapper restart).
+- <a id="claude-accounts"></a>**Claude accounts** live outside config, in the server's 0600
+  secret store `claude-accounts.json`: per account an OAuth pair (`access_token` +
+  single-use `refresh_token`, both **secret**), harvested from a signed-in clone at import.
+  The server owns the whole refresh lifecycle; a clone gets **only the current short-lived
+  access token** written into its `~/.claude/.credentials.json` (refresh emptied, far-future
+  expiry), re-pushed to every assigned clone whenever a refresh rotates it — so a *running*
+  clone hot-swaps without restart (written via the Proxmox node's `pct exec`).
 - **`CloneGroup`**: `name`, `accounts` (member emails). A clone bound to a group
   (`Host.claude_group`) is re-balanced across the group's members every 10 min (rotator),
   skipping any over 90% 5h usage; selected at clone/swap time as `group:<name>`.

@@ -18,7 +18,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { ChangeAccountModal } from "~/components/ChangeAccountModal";
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { CloneModal } from "~/components/CloneModal";
-import { ImportTokenModal } from "~/components/ImportTokenModal";
+import { ImportAccountModal } from "~/components/ImportAccountModal";
 import { NewTemplateModal } from "~/components/NewTemplateModal";
 import { OperationProgress } from "~/components/OperationProgress";
 import { SettingsPanel } from "~/components/SettingsPanel";
@@ -394,7 +394,14 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
         />
       ) : null}
 
-      {settingsOpen ? <SettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
+      {settingsOpen ? (
+        <SettingsPanel
+          accountEmails={(state.claudeAccounts ?? [])
+            .filter((a) => a.provider !== "codex")
+            .map((a) => a.email)}
+          onClose={() => setSettingsOpen(false)}
+        />
+      ) : null}
 
       {newTemplateOpen ? (
         <NewTemplateModal
@@ -415,7 +422,7 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
       ) : null}
 
       {importOpen ? (
-        <ImportTokenModal
+        <ImportAccountModal
           hosts={state.hosts}
           onClose={() => setImportOpen(false)}
           onImported={() => {

@@ -23,7 +23,7 @@ export function ChangeAccountModal({
   onSubmit,
 }: {
   host: Host;
-  /** Assignable accounts (those with a long-lived clone token). */
+  /** Assignable accounts (imported Claude accounts). */
   accounts: ClaudeUsage[];
   busy: boolean;
   onClose: () => void;
