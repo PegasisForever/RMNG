@@ -18,8 +18,9 @@ import type { ControlState } from "~/lib/types";
 const input =
   "w-full rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-400 focus:outline-none";
 
-/** Default name for the wizard-built base image (tagged `rmng/template:rmng/base`). */
-const DEFAULT_IMAGE_NAME = "rmng/base";
+/** Default name for the wizard-built base image. Names are bare DNS labels — the
+ *  server itself prepends the repo (`base` → `rmng/template:base`). */
+const DEFAULT_IMAGE_NAME = "base";
 
 /** Mirror of the server's `is_dns_label` (base-image name → `rmng/template:<name>`). */
 function isDnsLabel(s: string): boolean {
@@ -185,9 +186,7 @@ export function SetupWizard({
     setSaving(true);
     setError(null);
     try {
-      const res = (await putConfig({ setupComplete: true })) as unknown as {
-        networkWarning?: string;
-      };
+      const res = await putConfig({ setupComplete: true });
       // Non-fatal: setup is already latched server-side. Surface the network warning
       // (the operator may need to `docker network rm rmng`) but don't leave the wizard —
       // the `rmng` network is also created lazily on the first clone. Clicking Finish

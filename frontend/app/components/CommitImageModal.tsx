@@ -1,7 +1,8 @@
 // Commit a running clone to a new clone-source image (`docker commit` → tagged
-// `rmng/template:<name>`). Opened from the camera action on a managed host row.
-// The name prefills to `rmng/<host-id>` and is validated to a DNS label (mirrors
-// the server's `is_dns_label`). Note: committing bakes the clone's on-disk
+// `rmng/template:<name>`; the name is a bare DNS label, the server prepends the
+// repo). Opened from the camera action on a managed host row. The name prefills
+// to the host id (already a DNS label) and is validated to one (mirrors the
+// server's `is_dns_label`). Note: committing bakes the clone's on-disk
 // credentials into the image; the server logs a warning line — surfaced here too.
 import { useState } from "react";
 
@@ -21,7 +22,7 @@ export function CommitImageModal({
   onClose: () => void;
   onCommit: (name: string) => void;
 }) {
-  const [name, setName] = useState(`rmng/${hostId}`);
+  const [name, setName] = useState(hostId);
   const trimmed = name.trim();
   const labelOk = isDnsLabel(trimmed);
 
@@ -59,7 +60,7 @@ export function CommitImageModal({
             onKeyDown={(e) => {
               if (e.key === "Enter") submit();
             }}
-            placeholder="rmng/my-snapshot"
+            placeholder="my-snapshot"
             spellCheck={false}
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none"
           />

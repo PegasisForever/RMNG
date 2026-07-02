@@ -119,9 +119,13 @@ async function putJson(url: string, body: unknown): Promise<unknown> {
 export const getConfig = () => getJson("/api/config") as Promise<AppConfigRedacted>;
 /** Merge a partial config update (empty-string secrets are left unchanged), persist,
  *  apply live. Returns the new redacted config plus whether a restart is required to
- *  apply restart-scoped settings (ports, cloneSocket, staticDir, chroma). */
+ *  apply restart-scoped settings (ports, cloneSocket, staticDir, chroma). When the
+ *  patch flips `setupComplete` (wizard finish), the server also ensures the `rmng`
+ *  network; a non-fatal failure rides along as `networkWarning`. */
 export const putConfig = (patch: unknown) =>
-  putJson("/api/config", patch) as Promise<ConfigPutResponse>;
+  putJson("/api/config", patch) as Promise<
+    ConfigPutResponse & { networkWarning?: string }
+  >;
 /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
 export const testConfig = (what: string) =>
   postJson("/api/config/test", { what }) as Promise<{ ok: boolean; message: string }>;

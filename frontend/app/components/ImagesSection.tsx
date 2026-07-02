@@ -27,7 +27,7 @@ export function ImagesSection({
 }) {
   function build() {
     if (buildBusy) return;
-    const raw = window.prompt("Name for the new base image (→ rmng/template:<name>)", "rmng/base");
+    const raw = window.prompt("Name for the new base image (→ rmng/template:<name>)", "base");
     if (raw == null) return;
     const name = raw.trim();
     if (!isDnsLabel(name)) {
