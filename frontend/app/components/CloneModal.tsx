@@ -5,12 +5,7 @@ import { getConfig, recommendedClaudeAccount, type ClonePayload } from "~/lib/ap
 import type { ClaudeUsage } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { EnvPreset } from "~/lib/wire/EnvPreset";
-import {
-  parseTicketInput,
-  WORKSPACE_BADGE,
-  WORKSPACE_PREFIXES,
-  type WorkspacePrefix,
-} from "~/lib/workspace";
+import { parseTicketInput, workspaceBadge } from "~/lib/workspace";
 
 /**
  * Clone dialog. Three modes: paste an existing Linear ticket (link or `WE-142`),
@@ -35,7 +30,9 @@ export function CloneModal({
 }) {
   const [mode, setMode] = useState<"existing" | "create" | "plain">("existing");
   const [ticket, setTicket] = useState("");
-  const [workspace, setWorkspace] = useState<WorkspacePrefix>("we");
+  // Configured Linear workspaces (names with a stored key, from config).
+  const [workspaces, setWorkspaces] = useState<string[]>([]);
+  const [workspace, setWorkspace] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [message, setMessage] = useState("");
@@ -59,9 +56,12 @@ export function CloneModal({
       .then((c) => {
         setPresets(c.envPresets);
         setGroups(c.cloneGroups);
+        const ws = c.linearKeys.filter((k) => k.set).map((k) => k.name);
+        setWorkspaces(ws);
+        setWorkspace((w) => w || ws[0] || "");
       })
       .catch(() => {
-        // Config unreachable — just no preset/group options.
+        // Config unreachable — just no preset/group/workspace options.
       });
   }, []);
 
@@ -86,9 +86,12 @@ export function CloneModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const parsed = parseTicketInput(ticket);
-  // `create` and `plain` both need a title; `existing` needs a parseable ticket.
-  const valid = mode === "existing" ? !!parsed : title.trim().length > 0;
+  const parsed = parseTicketInput(ticket, workspaces);
+  // `create` needs a workspace + title; `plain` a title; `existing` a parseable ticket.
+  const valid =
+    mode === "existing"
+      ? !!parsed
+      : title.trim().length > 0 && (mode !== "create" || !!workspace);
 
   function submit() {
     if (!valid || busy) return;
@@ -175,13 +178,17 @@ export function CloneModal({
             />
             {ticket && !parsed ? (
               <p className="mt-1 text-[11px] text-red-600">
-                couldn’t find a supported ticket id (WE-, DEV-, HH-, PER-…)
+                {workspaces.length === 0
+                  ? "no Linear workspaces configured — add API keys in Settings"
+                  : `couldn’t find a supported ticket id (${workspaces
+                      .map((w) => `${w.toUpperCase()}-`)
+                      .join(", ")}…)`}
               </p>
             ) : null}
             {parsed ? (
               <p className="mt-1.5 flex items-center gap-1.5 text-[11px] font-normal text-slate-500">
                 <span
-                  className={`rounded px-1.5 py-0.5 font-medium ${WORKSPACE_BADGE[parsed.prefix]}`}
+                  className={`rounded px-1.5 py-0.5 font-medium ${workspaceBadge(parsed.prefix)}`}
                 >
                   {parsed.identifier}
                 </span>
@@ -198,12 +205,13 @@ export function CloneModal({
               Workspace
               <select
                 value={workspace}
-                onChange={(e) =>
-                  setWorkspace(e.target.value as WorkspacePrefix)
-                }
+                onChange={(e) => setWorkspace(e.target.value)}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
               >
-                {WORKSPACE_PREFIXES.map((p) => (
+                {workspaces.length === 0 ? (
+                  <option value="">no workspaces configured</option>
+                ) : null}
+                {workspaces.map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>

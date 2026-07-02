@@ -1,10 +1,11 @@
 //! Linear integration for ticket-driven cloning — Rust port of `linear.server.ts`.
 //! Talks to `api.linear.app/graphql` with a per-workspace personal API key
-//! (`Authorization: <key>`, no "Bearer"). The ticket-id prefix (WE/DEV/HH/PER)
-//! selects both the workspace key and the team.
+//! (`Authorization: <key>`, no "Bearer"). The ticket-id prefix (e.g. `WE-142` → `we`)
+//! selects both the workspace key and the team; the set of workspaces is config
+//! (`AppConfig.linear`), not a closed enum.
 
 use serde_json::{Value, json};
-use wire::{LinearConfig, LinearWorkspace};
+use wire::LinearConfig;
 
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 const ISSUE_FIELDS: &str =
@@ -19,38 +20,20 @@ impl std::fmt::Display for LinearError {
 }
 impl std::error::Error for LinearError {}
 
-pub fn team_key(ws: LinearWorkspace) -> &'static str {
-    match ws {
-        LinearWorkspace::We => "WE",
-        LinearWorkspace::Dev => "DEV",
-        LinearWorkspace::Hh => "HH",
-        LinearWorkspace::Per => "PER",
-    }
-}
-
-pub fn prefix_from_str(s: &str) -> Option<LinearWorkspace> {
-    match s.to_ascii_lowercase().as_str() {
-        "we" => Some(LinearWorkspace::We),
-        "dev" => Some(LinearWorkspace::Dev),
-        "hh" => Some(LinearWorkspace::Hh),
-        "per" => Some(LinearWorkspace::Per),
-        _ => None,
-    }
-}
-
-fn key_for(cfg: &LinearConfig, ws: LinearWorkspace) -> Option<&str> {
-    match ws {
-        LinearWorkspace::We => cfg.we.as_deref(),
-        LinearWorkspace::Dev => cfg.dev.as_deref(),
-        LinearWorkspace::Hh => cfg.hh.as_deref(),
-        LinearWorkspace::Per => cfg.per.as_deref(),
-    }
-    .filter(|k| !k.is_empty())
+/// "no Linear API key configured…" error naming the configured workspaces.
+fn no_key_err(cfg: &LinearConfig, ws: &str) -> LinearError {
+    let names = cfg.names();
+    LinearError(if names.is_empty() {
+        format!("no Linear API key configured for workspace \"{ws}\" (none configured — add keys in Settings)")
+    } else {
+        format!("no Linear API key configured for workspace \"{ws}\" (configured: {})", names.join(", "))
+    })
 }
 
 #[derive(Debug, Clone)]
 pub struct TicketRef {
-    pub prefix: LinearWorkspace,
+    /// Lowercase workspace name, e.g. `"we"`.
+    pub prefix: String,
     pub team_key: String,
     pub number: u64,
     pub identifier: String,
@@ -58,7 +41,8 @@ pub struct TicketRef {
 
 #[derive(Debug, Clone)]
 pub struct IssueInfo {
-    pub prefix: LinearWorkspace,
+    /// Lowercase workspace name, e.g. `"we"`.
+    pub prefix: String,
     pub id: String,
     pub identifier: String,
     pub title: String,
@@ -92,15 +76,9 @@ pub fn parse_ticket_ref(input: &str) -> Result<TicketRef, LinearError> {
             continue;
         }
         let team_key = t[start..i].to_uppercase();
-        let Some(prefix) = prefix_from_str(&team_key) else {
-            return Err(LinearError(format!(
-                "unsupported workspace \"{}\" — expected one of WE, DEV, HH, PER",
-                &t[start..i]
-            )));
-        };
         let number: u64 = t[ds..j].parse().map_err(|_| LinearError("bad ticket number".into()))?;
         return Ok(TicketRef {
-            prefix,
+            prefix: team_key.to_ascii_lowercase(),
             team_key: team_key.clone(),
             number,
             identifier: format!("{team_key}-{number}"),
@@ -144,10 +122,10 @@ async fn gql(
     body.get("data").cloned().ok_or_else(|| LinearError("Linear API returned no data".into()))
 }
 
-fn to_issue_info(prefix: LinearWorkspace, n: &Value) -> IssueInfo {
+fn to_issue_info(prefix: &str, n: &Value) -> IssueInfo {
     let s = |k: &str| n.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     IssueInfo {
-        prefix,
+        prefix: prefix.to_string(),
         id: s("id"),
         identifier: s("identifier"),
         title: s("title"),
@@ -173,14 +151,14 @@ pub async fn fetch_issue(
     cfg: &LinearConfig,
     r: &TicketRef,
 ) -> Result<IssueInfo, LinearError> {
-    let key = key_for(cfg, r.prefix).ok_or_else(|| LinearError("no Linear API key configured".into()))?;
+    let key = cfg.key_for(&r.prefix).ok_or_else(|| no_key_err(cfg, &r.prefix))?;
     let query = format!(
         "query($team: String!, $num: Float!) {{ issues(filter: {{ team: {{ key: {{ eq: $team }} }}, number: {{ eq: $num }} }}, first: 1) {{ nodes {{ {ISSUE_FIELDS} }} }} }}"
     );
     let data = gql(http, key, &query, json!({ "team": r.team_key, "num": r.number })).await?;
     let node = data.pointer("/issues/nodes/0").cloned().filter(|v| !v.is_null());
     match node {
-        Some(n) => Ok(to_issue_info(r.prefix, &n)),
+        Some(n) => Ok(to_issue_info(&r.prefix, &n)),
         None => Err(LinearError(format!("ticket {} not found in Linear", r.identifier))),
     }
 }
@@ -189,17 +167,17 @@ pub async fn fetch_issue(
 pub async fn create_issue(
     http: &reqwest::Client,
     cfg: &LinearConfig,
-    prefix: LinearWorkspace,
+    prefix: &str,
     title: &str,
     description: &str,
 ) -> Result<IssueInfo, LinearError> {
-    let key = key_for(cfg, prefix).ok_or_else(|| LinearError("no Linear API key configured".into()))?;
-    let tk = team_key(prefix);
+    let key = cfg.key_for(prefix).ok_or_else(|| no_key_err(cfg, prefix))?;
+    let tk = prefix.to_uppercase();
     let team_data = gql(
         http,
         key,
         "query($team: String!) { teams(filter: { key: { eq: $team } }, first: 1) { nodes { id } } }",
-        json!({ "team": tk }),
+        json!({ "team": &tk }),
     )
     .await?;
     let team_id = team_data
@@ -225,6 +203,7 @@ pub async fn create_issue(
     }
 }
 
+
 /// Move the issue to "In Progress" unless already started (no backwards drag).
 pub async fn ensure_in_progress(
     http: &reqwest::Client,
@@ -234,13 +213,13 @@ pub async fn ensure_in_progress(
     if issue.state_type == "started" {
         return Ok(());
     }
-    let key = key_for(cfg, issue.prefix).ok_or_else(|| LinearError("no Linear API key configured".into()))?;
-    let tk = team_key(issue.prefix);
+    let key = cfg.key_for(&issue.prefix).ok_or_else(|| no_key_err(cfg, &issue.prefix))?;
+    let tk = issue.prefix.to_uppercase();
     let data = gql(
         http,
         key,
         "query($team: String!) { teams(filter: { key: { eq: $team } }, first: 1) { nodes { states { nodes { id name type } } } } }",
-        json!({ "team": tk }),
+        json!({ "team": &tk }),
     )
     .await?;
     let states = data
@@ -311,10 +290,21 @@ mod tests {
     fn parses_ticket_refs() {
         let r = parse_ticket_ref("https://linear.app/x/issue/WE-142/foo").unwrap();
         assert_eq!(r.identifier, "WE-142");
-        assert_eq!(r.prefix, LinearWorkspace::We);
+        assert_eq!(r.prefix, "we");
         assert_eq!(parse_ticket_ref("dev-7").unwrap().identifier, "DEV-7");
-        assert!(parse_ticket_ref("XX-1").is_err()); // unsupported workspace
+        // Any prefix parses now (workspaces are config, not an enum); whether a key
+        // exists for it is checked at fetch/create time.
+        assert_eq!(parse_ticket_ref("XX-1").unwrap().prefix, "xx");
         assert!(parse_ticket_ref("nope").is_err());
+    }
+
+    #[test]
+    fn no_key_error_lists_configured_workspaces() {
+        use wire::{LinearConfig, LinearKey};
+        let cfg = LinearConfig(vec![LinearKey { name: "we".into(), key: "K".into() }]);
+        let msg = no_key_err(&cfg, "xx").to_string();
+        assert!(msg.contains("\"xx\"") && msg.contains("we"), "{msg}");
+        assert!(no_key_err(&LinearConfig::default(), "xx").to_string().contains("none configured"));
     }
 
     #[test]

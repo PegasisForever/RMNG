@@ -32,16 +32,6 @@ pub struct MonitorSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub enum LinearWorkspace {
-    We,
-    Dev,
-    Hh,
-    Per,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum Provider {
     Claude,
     Codex,
@@ -118,8 +108,10 @@ pub struct Host {
     /// hosts created before this field / when no Claude account is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_selection: Option<String>,
+    /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
+    /// string: the workspace set is config (Settings → Linear API keys), not an enum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub linear_workspace: Option<LinearWorkspace>,
+    pub linear_workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_ticket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,7 +315,7 @@ mod tests {
             port: 3389,
             gdm_username: Some("u".into()),
             claude_account_email: Some("a@b.c".into()),
-            linear_workspace: Some(LinearWorkspace::We),
+            linear_workspace: Some("we".into()),
             monitor_state: Some(MonitorState::Working),
             ..Default::default()
         };

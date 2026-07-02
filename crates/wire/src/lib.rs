@@ -25,10 +25,10 @@ pub mod viewer;
 
 pub use config::{
     AppConfig, AppConfigRedacted, ChromaMode, ClaudeConfig, CloneAccount, CloneGroup, EnvPreset,
-    EnvVar, ListenConfig, LinearConfig, ProxmoxConfig, TemplateConfig,
+    EnvVar, LinearConfig, LinearKey, ListenConfig, ProxmoxConfig,
 };
 pub use control::{
     AgentReport, Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
-    ControlState, Host, LinearWorkspace, MonitorSpec, MonitorState, Operation, OperationKind,
+    ControlState, Host, MonitorSpec, MonitorState, Operation, OperationKind,
     OperationStatus, Provider,
 };

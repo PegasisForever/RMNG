@@ -245,12 +245,19 @@ async fn resolve_issue(
         let workspace = create.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
         let title = create.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
         let description = create.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let prefix = linear::prefix_from_str(workspace)
-            .ok_or_else(|| "create.workspace must be one of we, dev, hh, per".to_string())?;
+        let prefix = workspace.trim().to_ascii_lowercase();
+        if lcfg.key_for(&prefix).is_none() {
+            let names = lcfg.names();
+            return Err(if names.is_empty() {
+                "no Linear API keys configured — add workspaces in Settings".to_string()
+            } else {
+                format!("create.workspace must be one of the configured workspaces ({})", names.join(", "))
+            });
+        }
         if title.is_empty() {
             return Err("create.title is required".into());
         }
-        return linear::create_issue(&app.http, lcfg, prefix, title, description)
+        return linear::create_issue(&app.http, lcfg, &prefix, title, description)
             .await
             .map_err(|e| e.to_string());
     }
@@ -263,16 +270,29 @@ async fn resolve_issue(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BootstrapReq {
     hostname: String,
+    /// CT resources from the "New template" modal; omitted fields fall back to the
+    /// proven defaults (16 cores / 32 GB / 128 GB). The base image is fixed
+    /// ([`crate::orchestrate::BASE_IMAGE`]) — the patched GNOME only builds there.
+    cores: Option<u32>,
+    memory_mb: Option<u32>,
+    disk_gb: Option<u32>,
 }
 
-/// `POST /api/template/bootstrap` — build a template/clone from a base image.
+/// `POST /api/template/bootstrap` — build a template/clone from the fixed base image.
 async fn template_bootstrap(
     State(app): State<App>,
     Json(req): Json<BootstrapReq>,
 ) -> Result<Json<Operation>, (StatusCode, String)> {
-    jobs::start_bootstrap(&app, &req.hostname)
+    let defaults = crate::orchestrate::BootstrapResources::default();
+    let res = crate::orchestrate::BootstrapResources {
+        cores: req.cores.unwrap_or(defaults.cores),
+        memory_mb: req.memory_mb.unwrap_or(defaults.memory_mb),
+        disk_gb: req.disk_gb.unwrap_or(defaults.disk_gb),
+    };
+    jobs::start_bootstrap(&app, &req.hostname, res)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }

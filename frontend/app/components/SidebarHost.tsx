@@ -3,7 +3,7 @@ import { CSS } from "@dnd-kit/utilities";
 
 import claudeLogo from "../assets/claude.png";
 import type { Host, Operation } from "~/lib/types";
-import { WORKSPACE_BADGE } from "~/lib/workspace";
+import { workspaceBadge } from "~/lib/workspace";
 
 // Visual style per host state. A running host is `working` (sky, pulsing) or
 // `idle` (amber — done / awaiting the next task / needs you); `offline` is rose.
@@ -235,9 +235,9 @@ export function SidebarHost({
           ) : null}
           {host.linearWorkspace && host.linearTicket ? (
             <span
-              className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold leading-none ${
-                WORKSPACE_BADGE[host.linearWorkspace]
-              }`}
+              className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold leading-none ${workspaceBadge(
+                host.linearWorkspace,
+              )}`}
             >
               {host.linearTicket}
             </span>

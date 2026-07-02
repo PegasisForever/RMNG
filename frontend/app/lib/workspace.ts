@@ -1,32 +1,48 @@
-// Shared client-side constants for the four Linear workspaces (ticket prefixes).
-// Plain constants (no server code) so both components and routes can import them.
-export const WORKSPACE_PREFIXES = ["we", "dev", "hh", "per"] as const;
-export type WorkspacePrefix = (typeof WORKSPACE_PREFIXES)[number];
+// Client-side helpers for Linear workspaces (ticket prefixes). The set of
+// workspaces is config (Settings → Linear API keys), not a constant — callers
+// pass the configured names in.
 
 /**
- * Tailwind pill classes per workspace — written as literal strings so the
- * compiler keeps them (no dynamic `bg-${x}` construction). we=blue, dev=orange,
- * hh=green, per=purple.
+ * Badge palette — literal strings so the Tailwind compiler keeps them (no
+ * dynamic `bg-${x}` construction).
  */
-export const WORKSPACE_BADGE: Record<WorkspacePrefix, string> = {
-  we: "bg-blue-100 text-blue-700",
-  dev: "bg-orange-100 text-orange-700",
-  hh: "bg-green-100 text-green-700",
-  per: "bg-purple-100 text-purple-700",
+const PALETTE = [
+  "bg-blue-100 text-blue-700",
+  "bg-orange-100 text-orange-700",
+  "bg-green-100 text-green-700",
+  "bg-purple-100 text-purple-700",
+  "bg-rose-100 text-rose-700",
+  "bg-cyan-100 text-cyan-700",
+  "bg-amber-100 text-amber-700",
+] as const;
+
+/** The four original workspaces keep their long-standing colors. */
+const FIXED: Record<string, string> = {
+  we: PALETTE[0],
+  dev: PALETTE[1],
+  hh: PALETTE[2],
+  per: PALETTE[3],
 };
 
-export function isWorkspacePrefix(s: string): s is WorkspacePrefix {
-  return (WORKSPACE_PREFIXES as readonly string[]).includes(s);
+/** Tailwind pill classes for a workspace badge; new names hash into the palette. */
+export function workspaceBadge(prefix: string): string {
+  const p = prefix.toLowerCase();
+  if (FIXED[p]) return FIXED[p];
+  let h = 0;
+  for (const c of p) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return PALETTE[h % PALETTE.length];
 }
 
-/** Extract a `WE-142` ref from a pasted Linear link or bare id, if supported. */
+/** Extract a `WE-142`-style ref from a pasted Linear link or bare id. Valid
+ *  prefixes are the configured workspace names (lowercase). */
 export function parseTicketInput(
   input: string,
-): { identifier: string; prefix: WorkspacePrefix; hostname: string } | null {
+  workspaces: readonly string[],
+): { identifier: string; prefix: string; hostname: string } | null {
   const m = /\b([A-Za-z]{2,})-(\d+)\b/.exec(input.trim());
   if (!m) return null;
   const prefix = m[1].toLowerCase();
-  if (!isWorkspacePrefix(prefix)) return null;
+  if (!workspaces.includes(prefix)) return null;
   return {
     identifier: `${m[1].toUpperCase()}-${m[2]}`,
     prefix,

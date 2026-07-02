@@ -1,8 +1,13 @@
-// Provision a brand-new template CT from the configured base image. Unlike a
-// clone (which copies an existing template), this bootstraps from zero using the
-// resources/base image set in Settings → "Clone container". The server takes only
-// a hostname; everything else comes from config.template.
+// Provision a brand-new template CT from zero. The base image is fixed (Ubuntu
+// 26.04 — the patched gnome-shell deb is compiled against its GNOME only); the
+// operator picks just a hostname + CT resources here.
 import { useState } from "react";
+
+/** CT resources sent with the bootstrap request. */
+export type TemplateResources = { cores: number; memoryMb: number; diskGb: number };
+
+/** What every template has actually been built with (proven on the current template). */
+const DEFAULT_RESOURCES: TemplateResources = { cores: 16, memoryMb: 32768, diskGb: 128 };
 
 /** Mirrors the server's `is_dns_label`: non-empty, ≤63 chars, lowercase letters /
  *  digits / hyphens, no leading or trailing hyphen. */
@@ -20,17 +25,22 @@ export function NewTemplateModal({
   /** Existing host ids, to flag a duplicate name before the server does. */
   existing: Set<string>;
   onClose: () => void;
-  onCreate: (hostname: string) => void;
+  onCreate: (hostname: string, resources: TemplateResources) => void;
 }) {
   const [hostname, setHostname] = useState("");
+  const [resources, setResources] = useState(DEFAULT_RESOURCES);
   const trimmed = hostname.trim();
   const labelOk = isDnsLabel(trimmed);
   const duplicate = existing.has(trimmed);
-  const valid = labelOk && !duplicate;
+  const resourcesOk = resources.cores >= 1 && resources.memoryMb >= 1024 && resources.diskGb >= 8;
+  const valid = labelOk && !duplicate && resourcesOk;
+
+  const setRes = (k: keyof TemplateResources, v: number) =>
+    setResources((r) => ({ ...r, [k]: v }));
 
   function submit() {
     if (!valid || busy) return;
-    onCreate(trimmed);
+    onCreate(trimmed, resources);
   }
 
   return (
@@ -47,9 +57,9 @@ export function NewTemplateModal({
       >
         <h3 className="text-sm font-semibold text-slate-900">New template</h3>
         <p className="mt-1 text-xs text-slate-500">
-          Provisions a fresh container from the base image and resources in{" "}
-          <span className="font-medium text-slate-600">Settings → Clone container</span>. The new
-          container is registered as a clonable template.
+          Provisions a fresh Ubuntu 26.04 container (the only base our patched GNOME is built
+          for) with the resources below. The new container is registered as a clonable
+          template.
         </p>
 
         <label className="mt-4 block text-xs font-medium text-slate-600">
@@ -75,6 +85,35 @@ export function NewTemplateModal({
             </p>
           ) : null}
         </label>
+
+        <div className="mt-3 grid grid-cols-3 gap-3">
+          {(
+            [
+              { key: "cores", label: "Cores", min: 1 },
+              { key: "memoryMb", label: "Memory (MB)", min: 1024 },
+              { key: "diskGb", label: "Disk (GB)", min: 8 },
+            ] as const
+          ).map((f) => (
+            <label key={f.key} className="block text-xs font-medium text-slate-600">
+              {f.label}
+              <input
+                type="number"
+                min={f.min}
+                value={resources[f.key]}
+                onChange={(e) => setRes(f.key, Number(e.target.value) || 0)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submit();
+                }}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
+              />
+            </label>
+          ))}
+        </div>
+        {!resourcesOk ? (
+          <p className="mt-1 text-[11px] text-red-600">
+            need ≥1 core, ≥1024 MB memory and ≥8 GB disk
+          </p>
+        ) : null}
 
         <div className="mt-4 flex justify-end gap-2">
           <button

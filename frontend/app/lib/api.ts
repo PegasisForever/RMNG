@@ -40,15 +40,19 @@ export const reorder = (order: string[]) => postJson("/api/reorder", { order });
 export const cloneHost = (source: string, payload: ClonePayload) =>
   postJson("/api/clone", { source, ...payload });
 export const deleteHost = (id: string) => postJson("/api/delete", { id });
-/** Provision a brand-new template CT from the configured base image. Its
- *  cores/memory/disk/base image come from Settings → "Clone container"; the new
- *  CT is registered as a clonable template. Progress streams over /events like a
- *  clone. (Bootstrap errors are plain text, so read the body as text on failure.) */
-export async function bootstrapTemplate(hostname: string): Promise<{ id: string }> {
+/** Provision a brand-new template CT from the fixed Ubuntu 26.04 base image (the
+ *  only base the patched GNOME is built for), with resources from the New-template
+ *  modal. The new CT is registered as a clonable template. Progress streams over
+ *  /events like a clone. (Bootstrap errors are plain text, so read the body as
+ *  text on failure.) */
+export async function bootstrapTemplate(
+  hostname: string,
+  resources: { cores: number; memoryMb: number; diskGb: number },
+): Promise<{ id: string }> {
   const res = await fetch("/api/template/bootstrap", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ hostname }),
+    body: JSON.stringify({ hostname, ...resources }),
   });
   if (!res.ok) throw new Error((await res.text().catch(() => "")) || res.statusText);
   return res.json().catch(() => ({})) as Promise<{ id: string }>;

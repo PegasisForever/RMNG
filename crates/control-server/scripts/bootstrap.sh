@@ -12,6 +12,9 @@ CD_BIN="${6:-}"  # node-side path to the clone-daemon binary (scp'd here by the 
 AW_BIN="${7:-}"  # node-side path to the agent-wrapper binary (scp'd here by the control-server)
 MONITORS="${8:-}"  # monitor layout CSV "WxH,WxH" (config.monitors) → clone-daemon RMNG_MONITORS
 SHELL_DEB="${9:-}"  # node-side path to the patched gnome-shell .deb (shell-01 + shell-03)
+CORES="${10:-16}"      # CT resources, chosen in the "New template" modal
+MEMORY_MB="${11:-32768}"
+DISK_GB="${12:-128}"
 
 prog locate "ensuring base image $TEMPLATE"
 case "$TEMPLATE" in
@@ -32,9 +35,11 @@ NEWID=$(pvesh get /cluster/nextid 2>/dev/null || echo "")
 prog config "pct create $NEWID ($HOSTNAME)"
 pct create "$NEWID" "$TEMPLATE" \
   --hostname "$HOSTNAME" --unprivileged 1 --features nesting=1,keyctl=1,fuse=1 \
-  --memory 32768 --swap 8192 --cpulimit 16 --rootfs "$STORAGE:48" \
+  --memory "$MEMORY_MB" --swap 8192 --cpulimit "$CORES" --rootfs "$STORAGE:$DISK_GB" \
   --net0 "name=eth0,bridge=$BRIDGE,ip=dhcp" --onboot 0 >&2
-# render node passthrough (mode 0666) + apparmor opt-out (headless Mutter path) +
+# render node passthrough (mode 0666) + apparmor fully disabled (headless Mutter path):
+# unconfined profile, plus bind /dev/null over the kernel's apparmor-enabled param so
+# nested processes see it off, relaxed proc/sys auto-mounts, and a cleared mount hook +
 # the shared control-server media socket dir bind-mounted at the SAME path (NOT under
 # /run — the CT's tmpfs would shadow it). clone-daemon ships to <dir>/clones.sock.
 # Clones inherit this via clone.sh's config copy.
@@ -43,6 +48,9 @@ mkdir -p "$SOCK_HOST_DIR"; chmod 0777 "$SOCK_HOST_DIR"
 printf '%s\n' \
   'dev0: /dev/dri/renderD128,gid=993,mode=0666' \
   'lxc.apparmor.profile: unconfined' \
+  'lxc.mount.entry: /dev/null sys/module/apparmor/parameters/enabled none bind,optional 0 0' \
+  'lxc.mount.auto: cgroup:mixed proc:rw sys:mixed' \
+  'lxc.hook.mount:' \
   "mp0: $SOCK_HOST_DIR,mp=$SOCK_HOST_DIR" \
   >> "/etc/pve/lxc/$NEWID.conf"
 

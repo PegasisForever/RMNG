@@ -252,7 +252,7 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
               <button
                 type="button"
                 onClick={() => setNewTemplateOpen(true)}
-                title="Provision a new template container from the configured base image"
+                title="Provision a new template container (Ubuntu 26.04)"
                 className="rounded px-1 text-[11px] font-medium text-slate-400 hover:bg-slate-200 hover:text-slate-600"
               >
                 + Template
@@ -401,9 +401,9 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
           busy={bootstrapping}
           existing={new Set(state.hosts.map((h) => h.id))}
           onClose={() => setNewTemplateOpen(false)}
-          onCreate={(hostname) => {
+          onCreate={(hostname, resources) => {
             setBootstrapping(true);
-            bootstrapTemplate(hostname)
+            bootstrapTemplate(hostname, resources)
               .then(() => setError(null))
               .catch((e: Error) => setError(e.message))
               .finally(() => {

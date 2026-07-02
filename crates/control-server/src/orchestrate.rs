@@ -218,12 +218,33 @@ pub fn control_env_vars(cfg: &AppConfig) -> Vec<wire::EnvVar> {
     vars
 }
 
-/// Build a template/clone CT **from a base image** (the from-zero path): create +
-/// render passthrough + headless-GNOME provisioning, all on the node. Returns
-/// `(ctid, ip)`. The in-CT provisioning script is shipped base64 to the node.
+/// The only supported base image. Not configurable: the patched gnome-shell deb
+/// (shell-01 + shell-03) is compiled against Ubuntu 26.04's GNOME only, so any
+/// other base would silently lose the window-mgmt MCP.
+pub const BASE_IMAGE: &str = "local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst";
+
+/// CT resources for one bootstrap, chosen in the "New template" modal.
+#[derive(Debug, Clone, Copy)]
+pub struct BootstrapResources {
+    pub cores: u32,
+    pub memory_mb: u32,
+    pub disk_gb: u32,
+}
+
+impl Default for BootstrapResources {
+    /// The values every template has actually been built with (proven on CT 132).
+    fn default() -> Self {
+        Self { cores: 16, memory_mb: 32768, disk_gb: 128 }
+    }
+}
+
+/// Build a template/clone CT **from the fixed Ubuntu base image** (the from-zero
+/// path): create + render passthrough + headless-GNOME provisioning, all on the
+/// node. Returns `(ctid, ip)`. The in-CT provisioning script is shipped base64.
 pub async fn bootstrap_template(
     cfg: &AppConfig,
     hostname: &str,
+    res: BootstrapResources,
     on_progress: impl FnMut(&str, &str),
 ) -> Result<(u32, String)> {
     if !is_dns_label(hostname) {
@@ -242,10 +263,15 @@ pub async fn bootstrap_template(
     // Monitor layout → the clone-daemon's `RMNG_MONITORS` env. One virtual monitor per
     // entry; falls back to a single primary 1080p.
     let mons = monitors_csv(cfg);
+    let (cores, mem, disk) =
+        (res.cores.to_string(), res.memory_mb.to_string(), res.disk_gb.to_string());
     let result = run_remote(
         ssh,
         BOOTSTRAP_SCRIPT,
-        &[hostname, &cfg.template.base_image, "local-lvm", "vmbr0", &prov_b64, &cd_arg, &aw_arg, &mons, &shell_arg],
+        &[
+            hostname, BASE_IMAGE, "local-lvm", "vmbr0", &prov_b64, &cd_arg, &aw_arg, &mons,
+            &shell_arg, &cores, &mem, &disk,
+        ],
         on_progress,
     )
     .await?;

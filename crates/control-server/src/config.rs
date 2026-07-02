@@ -64,6 +64,32 @@ mod tests {
     }
 
     #[test]
+    fn merge_linear_keys_by_name() {
+        use wire::{LinearConfig, LinearKey};
+        let mut base = AppConfig::default();
+        base.linear = LinearConfig(vec![
+            LinearKey { name: "we".into(), key: "OLD-WE".into() },
+            LinearKey { name: "dev".into(), key: "OLD-DEV".into() },
+        ]);
+        // UI sends the full list: blank key = unchanged, new row = added,
+        // omitted row ("dev") = deleted. Names are normalized to lowercase.
+        let incoming = serde_json::json!({
+            "linear": [
+                { "name": "we", "key": "" },
+                { "name": "OPS", "key": "NEW-OPS" },
+            ],
+        });
+        let merged = merge_update(&base, incoming).unwrap();
+        assert_eq!(merged.linear.names(), vec!["we", "ops"]);
+        assert_eq!(merged.linear.key_for("we"), Some("OLD-WE")); // blank kept stored
+        assert_eq!(merged.linear.key_for("ops"), Some("NEW-OPS"));
+        assert_eq!(merged.linear.key_for("dev"), None); // omitted → deleted
+        // No `linear` field at all → unchanged.
+        let untouched = merge_update(&base, serde_json::json!({})).unwrap();
+        assert_eq!(untouched.linear, base.linear);
+    }
+
+    #[test]
     fn merge_replaces_clone_groups_wholesale() {
         // The editor always sends the full group list, so a plain array replace is right.
         let mut base = AppConfig::default();
@@ -111,17 +137,43 @@ pub fn save(cfg: &AppConfig) -> Result<()> {
 /// Merge a partial config update onto `base`, returning the new config. Rules:
 /// non-secret fields are replaced; **empty-string scalars are treated as
 /// "unchanged"** (so the redacted UI can send back blank secrets without wiping
-/// them); `cloneAccounts` merge by email (a blank token keeps the stored one).
+/// them); `cloneAccounts` merge by email and `linear` by workspace name (a blank
+/// token/key keeps the stored one).
 pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<AppConfig> {
     let mut cur = serde_json::to_value(base)?;
-    // Pull cloneAccounts aside for email-wise merge (generic merge would replace).
+    // Pull the secret-bearing lists aside for key-wise merge (generic merge would replace).
     let incoming_accounts = incoming.get("cloneAccounts").cloned();
+    let incoming_linear = incoming.get("linear").cloned();
     deep_merge(&mut cur, &incoming);
     let mut merged: AppConfig = serde_json::from_value(cur)?;
     if let Some(serde_json::Value::Array(rows)) = incoming_accounts {
         merged.clone_accounts = merge_clone_accounts(&base.clone_accounts, &rows);
     }
+    if let Some(serde_json::Value::Array(rows)) = incoming_linear {
+        merged.linear = merge_linear_keys(&base.linear, &rows);
+    }
     Ok(merged)
+}
+
+/// Merge the UI's Linear-key rows by workspace name: a blank key keeps the stored
+/// one (write-only secret); a row absent from the list deletes that workspace.
+fn merge_linear_keys(base: &wire::LinearConfig, rows: &[serde_json::Value]) -> wire::LinearConfig {
+    let mut keys: Vec<wire::LinearKey> = Vec::new();
+    for r in rows {
+        let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
+        let name = name.trim().to_ascii_lowercase();
+        if name.is_empty() || keys.iter().any(|k| k.name == name) {
+            continue;
+        }
+        let sent = r.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let key = if sent.is_empty() {
+            base.key_for(&name).unwrap_or_default().to_string()
+        } else {
+            sent.to_string()
+        };
+        keys.push(wire::LinearKey { name, key });
+    }
+    wire::LinearConfig(keys)
 }
 
 /// Overlay `src` onto `dst`. Objects merge recursively; arrays + scalars replace —

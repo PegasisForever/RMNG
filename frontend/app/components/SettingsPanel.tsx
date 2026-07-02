@@ -145,10 +145,11 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [envPresets, setEnvPresets] =
     useState<{ name: string; vars: { key: string; value: string }[] }[]>([]);
   const [claudeGroups, setClaudeGroups] = useState<{ name: string; accounts: string[] }[]>([]);
-  const [template, setTemplate] = useState({ baseImage: "", cores: 4, memoryMb: 8192, diskGb: 40 });
   const [proxmoxSsh, setProxmoxSsh] = useState("");
   const [hostnamePrefix, setHostnamePrefix] = useState("");
-  const [linear, setLinear] = useState({ we: "", dev: "", hh: "", per: "" });
+  // Linear workspaces: editable rows. `key` is write-only (blank = keep stored);
+  // `set` mirrors whether the server holds one.
+  const [linearKeys, setLinearKeys] = useState<{ name: string; key: string; set: boolean }[]>([]);
   const [claude, setClaude] = useState({
     pollSecs: 600,
     pinnedEmail: "",
@@ -166,7 +167,6 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
         ? c.monitors.map((m) => ({ ...m }))
         : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
     );
-    setTemplate({ ...c.template });
     setHostnamePrefix(c.proxmoxHostnamePrefix);
     setClaude({
       ...c.claude,
@@ -179,6 +179,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     setStaticDir(c.staticDir);
     setEnvPresets(c.envPresets.map((p) => ({ name: p.name, vars: p.vars.map((v) => ({ ...v })) })));
     setClaudeGroups(c.cloneGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })));
+    setLinearKeys(c.linearKeys.map((k) => ({ name: k.name, key: "", set: k.set })));
   }
 
   useEffect(() => {
@@ -253,9 +254,10 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           y: Math.max(0, m.y),
           primary: m.primary,
         })),
-        template,
         proxmox: { ssh: proxmoxSsh, hostnamePrefix },
-        linear,
+        linear: linearKeys
+          .filter((k) => k.name.trim())
+          .map((k) => ({ name: k.name.trim().toLowerCase(), key: k.key })),
         claude: { ...claude, pinnedEmail: claude.pinnedEmail || null },
         listen,
         agentPort,
@@ -274,7 +276,6 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       const next = await putConfig(patch);
       load(next); // re-seed from the server's redacted view; clears write-only inputs
       setProxmoxSsh("");
-      setLinear({ we: "", dev: "", hh: "", per: "" });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {
@@ -504,45 +505,6 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               </div>
             </Section>
 
-            {/* Clone container (template). */}
-            <Section title="Clone container" hint="Resources + base image for newly bootstrapped clones.">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="col-span-2">
-                  <Field label="Base image (vztmpl)">
-                    <input
-                      value={template.baseImage}
-                      onChange={(e) => setTemplate({ ...template, baseImage: e.target.value })}
-                      className={input}
-                    />
-                  </Field>
-                </div>
-                <Field label="Cores">
-                  <input
-                    type="number"
-                    value={template.cores}
-                    onChange={(e) => setTemplate({ ...template, cores: Number(e.target.value) || 0 })}
-                    className={input}
-                  />
-                </Field>
-                <Field label="Memory (MB)">
-                  <input
-                    type="number"
-                    value={template.memoryMb}
-                    onChange={(e) => setTemplate({ ...template, memoryMb: Number(e.target.value) || 0 })}
-                    className={input}
-                  />
-                </Field>
-                <Field label="Disk (GB)">
-                  <input
-                    type="number"
-                    value={template.diskGb}
-                    onChange={(e) => setTemplate({ ...template, diskGb: Number(e.target.value) || 0 })}
-                    className={input}
-                  />
-                </Field>
-              </div>
-            </Section>
-
             {/* Proxmox. */}
             <Section title="Proxmox">
               <div className="space-y-3">
@@ -582,18 +544,56 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               </div>
             </Section>
 
-            {/* Linear (write-only keys). */}
-            <Section title="Linear API keys" hint="Per-workspace keys. Leave blank to keep the stored key.">
-              <div className="grid grid-cols-2 gap-3">
-                {(["we", "dev", "hh", "per"] as const).map((k) => (
-                  <Secret
-                    key={k}
-                    label={k.toUpperCase()}
-                    set={cfg.linearKeysSet[k]}
-                    value={linear[k]}
-                    onChange={(v) => setLinear({ ...linear, [k]: v })}
-                  />
+            {/* Linear (write-only keys, editable workspace list). */}
+            <Section
+              title="Linear API keys"
+              hint="One row per workspace. The name is the ticket prefix / Linear team key (e.g. we → WE-142). Leave a key blank to keep the stored one; removing a row deletes the workspace."
+            >
+              <div className="space-y-1.5">
+                {linearKeys.length === 0 ? <p className="text-xs text-slate-400">No workspaces.</p> : null}
+                {linearKeys.map((k, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <input
+                      value={k.name}
+                      onChange={(e) =>
+                        setLinearKeys((ks) => ks.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
+                      }
+                      placeholder="name"
+                      spellCheck={false}
+                      className="w-24 rounded border border-slate-300 px-2 py-1 font-mono text-xs lowercase focus:border-slate-400 focus:outline-none"
+                    />
+                    <input
+                      type="password"
+                      value={k.key}
+                      placeholder={k.set ? "•••••••• (set — leave blank to keep)" : "lin_api_…"}
+                      onChange={(e) =>
+                        setLinearKeys((ks) => ks.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))
+                      }
+                      className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-400 focus:outline-none"
+                    />
+                    <span
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                        k.set ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-400"
+                      }`}
+                    >
+                      {k.set ? "set" : "unset"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setLinearKeys((ks) => ks.filter((_, j) => j !== i))}
+                      className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 ))}
+                <button
+                  type="button"
+                  onClick={() => setLinearKeys((ks) => [...ks, { name: "", key: "", set: false }])}
+                  className="mt-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                >
+                  + Add workspace
+                </button>
               </div>
             </Section>
 

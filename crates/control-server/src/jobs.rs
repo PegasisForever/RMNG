@@ -32,7 +32,8 @@ impl std::error::Error for JobError {}
 /// Linear ticket metadata stamped onto a cloned `Host`.
 #[derive(Debug, Clone, Default)]
 pub struct LinearMeta {
-    pub workspace: Option<wire::LinearWorkspace>,
+    /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`).
+    pub workspace: Option<String>,
     pub ticket: Option<String>,
     pub ticket_url: Option<String>,
     pub branch: Option<String>,
@@ -250,7 +251,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             ..Default::default()
         };
         if let Some(m) = &spec.linear {
-            host.linear_workspace = m.workspace;
+            host.linear_workspace = m.workspace.clone();
             host.linear_ticket = m.ticket.clone();
             host.linear_ticket_url = m.ticket_url.clone();
             host.linear_branch = m.branch.clone();
@@ -333,11 +334,18 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     }
 }
 
-/// Bootstrap a template/clone from a base image (from-zero). Registers the result
-/// as a template (clonable). Drives a clone-kind Operation with no source.
-pub fn start_bootstrap(app: &App, hostname: &str) -> Result<Operation, JobError> {
+/// Bootstrap a template/clone from the fixed base image (from-zero). Registers the
+/// result as a template (clonable). Drives a clone-kind Operation with no source.
+pub fn start_bootstrap(
+    app: &App,
+    hostname: &str,
+    res: crate::orchestrate::BootstrapResources,
+) -> Result<Operation, JobError> {
     if !is_dns_label(hostname) {
         return Err(JobError("hostname must be a DNS label".into()));
+    }
+    if res.cores == 0 || res.memory_mb == 0 || res.disk_gb == 0 {
+        return Err(JobError("cores, memoryMb and diskGb must all be > 0".into()));
     }
     let st = app.store.get();
     if st.hosts.iter().any(|h| h.id == hostname) {
@@ -350,11 +358,16 @@ pub fn start_bootstrap(app: &App, hostname: &str) -> Result<Operation, JobError>
     let (ret, op_id) = (op.clone(), op.id.clone());
     app.store.mutate(|s| s.operations.push(op));
     let (app2, host) = (app.clone(), hostname.to_string());
-    tokio::spawn(async move { run_bootstrap(app2, op_id, host).await });
+    tokio::spawn(async move { run_bootstrap(app2, op_id, host, res).await });
     Ok(ret)
 }
 
-async fn run_bootstrap(app: App, op_id: String, hostname: String) {
+async fn run_bootstrap(
+    app: App,
+    op_id: String,
+    hostname: String,
+    res: crate::orchestrate::BootstrapResources,
+) {
     let cfg = app.config();
     let progress = {
         let (app, op_id) = (app.clone(), op_id.clone());
@@ -374,7 +387,7 @@ async fn run_bootstrap(app: App, op_id: String, hostname: String) {
             });
         }
     };
-    let (ctid, ip) = match crate::orchestrate::bootstrap_template(&cfg, &hostname, progress).await {
+    let (ctid, ip) = match crate::orchestrate::bootstrap_template(&cfg, &hostname, res, progress).await {
         Ok(v) => v,
         Err(e) => return fail_op(&app, &op_id, e.to_string()),
     };

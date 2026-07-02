@@ -148,16 +148,73 @@ impl Default for ProxmoxConfig {
     }
 }
 
+/// One Linear workspace: `name` is the lowercase ticket prefix, which doubles as
+/// the Linear team key (`we` ↔ `WE-142` tickets); `key` is the personal API key
+/// (**secret** — never sent to the browser).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct LinearConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub we: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dev: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hh: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub per: Option<String>,
+#[serde(rename_all = "camelCase")]
+pub struct LinearKey {
+    pub name: String,
+    #[serde(default)]
+    pub key: String,
+}
+
+/// The Linear workspaces — an editable list (Settings → "Linear API keys").
+/// Serialized as a plain array; old `config.json` files with the fixed
+/// `{we,dev,hh,per}` object still parse (see [`LinearConfigCompat`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(from = "LinearConfigCompat")]
+pub struct LinearConfig(pub Vec<LinearKey>);
+
+impl LinearConfig {
+    /// The API key for a workspace name (case-insensitive), if set non-empty.
+    pub fn key_for(&self, name: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|k| k.name.eq_ignore_ascii_case(name))
+            .map(|k| k.key.as_str())
+            .filter(|k| !k.is_empty())
+    }
+
+    /// Configured workspace names, for pickers and error messages.
+    pub fn names(&self) -> Vec<&str> {
+        self.0.iter().map(|k| k.name.as_str()).collect()
+    }
+}
+
+/// Both accepted `linear` wire shapes: the current list, and the legacy fixed
+/// four-workspace object written by pre-list versions.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LinearConfigCompat {
+    List(Vec<LinearKey>),
+    Legacy {
+        #[serde(default)]
+        we: Option<String>,
+        #[serde(default)]
+        dev: Option<String>,
+        #[serde(default)]
+        hh: Option<String>,
+        #[serde(default)]
+        per: Option<String>,
+    },
+}
+
+impl From<LinearConfigCompat> for LinearConfig {
+    fn from(c: LinearConfigCompat) -> Self {
+        match c {
+            LinearConfigCompat::List(keys) => Self(keys),
+            LinearConfigCompat::Legacy { we, dev, hh, per } => Self(
+                [("we", we), ("dev", dev), ("hh", hh), ("per", per)]
+                    .into_iter()
+                    .filter_map(|(name, key)| {
+                        let key = key.unwrap_or_default();
+                        (!key.is_empty()).then(|| LinearKey { name: name.into(), key })
+                    })
+                    .collect(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -177,27 +234,6 @@ pub struct ClaudeConfig {
 impl Default for ClaudeConfig {
     fn default() -> Self {
         Self { poll_secs: 600, pinned_email: None, auto_swap_on_exhaustion: false }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct TemplateConfig {
-    pub base_image: String,
-    pub cores: u32,
-    pub memory_mb: u32,
-    pub disk_gb: u32,
-}
-
-impl Default for TemplateConfig {
-    fn default() -> Self {
-        Self {
-            base_image: "local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst".into(),
-            cores: 4,
-            memory_mb: 8192,
-            disk_gb: 40,
-        }
     }
 }
 
@@ -231,8 +267,6 @@ pub struct AppConfig {
     /// `clone_accounts` emails).
     #[serde(default)]
     pub clone_groups: Vec<CloneGroup>,
-    #[serde(default)]
-    pub template: TemplateConfig,
     /// Named environment-variable presets the operator picks from at clone time.
     #[serde(default)]
     pub env_presets: Vec<EnvPreset>,
@@ -262,7 +296,6 @@ impl Default for AppConfig {
             claude: ClaudeConfig::default(),
             clone_accounts: Vec::new(),
             clone_groups: Vec::new(),
-            template: TemplateConfig::default(),
             env_presets: Vec::new(),
             chroma: ChromaMode::default(),
             detector_inference_url: default_inference_url(),
@@ -307,12 +340,12 @@ impl AppConfig {
             monitors: self.monitors.clone(),
             proxmox_ssh_set: !self.proxmox.ssh.is_empty(),
             proxmox_hostname_prefix: self.proxmox.hostname_prefix.clone(),
-            linear_keys_set: LinearKeysSet {
-                we: self.linear.we.is_some(),
-                dev: self.linear.dev.is_some(),
-                hh: self.linear.hh.is_some(),
-                per: self.linear.per.is_some(),
-            },
+            linear_keys: self
+                .linear
+                .0
+                .iter()
+                .map(|k| LinearKeyRedacted { name: k.name.clone(), set: !k.key.is_empty() })
+                .collect(),
             claude: self.claude.clone(),
             clone_accounts: self
                 .clone_accounts
@@ -324,7 +357,6 @@ impl AppConfig {
                 })
                 .collect(),
             clone_groups: self.clone_groups.clone(),
-            template: self.template.clone(),
             env_presets: self.env_presets.clone(),
             chroma: self.chroma,
             detector_inference_url: self.detector_inference_url.clone(),
@@ -332,14 +364,13 @@ impl AppConfig {
     }
 }
 
+/// A Linear workspace as shown to the browser: its name + whether a key is stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct LinearKeysSet {
-    pub we: bool,
-    pub dev: bool,
-    pub hh: bool,
-    pub per: bool,
+pub struct LinearKeyRedacted {
+    pub name: String,
+    pub set: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -364,11 +395,10 @@ pub struct AppConfigRedacted {
     pub monitors: Vec<MonitorSpec>,
     pub proxmox_ssh_set: bool,
     pub proxmox_hostname_prefix: String,
-    pub linear_keys_set: LinearKeysSet,
+    pub linear_keys: Vec<LinearKeyRedacted>,
     pub claude: ClaudeConfig,
     pub clone_accounts: Vec<CloneAccountRedacted>,
     pub clone_groups: Vec<CloneGroup>,
-    pub template: TemplateConfig,
     pub env_presets: Vec<EnvPreset>,
     pub chroma: ChromaMode,
     pub detector_inference_url: String,
@@ -414,9 +444,35 @@ mod tests {
     }
 
     #[test]
+    fn linear_config_parses_both_shapes() {
+        // Current shape: a plain list.
+        let c: AppConfig =
+            serde_json::from_str(r#"{ "linear": [{ "name": "we", "key": "K1" }, { "name": "ops", "key": "K2" }] }"#)
+                .unwrap();
+        assert_eq!(c.linear.names(), vec!["we", "ops"]);
+        assert_eq!(c.linear.key_for("OPS"), Some("K2")); // case-insensitive
+        // Legacy shape: the fixed four-workspace object (null/missing keys dropped).
+        let c: AppConfig =
+            serde_json::from_str(r#"{ "linear": { "we": "K1", "hh": null, "per": "K3" } }"#).unwrap();
+        assert_eq!(c.linear.names(), vec!["we", "per"]);
+        assert_eq!(c.linear.key_for("we"), Some("K1"));
+        assert_eq!(c.linear.key_for("hh"), None);
+        // Round-trips as the list shape.
+        let v = serde_json::to_value(&c.linear).unwrap();
+        assert!(v.is_array());
+        // Missing field → empty list.
+        let c: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(c.linear.0.is_empty());
+    }
+
+    #[test]
     fn redaction_hides_secrets() {
         let c = AppConfig {
             proxmox: ProxmoxConfig { ssh: "root@10.0.0.100".into(), ..Default::default() },
+            linear: LinearConfig(vec![
+                LinearKey { name: "we".into(), key: "lin_api_secret".into() },
+                LinearKey { name: "ops".into(), key: String::new() },
+            ]),
             clone_accounts: vec![CloneAccount {
                 email: "a@b".into(),
                 long_lived_token: "sk-ant-oat01-x".into(),
@@ -428,6 +484,10 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("sk-ant-oat01-x"));
         assert!(!json.contains("10.0.0.100"));
+        assert!(!json.contains("lin_api_secret"));
+        assert_eq!(r.linear_keys.len(), 2);
+        assert!(r.linear_keys[0].set && r.linear_keys[0].name == "we");
+        assert!(!r.linear_keys[1].set);
         assert!(r.proxmox_ssh_set);
         assert!(r.clone_accounts[0].long_lived_token_set);
         assert!(!r.clone_accounts[0].refresh_token_set);

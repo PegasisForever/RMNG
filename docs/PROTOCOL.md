@@ -128,11 +128,10 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../
 | `static_dir` | string | `"frontend/build/client"` | disk frontend (else embedded) |
 | `monitors` | `MonitorSpec[]` | `[]` → one 1080p primary | desired global layout |
 | `proxmox` | `ProxmoxConfig` | — | node SSH + clone subnet |
-| `linear` | `LinearConfig` | — | per-workspace API keys (**secret**) |
+| `linear` | `LinearKey[]` | `[]` | per-workspace API keys, editable list (**secret**) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
 | `clone_accounts` | `CloneAccount[]` | `[]` | Claude accounts for clones (**secret tokens**) |
 | `clone_groups` | `CloneGroup[]` | `[]` | named account pools for rotation (not secret) |
-| `template` | `TemplateConfig` | — | golden-template build params |
 
 - **`ListenConfig`**: `web 9000`, `video 9001`, `clone_mcp 9002`, `global_mcp 9003`,
   `daemon_mcp 9004`.
@@ -140,7 +139,10 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../
   (`"BC:24:11"` — clone.sh regenerates a CoW clone's MAC with this OUI to avoid colliding
   with the template's; config-only, not in the Settings UI), `hostname_prefix` (`"pega-"`,
   editable in Settings → prepended to derived clone hostnames).
-- **`LinearConfig`**: `we`/`dev`/`hh`/`per` optional API keys.
+- **`LinearKey`**: `name` (lowercase ticket prefix, doubles as the Linear team key —
+  `we` ↔ `WE-142`), `key` (personal API key, **secret**). The workspace set is this list,
+  not an enum; the legacy fixed `{we,dev,hh,per}` object shape still parses. `PUT
+  /api/config` merges rows by name (blank key keeps the stored one; omitted row deletes).
 - **`ClaudeConfig`**: `poll_secs` (`600`, floored 15), `pinned_email?`,
   `auto_swap_on_exhaustion` (bool).
 - <a id="cloneaccount"></a>**`CloneAccount`**: `email`, `long_lived_token` (installed into the
@@ -151,9 +153,12 @@ returns `AppConfigRedacted` (secrets → `*_set: bool`). Source: [config.rs](../
 - **`CloneGroup`**: `name`, `accounts` (member emails). A clone bound to a group
   (`Host.claude_group`) is re-balanced across the group's members every 10 min (rotator),
   skipping any over 90% 5h usage; selected at clone/swap time as `group:<name>`.
-- **`TemplateConfig`**: `base_image` (`local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst`),
-  `cores`, `memory_mb`, `disk_gb`.
 - **`MonitorSpec`**: `width`, `height`, `x`, `y`, `primary`.
+
+Template build params are not config: the base image is fixed in code
+(`local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst` — the patched gnome-shell is
+compiled against Ubuntu 26.04's GNOME only) and CT resources (cores/memory/disk) are chosen
+per bootstrap in the "New template" modal (`POST /api/template/bootstrap`).
 
 ---
 

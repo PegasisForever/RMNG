@@ -113,9 +113,11 @@ Body (one of three task modes + optional account/instructions):
 Hostname is derived (`pega-{ticket}` or a slug of the plain title, with a numeric suffix on
 collision). Returns `{ "ok": true, "op": Operation }` or `400 {error}`.
 
-### `POST /api/template/bootstrap` — body `{ "hostname": string }`
-Build a brand-new container from `config.template.base_image` (full provisioning, not CoW):
-headless GNOME + clone-daemon + agent-wrapper + the patched gnome-shell deb. Returns the
+### `POST /api/template/bootstrap` — body `{ "hostname": string, "cores"?: u32, "memoryMb"?: u32, "diskGb"?: u32 }`
+Build a brand-new container from the fixed Ubuntu 26.04 base image (full provisioning, not
+CoW): headless GNOME + clone-daemon + agent-wrapper + the patched gnome-shell deb. The base
+image is not configurable — the patched gnome-shell is compiled against Ubuntu 26.04's GNOME
+only. Resources default to 16 cores / 32768 MB / 128 GB when omitted. Returns the
 `Operation`. Use this once to create the golden template; thereafter clone from it.
 
 ### `POST /api/clone/redeploy` — body `{ "id": string, "daemonOnly"?: bool }`

@@ -46,8 +46,8 @@ export interface Host {
    * alone can't. Absent on hosts created before this field / when Claude isn't used.
    */
   claudeSelection?: string;
-  /** Linear workspace this host's ticket belongs to (selects the card color). */
-  linearWorkspace?: "we" | "dev" | "hh" | "per";
+  /** Linear workspace name this host's ticket belongs to (selects the card color). */
+  linearWorkspace?: string;
   /** Linear ticket identifier, e.g. "WE-142". */
   linearTicket?: string;
   /** Full Linear ticket URL. */
