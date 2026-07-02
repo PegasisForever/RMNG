@@ -34,10 +34,10 @@ ControlState { selected: Option<String>, monitors: Vec<MonitorSpec>,
                hosts: Vec<Host>, operations: Vec<Operation>,
                templates: Vec<String>, claude_accounts: Vec<ClaudeUsage> }
 Host { id, host, port, username, password, domain?, gdm_username?, gdm_password?,
-       ctid?, source?, claude_account_email?, linear_*?, display_name?,
+       container?, source?, claude_account_email?, linear_*?, display_name?,
        agent_report?, state_note?, monitor_state? }
-Operation { id, kind: Clone|Delete, target, source?, status, step, pct, message,
-            log: Vec<String>, ctid?, started_at, finished_at? }
+Operation { id, kind: Clone|Delete|Bootstrap|Commit, target, source?, status, step, pct,
+            message, log: Vec<String>, container?, started_at, finished_at? }
 ClaudeUsage { id, email, provider, active, assignable?, error?, stale?,
               last_updated, five_hour?, seven_day?, spend? }
 MonitorSpec { width, height }

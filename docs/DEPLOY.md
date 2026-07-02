@@ -132,7 +132,7 @@ is any image labeled `rmng.image=1`, repo `rmng/template:<name>`:
 
 **DinD × images are decoupled** (a semantic change from the old LVM-snapshot behavior):
 `docker commit` **excludes volume mounts**, and each clone's inner Docker (`/var/lib/docker`)
-lives on its per-clone `rmng-dind-<name>` volume. So a clone's inner-Docker state (pulled
+lives on its per-clone `rmng-dind-<id>` volume. So a clone's inner-Docker state (pulled
 images, build cache, running inner containers) **never travels into a committed image** —
 every clone always starts with an **empty inner Docker**. Daemon config / compose files in
 the clone user's `$HOME` **do** travel (they're on the image filesystem, not the volume). If
@@ -304,7 +304,7 @@ These are baked into the code/scripts now; listed so they aren't re-discovered.
    `rmng-sock` volume at `/srv/rmng-sock`; a host bind wouldn't be shareable into siblings.
 4. **Clones need `StopSignal=SIGRTMIN+3`** (baked into every image by `commit` with
    `set_boot_config`) or every stop is a 20 s hang + SIGKILL.
-5. **A per-clone `rmng-dind-<name>` volume** mounts at `/var/lib/docker` (the overlay-on-
+5. **A per-clone `rmng-dind-<id>` volume** mounts at `/var/lib/docker` (the overlay-on-
    overlay fix). It is never committed into images and is removed on clone delete.
 6. **`ubuntu:26.04` pull rate limits** on Docker Hub surface verbatim in the wizard's
    base-image build log.

@@ -5,7 +5,7 @@
 # invariant). The only ENV in play is RUST_LOG, baked into the image as a logging default.
 #
 # Equivalent one-liner (no registry needed):
-#   docker run -d --name rmng --privileged --init --restart unless-stopped \
+#   docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
 #     -p 9000-9003:9000-9003 rmng:latest

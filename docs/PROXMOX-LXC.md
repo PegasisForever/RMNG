@@ -44,7 +44,7 @@ docker run --rm hello-world                # nested Docker actually runs
 
 If the storage driver is `vfs` instead of `overlay2`, nested overlayfs isn't available —
 recheck `features: nesting=1` and that the CT was restarted. RMNG's per-clone
-`rmng-dind-<name>` volume at `/var/lib/docker` is the overlay-on-overlay fix for the clones'
+`rmng-dind-<id>` volume at `/var/lib/docker` is the overlay-on-overlay fix for the clones'
 own inner Docker, but the CT's *outer* Docker still needs overlay2.
 
 ## 4. Deploy RMNG
