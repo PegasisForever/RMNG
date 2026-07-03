@@ -199,4 +199,38 @@ mod tests {
         assert_eq!(back.target_digest.as_deref(), Some("sha256:new"));
         assert_eq!(back.spec.new_image_ref, "pegasis0/rmng:latest");
     }
+
+    #[test]
+    fn handoff_defaults_target_digest_when_absent() {
+        // The `#[serde(default)]` omission path: a handoff serialized with `None`, and an
+        // external payload that omits the key entirely, both deserialize to `target_digest:
+        // None` while preserving the nested SelfSpec.
+        let json = r#"{
+            "Id": "abc", "Name": "/rmng-server", "Image": "sha256:old",
+            "Config": {}, "HostConfig": {}, "NetworkSettings": { "Networks": {} }
+        }"#;
+        let resp: bollard::models::ContainerInspectResponse = serde_json::from_str(json).unwrap();
+        let spec = SelfSpec::from_inspect(&resp, "pegasis0/rmng:latest").unwrap();
+
+        // Round-trip through our own serializer with `None`.
+        let h = Handoff { spec, op_id: "op_2".into(), target_digest: None };
+        let back: Handoff = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
+        assert_eq!(back.op_id, "op_2");
+        assert_eq!(back.target_digest, None);
+        assert_eq!(back.spec.container_name, "rmng-server");
+        assert_eq!(back.spec.old_image_id, "sha256:old");
+
+        // An external payload that omits `target_digest` altogether still parses (default).
+        let minimal = r#"{
+            "spec": {
+                "container_name": "rmng-server", "new_image_ref": "pegasis0/rmng:latest",
+                "old_image_id": "sha256:old", "config": {}, "host_config": {}, "networks": {}
+            },
+            "op_id": "op_3"
+        }"#;
+        let parsed: Handoff = serde_json::from_str(minimal).unwrap();
+        assert_eq!(parsed.op_id, "op_3");
+        assert_eq!(parsed.target_digest, None);
+        assert_eq!(parsed.spec.old_image_id, "sha256:old");
+    }
 }
