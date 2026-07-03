@@ -36,8 +36,9 @@ services:
       # control-server's media plane. Must be a named volume (not bind) so clones share it.
       - rmng-sock:/srv/rmng-sock
     ports:
-      # 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP.
+      # 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP, 9005 forward.
       - "9000-9003:9000-9003"
+      - "9005:9005"
 
 volumes:
   rmng-data:

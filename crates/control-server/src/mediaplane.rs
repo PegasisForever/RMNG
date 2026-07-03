@@ -100,6 +100,10 @@ type Viewer = Arc<Mutex<Option<TcpStream>>>;
 type Encoders = Arc<Mutex<HashMap<u32, (Arc<Encoder>, u32, u32)>>>;
 
 pub fn spawn(app: App) {
+    // `spawn` is called from the async `main`, so a tokio runtime exists here; capture its
+    // handle so the std-thread media plane can `block_on` async control-plane calls
+    // (`App::dial_host`) from the forward-data serve threads.
+    let rt_handle = tokio::runtime::Handle::current();
     if let Err(e) = media::init() {
         tracing::error!("media init failed; port 1 disabled: {e}");
         return;
@@ -158,6 +162,22 @@ pub fn spawn(app: App) {
                 }
             }
             Err(e) => tracing::error!("port 1 bind {video_port} failed: {e}"),
+        });
+    }
+
+    // Port `forward` (data plane): one TCP connection per forwarded local socket.
+    {
+        let (app, rt_handle) = (app.clone(), rt_handle.clone());
+        std::thread::spawn(move || match TcpListener::bind(("0.0.0.0", forward_port)) {
+            Ok(l) => {
+                tracing::info!("forward data plane listening on 0.0.0.0:{forward_port}");
+                for stream in l.incoming().flatten() {
+                    let _ = stream.set_nodelay(true);
+                    let (app, rt_handle) = (app.clone(), rt_handle.clone());
+                    std::thread::spawn(move || serve_forward(stream, app, rt_handle));
+                }
+            }
+            Err(e) => tracing::error!("forward bind {forward_port} failed: {e}"),
         });
     }
 
@@ -640,6 +660,70 @@ fn read_viewer_input(mut sock: TcpStream, handle: Arc<MediaHandle>, app: App, vi
     app.forwards.clear();
 }
 
+/// Read the data-plane header: `[u32be len][JSON ForwardHeader]` (len capped at 64 KiB).
+fn read_forward_header(stream: &mut TcpStream) -> std::io::Result<wire::forward::ForwardHeader> {
+    let mut lb = [0u8; 4];
+    stream.read_exact(&mut lb)?;
+    let len = u32::from_be_bytes(lb) as usize;
+    if len > 64 * 1024 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "forward header too large"));
+    }
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body)?;
+    serde_json::from_slice(&body).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Bidirectionally pipe two TCP streams until both close. Each direction runs in its own
+/// thread and half-closes its peer's write side on EOF so the reverse direction drains.
+fn splice_forward(a: TcpStream, b: TcpStream) {
+    let (mut a_rd, mut b_wr) = match (a.try_clone(), b.try_clone()) {
+        (Ok(x), Ok(y)) => (x, y),
+        _ => return,
+    };
+    let (mut b_rd, mut a_wr) = (b, a);
+    let t = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut a_rd, &mut b_wr);
+        let _ = b_wr.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut b_rd, &mut a_wr);
+    let _ = a_wr.shutdown(std::net::Shutdown::Write);
+    let _ = t.join();
+}
+
+/// One forwarded connection: read the header, resolve + dial the clone port, reply a
+/// status byte, then splice. `0x00` = connected, non-zero = dial failed.
+fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
+    let header = match read_forward_header(&mut stream) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!("forward header read failed: {e}");
+            return;
+        }
+    };
+    let host = app.store.get().hosts.into_iter().find(|h| h.id == header.host_id);
+    let Some(host) = host else {
+        let _ = stream.write_all(&[1u8]);
+        return;
+    };
+    let dial = rt.block_on(app.dial_host(&host));
+    let addr = format!("{dial}:{}", header.remote_port);
+    match TcpStream::connect(&addr) {
+        Ok(upstream) => {
+            let _ = upstream.set_nodelay(true);
+            if stream.write_all(&[0u8]).is_err() {
+                return;
+            }
+            app.forwards.conn_opened(&header.host_id, &header.id);
+            splice_forward(stream, upstream);
+            app.forwards.conn_closed(&header.host_id, &header.id);
+        }
+        Err(e) => {
+            tracing::info!("forward dial {addr} failed: {e}");
+            let _ = stream.write_all(&[1u8]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,5 +800,49 @@ mod tests {
         assert!(msg.rules.iter().any(|r| r.host_id == "a" && r.local_port == 8080 && r.remote_port == 3000));
         assert!(msg.rules.iter().any(|r| r.host_id == "b" && r.local_port == 7000));
         assert!(!msg.rules.iter().any(|r| r.local_port == 9)); // disabled excluded
+    }
+
+    #[test]
+    fn forward_header_frames_round_trip() {
+        use std::io::Write;
+        use std::net::{TcpListener, TcpStream};
+        let hdr = wire::forward::ForwardHeader { token: None, host_id: "h".into(), id: "f22".into(), remote_port: 22 };
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            read_forward_header(&mut s).unwrap()
+        });
+        let mut c = TcpStream::connect(addr).unwrap();
+        let body = serde_json::to_vec(&hdr).unwrap();
+        c.write_all(&(body.len() as u32).to_be_bytes()).unwrap();
+        c.write_all(&body).unwrap();
+        assert_eq!(h.join().unwrap(), hdr);
+    }
+
+    #[test]
+    fn splice_forward_pipes_both_ways() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        // "upstream" = an echo server.
+        let echo = TcpListener::bind("127.0.0.1:0").unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = echo.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let n = s.read(&mut buf).unwrap();
+            s.write_all(&buf[..n]).unwrap();
+        });
+        // A pair standing in for the viewer-facing client socket.
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let front_addr = front.local_addr().unwrap();
+        let mut client = TcpStream::connect(front_addr).unwrap();
+        let (server_side, _) = front.accept().unwrap();
+        let upstream = TcpStream::connect(echo_addr).unwrap();
+        std::thread::spawn(move || splice_forward(server_side, upstream));
+        client.write_all(b"ping").unwrap();
+        let mut got = [0u8; 4];
+        client.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"ping");
     }
 }

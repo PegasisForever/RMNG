@@ -13,9 +13,6 @@ pub struct ForwardBus {
     inner: RwLock<HashMap<String, HashMap<String, ForwardRuntime>>>,
 }
 
-// The write half (`report` / `conn_opened` / `conn_closed` / `clear` and their private
-// helpers) gains its callers in the media-plane task; keep the crate warning-free until then.
-#[allow(dead_code)]
 impl ForwardBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(16);

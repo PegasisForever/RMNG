@@ -118,8 +118,8 @@ COPY --from=bun-build   /src/frontend/build/client      /usr/local/share/rmng/st
 
 # CWD-relative config.json + data/ land in the /data volume (config.rs uses relative paths).
 WORKDIR /data
-# 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP.
-EXPOSE 9000-9003
+# 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP, 9005 forward data plane.
+EXPOSE 9000-9003 9005
 # Logging default only (not a setting — no config lives in env, per the no-env invariant).
 ENV RUST_LOG=info,tower_http=warn,clip=debug
 ENTRYPOINT ["/usr/local/bin/rmng-control-server"]
