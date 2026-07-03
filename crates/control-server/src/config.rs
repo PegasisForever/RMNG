@@ -153,6 +153,25 @@ mod tests {
     }
 
     #[test]
+    fn merge_carries_preset_agent_playbook() {
+        let base = AppConfig::default();
+        let incoming = serde_json::json!({
+            "presets": [{ "name": "p", "agentPlaybook": "extra for p", "linearKey": "" }],
+        });
+        let merged = merge_update(&base, incoming).unwrap();
+        assert_eq!(merged.presets.len(), 1);
+        assert_eq!(merged.presets[0].agent_playbook, "extra for p");
+    }
+
+    #[test]
+    fn merge_sets_global_agent_playbook() {
+        let base = AppConfig::default();
+        let incoming = serde_json::json!({ "agentPlaybook": "NEW GLOBAL" });
+        let merged = merge_update(&base, incoming).unwrap();
+        assert_eq!(merged.agent_playbook, "NEW GLOBAL");
+    }
+
+    #[test]
     fn migrate_legacy_folds_old_fields() {
         // envPresets seed presets (no labels/key); linear + cloneAccounts just flag a rewrite.
         let raw = serde_json::json!({
@@ -516,7 +535,9 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
         } else {
             sent.to_string()
         };
-        out.push(wire::Preset { name, labels, linear_key, vars, agent_playbook: String::new() });
+        let agent_playbook =
+            r.get("agentPlaybook").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        out.push(wire::Preset { name, labels, linear_key, vars, agent_playbook });
     }
     out
 }

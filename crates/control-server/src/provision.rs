@@ -255,6 +255,7 @@ pub async fn clone_container(
     image: &str,
     hostname: &str,
     env: &[EnvVar],
+    agent_playbook: &str,
     mut on_progress: impl FnMut(&str, &str),
 ) -> Result<String> {
     if !is_dns_label(hostname) {
@@ -300,7 +301,7 @@ pub async fn clone_container(
 
     // From here on, a failure must tear the half-built clone down. Run the rest under
     // a guard that removes the container + its dind volumes on any early return.
-    match clone_container_after_create(app, &container, hostname, env, &mut on_progress).await {
+    match clone_container_after_create(app, &container, hostname, env, agent_playbook, &mut on_progress).await {
         Ok(()) => Ok(reference),
         Err(e) => {
             tracing::warn!("clone {hostname} failed after create; cleaning up: {e}");
@@ -319,6 +320,7 @@ async fn clone_container_after_create(
     container: &str,
     hostname: &str,
     env: &[EnvVar],
+    agent_playbook: &str,
     on_progress: &mut impl FnMut(&str, &str),
 ) -> Result<()> {
     let docker = &app.docker;
@@ -348,6 +350,18 @@ async fn clone_container_after_create(
             gid: CLONE_GID,
         },
     ];
+    // The Settings-editable agent playbook (global + preset append), read by the agent-wrapper
+    // at startup (AGENT_INSTRUCTIONS_PATH). Empty ⇒ skip; the wrapper then uses its baked-in
+    // default. Distinct from environment.d (this is a multi-KB markdown blob, not a KEY=VALUE).
+    if !agent_playbook.trim().is_empty() {
+        entries.push(TarEntry {
+            path: format!("home/{CLONE_USER}/.config/rmng/agent-instructions.md"),
+            data: agent_playbook.as_bytes().to_vec(),
+            mode: 0o644,
+            uid: CLONE_UID,
+            gid: CLONE_GID,
+        });
+    }
     if let Some(rc) = &path_rc {
         entries.push(TarEntry {
             path: "etc/fish/conf.d/rmng-preset-path.fish".into(),
