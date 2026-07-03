@@ -97,6 +97,8 @@ function Secret({
 export interface SettingsPanelProps {
   /** Emails of the imported Claude accounts (from live state) — the pool a group can draw from. */
   accountEmails: string[];
+  /** Emails of the imported Codex accounts (from live state) — the pool a Codex group can draw from. */
+  codexAccountEmails: string[];
   onClose: () => void;
   // --- injected server calls (no API logic lives in this component, so it's
   //     renderable in isolation — e.g. Storybook — with mocked data) ---
@@ -119,6 +121,7 @@ export interface SettingsPanelProps {
 
 export function SettingsPanel({
   accountEmails,
+  codexAccountEmails,
   onClose,
   getConfig,
   putConfig,
@@ -166,6 +169,13 @@ export function SettingsPanel({
     pinnedEmail: "",
     autoSwapOnExhaustion: false,
   });
+  const [codex, setCodex] = useState({
+    pollSecs: 600,
+    pinnedEmail: "",
+    autoSwapOnExhaustion: false,
+    usagePolling: true,
+  });
+  const [codexGroups, setCodexGroups] = useState<{ name: string; accounts: string[] }[]>([]);
   const [listen, setListen] = useState({ web: 9000, video: 9001, cloneMcp: 9002, globalMcp: 9003, daemonMcp: 9004 });
   const [agentPort, setAgentPort] = useState(4096);
   const [dataDir, setDataDir] = useState("");
@@ -191,6 +201,12 @@ export function SettingsPanel({
       pollSecs: Number(c.claude.pollSecs),
       pinnedEmail: c.claude.pinnedEmail ?? "",
     });
+    setCodex({
+      ...c.codex,
+      pollSecs: Number(c.codex.pollSecs),
+      pinnedEmail: c.codex.pinnedEmail ?? "",
+    });
+    setCodexGroups(c.codexGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })));
     setListen({ ...c.listen });
     setAgentPort(c.agentPort);
     setDataDir(c.dataDir);
@@ -256,6 +272,25 @@ export function SettingsPanel({
       ),
     );
 
+  // Codex group editors.
+  const addCodexGroup = () => setCodexGroups((gs) => [...gs, { name: "", accounts: [] }]);
+  const rmCodexGroup = (i: number) => setCodexGroups((gs) => gs.filter((_, j) => j !== i));
+  const setCodexGroupName = (i: number, name: string) =>
+    setCodexGroups((gs) => gs.map((g, j) => (j === i ? { ...g, name } : g)));
+  const toggleCodexGroupAccount = (i: number, email: string) =>
+    setCodexGroups((gs) =>
+      gs.map((g, j) =>
+        j === i
+          ? {
+              ...g,
+              accounts: g.accounts.includes(email)
+                ? g.accounts.filter((e) => e !== email)
+                : [...g.accounts, email],
+            }
+          : g,
+      ),
+    );
+
   async function save() {
     setSaving(true);
     setError(null);
@@ -279,6 +314,10 @@ export function SettingsPanel({
           ...(cfg?.setupComplete ? {} : { subnet }),
         },
         claude: { ...claude, pinnedEmail: claude.pinnedEmail || null },
+        codex: { ...codex, pinnedEmail: codex.pinnedEmail || null },
+        codexGroups: codexGroups
+          .filter((g) => g.name.trim())
+          .map((g) => ({ name: g.name.trim(), accounts: [...new Set(g.accounts)] })),
         listen,
         agentPort,
         dataDir,
@@ -695,6 +734,99 @@ export function SettingsPanel({
                 <button
                   type="button"
                   onClick={addGroup}
+                  className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                >
+                  + Add group
+                </button>
+              </div>
+            </Section>
+
+            {/* Codex. */}
+            <Section title="Codex">
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Usage poll interval (s)">
+                  <input
+                    type="number"
+                    value={codex.pollSecs}
+                    onChange={(e) => setCodex({ ...codex, pollSecs: Number(e.target.value) || 0 })}
+                    className={input}
+                  />
+                </Field>
+                <Field label="Pinned account email">
+                  <input
+                    value={codex.pinnedEmail}
+                    onChange={(e) => setCodex({ ...codex, pinnedEmail: e.target.value })}
+                    className={input}
+                  />
+                </Field>
+                <label className="col-span-2 flex items-center gap-2 text-sm text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={codex.autoSwapOnExhaustion}
+                    onChange={(e) => setCodex({ ...codex, autoSwapOnExhaustion: e.target.checked })}
+                  />
+                  Auto-swap a clone to another account when usage is exhausted
+                </label>
+                <label className="col-span-2 flex items-center gap-2 text-sm text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={codex.usagePolling}
+                    onChange={(e) => setCodex({ ...codex, usagePolling: e.target.checked })}
+                  />
+                  Poll ChatGPT usage (uncheck if the usage endpoint drifts; refresh + push still run)
+                </label>
+              </div>
+            </Section>
+
+            {/* Codex groups (named account pools). */}
+            <Section
+              title="Codex groups"
+              hint="A pool of Codex accounts. A clone bound to a group keeps its account until that account passes 90% usage, then moves to the least-used member."
+            >
+              <div className="space-y-3">
+                {codexGroups.length === 0 ? (
+                  <p className="text-xs text-slate-400">No groups.</p>
+                ) : null}
+                {codexGroups.map((g, i) => (
+                  <div key={i} className="rounded border border-slate-200 p-3">
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={g.name}
+                        onChange={(e) => setCodexGroupName(i, e.target.value)}
+                        placeholder="group name"
+                        className={input}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => rmCodexGroup(i)}
+                        className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    {codexAccountEmails.length === 0 ? (
+                      <p className="mt-2 text-xs text-slate-400">
+                        Import some Codex accounts first to add them to a group.
+                      </p>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+                        {codexAccountEmails.map((email) => (
+                          <label key={email} className="flex items-center gap-1.5 text-xs text-slate-600">
+                            <input
+                              type="checkbox"
+                              checked={g.accounts.includes(email)}
+                              onChange={() => toggleCodexGroupAccount(i, email)}
+                            />
+                            {email}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={addCodexGroup}
                   className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
                 >
                   + Add group

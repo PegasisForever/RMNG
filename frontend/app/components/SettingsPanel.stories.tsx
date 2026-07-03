@@ -4,6 +4,9 @@ import { fn } from "storybook/test";
 import { SettingsPanel } from "./SettingsPanel";
 import { accountEmails, appConfig, images } from "~/stories/fixtures";
 
+/** Codex account emails for the Codex groups editor (empty pool in stories). */
+const codexAccountEmails: string[] = [];
+
 // Mocked server calls — the component never imports the real API, so a story just
 // injects these. `fn(impl)` both runs the implementation and records the call in the
 // Actions panel.
@@ -21,6 +24,7 @@ const meta = {
   parameters: { layout: "fullscreen" },
   args: {
     accountEmails,
+    codexAccountEmails,
     onClose: fn(),
     getConfig: getConfig(),
     putConfig: putConfig(),
