@@ -17,6 +17,7 @@ import {
   deleteHost,
   deleteImage,
   getConfig,
+  getUpdateStatus,
   listImages,
   pullTemplate,
   putConfig,
@@ -397,6 +398,7 @@ function Dashboard({
           putConfig={putConfig}
           testConfig={testConfig}
           applyMonitors={applyMonitors}
+          getUpdateStatus={getUpdateStatus}
           images={images}
           imagesLoading={imagesLoading}
           pullBusy={state.operations.some(

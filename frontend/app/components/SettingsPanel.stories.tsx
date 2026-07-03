@@ -14,6 +14,16 @@ const testConfig = () =>
   fn(async () => ({ ok: true, message: "Docker reachable (Engine 27.1.1)" }));
 const applyMonitors = () =>
   fn(async () => ({ ok: true, applied: ["pega-we-142", "pega-dev-88"], errors: [] }));
+const getUpdateStatus = () =>
+  fn(async () => ({
+    currentRevision: "a1b2c3d",
+    currentCreated: "2026-07-01T12:00:00Z",
+    currentDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    remoteDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    available: false,
+    reference: "pegasis0/rmng:latest",
+    error: null,
+  }));
 
 const meta = {
   title: "Settings/SettingsPanel",
@@ -26,6 +36,7 @@ const meta = {
     putConfig: putConfig(),
     testConfig: testConfig(),
     applyMonitors: applyMonitors(),
+    getUpdateStatus: getUpdateStatus(),
     images,
     imagesLoading: false,
     pullBusy: false,
