@@ -150,6 +150,19 @@ fn tools_for(scope: Scope) -> Value {
             }),
             json!(["clone", "account"]),
         ));
+        tools.push(tool("codex_recommended", "Recommended Codex account for a new clone", json!({}), json!([])));
+        tools.push(tool(
+            "codex_swap",
+            "Hot-swap a clone's Codex account",
+            json!({
+                "clone": { "type": "string" },
+                "account": {
+                    "type": "string",
+                    "description": "An account email, \"auto\" (server picks best), \"group:<name>\", or \"none\" (remove the clone's token)",
+                },
+            }),
+            json!(["clone", "account"]),
+        ));
         tools.push(tool(
             "send_message",
             "Send a chat message to a clone's host agent. Async: the agent works in the background — poll read_chat for its reply. Errors if a turn is already running for that clone.",
@@ -331,6 +344,53 @@ async fn call_tool(st: &McpState, caller: Option<&str>, name: &str, args: Value)
                 (Some(g), Some(e)) => format!("swapped {clone} → {e} (group {g})"),
                 (None, Some(e)) => format!("swapped {clone} → {e}"),
                 _ => format!("swapped {clone} → none (no token)"),
+            }))
+        }
+        "codex_recommended" => {
+            Ok(text(json!({ "email": crate::codex::recommend(app) }).to_string()))
+        }
+        "codex_swap" => {
+            let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
+            let account = args.get("account").and_then(Value::as_str).unwrap_or("auto");
+            let host = app.store.get().hosts.into_iter().find(|h| h.id == clone).ok_or("unknown clone")?;
+            if !host.managed {
+                return Err("not a managed clone".into());
+            }
+            let assignment =
+                crate::codex::resolve_assignment(app, Some(account)).ok_or("no imported Codex accounts")?;
+            let selection = crate::codex::normalize_selection(Some(account));
+            let (group, email) = match assignment {
+                crate::codex::Assignment::None => {
+                    crate::codex::clear_clone_token(app, &host.id).await.map_err(|e| e.to_string())?;
+                    app.codex.forget_pushed(&host.id);
+                    (None, None)
+                }
+                crate::codex::Assignment::Group { name, initial } => {
+                    crate::codex::push_account_to_clone(app, &host.id, &initial)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    (Some(name), Some(initial))
+                }
+                crate::codex::Assignment::Account(a) => {
+                    crate::codex::push_account_to_clone(app, &host.id, &a)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    (None, Some(a))
+                }
+            };
+            let (id, email_set, group_set, sel_set) =
+                (host.id.clone(), email.clone(), group.clone(), selection.clone());
+            app.store.mutate(|s| {
+                if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+                    h.codex_account_email = email_set;
+                    h.codex_group = group_set;
+                    h.codex_selection = Some(sel_set);
+                }
+            });
+            Ok(text(match (&group, &email) {
+                (Some(g), Some(e)) => format!("swapped {clone} codex → {e} (group {g})"),
+                (None, Some(e)) => format!("swapped {clone} codex → {e}"),
+                _ => format!("swapped {clone} codex → none (no token)"),
             }))
         }
         "send_message" => {
