@@ -1,5 +1,7 @@
-//! macOS native titlebar: swap the GTK `HeaderBar` for a real `NSWindow` titlebar with
-//! two native `NSButton` accessories (fullscreen toggle + server-address settings).
+//! macOS native titlebar: swap the GTK `HeaderBar` for a real `NSWindow` titlebar with a
+//! native `NSButton` accessory (server-address settings). We intentionally do NOT add a
+//! custom fullscreen/maximize button — the native green traffic-light button already
+//! provides maximize/fullscreen on macOS.
 //!
 //! # Design
 //! This module is macOS-only (`#[cfg(target_os = "macos")]` on the `mod` declaration in
@@ -15,7 +17,8 @@
 //!    `unsafe { &*ptr }` — same live ObjC object, raw-pointer interop is valid.
 //! 4. Configure the titlebar: ensure `Titled` style mask, set title, `titlebarAppearsTransparent
 //!    = false`, `TitleVisibility = Visible`.
-//! 5. Build an `NSTitlebarAccessoryViewController` whose `view` holds two `NSButton`s.
+//! 5. Build an `NSTitlebarAccessoryViewController` whose `view` holds the settings `NSButton`
+//!    (primary window only).
 //! 6. Wire each button to a Rust closure via a tiny `NSObject` subclass (`ActionTarget`) that
 //!    stores a `Box<dyn Fn()>` ivar. The action method reads the ivar and calls the closure.
 //!    AppKit fires button actions on the main thread — the same thread as GTK's main loop on
@@ -134,8 +137,8 @@ impl ActionTarget {
 /// and `present()` is what triggers realize. The actual AppKit work happens inside that
 /// handler, which runs on the main thread once the surface (and its NSWindow) exists.
 ///
-/// `primary` — if `true`, adds both the fullscreen button AND the server-address button;
-/// if `false`, adds only fullscreen (secondary monitor windows in the future).
+/// `primary` — if `true`, adds the server-address settings button; if `false`, no accessory
+/// button is added (the native green traffic-light button handles maximize/fullscreen).
 pub fn install(
     window: &gtk4::ApplicationWindow,
     primary: bool,
@@ -232,81 +235,64 @@ fn install_on_realized(
         ns_window.titlebarAppearsTransparent()
     );
 
-    // ── 5. Build the accessory view controller ────────────────────────────────────────
-    // We need a MainThreadMarker to call many AppKit APIs.
-    // SAFETY: we are on the GTK main thread, which is the macOS main thread.
-    let mtm = unsafe { MainThreadMarker::new_unchecked() };
-
-    let vc = NSTitlebarAccessoryViewController::new(mtm);
-    // Trailing (right) placement in the titlebar.
-    vc.setLayoutAttribute(NSLayoutAttribute::Right);
-
-    // Container view (NSView) that holds the buttons side-by-side.
-    // Frame: width = 2 × 36px buttons + 8px gap = 80px; height = 28px (standard titlebar).
-    let container_frame = NSRect {
-        origin: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
-        size: NSSize { width: 80.0, height: 28.0 },
-    };
-    let container = NSView::initWithFrame(NSView::alloc(mtm), container_frame);
-
-    // ── 5a. Fullscreen button ─────────────────────────────────────────────────────────
-    let fs_image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        ns_string!("arrow.up.left.and.arrow.down.right"),
-        Some(ns_string!("Toggle fullscreen")),
-    );
-
-    let window_clone = window.clone();
-    let fs_callback: Box<dyn Fn()> = Box::new(move || {
-        crate::toggle_fullscreen(&window_clone);
-    });
-    let fs_target = ActionTarget::new(mtm, fs_callback);
-
-    let fs_btn = make_button(mtm, fs_image.as_deref(), "⛶", &fs_target);
-    // Position fullscreen button at the right end of the accessory bar.
-    fs_btn.setFrame(NSRect {
-        origin: objc2_foundation::NSPoint { x: 44.0, y: 0.0 },
-        size: NSSize { width: 32.0, height: 28.0 },
-    });
-    container.addSubview(&fs_btn);
-
-    // Keep the action target alive (it stores the closure). Since we `forget` it here,
-    // it will never be deallocated — acceptable for a spike (it lives as long as the app).
-    // SAFETY: `Retained<ActionTarget>` is intentionally leaked; that leaked +1 is what
-    // keeps the object alive. AppKit's `target` is an unretained (assign) reference and
-    // does NOT own it, so the leak — not the button — is what prevents a use-after-free.
-    std::mem::forget(fs_target);
-
-    // ── 5b. Settings button (primary window only) ─────────────────────────────────────
+    // ── 5. Build the accessory (settings button, primary window only) ─────────────────
+    // No custom fullscreen/maximize button: the native green traffic-light button already
+    // provides that on macOS. The only accessory button is the server-address settings
+    // button, which lives on the primary window. Non-primary windows get no accessory
+    // (an empty accessory would just reserve dead titlebar space).
     if primary {
+        // We need a MainThreadMarker to call many AppKit APIs.
+        // SAFETY: we are on the GTK main thread, which is the macOS main thread.
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+
+        let vc = NSTitlebarAccessoryViewController::new(mtm);
+        // Trailing (right) placement in the titlebar.
+        vc.setLayoutAttribute(NSLayoutAttribute::Right);
+
+        // Container view (NSView) holding the single settings button.
+        // Frame: 32px button + 8px trailing padding = 40px; height = 28px (standard titlebar).
+        let container_frame = NSRect {
+            origin: objc2_foundation::NSPoint { x: 0.0, y: 0.0 },
+            size: NSSize { width: 40.0, height: 28.0 },
+        };
+        let container = NSView::initWithFrame(NSView::alloc(mtm), container_frame);
+
         let settings_image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
             ns_string!("network"),
             Some(ns_string!("Server address")),
         );
 
-        let window_clone2 = window.clone();
+        let window_clone = window.clone();
         let addr_clone = addr.clone();
         let writer_clone = writer.clone();
         let settings_callback: Box<dyn Fn()> = Box::new(move || {
-            crate::show_server_addr_dialog(&window_clone2, &addr_clone, &writer_clone);
+            crate::show_server_addr_dialog(&window_clone, &addr_clone, &writer_clone);
         });
         let settings_target = ActionTarget::new(mtm, settings_callback);
 
         let settings_btn = make_button(mtm, settings_image.as_deref(), "⚙", &settings_target);
         settings_btn.setFrame(NSRect {
-            origin: objc2_foundation::NSPoint { x: 8.0, y: 0.0 },
+            origin: objc2_foundation::NSPoint { x: 4.0, y: 0.0 },
             size: NSSize { width: 32.0, height: 28.0 },
         });
         container.addSubview(&settings_btn);
+
+        // Keep the action target alive. Since we `forget` it here, it is never deallocated —
+        // fine here (it lives as long as the app / window).
+        // SAFETY: `Retained<ActionTarget>` is intentionally leaked; that leaked +1 is what
+        // keeps the object alive. AppKit's `target` is an unretained (assign) reference and
+        // does NOT own it, so the leak — not the button — is what prevents a use-after-free.
         std::mem::forget(settings_target);
+
+        // Attach the accessory VC to the window.
+        vc.setView(&container);
+        ns_window.addTitlebarAccessoryViewController(&vc);
     }
 
-    // TODO(spike): native FPS label — add an NSTextField here, updated from the 1s timer.
+    // TODO(spike): native FPS label — add an NSTextField accessory, updated from the 1s timer.
 
-    // ── 6. Attach the accessory VC to the window ──────────────────────────────────────
-    vc.setView(&container);
-    ns_window.addTitlebarAccessoryViewController(&vc);
-
-    // Diagnostic: count of titlebar accessory VCs after we added ours.
+    // ── 6. Diagnostics ────────────────────────────────────────────────────────────────
+    // Count of titlebar accessory VCs (ours, if primary, plus any GTK added).
     let vc_count = ns_window.titlebarAccessoryViewControllers().count();
     tracing::info!(
         "native_titlebar: titlebarAccessoryViewControllers count after install = {vc_count}"
