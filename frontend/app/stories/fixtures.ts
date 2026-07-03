@@ -210,6 +210,7 @@ export const appConfig: AppConfigRedacted = {
     cloneCpus: 16,
     cloneMemoryMb: 32768,
     templateReference: "pegasis0/rmng-template:latest",
+    serverImage: "pegasis0/rmng:latest",
   },
   claude: {
     pollSecs: BigInt(600),
