@@ -38,6 +38,7 @@ const meta = {
     applyMonitors: applyMonitors(),
     getUpdateStatus: getUpdateStatus(),
     updateServer: fn(),
+    restartServer: fn(async () => ({ ok: true })),
     images,
     imagesLoading: false,
     pullBusy: false,

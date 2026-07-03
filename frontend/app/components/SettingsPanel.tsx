@@ -114,6 +114,8 @@ export interface SettingsPanelProps {
   getUpdateStatus: () => Promise<UpdateStatus>;
   /** Pull the latest control-server image and swap the running container onto it. */
   updateServer: () => Promise<unknown>;
+  /** Restart the control-server container in place (applies changed startup settings). */
+  restartServer: () => Promise<{ ok: boolean }>;
   // --- clone-source images (moved here from the sidebar) ---
   images: ImageInfo[];
   imagesLoading: boolean;
@@ -132,6 +134,7 @@ export function SettingsPanel({
   applyMonitors,
   getUpdateStatus,
   updateServer,
+  restartServer,
   images,
   imagesLoading,
   pullBusy,
@@ -174,6 +177,16 @@ export function SettingsPanel({
     setServerMsg("updating… the server will restart shortly");
     try {
       await updateServer();
+    } catch (e) {
+      setServerMsg(`✗ ${(e as Error).message}`);
+    }
+  }
+
+  async function doRestart() {
+    if (!confirm("Restart the control-server now to apply the changed settings?\n\nThe UI will briefly disconnect and reconnect; running clones are unaffected.")) return;
+    setServerMsg("restarting… reconnecting shortly");
+    try {
+      await restartServer();
     } catch (e) {
       setServerMsg(`✗ ${(e as Error).message}`);
     }
@@ -427,8 +440,15 @@ export function SettingsPanel({
         ) : null}
 
         {restartRequired ? (
-          <div className="mb-3 rounded border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-400">
-            Run <code>docker restart rmng</code> to apply the changed port/socket/video settings.
+          <div className="mb-3 flex items-center gap-3 rounded border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-400">
+            <span>Changed port/socket/video settings need a restart to apply.</span>
+            <button
+              type="button"
+              onClick={doRestart}
+              className="rounded border border-amber-400 dark:border-amber-700 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+            >
+              Restart control-server
+            </button>
           </div>
         ) : null}
 
@@ -567,6 +587,13 @@ export function SettingsPanel({
                     className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
                   >
                     Update
+                  </button>
+                  <button
+                    type="button"
+                    onClick={doRestart}
+                    className="rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                  >
+                    Restart
                   </button>
                   {serverStatus ? (
                     <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${serverStatus.available ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400" : "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400"}`}>

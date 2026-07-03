@@ -24,6 +24,7 @@ import {
   putForwards,
   refreshClaudeUsage,
   reorder,
+  restartServer,
   swapClaudeAccount,
   testConfig,
   updateServer,
@@ -401,6 +402,7 @@ function Dashboard({
           applyMonitors={applyMonitors}
           getUpdateStatus={getUpdateStatus}
           updateServer={updateServer}
+          restartServer={restartServer}
           images={images}
           imagesLoading={imagesLoading}
           pullBusy={state.operations.some(

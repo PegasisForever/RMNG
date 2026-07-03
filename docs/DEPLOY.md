@@ -226,6 +226,26 @@ Two things worth knowing:
   refuses to swap from the drifted bytes (a WARN names the payload) rather than risk a swap
   loop — restart the dev server after restaging.
 
+### In-product restart & update (Docker deployment)
+
+Once the control-server is running a build that includes the self-update feature, its
+Settings page has **Restart control-server** and **Update** buttons:
+
+- **Restart** does an in-place `docker restart` of the control-server container (applies
+  changed port/socket/static-dir/chroma settings, re-read from config.json on boot). It does
+  NOT change the container's host-published port mapping — a `listen` port moved outside the
+  published `9000-9003` range still needs a host-level recreate.
+- **Update** pulls `docker.serverImage` (default `pegasis0/rmng:latest`) and swaps the
+  running container onto it via a detached helper. Running clones and the data volumes
+  survive.
+
+**First update is manual.** A server that predates this feature has no update code path, so
+the first hop onto a feature-bearing image is still the manual `docker pull … && docker rm -f
+… && docker run …` above. Every update after that is in-product.
+
+Publish a new control-server image with `scripts/publish-server.sh` (tags `:YYYYMMDD` +
+`:latest`, stamps the version labels the UI reads).
+
 ## Browsing clone homes (`data/hosts/<id>`)
 
 With `--pid host`, the control-server shares the host PID namespace, so a 15 s reconciler
