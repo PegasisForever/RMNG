@@ -252,7 +252,7 @@ function Dashboard({
             <path d="M3 5h14M3 10h14M3 15h14" />
           </svg>
         </button>
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800">
+        <span className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-800">
           {selectedHost ? selectedHost.id : "rmng control"}
         </span>
         {/* Notes/Chat toggle lives here on mobile — the only header < lg. */}
@@ -421,7 +421,7 @@ function Dashboard({
             <>
               {/* Per-host header — only ≥ lg; on mobile the top bar shows id + tabs. */}
               <div className="hidden shrink-0 items-center gap-3 border-b border-slate-100 px-4 py-3 sm:px-6 lg:flex">
-                <h2 className="truncate text-base font-semibold text-slate-900">
+                <h2 className="min-w-0 break-words text-base font-semibold text-slate-900">
                   {selectedHost.id}
                 </h2>
                 <span className="shrink-0 text-xs text-slate-400">
