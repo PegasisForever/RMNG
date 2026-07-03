@@ -760,6 +760,12 @@ async fn config_put(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     config::save(&merged).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let restart_required = config::restart_required(&old, &merged);
+    // Keep the DockerCtl's cached subnet in lockstep with the just-saved config BEFORE the
+    // lazy `rmng` bridge is materialized (the wizard-finish flip below, and the first clone).
+    // The ctl snapshots the subnet at boot from the DEFAULT config; without this, finishing
+    // the wizard with a non-default subnet would create the bridge with that stale default,
+    // then the next boot (ctl rebuilt from config) would reject the mismatched network.
+    app.docker.set_subnet(&merged.docker.subnet);
     // A wizard-finish flip (`setupComplete` false → true) is where the lazy `rmng` network is
     // first materialized AND the control-server attaches itself at `.2` — both live in
     // `self_setup` (gated on `setup_complete`, which was still false at startup, so this flip

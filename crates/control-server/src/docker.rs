@@ -234,7 +234,11 @@ pub struct DockerCtl {
     /// The resolved daemon socket path (config `docker.socket`, default applied).
     socket: String,
     /// The user-configured subnet (validated `/16`–`/24` IPv4 CIDR at config merge).
-    subnet: String,
+    /// Interior-mutable so a wizard subnet change reaches the lazily-materialized `rmng`
+    /// bridge: `config_put` pushes it via [`Self::set_subnet`] before the network is created
+    /// (otherwise the bridge would be built with the boot-time default and every later boot
+    /// would reject the mismatched network).
+    subnet: std::sync::RwLock<String>,
     env: RwLock<EnvReport>,
 }
 
@@ -372,9 +376,17 @@ impl DockerCtl {
         Self {
             client: std::sync::RwLock::new(client),
             socket,
-            subnet: cfg.subnet.clone(),
+            subnet: std::sync::RwLock::new(cfg.subnet.clone()),
             env: RwLock::new(EnvReport::default()),
         }
+    }
+
+    /// Refresh the cached subnet from config. The `rmng` bridge is materialized lazily
+    /// (wizard finish / first clone), so the subnet the operator sets in the wizard must be
+    /// pushed here *before* that happens — see the field doc. Called from `config_put` on
+    /// every config write, so the long-lived ctl never drifts from the persisted config.
+    pub fn set_subnet(&self, subnet: &str) {
+        *self.subnet.write().unwrap() = subnet.to_string();
     }
 
     /// The bollard client (cheap `Arc` clone), rebuilding it first if the initial build
@@ -416,7 +428,8 @@ impl DockerCtl {
         }
         // Not yet probed: derive from config (dev-mode gateway is the safe default until
         // a self-container is detected).
-        let plan = SubnetPlan::parse(&self.subnet)?;
+        let subnet = self.subnet.read().unwrap().clone();
+        let plan = SubnetPlan::parse(&subnet)?;
         Ok(plan.gateway().to_string())
     }
 
@@ -465,7 +478,8 @@ impl DockerCtl {
                 // static bits (control IP from config, DRI from the fs) so the wizard
                 // shows what it can.
                 report.daemon_detail = Some(format!("{e:#}"));
-                report.control_host = SubnetPlan::parse(&self.subnet).ok().map(|p| p.gateway().to_string());
+                let subnet = self.subnet.read().unwrap().clone();
+                report.control_host = SubnetPlan::parse(&subnet).ok().map(|p| p.gateway().to_string());
                 report.dri_ok = std::path::Path::new("/dev/dri/renderD128").exists();
                 report.sock_mount_detail = "Docker daemon unreachable".into();
                 *self.env.write().await = report.clone();
@@ -501,9 +515,10 @@ impl DockerCtl {
         } else {
             // dev mode: the server is on the host; clones reach it via the gateway IP
             // (they can't resolve a host process by name).
-            match SubnetPlan::parse(&self.subnet) {
+            let subnet = self.subnet.read().unwrap().clone();
+            match SubnetPlan::parse(&subnet) {
                 Ok(plan) => report.control_host = Some(plan.gateway().to_string()),
-                Err(e) => tracing::warn!(target: "docker", "subnet {:?} unparseable: {e}", self.subnet),
+                Err(e) => tracing::warn!(target: "docker", "subnet {subnet:?} unparseable: {e}"),
             }
         }
 
@@ -740,7 +755,8 @@ impl DockerCtl {
     /// no-op; an existing network with a *different* subnet errors (operator must
     /// `docker network rm rmng`). Called lazily — at wizard finish + before each clone.
     pub async fn ensure_network(&self) -> Result<()> {
-        let plan = SubnetPlan::parse(&self.subnet)?;
+        let subnet = self.subnet.read().unwrap().clone();
+        let plan = SubnetPlan::parse(&subnet)?;
         // Already present? Verify its subnet matches.
         match self.daemon()?.inspect_network(NETWORK, None::<bollard::query_parameters::InspectNetworkOptions>).await {
             Ok(net) => {
@@ -2099,6 +2115,20 @@ mod tests {
             err.contains("/nonexistent/rmng-test-docker.sock"),
             "error should name the socket path: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn set_subnet_refreshes_derived_network_params() {
+        // The `rmng` bridge is derived from DockerCtl.subnet at materialization time (wizard
+        // finish / first clone). Before the fix `subnet` was a boot-time snapshot, so a
+        // wizard subnet change never reached ensure_network — the bridge came up on the old
+        // default and every later boot rejected the mismatch. `set_subnet` must make the
+        // derived params (here the dev-mode gateway, same SubnetPlan ensure_network uses)
+        // reflect the new subnet immediately.
+        let ctl = DockerCtl::connect(&DockerConfig { subnet: "10.99.0.0/24".into(), ..Default::default() });
+        assert_eq!(ctl.control_host().await.unwrap(), "10.99.0.1");
+        ctl.set_subnet("10.98.0.0/24");
+        assert_eq!(ctl.control_host().await.unwrap(), "10.98.0.1");
     }
 
     // --- cpu percent ------------------------------------------------------------------
