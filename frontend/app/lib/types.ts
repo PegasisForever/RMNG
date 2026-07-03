@@ -95,7 +95,7 @@ export interface Operation {
   id: string;
   kind: OperationKind;
   /**
-   * What the op acts on: host id (clone/delete) or image name (bootstrap/commit).
+   * What the op acts on: host id (clone/delete) or image name (pull/commit).
    */
   target: string;
   /** Clone source image reference (clone), or source host id (commit). */

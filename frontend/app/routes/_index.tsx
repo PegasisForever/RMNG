@@ -27,13 +27,13 @@ import { SetupWizard } from "~/components/SetupWizard";
 import { SidebarHost } from "~/components/SidebarHost";
 import {
   activate,
-  bootstrapBaseImage,
   cloneHost,
   commitImage,
   deleteHost,
   deleteImage,
   getConfig,
   listImages,
+  pullTemplate,
   redeployClone,
   refreshClaudeUsage,
   reorder,
@@ -111,10 +111,10 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   if (!cfg.setupComplete) {
     return <SetupWizard state={state} initialConfig={cfg} onDone={refetchConfig} />;
   }
-  return <Dashboard state={state} />;
+  return <Dashboard state={state} templateRef={cfg.docker.templateReference} />;
 }
 
-function Dashboard({ state }: { state: ControlState }) {
+function Dashboard({ state, templateRef }: { state: ControlState; templateRef: string }) {
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -125,7 +125,7 @@ function Dashboard({ state }: { state: ControlState }) {
   const [changing, setChanging] = useState(false);
 
   // Clone-source images (from /api/images) — fetched on mount and refetched
-  // whenever a bootstrap/commit/delete op leaves `running` (the image set changed).
+  // whenever a pull/commit/delete op leaves `running` (the image set changed).
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [imagesLoading, setImagesLoading] = useState(true);
   const refreshImages = () => {
@@ -164,7 +164,7 @@ function Dashboard({ state }: { state: ControlState }) {
   });
   const selectedHost = state.selected ? hostsById.get(state.selected) ?? null : null;
 
-  // Refetch images when an image-mutating op (bootstrap/commit/delete) leaves the
+  // Refetch images when an image-mutating op (pull/commit/delete) leaves the
   // running set — that's when the image list changed. Keyed on the set of running
   // op ids so it fires on each transition, not on every SSE frame.
   const imgOpsRunning = state.operations
@@ -382,10 +382,11 @@ function Dashboard({ state }: { state: ControlState }) {
           <ImagesSection
             images={images}
             loading={imagesLoading}
-            buildBusy={state.operations.some(
+            pullBusy={state.operations.some(
               (o) => o.kind === "pull" && o.status === "running",
             )}
-            onBuild={(name) => run(bootstrapBaseImage(name))}
+            templateRef={templateRef}
+            onPull={(name, reference) => run(pullTemplate(name, reference))}
             onDelete={(reference) => run(deleteImage(reference))}
           />
 

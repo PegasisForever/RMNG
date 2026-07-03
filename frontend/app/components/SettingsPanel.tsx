@@ -127,6 +127,7 @@ export function SettingsPanel({
   >([]);
   const [claudeGroups, setClaudeGroups] = useState<{ name: string; accounts: string[] }[]>([]);
   const [hostnamePrefix, setHostnamePrefix] = useState("");
+  const [templateReference, setTemplateReference] = useState("");
   const [subnet, setSubnet] = useState("");
   const [cloneCpus, setCloneCpus] = useState(16);
   const [cloneMemoryMb, setCloneMemoryMb] = useState(32768);
@@ -151,6 +152,7 @@ export function SettingsPanel({
         : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
     );
     setHostnamePrefix(c.docker.hostnamePrefix);
+    setTemplateReference(c.docker.templateReference);
     setSubnet(c.docker.subnet);
     setCloneCpus(c.docker.cloneCpus);
     setCloneMemoryMb(c.docker.cloneMemoryMb);
@@ -241,6 +243,7 @@ export function SettingsPanel({
         // and the server rejects a change anyway. Blank = unchanged.
         docker: {
           hostnamePrefix,
+          templateReference,
           cloneCpus,
           cloneMemoryMb,
           ...(cfg?.setupComplete ? {} : { subnet }),
@@ -490,6 +493,24 @@ export function SettingsPanel({
                     Prepended to derived clone hostnames — e.g. <code>{hostnamePrefix || "pega-"}</code>dev-123 /{" "}
                     <code>{hostnamePrefix || "pega-"}</code>my-task. Lowercased + sanitized to a DNS label; blank keeps
                     the current value.
+                  </p>
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-500">Template reference</span>
+                    <EffectBadge effect="immediate" />
+                  </div>
+                  <input
+                    value={templateReference}
+                    onChange={(e) => setTemplateReference(e.target.value)}
+                    placeholder="pegasis0/rmng-template:latest"
+                    spellCheck={false}
+                    className={`mt-0.5 ${input}`}
+                  />
+                  <p className="mt-0.5 text-xs text-slate-400">
+                    Registry <code>repo:tag</code> the wizard/Images panel pulls the clone template
+                    from, then retags locally to <code>rmng/template:&lt;name&gt;</code>. Read fresh on
+                    each pull.
                   </p>
                 </div>
                 {/* Subnet is baked into the rmng bridge + every clone's static IP at first-run

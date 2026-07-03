@@ -10,7 +10,7 @@ import { useCallback, useState } from "react";
 import { EnvChecklist } from "~/components/EnvChecklist";
 import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
 import { OperationProgress } from "~/components/OperationProgress";
-import { bootstrapBaseImage, putConfig } from "~/lib/api";
+import { pullTemplate, putConfig } from "~/lib/api";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
 import type { ControlState } from "~/lib/types";
@@ -18,7 +18,7 @@ import type { ControlState } from "~/lib/types";
 const input =
   "w-full rounded border border-slate-300 px-2 py-1 text-sm focus:border-slate-400 focus:outline-none";
 
-/** Default name for the wizard-built base image. Names are bare DNS labels — the
+/** Default local name for the pulled template image. Names are bare DNS labels — the
  *  server itself prepends the repo (`base` → `rmng/template:base`). */
 const DEFAULT_IMAGE_NAME = "base";
 
@@ -40,7 +40,7 @@ function isValidSubnet(s: string): boolean {
   );
 }
 
-const STEPS = ["Environment", "Server", "Base image", "Finish"] as const;
+const STEPS = ["Environment", "Server", "Download template", "Finish"] as const;
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -95,10 +95,13 @@ export function SetupWizard({
   const [listen, setListen] = useState({ ...initialConfig.listen });
   const [agentPort, setAgentPort] = useState(initialConfig.agentPort);
 
-  // --- Step 3: Base image ---
+  // --- Step 3: Download template ---
+  const [templateReference, setTemplateReference] = useState(
+    initialConfig.docker.templateReference,
+  );
   const [imageName, setImageName] = useState(DEFAULT_IMAGE_NAME);
-  const [building, setBuilding] = useState(false);
-  const [buildTarget, setBuildTarget] = useState<string | null>(null);
+  const [pulling, setPulling] = useState(false);
+  const [pullTarget, setPullTarget] = useState<string | null>(null);
 
   const monitorsPatch = () =>
     monitors.map((m) => ({
@@ -109,10 +112,10 @@ export function SetupWizard({
       primary: m.primary,
     }));
 
-  // The bootstrap op is kind "bootstrap" with target === image name (jobs.rs
-  // start_bootstrap → make_op(Bootstrap, name, None)).
-  const imgOp = buildTarget
-    ? state.operations.find((o) => o.kind === "pull" && o.target === buildTarget)
+  // The pull op is kind "pull" with target === image name (jobs.rs start_pull →
+  // make_op(Pull, name, None)).
+  const imgOp = pullTarget
+    ? state.operations.find((o) => o.kind === "pull" && o.target === pullTarget)
     : undefined;
   const imgRunning = imgOp?.status === "running";
   const imgDone = imgOp?.status === "done";
@@ -155,7 +158,7 @@ export function SetupWizard({
       });
       if (!ok) return;
     }
-    // Step 2 (base image) has nothing to persist — the build happens via bootstrapBaseImage.
+    // Step 2 (download template) has nothing to persist — the pull happens via pullTemplate.
     setStep((s) => Math.min(STEPS.length - 1, s + 1));
     setError(null);
   }
@@ -166,18 +169,18 @@ export function SetupWizard({
     setStep((s) => Math.max(0, s - 1));
   }
 
-  async function build() {
+  async function pull() {
     const name = imageName.trim();
-    if (!isDnsLabel(name) || building || imgRunning) return;
-    setBuilding(true);
+    if (!isDnsLabel(name) || pulling || imgRunning) return;
+    setPulling(true);
     setError(null);
     try {
-      await bootstrapBaseImage(name);
-      setBuildTarget(name);
+      await pullTemplate(name, templateReference.trim() || undefined);
+      setPullTarget(name);
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setBuilding(false);
+      setPulling(false);
     }
   }
 
@@ -208,9 +211,9 @@ export function SetupWizard({
 
   const imageNameTrim = imageName.trim();
   const imageLabelOk = imageNameTrim.length === 0 || isDnsLabel(imageNameTrim);
-  const canBuild = isDnsLabel(imageNameTrim) && !building && !imgRunning && !imgDone;
-  // Env step blocks Next until required checks pass + a valid subnet; base-image step
-  // blocks Next while a build is running (mid-build).
+  const canPull = isDnsLabel(imageNameTrim) && !pulling && !imgRunning && !imgDone;
+  // Env step blocks Next until required checks pass + a valid subnet; download-template
+  // step blocks Next while a pull is running.
   const nextDisabled =
     saving ||
     (step === 0 && (!envOk || !subnetOk)) ||
@@ -405,15 +408,28 @@ export function SetupWizard({
             </div>
           ) : null}
 
-          {/* Step 3: Base image. */}
+          {/* Step 3: Download template. */}
           {step === 2 ? (
             <div className="space-y-4">
               <p className="text-sm text-slate-600">
-                Build the base image clones are made from (Ubuntu 26.04, the base our patched
-                GNOME is built for). It's tagged under <code>rmng/template</code>. You can skip
-                this and build it later from the Images panel.
+                Pull the pre-built clone template (Ubuntu 26.04, the base our patched GNOME is
+                built for) from Docker Hub and tag it locally under <code>rmng/template</code>.
+                You can skip this and pull it later from the Images panel.
               </p>
-              <Field label="Base image name">
+              <Field label="Template reference">
+                <input
+                  value={templateReference}
+                  onChange={(e) => setTemplateReference(e.target.value)}
+                  placeholder={initialConfig.docker.templateReference}
+                  spellCheck={false}
+                  disabled={imgRunning || imgDone}
+                  className={`${input} disabled:bg-slate-50 disabled:text-slate-400`}
+                />
+                <span className="mt-0.5 block text-xs text-slate-400">
+                  Docker Hub <code>repo:tag</code> the template is pulled from.
+                </span>
+              </Field>
+              <Field label="Local image name">
                 <input
                   value={imageName}
                   onChange={(e) => setImageName(e.target.value)}
@@ -437,18 +453,18 @@ export function SetupWizard({
               {imgOp ? <OperationProgress op={imgOp} /> : null}
               {imgDone ? (
                 <p className="text-xs font-medium text-emerald-600">
-                  ✓ Base image “{buildTarget}” built.
+                  ✓ Template “{pullTarget}” pulled.
                 </p>
               ) : null}
 
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={build}
-                  disabled={!canBuild}
+                  onClick={pull}
+                  disabled={!canPull}
                   className="rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
                 >
-                  {building || imgRunning ? "Building…" : "Build base image"}
+                  {pulling || imgRunning ? "Pulling…" : "Download template"}
                 </button>
                 {!imgRunning && !imgDone ? (
                   <button
@@ -481,8 +497,8 @@ export function SetupWizard({
                     ["Chroma", chroma],
                     ["Detector URL", detectorInferenceUrl || "(none)"],
                     [
-                      "Base image",
-                      imgDone ? `${buildTarget} ✓` : "not built (build one later)",
+                      "Template image",
+                      imgDone ? `${pullTarget} ✓` : "not pulled (pull one later)",
                     ],
                   ] as const
                 ).map(([k, v]) => (

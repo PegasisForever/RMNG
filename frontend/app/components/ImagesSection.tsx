@@ -1,12 +1,13 @@
 // Sidebar section listing the clone-source images (`rmng.image=1`). Each row shows
-// the reference, a "base" badge for the wizard-built base, size, age and the count
+// the reference, a "base" badge for the wizard-pulled template, size, age and the count
 // of live clones running on it. Delete is confirm-gated and disabled while the
-// image is in use (a live clone's `source` points at it). A "+ Build base image"
-// action kicks off a from-zero base-image build (prompts for a DNS-label name).
+// image is in use (a live clone's `source` points at it). A "+ Pull template" action
+// pulls the configured (or overridden) registry reference and tags it locally
+// (prompts for the reference, then a DNS-label local name).
 import { formatBytes, relativeAge } from "~/lib/format";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
-/** Mirror of the server's `is_dns_label` (base-image name → `rmng/template:<name>`). */
+/** Mirror of the server's `is_dns_label` (local image name → `rmng/template:<name>`). */
 function isDnsLabel(s: string): boolean {
   return s.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(s);
 }
@@ -14,27 +15,37 @@ function isDnsLabel(s: string): boolean {
 export function ImagesSection({
   images,
   loading,
-  buildBusy,
-  onBuild,
+  pullBusy,
+  templateRef,
+  onPull,
   onDelete,
 }: {
   images: ImageInfo[];
   loading: boolean;
-  /** True while a base-image build op is running (disables the build action). */
-  buildBusy: boolean;
-  onBuild: (name: string) => void;
+  /** True while a template-pull op is running (disables the pull action). */
+  pullBusy: boolean;
+  /** Configured `docker.templateReference`, prefilled into the reference prompt. */
+  templateRef: string;
+  onPull: (name: string, reference: string) => void;
   onDelete: (reference: string) => void;
 }) {
-  function build() {
-    if (buildBusy) return;
-    const raw = window.prompt("Name for the new base image (→ rmng/template:<name>)", "base");
-    if (raw == null) return;
-    const name = raw.trim();
+  function pull() {
+    if (pullBusy) return;
+    const rawRef = window.prompt("Template reference to pull (Docker Hub repo:tag)", templateRef);
+    if (rawRef == null) return;
+    const reference = rawRef.trim();
+    if (!reference) {
+      alert("Enter a template reference.");
+      return;
+    }
+    const rawName = window.prompt("Name for the local image (→ rmng/template:<name>)", "base");
+    if (rawName == null) return;
+    const name = rawName.trim();
     if (!isDnsLabel(name)) {
       alert("Invalid name: lowercase letters, digits and hyphens only (no leading/trailing hyphen, ≤63 chars).");
       return;
     }
-    onBuild(name);
+    onPull(name, reference);
   }
 
   return (
@@ -45,12 +56,12 @@ export function ImagesSection({
         </h2>
         <button
           type="button"
-          onClick={build}
-          disabled={buildBusy}
-          title="Build a base image (Ubuntu 26.04) from zero"
+          onClick={pull}
+          disabled={pullBusy}
+          title="Pull the clone template (Ubuntu 26.04) from Docker Hub"
           className="rounded px-1 text-[11px] font-medium text-slate-400 hover:bg-slate-200 hover:text-slate-600 disabled:opacity-40"
         >
-          + Build base image
+          + Pull template
         </button>
       </div>
 
@@ -60,7 +71,7 @@ export function ImagesSection({
         </p>
       ) : images.length === 0 ? (
         <p className="rounded-lg border border-dashed border-slate-300 bg-white p-4 text-center text-xs text-slate-400">
-          No images yet. Build a base image to start cloning.
+          No images yet. Pull the template to start cloning.
         </p>
       ) : (
         <div className="space-y-0.5">

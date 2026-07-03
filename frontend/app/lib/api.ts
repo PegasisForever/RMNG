@@ -55,11 +55,12 @@ export const deleteHost = (id: string) => postJson("/api/delete", { id });
  *  clones running on it (`inUseBy`). Powers the sidebar Images section + the
  *  clone dialog's image picker. */
 export const listImages = () => getJson("/api/images") as Promise<ImageInfo[]>;
-/** Build the wizard base image `rmng/template:<name>` from the fixed base OS
- *  (from-zero). Returns the driving Operation (kind `bootstrap`); progress streams
- *  over /events. */
-export const bootstrapBaseImage = (name: string) =>
-  postJson("/api/images/bootstrap", { name });
+/** Pull the clone template from a registry (`reference`, e.g. `pegasis0/rmng-template:latest`)
+ *  and retag it locally as `rmng/template:<name>`. Omitted/blank `reference` falls back
+ *  server-side to `docker.templateReference`. Returns the driving Operation (kind `pull`);
+ *  progress streams over /events. */
+export const pullTemplate = (name: string, reference?: string) =>
+  postJson("/api/images/pull", { name, reference });
 /** Commit a running clone to a new clone-source image `rmng/template:<name>`.
  *  Returns the driving Operation (kind `commit`); progress streams over /events. */
 export const commitImage = (host: string, name: string) =>
