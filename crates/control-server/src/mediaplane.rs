@@ -106,6 +106,7 @@ pub fn spawn(app: App) {
     }
     let cfg = app.config();
     let video_port = cfg.listen.video;
+    let forward_port = cfg.listen.forward;
     let sock_path = cfg.clone_socket.clone();
     // Chroma mode is global + fixed at launch (restart-required); snapshot it once for
     // the accept loop so every viewer connect uses the same value the encoders were
@@ -149,6 +150,8 @@ pub fn spawn(app: App) {
                         if let Some((offer, _)) = handle.clip.lock().unwrap().offer.clone() {
                             write_clip(&viewer, &ClipboardMsg::Offer(offer));
                         }
+                        // Push the desired forward set so the viewer opens its listeners.
+                        write_forwards(&viewer, &app.store.get(), forward_port);
                         let (handle, app, viewer2) = (handle.clone(), app.clone(), viewer.clone());
                         std::thread::spawn(move || read_viewer_input(input_sock, handle, app, viewer2));
                     }
@@ -175,6 +178,11 @@ pub fn spawn(app: App) {
                 match rx.blocking_recv() {
                     // Any state mutation (or a lag) → re-check the selection; act only on a change.
                     Ok(_) | Err(RecvError::Lagged(_)) => {
+                        // A config change (or any mutation) may have altered forwards —
+                        // re-push the full set; the viewer reconciles idempotently.
+                        if viewer.lock().unwrap().is_some() {
+                            write_forwards(&viewer, &app.store.get(), forward_port);
+                        }
                         let sel = app.store.selected();
                         let mut ls = last_sel.lock().unwrap();
                         if *ls == sel {
@@ -229,11 +237,38 @@ const T_CLIPBOARD: u8 = 1;
 const T_CURSOR: u8 = 2;
 const T_LAYOUT: u8 = 3;
 const T_MODE: u8 = 4;
+/// Server→viewer tag 5: the desired forward set (`[5][u32be len][JSON ForwardsMsg]`).
+const T_FORWARDS: u8 = 5;
+/// Viewer→server tag 2: a forward rule's status changed (`[2][u32be len][JSON ForwardStatusMsg]`).
+const T_FORWARD_STATUS: u8 = 2;
 
 /// Announce the active chroma mode: `[4u8][u32be len][JSON ModeMsg]`. Sent first on
 /// connect so the viewer picks its decode path before the first AU arrives.
 fn write_mode(viewer: &Viewer, chroma: ChromaMode) {
     write_json_frame(viewer, T_MODE, &ModeMsg { chroma });
+}
+
+/// Build the viewer's desired forward set: the union of every host's *enabled* rules,
+/// each tagged with its host id, plus the data port.
+fn build_forwards_msg(state: &wire::ControlState, forward_port: u16) -> wire::forward::ForwardsMsg {
+    let rules = state
+        .hosts
+        .iter()
+        .flat_map(|h| {
+            h.forwards.iter().filter(|f| f.enabled).map(move |f| wire::forward::ForwardRule {
+                host_id: h.id.clone(),
+                id: f.id.clone(),
+                remote_port: f.remote_port,
+                local_port: f.local_port,
+            })
+        })
+        .collect();
+    wire::forward::ForwardsMsg { forward_port, rules }
+}
+
+/// Push the current desired forward set to the viewer (port-1 tag 5).
+fn write_forwards(viewer: &Viewer, state: &wire::ControlState, forward_port: u16) {
+    write_json_frame(viewer, T_FORWARDS, &build_forwards_msg(state, forward_port));
 }
 
 /// Frame one H.264 AU to the viewer: `[0u8][u32be monitor_id][u32be len][AnnexB]`.
@@ -592,9 +627,17 @@ fn read_viewer_input(mut sock: TcpStream, handle: Arc<MediaHandle>, app: App, vi
                     }
                 }
             }
+            T_FORWARD_STATUS => {
+                if let Ok(msg) = serde_json::from_slice::<wire::forward::ForwardStatusMsg>(&body) {
+                    app.forwards.report(msg);
+                }
+            }
             _ => break,
         }
     }
+    // Viewer gone → its listeners are gone; drop all runtime status so the UI shows
+    // every rule as offline until a viewer reconnects and re-reports.
+    app.forwards.clear();
 }
 
 #[cfg(test)]
@@ -651,5 +694,27 @@ mod tests {
         teardown_if_current(&conns, &latest, "x", &conn_b);
         assert!(!conns.lock().unwrap().contains_key("x"));
         assert!(!latest.lock().unwrap().contains_key("x"));
+    }
+
+    #[test]
+    fn build_forwards_msg_unions_enabled_rules_only() {
+        use wire::{ControlState, Host, PortForward};
+        let mut a = Host { id: "a".into(), host: "a".into(), ..Default::default() };
+        a.forwards = vec![
+            PortForward { id: "f8080".into(), remote_port: 3000, local_port: 8080, enabled: true, label: None },
+            PortForward { id: "f9".into(), remote_port: 9, local_port: 9, enabled: false, label: None },
+        ];
+        let mut b = Host { id: "b".into(), host: "b".into(), ..Default::default() };
+        b.forwards = vec![
+            PortForward { id: "f7000".into(), remote_port: 5000, local_port: 7000, enabled: true, label: None },
+        ];
+        let st = ControlState { hosts: vec![a, b], ..Default::default() };
+        let msg = build_forwards_msg(&st, 9005);
+        assert_eq!(msg.forward_port, 9005);
+        // Only the two enabled rules, tagged with host id.
+        assert_eq!(msg.rules.len(), 2);
+        assert!(msg.rules.iter().any(|r| r.host_id == "a" && r.local_port == 8080 && r.remote_port == 3000));
+        assert!(msg.rules.iter().any(|r| r.host_id == "b" && r.local_port == 7000));
+        assert!(!msg.rules.iter().any(|r| r.local_port == 9)); // disabled excluded
     }
 }
