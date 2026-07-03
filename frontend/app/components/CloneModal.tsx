@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { ImagePicker } from "~/components/ImagePicker";
-import { getConfig, recommendedClaudeAccount, type ClonePayload } from "~/lib/api";
+import { getConfig, recommendedClaudeAccount, recommendedCodexAccount, type ClonePayload } from "~/lib/api";
 import type { ClaudeUsage } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
@@ -23,6 +23,7 @@ export function CloneModal({
   imagesLoading,
   busy,
   accounts,
+  codexAccounts,
   onClose,
   onClone,
 }: {
@@ -32,6 +33,8 @@ export function CloneModal({
   busy: boolean;
   /** Assignable Claude accounts (imported accounts), for the picker. */
   accounts: ClaudeUsage[];
+  /** Assignable Codex accounts. */
+  codexAccounts: ClaudeUsage[];
   onClose: () => void;
   /** `image` = the chosen clone-source image reference. */
   onClone: (image: string, payload: ClonePayload) => void;
@@ -55,6 +58,9 @@ export function CloneModal({
   const [recommended, setRecommended] = useState<string | null>(null);
   // Account groups (from config), for the group options in the picker.
   const [groups, setGroups] = useState<CloneGroup[]>([]);
+  const [codexAccount, setCodexAccount] = useState("auto");
+  const [codexRecommended, setCodexRecommended] = useState<string | null>(null);
+  const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
   // Presets (from config) + the chosen one ("" = auto-by-ticket-labels; create/plain
   // require an explicit pick, defaulted to the first preset below).
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
@@ -65,6 +71,7 @@ export function CloneModal({
       .then((c) => {
         setPresets(c.presets);
         setGroups(c.cloneGroups);
+        setCodexGroups(c.codexGroups);
       })
       .catch(() => {
         // Config unreachable — just no preset/group options.
@@ -100,6 +107,27 @@ export function CloneModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (codexAccounts.length === 0) return;
+    let cancelled = false;
+    recommendedCodexAccount()
+      .then((r) => {
+        if (cancelled || !r.email) return;
+        if (codexAccounts.some((a) => a.email === r.email)) {
+          setCodexRecommended(r.email);
+          setCodexAccount(r.email); // pre-select the recommendation
+        }
+      })
+      .catch(() => {
+        // No recommendation available — keep the default.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Mount-only: the dialog is short-lived; one fetch when it opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const parsed = parseTicketInput(ticket);
   // A source image is always required; then: `existing` needs a parseable ticket;
   // `create` a preset (its key creates the ticket) + team + title; `plain` a title +
@@ -119,6 +147,7 @@ export function CloneModal({
       onClone(image, {
         plain: { title: title.trim(), message: message.trim() },
         claudeAccount: account,
+        codexAccount,
         preset: preset || undefined,
       });
       return;
@@ -134,6 +163,7 @@ export function CloneModal({
         ticket: ticket.trim(),
         ...extra,
         claudeAccount: account,
+        codexAccount,
         preset: preset || undefined, // "" ⇒ auto-select by ticket labels
       });
     else
@@ -141,6 +171,7 @@ export function CloneModal({
         create: { team: team.trim().toLowerCase(), title: title.trim(), description },
         ...extra,
         claudeAccount: account,
+        codexAccount,
         preset: preset || undefined,
       });
   }
@@ -299,6 +330,20 @@ export function CloneModal({
               value={account}
               onChange={setAccount}
               recommended={recommended}
+              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
+            />
+          </label>
+        ) : null}
+
+        {codexAccounts.length > 0 || codexGroups.length > 0 ? (
+          <label className="mt-3 block text-xs font-medium text-slate-500">
+            Codex account
+            <AccountGroupSelect
+              groups={codexGroups}
+              accounts={codexAccounts}
+              value={codexAccount}
+              onChange={setCodexAccount}
+              recommended={codexRecommended}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
             />
           </label>

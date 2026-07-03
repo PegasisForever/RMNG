@@ -22,6 +22,7 @@ import {
   refreshCodexUsage,
   reorder,
   swapClaudeAccount,
+  swapCodexAccount,
   testConfig,
 } from "~/lib/api";
 import { type ControlState, type Host, emptyState } from "~/lib/types";
@@ -438,15 +439,17 @@ function Dashboard({
           )}
           busy={changing}
           onClose={() => setChangeHost(null)}
-          onSubmit={(value) => {
+          onSubmit={(claude, codex) => {
             setChanging(true);
-            swapClaudeAccount(changeHost.id, value)
-              .then(() => setError(null))
-              .catch((e: Error) => setError(e.message))
-              .finally(() => {
-                setChanging(false);
-                setChangeHost(null);
-              });
+            const jobs: Promise<unknown>[] = [];
+            if (claude !== (changeHost.claudeSelection ?? changeHost.claudeAccountEmail ?? "auto"))
+              jobs.push(swapClaudeAccount(changeHost.id, claude));
+            if (codex !== (changeHost.codexSelection ?? changeHost.codexAccountEmail ?? "auto"))
+              jobs.push(swapCodexAccount(changeHost.id, codex));
+            Promise.allSettled(jobs).finally(() => {
+              setChanging(false);
+              setChangeHost(null);
+            });
           }}
         />
       ) : null}

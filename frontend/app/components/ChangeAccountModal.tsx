@@ -16,9 +16,16 @@ function currentValue(host: Host): string {
   return host.claudeAccountEmail ?? "auto";
 }
 
+function currentCodexValue(host: Host): string {
+  if (host.codexSelection) return host.codexSelection;
+  if (host.codexGroup) return `group:${host.codexGroup}`;
+  return host.codexAccountEmail ?? "auto";
+}
+
 export function ChangeAccountModal({
   host,
   accounts,
+  codexAccounts,
   busy,
   onClose,
   onSubmit,
@@ -26,16 +33,23 @@ export function ChangeAccountModal({
   host: Host;
   /** Assignable accounts (imported Claude accounts). */
   accounts: ClaudeUsage[];
+  /** Assignable Codex accounts. */
+  codexAccounts: ClaudeUsage[];
   busy: boolean;
   onClose: () => void;
-  onSubmit: (value: string) => void;
+  onSubmit: (claude: string, codex: string) => void;
 }) {
   const [value, setValue] = useState(() => currentValue(host));
   const [groups, setGroups] = useState<CloneGroup[]>([]);
+  const [codexValue, setCodexValue] = useState(() => currentCodexValue(host));
+  const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
 
   useEffect(() => {
     getConfig()
-      .then((c) => setGroups(c.cloneGroups))
+      .then((c) => {
+        setGroups(c.cloneGroups);
+        setCodexGroups(c.codexGroups);
+      })
       .catch(() => {
         // Config unreachable — only accounts (no group options).
       });
@@ -72,6 +86,19 @@ export function ChangeAccountModal({
           />
         </label>
 
+        {codexAccounts.length > 0 || codexGroups.length > 0 ? (
+          <label className="mt-3 block text-xs font-medium text-slate-600">
+            Codex account
+            <AccountGroupSelect
+              groups={codexGroups}
+              accounts={codexAccounts}
+              value={codexValue}
+              onChange={setCodexValue}
+              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
+            />
+          </label>
+        ) : null}
+
         <div className="mt-4 flex justify-end gap-2">
           <button
             type="button"
@@ -82,7 +109,7 @@ export function ChangeAccountModal({
           </button>
           <button
             type="button"
-            onClick={() => onSubmit(value)}
+            onClick={() => onSubmit(value, codexValue)}
             disabled={busy}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
