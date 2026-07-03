@@ -1,6 +1,11 @@
 //! Headless mode (CI driver, no display): connect to port 1, decode **each
 //! monitor** (`[u32be monitor_id][u32be len][AnnexB]`), report per-monitor fps.
 //! `RMNG_DUMP=*.png` writes the first decoded frame as PNG then exits.
+//!
+//! Port forwarding works here too (no display needed): the server's tag-5
+//! `ForwardsMsg` is reconciled into the shared [`crate::forward::ForwardManager`], and
+//! status is reported back as port-1 tag-2 frames — the same wiring the GUI uses, so a
+//! headless viewer is a full forward endpoint even with no clone selected (no video).
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -14,7 +19,10 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSrc};
 use wire::ChromaMode;
+use wire::forward::{ForwardStatusMsg, ForwardsMsg};
 use wire::viewer::ModeMsg;
+
+use crate::forward::{ForwardManager, StatusReport};
 
 type Counters = Arc<Mutex<HashMap<u32, Arc<AtomicU64>>>>;
 
@@ -81,6 +89,19 @@ pub fn run() -> Result<()> {
     let dump = std::env::var("RMNG_DUMP").ok();
     let counters: Counters = Arc::new(Mutex::new(HashMap::new()));
 
+    // Port-forward manager (shared across reconnects). Its status closure frames each
+    // update as a port-1 tag-2 `ForwardStatusMsg` over the current write half.
+    let writer: crate::Writer = Arc::new(Mutex::new(None));
+    let fwd_mgr: Arc<ForwardManager> = {
+        let writer = writer.clone();
+        let report: StatusReport = Arc::new(move |msg: ForwardStatusMsg| {
+            if let Ok(json) = serde_json::to_string(&msg) {
+                crate::send_tagged(&writer, 2, json);
+            }
+        });
+        Arc::new(ForwardManager::new(report))
+    };
+
     {
         let counters = counters.clone();
         std::thread::spawn(move || loop {
@@ -102,13 +123,17 @@ pub fn run() -> Result<()> {
         match TcpStream::connect(&addr) {
             Ok(mut stream) => {
                 stream.set_nodelay(true).ok();
+                // Write half for viewer→server frames (forward status, tag 2).
+                if let Ok(w) = stream.try_clone() {
+                    *writer.lock().unwrap() = Some(w);
+                }
                 tracing::info!("connected; decoding (headless) …");
                 let mut tag = [0u8; 1];
                 while stream.read_exact(&mut tag).is_ok() {
-                    // tags 1 (clipboard) + 2 (cursor) + 3 (layout) + 4 (mode) are all [u32 len][json].
-                    // Tag 4 (chroma mode) arrives before the first AU — record it so make_decoder
-                    // builds the right pipeline; the rest are discarded. (Missing any desyncs.)
-                    if matches!(tag[0], 1 | 2 | 3 | 4) {
+                    // tags 1 (clipboard) + 2 (cursor) + 3 (layout) + 4 (mode) + 5 (forwards)
+                    // are all [u32 len][json]. Tag 4 (chroma) arrives before the first AU;
+                    // tag 5 drives the forward listeners; the rest are discarded. (Missing any desyncs.)
+                    if matches!(tag[0], 1 | 2 | 3 | 4 | 5) {
                         let mut lb = [0u8; 4];
                         if stream.read_exact(&mut lb).is_err() {
                             break;
@@ -121,6 +146,18 @@ pub fn run() -> Result<()> {
                             if let Ok(m) = serde_json::from_slice::<ModeMsg>(&body) {
                                 CHROMA.store(matches!(m.chroma, ChromaMode::Yuv444) as u8, Ordering::Relaxed);
                                 tracing::info!("server chroma mode: {:?}", m.chroma);
+                            }
+                        } else if tag[0] == 5 {
+                            // Desired forward set: reconcile local listeners. The data port
+                            // lives on the same host as the video port.
+                            if let Ok(m) = serde_json::from_slice::<ForwardsMsg>(&body) {
+                                let host = addr
+                                    .rsplit_once(':')
+                                    .map(|(h, _)| h.to_string())
+                                    .unwrap_or_else(|| addr.clone());
+                                let forward_addr = format!("{host}:{}", m.forward_port);
+                                tracing::info!("forwards: {} rule(s) → data port {}", m.rules.len(), m.forward_port);
+                                fwd_mgr.reconcile(m.rules, forward_addr);
                             }
                         }
                         continue;
@@ -154,6 +191,7 @@ pub fn run() -> Result<()> {
                         break;
                     }
                 }
+                *writer.lock().unwrap() = None;
                 tracing::info!("disconnected; retrying");
             }
             Err(e) => tracing::warn!("connect {addr} failed: {e}"),
