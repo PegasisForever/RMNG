@@ -20,6 +20,7 @@ mod mcp;
 mod mediaplane;
 mod monitor;
 mod provision;
+mod smb;
 mod state;
 mod web;
 
@@ -124,13 +125,16 @@ async fn main() -> Result<()> {
     }
 
     // Background loops: Claude usage poller, group-rotation loop, per-host agent-state
-    // poller, and the clone-home reconciler (the Docker-port successor to the Proxmox-era
-    // sshfs mount loop — it symlinks data/hosts/<id> → /proc/<clone-pid>/root/home/rmng so
-    // every clone's home is browsable in one place; needs the container's `pid: "host"`).
+    // poller, the clone-home reconciler (the Docker-port successor to the Proxmox-era sshfs
+    // mount loop — it symlinks data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so
+    // every clone's home is browsable in one place; needs the container's `pid: "host"`),
+    // and the smbd supervisor that serves that same directory as the `clones` SMB share
+    // (port 445), so the homes are browsable over `smb://<host>/clones` too.
     tokio::spawn(claude::run_poller(app.clone()));
     tokio::spawn(claude::run_rotator(app.clone()));
     tokio::spawn(monitor::run(app.clone()));
     tokio::spawn(homes::run(app.clone()));
+    tokio::spawn(smb::run(app.clone()));
 
     // Automatic hash-based binary hot-swap engine: warm the expected payload hashes, then
     // run the worker + sweep loops. Spawned BEFORE the media plane so its enqueue channel

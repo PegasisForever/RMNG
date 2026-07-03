@@ -57,7 +57,7 @@ and run `docker compose up -d` (no `--build`). The equivalent one-liner off the 
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9003:9000-9003 pegasis0/rmng
+  -p 9000-9003:9000-9003 -p 445:445 pegasis0/rmng
 ```
 
 What each piece is for:
@@ -66,11 +66,12 @@ What each piece is for:
 |---|---|
 | `--privileged` | the control-server orchestrates **privileged** clone containers (nested Docker) on the same daemon |
 | `--init` | PID-1 reaper for the short-lived exec/tar helpers the server spawns |
-| `--pid host` | share the host PID namespace so clone PIDs are visible → the clone-home browse view (below). Omitting it disables **only** that feature (the server warns once) |
+| `--pid host` | share the host PID namespace so clone PIDs are visible — that's what lets the reconciler find each clone's **uid-1000** process (matched by mount namespace via `/proc/<pid>/ns/mnt`) and link the browse target, served both as the `clones` SMB share and at the host path. Omitting it disables **only** that feature (the server warns once) |
 | `-v /var/run/docker.sock:…` | the daemon the server drives via bollard |
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
 | `-p 9000-9003:9000-9003` | the four listen ports |
+| `-p 445:445` | the SMB clone-home share (`clones`) — browse every running clone's `/home/rmng` from `smb://<host>/clones` (below) |
 
 **There are zero `-e` configuration flags, by design.** `config.json` (edited via the
 wizard / Settings, `PUT /api/config`) is the single source of truth — subnet, hostname
@@ -232,19 +233,21 @@ With `--pid host`, the control-server shares the host PID namespace, so a 15 s r
 maintains a symlink per running managed clone:
 
 ```
-<data_dir>/hosts/<id> → /proc/<clone-pid-1>/root/home/rmng
+<data_dir>/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng
 ```
 
 That surfaces every clone's home (`/home/rmng`) in one directory. It repoints links across
 clone restarts (the PID changes) and prunes stopped/deleted clones. Reach it three ways:
 
+- **Over SMB** (the primary client path) — the control-server serves that directory as the
+  `clones` share on port **445**, so `smb://<docker-host>/clones` browses every clone's home
+  from any machine. Linux: `smbclient //<host>/clones -U rmng`, or mount it with
+  `mount -t cifs //<host>/clones /mnt -o user=rmng`; macOS: Finder → ⌘K → `smb://<host>/clones`.
+  Fixed credential → user `rmng`, password `rmng`. **Prerequisite: host port 445 must be free**
+  (the `-p 445:445` publish fails clearly if something already holds it). Files you create over
+  SMB land owned by the clone's own `rmng` user (uid **1000**).
 - **From the Docker host** (the same symlink path resolves there, since `/proc/<pid>/root` is
   the clone's rootfs): `/var/lib/docker/volumes/rmng-data/_data/data/hosts/<id>`.
-- **Over sshfs** to the host: mount with `-o follow_symlinks` so the `/proc/*` targets
-  resolve, e.g.:
-  ```sh
-  sshfs -o follow_symlinks root@<docker-host>:/var/lib/docker/volumes/rmng-data/_data/data/hosts ~/rmng-hosts
-  ```
 - **`docker exec`** into the control-server container and browse `data/hosts/`.
 
 Omit `--pid host` and this feature is simply off (the server logs a one-time hint per clone);
