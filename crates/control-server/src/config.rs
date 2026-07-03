@@ -67,6 +67,7 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                     labels: Vec::new(),
                     linear_key: String::new(),
                     vars,
+                    agent_playbook: String::new(),
                 });
             }
         }
@@ -515,7 +516,7 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
         } else {
             sent.to_string()
         };
-        out.push(wire::Preset { name, labels, linear_key, vars });
+        out.push(wire::Preset { name, labels, linear_key, vars, agent_playbook: String::new() });
     }
     out
 }
