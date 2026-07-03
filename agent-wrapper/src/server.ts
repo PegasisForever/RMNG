@@ -7,8 +7,9 @@
 // run_in_background), end its turn, and be re-engaged AUTOMATICALLY when that
 // command exits (a `task_notification` arrives in the still-open stream) — no new
 // user message needed. The desktop operating notes + the per-host "implement a ticket"
-// procedure are baked into this binary and injected as the system-prompt append below
-// (see operating-notes.md / ticket-procedure.md). Separately, the clone's shared
+// procedure are injected as the system-prompt append below — the Settings-editable copy
+// the control-server injects at clone creation if present, else the baked-in default
+// (see instructions.ts / agent-instructions.md). Separately, the clone's shared
 // ~/.claude/CLAUDE.md (general engineering guidance, deployed by provision-clone.sh) is
 // read as user memory via settingSources — see buildOptions.
 //
@@ -30,30 +31,16 @@
 import { query, type McpServerConfig, type Options, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { hostname } from "node:os";
 
-// The agent's instructions are embedded at BUILD time via Bun text imports. This
-// wrapper ships as a `bun build --compile` single-exec, so a runtime read
-// (`readFileSync(new URL("../foo.md", import.meta.url))`) resolves into the bunfs
-// virtual filesystem and fails with ENOENT — the instructions never reach the agent.
-// A `with { type: "text" }` import is inlined as a string constant, so it always ships.
-import OPERATING_NOTES_RAW from "../operating-notes.md" with { type: "text" };
-import TICKET_PROCEDURE_RAW from "../ticket-procedure.md" with { type: "text" };
+import { resolveSystemAppend } from "./instructions";
 
 import { CONFIG } from "./config";
 
-// The "Implementing a ticket" procedure for THIS host's session agent only. It is
-// injected as a system-prompt append (below), NOT placed in ~/.claude/CLAUDE.md —
-// otherwise the Claude Code running inside Cursor (which the agent types
-// `implement <link>` into) would also read it and recursively try to open Cursor.
-const TICKET_PROCEDURE = TICKET_PROCEDURE_RAW.trim();
-
-// General operating notes (sandbox, coordinates, launching GUIs, app quirks) for the
-// desktop agent. Injected from code as a system-prompt append — these are wrapper-only
-// (the inner Cursor agent has no desktop tool), so they must NOT go in the shared
-// ~/.claude/CLAUDE.md that every `claude` on the host reads (see buildOptions).
-const OPERATING_NOTES = OPERATING_NOTES_RAW.trim();
-
-// The full system-prompt append: operating notes first, then the ticket procedure.
-const SYSTEM_APPEND = [OPERATING_NOTES, TICKET_PROCEDURE].filter(Boolean).join("\n\n");
+// The system-prompt append for THIS host's session agent: the control-server-injected,
+// Settings-editable playbook (operating notes + ticket procedure) if present, else the
+// baked-in default. Read once at startup — a fresh clone boots a fresh wrapper. It is NOT
+// placed in ~/.claude/CLAUDE.md: the inner Cursor Claude Code reads that file and would
+// recursively try to open Cursor. See instructions.ts + agent-wrapper/README.md.
+const SYSTEM_APPEND = resolveSystemAppend(CONFIG.instructionsPath);
 
 const ACTIVITY_MAX = 200;
 // Safety: if an autonomous turn is marked active but never produces a result

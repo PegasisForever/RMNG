@@ -256,6 +256,8 @@ The full config with the only secret (preset Linear keys) replaced by `linearKey
 Everything else is returned verbatim — ports, monitors, the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
 socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`, `detectorInferenceUrl`,
+`agentPlaybook` (the editable agent playbook seeded with the shipped default and injected into new
+clones — non-secret; a preset's optional `agentPlaybook` append rides along in each `presets` row),
 and claude poll config. See [PROTOCOL.md](PROTOCOL.md#config-schema) for the schema.
 
 ### `PUT /api/config` (partial merge) → `{ config, restartRequired, networkWarning? }`

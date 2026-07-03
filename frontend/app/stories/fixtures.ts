@@ -224,10 +224,12 @@ export const appConfig: AppConfigRedacted = {
       labels: ["frontend", "webapp"],
       linearKeySet: true,
       vars: [{ key: "NODE_ENV", value: "development" }],
+      agentPlaybook: "",
     },
   ],
   chroma: "yuv420",
   detectorInferenceUrl: "http://detector.internal:8080",
+  agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
 };
 
 /** Emails a Claude group can draw from (the Settings pool). */

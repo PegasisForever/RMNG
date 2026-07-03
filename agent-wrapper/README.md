@@ -48,19 +48,33 @@ Code CLI under `node` (`AGENT_EXECUTABLE`).
 | `COMPUTER_USE_BIN` | `/usr/local/bin/computer-use` | desktop MCP binary |
 | `COMPUTER_USE_MAX_WIDTH` / `_HEIGHT` | unset | override the desktop MCP's screenshot cap; unset ⇒ its built-in 1080p default |
 | `LINEAR_API_KEY` | unset | Linear hosted MCP (registered as `linear`); injected per-clone from the chosen preset; empty ⇒ skipped |
+| `AGENT_INSTRUCTIONS_PATH` | `~/.config/rmng/agent-instructions.md` | the editable agent playbook the control-server injects at clone creation; present + non-empty ⇒ wins over the baked-in default. Read once at startup |
 
 The agent's instructions come in two layers:
 
-**Baked into the wrapper binary** — the desktop **operating notes**
-(`operating-notes.md`: coordinates, asking-the-human, app quirks, the monitor loop)
-and the **"Implementing a ticket"** procedure (`ticket-procedure.md`: open Cursor,
-drive the Claude Code panel, open Firefox to the ticket, monitor). Both are `with {
-type: "text" }` imports, so they ship inside the `bun build --compile` single-exec
-(no deploy step), and both are injected as a **system-prompt `append` for this
-session agent only**. They are deliberately kept OUT of `~/.claude/CLAUDE.md`,
-because that file is read by *every* `claude` on the host — including the Claude Code
-inside Cursor that this agent types `implement <link>` into; if the ticket procedure
-were shared, that inner agent would recursively try to open Cursor.
+**System-prompt `append` (this session agent only)** — the desktop **operating
+notes** (coordinates, asking-the-human, app quirks, the monitor loop) and the
+**"Implementing a ticket"** procedure (open Cursor, drive the Claude Code panel, open
+Firefox to the ticket, monitor), now merged into a single **`agent-instructions.md`**.
+It resolves at startup (`resolveSystemAppend`) from one of two sources:
+
+- **Injected, Settings-editable (wins)** — at clone creation the control-server
+  writes the effective playbook to `AGENT_INSTRUCTIONS_PATH` (default
+  `~/.config/rmng/agent-instructions.md`). That playbook is composed *control-side* as
+  the global `agentPlaybook` config (seeded with this file's shipped default) plus the
+  chosen preset's optional per-preset append (concatenated after a blank line). When
+  the file is present and non-empty it wins over the fallback.
+- **Baked-in fallback** — `agent-wrapper/agent-instructions.md`, a `with { type:
+  "text" }` import (`BAKED_IN_INSTRUCTIONS`) so it ships inside the `bun build
+  --compile` single-exec (no deploy step). Used when the injected file is absent or
+  empty (e.g. a local `bun run`).
+
+Either way it is read **once at startup** and injected as the SDK's system-prompt
+`append` for this session agent only. It is deliberately kept OUT of
+`~/.claude/CLAUDE.md`, because that file is read by *every* `claude` on the host —
+including the Claude Code inside Cursor that this agent types `implement <link>` into;
+if the ticket procedure were shared, that inner agent would recursively try to open
+Cursor.
 
 **Shared on-disk memory** — `~/.claude/CLAUDE.md`: general engineering guidance
 (disposable sandbox, verify-before-done, git discipline), written into the template image by

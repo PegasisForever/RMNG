@@ -347,6 +347,7 @@ async fn clone(
             agent_instructions,
             claude_instructions,
             env,
+            agent_playbook: compose_playbook(&cfg, explicit),
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
         return Ok(Json(json!({ "ok": true, "op": op })));
@@ -377,6 +378,7 @@ async fn clone(
         agent_instructions,
         claude_instructions,
         env: preset_env(&preset),
+        agent_playbook: compose_playbook(&cfg, Some(&preset)),
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
@@ -394,6 +396,17 @@ fn preset_env(p: &wire::Preset) -> Vec<wire::EnvVar> {
 
 fn preset_names(cfg: &wire::AppConfig) -> String {
     cfg.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// The effective agent playbook for a clone: the global `agentPlaybook` plus the preset's
+/// optional append (after a blank line). Empty/whitespace preset field ⇒ global only. Mirrors
+/// the wrapper's `[notes, procedure].filter(Boolean).join("\n\n")`.
+pub(crate) fn compose_playbook(cfg: &wire::AppConfig, preset: Option<&wire::Preset>) -> String {
+    let base = cfg.agent_playbook.trim();
+    match preset.map(|p| p.agent_playbook.trim()).filter(|s| !s.is_empty()) {
+        Some(extra) => format!("{base}\n\n{extra}"),
+        None => base.to_string(),
+    }
 }
 
 /// Resolve the clone body to a Linear issue (create one, or fetch an existing), the
@@ -1211,5 +1224,35 @@ mod forwards_validation_tests {
         let st = state_with(vec![host("a"), other]);
         let err = validate_forwards(&st, "a", vec![input(3000, 8080)]).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod playbook_tests {
+    use super::*;
+
+    fn cfg_with(global: &str) -> wire::AppConfig {
+        wire::AppConfig { agent_playbook: global.into(), ..Default::default() }
+    }
+    fn preset_with(pb: &str) -> wire::Preset {
+        wire::Preset { name: "p".into(), agent_playbook: pb.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn global_only_when_no_preset() {
+        assert_eq!(compose_playbook(&cfg_with("BASE"), None), "BASE");
+    }
+
+    #[test]
+    fn global_only_when_preset_field_empty() {
+        assert_eq!(compose_playbook(&cfg_with("BASE"), Some(&preset_with("  "))), "BASE");
+    }
+
+    #[test]
+    fn appends_preset_after_global_with_blank_line() {
+        assert_eq!(
+            compose_playbook(&cfg_with("BASE"), Some(&preset_with("EXTRA"))),
+            "BASE\n\nEXTRA"
+        );
     }
 }

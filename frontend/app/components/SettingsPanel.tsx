@@ -203,6 +203,7 @@ export function SettingsPanel({
       linearKey: string;
       keySet: boolean;
       vars: { key: string; value: string }[];
+      agentPlaybook: string;
     }[]
   >([]);
   const [claudeGroups, setClaudeGroups] = useState<{ name: string; accounts: string[] }[]>([]);
@@ -223,6 +224,7 @@ export function SettingsPanel({
   const [cloneSocket, setCloneSocket] = useState("");
   const [chroma, setChroma] = useState<ChromaMode>("yuv420");
   const [detectorInferenceUrl, setDetectorInferenceUrl] = useState("");
+  const [agentPlaybook, setAgentPlaybook] = useState("");
 
   function load(c: AppConfigRedacted) {
     setCfg(c);
@@ -248,6 +250,7 @@ export function SettingsPanel({
     setCloneSocket(c.cloneSocket);
     setChroma(c.chroma);
     setDetectorInferenceUrl(c.detectorInferenceUrl);
+    setAgentPlaybook(c.agentPlaybook);
     setPresets(
       c.presets.map((p) => ({
         name: p.name,
@@ -255,6 +258,7 @@ export function SettingsPanel({
         linearKey: "",
         keySet: p.linearKeySet,
         vars: p.vars.map((v) => ({ ...v })),
+        agentPlaybook: p.agentPlaybook,
       })),
     );
     setClaudeGroups(c.cloneGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })));
@@ -281,10 +285,10 @@ export function SettingsPanel({
   const addPreset = () =>
     setPresets((ps) => [
       ...ps,
-      { name: "", labels: "", linearKey: "", keySet: false, vars: [{ key: "", value: "" }] },
+      { name: "", labels: "", linearKey: "", keySet: false, vars: [{ key: "", value: "" }], agentPlaybook: "" },
     ]);
   const rmPreset = (i: number) => setPresets((ps) => ps.filter((_, j) => j !== i));
-  const setPresetField = (i: number, field: "name" | "labels" | "linearKey", v: string) =>
+  const setPresetField = (i: number, field: "name" | "labels" | "linearKey" | "agentPlaybook", v: string) =>
     setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, [field]: v } : p)));
   const addVar = (i: number) =>
     setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, vars: [...p.vars, { key: "", value: "" }] } : p)));
@@ -346,6 +350,7 @@ export function SettingsPanel({
         cloneSocket,
         chroma,
         detectorInferenceUrl,
+        agentPlaybook,
         presets: presets
           .filter((p) => p.name.trim())
           .map((p) => ({
@@ -353,6 +358,7 @@ export function SettingsPanel({
             labels: p.labels.split(",").map((s) => s.trim()).filter(Boolean),
             linearKey: p.linearKey, // "" = keep the stored key
             vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
+            agentPlaybook: p.agentPlaybook,
           })),
         cloneGroups: claudeGroups
           .filter((g) => g.name.trim())
@@ -471,6 +477,22 @@ export function SettingsPanel({
               />
             </Section>
 
+            {/* Agent instructions — the desktop agent's operating notes / ticket
+                procedure, injected as its system prompt at clone time. */}
+            <Section
+              title="Agent instructions"
+              effect="immediate"
+              hint="The desktop agent's operating notes + ticket procedure, injected as its system prompt. Applies to newly created clones (existing clones keep the instructions they were created with)."
+            >
+              <textarea
+                value={agentPlaybook}
+                onChange={(e) => setAgentPlaybook(e.target.value)}
+                spellCheck={false}
+                rows={16}
+                className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
+              />
+            </Section>
+
             {/* Presets — Linear identity (key + auto-select labels) + env vars, picked
                 (or label-matched) at clone time. */}
             <Section
@@ -550,6 +572,18 @@ export function SettingsPanel({
                     >
                       + Add variable
                     </button>
+                    <div className="mt-2">
+                      <Field label="Extra agent instructions (appended after the global instructions for this preset)">
+                        <textarea
+                          value={p.agentPlaybook}
+                          onChange={(e) => setPresetField(i, "agentPlaybook", e.target.value)}
+                          spellCheck={false}
+                          rows={4}
+                          placeholder="(optional)"
+                          className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+                        />
+                      </Field>
+                    </div>
                   </div>
                 ))}
                 <button

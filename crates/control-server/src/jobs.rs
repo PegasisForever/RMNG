@@ -58,6 +58,9 @@ pub struct CloneSpec {
     pub claude_instructions: Option<String>,
     /// Resolved env-preset vars to write into the clone's session env at creation.
     pub env: Vec<wire::EnvVar>,
+    /// Composed agent playbook (global + preset append) injected into the clone at creation
+    /// as ~/.config/rmng/agent-instructions.md. Empty ⇒ no file injected.
+    pub agent_playbook: String,
 }
 
 fn now_ms() -> i64 {
@@ -286,7 +289,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // commit flow can stamp lineage. The backing container's name is the host id — that's
     // how every later call (dials, redeploy, credential ops, delete) addresses it.
     let image_ref =
-        match clone_container(&app, &spec.source_image, &spec.new_hostname, &env, progress).await {
+        match clone_container(&app, &spec.source_image, &spec.new_hostname, &env, &spec.agent_playbook, progress).await {
             Ok(v) => v,
             Err(e) => return fail_op(&app, &op_id, e.to_string()),
         };

@@ -45,4 +45,10 @@ export const CONFIG = {
   /** Linear hosted MCP — one server; the key is the clone's preset Linear key,
    * injected as LINEAR_API_KEY at clone creation. Empty => the server is skipped. */
   linearApiKey: process.env.LINEAR_API_KEY ?? "",
+
+  /** Editable agent playbook injected by the control-server at clone creation. The wrapper
+   * reads this at startup; absent ⇒ the baked-in default (see instructions.ts). */
+  instructionsPath:
+    process.env.AGENT_INSTRUCTIONS_PATH ??
+    `${process.env.HOME ?? "/home/rmng"}/.config/rmng/agent-instructions.md`,
 } as const;
