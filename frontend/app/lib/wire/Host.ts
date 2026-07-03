@@ -39,6 +39,22 @@ claudeGroup: string | null,
  */
 claudeSelection: string | null, 
 /**
+ * Email of the imported Codex (ChatGPT) account whose token is written into this
+ * clone's `~/.codex/auth.json`. Independent of `claude_account_email` — a clone can
+ * hold both. `None` when no Codex account is assigned.
+ */
+codexAccountEmail: string | null, 
+/**
+ * Name of the Codex group this clone is balanced within (sticky, like `claude_group`);
+ * `None` when bound to a single fixed Codex account.
+ */
+codexGroup: string | null, 
+/**
+ * The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
+ * an account email — the Codex twin of `claude_selection`.
+ */
+codexSelection: string | null, 
+/**
  * Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
  * string: the workspace set is config (Settings → Linear API keys), not an enum.
  */

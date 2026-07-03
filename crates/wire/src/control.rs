@@ -115,6 +115,19 @@ pub struct Host {
     /// hosts created before this field / when no Claude account is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_selection: Option<String>,
+    /// Email of the imported Codex (ChatGPT) account whose token is written into this
+    /// clone's `~/.codex/auth.json`. Independent of `claude_account_email` — a clone can
+    /// hold both. `None` when no Codex account is assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_account_email: Option<String>,
+    /// Name of the Codex group this clone is balanced within (sticky, like `claude_group`);
+    /// `None` when bound to a single fixed Codex account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_group: Option<String>,
+    /// The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
+    /// an account email — the Codex twin of `claude_selection`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_selection: Option<String>,
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
     /// string: the workspace set is config (Settings → Linear API keys), not an enum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,8 +256,8 @@ pub struct ClaudeUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
     pub active: bool,
-    /// Whether the account can run a clone: true for every imported Claude
-    /// account (the server owns its token lifecycle); Codex accounts never.
+    /// Whether the account can run a clone: true for every imported account of either
+    /// provider (the server owns each account's token lifecycle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,6 +429,33 @@ mod tests {
         let op: Operation = serde_json::from_str(legacy).unwrap();
         assert_eq!(op.kind, OperationKind::Pull);
         assert_eq!(op.target, "my-base");
+    }
+
+    #[test]
+    fn host_codex_fields_camelcase() {
+        let h = Host {
+            id: "h".into(),
+            host: "1.2.3.4".into(),
+            port: 3389,
+            claude_account_email: Some("a@b.c".into()),
+            codex_account_email: Some("z@openai.com".into()),
+            codex_group: Some("team".into()),
+            codex_selection: Some("group:team".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["codexAccountEmail"], "z@openai.com");
+        assert_eq!(v["codexGroup"], "team");
+        assert_eq!(v["codexSelection"], "group:team");
+        // Claude fields still present and untouched.
+        assert_eq!(v["claudeAccountEmail"], "a@b.c");
+        // Omitted codex fields are not serialized.
+        let bare = Host { id: "h2".into(), ..Default::default() };
+        let bv = serde_json::to_value(&bare).unwrap();
+        assert!(bv.get("codexAccountEmail").is_none());
+        // Round-trips.
+        let back: Host = serde_json::from_value(v).unwrap();
+        assert_eq!(back.codex_selection.as_deref(), Some("group:team"));
     }
 
     #[test]
