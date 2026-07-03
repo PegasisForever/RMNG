@@ -85,6 +85,9 @@ export const getUpdateStatus = () => getJson("/api/server/version") as Promise<U
 /** Pull the latest control-server image and swap the running container onto it. Returns the
  *  driving Operation (kind `update`); the server restarts mid-op. */
 export const updateServer = () => postJson("/api/server/update", {}) as Promise<Operation>;
+/** Restart the control-server in place to apply changed startup settings. The UI briefly
+ *  disconnects and reconnects. */
+export const restartServer = () => postJson("/api/server/restart", {}) as Promise<{ ok: boolean }>;
 
 /** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */
 export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});

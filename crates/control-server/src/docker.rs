@@ -1326,6 +1326,21 @@ impl DockerCtl {
         }
     }
 
+    /// Restart our own container in place (the programmatic twin of `docker restart rmng`) —
+    /// the daemon stops+starts the same container, which re-reads config.json on boot. Used
+    /// to apply restart-required settings. The `--restart unless-stopped` policy is a backstop
+    /// if the daemon's restart is interrupted. Uses the systemd stop timeout.
+    pub async fn restart_self(&self, self_id: &str) -> Result<()> {
+        let opts = bollard::query_parameters::RestartContainerOptionsBuilder::new()
+            .t(STOP_TIMEOUT_SECS)
+            .build();
+        self.daemon()?
+            .restart_container(self_id, Some(opts))
+            .await
+            .with_context(|| format!("restarting self container {self_id}"))?;
+        Ok(())
+    }
+
     /// Remove a container (force + volumes-owned-by-container). Tolerates 404 (gone). The
     /// per-clone named volume is NOT removed here — it is named + reused; callers use
     /// [`DockerCtl::remove_volume`] for that.

@@ -59,6 +59,7 @@ pub fn router(app: App) -> Router {
         .route("/api/setup/env", get(setup_env))
         .route("/api/server/version", get(server_version))
         .route("/api/server/update", post(server_update))
+        .route("/api/server/restart", post(server_restart))
         .route("/api/images", get(images_list))
         .route("/api/images/pull", post(images_pull))
         .route("/api/images/commit", post(images_commit))
@@ -839,6 +840,29 @@ async fn server_update(State(app): State<App>) -> Result<Json<Operation>, (Statu
     jobs::start_update(&app, &reference)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// `POST /api/server/restart` — restart the control-server in place to apply restart-required
+/// settings (ports / sockets / static dir / chroma), re-read from config.json on boot. The
+/// response is sent before the daemon tears us down; the UI reconnects when we're back.
+async fn server_restart(State(app): State<App>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let self_id = app
+        .docker
+        .env()
+        .await
+        .self_container
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "not running as a container (dev mode) — restart manually".to_string()))?;
+    let docker = app.docker.clone();
+    // Spawn the restart so the HTTP response flushes to the client BEFORE the daemon stops us
+    // (otherwise the browser sees a dropped connection instead of {ok:true}).
+    tokio::spawn(async move {
+        // Small delay to let the response return.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        if let Err(e) = docker.restart_self(&self_id).await {
+            tracing::error!(target: "update", "self-restart failed: {e:#}");
+        }
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // --- Claude accounts -------------------------------------------------------
