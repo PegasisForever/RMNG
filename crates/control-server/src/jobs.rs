@@ -416,7 +416,10 @@ async fn run_pull(app: App, op_id: String, name: String, reference: String) {
     let progress = pull_op_progress(&app, &op_id);
     let local_ref = match pull_template(&app, &reference, &name, progress).await {
         Ok(r) => r,
-        Err(e) => return fail_op(&app, &op_id, e.to_string()),
+        // `{e:#}` (not `e.to_string()`, which prints only the outermost context) — a pull
+        // failure's useful part is usually the daemon's verbatim message (e.g. "pull access
+        // denied … repository does not exist"), buried under a `with_context` layer.
+        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
     };
     patch_op(&app, &op_id, |op| {
         op.status = OperationStatus::Done;
