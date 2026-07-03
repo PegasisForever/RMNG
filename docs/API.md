@@ -18,9 +18,10 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 
 | Method | Path | Purpose | Success |
 |---|---|---|---|
-| GET | `/events` | Global state SSE (snapshot + diffs) + named `stats` event | 200 SSE `ControlState` |
+| GET | `/events` | Global state SSE (snapshot + diffs) + named `stats` + `forwards` events | 200 SSE `ControlState` |
 | POST | `/api/activate` | Select the host shown in the viewer | 200 `ControlState` |
 | POST | `/api/reorder` | Reorder the host list | 200 `ControlState` |
+| PUT | `/api/hosts/:id/forwards` | Replace a host's port-forward rules | 200 `ControlState` |
 | POST | `/api/clone` | Start a clone from an image (Linear ticket / new ticket / plain) | 200 `{ok, op}` |
 | POST | `/api/monitors/apply` | Push the saved monitor layout to all running clones | 200 `{ok,applied,errors}` |
 | POST | `/api/delete` | Destroy a clone / unregister a plain host | 200 `Operation` |
@@ -76,7 +77,9 @@ keeps the connection alive. This is what the dashboard subscribes to.
 (true = a Docker container named after the host id backs it; false = a plain unmanaged
 row), the `source` image reference, the assigned
 `claude_account_email`, Linear metadata (`linear_workspace`, `linear_ticket`, `linear_branch`,
-…), `agent_report` (working/idle), `state_note`, and `monitor_state` (working/idle/offline).
+…), `agent_report` (working/idle), `state_note`, `monitor_state` (working/idle/offline), and
+`forwards` (`PortForward[]` — the host's persisted port-forward rules; live status rides the
+`forwards` SSE event below, never `ControlState`).
 `Operation` carries `id`, `kind` (clone/delete/pull/commit — a persisted legacy `"bootstrap"`
 op still loads, aliased onto `pull`), `target`, `source`, `status`, `step`, `pct`, a rolling
 `log`, and timestamps.
@@ -93,6 +96,14 @@ map immediately, then one push per tick — but only when the map actually chang
 by value, not serialization, so an idle fleet doesn't wake subscribers). Deliberately kept
 out of `ControlState`/`state.json`: these numbers move every tick, and every `ControlState`
 mutation persists the file, so folding stats in would rewrite it every 4 s.
+
+### `forwards` event
+The same `/events` connection multiplexes a third, named SSE event: `forwards`, the volatile
+port-forward **runtime** map — the live status of each host's forward rules as the viewer
+opens/closes its local listeners. A new subscriber gets the current snapshot immediately, then
+one push per status change. It rides its own SSE-only bus (`crate::forward::ForwardBus`), so —
+like `stats` — it never enters `ControlState`/`state.json`. The *desired* rules themselves are
+persisted on `Host.forwards` and edited via `PUT /api/hosts/:id/forwards`.
 
 ---
 
@@ -205,7 +216,8 @@ The setup wizard's environment preflight: `{ rows: EnvCheckRow[] }`, each row `{
 ok, detail, required }`. Rows, in order: **Docker daemon** reachable (`dockerDaemon`,
 required), **control-server container** detected (`selfContainer`, info — absence = dev mode),
 **clone media socket mount** at `/srv/rmng-sock` (`sockMount`, required), **GPU render node**
-`/dev/dri/renderD128` (`renderNode`, required). Cached from the Docker self-setup probe
+`/dev/dri/renderD128` (`renderNode`, required), and **LXCFS** on the Docker host (`lxcfs`,
+advisory — without it clones see host-wide `/proc` values). Cached from the Docker self-setup probe
 (refreshed at startup and by `POST /api/config/test {docker}`).
 
 ---

@@ -1,7 +1,9 @@
 # control-server
 
 The backend binary — one tokio service that is the **control plane**, the **media plane**,
-and the **fleet-automation plane**. It exposes **four ports** and ships as a Docker image; the
+and the **fleet-automation plane**. It exposes **five listen ports** (9000 web, 9001 video,
+9002 per-clone MCP, 9003 fleet MCP, 9005 forward) plus an SMB clone-home share on 445, and
+ships as a Docker image; the
 frontend and the `clone-daemon`/`agent-wrapper` binaries are plain on-disk payloads under
 `/usr/local/share/rmng/` (read at runtime, hot-swapped into running clones) — nothing is
 compiled into the binary. Clones themselves are created from a separately-published **template**
@@ -14,20 +16,24 @@ control-server payload at all. Full references: [API](../../docs/API.md) ·
 |---|---|---|---|
 | **1 — video** | 9001 | framed H.264/JSON over TCP | the native [viewer](../viewer/README.md): selected clone's monitors out; input/clipboard/cursor |
 | **2 — web API** | 9000 | `axum` HTTP + SSE + embedded frontend | the [frontend](../../frontend/README.md): `/events`, all `/api/*`, the SPA |
-| **3 — per-clone MCP** | 9002 | HTTP JSON-RPC (IP-routed) | the in-clone agent's `set_state` (clone resolved from caller IP) |
+| **3 — per-clone MCP** | 9002 | HTTP JSON-RPC (header-routed) | the in-clone agent's `set_state` (clone self-identifies via the `x-rmng-clone` header) |
 | **4 — fleet MCP** | 9003 | HTTP JSON-RPC | operator/fleet: web actions (local) + desktop/window tools (proxied to the clone's daemon MCP) |
+| **5 — forward** | 9005 | framed TCP over TCP | the viewer's port-forward data plane: one TCP conn per accepted local socket, spliced to the clone |
+| **SMB** | 445 | SMB (smbd) | the `clones` share — browse every running clone's `/home/rmng` from `smb://<host>/clones` (fixed cred `rmng`/`rmng`) |
 
 ## Modules
 
 `app` (shared state holder) · `state` (in-memory `ControlState` + atomic `state.json` persist
 + file-watch + SSE bus) · `config` (load/merge/redact `config.json` at 0600) · `web` (port 2
 routes + SSE + SPA) · `mediaplane` (port 1: clone-socket ingest → `media` encode → viewer;
-input routing; clipboard broker) · `mcp` (ports 3 + 4) · `docker` (bollard primitives against
+input routing; clipboard broker) · `mcp` (ports 3 + 4) · `forward` (port-forward data plane:
+viewer TCP spliced to the clone) · `docker` (bollard primitives against
 the local daemon) · `provision` (clone/pull/commit/delete flows over those primitives) ·
 `jobs` (the clone/delete/pull/commit Operation machine) · `binswap` (automatic clone-binary
 hot-swap: hash-check on daemon `Hello` + a periodic sweep) · `linear` · `claude` (usage poll
 + token refresh/push + assign/swap) · `chat` (agent-wrapper proxy + per-host SSE) · `monitor`
-(host poller) · `homes` (clone-home symlinks under `data/hosts/`) · `files`
+(host poller) · `homes` (clone-home symlinks under `data/hosts/`) · `smb` (smbd supervisor +
+read-write `clones` share over `data/hosts`) · `files`
 (notes/uploads/detector-feedback) · `assets` (on-disk clone-daemon/agent-wrapper payloads + the
 served frontend).
 
@@ -54,8 +60,8 @@ checks the Docker environment (mirrored row-by-row at `GET /api/setup/env`).
 ## Ports 3 & 4 — MCP (`mcp`)
 
 Hand-rolled JSON-RPC-over-HTTP (curl-testable; not `rmcp`).
-- **Port 3 (per-clone, IP-routed):** the one tool is `set_state` — the in-clone agent reports
-  `working`/`idle` + a note; the clone is resolved from the caller's source IP.
+- **Port 3 (per-clone, header-routed):** the one tool is `set_state` — the in-clone agent reports
+  `working`/`idle` + a note; the clone self-identifies via the `x-rmng-clone` header.
 - **Port 4 (fleet):** web-action tools (`list_hosts`, `select`, `clone`, `delete`, `claude_*`,
   `set_state`, `send_message`, `read_chat`) run locally; desktop/window tools (`screenshot`,
   `mouse_move`, clicks, `scroll`, `key`, `type`, `list_windows`, `move_window`, `list_apps`,
@@ -111,7 +117,9 @@ user-defined `rmng` Docker bridge (static IPs: `.1` gateway, `.2` control-server
 clones), reachable *from* the control-server (the agent-wrapper chat proxy + the
 fleet-MCP→daemon-MCP proxy); media/input cross the shared `/srv/rmng-sock` named-volume unix
 socket (SCM_RIGHTS), not the network. Exposure split: ports 1+2 operator-facing; port 3
-internal bridge only (needs real peer IPs); port 4 most-privileged (localhost/token).
+internal bridge only (header-routed via `x-rmng-clone`); port 4 most-privileged
+(localhost/token); the forward data plane (9005) and the `clones` SMB share (445) are both
+published for the viewer / clone-home browsing.
 
 ## Dependencies
 

@@ -21,8 +21,9 @@
 #                    (bun build --compile).
 #   2. rust-build  — rustup stable; dev deps; cargo build --release clone-daemon
 #                    + control-server.
-#   3. runtime     — ubuntu:26.04, runtime libs + /usr/local/share/rmng payloads
-#                    (2 binaries + static/), WORKDIR /data, EXPOSE 9000-9003.
+#   3. runtime     — ubuntu:26.04, runtime libs + samba (smbd serves clone homes over SMB)
+#                    + /usr/local/share/rmng payloads (2 binaries + static/), a local rmng
+#                    uid-1000 user for the share, WORKDIR /data, EXPOSE 9000-9003 9005 445.
 
 # ---------------------------------------------------------------------------------------
 # 1. bun stage: frontend build + agent-wrapper bun --compile
@@ -95,15 +96,30 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---------------------------------------------------------------------------------------
 FROM ubuntu:26.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
-# Runtime deps mined from scripts/cs-deploy-ct.sh, minus openssh-client/sshfs (the Docker
-# port dials the local daemon over a unix socket — no SSH). vah264enc/vapostproc live in
-# the `va` plugin shipped by gstreamer1.0-plugins-bad; pngenc (screenshots) in -good.
+# Runtime deps mined from scripts/cs-deploy-ct.sh. Still no openssh-client/sshfs: the Docker
+# port dials the local daemon over a unix socket — no SSH anywhere. Clone homes are instead
+# served over SMB by samba's smbd (see smb.rs), so `samba` is added here — it provides smbd +
+# smbpasswd and the vfs_fruit/catia modules smb.conf loads. vah264enc/vapostproc live in the
+# `va` plugin shipped by gstreamer1.0-plugins-bad; pngenc (screenshots) in -good.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
       libva2 libva-drm2 va-driver-all libdrm2 \
-      ca-certificates \
+      ca-certificates samba \
  && rm -rf /var/lib/apt/lists/*
+
+# Local `rmng` account at uid/gid 1000 for the SMB share. `force user = rmng` in smb.conf
+# (see smb.rs) maps every SMB session to this uid, and it must equal the clone's rmng uid
+# (1000) so files created through the share land with the right owner. The ubuntu:26.04 base
+# ships a default `ubuntu` user at uid 1000, so free that uid first — delete whoever holds it
+# (the getent guard makes this a no-op if a future base drops the default user, so the build
+# never fails on its absence; deleting the user also releases its private group at gid 1000).
+# `-M` (no home) + `/usr/sbin/nologin`: an SMB-only account, never an interactive login.
+# smb.rs re-runs the same groupadd/useradd idempotently at boot; baking it here pins the uid
+# so that boot-time provisioning is a harmless no-op.
+RUN if getent passwd 1000 >/dev/null; then userdel -r "$(getent passwd 1000 | cut -d: -f1)" 2>/dev/null || true; fi \
+ && groupadd -g 1000 rmng \
+ && useradd -u 1000 -g 1000 -M -s /usr/sbin/nologin rmng
 
 COPY --from=rust-build /out/rmng-control-server /usr/local/bin/rmng-control-server
 
@@ -118,8 +134,8 @@ COPY --from=bun-build   /src/frontend/build/client      /usr/local/share/rmng/st
 
 # CWD-relative config.json + data/ land in the /data volume (config.rs uses relative paths).
 WORKDIR /data
-# 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP, 9005 forward data plane.
-EXPOSE 9000-9003 9005
+# 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP, 9005 forward, 445 SMB (clone homes).
+EXPOSE 9000-9003 9005 445
 # Logging default only (not a setting — no config lives in env, per the no-env invariant).
 ENV RUST_LOG=info,tower_http=warn,clip=debug
 ENTRYPOINT ["/usr/local/bin/rmng-control-server"]

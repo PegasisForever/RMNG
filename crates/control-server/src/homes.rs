@@ -5,8 +5,11 @@
 //!
 //! The Docker-port successor to the Proxmox-era sshfs reconciler (`mounts.rs`, deleted):
 //! instead of FUSE-mounting each host's home over SSH, it maintains a plain symlink
-//! `<data_dir>/hosts/<id>` → `/proc/<clone-pid>/root/home/rmng` for every RUNNING managed
-//! clone. This works because the control-server container runs with `pid: "host"` (see
+//! `<data_dir>/hosts/<id>` → `/proc/<uid-1000-pid>/root/home/rmng` for every RUNNING managed
+//! clone. The target is a uid-1000 process's proc-root (not the clone's root-owned init) so
+//! the SMB share (smb.rs, smbd acting as uid 1000) can follow the link; every process in the
+//! clone shares one rootfs, so host-side / `docker exec` browsing is unaffected.
+//! This works because the control-server container runs with `pid: "host"` (see
 //! compose.yaml): it shares the Docker host's PID namespace, so `/proc/<pid>/root/...` IS
 //! the clone container's root filesystem — and the very same link path resolves on the
 //! host too (that's the user's access path).
@@ -29,8 +32,14 @@ use crate::files::is_safe_id;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 
+/// The clone user's uid (see `docker::CLONE_USER`). The SMB share acts as this uid, so the
+/// browse link must point at a uid-1000 process's proc-root.
+const CLONE_UID: u32 = 1000;
+
 /// The directory holding one symlink per managed clone home (`<data_dir>/hosts`).
-fn hosts_root(data_dir: &str) -> PathBuf {
+/// `pub(crate)` so smb.rs single-sources the SMB share `path` from it (the share root is
+/// exactly where the reconciler writes links, so the two can never diverge).
+pub(crate) fn hosts_root(data_dir: &str) -> PathBuf {
     Path::new(data_dir).join("hosts")
 }
 
@@ -44,6 +53,43 @@ fn clone_home(pid: i64) -> PathBuf {
 /// namespace (i.e. the operator did add `pid: "host"`).
 fn proc_dir(pid: i64) -> PathBuf {
     PathBuf::from(format!("/proc/{pid}"))
+}
+
+/// From `(pid, uid, mnt_ns_ino)` triples, pick a pid in the clone's mount namespace
+/// (`target_mnt_ino`) that runs as the clone user. Pure, so it's unit-testable.
+fn pick_home_pid(target_mnt_ino: u64, candidates: &[(i64, u32, u64)]) -> Option<i64> {
+    candidates
+        .iter()
+        .find(|(_, uid, ino)| *uid == CLONE_UID && *ino == target_mnt_ino)
+        .map(|(pid, _, _)| *pid)
+}
+
+/// Real uid from `/proc/<pid>/status` (first field of the `Uid:` line).
+fn proc_uid(pid: i64) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let line = status.lines().find(|l| l.starts_with("Uid:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Inode of `/proc/<pid>/ns/mnt` — identical for every process in one mount namespace
+/// (i.e. one clone container). `None` if unreadable.
+fn mnt_ns_ino(pid: i64) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(format!("/proc/{pid}/ns/mnt")).ok().map(|m| m.ino())
+}
+
+/// A uid-1000 pid in the same mount namespace as the clone's root-owned main `pid`. Scans
+/// /proc once. `None` while the clone has no uid-1000 session yet (still booting).
+fn home_pid(main_pid: i64) -> Option<i64> {
+    let target = mnt_ns_ino(main_pid)?;
+    let mut candidates: Vec<(i64, u32, u64)> = Vec::new();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i64>() else { continue };
+        if let (Some(uid), Some(ino)) = (proc_uid(pid), mnt_ns_ino(pid)) {
+            candidates.push((pid, uid, ino));
+        }
+    }
+    pick_home_pid(target, &candidates)
 }
 
 /// Names present under `hosts/` that no longer belong to a maintained clone and should be
@@ -147,7 +193,16 @@ async fn reconcile(app: &App, warned: &mut HashSet<String>) {
         }
         warned.remove(&h.id); // resolved → allow a fresh warning if it ever recurs
 
-        ensure_symlink(&root.join(&h.id), &clone_home(pid), &h.id);
+        // Link a uid-1000 process's proc-root (not the root-owned main pid), so the SMB
+        // share (smbd → force user=rmng) can follow it. No uid-1000 session yet (clone
+        // still booting) → keep any existing link and retry next tick.
+        let Some(home) = home_pid(pid) else {
+            if root.join(&h.id).exists() {
+                desired.insert(h.id.clone());
+            }
+            continue;
+        };
+        ensure_symlink(&root.join(&h.id), &clone_home(home), &h.id);
         desired.insert(h.id.clone());
     }
 
@@ -187,6 +242,15 @@ mod tests {
     #[test]
     fn proc_dir_shape() {
         assert_eq!(proc_dir(17), PathBuf::from("/proc/17"));
+    }
+
+    #[test]
+    fn pick_home_pid_wants_uid1000_in_target_ns() {
+        let target = 42u64; // the clone's mount-namespace inode
+        let cands = [(1i64, 0u32, 42u64), (37, 1000, 42), (99, 1000, 7)];
+        assert_eq!(pick_home_pid(target, &cands), Some(37));
+        // Clone still booting — no uid-1000 process in its ns yet → None.
+        assert_eq!(pick_home_pid(target, &[(1i64, 0u32, 42u64)]), None);
     }
 
     #[test]
