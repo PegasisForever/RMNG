@@ -276,8 +276,16 @@ async fn call_tool(st: &McpState, caller: Option<&str>, name: &str, args: Value)
         "clone" => {
             let image = args.get("image").and_then(Value::as_str).ok_or("image required")?.to_string();
             let hostname = args.get("hostname").and_then(Value::as_str).ok_or("hostname required")?.to_string();
-            let op = jobs::start_clone(app, CloneSpec { source_image: image, new_hostname: hostname, ..Default::default() })
-                .map_err(|e| e.to_string())?;
+            let op = jobs::start_clone(
+                app,
+                CloneSpec {
+                    source_image: image,
+                    new_hostname: hostname,
+                    agent_playbook: crate::web::compose_playbook(&app.config(), None),
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| e.to_string())?;
             Ok(text(format!("clone started: op {}", op.id)))
         }
         "delete" => {

@@ -401,7 +401,7 @@ fn preset_names(cfg: &wire::AppConfig) -> String {
 /// The effective agent playbook for a clone: the global `agentPlaybook` plus the preset's
 /// optional append (after a blank line). Empty/whitespace preset field ⇒ global only. Mirrors
 /// the wrapper's `[notes, procedure].filter(Boolean).join("\n\n")`.
-fn compose_playbook(cfg: &wire::AppConfig, preset: Option<&wire::Preset>) -> String {
+pub(crate) fn compose_playbook(cfg: &wire::AppConfig, preset: Option<&wire::Preset>) -> String {
     let base = cfg.agent_playbook.trim();
     match preset.map(|p| p.agent_playbook.trim()).filter(|s| !s.is_empty()) {
         Some(extra) => format!("{base}\n\n{extra}"),
