@@ -457,6 +457,10 @@ fn serve_clone(
             Ok((DaemonMsg::Hello(h), _)) => {
                 tracing::info!("clone-daemon '{}' connected", h.clone_id);
                 handle.conns.lock().unwrap().insert(h.clone_id.clone(), conn.clone());
+                // Every Hello (clone create, daemon restart, control-server boot, or the
+                // unit bounce after a hot-swap) is exactly when a re-check belongs: it's
+                // also the post-swap success verification (re-Hello finds matching hashes).
+                app.swap.request_check(&h.clone_id);
                 clone_id = Some(h.clone_id);
             }
             Ok((DaemonMsg::Frame(f), fds)) => {
@@ -523,8 +527,19 @@ fn serve_clone(
             }
             Err(e) => {
                 if let Some(id) = &clone_id {
-                    handle.conns.lock().unwrap().remove(id);
-                    handle.latest.lock().unwrap().remove(id);
+                    // A swap bounces the daemon unit: the new daemon can reconnect and
+                    // Hello (re-inserting into `conns`/`latest`) before THIS (old) thread's
+                    // blocking `recv()` above finally errors out here. Only tear down if
+                    // `conns` still holds this thread's own connection — guarding both maps
+                    // on that identity check means a late old-thread teardown can never
+                    // clobber the new session's entries.
+                    let mut conns = handle.conns.lock().unwrap();
+                    let is_current = conns.get(id).is_some_and(|c| Arc::ptr_eq(c, &conn));
+                    if is_current {
+                        conns.remove(id);
+                        drop(conns);
+                        handle.latest.lock().unwrap().remove(id);
+                    }
                     tracing::info!("clone-daemon '{id}' disconnected: {e}");
                 }
                 break;
