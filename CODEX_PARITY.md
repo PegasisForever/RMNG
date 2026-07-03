@@ -14,7 +14,7 @@ RMNG's Claude accounts just moved to a single-token model: the server owns each 
 - **CLI self-refresh triggers**: access-token `exp` within 5 min, OR `last_refresh` older than 8 days, OR on 401. **Injection trick**: write the fresh access+id token + account_id with `refresh_token: ""` and `last_refresh: now` — defeats the 8-day fallback; the 5-min window is never reached because the server re-pushes with a 60-min lead.
 - **Usage**: GET `https://chatgpt.com/backend-api/wham/usage`, `Authorization: Bearer` + `ChatGPT-Account-Id`. Response `{plan_type, rate_limit: {primary_window, secondary_window: {used_percent, limit_window_seconds, reset_after_seconds, reset_at}}}` → map to the 5h/weekly bars **by `limit_window_seconds`** (~18000 vs ~604800), not by field order.
 - **Import identity**: `codex login status` is stderr prose — read auth.json and decode the id_token JWT claims (`email`, `https://api.openai.com/auth`.chatgpt_plan_type / .chatgpt_account_id).
-- **Install**: `CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh` → standalone binary at `~/.local/bin/codex` (no node) — clean parallel to the Claude installer in provision-clone.sh:~344.
+- **Install**: `CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh` → standalone binary at `~/.local/bin/codex` (no node) — clean parallel to the Claude installer in `template/setup/30-user.sh:~140`.
 
 **Unverified, hedged** (see Verification): exact access-token lifetime (decode a real token on staging; keep `REFRESH_LEAD_MS` < lifetime); whether the CLI tolerates `refresh_token: ""` at startup (fallback: dead sentinel token in the script — no Rust change); `/wham/usage` response drift (Option-tolerant serde + last-good-stale + a `codex.usage_polling` config flag that disables usage without touching refresh/push/assignment).
 
@@ -49,7 +49,7 @@ As designed above; `mod clone_ops;` in main.rs; claude.rs drops its private copi
 
 ### 5. Scripts + provisioning
 - New `crates/control-server/scripts/codex-import.sh` (sibling of claude-import.sh): `status` (cat auth.json, never fails), `read`, `clear`, `apply <b64>` (writes full auth.json 0600).
-- `crates/control-server/scripts/provision-clone.sh`: after the claude install (~:344), install codex via the standalone installer (`CODEX_NON_INTERACTIVE=1`, warn-only on failure). Existing images/clones need a base-image rebuild (`/api/images/bootstrap`) or manual install — call out in docs; `/api/clone/redeploy` only swaps binaries, it does NOT re-provision.
+- `template/setup/30-user.sh`: after the claude install (~:140), install codex via the standalone installer (`CODEX_NON_INTERACTIVE=1`, warn-only on failure) — this now lives in the clone **template** build, not an in-product provisioning script. Existing images/clones need a new template publish + pull (`scripts/publish-template.sh` then `POST /api/images/pull`) or manual install — call out in docs; the automatic hot-swap engine (`binswap`) only ever syncs `clone-daemon`/`agent-wrapper`, it does NOT install new CLIs or re-provision.
 
 ### 6. Frontend
 - Regenerate ts-rs (`cargo test -p wire`): `Host.ts` (+codex fields), new `CodexConfig.ts`, `AppConfigRedacted.ts`. Add codex fields to the hand-written `Host` in `frontend/app/lib/types.ts`.

@@ -43,14 +43,15 @@ ClaudeUsage { id, email, provider, active, assignable?, error?, stale?,
 MonitorSpec { width, height }
 
 # configuration (edited via the Settings UI, not hand-edited files)
-AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb},
+AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb, template_reference},
             presets: [{name, labels: [label], linear_key, vars: [{key, value}]}],
             claude{poll, pinnedEmail, swap..., auto_swap_on_exhaustion: bool},
             clone_groups: [{name, accounts: [email]}],
             clone_socket, data_dir, static_dir, chroma, setup_complete, detector_inference_url,
             monitors: [MonitorSpec], listen{video, web, clone_mcp, global_mcp}, agent{port} }
-# Clone sources are images (rmng/template:<name>), not a config template block — built via
-# POST /api/images/bootstrap; see ImageInfo below + docs/API.md.
+# Clone sources are images (rmng/template:<name>), not a config template block — pulled from a
+# registry (docker.template_reference, default pegasis0/rmng-template:latest) via
+# POST /api/images/pull; see ImageInfo below + docs/API.md.
 # A preset's `labels` auto-select it when cloning from a Linear ticket; `linear_key`
 # fetches/creates tickets server-side and is injected into the clone as LINEAR_API_KEY.
 # Claude account tokens are NOT config: each account's OAuth pair lives in the server's

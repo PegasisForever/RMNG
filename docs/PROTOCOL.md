@@ -154,14 +154,16 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   validated `/16`–`/24` at merge; **one-time**, baked into the network at first-run setup), `hostname_prefix` (`"pega-"`, editable in Settings → prepended to derived
   clone hostnames; carried from the retired `proxmox.hostname_prefix` on migration),
   `clone_cpus` (`16` — whole cores → `nano_cpus`) and `clone_memory_mb` (`32768` — MiB, +8 GiB
-  swap), both editable per-clone limits.
+  swap), both editable per-clone limits, and `template_reference`
+  (`"pegasis0/rmng-template:latest"` — the registry `repo:tag` the wizard/API pulls the clone
+  template from at `POST /api/images/pull`; editable, no secret).
 - **First-run setup wizard**: a fresh deploy ships `config.json` with `"setupComplete":
   false`, so the web UI shows the wizard (environment checklist → server settings + monitors
-  → build the base image → finish) instead of the dashboard; finishing latches
+  → download the clone template → finish) instead of the dashboard; finishing latches
   `setupComplete: true` (a one-way latch) and materializes the lazy `rmng` network, after
   which the one-time fields (`data_dir`, `clone_socket`, `docker.subnet`) are locked. There is
   **no grandfather rule**: an old `config.json` re-runs the wizard (new machine, no network /
-  base image). A legacy `proxmox` block is scrubbed on load, carrying `hostnamePrefix` into
+  template pulled yet). A legacy `proxmox` block is scrubbed on load, carrying `hostnamePrefix` into
   `docker.hostname_prefix`; old `state.json` hosts load as plain unmanaged rows
   (`managed: false`; serde drops the stale `ctid`/`container` keys).
 - <a id="preset"></a>**`Preset`**: `name`, `labels` (Linear ticket labels that auto-select
@@ -187,11 +189,12 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   the least-loaded / least-used member. Selected at clone/swap time as `group:<name>`.
 - **`MonitorSpec`**: `width`, `height`, `x`, `y`, `primary`.
 
-Base-image build params are not config: the base OS is fixed in code (`ubuntu:26.04` — the
-patched gnome-shell is compiled against 26.04's GNOME only), and the wizard/API build takes
-only a name (`POST /api/images/bootstrap {name}` → `rmng/template:<name>`). Per-clone CPU /
-memory limits come from `docker.clone_cpus` / `docker.clone_memory_mb`, applied at clone
-create — not per image.
+Template params are mostly not config: the base OS is fixed in the template build
+(`ubuntu:26.04` in `template/Dockerfile` — the patched gnome-shell is compiled against 26.04's
+GNOME only) and isn't chosen at pull time. The wizard/API pull takes a local name plus an
+optional registry reference (`POST /api/images/pull {name, reference?}` → `rmng/template:<name>`;
+`reference` defaults to `docker.template_reference`). Per-clone CPU / memory limits come from
+`docker.clone_cpus` / `docker.clone_memory_mb`, applied at clone create — not per image.
 
 ---
 

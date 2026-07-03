@@ -22,12 +22,11 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/activate` | Select the host shown in the viewer | 200 `ControlState` |
 | POST | `/api/reorder` | Reorder the host list | 200 `ControlState` |
 | POST | `/api/clone` | Start a clone from an image (Linear ticket / new ticket / plain) | 200 `{ok, op}` |
-| POST | `/api/clone/redeploy` | Hot-swap a clone's daemon (+agent) binaries | 200 `{ok}` |
 | POST | `/api/monitors/apply` | Push the saved monitor layout to all running clones | 200 `{ok,applied,errors}` |
 | POST | `/api/delete` | Destroy a clone / unregister a plain host | 200 `Operation` |
 | GET | `/api/setup/env` | Setup wizard environment preflight rows | 200 `SetupEnv` |
 | GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
-| POST | `/api/images/bootstrap` | Build the base image `rmng/template:<name>` from the base OS | 200 `Operation` |
+| POST | `/api/images/pull` | Pull the clone template from a registry and tag it `rmng/template:<name>` | 200 `Operation` |
 | POST | `/api/images/commit` | Commit a running clone to a new image | 200 `Operation` |
 | POST | `/api/images/delete` | Remove a clone-source image | 200 `{ok}` |
 | GET | `/api/notes/:id` | Fetch a host's rich-text notes | 200 `[block]` |
@@ -70,7 +69,7 @@ keeps the connection alive. This is what the dashboard subscribes to.
 | `selected` | `string?` | host id shown in the viewer |
 | `monitors` | `MonitorSpec[]` | global desired layout |
 | `hosts` | `Host[]` | all registered clones + plain hosts |
-| `operations` | `Operation[]` | in-flight + recent clone/delete/bootstrap/commit jobs |
+| `operations` | `Operation[]` | in-flight + recent clone/delete/pull/commit jobs |
 | `claude_accounts` | `ClaudeUsage[]` | per-account 5h/7d usage + spend |
 
 `Host` carries connection info (`id`, `host`, `port`, `username`, …), the `managed` flag
@@ -78,8 +77,9 @@ keeps the connection alive. This is what the dashboard subscribes to.
 row), the `source` image reference, the assigned
 `claude_account_email`, Linear metadata (`linear_workspace`, `linear_ticket`, `linear_branch`,
 …), `agent_report` (working/idle), `state_note`, and `monitor_state` (working/idle/offline).
-`Operation` carries `id`, `kind` (clone/delete/bootstrap/commit), `target`, `source`,
-`status`, `step`, `pct`, a rolling `log`, and timestamps.
+`Operation` carries `id`, `kind` (clone/delete/pull/commit — a persisted legacy `"bootstrap"`
+op still loads, aliased onto `pull`), `target`, `source`, `status`, `step`, `pct`, a rolling
+`log`, and timestamps.
 
 ---
 
@@ -128,12 +128,10 @@ key>` (auths the clone's `linear` MCP). Hostname is derived (`pega-{ticket}` or 
 plain title, with a numeric suffix on collision). Returns `{ "ok": true, "op": Operation }` or
 `400 {error}`.
 
-### `POST /api/clone/redeploy` — body `{ "id": string, "daemonOnly"?: bool }`
-Hot-swap a running clone's `clone-daemon` (+ `agent-wrapper` unless `daemonOnly`) from the
-image's on-disk payloads (`/usr/local/share/rmng/`), pushed into `/opt/rmng/bin/` via a tar
-upload + `systemctl --user` bounce — no reprovisioning (~10 s). The daemon reconnects to the
-media socket; with `daemonOnly` the Claude session stays alive. Returns `{ok}`. (This is how
-an image upgrade reaches already-running clones — see [DEPLOY.md](DEPLOY.md#upgrades).)
+> There is no `/api/clone/redeploy` endpoint (and no fleet MCP `redeploy` tool) any more.
+> Clone binaries (`clone-daemon`/`agent-wrapper`) hot-swap themselves automatically — a hash
+> check on the daemon's `Hello` plus a periodic sweep — see
+> [DEPLOY.md#upgrades](DEPLOY.md#upgrades).
 
 ### `POST /api/monitors/apply`
 Push `config.monitors` to every running clone (those with a `container`): rewrites each
@@ -156,16 +154,23 @@ params).
 ### `GET /api/images` → `ImageInfo[]`
 List clone-source images, newest first. Each `ImageInfo` carries `id` (`sha256:…`),
 `reference` (`rmng/template:<name>`), `size_bytes`, `created_at`, `base` (true for the
-wizard-built base, `rmng.base=1`), `created_from` (lineage, `rmng.created-from`), and
+published clone template, `rmng.base=1`), `created_from` (lineage, `rmng.created-from`), and
 `in_use_by` (host ids of live clones whose `source` is this image). `502` if the daemon is
 unreachable.
 
-### `POST /api/images/bootstrap` — body `{ "name": string }`
-Build the base image `rmng/template:<name>` from the fixed base OS `ubuntu:26.04` (from-zero:
-headless GNOME + clone-daemon + agent-wrapper + patched gnome-shell). `name` is a bare DNS
-label; the server prepends the repo. Rejects a name that already exists. Returns the driving
-`Operation` (kind `bootstrap`, which the setup wizard watches for). The base OS is not
-configurable — the patched gnome-shell is compiled against 26.04's GNOME only.
+### `POST /api/images/pull` — body `{ "name": string, "reference"?: string }`
+Pull the clone template from a registry and retag it locally as `rmng/template:<name>`. `name`
+is a bare DNS label; the server prepends the repo. `reference` is a registry `repo:tag` to pull
+from — absent/blank defaults to `config.docker.templateReference` (default
+`pegasis0/rmng-template:latest`); see
+[DEPLOY.md#publishing-the-template](DEPLOY.md#publishing-the-template) for how that image is
+built and published. Rejects a name that already exists, a blank reference, and a
+`repo@sha256:…` digest reference (pull a `repo:tag` instead). Verifies the pulled image
+carries the `rmng.image=1` label **before** retagging (else it isn't an RMNG template) and
+warns — without refusing — if its `StopSignal` isn't `SIGRTMIN+3`. Returns the driving
+`Operation` (kind `pull`, which the setup wizard's "Download template" step watches for,
+showing aggregate byte progress). Replaces the retired in-product `/api/images/bootstrap`
+build — no base OS is built in-product any more, only pulled pre-built.
 
 ### `POST /api/images/commit` — body `{ "host": string, "name": string }`
 Commit a running managed clone (`host`) to a new clone-source image `rmng/template:<name>`
@@ -176,8 +181,11 @@ that already exists.
 
 ### `POST /api/images/delete` — body `{ "reference": string }` → `{ok}`
 Remove a clone-source image. `409` if any host still runs on it (`in_use_by` non-empty) or a
-running clone/commit references it; the daemon's own "in use by a container" `409` is surfaced
-too.
+running operation (clone/commit/pull) references it as its source or target; the daemon's own
+"in use by a container" `409` is surfaced too. Deleting a pulled template's local
+`rmng/template:<name>` tag only untags it while the registry tag is still attached to the same
+layers — the image re-lists under that remaining reference; delete again to actually free them
+(see [DEPLOY.md#publishing-the-template](DEPLOY.md#publishing-the-template)).
 
 ### `GET /api/setup/env` → `SetupEnv`
 The setup wizard's environment preflight: `{ rows: EnvCheckRow[] }`, each row `{ id, label,

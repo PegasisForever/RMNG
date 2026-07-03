@@ -9,43 +9,41 @@ The Docker port collapsed RMNG's script surface to almost nothing. The old
 [`provision.rs`](../crates/control-server/src/provision.rs), driving the bollard primitives in
 [`docker.rs`](../crates/control-server/src/docker.rs). The `P <step> <msg>` / `RESULT` bash
 protocol died with them: Rust emits progress directly through a `FnMut(&str, &str)` callback,
-and a guest script's own stdout lines are line-buffered into the Operation log.
+and a guest script's own stdout lines are line-buffered into the Operation log. Clone binaries
+also no longer redeploy via a script + endpoint — the control-server hot-swaps them itself
+(hash check + `systemctl --user` bounce driven straight from Rust; see
+[DEPLOY.md#upgrades](DEPLOY.md#upgrades)).
 
-What survives is **three in-container guest scripts** (`include_str!`'d into the binary and
-streamed to a container over `docker exec bash -s` — `DockerCtl::exec_script`), plus the
-**gnome-patch build** (now a Dockerfile stage).
+The in-product clone-source **build** is gone too: what used to be
+`crates/control-server/scripts/provision-clone.sh`, run inside a privileged build container
+over `docker exec`, is now [`template/setup/`](../template/setup/) — ordered phase scripts
+`RUN` directly by [`template/Dockerfile`](../template/Dockerfile) at `docker build` time,
+published as an image (`pegasis0/rmng-template`) instead of provisioned per install. See
+[DEPLOY.md#publishing-the-template](DEPLOY.md#publishing-the-template).
+
+What survives at **runtime** is **two in-container guest scripts** (`include_str!`'d into the
+control-server binary and streamed to a container over `docker exec bash -s` —
+`DockerCtl::exec_script`), plus the **template build scripts** and the **gnome-patch build**
+(both Dockerfile-stage/`RUN` steps, not `docker exec`).
 
 | Script | Runs where | Invoked by | Purpose |
 |---|---|---|---|
-| `crates/control-server/scripts/provision-clone.sh` | in a build container (`docker exec`) | `provision::bootstrap_base_image` | Turn `ubuntu:26.04` into a clone-source image: headless GNOME + clone-daemon + agent-wrapper + patched shell |
 | `crates/control-server/scripts/apply-monitors.sh` | in a clone container (`docker exec`) | `provision::apply_monitors` | Re-apply a monitor layout to a running clone without reprovisioning |
 | `crates/control-server/scripts/claude-import.sh` | in a clone container (`docker exec`) | `provision::run_clone_op` (`claude.rs`) | Read `claude auth status` / the credentials file, clear it, or install a token |
-| `gnome-patch/build-shell-deb.sh` | the `gnome-build` Dockerfile stage | `docker build` | Build the patched gnome-shell `.deb` |
+| `template/setup/{lib,10-desktop,15-gnome-patch,20-toolbox,30-user}.sh` | in the template build (`RUN`) | `template/Dockerfile` | Provision the clone template rootfs: desktop, patched shell, dev toolbox, the clone user + its units (binaries themselves are `COPY`'d in by the Dockerfile after) |
+| `gnome-patch/build-shell-deb.sh` | the `gnome-build` stage of `template/Dockerfile` | `docker build` | Build the patched gnome-shell `.deb` |
 
-The three guest scripts are baked in at compile time
-([provision.rs:28-30](../crates/control-server/src/provision.rs)) and fed to
+The two runtime guest scripts are baked in at compile time
+([provision.rs:32-33](../crates/control-server/src/provision.rs)) and fed to
 `bash -s -- <args…>` over the exec's stdin at runtime — they are **not** pre-installed in any
 container. Each emits its step lines as `    [ct] <message>`, which `provision.rs` strips for
-the operation message; other stdout/stderr becomes plain log context.
+the operation message; other stdout/stderr becomes plain log context. The template build
+scripts, by contrast, are `COPY`'d into the build context and `RUN` by the Dockerfile itself —
+they never touch the control-server binary or a live container.
 
 ---
 
 ## In-container guest scripts
-
-### `provision-clone.sh <username> <password> <monitors> <clone_socket>`
-Runs as root **inside a privileged `sleep infinity` build container** (systemd is *not* PID 1
-there, so its `systemctl enable/mask/set-default` are pure symlink ops — the Rust caller sets
-`SYSTEMD_OFFLINE=1` + `DEBIAN_FRONTEND=noninteractive`). Codifies the validated recipe:
-`apt full-upgrade`; remove snap + disable guest AppArmor; install vanilla **headless GNOME +
-Mutter + VA-API + PipeWire** (no GDM, no gnome-remote-desktop, no flatpak); **install the
-patched gnome-shell deb** if it was pushed in; create the `rmng` user (uid 1000, sudo,
-render/video groups, linger); install `clone-daemon` + `agent-wrapper` (to `/opt/rmng/bin`) +
-the standalone `claude` CLI; write + enable three `systemd --user` units (`gnome-headless`,
-`rmng-clone-daemon`, `agent-wrapper`). `<monitors>` is the config CSV (`WxH+X+Y[*],…`) → the
-daemon's `RMNG_MONITORS` + the headless dummy mode specs; `<clone_socket>` → the daemon's
-`RMNG_SOCKET`. The control-server pushes the payload binaries in first (to
-`/root/rmng-clone-daemon`, `/root/agent-wrapper`, `/root/gnome-shell-patched.deb`), then
-`bootstrap_base_image` cleans up + commits the container to `rmng/template:<name>`.
 
 ### `apply-monitors.sh <username> <monitors-csv>`
 Runs as root inside a **running clone** container. Rewrites the clone-daemon's `RMNG_MONITORS`
@@ -65,12 +63,41 @@ running clone's account with no restart (Claude Code re-reads creds per request)
 
 ---
 
+## Template build scripts
+
+Ordered phase scripts under [`template/setup/`](../template/setup/), each `COPY`'d in
+immediately before its own `RUN` in `template/Dockerfile` (not one bulk copy — see the
+Dockerfile's comments on why per-phase copies matter for layer caching). Rarest-changing
+first, so a `30-user.sh` tweak never re-runs the ~20-minute phase-10 apt layer. Every phase
+sources `lib.sh` first (`DEBIAN_FRONTEND=noninteractive` + `SYSTEMD_OFFLINE=1`, exported
+inside the script — never baked as image `ENV`, or it would leak into the booted clone).
+
+| Script | Purpose |
+|---|---|
+| `lib.sh` | Shared env + `log()` helper; sourced (not run) by every phase |
+| `10-desktop.sh` | Locale/tz, headless GNOME + Mutter + VA-API + PipeWire (no gdm3/g-r-d/flatpak), the Recommends strip, container masks |
+| `15-gnome-patch.sh` | `dpkg -i` the patched gnome-shell `.deb` (from the `gnome-build` stage) over stock |
+| `20-toolbox.sh` | Best-effort dev toolbox: CLI tools, Docker, cloud CLIs, browsers, Cursor/VS Code, HMCL/Mission Center/Monaspace, dconf defaults |
+| `30-user.sh` | The uid-1000 clone user (groups, linger, fish), preset-PATH rc, keyring, shared `CLAUDE.md` + linear MCP, `claude`/`uv`/`rustup`/`nvm` toolchains, and the three `systemd --user` units (`gnome-headless`, `rmng-clone-daemon`, `agent-wrapper`) + wants symlinks |
+
+`30-user.sh` creates `/opt/rmng/bin` (root:root, 0755); `template/Dockerfile` then `COPY
+--from`s the built `clone-daemon` + `agent-wrapper` straight into it as the last two layers —
+the same destination [`redeploy_clone`](../crates/control-server/src/provision.rs) hot-swaps
+into later (`REDEPLOY_UNITS`). Unlike the retired `provision-clone.sh`, these scripts never run
+inside a live container over `docker exec` — they're plain Dockerfile `RUN` steps executed
+once, at `template/Dockerfile` build time; see
+[DEPLOY.md#publishing-the-template](DEPLOY.md#publishing-the-template).
+
+---
+
 ## gnome-patch build
 
 ### `gnome-patch/build-shell-deb.sh`
-Runs in the **`gnome-build` Dockerfile stage** (`docker build`). Repack approach: applies
-shell-01 + shell-03 to the gnome-shell source, rebuilds only `libshell-<N>.so` (meson/ninja),
-swaps it into the stock `.deb`, and bumps the version `+ngshell1`. Prints `DEB=<path>` — the
-Dockerfile copies that to `/usr/local/share/rmng/gnome-shell.deb` in the runtime image, from
-where `provision.rs` pushes it into build containers. Cached (skips if the deb is newer than
-the patches; `FORCE=1` rebuilds). See [gnome-patch/README.md](../gnome-patch/README.md).
+Runs in the **`gnome-build` stage of `template/Dockerfile`** (`docker build`). Repack approach:
+applies shell-01 + shell-03 to the gnome-shell source, rebuilds only `libshell-<N>.so`
+(meson/ninja), swaps it into the stock `.deb`, and bumps the version `+ngshell1`. Prints
+`DEB=<path>` — `template/Dockerfile` copies that to `/tmp/gnome-shell.deb` in the final stage,
+where `15-gnome-patch.sh` `dpkg -i`s it directly into the template rootfs (it is **not** a
+control-server payload — nothing under `/usr/local/share/rmng/` ships it any more). Cached
+(skips if the deb is newer than the patches; `FORCE=1` rebuilds). See
+[gnome-patch/README.md](../gnome-patch/README.md).

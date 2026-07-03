@@ -108,8 +108,10 @@ RUN apt-get update \
 COPY --from=rust-build /out/rmng-control-server /usr/local/bin/rmng-control-server
 
 # Payloads + frontend on the image filesystem, stored PLAIN (assets.rs / web.rs read
-# these; provision.rs pushes the same bytes into clones at /root/… where
-# provision-clone.sh installs them — destinations/modes unchanged from the gz era).
+# these; the binswap engine hot-swaps the same clone-daemon/agent-wrapper bytes into
+# already-running clones at /opt/rmng/bin/<bin> — see binswap.rs. Clones are no longer
+# provisioned from these payloads: they're created FROM the pre-built, separately
+# published clone template (template/Dockerfile), which installs its own copies.
 COPY --from=rust-build  /out/clone-daemon               /usr/local/share/rmng/clone-daemon
 COPY --from=bun-build   /tmp/agent-wrapper              /usr/local/share/rmng/agent-wrapper
 COPY --from=bun-build   /src/frontend/build/client      /usr/local/share/rmng/static
