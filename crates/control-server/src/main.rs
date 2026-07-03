@@ -9,6 +9,7 @@ mod assets;
 mod binswap;
 mod chat;
 mod claude;
+mod clone_ops;
 mod config;
 mod docker;
 mod files;

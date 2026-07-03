@@ -1654,7 +1654,7 @@ fn extract_container_id_from_mountinfo(mountinfo: &str) -> Option<String> {
 
 /// Format epoch seconds as an RFC 3339 / ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`),
 /// so `ImageInfo.created_at` is a real ISO string without pulling in a date crate.
-fn epoch_to_rfc3339(secs: i64) -> String {
+pub(crate) fn epoch_to_rfc3339(secs: i64) -> String {
     // Days-from-civil algorithm (Howard Hinnant), valid across the proleptic Gregorian
     // calendar; we only ever feed it positive, in-range Docker image timestamps.
     let days = secs.div_euclid(86_400);

@@ -829,23 +829,7 @@ pub async fn apply_monitors(
 /// Script args: `<user> <op> [b64]`. `status` never fails (stderr merged in the script);
 /// the others surface a non-zero exit as an error.
 pub async fn run_clone_op(app: &App, container: &str, op: &str, extra: &[&str]) -> Result<String> {
-    let mut args: Vec<String> = vec![CLONE_USER.to_string(), op.to_string()];
-    args.extend(extra.iter().map(|s| s.to_string()));
-
-    let mut out = String::new();
-    let code = app
-        .docker
-        .exec_script(container, IMPORT_SCRIPT, &[], &args, |_stream, line| {
-            out.push_str(line);
-            out.push('\n');
-        })
-        .await?;
-
-    if code == 0 {
-        Ok(out)
-    } else {
-        bail!("clone op '{op}' failed in {container} (exit {code}): {}", out.trim());
-    }
+    crate::clone_ops::run_clone_op(app, container, IMPORT_SCRIPT, op, extra).await
 }
 
 // --- op-log pct helpers (exposed for jobs.rs step tables) -----------------------------
