@@ -431,8 +431,10 @@ struct RawRateWindow {
     used_percent: Option<f64>,
     #[serde(default)]
     limit_window_seconds: Option<i64>,
+    /// Epoch SECONDS when the window resets (the ChatGPT usage API returns a number here,
+    /// unlike Claude's ISO string) — converted to an ISO timestamp in [`window_of`].
     #[serde(default)]
-    reset_at: Option<String>,
+    reset_at: Option<i64>,
 }
 #[derive(Deserialize)]
 struct RawRateLimit {
@@ -470,7 +472,14 @@ async fn fetch_usage(http: &reqwest::Client, token: &str, account_id: &str) -> R
 fn window_of(w: RawRateWindow) -> Option<(bool, ClaudeUsageWindow)> {
     let secs = w.limit_window_seconds?;
     let is_five = (secs - 18_000).abs() <= (secs - 604_800).abs();
-    Some((is_five, ClaudeUsageWindow { pct: w.used_percent.unwrap_or(0.0).round(), resets_at: w.reset_at }))
+    Some((
+        is_five,
+        ClaudeUsageWindow {
+            pct: w.used_percent.unwrap_or(0.0).round(),
+            // ISO string for the frontend (ClaudeUsageWindow.resetsAt → Date.parse).
+            resets_at: w.reset_at.map(crate::docker::epoch_to_rfc3339),
+        },
+    ))
 }
 
 fn to_usage(acct: &StoredCodexAccount, raw: RawUsage) -> ClaudeUsage {
@@ -1000,24 +1009,32 @@ mod tests {
 
     #[test]
     fn usage_maps_by_window_seconds_not_order() {
-        // primary=5h, secondary=weekly.
-        let body = r#"{"plan_type":"plus","rate_limit":{
-            "primary_window":{"used_percent":12.0,"limit_window_seconds":18000,"reset_at":"2026-07-03T00:00:00Z"},
-            "secondary_window":{"used_percent":3.0,"limit_window_seconds":604800,"reset_at":"2026-07-10T00:00:00Z"}
-        }}"#;
+        // Real chatgpt.com/backend-api/wham/usage shape: `used_percent` is a bare number,
+        // `reset_at` is epoch SECONDS (not an ISO string), and there are sibling fields we
+        // ignore (`allowed`, `reset_after_seconds`, `additional_rate_limits`). primary=5h,
+        // secondary=weekly.
+        let body = r#"{"plan_type":"pro","rate_limit":{"allowed":true,
+            "primary_window":{"used_percent":12,"limit_window_seconds":18000,"reset_after_seconds":2434,"reset_at":1609459200},
+            "secondary_window":{"used_percent":3,"limit_window_seconds":604800,"reset_at":1612137600}
+        },"additional_rate_limits":[]}"#;
         let u = to_usage(&sample_account(), serde_json::from_str(body).unwrap());
         assert_eq!(u.five_hour.as_ref().unwrap().pct, 12.0);
         assert_eq!(u.seven_day.as_ref().unwrap().pct, 3.0);
+        // Epoch seconds are converted to an ISO string so the frontend's Date.parse works.
+        assert_eq!(u.five_hour.as_ref().unwrap().resets_at.as_deref(), Some("2021-01-01T00:00:00Z"));
+        assert_eq!(u.seven_day.as_ref().unwrap().resets_at.as_deref(), Some("2021-02-01T00:00:00Z"));
         assert_eq!(u.provider, Some(wire::Provider::Codex));
         assert!(u.spend.is_none());
-        // Swapped field order: still classified by limit_window_seconds.
+        // Swapped field order: still classified by limit_window_seconds. `reset_at` absent
+        // here → resets_at is None (window still maps).
         let swapped = r#"{"rate_limit":{
-            "primary_window":{"used_percent":3.0,"limit_window_seconds":604800},
-            "secondary_window":{"used_percent":12.0,"limit_window_seconds":18000}
+            "primary_window":{"used_percent":3,"limit_window_seconds":604800},
+            "secondary_window":{"used_percent":12,"limit_window_seconds":18000}
         }}"#;
         let u2 = to_usage(&sample_account(), serde_json::from_str(swapped).unwrap());
         assert_eq!(u2.five_hour.as_ref().unwrap().pct, 12.0);
         assert_eq!(u2.seven_day.as_ref().unwrap().pct, 3.0);
+        assert!(u2.five_hour.as_ref().unwrap().resets_at.is_none());
     }
 
     #[test]
