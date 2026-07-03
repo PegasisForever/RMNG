@@ -96,14 +96,10 @@ Settings UI (textarea)                     config.json
   `default_agent_playbook()` returns
   `include_str!("../../../agent-wrapper/agent-instructions.md").to_string()` — the **same** file
   the wrapper embeds, so a config missing the key shows the shipped default in the UI and it is
-  persisted to `config.json` on the next save. Non-secret ⇒ passes through into
-  `AppConfigRedacted.agent_playbook`.
-  - **Freeze timing (decided):** with a serde default, an install that never opens/saves Settings
-    keeps getting the shipped default (it auto-upgrades across releases); the value is frozen into
-    `config.json` on the **first save**, not the first load. This is the recommended behavior — it
-    preserves WYSIWYG editing while auto-upgrading untouched installs, and avoids writing
-    `config.json` on a read. If strict freeze-**on-first-load** is wanted instead, add an explicit
-    write-back when the key is absent at load; flag during review if so.
+  persisted to `config.json` on the first save. Non-secret ⇒ passes through into
+  `AppConfigRedacted.agent_playbook`. (Not yet deployed, so there is no existing-config migration
+  to consider — the serde default is purely a clean way to surface the shipped text as the
+  editable value.)
 - `Preset.agent_playbook: String`, `#[serde(default)]` (empty ⇒ no append). Non-secret ⇒ passes
   through into `PresetRedacted.agent_playbook` (alongside `vars`/`labels`).
 - `ConfigPutResponse` / restart-required: **not** restart-required (read fresh per clone, like
