@@ -97,6 +97,10 @@ pub struct Preset {
     pub linear_key: String,
     #[serde(default)]
     pub vars: Vec<EnvVar>,
+    /// Optional per-preset text appended (after `"\n\n"`) to the global agent playbook for
+    /// clones of this preset. Empty ⇒ no append. Non-secret.
+    #[serde(default)]
+    pub agent_playbook: String,
 }
 
 impl Preset {
@@ -106,6 +110,7 @@ impl Preset {
             labels: self.labels.clone(),
             linear_key_set: !self.linear_key.is_empty(),
             vars: self.vars.clone(),
+            agent_playbook: self.agent_playbook.clone(),
         }
     }
 }
@@ -120,6 +125,7 @@ pub struct PresetRedacted {
     pub labels: Vec<String>,
     pub linear_key_set: bool,
     pub vars: Vec<EnvVar>,
+    pub agent_playbook: String,
 }
 
 /// A named pool of clone accounts (by email). A clone bound to a group sticks to its
@@ -291,6 +297,11 @@ pub struct AppConfig {
     /// retired stack's subnet address, unreachable from vmbr0 clones).
     #[serde(default = "default_inference_url")]
     pub detector_inference_url: String,
+    /// The desktop agent's base playbook (operating notes + ticket procedure), injected into
+    /// each new clone at creation as its system-prompt append. Seeded with the shipped default
+    /// (the wrapper's `agent-instructions.md`); edited in Settings. Applies to the next clone.
+    #[serde(default = "default_agent_playbook")]
+    pub agent_playbook: String,
 }
 
 impl Default for AppConfig {
@@ -309,12 +320,19 @@ impl Default for AppConfig {
             presets: Vec::new(),
             chroma: ChromaMode::default(),
             detector_inference_url: default_inference_url(),
+            agent_playbook: default_agent_playbook(),
         }
     }
 }
 
 fn default_agent_port() -> u16 {
     4096
+}
+/// The shipped agent playbook: the wrapper's merged instructions file, embedded so the
+/// control-server can seed the setting and inject it without a runtime file dependency.
+/// Same file the agent-wrapper bakes in as its fallback (single source of truth).
+fn default_agent_playbook() -> String {
+    include_str!("../../../agent-wrapper/agent-instructions.md").to_string()
 }
 fn default_inference_url() -> String {
     "http://10.0.0.42:8080".into()
@@ -359,6 +377,7 @@ impl AppConfig {
             presets: self.presets.iter().map(Preset::redacted).collect(),
             chroma: self.chroma,
             detector_inference_url: self.detector_inference_url.clone(),
+            agent_playbook: self.agent_playbook.clone(),
         }
     }
 }
@@ -382,6 +401,7 @@ pub struct AppConfigRedacted {
     pub presets: Vec<PresetRedacted>,
     pub chroma: ChromaMode,
     pub detector_inference_url: String,
+    pub agent_playbook: String,
 }
 
 /// Response body for `PUT /api/config`: the redacted config after the merge, plus
@@ -543,6 +563,7 @@ mod tests {
                     labels: vec!["Backend".into()],
                     linear_key: "lin_api_secret".into(),
                     vars: vec![EnvVar { key: "A".into(), value: "1".into() }],
+                    agent_playbook: String::new(),
                 },
                 Preset { name: "bare".into(), ..Default::default() },
             ],
@@ -564,6 +585,33 @@ mod tests {
         assert_eq!(r.docker.hostname_prefix, "dev-");
         // template_reference is non-secret — it passes through the redacted view intact.
         assert_eq!(r.docker.template_reference, "pegasis0/rmng-template:v9");
+    }
+
+    #[test]
+    fn agent_playbook_defaults_to_embedded_file() {
+        // Missing key ⇒ the shipped default (the merged wrapper instructions), non-empty.
+        let c: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(!c.agent_playbook.is_empty());
+        assert_eq!(c.agent_playbook, default_agent_playbook());
+        // A preset's playbook defaults to empty (optional append).
+        let p: Preset = serde_json::from_str(r#"{ "name": "x" }"#).unwrap();
+        assert!(p.agent_playbook.is_empty());
+    }
+
+    #[test]
+    fn agent_playbook_passes_through_redaction() {
+        let c = AppConfig {
+            agent_playbook: "GLOBAL NOTES".into(),
+            presets: vec![Preset {
+                name: "p".into(),
+                agent_playbook: "PRESET APPEND".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = c.redacted();
+        assert_eq!(r.agent_playbook, "GLOBAL NOTES");
+        assert_eq!(r.presets[0].agent_playbook, "PRESET APPEND");
     }
 }
 
