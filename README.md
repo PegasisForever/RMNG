@@ -17,7 +17,7 @@ It replaces an older split where a native RDP client connected directly to each 
 
 ## The shape
 
-The control-server exposes **four ports**; a fifth automation surface lives inside each clone.
+The control-server exposes **five ports** plus an SMB clone-home share; a further automation surface (the daemon MCP) lives inside each clone.
 
 | Port | Default | Transport | Purpose |
 |---|---|---|---|
@@ -25,6 +25,8 @@ The control-server exposes **four ports**; a fifth automation surface lives insi
 | **2 — web API** | `9000` | HTTP + SSE (+ embedded frontend) | the React management UI: host selection, clone/Linear/Claude/chat orchestration, settings |
 | **3 — per-clone MCP** | `9002` | HTTP JSON-RPC, header-routed | the in-clone agent reports its verdict (`set_state`); caller self-identifies via the `x-rmng-clone` header |
 | **4 — fleet MCP** | `9003` | HTTP JSON-RPC | every web action + every desktop/window tool (with a `clone` selector); desktop tools proxied to the clone's daemon MCP |
+| **5 — forward** | `9005` | framed TCP over TCP | the viewer's port-forwarding data plane: one TCP connection per accepted local socket, spliced to the clone |
+| **SMB** | `445` | SMB (smbd) | the `clones` share — browse every running clone's `/home/rmng` from `smb://<host>/clones` (fixed cred `rmng`/`rmng`) |
 | daemon MCP | `9004` | HTTP JSON-RPC (in each clone) | the full desktop-automation surface; the agent calls it on localhost, the fleet MCP proxies to it |
 | clone socket | `/srv/rmng-sock/clones.sock` | unix `SOCK_SEQPACKET` | clone-daemon ⇄ control-server: dmabuf frames (`SCM_RIGHTS`) out, input/clipboard in |
 
@@ -54,7 +56,7 @@ no manual redeploy step.
 | Path | Kind | What |
 |---|---|---|
 | [crates/wire](crates/wire/README.md) | lib | shared types: control state, config, the clone socket + viewer protocols, MCP DTOs; ts-rs export for the frontend |
-| [crates/control-server](crates/control-server/README.md) | bin | the 4-port server: media plane, web API/SSE, per-clone + fleet MCP, Docker orchestration (bollard), on-disk frontend + clone payloads, clone-template pull + automatic binary hot-swap |
+| [crates/control-server](crates/control-server/README.md) | bin | the server: media plane, web API/SSE, per-clone + fleet MCP, port-forward + SMB planes, Docker orchestration (bollard), on-disk frontend + clone payloads, clone-template pull + automatic binary hot-swap |
 | [crates/media](crates/media/README.md) | lib | dmabuf ingest → VA-API H.264 per monitor + dmabuf→PNG screenshots + the clone-socket transport |
 | [crates/clone-daemon](crates/clone-daemon/README.md) | bin | the thin in-clone pipe: RecordVirtual capture, RemoteDesktop input inject, clipboard bridge, the desktop MCP (:9004), and the needs-human detector |
 | [crates/viewer](crates/viewer/README.md) | bin | the native GTK client (GUI + headless test mode): zero-copy VA-API decode, multi-monitor, client-drawn cursor, input + pointer-lock + clipboard |
@@ -85,7 +87,7 @@ published image (or `docker build -t rmng:latest .` from a checkout), then run t
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9003:9000-9003 pegasis0/rmng
+  -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 pegasis0/rmng
 # …or, from a checkout: docker compose up -d --build
 ```
 

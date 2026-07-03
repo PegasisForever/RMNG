@@ -11,7 +11,8 @@ use ts_rs::TS;
 
 use crate::control::MonitorSpec;
 
-/// The four listen ports (see README: 1 video, 2 web, 3 per-clone MCP, 4 global MCP).
+/// The control-server listen ports: video, web, per-clone MCP, global/fleet MCP, the
+/// in-clone daemon MCP, and the forward data plane (see README).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]

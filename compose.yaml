@@ -8,7 +8,7 @@
 #   docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-#     -p 9000-9003:9000-9003 -p 445:445 rmng:latest
+#     -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 rmng:latest
 
 services:
   rmng:

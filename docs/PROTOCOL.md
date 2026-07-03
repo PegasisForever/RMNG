@@ -16,6 +16,7 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 | web | `9000` | `listen.web` | control-server web | browser / control-client | HTTP + SSE |
 | per-clone MCP | `9002` | `listen.clone_mcp` | control-server mcp | in-clone agent-wrapper | HTTP JSON-RPC (header-routed) |
 | fleet MCP | `9003` | `listen.global_mcp` | control-server mcp | operator / fleet agents | HTTP JSON-RPC |
+| forward | `9005` | `listen.forward` | control-server mediaplane | native viewer | framed TCP over TCP (one conn per forwarded local socket, spliced to the clone) |
 | daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agent-wrapper + fleet MCP proxy | HTTP JSON-RPC |
 | agent-wrapper | `4096` | `agent_port` (config) / `AGENT_PORT` | agent-wrapper (in clone) | control-server chat proxy | HTTP + SSE |
 | clone socket | `/srv/rmng-sock/clones.sock` | `cloneSocket` config (server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
@@ -129,7 +130,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `listen` | `ListenConfig` | see below | the 5 ports |
+| `listen` | `ListenConfig` | see below | the 6 ports |
 | `agent_port` | u16 | `4096` | agent-wrapper port on each clone |
 | `data_dir` | string | `"data"` | state/notes/uploads/chats/feedback root; `state.json` and the `claude-accounts.json` secret store live here. **One-time** (set in the setup wizard) |
 | `static_dir` | string | `""` (embedded) | empty serves the frontend embedded in the binary; a non-empty disk path serves the bundle from there. Set in Settings → Advanced. **Restart-required** |
@@ -144,7 +145,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 | `detector_inference_url` | string | `http://10.0.0.42:8080` | vision-LLM the needs-human detector polls; injected into clones as `RMNG_INFERENCE_URL` |
 
 - **`ListenConfig`**: `web 9000`, `video 9001`, `clone_mcp 9002`, `global_mcp 9003`,
-  `daemon_mcp 9004`.
+  `daemon_mcp 9004`, `forward 9005`.
 - **`DockerConfig`** (no secret — the local daemon is reached over a unix socket, so the
   whole struct passes through the redacted view): `socket`
   (`"/var/run/docker.sock"` — the daemon the control-server drives, **restart-required**;
@@ -203,7 +204,7 @@ optional registry reference (`POST /api/images/pull {name, reference?}` → `rmn
 **control-server:** reads **no `RMNG_*` env vars** — all config is `./config.json` in the
 working directory (the Docker image sets `WORKDIR /data`, the `rmng-data` volume). The
 disk-frontend path, chroma, and Docker daemon socket are the `staticDir` / `chroma` /
-`docker.socket` config fields (restart-required, along with the four listen ports); the clone
+`docker.socket` config fields (restart-required, along with the five listen ports); the clone
 socket is the `cloneSocket` config field (**one-time** — baked into every clone's
 `/srv/rmng-sock` bind + clone-daemon `RMNG_SOCKET` at bootstrap — but a pre-latch edit is
 still restart-required, since the old path is bound at startup). Only `RUST_LOG`

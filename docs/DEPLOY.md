@@ -20,7 +20,8 @@ dashboard/API — clone binaries stay current on their own, with no manual redep
 - A **GPU render node** `/dev/dri/renderD128` on the host (AMD radeonsi/Mesa VA-API). The
   control-server VA-API-**encodes** every clone's frames and each clone **captures** its own
   desktop — both need the render node. Validated on the AMD Radeon Pro **W6800**.
-- Ports **9000–9003** free (web/API, video, per-clone MCP, fleet MCP).
+- Ports **9000–9003**, **9005** (port-forward), and **445** (SMB) free (web/API, video,
+  per-clone MCP, fleet MCP, port-forward data plane, clone-home share).
 
 ## 1. Get the image
 
@@ -57,7 +58,7 @@ and run `docker compose up -d` (no `--build`). The equivalent one-liner off the 
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9003:9000-9003 -p 445:445 pegasis0/rmng
+  -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 pegasis0/rmng
 ```
 
 What each piece is for:
@@ -70,7 +71,8 @@ What each piece is for:
 | `-v /var/run/docker.sock:…` | the daemon the server drives via bollard |
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
-| `-p 9000-9003:9000-9003` | the four listen ports |
+| `-p 9000-9003:9000-9003` | the web API, video, per-clone MCP, and fleet MCP ports |
+| `-p 9005:9005` | the port-forward data plane (viewer↔clone TCP splice) |
 | `-p 445:445` | the SMB clone-home share (`clones`) — browse every running clone's `/home/rmng` from `smb://<host>/clones` (below) |
 
 **There are zero `-e` configuration flags, by design.** `config.json` (edited via the

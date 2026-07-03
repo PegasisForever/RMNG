@@ -1,8 +1,8 @@
-//! control-server — the four-port hub (see ../README.md).
+//! control-server — the fleet hub (see ../README.md).
 //!
-//! Phase 1 brings up **port 2** (web API + SSE + static frontend) on top of the
-//! state store. Ports 1 (video), 3 (per-clone MCP), and 4 (global MCP) are wired
-//! as explicit "not yet" log lines until Phases 4/6 fill them in.
+//! One tokio service binding five listen ports — port 1 (video), port 2 (web API + SSE +
+//! static frontend), port 3 (per-clone MCP), port 4 (fleet MCP), and the forward data plane
+//! (9005) — plus an smbd `clones` share on 445 that surfaces every clone's home. All live.
 
 mod app;
 mod assets;
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
     // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
     mediaplane::spawn(app.clone());
 
-    // Ports 3 (per-clone MCP, IP-routed) + 4 (global MCP).
+    // Ports 3 (per-clone MCP, header-routed via `x-rmng-clone`) + 4 (global MCP).
     {
         let cfg = app.config();
         tokio::spawn(mcp::serve(app.clone(), cfg.listen.clone_mcp, mcp::Scope::PerClone));
