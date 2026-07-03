@@ -39,6 +39,8 @@ pub fn set_keepalive(sock: &TcpStream) -> std::io::Result<()> {
             .with_interval(Duration::from_secs(3)) // between probes
             .with_retries(3), // unanswered probes before declaring the peer dead
     )?;
+    // `TCP_USER_TIMEOUT` bounds unacked-write retransmit to ~20 s; Linux-only.
+    #[cfg(target_os = "linux")]
     sock.set_tcp_user_timeout(Some(Duration::from_secs(20)))?;
     Ok(())
 }
