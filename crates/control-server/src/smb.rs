@@ -4,10 +4,16 @@
 //! pointing at that clone's `/home/rmng`. So an SMB client browsing `\\<host>\clones` sees
 //! every clone's home side by side.
 //!
-//! `force user = rmng` (uid 1000) makes smbd both *traverse* those `/proc/<pid>/root`
-//! symlinks — a uid-1000 session can only ptrace-follow a fellow uid-1000 process, which
-//! is exactly why `homes` links through a uid-1000 pid — and *own* newly created files as
-//! uid 1000 inside the clone.
+//! `force user = root` makes smbd *traverse* those `/proc/<pid>/root` symlinks: the clone's
+//! uid-1000 session process is non-dumpable (it setuid'd from root at login), so following
+//! its `/proc/<pid>/root` needs `CAP_SYS_PTRACE` — which only root has (a fellow uid-1000
+//! process is denied, and Yama `ptrace_scope`/`suid_dumpable` don't change that). To keep
+//! *writes* owned by the clone's own `rmng` (uid 1000) rather than root, `inherit owner =
+//! unix only` gives each new file the owner of its parent directory — the clone home — so an
+//! uploaded file lands as a regular clone-user file it can edit/delete; `force group = rmng`
+//! keeps the group the clone's too. (Trade-off: serving as root with `wide links` means an
+//! authenticated `clones` client can read any root-readable path via a planted symlink — an
+//! accepted risk for this trusted, credential-gated share.)
 //!
 //! On startup we (re)render `/data/smb.conf` from the live config's `data_dir` (so the
 //! share `path` always tracks where the reconciler writes its links), provision the local
@@ -57,9 +63,10 @@ pub fn render_smb_conf(hosts_root: &Path) -> String {
    read only = no
    wide links = yes
    follow symlinks = yes
-   force user = rmng
+   force user = root
    force group = rmng
    valid users = rmng
+   inherit owner = unix only
 ",
         hosts_root.display()
     )
@@ -238,9 +245,10 @@ mod tests {
             "read only = no",
             "wide links = yes",
             "follow symlinks = yes",
-            "force user = rmng",
+            "force user = root",
             "force group = rmng",
             "valid users = rmng",
+            "inherit owner = unix only",
         ] {
             assert!(out.contains(needle), "smb.conf missing `{needle}`:\n{out}");
         }
