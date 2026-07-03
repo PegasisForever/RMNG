@@ -140,6 +140,13 @@ install -d -m0755 "$BINDIR"
 log "install standalone claude CLI (no node)"
 runuser -u "$USERNAME" -- bash -lc 'set -o pipefail; command -v claude >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash'
 
+# Codex CLI installs standalone (self-contained binary, no node) → ~/.local/bin/codex.
+# Warn-only: unlike claude, the agent-wrapper does not require codex, so a failed install
+# must not fail the template build. Idempotent (skips if already present).
+log "install standalone codex CLI (no node)"
+runuser -u "$USERNAME" -- bash -lc 'set -o pipefail; command -v codex >/dev/null 2>&1 || CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
+  || warn "codex install failed; codex accounts will be unavailable on clones from this template"
+
 # Shared user CLAUDE.md — operating memory read by EVERY `claude` on this clone: the
 # agent-wrapper's SDK agent (settingSources: ["user"]), the Claude Code it drives inside
 # Cursor to implement tickets, and any interactive `claude` a human opens. General
