@@ -117,10 +117,14 @@ fn tunnel(local: TcpStream, forward_addr: String, rule: ForwardRule) {
     if up.write_all(&(body.len() as u32).to_be_bytes()).is_err() || up.write_all(&body).is_err() {
         return;
     }
+    // Bound the status handshake read so a stalled/hostile server can't park this thread
+    // forever; cleared before the splice so an established idle tunnel isn't subject to it.
+    let _ = up.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let mut status = [0u8; 1];
     if up.read_exact(&mut status).is_err() || status[0] != 0 {
         return; // dial failed server-side
     }
+    let _ = up.set_read_timeout(None);
     splice(local, up);
 }
 

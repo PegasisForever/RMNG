@@ -693,6 +693,12 @@ fn splice_forward(a: TcpStream, b: TcpStream) {
 /// One forwarded connection: read the header, resolve + dial the clone port, reply a
 /// status byte, then splice. `0x00` = connected, non-zero = dial failed.
 fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
+    // Bound the pre-splice handshake reads: the data plane is published on 0.0.0.0 with
+    // no auth, so a peer that connects and never sends the header would otherwise park
+    // this OS thread forever (unbounded thread-exhaustion DoS). 10 s is ample for a
+    // header + status handshake. This is CLEARED before splicing (below) so long-lived
+    // idle established tunnels are not subject to it.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let header = match read_forward_header(&mut stream) {
         Ok(h) => h,
         Err(e) => {
@@ -705,6 +711,17 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
         let _ = stream.write_all(&[1u8]);
         return;
     };
+    // Confine the data plane to *configured, enabled* forwards for this host — otherwise
+    // the 0.0.0.0 listener is an open TCP proxy into the Docker network. The header must
+    // name a forward that exists, is enabled, and targets the same remote port.
+    let ok = host
+        .forwards
+        .iter()
+        .any(|f| f.enabled && f.id == header.id && f.remote_port == header.remote_port);
+    if !ok {
+        let _ = stream.write_all(&[1u8]);
+        return;
+    }
     let dial = rt.block_on(app.dial_host(&host));
     let addr = format!("{dial}:{}", header.remote_port);
     match TcpStream::connect(&addr) {
@@ -713,6 +730,11 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
             if stream.write_all(&[0u8]).is_err() {
                 return;
             }
+            // Handshake complete: clear the read timeout BEFORE splicing so an idle
+            // established tunnel is not torn down at 10 s. `splice_forward` makes its
+            // `try_clone`s from `stream` below, so clearing here means the cloned fds
+            // inherit no read timeout.
+            let _ = stream.set_read_timeout(None);
             app.forwards.conn_opened(&header.host_id, &header.id);
             splice_forward(stream, upstream);
             app.forwards.conn_closed(&header.host_id, &header.id);
