@@ -7,7 +7,7 @@ mode and a first-class **headless** mode for testing (see
 [Headless mode](#headless-mode-first-class)). This is the production successor to the old
 RDP client (`../../core`/`../../gtk`/`../../headless`), and it is the one component the user
 explicitly required be **written clean — no code imported from the old GTK client**
-(see [Clean-room](../../README.md#clean-room)). The Phase-0 PoC (which extended the old
+(see [Clean-room](../../docs/DEVELOPMENT.md#clean-room)). The Phase-0 PoC (which extended the old
 client) proved the approach; this crate re-implements it fresh.
 
 ## What it does

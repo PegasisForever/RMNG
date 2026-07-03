@@ -57,7 +57,7 @@ and run `docker compose up -d` (no `--build`). The equivalent one-liner off the 
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9003:9000-9003 pegasis0/rmng
+  -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 pegasis0/rmng
 ```
 
 What each piece is for:
@@ -70,7 +70,7 @@ What each piece is for:
 | `-v /var/run/docker.sock:…` | the daemon the server drives via bollard |
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
-| `-p 9000-9003:9000-9003` | the four listen ports |
+| `-p 9000-9003:9000-9003 -p 9005:9005 -p 445:445` | the four listen ports (9000 web · 9001 video · 9002/9003 MCP), 9005 the port-forward data plane, and 445 the SMB clone-home share (host 445 must be free) |
 
 **There are zero `-e` configuration flags, by design.** `config.json` (edited via the
 wizard / Settings, `PUT /api/config`) is the single source of truth — subnet, hostname
@@ -317,7 +317,7 @@ that unit).
 ## The dev loop
 
 The whole workspace compiles on any Linux dev box with the desktop media/GUI dev libs (the
-[Prerequisites](../README.md#prerequisites): GStreamer + GTK4 + PipeWire + libdrm + `clang`);
+[Prerequisites](DEVELOPMENT.md#prerequisites): GStreamer + GTK4 + PipeWire + libdrm + `clang`);
 a bare box without them builds only `wire`. What needs a **GPU** is *running* the pipeline —
 the control-server's VA-API **encode** and each clone's **capture** — so exercising real
 clones requires the W6800 host with Docker. The **`viewer` is the exception: it builds *and*

@@ -103,7 +103,7 @@ Internal socket/viewer types may use snake_case.
 - Serialize `ControlState` so the frontend keeps parsing it unchanged
   (unknown-field-tolerant; only the **server** publisher changes). This is the one wire
   contract we deliberately keep across the cutover; the Rust types themselves are written
-  fresh (see [Clean-room](../../README.md#clean-room)).
+  fresh (see [Clean-room](../../docs/DEVELOPMENT.md#clean-room)).
 - During cutover the old `../../shared` crate still backs the legacy client until it is
   retired; `wire` does not depend on it.
 
