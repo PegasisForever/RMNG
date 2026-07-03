@@ -193,7 +193,7 @@ export const deleteOperation: Operation = {
 // --- redacted app config (for the Settings story) --------------------------
 
 export const appConfig: AppConfigRedacted = {
-  listen: { web: 9000, video: 9001, cloneMcp: 9002, globalMcp: 9003, daemonMcp: 9004 },
+  listen: { web: 9000, video: 9001, cloneMcp: 9002, globalMcp: 9003, daemonMcp: 9004, forward: 9005 },
   agentPort: 4096,
   dataDir: "/data",
   staticDir: "",
