@@ -130,6 +130,8 @@ async fn main() -> Result<()> {
     // every clone's home is browsable in one place; needs the container's `pid: "host"`).
     tokio::spawn(claude::run_poller(app.clone()));
     tokio::spawn(claude::run_rotator(app.clone()));
+    tokio::spawn(codex::run_poller(app.clone()));
+    tokio::spawn(codex::run_rotator(app.clone()));
     tokio::spawn(monitor::run(app.clone()));
     tokio::spawn(homes::run(app.clone()));
 

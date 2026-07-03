@@ -17,8 +17,6 @@ use serde::{Deserialize, Serialize};
 use wire::{ClaudeUsage, ClaudeUsageWindow, CloneGroup, Host};
 
 use crate::app::App;
-// TODO(task-9): rand_u64/shuffle consumed by scoring
-#[allow(unused_imports)]
 use crate::clone_ops::{extract_json, jwt_claims, now_ms, rand_u64, run_clone_op, shuffle, snippet};
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -31,13 +29,9 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGGER: Duration = Duration::from_millis(400);
 
 // scoring knobs — copied from claude.rs (identical semantics).
-#[allow(dead_code)]
 const SESSION_HEADROOM_PCT: f64 = 40.0;
-#[allow(dead_code)]
 const SEVEN_DAY_CAP_PCT: f64 = 95.0;
-#[allow(dead_code)]
 const ROTATE_MAX_FIVE_HOUR_PCT: f64 = 90.0;
-#[allow(dead_code)]
 const ROTATE_SECS: u64 = 600;
 
 const IMPORT_SCRIPT: &str = include_str!("../scripts/codex-import.sh");
@@ -525,6 +519,409 @@ fn codex_base(acct: &StoredCodexAccount) -> ClaudeUsage {
     }
 }
 
+// --- scoring + assignment (mirrors claude.rs) -----------------------------
+
+const AUTO: &str = "auto";
+const NONE: &str = "none";
+
+pub fn normalize_selection(requested: Option<&str>) -> String {
+    let want = requested.unwrap_or("").trim();
+    if want.is_empty() { AUTO.to_string() } else { want.to_string() }
+}
+
+struct Scored {
+    email: String,
+    score: f64,
+    eligible: bool,
+}
+
+fn clamp01(n: f64) -> f64 {
+    n.clamp(0.0, 1.0)
+}
+
+fn score_accounts(app: &App) -> Vec<Scored> {
+    let st = app.store.get();
+    let usage: HashMap<&str, &ClaudeUsage> = st
+        .claude_accounts
+        .iter()
+        .filter(|u| u.provider == Some(wire::Provider::Codex))
+        .map(|u| (u.email.as_str(), u))
+        .collect();
+    let mut clones: HashMap<&str, u32> = HashMap::new();
+    for h in &st.hosts {
+        if let Some(e) = &h.codex_account_email {
+            *clones.entry(e.as_str()).or_insert(0) += 1;
+        }
+    }
+    app.codex
+        .emails()
+        .into_iter()
+        .map(|email| {
+            let u = usage.get(email.as_str());
+            let five = u.and_then(|u| u.five_hour.as_ref()).map(|w| w.pct).unwrap_or(0.0);
+            let seven = u.and_then(|u| u.seven_day.as_ref()).map(|w| w.pct).unwrap_or(0.0);
+            let headroom = clamp01((100.0 - five) / 100.0);
+            let n = *clones.get(email.as_str()).unwrap_or(&0) as f64;
+            let score = headroom - 0.5 * n;
+            let eligible = (100.0 - five >= SESSION_HEADROOM_PCT) && seven < SEVEN_DAY_CAP_PCT;
+            Scored { email, score, eligible }
+        })
+        .collect()
+}
+
+fn best_scored(app: &App) -> Option<String> {
+    let scored = score_accounts(app);
+    if scored.is_empty() {
+        return None;
+    }
+    let mut pool: Vec<&Scored> = scored.iter().filter(|s| s.eligible).collect();
+    if pool.is_empty() {
+        pool = scored.iter().collect();
+    }
+    pool.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    pool.first().map(|s| s.email.clone())
+}
+
+pub fn recommend(app: &App) -> Option<String> {
+    best_scored(app)
+}
+
+pub fn resolve_clone_account(app: &App, requested: Option<&str>) -> Option<String> {
+    let emails = app.codex.emails();
+    if emails.is_empty() {
+        return None;
+    }
+    let want = requested.unwrap_or("").trim();
+    if !want.is_empty() && want != AUTO {
+        if let Some(hit) = emails.iter().find(|e| e.as_str() == want) {
+            return Some(hit.clone());
+        }
+        tracing::warn!("codex account '{want}' not imported; using recommended");
+    }
+    best_scored(app)
+}
+
+pub enum Assignment {
+    Account(String),
+    Group { name: String, initial: String },
+    None,
+}
+
+pub fn resolve_assignment(app: &App, requested: Option<&str>) -> Option<Assignment> {
+    let want = requested.unwrap_or("").trim();
+    if want.eq_ignore_ascii_case(NONE) {
+        return Some(Assignment::None);
+    }
+    if let Some(name) = want.strip_prefix("group:") {
+        let name = name.trim();
+        let initial = pick_group_account(app, name)?;
+        return Some(Assignment::Group { name: name.to_string(), initial });
+    }
+    resolve_clone_account(app, requested).map(Assignment::Account)
+}
+
+fn clone_counts(app: &App) -> HashMap<String, u32> {
+    let mut m = HashMap::new();
+    for h in &app.store.get().hosts {
+        if let Some(e) = &h.codex_account_email {
+            *m.entry(e.clone()).or_insert(0) += 1;
+        }
+    }
+    m
+}
+
+fn five_hour_pct(app: &App, email: &str) -> f64 {
+    app.store
+        .get()
+        .claude_accounts
+        .iter()
+        .filter(|u| u.provider == Some(wire::Provider::Codex))
+        .find(|u| u.email == email)
+        .and_then(|u| u.five_hour.as_ref())
+        .map(|w| w.pct)
+        .unwrap_or(0.0)
+}
+
+fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
+    let known = app.codex.emails();
+    group
+        .accounts
+        .iter()
+        .filter(|email| known.iter().any(|k| &k == email))
+        .filter(|email| five_hour_pct(app, email) <= ROTATE_MAX_FIVE_HOUR_PCT)
+        .cloned()
+        .collect()
+}
+
+fn pick_group_account(app: &App, group_name: &str) -> Option<String> {
+    let cfg = app.config();
+    let group = cfg.codex_groups.iter().find(|g| g.name == group_name)?;
+    let counts = clone_counts(app);
+    let mut pool = eligible_group_accounts(app, group);
+    if pool.is_empty() {
+        let known = app.codex.emails();
+        pool = group.accounts.iter().filter(|e| known.iter().any(|k| &k == e)).cloned().collect();
+    }
+    shuffle(&mut pool);
+    pool.into_iter().min_by_key(|email| {
+        let load = *counts.get(email).unwrap_or(&0);
+        let pct = five_hour_pct(app, email).round() as u32;
+        (load, pct)
+    })
+}
+
+fn assign_rotation(
+    clones: &[Host],
+    eligible: &[String],
+    usage: &HashMap<String, f64>,
+) -> Vec<(Host, String)> {
+    let mut used: HashMap<String, u32> = HashMap::new();
+    let mut out: Vec<(Host, String)> = Vec::with_capacity(clones.len());
+    let mut homeless: Vec<Host> = Vec::new();
+    for c in clones {
+        match &c.codex_account_email {
+            Some(e) if eligible.contains(e) => {
+                *used.entry(e.clone()).or_insert(0) += 1;
+                out.push((c.clone(), e.clone()));
+            }
+            _ => homeless.push(c.clone()),
+        }
+    }
+    shuffle(&mut homeless);
+    for host in homeless {
+        let pick = eligible
+            .iter()
+            .min_by_key(|email| {
+                let load = *used.get(*email).unwrap_or(&0);
+                let pct = usage.get(*email).copied().unwrap_or(0.0).round() as u32;
+                (load, pct, rand_u64() as u32)
+            })
+            .expect("eligible is non-empty")
+            .clone();
+        *used.entry(pick.clone()).or_insert(0) += 1;
+        out.push((host, pick));
+    }
+    out
+}
+
+pub async fn rotate_once(app: &App) {
+    let cfg = app.config();
+    if cfg.codex_groups.is_empty() {
+        return;
+    }
+    let mut by_group: HashMap<String, Vec<Host>> = HashMap::new();
+    for h in &app.store.get().hosts {
+        if let (Some(g), true) = (&h.codex_group, h.managed) {
+            by_group.entry(g.clone()).or_default().push(h.clone());
+        }
+    }
+    for (gname, clones) in by_group {
+        let Some(group) = cfg.codex_groups.iter().find(|g| g.name == gname) else {
+            continue;
+        };
+        let eligible = eligible_group_accounts(app, group);
+        if eligible.is_empty() {
+            tracing::info!(
+                "codex rotate: group '{gname}' has no account <= {ROTATE_MAX_FIVE_HOUR_PCT}% 5h; leaving {} clone(s)",
+                clones.len()
+            );
+            continue;
+        }
+        let usage: HashMap<String, f64> =
+            eligible.iter().map(|e| (e.clone(), five_hour_pct(app, e))).collect();
+        for (host, email) in assign_rotation(&clones, &eligible, &usage) {
+            if host.codex_account_email.as_deref() == Some(email.as_str()) {
+                continue;
+            }
+            match push_account_to_clone(app, &host.id, &email).await {
+                Ok(()) => {
+                    tracing::info!(
+                        "codex rotate: {} {} -> {}",
+                        host.id,
+                        host.codex_account_email.as_deref().unwrap_or("none"),
+                        email
+                    );
+                    let id = host.id.clone();
+                    app.store.mutate(|s| {
+                        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+                            h.codex_account_email = Some(email);
+                        }
+                    });
+                }
+                Err(e) => tracing::warn!("codex rotate: applying {email} to {} failed: {e}", host.id),
+            }
+            tokio::time::sleep(STAGGER).await;
+        }
+    }
+}
+
+pub async fn run_rotator(app: App) {
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    loop {
+        rotate_once(&app).await;
+        tokio::time::sleep(Duration::from_secs(ROTATE_SECS)).await;
+    }
+}
+
+async fn auto_swap_exhausted(app: &App) {
+    let st = app.store.get();
+    let usage: HashMap<String, &ClaudeUsage> = st
+        .claude_accounts
+        .iter()
+        .filter(|u| u.provider == Some(wire::Provider::Codex))
+        .map(|u| (u.email.clone(), u))
+        .collect();
+    let exhausted = |email: &str| -> bool {
+        usage.get(email).is_some_and(|u| {
+            let five = u.five_hour.as_ref().map(|w| w.pct).unwrap_or(0.0);
+            let seven = u.seven_day.as_ref().map(|w| w.pct).unwrap_or(0.0);
+            (100.0 - five) < SESSION_HEADROOM_PCT || seven >= SEVEN_DAY_CAP_PCT
+        })
+    };
+    for host in &st.hosts {
+        if host.codex_group.is_some() {
+            continue;
+        }
+        if !host.managed {
+            continue;
+        }
+        let Some(cur) = &host.codex_account_email else { continue };
+        if !exhausted(cur) {
+            continue;
+        }
+        let Some(next) = best_scored(app) else { continue };
+        if &next == cur || exhausted(&next) {
+            continue;
+        }
+        match push_account_to_clone(app, &host.id, &next).await {
+            Ok(()) => {
+                tracing::info!("codex auto-swapped {} from {cur} to {next}", host.id);
+                let id = host.id.clone();
+                app.store.mutate(|s| {
+                    if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+                        h.codex_account_email = Some(next);
+                    }
+                });
+            }
+            Err(e) => tracing::warn!("codex auto-swap of {} failed: {e}", host.id),
+        }
+    }
+}
+
+// --- poller ----------------------------------------------------------------
+
+pub async fn poll_once(app: &App) -> Result<bool> {
+    {
+        let mut p = app.codex.polling.lock().unwrap();
+        if *p {
+            return Ok(false);
+        }
+        *p = true;
+    }
+    let result = poll_inner(app).await;
+    *app.codex.polling.lock().unwrap() = false;
+    result
+}
+
+async fn poll_inner(app: &App) -> Result<bool> {
+    let accts = app.codex.snapshot();
+    let cfg = app.config();
+    if accts.is_empty() {
+        crate::clone_ops::replace_provider_views(app, wire::Provider::Codex, Vec::new(), None);
+        return Ok(false);
+    }
+
+    let usage_polling = cfg.codex.usage_polling;
+    let mut any429 = false;
+    let mut views = Vec::with_capacity(accts.len());
+
+    for (i, acct) in accts.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(STAGGER).await;
+        }
+        let outcome = async {
+            let (fresh, _) = fresh_access_token(app, &acct.email).await?;
+            if !usage_polling {
+                // Refresh + push still happen; skip the usage fetch, publish a base view.
+                let mut b = codex_base(acct);
+                b.error = Some("usage polling disabled (codex.usagePolling=false)".into());
+                return Ok::<_, anyhow::Error>(b);
+            }
+            let raw = fetch_usage(&app.http, &fresh.access_token, &fresh.account_id).await?;
+            Ok::<_, anyhow::Error>(to_usage(acct, raw))
+        }
+        .await;
+        match outcome {
+            Ok(u) => {
+                app.codex.last_good.lock().unwrap().insert(acct.id.clone(), u.clone());
+                views.push(u);
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("429") {
+                    any429 = true;
+                }
+                let prev = app.codex.last_good.lock().unwrap().get(&acct.id).cloned();
+                views.push(match prev {
+                    Some(mut p) => {
+                        p.stale = Some(true);
+                        p
+                    }
+                    None => {
+                        let mut b = codex_base(acct);
+                        b.error = Some(msg);
+                        b
+                    }
+                });
+            }
+        }
+    }
+
+    for v in &mut views {
+        v.assignable = Some(true);
+    }
+    crate::clone_ops::replace_provider_views(
+        app,
+        wire::Provider::Codex,
+        views,
+        cfg.codex.pinned_email.as_deref(),
+    );
+
+    push_stale_tokens(app).await;
+
+    if cfg.codex.auto_swap_on_exhaustion {
+        auto_swap_exhausted(app).await;
+    }
+    Ok(any429)
+}
+
+pub async fn run_poller(app: App) {
+    const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
+    let mut backoff: u32 = 0;
+    loop {
+        let any429 = match poll_once(&app).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("codex usage poll failed: {e}");
+                false
+            }
+        };
+        let base = Duration::from_secs(app.config().codex.poll_secs.max(15));
+        let delay = if any429 {
+            backoff = (backoff + 1).min(8);
+            let escalate = backoff.saturating_sub(2);
+            (base * 2u32.pow(escalate)).min(MAX_BACKOFF)
+        } else {
+            backoff = 0;
+            base
+        };
+        if any429 {
+            tracing::warn!("codex usage rate-limited (429); next poll in {}s", delay.as_secs());
+        }
+        tokio::time::sleep(delay).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,5 +1027,35 @@ mod tests {
         acct.access_token = jwt_with(r#"{"exp":2000000000}"#);
         set_expiry_from_access(&mut acct);
         assert_eq!(acct.expires_at, 2_000_000_000_000);
+    }
+
+    fn clone_host(id: &str, cur: Option<&str>) -> Host {
+        Host { id: id.into(), managed: true, codex_account_email: cur.map(str::to_string), ..Default::default() }
+    }
+
+    #[test]
+    fn assignment_uses_codex_account_field() {
+        // Sticky keep: a clone on an eligible account stays; a homeless clone lands in-set.
+        let eligible = ["a@o".to_string(), "b@o".to_string()];
+        let clones = [clone_host("c1", Some("a@o")), clone_host("c2", Some("z@gone"))];
+        for _ in 0..50 {
+            let got = assign_rotation(&clones, &eligible, &HashMap::new());
+            let by_id: HashMap<_, _> = got.iter().map(|(h, e)| (h.id.clone(), e.clone())).collect();
+            assert_eq!(by_id["c1"], "a@o");
+            assert_eq!(by_id["c2"], "b@o");
+        }
+    }
+
+    #[test]
+    fn assignment_distinct_when_enough_accounts() {
+        let eligible = ["a@o".to_string(), "b@o".to_string(), "c@o".to_string()];
+        let clones = [clone_host("c1", None), clone_host("c2", None), clone_host("c3", None)];
+        for _ in 0..50 {
+            let got = assign_rotation(&clones, &eligible, &HashMap::new());
+            let mut emails: Vec<_> = got.iter().map(|(_, e)| e.clone()).collect();
+            emails.sort();
+            emails.dedup();
+            assert_eq!(emails.len(), 3);
+        }
     }
 }
