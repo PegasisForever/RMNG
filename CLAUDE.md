@@ -1,0 +1,1 @@
+always commit and push directly to main, do not create feature branches
