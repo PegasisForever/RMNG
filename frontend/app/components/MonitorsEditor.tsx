@@ -3,7 +3,6 @@ export type Mon = { width: number; height: number; x: number; y: number; primary
 const PRESETS: { label: string; width: number; height: number }[] = [
   { label: "1080p", width: 1920, height: 1080 },
   { label: "1440p", width: 2560, height: 1440 },
-  { label: "4K", width: 3840, height: 2160 },
 ];
 
 /** Graphical preview of the monitor arrangement (scaled to fit). Primary is highlighted. */

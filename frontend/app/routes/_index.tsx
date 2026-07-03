@@ -1,32 +1,15 @@
-import {
-  closestCenter,
-  DndContext,
-  type DragEndEvent,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from "@dnd-kit/core";
-import {
-  arrayMove,
-  SortableContext,
-  sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { ChangeAccountModal } from "~/components/ChangeAccountModal";
-import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { CloneModal } from "~/components/CloneModal";
 import { CommitImageModal } from "~/components/CommitImageModal";
-import { ImagesSection } from "~/components/ImagesSection";
 import { ImportAccountModal } from "~/components/ImportAccountModal";
-import { OperationProgress } from "~/components/OperationProgress";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
-import { SidebarHost } from "~/components/SidebarHost";
+import { Sidebar } from "~/components/Sidebar";
 import {
   activate,
+  applyMonitors,
   cloneHost,
   commitImage,
   deleteHost,
@@ -34,9 +17,11 @@ import {
   getConfig,
   listImages,
   pullTemplate,
+  putConfig,
   refreshClaudeUsage,
   reorder,
   swapClaudeAccount,
+  testConfig,
 } from "~/lib/api";
 import { type ControlState, type Host, emptyState } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
@@ -121,25 +106,16 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   if (!cfg.setupComplete) {
     return <SetupWizard state={state} initialConfig={cfg} onDone={refetchConfig} />;
   }
-  return (
-    <Dashboard
-      state={state}
-      stats={stats}
-      templateRef={cfg.docker.templateReference}
-      cloneCpus={cfg.docker.cloneCpus}
-    />
-  );
+  return <Dashboard state={state} stats={stats} cloneCpus={cfg.docker.cloneCpus} />;
 }
 
 function Dashboard({
   state,
   stats,
-  templateRef,
   cloneCpus,
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
-  templateRef: string;
   cloneCpus: number;
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -210,27 +186,16 @@ function Dashboard({
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
-
-  function onDragEnd(event: DragEndEvent) {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const oldIndex = order.indexOf(String(active.id));
-    const newIndex = order.indexOf(String(over.id));
-    if (oldIndex < 0 || newIndex < 0) return;
-    const next = arrayMove(order, oldIndex, newIndex);
-    setOrder(next); // optimistic; SSE confirms after the server persists
+  // Drag-reorder: optimistically adopt the new order (smooth UI), then persist —
+  // the SSE frame confirms after the server writes it.
+  const onReorder = (next: string[]) => {
+    setOrder(next);
     run(reorder(next));
-  }
+  };
 
   const runningClone = state.operations.some(
     (o) => o.kind === "clone" && o.status === "running",
   );
-  const opForHost = (id: string) =>
-    state.operations.find((o) => o.target === id && o.status === "running");
 
   return (
     <div className="flex h-screen flex-col">
@@ -303,127 +268,34 @@ function Dashboard({
           />
         ) : null}
 
-        {/* Left: host selection sidebar. Off-canvas drawer < lg, static ≥ lg. */}
-        <aside
-          className={`fixed inset-y-0 left-0 z-40 flex w-96 max-w-[90vw] shrink-0 flex-col gap-3 overflow-y-auto border-r border-slate-200 bg-slate-50 p-3 shadow-xl transition-transform duration-200 lg:static lg:z-auto lg:translate-x-0 lg:shadow-none ${
-            sidebarOpen ? "translate-x-0" : "-translate-x-full"
-          }`}
-        >
-          <div className="flex items-center justify-between px-1">
-            <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-              rmng control
-            </span>
-            <button
-              type="button"
-              onClick={() => setSettingsOpen(true)}
-              title="Settings"
-              aria-label="Settings"
-              className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 20 20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.6"
-                strokeLinecap="round"
-                aria-hidden
-              >
-                <circle cx="10" cy="10" r="3" />
-                <path d="M10 1.5v2M10 16.5v2M18.5 10h-2M3.5 10h-2M15.6 4.4l-1.4 1.4M5.8 14.2l-1.4 1.4M15.6 15.6l-1.4-1.4M5.8 5.8 4.4 4.4" />
-              </svg>
-            </button>
-          </div>
-
-          <ClaudeAccountsPanel
-            accounts={state.claudeAccounts ?? []}
-            onRefresh={() => run(refreshClaudeUsage())}
-            onImport={() => setImportOpen(true)}
-          />
-
-          <div>
-            <div className="mb-1 flex items-center justify-between px-1">
-              <h2 className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                Hosts ({orderedHosts.length})
-              </h2>
-              <button
-                type="button"
-                onClick={() => setCloneOpen(true)}
-                disabled={runningClone}
-                title="Create a new clone from a source image"
-                className="rounded px-1 text-[11px] font-medium text-slate-400 hover:bg-slate-200 hover:text-slate-600 disabled:opacity-40"
-              >
-                + Clone
-              </button>
-            </div>
-            {orderedHosts.length === 0 ? (
-              <p className="rounded-lg border border-dashed border-slate-300 bg-white p-4 text-center text-xs text-slate-400">
-                No hosts yet.
-              </p>
-            ) : (
-              <DndContext
-                sensors={sensors}
-                collisionDetection={closestCenter}
-                onDragEnd={onDragEnd}
-              >
-                <SortableContext
-                  items={orderedHosts.map((h) => h.id)}
-                  strategy={verticalListSortingStrategy}
-                >
-                  <div className="space-y-0.5">
-                    {orderedHosts.map((host) => (
-                      <SidebarHost
-                        key={host.id}
-                        host={host}
-                        stats={stats[host.id]}
-                        cloneCpus={cloneCpus}
-                        selected={state.selected === host.id}
-                        op={opForHost(host.id)}
-                        onSelect={() => {
-                          run(activate(host.id));
-                          setSidebarOpen(false);
-                        }}
-                        onCommit={() => setCommitHost(host)}
-                        onDelete={() => {
-                          const msg = host.managed
-                            ? `Delete ${host.id}? This destroys its container.`
-                            : `Remove ${host.id}? This unregisters the host.`;
-                          if (confirm(msg)) run(deleteHost(host.id));
-                        }}
-                        onChangeAccount={() => setChangeHost(host)}
-                      />
-                    ))}
-                  </div>
-                </SortableContext>
-              </DndContext>
-            )}
-          </div>
-
-          <ImagesSection
-            images={images}
-            loading={imagesLoading}
-            pullBusy={state.operations.some(
-              (o) => o.kind === "pull" && o.status === "running",
-            )}
-            templateRef={templateRef}
-            onPull={(name, reference) => run(pullTemplate(name, reference))}
-            onDelete={(reference) => run(deleteImage(reference))}
-          />
-
-          {state.operations.length > 0 ? (
-            <div className="space-y-2">
-              <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                Activity
-              </h2>
-              {[...state.operations]
-                .sort((a, b) => b.startedAt - a.startedAt)
-                .map((op) => (
-                  <OperationProgress key={op.id} op={op} />
-                ))}
-            </div>
-          ) : null}
-        </aside>
+        {/* Left: host selection sidebar. Off-canvas drawer < lg, static ≥ lg.
+            Presentational — every server call is a callback wired up here. */}
+        <Sidebar
+          open={sidebarOpen}
+          accounts={state.claudeAccounts ?? []}
+          hosts={orderedHosts}
+          stats={stats}
+          operations={state.operations}
+          selectedId={state.selected}
+          cloneCpus={cloneCpus}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenClone={() => setCloneOpen(true)}
+          onRefreshClaude={() => run(refreshClaudeUsage())}
+          onImportAccount={() => setImportOpen(true)}
+          onSelectHost={(host) => {
+            run(activate(host.id));
+            setSidebarOpen(false);
+          }}
+          onDeleteHost={(host) => {
+            const msg = host.managed
+              ? `Delete ${host.id}? This destroys its container.`
+              : `Remove ${host.id}? This unregisters the host.`;
+            if (confirm(msg)) run(deleteHost(host.id));
+          }}
+          onCommitHost={(host) => setCommitHost(host)}
+          onChangeAccountHost={(host) => setChangeHost(host)}
+          onReorder={onReorder}
+        />
 
         {/* Right: per-host editor */}
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
@@ -504,6 +376,17 @@ function Dashboard({
             .filter((a) => a.provider !== "codex")
             .map((a) => a.email)}
           onClose={() => setSettingsOpen(false)}
+          getConfig={getConfig}
+          putConfig={putConfig}
+          testConfig={testConfig}
+          applyMonitors={applyMonitors}
+          images={images}
+          imagesLoading={imagesLoading}
+          pullBusy={state.operations.some(
+            (o) => o.kind === "pull" && o.status === "running",
+          )}
+          onPullTemplate={(name, reference) => run(pullTemplate(name, reference))}
+          onDeleteImage={(reference) => run(deleteImage(reference))}
         />
       ) : null}
 

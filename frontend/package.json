@@ -8,7 +8,9 @@
     "dev": "react-router dev",
     "build": "react-router build",
     "start": "bun run server.ts",
-    "typecheck": "react-router typegen && tsc"
+    "typecheck": "react-router typegen && tsc",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build"
   },
   "dependencies": {
     "@blocknote/core": "^0.51.4",
@@ -25,11 +27,13 @@
   },
   "devDependencies": {
     "@react-router/dev": "^7.7.0",
+    "@storybook/react-vite": "^10",
     "@tailwindcss/vite": "^4.1.0",
     "@types/bun": "^1.3.14",
     "@types/node": "^22.10.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "storybook": "^10",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.7.0",
     "vite": "^6.3.0",

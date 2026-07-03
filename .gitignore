@@ -2,6 +2,7 @@
 **/target/
 node_modules/
 frontend/build/
+frontend/storybook-static/
 # dev payload staging dir — its own .gitignore ignores everything but itself
 crates/control-server/embedded-bin/*
 !crates/control-server/embedded-bin/.gitignore

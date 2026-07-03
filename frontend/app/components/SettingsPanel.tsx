@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 
-import { applyMonitors, getConfig, putConfig, testConfig } from "~/lib/api";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
+import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
+import type { ImageInfo } from "~/lib/wire/ImageInfo";
+import { ImagesSection } from "~/components/ImagesSection";
 import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
 
 const input =
@@ -92,14 +94,42 @@ function Secret({
   );
 }
 
-export function SettingsPanel({
-  accountEmails,
-  onClose,
-}: {
+export interface SettingsPanelProps {
   /** Emails of the imported Claude accounts (from live state) — the pool a group can draw from. */
   accountEmails: string[];
   onClose: () => void;
-}) {
+  // --- injected server calls (no API logic lives in this component, so it's
+  //     renderable in isolation — e.g. Storybook — with mocked data) ---
+  /** Read the current redacted config (secrets shown as set/unset booleans). */
+  getConfig: () => Promise<AppConfigRedacted>;
+  /** Persist a partial config patch; returns the merged config + a restart-required flag. */
+  putConfig: (patch: unknown) => Promise<ConfigPutResponse & { networkWarning?: string }>;
+  /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
+  testConfig: (what: string) => Promise<{ ok: boolean; message: string }>;
+  /** Apply the saved monitor layout to all running clones. */
+  applyMonitors: () => Promise<{ ok: boolean; applied: string[]; errors: string[] }>;
+  // --- clone-source images (moved here from the sidebar) ---
+  images: ImageInfo[];
+  imagesLoading: boolean;
+  /** True while a template-pull op is running (disables the pull action). */
+  pullBusy: boolean;
+  onPullTemplate: (name: string, reference: string) => void;
+  onDeleteImage: (reference: string) => void;
+}
+
+export function SettingsPanel({
+  accountEmails,
+  onClose,
+  getConfig,
+  putConfig,
+  testConfig,
+  applyMonitors,
+  images,
+  imagesLoading,
+  pullBusy,
+  onPullTemplate,
+  onDeleteImage,
+}: SettingsPanelProps) {
   const [cfg, setCfg] = useState<AppConfigRedacted | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -567,6 +597,24 @@ export function SettingsPanel({
                   created with).
                 </p>
               </div>
+            </Section>
+
+            {/* Images — clone-source templates (pull from a registry / delete). Moved
+                here from the sidebar. Prefills the pull prompt from the Template
+                reference field above. */}
+            <Section
+              title="Images"
+              effect="immediate"
+              hint="Clone-source images (rmng.image=1). Pull the template from a registry (retagged locally as rmng/template:<name>) or delete an unused one; a live clone running on an image blocks its delete."
+            >
+              <ImagesSection
+                images={images}
+                loading={imagesLoading}
+                pullBusy={pullBusy}
+                templateRef={templateReference}
+                onPull={onPullTemplate}
+                onDelete={onDeleteImage}
+              />
             </Section>
 
             {/* Claude. */}
