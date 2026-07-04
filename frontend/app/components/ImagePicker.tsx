@@ -1,8 +1,8 @@
 // Dropdown of clone-source images, used inside the clone dialog. Takes the image
 // list as props (the dashboard owns the `/api/images` fetch), preselects the
-// wizard-built base (`base: true`) — or the first image — and reports the chosen
-// reference up via `onChange`. Shows a loading / empty state (empty = no base
-// image yet: the operator must build one in the wizard or the Images panel first).
+// newest-created image and reports the chosen reference up via `onChange`. Shows a
+// loading / empty state (empty = no base image yet: the operator must build one in
+// the wizard or the Images panel first).
 import { useEffect } from "react";
 
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
@@ -21,12 +21,14 @@ export function ImagePicker({
   value: string | null;
   onChange: (reference: string) => void;
 }) {
-  // Preselect the base image (or the first) once the list arrives, unless the
+  // Preselect the newest-created image once the list arrives, unless the
   // operator already picked one that still exists.
   useEffect(() => {
     if (images.length === 0) return;
     if (value && images.some((i) => i.reference === value)) return;
-    const preferred = images.find((i) => i.base) ?? images[0];
+    const preferred = images.reduce((newest, img) =>
+      new Date(img.createdAt).getTime() > new Date(newest.createdAt).getTime() ? img : newest,
+    );
     onChange(preferred.reference);
   }, [images, value, onChange]);
 
