@@ -280,15 +280,27 @@ the server replies with `ServerMsg::SetMonitors` carrying `config.effective_moni
 active layout preset), live-correcting a stale baked layout without a restart. Every
 subsequent `POST /api/layout/activate` pushes a fresh `SetMonitors` the same way.
 
-**`rmng-clone-daemon wait-for-stuck`** — the needs-human detector. Pulls screenshots from the
-local MCP, tiles them, asks the inference LLM, exits 0 when stuck. Flags: `--inference-url
-<url>` (default the built-in inference CT), `--ignore-reason <str>` (repeatable),
-`--interval <secs>` (60), `--timeout <secs>` (1200).
+**`rmng-clone-daemon wait-for-stuck`** — the needs-human detector, two modes:
+
+- **Screen mode** (default): pulls screenshots from the local MCP, tiles them, asks the
+  inference vision-LLM per cell, exits 0 when stuck. Flags: `--inference-url <url>` (default
+  the built-in inference CT), `--ignore-reason <str>` (repeatable), `--interval <secs>` (60),
+  `--timeout <secs>` (1200).
+- **Text mode** (`--text-cmd <shell cmd>`): each interval, runs the command (e.g.
+  `tmux capture-pane -pt work -S -200`) and judges its *text* against `--criteria <str>` —
+  the operator's semantic definition of what working/stuck look like for this session — via
+  a text-only completion on the same endpoint. The model also gets a deterministic
+  did-the-text-change signal (a frozen pane across checks is strong stuck evidence), and its
+  prompt pins pane text as untrusted data. No screenshots/MCP involved; one call per check.
+  Far more reliable than vision for terminal agents. `--criteria` requires `--text-cmd`;
+  `--ignore-reason` works in both modes.
 
 **`clone-daemon report-detection`** — POST a wrong-verdict record to the control-server's
 `/api/detector-feedback`. Flags: `--kind false-positive|false-negative` (required), `--note
-<str>`, `--control <url>`. (These two subcommands replace the retired `computer-use` binary;
-the agent-wrapper spawns `wait-for-stuck` for monitoring.)
+<str>`, `--control <url>`. Uploads the artifact the verdict was made on: the screenshot
+composite (screen mode) or the exact pane capture + criteria (text mode), plus a `mode`
+field. (These two subcommands replace the retired `computer-use` binary; the agent-wrapper
+spawns `wait-for-stuck` for monitoring.)
 
 ---
 

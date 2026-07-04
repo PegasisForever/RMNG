@@ -159,13 +159,18 @@ async fn main() -> Result<()> {
 }
 
 /// `wait-for-stuck [--inference-url <url>] [--ignore-reason <str>]… [--interval <secs>]
-/// [--timeout <secs>]` — flags match the old `computer-use` CLI so the agent's command
-/// pattern carries over with just a binary-name swap.
+/// [--timeout <secs>] [--text-cmd <shell cmd> [--criteria <str>]]` — screen-mode flags
+/// match the old `computer-use` CLI so the agent's command pattern carries over with
+/// just a binary-name swap. `--text-cmd` switches to text mode: the command's stdout
+/// (e.g. `tmux capture-pane -pt work -S -200`) is judged against `--criteria` instead
+/// of screenshots.
 async fn run_wait_for_stuck(args: Vec<String>) -> Result<()> {
     let mut inference_url = detector::default_inference_url();
     let mut ignore_reasons = Vec::new();
     let mut interval = 60u64;
     let mut timeout = 1200u64;
+    let mut text_cmd = None;
+    let mut criteria = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -185,8 +190,19 @@ async fn run_wait_for_stuck(args: Vec<String>) -> Result<()> {
                 timeout = args.get(i + 1).context("--timeout requires seconds")?.parse().context("--timeout integer")?;
                 i += 2;
             }
+            "--text-cmd" => {
+                text_cmd = Some(args.get(i + 1).context("--text-cmd requires a shell command")?.clone());
+                i += 2;
+            }
+            "--criteria" => {
+                criteria = Some(args.get(i + 1).context("--criteria requires a string")?.clone());
+                i += 2;
+            }
             other => anyhow::bail!("unknown wait-for-stuck arg {other:?}"),
         }
+    }
+    if criteria.is_some() && text_cmd.is_none() {
+        anyhow::bail!("--criteria only applies to text mode; pass --text-cmd too");
     }
     let mcp_port =
         std::env::var("RMNG_DAEMON_MCP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9004);
@@ -196,6 +212,8 @@ async fn run_wait_for_stuck(args: Vec<String>) -> Result<()> {
         interval: Duration::from_secs(interval),
         timeout: Duration::from_secs(timeout),
         mcp_port,
+        text_cmd,
+        criteria,
     })
     .await
 }
