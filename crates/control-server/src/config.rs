@@ -45,9 +45,11 @@ pub fn load() -> Result<AppConfig> {
 /// the single-token model) are dropped; the rewrite scrubs them from disk. The retired
 /// Proxmox backend is gone: any `proxmox` block is scrubbed (rewrite), and its
 /// `hostnamePrefix` is carried into `docker.hostnamePrefix` when the new config has no
-/// `docker` key. There is no `setupComplete` grandfather — an old `config.json` re-runs
-/// the wizard (new machine, no `rmng` network / base image), so `setupComplete` stays
-/// whatever the file said (default `false` when absent).
+/// `docker` key. Legacy top-level `monitors` array is migrated to a `"Default"` layout
+/// preset (one-shot only, when `layout_presets` is still empty). There is no
+/// `setupComplete` grandfather — an old `config.json` re-runs the wizard (new machine,
+/// no `rmng` network / base image), so `setupComplete` stays whatever the file said
+/// (default `false` when absent).
 fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
     let non_empty = |k: &str| match raw.get(k) {
         Some(serde_json::Value::Array(a)) => !a.is_empty(),
@@ -386,7 +388,13 @@ mod tests {
 
     #[test]
     fn migration_noop_when_presets_present() {
-        let raw: serde_json::Value = serde_json::json!({ "monitors": [] });
+        // Use a non-empty, different monitors array to truly test the anti-clobber guard.
+        // If the outer `cfg.layout_presets.is_empty()` guard were removed, this test would fail.
+        let raw: serde_json::Value = serde_json::json!({
+            "monitors": [
+                { "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": true }
+            ]
+        });
         let mut cfg = AppConfig::default();
         cfg.layout_presets = vec![wire::LayoutPreset {
             name: "X".into(),
@@ -397,6 +405,7 @@ mod tests {
         let _ = migrate_legacy(&raw, &mut cfg);
         assert_eq!(cfg.layout_presets.len(), 1);
         assert_eq!(cfg.layout_presets[0].name, "X");
+        assert_eq!(cfg.layout_presets[0].monitors[0].width, 800, "existing preset width must not be clobbered");
     }
 
     #[test]
