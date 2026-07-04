@@ -740,6 +740,19 @@ async fn detector_feedback(
 
 // --- config API (redacted read / validated write / live-apply) -------------
 
+/// Copy the config's active layout + preset names into ControlState so the sidebar
+/// switcher renders + highlights over the live `/events` SSE. Idempotent; call after any
+/// change to `layout_presets` / `active_layout` and once at boot.
+pub(crate) fn mirror_layout_to_state(app: &App) {
+    let cfg = app.config();
+    let active = cfg.active_layout.clone();
+    let names: Vec<String> = cfg.layout_presets.iter().map(|p| p.name.clone()).collect();
+    app.store.mutate(|s| {
+        s.active_layout = active.clone();
+        s.layout_preset_names = names.clone();
+    });
+}
+
 /// `GET /api/config` — the redacted view (no plaintext secrets).
 async fn config_get(State(app): State<App>) -> Json<AppConfigRedacted> {
     Json(app.config().redacted())
@@ -795,6 +808,8 @@ async fn config_put(
         }
     }
     *app.cfg.write().unwrap() = merged.clone();
+    // Keep the sidebar's live layout list/active marker in sync with the just-saved presets.
+    mirror_layout_to_state(&app);
     let resp = ConfigPutResponse { restart_required, config: merged.redacted() };
     let mut body = serde_json::to_value(&resp).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let (Some(obj), Some(w)) = (body.as_object_mut(), network_warning) {

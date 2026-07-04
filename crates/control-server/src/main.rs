@@ -57,6 +57,11 @@ async fn main() -> Result<()> {
 
     let app = app::App::new(store, cfg);
 
+    // Seed ControlState with the config's active layout + preset names so the sidebar
+    // switcher renders correctly on a fresh boot, before any `/api/config` PUT or
+    // `/api/layout/activate` call runs.
+    web::mirror_layout_to_state(&app);
+
     // Probe the Docker environment (daemon reachable, self-container detection, sock mount,
     // render node) and cache the report so `GET /api/setup/env` + the wizard can render it.
     // Non-fatal: a down daemon / failed check must NOT stop the server booting — the wizard
