@@ -48,8 +48,6 @@ const STAGGER: Duration = Duration::from_millis(400);
 // scoring knobs (clone-accounts.server.ts)
 const SESSION_HEADROOM_PCT: f64 = 20.0;
 const SEVEN_DAY_CAP_PCT: f64 = 95.0;
-/// 5h utilization at/above which an account is filtered out of group rotation.
-const ROTATE_MAX_FIVE_HOUR_PCT: f64 = 90.0;
 /// How often group-bound clones are checked against their group's eligible accounts.
 /// Sticky: a pass moves a clone only if its account fell out of eligibility — an
 /// account switch always cold-starts the clone's Anthropic prompt cache, so staying
@@ -792,19 +790,65 @@ fn assign_rotation(
     out
 }
 
-/// One rotation pass: for each group with bound clones, move **only** the clones
-/// whose current account fell out of the group's eligible set (over the 5h cap,
-/// removed from the group, or never assigned) onto the least-loaded / least-used
-/// eligible account, and write the new credentials (no agent-wrapper restart).
-/// Clones on a still-eligible account are left alone (see [`assign_rotation`]).
-pub async fn rotate_once(app: &App) {
-    let cfg = app.config();
-    if cfg.clone_groups.is_empty() {
+/// Rotate one pool of clones over candidate account emails `members`. Drops members
+/// that aren't imported or are exhausted, sticky-assigns clones to the survivors
+/// ([`assign_rotation`]), and pushes any moves (no agent-wrapper restart). `label` names
+/// the pool in logs. Leaves clones untouched when no member is eligible.
+async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[Host]) {
+    let eligible = eligible_members(app, members);
+    if eligible.is_empty() {
+        tracing::info!("rotate: pool '{label}' has no eligible account; leaving {} clone(s)", clones.len());
         return;
     }
-    // group name -> its bound managed clones
+    let usage: HashMap<String, f64> =
+        eligible.iter().map(|e| (e.clone(), five_hour_pct(app, e))).collect();
+    for (host, email) in assign_rotation(clones, &eligible, &usage) {
+        if host.claude_account_email.as_deref() == Some(email.as_str()) {
+            continue; // unchanged (sticky keep) → no rewrite
+        }
+        match push_account_to_clone(app, &host.id, &email).await {
+            Ok(()) => {
+                tracing::info!(
+                    "rotate[{label}]: {} {} -> {}",
+                    host.id,
+                    host.claude_account_email.as_deref().unwrap_or("none"),
+                    email
+                );
+                let id = host.id.clone();
+                app.store.mutate(|s| {
+                    if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+                        h.claude_account_email = Some(email);
+                    }
+                });
+            }
+            Err(e) => tracing::warn!("rotate[{label}]: applying {email} to {} failed: {e}", host.id),
+        }
+        tokio::time::sleep(STAGGER).await; // gentle on the daemon
+    }
+}
+
+/// Managed clones bound to the implicit "auto" pool: `claude_selection == "auto"` and
+/// not in a named group. Legacy hosts with `claude_selection == None` are treated as
+/// pinned (never rotated).
+fn auto_pool_clones(hosts: &[Host]) -> Vec<Host> {
+    hosts
+        .iter()
+        .filter(|h| {
+            h.managed && h.claude_group.is_none() && h.claude_selection.as_deref() == Some(AUTO)
+        })
+        .cloned()
+        .collect()
+}
+
+/// One rotation pass over every named group plus the implicit "auto" pool (all imported
+/// accounts, recomputed live). Sticky: a clone moves only when its account exhausts or
+/// leaves its pool. See [`rotate_pool`] / [`assign_rotation`].
+pub async fn rotate_once(app: &App) {
+    let cfg = app.config();
+    let hosts = app.store.get().hosts;
+    // Named groups.
     let mut by_group: HashMap<String, Vec<Host>> = HashMap::new();
-    for h in &app.store.get().hosts {
+    for h in &hosts {
         if let (Some(g), true) = (&h.claude_group, h.managed) {
             by_group.entry(g.clone()).or_default().push(h.clone());
         }
@@ -813,39 +857,12 @@ pub async fn rotate_once(app: &App) {
         let Some(group) = cfg.clone_groups.iter().find(|g| g.name == gname) else {
             continue; // group deleted → leave its clones on their current account
         };
-        let eligible = eligible_group_accounts(app, group);
-        if eligible.is_empty() {
-            tracing::info!(
-                "rotate: group '{gname}' has no account <= {ROTATE_MAX_FIVE_HOUR_PCT}% 5h; leaving {} clone(s)",
-                clones.len()
-            );
-            continue;
-        }
-        let usage: HashMap<String, f64> =
-            eligible.iter().map(|e| (e.clone(), five_hour_pct(app, e))).collect();
-        for (host, email) in assign_rotation(&clones, &eligible, &usage) {
-            if host.claude_account_email.as_deref() == Some(email.as_str()) {
-                continue; // unchanged (sticky keep) → no rewrite
-            }
-            match push_account_to_clone(app, &host.id, &email).await {
-                Ok(()) => {
-                    tracing::info!(
-                        "rotate: {} {} -> {}",
-                        host.id,
-                        host.claude_account_email.as_deref().unwrap_or("none"),
-                        email
-                    );
-                    let id = host.id.clone();
-                    app.store.mutate(|s| {
-                        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                            h.claude_account_email = Some(email);
-                        }
-                    });
-                }
-                Err(e) => tracing::warn!("rotate: applying {email} to {} failed: {e}", host.id),
-            }
-            tokio::time::sleep(STAGGER).await; // gentle on the daemon
-        }
+        rotate_pool(app, &gname, &group.accounts, &clones).await;
+    }
+    // "auto" == a live group of all imported accounts.
+    let auto = auto_pool_clones(&hosts);
+    if !auto.is_empty() {
+        rotate_pool(app, "auto", &app.claude.emails(), &auto).await;
     }
 }
 
@@ -1189,5 +1206,30 @@ mod tests {
         assert!(!is_exhausted(0.0, 94.9), "under the 7d cap is eligible");
         assert!(is_exhausted(0.0, 95.0), "hitting the 7d cap is exhausted");
         assert!(!is_exhausted(79.9, 94.9), "both under caps is eligible");
+    }
+
+    // --- "auto" pool ---------------------------------------------------------
+
+    fn host_sel(id: &str, managed: bool, group: Option<&str>, sel: Option<&str>) -> Host {
+        Host {
+            id: id.into(),
+            managed,
+            claude_group: group.map(str::to_string),
+            claude_selection: sel.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn auto_pool_is_only_managed_ungrouped_auto_clones() {
+        let hosts = vec![
+            host_sel("auto1", true, None, Some("auto")),        // in
+            host_sel("pinned", true, None, Some("me@x")),       // out: pinned to an email
+            host_sel("legacy", true, None, None),               // out: legacy None == pinned
+            host_sel("grouped", true, Some("g"), Some("auto")), // out: named group handles it
+            host_sel("stopped", false, None, Some("auto")),     // out: unmanaged
+        ];
+        let picked: Vec<String> = auto_pool_clones(&hosts).into_iter().map(|h| h.id).collect();
+        assert_eq!(picked, vec!["auto1"]);
     }
 }
