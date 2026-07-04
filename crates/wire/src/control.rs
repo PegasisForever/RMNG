@@ -334,6 +334,23 @@ pub struct ClaudeUsage {
     pub reset_credits: Option<i64>,
 }
 
+/// One recorded auto-consumed (or reserved) Codex reset. Persisted in `ControlState`
+/// so a server restart can't re-spend on an account already reset this 7d window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct CodexResetMark {
+    pub account_id: String,
+    /// The 7d window (its `resets_at` epoch **seconds**) this reset was spent against —
+    /// the cooldown key. An account is on cooldown while its current 7d window matches.
+    pub window_resets_at: i64,
+    /// Wall-clock ms when the mark was reserved / consume attempted (audit / UI tooltip).
+    pub consumed_at: i64,
+    /// Idempotency key sent to `/consume` for this reservation (audit; enables a future
+    /// safe same-key retry — v1 does not retry within a window).
+    pub redeem_request_id: String,
+}
+
 /// The top-level state broadcast over `/events` and persisted to `state.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]
@@ -359,6 +376,10 @@ pub struct ControlState {
     /// Per-Claude-account usage view (no tokens).
     #[serde(default)]
     pub claude_accounts: Vec<ClaudeUsage>,
+    /// Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
+    /// account per week, so it belongs in `state.json` (unlike per-tick stats).
+    #[serde(default)]
+    pub codex_reset_marks: Vec<CodexResetMark>,
 }
 
 impl ControlState {
@@ -578,6 +599,25 @@ mod tests {
         assert_eq!(v["monitors"][0]["width"], 2560);
         let back: LayoutPreset = serde_json::from_value(v).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn codex_reset_marks_roundtrip_camelcase() {
+        let st = ControlState {
+            codex_reset_marks: vec![CodexResetMark {
+                account_id: "codex:acc-1".into(),
+                window_resets_at: 1783392770,
+                consumed_at: 1783168000000,
+                redeem_request_id: "abc123".into(),
+            }],
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&st).unwrap();
+        assert!(s.contains("\"codexResetMarks\""));
+        assert!(s.contains("\"windowResetsAt\":1783392770"));
+        assert!(s.contains("\"redeemRequestId\":\"abc123\""));
+        let back: ControlState = serde_json::from_str(&s).unwrap();
+        assert_eq!(st, back);
     }
 }
 
