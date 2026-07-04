@@ -676,11 +676,15 @@ async fn reconfigure(
     // 3. Point input + clipboard + MCP at the new session BEFORE dropping the old. Setting
     //    `conn` here makes this handle the sole long-lived owner of the old conn, so the old
     //    connection drops when this scope replaces it (unblocking the clipboard re-subscribe).
+    //    Also update `live_monitors` here (same critical section) to pair with the new `active`,
+    //    preventing MCP requests from pairing NEW rd/conn with OLD monitor paths during the
+    //    .await calls in steps 4-6.
     {
         let mut rt = active.lock().await;
         rt.rd = new.rd.clone();
         rt.conn = new.conn.clone();
         rt.streams = new.monitors.iter().map(|m| (m.monitor_id, m.stream_path.clone())).collect();
+        *live_monitors.lock().unwrap() = new.monitors.clone();
     }
 
     // 4. Stop the OLD session (old outputs drop; gnome-shell reflows onto the new set),
@@ -704,13 +708,11 @@ async fn reconfigure(
         *m = new_flags;
     }
 
-    // 6. Swap in the new session/capture + refresh the MCP monitor set. Prune `latest`
-    //    frames for monitors that no longer exist (a shrink), so stale dmabuf fds for
-    //    removed monitors don't linger (the MCP also only surfaces `live_monitors`, but this
-    //    frees the fds promptly).
+    // 6. Swap in the new session/capture + prune `latest` frames for monitors that no
+    //    longer exist (a shrink), so stale dmabuf fds for removed monitors don't linger.
+    //    (`live_monitors` was already updated in step 3 to pair with the new `active`.)
     *session = new;
     *capture = new_capture;
-    *live_monitors.lock().unwrap() = session.monitors.clone();
     {
         let live: std::collections::HashSet<u32> =
             session.monitors.iter().map(|m| m.monitor_id).collect();
