@@ -169,6 +169,11 @@ export interface ClaudeUsage {
   fiveHour?: ClaudeUsageWindow;
   sevenDay?: ClaudeUsageWindow;
   spend?: ClaudeSpend;
+  /** Codex only: banked rate-limit reset credits ("usage resets") left on the
+   *  account. Absent/null for Claude (no such concept) and when usage is
+   *  unavailable. Wire type is `bigint | null` — callers must `Number(...)`
+   *  it before numeric comparison. */
+  resetCredits?: bigint | null;
 }
 
 export interface ControlState {

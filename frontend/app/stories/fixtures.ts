@@ -172,6 +172,17 @@ export const claudeAccounts: ClaudeUsage[] = [
     fiveHour: { pct: 88, resetsAt: null },
     sevenDay: { pct: 73, resetsAt: null },
   },
+  {
+    id: "codex:alex@openai.com",
+    email: "alex@openai.com",
+    provider: "codex",
+    active: true,
+    assignable: false,
+    lastUpdated: 1_700_000_000_000,
+    fiveHour: { pct: 24, resetsAt: null },
+    sevenDay: { pct: 40, resetsAt: null },
+    resetCredits: 3n,
+  },
 ];
 
 // --- clone-source images ----------------------------------------------------
@@ -258,7 +269,7 @@ export const appConfig: AppConfigRedacted = {
     pollSecs: BigInt(600),
     pinnedEmail: "alex@example.com",
   },
-  codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true },
+  codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
   codexGroups: [],
   cloneGroups: [{ name: "pooled", accounts: ["alex@example.com", "sam@example.com"] }],
   presets: [

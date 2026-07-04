@@ -82,6 +82,8 @@ function Bar({
 }
 
 function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
+  const resetCredits =
+    a.provider === "codex" && a.resetCredits != null ? Number(a.resetCredits) : null;
   return (
     <div className="px-1 py-1">
       <div className="flex items-center gap-1.5">
@@ -96,6 +98,16 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
         {a.spend ? (
           <span className="shrink-0 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
             {spendLine(a.spend)}
+          </span>
+        ) : null}
+        {resetCredits != null ? (
+          <span
+            className={`shrink-0 text-[10px] tabular-nums ${
+              resetCredits === 0 ? "text-rose-400" : "text-slate-500 dark:text-slate-400"
+            }`}
+            title="Banked Codex rate-limit resets left"
+          >
+            ⟳ {resetCredits}
           </span>
         ) : null}
       </div>
