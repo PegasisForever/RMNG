@@ -8,8 +8,9 @@
 //! Claude Code just uses whatever we last installed; see [`apply_clone_token`]).
 //! Whenever a refresh rotates an account's access token, [`push_stale_tokens`]
 //! fans the new token out to every clone assigned to that account. The poller
-//! publishes a token-free `ClaudeUsage` view onto `ControlState.claudeAccounts`,
-//! and (when enabled) auto-swaps a clone whose account is exhausted.
+//! publishes a token-free `ClaudeUsage` view onto `ControlState.claudeAccounts`.
+//! Clones select an account via `"auto"` (rotated across all imported accounts by
+//! [`rotate_once`]), a named group, or a pinned email.
 //!
 //! **Importing an account** ([`check_clone_auth`] / [`import_clone_account`]) harvests
 //! the OAuth pair from a clone that's already signed in to Claude Code via `claude.ai`:
@@ -540,9 +541,6 @@ async fn poll_inner(app: &App) -> Result<bool> {
     // Fan out any tokens this poll rotated (and retry earlier failed pushes).
     push_stale_tokens(app).await;
 
-    if cfg.claude.auto_swap_on_exhaustion {
-        auto_swap_exhausted(app).await;
-    }
     Ok(any429)
 }
 
@@ -962,53 +960,6 @@ pub async fn push_stale_tokens(app: &App) {
             Err(e) => {
                 tracing::warn!("pushing token ({email}) to {} failed (retried next pass): {e}", host.id)
             }
-        }
-    }
-}
-
-/// When a clone's assigned account is exhausted, hot-swap it to the best alternative.
-async fn auto_swap_exhausted(app: &App) {
-    let st = app.store.get();
-    let usage: HashMap<String, &ClaudeUsage> = st
-        .claude_accounts
-        .iter()
-        .filter(|u| u.provider != Some(wire::Provider::Codex))
-        .map(|u| (u.email.clone(), u))
-        .collect();
-    let exhausted = |email: &str| -> bool {
-        usage.get(email).is_some_and(|u| {
-            let five = u.five_hour.as_ref().map(|w| w.pct).unwrap_or(0.0);
-            let seven = u.seven_day.as_ref().map(|w| w.pct).unwrap_or(0.0);
-            (100.0 - five) < SESSION_HEADROOM_PCT || seven >= SEVEN_DAY_CAP_PCT
-        })
-    };
-    for host in &st.hosts {
-        // Group-bound clones are handled by the rotator, not exhaustion-swap.
-        if host.claude_group.is_some() {
-            continue;
-        }
-        if !host.managed {
-            continue;
-        }
-        let Some(cur) = &host.claude_account_email else { continue };
-        if !exhausted(cur) {
-            continue;
-        }
-        let Some(next) = best_scored(app) else { continue };
-        if &next == cur || exhausted(&next) {
-            continue; // no better option
-        }
-        match push_account_to_clone(app, &host.id, &next).await {
-            Ok(()) => {
-                tracing::info!("auto-swapped {} from {cur} to {next}", host.id);
-                let id = host.id.clone();
-                app.store.mutate(|s| {
-                    if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                        h.claude_account_email = Some(next);
-                    }
-                });
-            }
-            Err(e) => tracing::warn!("auto-swap of {} failed: {e}", host.id),
         }
     }
 }
