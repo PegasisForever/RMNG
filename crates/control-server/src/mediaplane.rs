@@ -757,6 +757,11 @@ fn serve_clone(
                 if let Some(id) = clone_id.clone() {
                     handle.layout.lock().unwrap().insert(id.clone(), l.clone());
                     if app.store.selected().as_deref() == Some(id.as_str()) {
+                        // Drop encoders for monitors that no longer exist on the selected
+                        // clone (added/resized ones are (re)built lazily by encoder_for on
+                        // the next frame). Prevents stale encoders lingering after a switch.
+                        let live: std::collections::HashSet<u32> = l.iter().map(|m| m.id).collect();
+                        encoders.lock().unwrap().retain(|mid, _| live.contains(mid));
                         broadcast_json(&viewers, T_LAYOUT, &l);
                     }
                 }
