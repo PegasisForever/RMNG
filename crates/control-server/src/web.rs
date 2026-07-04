@@ -45,6 +45,7 @@ use crate::linear;
 pub fn router(app: App) -> Router {
     let routes = Router::new()
         .route("/events", get(events))
+        .route("/api/state", get(state_get))
         .route("/api/activate", post(activate))
         .route("/api/reorder", post(reorder))
         .route("/api/clone", post(clone))
@@ -171,6 +172,13 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     .keep_alive(KeepAlive::new().interval(Duration::from_secs(20)).text("ping"))
 }
 
+/// `GET /api/state` — the current [`ControlState`] as a single-shot snapshot (the same
+/// JSON as the first default `/events` frame). For one-off readers — the `rmng` CLI,
+/// scripts — that shouldn't have to open an SSE stream to see the fleet.
+async fn state_get(State(app): State<App>) -> Json<ControlState> {
+    Json(app.store.get())
+}
+
 #[derive(Deserialize)]
 struct ActivateReq {
     #[serde(default)]
@@ -292,6 +300,8 @@ async fn forwards_put(
 ///   `{ image, create: { team, title, description } }` — create a ticket first (preset required;
 ///                                                        its Linear key creates the issue)
 ///   `{ image, plain: { title, message } }`            — no ticket (preset required if any exist)
+///   `{ image, hostname }`                             — raw clone under an exact hostname
+///                                                        (fleet CLI; preset optional, no ticket)
 /// plus optional `preset` (name; absent/"auto" = label auto-select in ticket mode) /
 /// `claudeAccount` / `agentInstructions` / `claudeInstructions`. `image` is a clone-source
 /// image reference (e.g. `pegasis0/rmng-template:latest`) from `GET /api/images`.
@@ -329,6 +339,29 @@ async fn clone(
         let display = if suffix.is_empty() { title.to_string() } else { format!("{title} ({suffix})") };
         (hostname, display)
     };
+
+    // Raw hostname clone (fleet CLI): the caller owns the exact hostname; no ticket, no
+    // derived display name. A preset is optional — fleet workers usually need none; an
+    // explicitly chosen one still applies its env + playbook append. Hostname validity +
+    // uniqueness are gated by `start_clone`.
+    if let Some(hostname) =
+        str_field("hostname").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    {
+        let spec = CloneSpec {
+            source_image: image,
+            new_hostname: hostname,
+            linear: None,
+            claude_account,
+            codex_account,
+            first_message: None,
+            agent_instructions,
+            claude_instructions,
+            env: explicit.map(preset_env).unwrap_or_default(),
+            agent_playbook: compose_playbook(&cfg, explicit),
+        };
+        let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
+        return Ok(Json(json!({ "ok": true, "op": op })));
+    }
 
     // Plain (no-ticket) clone: a preset must be picked whenever any are configured.
     if let Some(plain) = body.get("plain").filter(|v| v.is_object()) {
@@ -1265,6 +1298,53 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("already being pulled"), "msg: {}", err.1);
+    }
+
+    // --- GET /api/state (single-shot snapshot for the rmng CLI) ---
+
+    #[tokio::test]
+    async fn api_state_returns_current_snapshot() {
+        let app = test_app();
+        app.store.mutate(|s| {
+            s.hosts.push(wire::Host { id: "w1".into(), host: "w1".into(), managed: true, ..Default::default() });
+            s.selected = Some("w1".into());
+        });
+        let st = state_get(State(app.clone())).await.0;
+        assert_eq!(st.hosts.len(), 1);
+        assert_eq!(st.selected.as_deref(), Some("w1"));
+    }
+
+    // --- POST /api/clone `hostname` mode (raw clone, fleet CLI) ---
+
+    #[tokio::test]
+    async fn clone_hostname_mode_registers_clone_op() {
+        let app = test_app();
+        let body = json!({ "image": "tmpl:latest", "hostname": "w-mod-claude", "claudeAccount": "auto" });
+        let resp = clone(State(app.clone()), Json(body)).await.unwrap().0;
+        assert_eq!(resp["ok"], true);
+        let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
+        assert_eq!(op.kind, wire::OperationKind::Clone);
+        assert_eq!(op.target, "w-mod-claude");
+        assert_eq!(op.source.as_deref(), Some("tmpl:latest"));
+        assert!(app.store.get().operations.iter().any(|o| o.id == op.id));
+    }
+
+    #[tokio::test]
+    async fn clone_hostname_mode_rejects_bad_label() {
+        let app = test_app();
+        let body = json!({ "image": "tmpl:latest", "hostname": "Not A Label!" });
+        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("DNS label"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn clone_hostname_mode_rejects_unknown_preset() {
+        let app = test_app();
+        let body = json!({ "image": "tmpl:latest", "hostname": "w1", "preset": "nope" });
+        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
     }
 }
 
