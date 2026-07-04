@@ -247,22 +247,34 @@ async fn connect_retry(socket_path: &str) -> Arc<transport::Transport> {
 /// Apply the configured monitor layout (positions + primary) to Mutter via
 /// `DisplayConfig.ApplyMonitorsConfig`. Uses `gdbus` (the nested ApplyMonitorsConfig
 /// GVariant types are painful via zbus). Best-effort: logs + continues on failure (the
-/// monitors still capture, just in Mutter's default left-to-right order). Connectors are
-/// `Meta-<i>` in creation order; the mode id is `<W>x<H>@60.000` (see `build_modes`).
+/// monitors still capture, just in Mutter's default left-to-right order). Connector names
+/// are read back from `GetCurrentState` (Task 3.2) rather than assumed `Meta-<i>`, since
+/// after a session-swap reconfiguration Mutter may hand out connectors in a different
+/// order (or reuse different ones) than creation order.
 async fn apply_layout(monitors: &[MonitorCfg]) {
-    let Some(serial) = display_config_serial().await else {
-        tracing::warn!("layout: couldn't read DisplayConfig serial; leaving Mutter's default layout");
+    let Some((serial, stdout)) = get_current_state().await else {
+        tracing::warn!("layout: couldn't read DisplayConfig state; leaving Mutter's default layout");
         return;
     };
+    let mut available = parse_connectors(&stdout);
     let mut lm = String::from("[");
-    for (i, m) in monitors.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    for m in monitors {
+        // Pick (and consume) the first available connector whose current mode matches
+        // this monitor's (w, h), so duplicate sizes still map 1:1 in order.
+        let Some(idx) = available.iter().position(|(_, w, h)| *w == m.w && *h == m.h) else {
+            tracing::warn!("layout: no Mutter connector currently at {}x{}; skipping that monitor", m.w, m.h);
+            continue;
+        };
+        let (connector, w, h) = available.remove(idx);
+        if !first {
             lm.push_str(", ");
         }
+        first = false;
         // (x, y, scale, transform, primary, [(connector, mode_id, props)])
         lm.push_str(&format!(
-            "({}, {}, 1.0, uint32 0, {}, [('Meta-{}', '{}x{}@60.000', @a{{sv}} {{}})])",
-            m.x, m.y, m.primary, i, m.w, m.h
+            "({}, {}, 1.0, uint32 0, {}, [('{}', '{}x{}@60.000', @a{{sv}} {{}})])",
+            m.x, m.y, m.primary, connector, w, h
         ));
     }
     lm.push(']');
@@ -282,8 +294,10 @@ async fn apply_layout(monitors: &[MonitorCfg]) {
     }
 }
 
-/// The current `DisplayConfig` serial (the first `uint32` in `GetCurrentState`).
-async fn display_config_serial() -> Option<u32> {
+/// Call `DisplayConfig.GetCurrentState` and return `(serial, stdout)`. Shared by
+/// `apply_layout` (needs the full state to read back connectors) and
+/// `display_config_serial` (only needs the leading serial).
+async fn get_current_state() -> Option<(u32, String)> {
     let out = tokio::process::Command::new("gdbus")
         .args([
             "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
@@ -293,9 +307,87 @@ async fn display_config_serial() -> Option<u32> {
         .output()
         .await
         .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
+    let s = String::from_utf8_lossy(&out.stdout).into_owned();
     let idx = s.find("uint32 ")?;
-    s[idx + 7..].split(|c: char| !c.is_ascii_digit()).find(|t| !t.is_empty())?.parse().ok()
+    let serial =
+        s[idx + 7..].split(|c: char| !c.is_ascii_digit()).find(|t| !t.is_empty())?.parse().ok()?;
+    Some((serial, s))
+}
+
+/// The current `DisplayConfig` serial (the first `uint32` in `GetCurrentState`).
+#[allow(dead_code)]
+async fn display_config_serial() -> Option<u32> {
+    get_current_state().await.map(|(serial, _)| serial)
+}
+
+/// Parse the text form of `DisplayConfig.GetCurrentState`'s stdout (as printed by
+/// `gdbus call`) into `(connector, width, height)` for each monitor's *current* mode.
+///
+/// Shape (scales list length varies, `...` elided):
+/// ```text
+/// (uint32 3, [(('Meta-0', 'MetaVendor', 'Virtual remote monitor', '0x000001'),
+///   [('2560x1440@60.000', 2560, 1440, 60.0, 1.0, [1.0, 1.25],
+///     {'is-current': <true>, 'is-preferred': <true>})],
+///   {'is-builtin': <false>, ...}), (('Meta-1', ...), [...], {...})], [...], {...})
+/// ```
+/// Each monitor group starts at a `('Meta-` (or other connector-prefixed) tuple; we split
+/// the monitor-list on that boundary. Within a group, the connector is the first
+/// single-quoted string; the current mode is whichever mode tuple's props contain
+/// `'is-current': <true>`, and its `WxH` are the two integers immediately following that
+/// mode's `'WxH@rate'` id string.
+fn parse_connectors(get_current_state_stdout: &str) -> Vec<(String, u32, u32)> {
+    let mut out = Vec::new();
+    // Split into per-monitor chunks on `(('` (the start of each monitor's connector
+    // tuple), which only occurs at monitor-group boundaries in this shape.
+    for chunk in get_current_state_stdout.split("((").skip(1) {
+        // The connector name is the first single-quoted string in the chunk.
+        let Some(connector) = first_quoted(chunk) else { continue };
+        // Find the mode tuple containing `'is-current': <true>`; walk each
+        // `'<mode-id>', <w>, <h>` occurrence and keep the one whose nearby props (up to
+        // the next mode/group) mention is-current.
+        let Some(current_mode_end) = chunk.find("'is-current': <true>") else { continue };
+        // The mode id governing that is-current marker is the *last* mode-id string
+        // (`'WxH@rate'`) appearing before it.
+        let mut best: Option<(usize, u32, u32)> = None;
+        let mut rest = chunk;
+        let mut base = 0usize;
+        while let Some(rel) = rest.find('\'') {
+            let abs = base + rel;
+            if abs >= current_mode_end {
+                break;
+            }
+            let after_quote = &rest[rel + 1..];
+            let Some(end_quote) = after_quote.find('\'') else { break };
+            let id = &after_quote[..end_quote];
+            // A mode id looks like `WxH@rate`; parse w/h if it matches, else skip (e.g.
+            // connector/vendor/product/serial strings).
+            if let Some((w, h)) = parse_mode_id(id) {
+                best = Some((abs, w, h));
+            }
+            let consumed = rel + 1 + end_quote + 1;
+            rest = &rest[consumed..];
+            base = abs + 1 + end_quote + 1;
+        }
+        if let Some((_, w, h)) = best {
+            out.push((connector, w, h));
+        }
+    }
+    out
+}
+
+/// The first single-quoted string in `s`, e.g. `"'Meta-0', 'MetaVendor'"` → `"Meta-0"`.
+fn first_quoted(s: &str) -> Option<String> {
+    let start = s.find('\'')? + 1;
+    let end = s[start..].find('\'')? + start;
+    Some(s[start..end].to_string())
+}
+
+/// Parse a mode id like `2560x1440@60.000` into `(2560, 1440)`; `None` if `s` isn't of
+/// that shape (e.g. a connector/vendor/product/serial string encountered along the way).
+fn parse_mode_id(s: &str) -> Option<(u32, u32)> {
+    let (wh, _rate) = s.split_once('@')?;
+    let (w, h) = wh.split_once('x')?;
+    Some((w.parse().ok()?, h.parse().ok()?))
 }
 
 /// Shipping mode: capture → ship dmabuf; recv input → inject. `transport` is already
@@ -608,5 +700,25 @@ fn nudge_cursor(session: &Session) {
                 tokio::time::sleep(Duration::from_millis(16)).await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_connectors_and_current_modes() {
+        // Real GetCurrentState shape from Phase 0 (CT 113, GNOME 48), scales trimmed.
+        let blob = "(uint32 3, [(('Meta-0', 'MetaVendor', 'Virtual remote monitor', '0x000001'), \
+[('2560x1440@60.000', 2560, 1440, 60.0, 1.0, [1.0, 1.25], {'is-current': <true>, 'is-preferred': <true>})], \
+{'is-builtin': <false>}), (('Meta-1', 'MetaVendor', 'Virtual remote monitor', '0x000002'), \
+[('1920x1080@60.000', 1920, 1080, 60.0, 1.0, [1.0], {'is-current': <true>, 'is-preferred': <true>})], \
+{'is-builtin': <false>})], [(2560, 0, 1.0, uint32 0, true, [('Meta-0', 'x', 'y', '0x1')], @a{sv} {}), \
+(0, 0, 1.0, 0, false, [('Meta-1', 'x', 'y', '0x2')], {})], {'layout-mode': <uint32 1>})";
+        let conns = parse_connectors(blob);
+        assert_eq!(conns.len(), 2);
+        assert_eq!(conns[0], ("Meta-0".to_string(), 2560, 1440));
+        assert_eq!(conns[1], ("Meta-1".to_string(), 1920, 1080));
     }
 }
