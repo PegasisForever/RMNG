@@ -12,7 +12,7 @@ import { parseTicketInput, workspaceBadge } from "~/lib/workspace";
 /**
  * Clone dialog. Pick a clone-source image, then one of three ticket modes: paste an
  * existing Linear ticket (link or `WE-142`) — the preset is auto-selected from the
- * ticket's labels unless overridden; create a new ticket (preset + team + title +
+ * ticket-id prefix unless overridden; create a new ticket (preset + team + title +
  * description — the preset's Linear key creates it); or a plain no-ticket clone
  * (title + optional first message; a preset must be picked when any are configured).
  * The hostname derives from the ticket id (`WE-142` → `pega-we-142`) or the title
@@ -57,7 +57,7 @@ export function CloneModal({
   const [groups, setGroups] = useState<CloneGroup[]>([]);
   const [codexAccount, setCodexAccount] = useState("auto");
   const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
-  // Presets (from config) + the chosen one ("" = auto-by-ticket-labels; create/plain
+  // Presets (from config) + the chosen one ("" = auto-by-ticket-prefix; create/plain
   // require an explicit pick, defaulted to the first preset below).
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
   const [preset, setPreset] = useState("");
@@ -75,7 +75,7 @@ export function CloneModal({
   }, []);
 
   // Create/plain mode need an explicit preset — default to the first one; back on
-  // the ticket tab "" means auto-by-labels, so leave whatever the operator chose.
+  // the ticket tab "" means auto-by-prefix, so leave whatever the operator chose.
   useEffect(() => {
     if (mode !== "existing" && preset === "" && presets.length > 0) {
       setPreset(presets[0].name);
@@ -118,7 +118,7 @@ export function CloneModal({
         ...extra,
         claudeAccount: account,
         codexAccount,
-        preset: preset || undefined, // "" ⇒ auto-select by ticket labels
+        preset: preset || undefined, // "" ⇒ auto-select by ticket-id prefix
       });
     else
       onClone(image, {
@@ -310,7 +310,7 @@ export function CloneModal({
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100"
             >
               {mode === "existing" ? (
-                <option value="">Auto (from ticket labels)</option>
+                <option value="">Auto (from ticket-id prefix)</option>
               ) : null}
               {presets.map((p) => (
                 <option key={p.name} value={p.name}>

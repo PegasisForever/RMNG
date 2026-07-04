@@ -75,7 +75,7 @@ pub struct EnvVar {
     pub value: String,
 }
 
-/// A clone preset: a Linear identity (API key + the ticket labels that auto-select
+/// A clone preset: a Linear identity (API key + the ticket-id prefixes that auto-select
 /// this preset when cloning from a ticket) plus a named set of environment variables,
 /// applied to a clone's session at creation (written to
 /// `~/.config/environment.d/30-rmng-preset.conf`; the Linear key is additionally
@@ -88,8 +88,9 @@ pub struct EnvVar {
 #[serde(rename_all = "camelCase")]
 pub struct Preset {
     pub name: String,
-    /// Linear ticket labels that auto-select this preset (matched case-insensitively
-    /// against the ticket's labels; first matching preset in config order wins).
+    /// Ticket-id prefixes (Linear team keys, e.g. `DEV`) that auto-select this preset,
+    /// matched case-insensitively against the ticket's prefix (`DEV-196` → `dev`); first
+    /// matching preset in config order wins. Named `labels` for config back-compat.
     #[serde(default)]
     pub labels: Vec<String>,
     /// Linear personal API key (**secret**; injected into clones as `LINEAR_API_KEY`).

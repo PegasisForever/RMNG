@@ -543,12 +543,12 @@ export function SettingsPanel({
               />
             </Section>
 
-            {/* Presets — Linear identity (key + auto-select labels) + env vars, picked
-                (or label-matched) at clone time. */}
+            {/* Presets — Linear identity (key + auto-select ticket-id prefixes) + env vars,
+                picked (or prefix-matched) at clone time. */}
             <Section
               title="Presets"
               effect="immediate"
-              hint="A preset = Linear API key + the ticket labels that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by label; other clones require an explicit pick."
+              hint="A preset = Linear API key + the ticket-id prefixes (Linear team keys, e.g. DEV) that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by the ticket's team prefix (DEV-196 → DEV); other clones require an explicit pick."
             >
               <div className="space-y-3">
                 {presets.length === 0 ? <p className="text-xs text-slate-400 dark:text-slate-500">No presets.</p> : null}
@@ -573,7 +573,7 @@ export function SettingsPanel({
                       <input
                         value={p.labels}
                         onChange={(e) => setPresetField(i, "labels", e.target.value)}
-                        placeholder="Linear ticket labels, comma-separated (auto-selects this preset)"
+                        placeholder="Ticket-id prefixes / team keys, comma-separated, e.g. DEV, WE (auto-selects this preset)"
                         spellCheck={false}
                         className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
                       />

@@ -33,7 +33,7 @@ async function getJson(url: string): Promise<unknown> {
  *  `claudeAccount` (all modes) picks the Claude account to run under — an email,
  *  "auto" (the default when omitted), "group:<name>", or "none" (install no token).
  *  `preset` picks the clone preset (env vars + Linear key): omitted/"auto" means
- *  auto-select by ticket labels (ticket mode); create/plain require a name. */
+ *  auto-select by ticket-id prefix (ticket mode); create/plain require a name. */
 export type ClonePayload = (
   | ((
       | { ticket: string }

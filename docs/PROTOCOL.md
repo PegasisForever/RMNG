@@ -144,7 +144,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 | `layout_presets` | `LayoutPreset[]` | `[]` | named monitor-layout presets (`{name, monitors: MonitorSpec[]}`); the operator switches the active one from the sidebar (`POST /api/layout/activate`) |
 | `active_layout` | string | `""` | name of the active layout preset; drives `effective_monitors()` (see below) |
 | `docker` | `DockerConfig` | see below | daemon socket + `rmng`-network subnet + hostname prefix + per-clone limits |
-| `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select labels (**key secret**) |
+| `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (**key secret**) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
 | `clone_groups` | `CloneGroup[]` | `[]` | named account pools for Claude rotation (not secret) |
 | `codex` | `CodexConfig` | — | Codex usage polling config |
@@ -175,9 +175,10 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   template pulled yet). A legacy `proxmox` block is scrubbed on load, carrying `hostnamePrefix` into
   `docker.hostname_prefix`; old `state.json` hosts load as plain unmanaged rows
   (`managed: false`; serde drops the stale `ctid`/`container` keys).
-- <a id="preset"></a>**`Preset`**: `name`, `labels` (Linear ticket labels that auto-select
-  this preset when cloning from a ticket — case-insensitive, first match in config order
-  wins), `linear_key` (personal API key, **secret** — fetches/creates tickets server-side
+- <a id="preset"></a>**`Preset`**: `name`, `labels` (ticket-id prefixes / Linear team keys,
+  e.g. `DEV`, that auto-select this preset when cloning from a ticket — matched
+  case-insensitively against the ticket's prefix like `DEV-196` → `dev`, first match in
+  config order wins), `linear_key` (personal API key, **secret** — fetches/creates tickets server-side
   and is injected into the clone as `LINEAR_API_KEY`, authing its `linear` MCP), `vars`
   (env vars written to the clone's session env), and `agent_playbook` (optional,
   non-secret — text appended after a blank line to the global `agent_playbook` for

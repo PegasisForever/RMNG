@@ -26,7 +26,7 @@ The two-pane layout stays Notes/Chat (`pane: "notes" | "chat"`) — the planned 
 
 - **`Settings.tsx`** — per-section forms for **all** configuration (the Docker backend —
   daemon socket / `rmng`-network subnet / hostname prefix / per-clone limits, presets —
-  Linear key + auto-select labels + env vars, Claude polling/groups, monitor defaults, the
+  Linear key + auto-select ticket-id prefixes + env vars, Claude polling/groups, monitor defaults, the
   four listen ports), replacing hand-edited `config.json`. Secret fields are
   masked/write-only with **Test connection** buttons (`POST /api/config/test`); saves go to
   `PUT /api/config` and apply live. Claude accounts are imported from a signed-in clone

@@ -462,11 +462,11 @@ async fn resolve_issue(
         linear::fetch_issue_any(&app.http, &keys, &r).await.map_err(|e| e.to_string())?;
     let preset = match explicit {
         Some(p) => p.clone(),
-        None => linear::pick_preset_by_labels(&cfg.presets, &issue.labels).cloned().ok_or_else(|| {
-            let labels = if issue.labels.is_empty() { "(none)".into() } else { issue.labels.join(", ") };
+        None => linear::pick_preset_by_prefix(&cfg.presets, &issue.prefix).cloned().ok_or_else(|| {
             format!(
-                "no preset matches ticket {}'s labels [{labels}] — pick a preset explicitly (configured: {})",
+                "no preset matches ticket {}'s team {} — pick a preset explicitly (configured: {})",
                 issue.identifier,
+                r.team_key,
                 preset_names(cfg),
             )
         })?,

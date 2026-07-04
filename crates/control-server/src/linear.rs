@@ -1,8 +1,8 @@
 //! Linear integration for ticket-driven cloning — Rust port of `linear.server.ts`.
 //! Talks to `api.linear.app/graphql` with a personal API key (`Authorization: <key>`,
 //! no "Bearer"). Keys live on presets (`AppConfig.presets`), so a ticket is fetched by
-//! trying each preset's key ([`fetch_issue_any`]); the ticket's labels then pick the
-//! preset ([`pick_preset_by_labels`]). The ticket-id prefix (e.g. `WE-142` → `we`)
+//! trying each preset's key ([`fetch_issue_any`]); the ticket-id prefix then picks the
+//! preset ([`pick_preset_by_prefix`]). The ticket-id prefix (e.g. `WE-142` → `we`)
 //! names the team within whichever workspace the key can see.
 
 use serde_json::{Value, json};
@@ -184,17 +184,14 @@ pub async fn fetch_issue_any(
     }))
 }
 
-/// The first preset whose labels intersect `issue_labels` (case-insensitive),
-/// in config order. Presets with no labels never auto-match.
-pub fn pick_preset_by_labels<'a>(
+/// The first preset (config order) with a label matching the ticket-id `prefix`
+/// (case-insensitive), e.g. a preset labelled `DEV` matches `DEV-196` (prefix `dev`).
+/// Presets with no labels never auto-match.
+pub fn pick_preset_by_prefix<'a>(
     presets: &'a [wire::Preset],
-    issue_labels: &[String],
+    prefix: &str,
 ) -> Option<&'a wire::Preset> {
-    presets.iter().find(|p| {
-        p.labels
-            .iter()
-            .any(|pl| issue_labels.iter().any(|il| il.eq_ignore_ascii_case(pl)))
-    })
+    presets.iter().find(|p| p.labels.iter().any(|pl| pl.eq_ignore_ascii_case(prefix)))
 }
 
 /// Create a new issue in team `prefix`, with an explicit API key.
@@ -332,23 +329,20 @@ mod tests {
     }
 
     #[test]
-    fn picks_preset_by_label_intersection() {
+    fn picks_preset_by_ticket_prefix() {
         let p = |name: &str, labels: &[&str]| wire::Preset {
             name: name.into(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         };
-        let presets =
-            [p("front", &["Frontend", "UI"]), p("back", &["Backend"]), p("nolabel", &[])];
-        let labels = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        // Case-insensitive match.
-        assert_eq!(pick_preset_by_labels(&presets, &labels(&["backend"])).unwrap().name, "back");
-        // Multiple presets match → first in config order wins.
-        let both = labels(&["Backend", "ui"]);
-        assert_eq!(pick_preset_by_labels(&presets, &both).unwrap().name, "front");
-        // No intersection / labelless presets never auto-match.
-        assert!(pick_preset_by_labels(&presets, &labels(&["Docs"])).is_none());
-        assert!(pick_preset_by_labels(&presets, &[]).is_none());
+        let presets = [p("front", &["WE", "UI"]), p("back", &["DEV"]), p("nolabel", &[])];
+        // Case-insensitive match against the (lowercase) ticket-id prefix.
+        assert_eq!(pick_preset_by_prefix(&presets, "dev").unwrap().name, "back");
+        // Multiple labels on a preset → any of them can match.
+        assert_eq!(pick_preset_by_prefix(&presets, "we").unwrap().name, "front");
+        // No matching prefix / labelless presets never auto-match.
+        assert!(pick_preset_by_prefix(&presets, "docs").is_none());
+        assert!(pick_preset_by_prefix(&presets, "").is_none());
     }
 
     #[test]
