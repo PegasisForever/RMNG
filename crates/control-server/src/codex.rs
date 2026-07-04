@@ -29,9 +29,8 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGGER: Duration = Duration::from_millis(400);
 
 // scoring knobs — copied from claude.rs (identical semantics).
-const SESSION_HEADROOM_PCT: f64 = 40.0;
+const SESSION_HEADROOM_PCT: f64 = 20.0;
 const SEVEN_DAY_CAP_PCT: f64 = 95.0;
-const ROTATE_MAX_FIVE_HOUR_PCT: f64 = 90.0;
 const ROTATE_SECS: u64 = 600;
 
 const IMPORT_SCRIPT: &str = include_str!("../scripts/codex-import.sh");
@@ -651,15 +650,38 @@ fn five_hour_pct(app: &App, email: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
+fn seven_day_pct(app: &App, email: &str) -> f64 {
+    app.store
+        .get()
+        .claude_accounts
+        .iter()
+        .filter(|u| u.provider == Some(wire::Provider::Codex))
+        .find(|u| u.email == email)
+        .and_then(|u| u.seven_day.as_ref())
+        .map(|w| w.pct)
+        .unwrap_or(0.0)
+}
+
+fn is_exhausted(five: f64, seven: f64) -> bool {
+    (100.0 - five) < SESSION_HEADROOM_PCT || seven >= SEVEN_DAY_CAP_PCT
+}
+
+fn exhausted(app: &App, email: &str) -> bool {
+    is_exhausted(five_hour_pct(app, email), seven_day_pct(app, email))
+}
+
+fn eligible_members(app: &App, members: &[String]) -> Vec<String> {
     let known = app.codex.emails();
-    group
-        .accounts
+    members
         .iter()
         .filter(|email| known.iter().any(|k| &k == email))
-        .filter(|email| five_hour_pct(app, email) <= ROTATE_MAX_FIVE_HOUR_PCT)
+        .filter(|email| !exhausted(app, email))
         .cloned()
         .collect()
+}
+
+fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
+    eligible_members(app, &group.accounts)
 }
 
 fn pick_group_account(app: &App, group_name: &str) -> Option<String> {
@@ -713,13 +735,54 @@ fn assign_rotation(
     out
 }
 
-pub async fn rotate_once(app: &App) {
-    let cfg = app.config();
-    if cfg.codex_groups.is_empty() {
+async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[Host]) {
+    let eligible = eligible_members(app, members);
+    if eligible.is_empty() {
+        tracing::info!("codex rotate: pool '{label}' has no eligible account; leaving {} clone(s)", clones.len());
         return;
     }
+    let usage: HashMap<String, f64> =
+        eligible.iter().map(|e| (e.clone(), five_hour_pct(app, e))).collect();
+    for (host, email) in assign_rotation(clones, &eligible, &usage) {
+        if host.codex_account_email.as_deref() == Some(email.as_str()) {
+            continue;
+        }
+        match push_account_to_clone(app, &host.id, &email).await {
+            Ok(()) => {
+                tracing::info!(
+                    "codex rotate[{label}]: {} {} -> {}",
+                    host.id,
+                    host.codex_account_email.as_deref().unwrap_or("none"),
+                    email
+                );
+                let id = host.id.clone();
+                app.store.mutate(|s| {
+                    if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+                        h.codex_account_email = Some(email);
+                    }
+                });
+            }
+            Err(e) => tracing::warn!("codex rotate[{label}]: applying {email} to {} failed: {e}", host.id),
+        }
+        tokio::time::sleep(STAGGER).await;
+    }
+}
+
+fn auto_pool_clones(hosts: &[Host]) -> Vec<Host> {
+    hosts
+        .iter()
+        .filter(|h| {
+            h.managed && h.codex_group.is_none() && h.codex_selection.as_deref() == Some(AUTO)
+        })
+        .cloned()
+        .collect()
+}
+
+pub async fn rotate_once(app: &App) {
+    let cfg = app.config();
+    let hosts = app.store.get().hosts;
     let mut by_group: HashMap<String, Vec<Host>> = HashMap::new();
-    for h in &app.store.get().hosts {
+    for h in &hosts {
         if let (Some(g), true) = (&h.codex_group, h.managed) {
             by_group.entry(g.clone()).or_default().push(h.clone());
         }
@@ -728,39 +791,11 @@ pub async fn rotate_once(app: &App) {
         let Some(group) = cfg.codex_groups.iter().find(|g| g.name == gname) else {
             continue;
         };
-        let eligible = eligible_group_accounts(app, group);
-        if eligible.is_empty() {
-            tracing::info!(
-                "codex rotate: group '{gname}' has no account <= {ROTATE_MAX_FIVE_HOUR_PCT}% 5h; leaving {} clone(s)",
-                clones.len()
-            );
-            continue;
-        }
-        let usage: HashMap<String, f64> =
-            eligible.iter().map(|e| (e.clone(), five_hour_pct(app, e))).collect();
-        for (host, email) in assign_rotation(&clones, &eligible, &usage) {
-            if host.codex_account_email.as_deref() == Some(email.as_str()) {
-                continue;
-            }
-            match push_account_to_clone(app, &host.id, &email).await {
-                Ok(()) => {
-                    tracing::info!(
-                        "codex rotate: {} {} -> {}",
-                        host.id,
-                        host.codex_account_email.as_deref().unwrap_or("none"),
-                        email
-                    );
-                    let id = host.id.clone();
-                    app.store.mutate(|s| {
-                        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                            h.codex_account_email = Some(email);
-                        }
-                    });
-                }
-                Err(e) => tracing::warn!("codex rotate: applying {email} to {} failed: {e}", host.id),
-            }
-            tokio::time::sleep(STAGGER).await;
-        }
+        rotate_pool(app, &gname, &group.accounts, &clones).await;
+    }
+    let auto = auto_pool_clones(&hosts);
+    if !auto.is_empty() {
+        rotate_pool(app, "auto", &app.codex.emails(), &auto).await;
     }
 }
 
@@ -769,51 +804,6 @@ pub async fn run_rotator(app: App) {
     loop {
         rotate_once(&app).await;
         tokio::time::sleep(Duration::from_secs(ROTATE_SECS)).await;
-    }
-}
-
-async fn auto_swap_exhausted(app: &App) {
-    let st = app.store.get();
-    let usage: HashMap<String, &ClaudeUsage> = st
-        .claude_accounts
-        .iter()
-        .filter(|u| u.provider == Some(wire::Provider::Codex))
-        .map(|u| (u.email.clone(), u))
-        .collect();
-    let exhausted = |email: &str| -> bool {
-        usage.get(email).is_some_and(|u| {
-            let five = u.five_hour.as_ref().map(|w| w.pct).unwrap_or(0.0);
-            let seven = u.seven_day.as_ref().map(|w| w.pct).unwrap_or(0.0);
-            (100.0 - five) < SESSION_HEADROOM_PCT || seven >= SEVEN_DAY_CAP_PCT
-        })
-    };
-    for host in &st.hosts {
-        if host.codex_group.is_some() {
-            continue;
-        }
-        if !host.managed {
-            continue;
-        }
-        let Some(cur) = &host.codex_account_email else { continue };
-        if !exhausted(cur) {
-            continue;
-        }
-        let Some(next) = best_scored(app) else { continue };
-        if &next == cur || exhausted(&next) {
-            continue;
-        }
-        match push_account_to_clone(app, &host.id, &next).await {
-            Ok(()) => {
-                tracing::info!("codex auto-swapped {} from {cur} to {next}", host.id);
-                let id = host.id.clone();
-                app.store.mutate(|s| {
-                    if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                        h.codex_account_email = Some(next);
-                    }
-                });
-            }
-            Err(e) => tracing::warn!("codex auto-swap of {} failed: {e}", host.id),
-        }
     }
 }
 
@@ -898,9 +888,6 @@ async fn poll_inner(app: &App) -> Result<bool> {
 
     push_stale_tokens(app).await;
 
-    if cfg.codex.auto_swap_on_exhaustion {
-        auto_swap_exhausted(app).await;
-    }
     Ok(any429)
 }
 
@@ -1074,5 +1061,36 @@ mod tests {
             emails.dedup();
             assert_eq!(emails.len(), 3);
         }
+    }
+
+    #[test]
+    fn codex_exhaustion_threshold_is_80_5h_or_95_7d() {
+        assert!(!is_exhausted(80.0, 0.0));
+        assert!(is_exhausted(80.1, 0.0));
+        assert!(!is_exhausted(0.0, 94.9));
+        assert!(is_exhausted(0.0, 95.0));
+    }
+
+    fn host_sel(id: &str, managed: bool, group: Option<&str>, sel: Option<&str>) -> Host {
+        Host {
+            id: id.into(),
+            managed,
+            codex_group: group.map(str::to_string),
+            codex_selection: sel.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn codex_auto_pool_is_only_managed_ungrouped_auto_clones() {
+        let hosts = vec![
+            host_sel("auto1", true, None, Some("auto")),
+            host_sel("pinned", true, None, Some("me@x")),
+            host_sel("legacy", true, None, None),
+            host_sel("grouped", true, Some("g"), Some("auto")),
+            host_sel("stopped", false, None, Some("auto")),
+        ];
+        let picked: Vec<String> = auto_pool_clones(&hosts).into_iter().map(|h| h.id).collect();
+        assert_eq!(picked, vec!["auto1"]);
     }
 }
