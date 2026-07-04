@@ -328,6 +328,10 @@ pub struct ClaudeUsage {
     pub seven_day: Option<ClaudeUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend: Option<ClaudeSpend>,
+    /// Codex only: banked rate-limit reset credits ("usage resets") left on the
+    /// account. `None` for Claude (no such concept) and when usage is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<i64>,
 }
 
 /// The top-level state broadcast over `/events` and persisted to `state.json`.
@@ -539,12 +543,14 @@ mod tests {
                 five_hour: Some(ClaudeUsageWindow { pct: 12.5, resets_at: None }),
                 seven_day: None,
                 spend: None,
+                reset_credits: Some(3),
             }],
             ..Default::default()
         };
         let s = serde_json::to_string(&st).unwrap();
         assert!(s.contains("\"claudeAccounts\""));
         assert!(s.contains("\"fiveHour\""));
+        assert!(s.contains("\"resetCredits\":3"));
         let back: ControlState = serde_json::from_str(&s).unwrap();
         assert_eq!(st, back);
     }

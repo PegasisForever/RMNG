@@ -15,4 +15,9 @@ id: string, email: string, provider: Provider | null, active: boolean,
  * Whether the account can run a clone: true for every imported account of either
  * provider (the server owns each account's token lifecycle).
  */
-assignable: boolean | null, error: string | null, stale: boolean | null, lastUpdated: bigint, fiveHour: ClaudeUsageWindow | null, sevenDay: ClaudeUsageWindow | null, spend: ClaudeSpend | null, };
+assignable: boolean | null, error: string | null, stale: boolean | null, lastUpdated: bigint, fiveHour: ClaudeUsageWindow | null, sevenDay: ClaudeUsageWindow | null, spend: ClaudeSpend | null, 
+/**
+ * Codex only: banked rate-limit reset credits ("usage resets") left on the
+ * account. `None` for Claude (no such concept) and when usage is unavailable.
+ */
+resetCredits: bigint | null, };
