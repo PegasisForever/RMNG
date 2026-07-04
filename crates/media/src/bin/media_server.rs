@@ -73,7 +73,7 @@ fn main() -> Result<()> {
         match conn.recv() {
             Ok((DaemonMsg::Frame(f), fds)) => {
                 if let Some(fd) = fds.into_iter().next() {
-                    if let Err(e) = enc.push(fd, f.fourcc, f.modifier, f.width, f.height) {
+                    if let Err(e) = enc.push(fd, f.fourcc, f.modifier, f.width, f.height, &f.planes) {
                         tracing::warn!("encode push failed: {e}");
                     }
                 }

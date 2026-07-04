@@ -120,7 +120,16 @@ impl Encoder {
     }
 
     /// Push one captured dmabuf frame. `fd` is consumed (the GstMemory owns it).
-    pub fn push(&self, fd: OwnedFd, fourcc: u32, modifier: u64, w: u32, h: u32) -> Result<()> {
+    /// `planes` is the daemon-reported per-plane (offset, stride) of the dmabuf.
+    pub fn push(
+        &self,
+        fd: OwnedFd,
+        fourcc: u32,
+        modifier: u64,
+        w: u32,
+        h: u32,
+        planes: &[wire::socket::PlaneLayout],
+    ) -> Result<()> {
         {
             let mut cur = self.cur.lock().unwrap();
             if *cur != Some((fourcc, modifier, w, h)) {
@@ -150,22 +159,24 @@ impl Encoder {
             b.append_memory(mem);
             // Attach plane metadata so GL import (glupload, Yuv444 path) works: the bare
             // dmabuf buffer carries none, so glupload derives 0 planes and falls back to a
-            // failing CPU mmap. The capture is single-plane 32bpp; stride = width·4 (the
-            // nominal pitch — the AMD tiling is conveyed by the modifier in the caps). VA
-            // (Yuv420 path) ignores the meta and derives the layout itself, so this is safe
-            // for both modes.
+            // failing CPU mmap. The layout must be the *real* one the compositor allocated:
+            // the GPU pads pitches (width 1440 → a 256-byte-aligned pitch, not 1440·4), and
+            // an EGL import with a wrong pitch is rejected, killing the stream. VA (Yuv420
+            // path) ignores the meta and derives the layout itself, so this is safe for
+            // both modes.
             let vfmt = match fourcc_str(fourcc).as_str() {
                 "AB24" | "XB24" => gstreamer_video::VideoFormat::Rgba,
                 _ => gstreamer_video::VideoFormat::Bgra, // AR24/XR24 (ARGB/xRGB) and default
             };
+            let (offsets, strides) = meta_layout(w, planes);
             let _ = gstreamer_video::VideoMeta::add_full(
                 b,
                 gstreamer_video::VideoFrameFlags::empty(),
                 vfmt,
                 w,
                 h,
-                &[0],
-                &[(w * 4) as i32],
+                &offsets,
+                &strides,
             );
         }
         // For latency measurement, record the push instant just before handing the frame off; the
@@ -176,6 +187,20 @@ impl Encoder {
             fifo.lock().unwrap().push_back(t0);
         }
         Ok(())
+    }
+}
+
+/// VideoMeta plane layout for a pushed dmabuf: the daemon-reported per-plane
+/// (offset, stride) when present, else the packed single-plane fallback
+/// (stride = width·4) for callers with no plane info.
+fn meta_layout(w: u32, planes: &[wire::socket::PlaneLayout]) -> (Vec<usize>, Vec<i32>) {
+    if planes.is_empty() {
+        (vec![0], vec![(w * 4) as i32])
+    } else {
+        (
+            planes.iter().map(|p| p.offset as usize).collect(),
+            planes.iter().map(|p| p.stride as i32).collect(),
+        )
     }
 }
 
@@ -248,4 +273,36 @@ fn report_latency(tag: &str, samples: &mut Vec<f64>) {
         mean
     );
     samples.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::meta_layout;
+    use wire::socket::PlaneLayout;
+
+    #[test]
+    fn meta_layout_uses_real_plane_strides() {
+        // Width 1440: the GPU pads the pitch to 6144 (256-byte aligned) — the meta
+        // must carry that real pitch, not the packed 1440·4 = 5760.
+        let planes = [PlaneLayout { offset: 0, stride: 6144 }];
+        let (offsets, strides) = meta_layout(1440, &planes);
+        assert_eq!(offsets, vec![0]);
+        assert_eq!(strides, vec![6144]);
+    }
+
+    #[test]
+    fn meta_layout_passes_through_multiplane() {
+        let planes =
+            [PlaneLayout { offset: 0, stride: 8192 }, PlaneLayout { offset: 1024, stride: 4096 }];
+        let (offsets, strides) = meta_layout(1920, &planes);
+        assert_eq!(offsets, vec![0, 1024]);
+        assert_eq!(strides, vec![8192, 4096]);
+    }
+
+    #[test]
+    fn meta_layout_falls_back_to_packed_when_no_planes() {
+        let (offsets, strides) = meta_layout(1920, &[]);
+        assert_eq!(offsets, vec![0]);
+        assert_eq!(strides, vec![1920 * 4]);
+    }
 }

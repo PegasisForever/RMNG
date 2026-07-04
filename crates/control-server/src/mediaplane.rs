@@ -107,6 +107,8 @@ struct LatestFrame {
     modifier: u64,
     width: u32,
     height: u32,
+    /// Real per-plane (offset, stride) of the dmabuf, as reported by the daemon.
+    planes: Vec<wire::socket::PlaneLayout>,
 }
 
 /// Per-viewer clipboard source id. Distinct per connection so the lazy broker can
@@ -615,27 +617,37 @@ fn prime_viewer_video(
 ) {
     let Some(sel) = selected else { return };
     // Video: re-encode each monitor's latest frame (broadcasts via the shared encoder).
-    let frames: Vec<(u32, OwnedFd, u32, u64, u32, u32)> = {
-        let latest = handle.latest.lock().unwrap();
-        latest
-            .get(&sel)
-            .map(|m| {
-                m.values()
-                    .filter_map(|f| {
-                        dup_owned(&f.fd).map(|fd| (f.monitor_id, fd, f.fourcc, f.modifier, f.width, f.height))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    for (mid, fd, fourcc, modifier, w, h) in frames {
+    let frames = dup_latest_frames(handle, &sel);
+    for (mid, fd, fourcc, modifier, w, h, planes) in frames {
         if let Some(enc) = encoder_for(encoders, viewers, mid, w, h, chroma) {
             enc.force_idr();
-            if let Err(e) = enc.push(fd, fourcc, modifier, w, h) {
+            if let Err(e) = enc.push(fd, fourcc, modifier, w, h, &planes) {
                 tracing::warn!("prime re-encode failed: {e}");
             }
         }
     }
+}
+
+/// Duplicate the selected clone's cached latest frame per monitor (fd dup'd so the
+/// cache keeps its own) for re-encoding: (monitor_id, fd, fourcc, modifier, w, h, planes).
+#[allow(clippy::type_complexity)]
+fn dup_latest_frames(
+    handle: &MediaHandle,
+    sel: &str,
+) -> Vec<(u32, OwnedFd, u32, u64, u32, u32, Vec<wire::socket::PlaneLayout>)> {
+    let latest = handle.latest.lock().unwrap();
+    latest
+        .get(sel)
+        .map(|m| {
+            m.values()
+                .filter_map(|f| {
+                    dup_owned(&f.fd).map(|fd| {
+                        (f.monitor_id, fd, f.fourcc, f.modifier, f.width, f.height, f.planes.clone())
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Re-prime ALL viewers after a selection change: force fresh keyframes + rebroadcast
@@ -655,22 +667,10 @@ fn reprime_all(
     if let Some(c) = handle.cursor.lock().unwrap().get(&sel).cloned() {
         broadcast_json(viewers, T_CURSOR, &c);
     }
-    let frames: Vec<(u32, OwnedFd, u32, u64, u32, u32)> = {
-        let latest = handle.latest.lock().unwrap();
-        latest
-            .get(&sel)
-            .map(|m| {
-                m.values()
-                    .filter_map(|f| {
-                        dup_owned(&f.fd).map(|fd| (f.monitor_id, fd, f.fourcc, f.modifier, f.width, f.height))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    for (mid, fd, fourcc, modifier, w, h) in frames {
+    let frames = dup_latest_frames(handle, &sel);
+    for (mid, fd, fourcc, modifier, w, h, planes) in frames {
         if let Some(enc) = encoder_for(encoders, viewers, mid, w, h, chroma) {
-            enc.push(fd, fourcc, modifier, w, h).ok();
+            enc.push(fd, fourcc, modifier, w, h, &planes).ok();
         }
     }
 }
@@ -706,7 +706,7 @@ fn serve_clone(
                     if let Some(dup) = dup_owned(&fd) {
                         handle.latest.lock().unwrap().entry(id.clone()).or_default().insert(
                             f.monitor_id,
-                            LatestFrame { monitor_id: f.monitor_id, fd: dup, fourcc: f.fourcc, modifier: f.modifier, width: f.width, height: f.height },
+                            LatestFrame { monitor_id: f.monitor_id, fd: dup, fourcc: f.fourcc, modifier: f.modifier, width: f.width, height: f.height, planes: f.planes.clone() },
                         );
                     }
                     let sel = app.store.selected();
@@ -720,7 +720,7 @@ fn serve_clone(
                     }
                     if sel.as_deref() == Some(id.as_str()) {
                         if let Some(enc) = encoder_for(&encoders, &viewers, f.monitor_id, f.width, f.height, chroma) {
-                            if let Err(e) = enc.push(fd, f.fourcc, f.modifier, f.width, f.height) {
+                            if let Err(e) = enc.push(fd, f.fourcc, f.modifier, f.width, f.height, &f.planes) {
                                 tracing::warn!("encode push failed: {e}");
                             }
                         }
