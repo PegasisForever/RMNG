@@ -46,7 +46,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGGER: Duration = Duration::from_millis(400);
 
 // scoring knobs (clone-accounts.server.ts)
-const SESSION_HEADROOM_PCT: f64 = 40.0;
+const SESSION_HEADROOM_PCT: f64 = 20.0;
 const SEVEN_DAY_CAP_PCT: f64 = 95.0;
 /// 5h utilization at/above which an account is filtered out of group rotation.
 const ROTATE_MAX_FIVE_HOUR_PCT: f64 = 90.0;
@@ -687,17 +687,46 @@ fn five_hour_pct(app: &App, email: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Group members that are imported accounts (exist in the store) and 5h usage
-/// at/below the rotation cap. Missing usage counts as eligible.
-fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
+/// The 7d utilization for `email` from the latest usage view (0 if unknown).
+fn seven_day_pct(app: &App, email: &str) -> f64 {
+    app.store
+        .get()
+        .claude_accounts
+        .iter()
+        .filter(|u| u.provider != Some(wire::Provider::Codex))
+        .find(|u| u.email == email)
+        .and_then(|u| u.seven_day.as_ref())
+        .map(|w| w.pct)
+        .unwrap_or(0.0)
+}
+
+/// Whether an account is out of usable headroom: 5h over the session cap or 7d at the
+/// weekly cap. Pure decision (see [`exhausted`] for the store-backed wrapper).
+fn is_exhausted(five: f64, seven: f64) -> bool {
+    (100.0 - five) < SESSION_HEADROOM_PCT || seven >= SEVEN_DAY_CAP_PCT
+}
+
+/// [`is_exhausted`] against `email`'s latest usage view.
+fn exhausted(app: &App, email: &str) -> bool {
+    is_exhausted(five_hour_pct(app, email), seven_day_pct(app, email))
+}
+
+/// Imported accounts among `members` that aren't exhausted — the usable rotation
+/// targets for a pool. (Non-imported members have no token, so they're dropped.)
+fn eligible_members(app: &App, members: &[String]) -> Vec<String> {
     let known = app.claude.emails();
-    group
-        .accounts
+    members
         .iter()
         .filter(|email| known.iter().any(|k| &k == email))
-        .filter(|email| five_hour_pct(app, email) <= ROTATE_MAX_FIVE_HOUR_PCT)
+        .filter(|email| !exhausted(app, email))
         .cloned()
         .collect()
+}
+
+/// Group members that are imported accounts and not exhausted. Missing usage counts as
+/// eligible (0% util).
+fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
+    eligible_members(app, &group.accounts)
 }
 
 /// Pick one account from group `group_name` for a new assignment: among eligible
@@ -1151,5 +1180,14 @@ mod tests {
         let clones = [clone_host("c1", Some("only@x")), clone_host("c2", Some("old@x"))];
         let got = assign_rotation(&clones, &eligible, &HashMap::new());
         assert!(got.iter().all(|(_, e)| e == "only@x"));
+    }
+
+    #[test]
+    fn exhaustion_threshold_is_80_5h_or_95_7d() {
+        assert!(!is_exhausted(80.0, 0.0), "exactly 80% 5h is still eligible");
+        assert!(is_exhausted(80.1, 0.0), "just over 80% 5h is exhausted");
+        assert!(!is_exhausted(0.0, 94.9), "under the 7d cap is eligible");
+        assert!(is_exhausted(0.0, 95.0), "hitting the 7d cap is exhausted");
+        assert!(!is_exhausted(79.9, 94.9), "both under caps is eligible");
     }
 }
