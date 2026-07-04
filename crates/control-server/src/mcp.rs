@@ -6,8 +6,11 @@
 //!     with its clone id in the `x-rmng-clone` header (clone IPs are dynamic Docker
 //!     IPAM now, so there is nothing to reverse-map a source IP against). Tools:
 //!     `set_state`.
-//!   - **Port 4 (global)**: every web-frontend action as a tool, plus the desktop
-//!     tools with an explicit `clone` argument. Replaces `control-server-ctl`.
+//!   - **Port 4 (global)**: the desktop/computer-use tools, proxied to the target
+//!     clone's daemon with an explicit `clone` argument. Fleet management (hosts,
+//!     clone/delete, images, accounts) lives in the `rmng` CLI over the port-2 web
+//!     API — MCP is for tools whose results belong in model context (screenshots),
+//!     not for orchestration.
 
 use axum::{
     Json, Router,
@@ -18,13 +21,12 @@ use axum::{
 use serde_json::{Value, json};
 
 use crate::app::App;
-use crate::jobs::{self, CloneSpec};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Scope {
     /// Port 3: the clone is the caller (self-identified via the `x-rmng-clone` header).
     PerClone,
-    /// Port 4: global control; tools take an explicit `clone` + web actions.
+    /// Port 4: the proxied desktop tools; each takes an explicit `clone` argument.
     Global,
 }
 
@@ -89,15 +91,13 @@ fn dtool(name: &str, desc: &str, mut props: Value, extra_required: &[&str]) -> V
 }
 
 fn tools_for(scope: Scope) -> Value {
-    let clone_arg = json!({ "clone": { "type": "string", "description": "target clone id" } });
     let mut tools = vec![];
-    // set_state — both scopes (PerClone derives the clone from the x-rmng-clone header).
-    let set_state_props = if scope == Scope::Global {
-        json!({ "clone": { "type": "string" }, "report": { "type": "string", "enum": ["working", "idle"] }, "note": { "type": "string" } })
-    } else {
-        json!({ "report": { "type": "string", "enum": ["working", "idle"] }, "note": { "type": "string" } })
-    };
-    tools.push(tool("set_state", "Report the agent's desktop verdict + a note", set_state_props, json!([])));
+    // set_state — per-clone only (the clone is derived from the x-rmng-clone header).
+    if scope == Scope::PerClone {
+        let set_state_props =
+            json!({ "report": { "type": "string", "enum": ["working", "idle"] }, "note": { "type": "string" } });
+        tools.push(tool("set_state", "Report the agent's desktop verdict + a note", set_state_props, json!([])));
+    }
 
     if scope == Scope::Global {
         // Desktop + window tools — proxied to the target clone-daemon's MCP.
@@ -125,56 +125,6 @@ fn tools_for(scope: Scope) -> Value {
             "Tile a window: mode \"maximize\" (default) or \"center-half\", optionally onto a monitor index",
             json!({ "id": { "type": "integer" }, "monitor": { "type": "integer" }, "mode": { "type": "string", "enum": ["maximize", "center-half"] } }),
             &["id"],
-        ));
-
-        // Web/control actions (handled locally; replace control-server-ctl).
-        tools.push(tool("list_hosts", "List all hosts + their state", json!({}), json!([])));
-        tools.push(tool("select", "Select the host shown in the viewer", clone_arg.clone(), json!(["clone"])));
-        tools.push(tool(
-            "clone",
-            "Create a clone from a source image (e.g. pegasis0/rmng-template:latest)",
-            json!({ "image": { "type": "string", "description": "clone-source image reference" }, "hostname": { "type": "string" } }),
-            json!(["image", "hostname"]),
-        ));
-        tools.push(tool("delete", "Delete a host", clone_arg.clone(), json!(["clone"])));
-        tools.push(tool(
-            "claude_swap",
-            "Hot-swap a clone's Claude account",
-            json!({
-                "clone": { "type": "string" },
-                "account": {
-                    "type": "string",
-                    "description": "An account email, \"auto\" (server picks best), \"group:<name>\", or \"none\" (remove the clone's token)",
-                },
-            }),
-            json!(["clone", "account"]),
-        ));
-        tools.push(tool(
-            "codex_swap",
-            "Hot-swap a clone's Codex account",
-            json!({
-                "clone": { "type": "string" },
-                "account": {
-                    "type": "string",
-                    "description": "An account email, \"auto\" (server picks best), \"group:<name>\", or \"none\" (remove the clone's token)",
-                },
-            }),
-            json!(["clone", "account"]),
-        ));
-        tools.push(tool(
-            "send_message",
-            "Send a chat message to a clone's host agent. Async: the agent works in the background — poll read_chat for its reply. Errors if a turn is already running for that clone.",
-            json!({
-                "clone": { "type": "string", "description": "target clone id" },
-                "text": { "type": "string", "description": "the message to send to the host agent" },
-            }),
-            json!(["clone", "text"]),
-        ));
-        tools.push(tool(
-            "read_chat",
-            "Read a clone's host-agent chat history + live working state: { busy, activity?, messages[] }. `busy` = a turn is running; `activity` = what it's doing right now.",
-            clone_arg.clone(),
-            json!(["clone"]),
         ));
     }
     Value::Array(tools)
@@ -223,16 +173,11 @@ async fn rpc(State(st): State<McpState>, headers: HeaderMap, Json(req): Json<Val
     }
 }
 
-/// Resolve which clone a call targets: per-clone scope → the caller's self-reported id
-/// (`x-rmng-clone` header), validated against the host list; global → `clone` arg.
-fn target_clone(st: &McpState, caller: Option<&str>, args: &Value) -> Option<String> {
-    match st.scope {
-        Scope::Global => args.get("clone").and_then(Value::as_str).map(str::to_string),
-        Scope::PerClone => {
-            let id = caller?;
-            st.app.store.get().hosts.into_iter().find(|h| h.id == id).map(|h| h.id)
-        }
-    }
+/// Resolve which clone a per-clone call targets: the caller's self-reported id
+/// (`x-rmng-clone` header), validated against the host list.
+fn caller_clone(st: &McpState, caller: Option<&str>) -> Option<String> {
+    let id = caller?;
+    st.app.store.get().hosts.into_iter().find(|h| h.id == id).map(|h| h.id)
 }
 
 /// A single text content item (MCP `content` array element).
@@ -255,8 +200,8 @@ async fn call_tool(st: &McpState, caller: Option<&str>, name: &str, args: Value)
         return proxy_to_daemon(app, &host, name, &args).await;
     }
     match name {
-        "set_state" => {
-            let clone = target_clone(st, caller, &args).ok_or("could not resolve target clone")?;
+        "set_state" if st.scope == Scope::PerClone => {
+            let clone = caller_clone(st, caller).ok_or("could not resolve target clone")?;
             let report = args.get("report").and_then(Value::as_str).map(str::to_string);
             let note = args.get("note").and_then(Value::as_str).map(str::to_string);
             app.store.mutate(|s| {
@@ -274,138 +219,6 @@ async fn call_tool(st: &McpState, caller: Option<&str>, name: &str, args: Value)
                 }
             });
             Ok(text(format!("state updated for {clone}")))
-        }
-        "list_hosts" => {
-            let hosts = app.store.get().hosts;
-            serde_json::to_string(&hosts).map(text).map_err(|e| e.to_string())
-        }
-        "select" => {
-            let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?.to_string();
-            app.store.mutate(|s| s.selected = Some(clone.clone()));
-            Ok(text(format!("selected {clone}")))
-        }
-        "clone" => {
-            let image = args.get("image").and_then(Value::as_str).ok_or("image required")?.to_string();
-            let hostname = args.get("hostname").and_then(Value::as_str).ok_or("hostname required")?.to_string();
-            let op = jobs::start_clone(
-                app,
-                CloneSpec {
-                    source_image: image,
-                    new_hostname: hostname,
-                    agent_playbook: crate::web::compose_playbook(&app.config(), None),
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(text(format!("clone started: op {}", op.id)))
-        }
-        "delete" => {
-            let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
-            let op = jobs::start_delete(app, clone).map_err(|e| e.to_string())?;
-            Ok(text(format!("delete started: op {}", op.id)))
-        }
-        "claude_swap" => {
-            let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
-            let account = args.get("account").and_then(Value::as_str).unwrap_or("auto");
-            let host = app.store.get().hosts.into_iter().find(|h| h.id == clone).ok_or("unknown clone")?;
-            if !host.managed {
-                return Err("not a managed clone".into());
-            }
-            let assignment = crate::claude::resolve_assignment(app, Some(account)).ok_or("no imported Claude accounts")?;
-            let selection = crate::claude::normalize_selection(Some(account));
-            let (group, email) = match assignment {
-                crate::claude::Assignment::None => {
-                    crate::claude::clear_clone_token(app, &host.id)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    app.claude.forget_pushed(&host.id);
-                    (None, None)
-                }
-                crate::claude::Assignment::Group { name, initial } => {
-                    crate::claude::push_account_to_clone(app, &host.id, &initial)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    (Some(name), Some(initial))
-                }
-                crate::claude::Assignment::Account(a) => {
-                    crate::claude::push_account_to_clone(app, &host.id, &a)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    (None, Some(a))
-                }
-            };
-            let (id, email_set, group_set, sel_set) =
-                (host.id.clone(), email.clone(), group.clone(), selection.clone());
-            app.store.mutate(|s| {
-                if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                    h.claude_account_email = email_set;
-                    h.claude_group = group_set;
-                    h.claude_selection = Some(sel_set);
-                }
-            });
-            Ok(text(match (&group, &email) {
-                (Some(g), Some(e)) => format!("swapped {clone} → {e} (group {g})"),
-                (None, Some(e)) => format!("swapped {clone} → {e}"),
-                _ => format!("swapped {clone} → none (no token)"),
-            }))
-        }
-        "codex_swap" => {
-            let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
-            let account = args.get("account").and_then(Value::as_str).unwrap_or("auto");
-            let host = app.store.get().hosts.into_iter().find(|h| h.id == clone).ok_or("unknown clone")?;
-            if !host.managed {
-                return Err("not a managed clone".into());
-            }
-            let assignment =
-                crate::codex::resolve_assignment(app, Some(account)).ok_or("no imported Codex accounts")?;
-            let selection = crate::codex::normalize_selection(Some(account));
-            let (group, email) = match assignment {
-                crate::codex::Assignment::None => {
-                    crate::codex::clear_clone_token(app, &host.id).await.map_err(|e| e.to_string())?;
-                    app.codex.forget_pushed(&host.id);
-                    (None, None)
-                }
-                crate::codex::Assignment::Group { name, initial } => {
-                    crate::codex::push_account_to_clone(app, &host.id, &initial)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    (Some(name), Some(initial))
-                }
-                crate::codex::Assignment::Account(a) => {
-                    crate::codex::push_account_to_clone(app, &host.id, &a)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    (None, Some(a))
-                }
-            };
-            let (id, email_set, group_set, sel_set) =
-                (host.id.clone(), email.clone(), group.clone(), selection.clone());
-            app.store.mutate(|s| {
-                if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                    h.codex_account_email = email_set;
-                    h.codex_group = group_set;
-                    h.codex_selection = Some(sel_set);
-                }
-            });
-            Ok(text(match (&group, &email) {
-                (Some(g), Some(e)) => format!("swapped {clone} codex → {e} (group {g})"),
-                (None, Some(e)) => format!("swapped {clone} codex → {e}"),
-                _ => format!("swapped {clone} codex → none (no token)"),
-            }))
-        }
-        "send_message" => {
-            let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
-            let msg = args.get("text").and_then(Value::as_str).ok_or("text required")?;
-            let host = app.store.get().hosts.into_iter().find(|h| h.id == clone).ok_or("unknown clone")?;
-            crate::chat::send_chat(app, &host, msg)?;
-            Ok(text(format!("message sent to {clone}; the host agent is now working — poll read_chat for its reply")))
-        }
-        "read_chat" => {
-            let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
-            if !app.store.get().hosts.iter().any(|h| h.id == clone) {
-                return Err("unknown clone".into());
-            }
-            Ok(text(crate::chat::snapshot_json(app, clone)))
         }
         other => Err(format!("unknown tool '{other}'")),
     }
@@ -433,4 +246,50 @@ async fn proxy_to_daemon(app: &App, host: &wire::Host, name: &str, args: &Value)
         .and_then(|r| r.get("content"))
         .cloned()
         .ok_or_else(|| "clone-daemon MCP result missing content".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_names(scope: Scope) -> Vec<String> {
+        tools_for(scope)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn global_scope_serves_only_proxied_desktop_tools() {
+        let names = tool_names(Scope::Global);
+        // Every listed tool is a daemon tool, and every daemon tool is listed.
+        assert!(names.iter().all(|n| is_daemon_tool(n)), "non-desktop tool leaked: {names:?}");
+        assert_eq!(names.len(), 14, "desktop tool count drifted: {names:?}");
+        // The retired fleet tools are gone (fleet management moved to the rmng CLI).
+        for retired in [
+            "set_state", "list_hosts", "select", "clone", "delete",
+            "claude_swap", "codex_swap", "send_message", "read_chat",
+        ] {
+            assert!(!names.iter().any(|n| n == retired), "retired tool still listed: {retired}");
+        }
+    }
+
+    #[test]
+    fn per_clone_scope_serves_only_set_state() {
+        assert_eq!(tool_names(Scope::PerClone), vec!["set_state"]);
+    }
+
+    #[test]
+    fn every_global_tool_requires_the_clone_arg() {
+        for t in tools_for(Scope::Global).as_array().unwrap() {
+            let req = t["inputSchema"]["required"].as_array().unwrap();
+            assert!(
+                req.iter().any(|r| r == "clone"),
+                "tool {} does not require `clone`",
+                t["name"]
+            );
+        }
+    }
 }
