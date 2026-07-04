@@ -968,6 +968,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
     let usage_polling = cfg.codex.usage_polling;
     let mut any429 = false;
     let mut views = Vec::with_capacity(accts.len());
+    let mut fleet: Vec<FleetFacts> = Vec::with_capacity(accts.len());
 
     for (i, acct) in accts.iter().enumerate() {
         if i > 0 {
@@ -979,16 +980,20 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 // Refresh + push still happen; skip the usage fetch, publish a base view.
                 let mut b = codex_base(acct);
                 b.error = Some("usage polling disabled (codex.usagePolling=false)".into());
-                return Ok::<_, anyhow::Error>(b);
+                return Ok::<_, anyhow::Error>((b, None));
             }
             let raw = fetch_usage(&app.http, &fresh.access_token, &fresh.account_id).await?;
-            Ok::<_, anyhow::Error>(to_usage(acct, raw))
+            let facts = gate_facts(&acct.id, &raw); // borrow before `raw` moves into to_usage
+            Ok::<_, anyhow::Error>((to_usage(acct, raw), facts))
         }
         .await;
         match outcome {
-            Ok(u) => {
+            Ok((u, facts)) => {
                 app.codex.last_good.lock().unwrap().insert(acct.id.clone(), u.clone());
                 views.push(u);
+                if let Some(f) = facts {
+                    fleet.push(f);
+                }
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -1014,6 +1019,78 @@ async fn poll_inner(app: &App) -> Result<bool> {
     for v in &mut views {
         v.assignable = Some(true);
     }
+
+    // --- fleet auto-reset gate ---------------------------------------------
+    let now_secs = now_ms() / 1000;
+    let marks = app.store.get().codex_reset_marks;
+    if let Some(target_id) =
+        choose_reset_target(&fleet, accts.len(), &marks, now_secs, cfg.codex.auto_reset)
+    {
+        if let (Some(target_facts), Some(acct)) = (
+            fleet.iter().find(|f| f.account_id == target_id),
+            accts.iter().find(|a| a.id == target_id),
+        ) {
+            let window = target_facts.seven_reset_at;
+            let req_id = new_request_id();
+            // Reserve the cooldown mark BEFORE the POST (no outcome can double-spend).
+            app.store.mutate(|s| {
+                s.codex_reset_marks.retain(|m| m.account_id != target_id);
+                s.codex_reset_marks.push(wire::CodexResetMark {
+                    account_id: target_id.clone(),
+                    window_resets_at: window,
+                    consumed_at: now_ms(),
+                    redeem_request_id: req_id.clone(),
+                });
+                prune_marks(&mut s.codex_reset_marks, now_secs);
+            });
+            match fresh_access_token(app, &acct.email).await {
+                Ok((fresh, _)) => {
+                    match consume_reset(&app.http, &fresh.access_token, &fresh.account_id, &req_id)
+                        .await
+                    {
+                        Ok(ConsumeOutcome::Reset) => {
+                            tracing::info!(
+                                "codex auto-reset consumed for {} (7d was {:.0}%); re-polling",
+                                acct.email,
+                                target_facts.seven_pct
+                            );
+                            // Best-effort immediate re-poll of just this account.
+                            if let Ok(raw2) =
+                                fetch_usage(&app.http, &fresh.access_token, &fresh.account_id).await
+                            {
+                                let u2 = to_usage(&acct, raw2);
+                                tracing::info!(
+                                    "codex auto-reset after: {} 7d={:?} credits={:?}",
+                                    acct.email,
+                                    u2.seven_day.as_ref().map(|w| w.pct),
+                                    u2.reset_credits
+                                );
+                                app.codex.last_good.lock().unwrap().insert(acct.id.clone(), u2.clone());
+                                if let Some(v) = views.iter_mut().find(|v| v.id == acct.id) {
+                                    *v = u2;
+                                    v.assignable = Some(true);
+                                }
+                            }
+                        }
+                        Ok(other) => tracing::warn!(
+                            "codex auto-reset for {}: {:?} (mark kept, no retry this window)",
+                            acct.email,
+                            other
+                        ),
+                        Err(e) => tracing::warn!(
+                            "codex auto-reset consume for {} failed: {e} (mark kept)",
+                            acct.email
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "codex auto-reset: token refresh for {} failed: {e} (mark kept)",
+                    acct.email
+                ),
+            }
+        }
+    }
+
     crate::clone_ops::replace_provider_views(
         app,
         wire::Provider::Codex,
