@@ -484,9 +484,16 @@ async fn run_shipping(
             session.monitors.iter().map(|m| (m.monitor_id, Arc::new(AtomicBool::new(false)))).collect(),
         ));
 
-    // Reader thread: ServerMsg in (Input → inject; Ack → gate; ClipboardData → selection).
+    // Reconfigure channel: the reader thread below hands each pushed `SetMonitors` layout to
+    // the control loop at the bottom of this fn via `blocking_send`. The reader thread moves
+    // in its own sender clone, which lives for the daemon's whole run, so `reconfig_rx.recv()`
+    // blocks between layout changes instead of returning `None` and exiting the control loop.
+    let (reconfig_tx, mut reconfig_rx) = tokio::sync::mpsc::channel::<Vec<MonitorCfg>>(4);
+
+    // Reader thread: ServerMsg in (Input → inject; Ack → gate; ClipboardData → selection;
+    // SetMonitors → live reconfigure).
     {
-        let (transport, flags) = (transport.clone(), in_flight.clone());
+        let (transport, flags, reconfig_tx) = (transport.clone(), in_flight.clone(), reconfig_tx);
         std::thread::spawn(move || {
             loop {
                 match transport.recv() {
@@ -506,6 +513,25 @@ async fn run_shipping(
                     }
                     Ok(ServerMsg::ClipboardData(d)) => {
                         let _ = clip_tx.send(clipboard::FromServer::Data(d));
+                    }
+                    Ok(ServerMsg::SetMonitors { monitors }) => {
+                        // Convert wire MonitorSpec → daemon MonitorCfg and hand to the
+                        // async reconfigure controller. Guarantees exactly one primary.
+                        let mut mons: Vec<MonitorCfg> = monitors
+                            .iter()
+                            .map(|m| MonitorCfg {
+                                w: m.width, h: m.height, x: m.x as i32, y: m.y as i32, primary: m.primary,
+                            })
+                            .collect();
+                        if mons.is_empty() {
+                            mons.push(MonitorCfg { w: 1920, h: 1080, x: 0, y: 0, primary: true });
+                        }
+                        if !mons.iter().any(|m| m.primary) {
+                            mons[0].primary = true;
+                        }
+                        if reconfig_tx.blocking_send(mons).is_err() {
+                            tracing::warn!("reconfigure channel closed; ignoring SetMonitors");
+                        }
                     }
                     Ok(_) => {} // Subscribe/FrameRequest — not used by the daemon
                     Err(e) => {
@@ -564,10 +590,10 @@ async fn run_shipping(
     );
 
     // Control loop: apply each pushed layout via a make-before-break session swap. The
-    // sender side (`reconfig_tx`) is wired by Task 3.4 (the ServerMsg reader's Reconfigure
-    // arm); `_reconfig_tx` is held here only to keep the channel open — so `recv()` blocks
-    // (like the old terminal `pending()`) instead of returning None and exiting the daemon.
-    let (_reconfig_tx, mut reconfig_rx) = tokio::sync::mpsc::channel::<Vec<MonitorCfg>>(4);
+    // sender side (`reconfig_tx`) is wired into the ServerMsg reader thread above (its
+    // SetMonitors arm); that thread's sender clone keeps this channel open for the
+    // daemon's whole run, so `recv()` blocks between layout changes instead of returning
+    // `None` and exiting the control loop.
     let mut current_cfg = monitors.to_vec();
     while let Some(desired) = reconfig_rx.recv().await {
         if desired == current_cfg {
