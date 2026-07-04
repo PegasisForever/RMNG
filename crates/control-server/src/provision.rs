@@ -835,11 +835,18 @@ async fn sock_source_dir(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wire::MonitorSpec;
+    use wire::{LayoutPreset, MonitorSpec};
 
     fn cfg_with_monitors(mons: Vec<MonitorSpec>) -> AppConfig {
         let mut c = AppConfig::default();
-        c.monitors = mons;
+        // Empty `mons` must leave `layout_presets` empty too, or effective_monitors()
+        // would resolve the (empty-monitors) active preset instead of falling through
+        // to its hardcoded dual-1440p default — which is exactly what
+        // `monitors_csv_falls_back_to_default` below exercises.
+        if !mons.is_empty() {
+            c.layout_presets = vec![LayoutPreset { name: "T".into(), monitors: mons }];
+            c.active_layout = "T".into();
+        }
         c
     }
 

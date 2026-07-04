@@ -4,6 +4,7 @@ import type { ClaudeConfig } from "./ClaudeConfig";
 import type { CloneGroup } from "./CloneGroup";
 import type { CodexConfig } from "./CodexConfig";
 import type { DockerConfig } from "./DockerConfig";
+import type { LayoutPreset } from "./LayoutPreset";
 import type { ListenConfig } from "./ListenConfig";
 import type { MonitorSpec } from "./MonitorSpec";
 import type { PresetRedacted } from "./PresetRedacted";
@@ -12,4 +13,4 @@ import type { PresetRedacted } from "./PresetRedacted";
  * The shape `GET /api/config` returns: same structure as [`AppConfig`] but with
  * every secret replaced by a boolean "is set". Powers the Settings UI.
  */
-export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataDir: string, staticDir: string, cloneSocket: string, setupComplete: boolean, monitors: Array<MonitorSpec>, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, cloneGroups: Array<CloneGroup>, codexGroups: Array<CloneGroup>, presets: Array<PresetRedacted>, chroma: ChromaMode, detectorInferenceUrl: string, agentPlaybook: string, };
+export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataDir: string, staticDir: string, cloneSocket: string, setupComplete: boolean, monitors: Array<MonitorSpec>, layoutPresets: Array<LayoutPreset>, activeLayout: string, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, cloneGroups: Array<CloneGroup>, codexGroups: Array<CloneGroup>, presets: Array<PresetRedacted>, chroma: ChromaMode, detectorInferenceUrl: string, agentPlaybook: string, };
