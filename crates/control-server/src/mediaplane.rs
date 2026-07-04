@@ -16,6 +16,8 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::SyncSender;
 
 use tokio::sync::broadcast::error::RecvError;
 
@@ -28,6 +30,68 @@ use wire::socket::{
 use wire::viewer::ModeMsg;
 
 use crate::app::App;
+
+/// One connected viewer: its id + the sender into its per-viewer writer thread.
+/// The writer thread owns the socket; producers only ever `try_send` here, so a slow
+/// viewer's socket never blocks the encode or metadata threads.
+#[allow(dead_code)] // wired in by the multi-viewer integration task
+struct ViewerConn {
+    id: u64,
+    tx: SyncSender<Arc<[u8]>>,
+}
+
+/// The live set of viewers, keyed by id. Held under a short-lived lock only to
+/// snapshot/insert/remove; all sends are non-blocking `try_send`.
+#[allow(dead_code)]
+type Viewers = Arc<Mutex<HashMap<u64, ViewerConn>>>;
+
+/// Bounded per-viewer queue depth. `try_send` overflow disconnects the viewer (it
+/// reconnects + re-primes). Bounds worst-case queued memory at CAP × max-AU per slow
+/// viewer; tune here if joins on very bursty desktops need more slack.
+#[allow(dead_code)]
+const VIEWER_CHAN_CAP: usize = 128;
+
+/// Monotonic per-process viewer id.
+#[allow(dead_code)]
+fn next_viewer_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Fan one pre-framed message out to every viewer. A viewer whose channel is full
+/// (too slow) or disconnected (writer already gone) is removed from the registry;
+/// dropping its stored `tx` lets its writer thread's channel disconnect, which tears
+/// the viewer down. Never blocks: `try_send` is non-blocking.
+#[allow(dead_code)]
+fn broadcast_bytes(viewers: &Viewers, buf: &Arc<[u8]>) {
+    let mut guard = viewers.lock().unwrap();
+    let mut dead: Vec<u64> = Vec::new();
+    for (id, v) in guard.iter() {
+        if v.tx.try_send(buf.clone()).is_err() {
+            dead.push(*id);
+        }
+    }
+    for id in dead {
+        guard.remove(&id);
+    }
+}
+
+/// Send one pre-framed message to a single viewer; remove it on failure.
+#[allow(dead_code)]
+fn send_bytes_to(viewers: &Viewers, id: u64, buf: Arc<[u8]>) {
+    let mut guard = viewers.lock().unwrap();
+    if let Some(v) = guard.get(&id) {
+        if v.tx.try_send(buf).is_err() {
+            guard.remove(&id);
+        }
+    }
+}
+
+/// Idempotently remove a viewer (dropping its `tx`).
+#[allow(dead_code)]
+fn remove_viewer(viewers: &Viewers, id: u64) {
+    viewers.lock().unwrap().remove(&id);
+}
 
 /// Central clipboard broker state (rich + lazy). One current `offer` (the selection
 /// owner) + the in-flight `pending` requests so `Data` replies route back to whoever
@@ -862,5 +926,39 @@ mod tests {
         let mut got = [0u8; 4];
         client.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"ping");
+    }
+
+    #[test]
+    fn broadcast_drops_only_the_full_viewer() {
+        use std::sync::mpsc::sync_channel;
+
+        // Viewer A: capacity 4, actively has room. Viewer B: capacity 1, pre-filled → full.
+        let (tx_a, rx_a) = sync_channel::<Arc<[u8]>>(4);
+        let (tx_b, _rx_b) = sync_channel::<Arc<[u8]>>(1);
+        let filler: Arc<[u8]> = Arc::from(vec![0u8; 1]);
+        tx_b.try_send(filler).unwrap(); // B is now full (nobody drains _rx_b)
+
+        let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
+        viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx: tx_a });
+        viewers.lock().unwrap().insert(2, ViewerConn { id: 2, tx: tx_b });
+
+        let msg: Arc<[u8]> = Arc::from(vec![7u8, 8, 9]);
+        broadcast_bytes(&viewers, &msg);
+
+        // A received the message and stayed; B was full and got removed.
+        assert_eq!(&*rx_a.recv().unwrap(), &[7u8, 8, 9]);
+        assert!(viewers.lock().unwrap().contains_key(&1), "fast viewer was wrongly dropped");
+        assert!(!viewers.lock().unwrap().contains_key(&2), "full viewer was not dropped");
+    }
+
+    #[test]
+    fn remove_viewer_is_idempotent() {
+        use std::sync::mpsc::sync_channel;
+        let (tx, _rx) = sync_channel::<Arc<[u8]>>(1);
+        let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
+        viewers.lock().unwrap().insert(5, ViewerConn { id: 5, tx });
+        remove_viewer(&viewers, 5);
+        remove_viewer(&viewers, 5); // second call must be a no-op, not a panic
+        assert!(viewers.lock().unwrap().is_empty());
     }
 }
