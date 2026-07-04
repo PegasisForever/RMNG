@@ -114,6 +114,35 @@ struct LatestFrame {
 /// Pseudo-source id for clipboard that originated at the (single) viewer.
 const VIEWER_SRC: &str = "\0viewer";
 
+/// Per-viewer clipboard source id. Distinct per connection so the lazy broker can
+/// route a `Request` to the exact viewer that owns the current offer and a `Data`
+/// reply back to the exact requester. (Replaces the old single `VIEWER_SRC`.)
+#[allow(dead_code)]
+fn viewer_src(id: u64) -> String {
+    format!("\0viewer:{id}")
+}
+
+/// Parse a viewer source id back to its numeric id; `None` for clone ids.
+#[allow(dead_code)]
+fn viewer_src_id(s: &str) -> Option<u64> {
+    s.strip_prefix("\0viewer:").and_then(|n| n.parse().ok())
+}
+
+/// A source (a leaving viewer, or a departed clone) is gone: if it owns the current
+/// offer, drop the offer; remove it from every pending requester list, discarding
+/// lists that become empty.
+#[allow(dead_code)]
+fn clip_forget_source(clip: &Mutex<ClipState>, src: &str) {
+    let mut clip = clip.lock().unwrap();
+    if clip.offer.as_ref().is_some_and(|(_, owner)| owner == src) {
+        clip.offer = None;
+    }
+    clip.pending.retain(|_, requesters| {
+        requesters.retain(|r| r != src);
+        !requesters.is_empty()
+    });
+}
+
 #[derive(Default)]
 pub struct MediaHandle {
     conns: Mutex<HashMap<String, Arc<Conn>>>,
@@ -1018,5 +1047,43 @@ mod tests {
         assert_eq!(f[0], T_CURSOR);
         assert_eq!(&f[1..5], &(json.len() as u32).to_be_bytes());
         assert_eq!(&f[5..], &json[..]);
+    }
+
+    #[test]
+    fn viewer_src_roundtrips_and_rejects_clone_ids() {
+        let s = viewer_src(42);
+        assert_eq!(viewer_src_id(&s), Some(42));
+        assert_eq!(viewer_src_id("some-clone-host"), None);
+        assert_eq!(viewer_src_id("\0viewer:notanum"), None);
+    }
+
+    #[test]
+    fn clip_forget_source_drops_owned_offer_and_scrubs_pending() {
+        use wire::socket::ClipboardOffer;
+        let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
+        let owner = viewer_src(1);
+        let other = viewer_src(2);
+        {
+            let mut c = clip.lock().unwrap();
+            c.offer = Some((ClipboardOffer { serial: 1, mime_types: vec!["text/plain".into()] }, owner.clone()));
+            // A pending request that the owner (viewer 1) and viewer 2 both wanted.
+            c.pending.insert((1, "text/plain".into()), vec![owner.clone(), other.clone()]);
+        }
+
+        clip_forget_source(&clip, &owner);
+
+        let c = clip.lock().unwrap();
+        assert!(c.offer.is_none(), "offer owned by the leaving viewer should be dropped");
+        // owner scrubbed from the requester list; viewer 2 remains.
+        assert_eq!(c.pending.get(&(1, "text/plain".into())), Some(&vec![other.clone()]));
+    }
+
+    #[test]
+    fn clip_forget_source_removes_empty_pending_entries() {
+        let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
+        let only = viewer_src(9);
+        clip.lock().unwrap().pending.insert((7, "image/png".into()), vec![only.clone()]);
+        clip_forget_source(&clip, &only);
+        assert!(clip.lock().unwrap().pending.is_empty(), "emptied requester list should be removed");
     }
 }
