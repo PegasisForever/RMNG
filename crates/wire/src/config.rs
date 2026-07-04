@@ -230,14 +230,11 @@ pub struct ClaudeConfig {
     /// Account email pinned to the top of the usage list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_email: Option<String>,
-    /// Hot-swap a clone to another account when its usage is exhausted.
-    #[serde(default)]
-    pub auto_swap_on_exhaustion: bool,
 }
 
 impl Default for ClaudeConfig {
     fn default() -> Self {
-        Self { poll_secs: 600, pinned_email: None, auto_swap_on_exhaustion: false }
+        Self { poll_secs: 600, pinned_email: None }
     }
 }
 
@@ -250,9 +247,6 @@ pub struct CodexConfig {
     /// Account email pinned to the top of the usage list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_email: Option<String>,
-    /// Hot-swap a clone to another account when its usage is exhausted.
-    #[serde(default)]
-    pub auto_swap_on_exhaustion: bool,
     /// Poll the ChatGPT usage endpoint. When false, the poller still refreshes + pushes
     /// tokens and publishes base views (with an explanatory `error`), but skips the usage
     /// fetch — an escape hatch if the unofficial `/wham/usage` shape drifts.
@@ -266,7 +260,7 @@ fn default_true() -> bool {
 
 impl Default for CodexConfig {
     fn default() -> Self {
-        Self { poll_secs: 600, pinned_email: None, auto_swap_on_exhaustion: false, usage_polling: true }
+        Self { poll_secs: 600, pinned_email: None, usage_polling: true }
     }
 }
 
@@ -590,11 +584,10 @@ mod tests {
 
     #[test]
     fn codex_config_defaults_and_passthrough() {
-        // Defaults: 600s poll, no pinned email, no auto-swap, usage polling ON.
+        // Defaults: 600s poll, no pinned email, usage polling ON.
         let c = AppConfig::default();
         assert_eq!(c.codex.poll_secs, 600);
         assert!(c.codex.pinned_email.is_none());
-        assert!(!c.codex.auto_swap_on_exhaustion);
         assert!(c.codex.usage_polling, "usage_polling defaults to true");
         assert!(c.codex_groups.is_empty());
         // Missing keys fall back to defaults (older config.json stays valid).
@@ -620,7 +613,6 @@ mod tests {
         // Round-trips as camelCase.
         let v = serde_json::to_value(&CodexConfig::default()).unwrap();
         assert!(v.get("usagePolling").is_some());
-        assert!(v.get("autoSwapOnExhaustion").is_some());
     }
 
     #[test]

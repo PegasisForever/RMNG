@@ -47,9 +47,9 @@ MonitorSpec { width, height }
 # configuration (edited via the Settings UI, not hand-edited files)
 AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb, template_reference},
             presets: [{name, labels: [label], linear_key, vars: [{key, value}]}],
-            claude{poll, pinnedEmail, swap..., auto_swap_on_exhaustion: bool},
+            claude{poll, pinnedEmail, swap...},
             clone_groups: [{name, accounts: [email]}],
-            codex{pollSecs, pinnedEmail, autoSwapOnExhaustion, usagePolling},
+            codex{pollSecs, pinnedEmail, usagePolling},
             codex_groups: [{name, accounts: [email]}],
             clone_socket, data_dir, static_dir, chroma, setup_complete, detector_inference_url,
             monitors: [MonitorSpec], listen{video, web, clone_mcp, global_mcp}, agent{port} }
@@ -64,7 +64,7 @@ AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb,
 # Codex account tokens are NOT config: each account's OAuth triple lives in the server's
 # 0600 `codex-accounts.json`; the server refreshes it and pushes a short-lived
 # auth.json into assigned clones' ~/.codex/auth.json (refresh_token emptied; see control-server).
-CodexConfig { pollSecs, pinnedEmail?, autoSwapOnExhaustion: bool, usagePolling: bool }
+CodexConfig { pollSecs, pinnedEmail?, usagePolling: bool }
              # usagePolling=false suppresses GET /wham/usage; refresh + push still run
 AppConfigRedacted   # GET /api/config shape: the one secret → set/unset, never plaintext
 ImageInfo   # GET /api/images row: {id, reference, size_bytes, created_at, base, created_from?, in_use_by}
