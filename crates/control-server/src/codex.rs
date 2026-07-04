@@ -443,11 +443,18 @@ struct RawRateLimit {
     secondary_window: Option<RawRateWindow>,
 }
 #[derive(Deserialize)]
+struct RawResetCredits {
+    #[serde(default)]
+    available_count: Option<i64>,
+}
+#[derive(Deserialize)]
 struct RawUsage {
     #[serde(default)]
     plan_type: Option<String>,
     #[serde(default)]
     rate_limit: Option<RawRateLimit>,
+    #[serde(default)]
+    rate_limit_reset_credits: Option<RawResetCredits>,
 }
 
 async fn fetch_usage(http: &reqwest::Client, token: &str, account_id: &str) -> Result<RawUsage> {
@@ -496,6 +503,7 @@ fn to_usage(acct: &StoredCodexAccount, raw: RawUsage) -> ClaudeUsage {
         }
     }
     let _ = raw.plan_type; // plan is stored on the account, not the usage view
+    let reset_credits = raw.rate_limit_reset_credits.as_ref().and_then(|c| c.available_count);
     ClaudeUsage {
         id: acct.id.clone(),
         email: acct.email.clone(),
@@ -508,7 +516,7 @@ fn to_usage(acct: &StoredCodexAccount, raw: RawUsage) -> ClaudeUsage {
         five_hour,
         seven_day,
         spend: None,
-        reset_credits: None,
+        reset_credits,
     }
 }
 
@@ -1077,6 +1085,23 @@ mod tests {
             codex_selection: sel.map(str::to_string),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn to_usage_reads_reset_credits() {
+        let raw: RawUsage = serde_json::from_str(
+            r#"{"plan_type":"pro","rate_limit":{"secondary_window":{"used_percent":96,"limit_window_seconds":604800,"reset_at":1783392770}},"rate_limit_reset_credits":{"available_count":4}}"#,
+        )
+        .unwrap();
+        let u = to_usage(&sample_account(), raw);
+        assert_eq!(u.reset_credits, Some(4));
+        assert_eq!(u.seven_day.unwrap().pct, 96.0);
+    }
+
+    #[test]
+    fn to_usage_absent_reset_credits_is_none() {
+        let raw: RawUsage = serde_json::from_str(r#"{"rate_limit":{}}"#).unwrap();
+        assert_eq!(to_usage(&sample_account(), raw).reset_credits, None);
     }
 
     #[test]
