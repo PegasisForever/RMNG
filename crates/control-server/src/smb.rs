@@ -1,5 +1,5 @@
-//! `smbd` supervisor + the `clones` SMB share. The control-server runs its own smbd
-//! (port 445) exporting one read-write share whose root is `data/hosts` — the symlink
+//! `smbd` supervisor + two SMB shares (`clones`, `feedback`). The control-server runs its own
+//! smbd (port 445) exporting two read-write shares. `clones`'s root is `data/hosts` — the symlink
 //! directory the clone-home reconciler (`homes.rs`) maintains, one link per running clone
 //! pointing at that clone's `/home/rmng`. So an SMB client browsing `\\<host>\clones` sees
 //! every clone's home side by side.
@@ -14,6 +14,12 @@
 //! keeps the group the clone's too. (Trade-off: serving as root with `wide links` means an
 //! authenticated `clones` client can read any root-readable path via a planted symlink — an
 //! accepted risk for this trusted, credential-gated share.)
+//!
+//! The `feedback` share is far simpler: `data/detector-feedback` is a plain control-server-owned
+//! directory (the records `save_detector_feedback` writes), not a `/proc` symlink, so it needs
+//! none of the `wide links` traversal machinery. `force user = root` there is only so the
+//! authenticated `rmng` client can read/write the root-owned records; files it creates land
+//! root-owned, matching the API writer. It works regardless of `pid: "host"`.
 //!
 //! On startup we (re)render `/data/smb.conf` from the live config's `data_dir` (so the
 //! share `path` always tracks where the reconciler writes its links), provision the local
@@ -87,6 +93,14 @@ pub fn render_smb_conf(hosts_root: &Path, feedback_root: &Path) -> String {
 /// symlink resolution). Sourced from `homes` so the reconciler and the share never diverge.
 fn absolute_hosts_root(data_dir: &str) -> PathBuf {
     let root = homes::hosts_root(data_dir);
+    std::path::absolute(&root).unwrap_or(root)
+}
+
+/// The feedback share root as an absolute path, sourced from `files::detector_feedback_root` so
+/// the share and the writer never diverge. Lexical `std::path::absolute` only (no symlink
+/// resolution), mirroring [`absolute_hosts_root`].
+fn absolute_feedback_root(data_dir: &str) -> PathBuf {
+    let root = crate::files::detector_feedback_root(data_dir);
     std::path::absolute(&root).unwrap_or(root)
 }
 
@@ -227,16 +241,17 @@ async fn supervise() {
 pub async fn run(app: App) {
     let cfg = app.config();
     let root = absolute_hosts_root(&cfg.data_dir);
+    let feedback_root = absolute_feedback_root(&cfg.data_dir);
     let _ = std::fs::create_dir_all(&root); // harmless if homes already made it
+    let _ = std::fs::create_dir_all(&feedback_root); // may not exist until the first report
 
-    let feedback = {
-        let fb = PathBuf::from(format!("{}/data/detector-feedback", cfg.data_dir));
-        std::path::absolute(&fb).unwrap_or(fb)
-    };
-    let _ = std::fs::create_dir_all(&feedback);
-
-    match std::fs::write(SMB_CONF, render_smb_conf(&root, &feedback)) {
-        Ok(()) => tracing::info!(target: "smb", "wrote {SMB_CONF} (share root {})", root.display()),
+    match std::fs::write(SMB_CONF, render_smb_conf(&root, &feedback_root)) {
+        Ok(()) => tracing::info!(
+            target: "smb",
+            "wrote {SMB_CONF} (clones {}, feedback {})",
+            root.display(),
+            feedback_root.display()
+        ),
         Err(e) => tracing::error!(target: "smb", "writing {SMB_CONF}: {e}"),
     }
 
