@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::broadcast;
 use wire::forward::{ForwardRuntime, ForwardState, ForwardStatusMsg};
@@ -11,12 +12,16 @@ use wire::forward::{ForwardRuntime, ForwardState, ForwardStatusMsg};
 pub struct ForwardBus {
     tx: broadcast::Sender<String>,
     inner: RwLock<HashMap<String, HashMap<String, ForwardRuntime>>>,
+    /// Number of currently-connected viewers. Runtime status is a union of what the
+    /// viewers report; it is cleared only when this returns to zero so one viewer
+    /// disconnecting does not blank a rule another viewer is still serving.
+    viewers: AtomicUsize,
 }
 
 impl ForwardBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(16);
-        Self { tx, inner: RwLock::new(HashMap::new()) }
+        Self { tx, inner: RwLock::new(HashMap::new()), viewers: AtomicUsize::new(0) }
     }
 
     /// Current snapshot (JSON `Record<hostId, ForwardRuntime[]>`) + a live receiver.
@@ -80,6 +85,24 @@ impl ForwardBus {
         self.inner.write().unwrap().clear();
         self.broadcast();
     }
+
+    /// A viewer connected: it will start reporting its forward listeners.
+    pub fn viewer_joined(&self) {
+        self.viewers.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A viewer disconnected. Clear all runtime status only when the last one leaves
+    /// (its listeners are gone, and no other viewer remains to keep the union alive).
+    pub fn viewer_left(&self) {
+        // Saturating decrement: never underflow if called spuriously.
+        let prev = self
+            .viewers
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1)))
+            .unwrap();
+        if prev <= 1 {
+            self.clear();
+        }
+    }
 }
 
 impl Default for ForwardBus {
@@ -119,5 +142,33 @@ mod tests {
         assert!(rx.try_recv().unwrap().contains("\"activeConns\":0"));
         bus.clear();
         assert_eq!(rx.try_recv().unwrap(), "{}");
+    }
+
+    #[test]
+    fn viewer_refcount_clears_only_when_last_leaves() {
+        let bus = ForwardBus::new();
+        let (_seed, mut rx) = bus.subscribe();
+        // Two viewers connect; one reports a listening rule.
+        bus.viewer_joined();
+        bus.viewer_joined();
+        bus.report(ForwardStatusMsg {
+            host_id: "h".into(),
+            id: "f8080".into(),
+            state: ForwardState::Listening,
+            error: None,
+        });
+        let _ = rx.try_recv(); // drain the report broadcast
+
+        // First viewer leaves — status must persist (another viewer remains).
+        bus.viewer_left();
+        assert!(bus.snapshot_json().contains("\"f8080\""), "status cleared too early");
+
+        // Last viewer leaves — status is now cleared.
+        bus.viewer_left();
+        assert_eq!(bus.snapshot_json(), "{}", "status not cleared after last viewer left");
+
+        // Underflow guard: an extra leave with no viewers must not panic or clear-loop.
+        bus.viewer_left();
+        assert_eq!(bus.snapshot_json(), "{}");
     }
 }
