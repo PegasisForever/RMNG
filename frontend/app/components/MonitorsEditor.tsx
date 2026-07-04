@@ -1,3 +1,5 @@
+import { useId } from "react";
+
 export type Mon = { width: number; height: number; x: number; y: number; primary: boolean };
 
 const PRESETS: { label: string; width: number; height: number }[] = [
@@ -71,6 +73,10 @@ export function MonitorsEditor({
   monitors: Mon[];
   onChange: (next: Mon[]) => void;
 }) {
+  // Unique radio-group name per editor instance: several editors render at once
+  // (one per layout preset), and a shared name would let the browser keep only ONE
+  // primary checked across all of them.
+  const radioGroup = useId();
   const setMon = (i: number, k: "width" | "height" | "x" | "y", v: number) =>
     onChange(monitors.map((m, j) => (j === i ? { ...m, [k]: v } : m)));
   const setPrimary = (i: number) => onChange(monitors.map((m, j) => ({ ...m, primary: j === i })));
@@ -112,7 +118,7 @@ export function MonitorsEditor({
             ))}
             <input
               type="radio"
-              name="primaryMonitor"
+              name={radioGroup}
               checked={m.primary}
               onChange={() => setPrimary(i)}
               title="set as primary"
