@@ -49,6 +49,7 @@ pub fn router(app: App) -> Router {
         .route("/api/reorder", post(reorder))
         .route("/api/clone", post(clone))
         .route("/api/monitors/apply", post(monitors_apply))
+        .route("/api/layout/activate", post(layout_activate))
         .route("/api/delete", post(delete))
         .route("/api/notes/:id", get(notes_get).post(notes_save))
         .route("/api/upload", post(upload))
@@ -636,6 +637,45 @@ async fn monitors_apply(State(app): State<App>) -> Result<Json<serde_json::Value
     }
     if applied.is_empty() && !errors.is_empty() {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, errors.join("; ")));
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "applied": applied, "errors": errors })))
+}
+
+#[derive(Deserialize)]
+struct LayoutActivateReq {
+    name: String,
+}
+
+/// `POST /api/layout/activate` — make `name` the active layout preset and live-apply it
+/// to every running clone (no session restart). Persists config, mirrors the active
+/// name into ControlState (so all sidebars update over SSE), then pushes `SetMonitors`
+/// to each daemon. Best-effort per clone; partial failures are reported.
+async fn layout_activate(
+    State(app): State<App>,
+    Json(req): Json<LayoutActivateReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // 1. Validate + persist the active_layout.
+    let mut cfg = app.config();
+    if !cfg.layout_presets.iter().any(|p| p.name == req.name) {
+        return Err((StatusCode::BAD_REQUEST, format!("unknown layout preset '{}'", req.name)));
+    }
+    cfg.active_layout = req.name.clone();
+    crate::config::save(&cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    *app.cfg.write().unwrap() = cfg.clone();
+
+    // 2. Mirror into ControlState for the sidebar (SSE broadcast).
+    mirror_layout_to_state(&app);
+
+    // 3. Live-apply to all running clones.
+    let monitors = cfg.effective_monitors();
+    let results = app.media.set_monitors_all(&monitors);
+    let mut applied = Vec::new();
+    let mut errors = Vec::new();
+    for (id, r) in results {
+        match r {
+            Ok(()) => applied.push(id),
+            Err(e) => errors.push(format!("{id}: {e}")),
+        }
     }
     Ok(Json(serde_json::json!({ "ok": true, "applied": applied, "errors": errors })))
 }
