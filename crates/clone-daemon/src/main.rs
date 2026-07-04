@@ -294,9 +294,8 @@ async fn apply_layout(monitors: &[MonitorCfg]) {
     }
 }
 
-/// Call `DisplayConfig.GetCurrentState` and return `(serial, stdout)`. Shared by
-/// `apply_layout` (needs the full state to read back connectors) and
-/// `display_config_serial` (only needs the leading serial).
+/// Call `DisplayConfig.GetCurrentState` and return `(serial, stdout)`. Used by
+/// `apply_layout` to read back connector names from the current Mutter state.
 async fn get_current_state() -> Option<(u32, String)> {
     let out = tokio::process::Command::new("gdbus")
         .args([
@@ -312,12 +311,6 @@ async fn get_current_state() -> Option<(u32, String)> {
     let serial =
         s[idx + 7..].split(|c: char| !c.is_ascii_digit()).find(|t| !t.is_empty())?.parse().ok()?;
     Some((serial, s))
-}
-
-/// The current `DisplayConfig` serial (the first `uint32` in `GetCurrentState`).
-#[allow(dead_code)]
-async fn display_config_serial() -> Option<u32> {
-    get_current_state().await.map(|(serial, _)| serial)
 }
 
 /// Parse the text form of `DisplayConfig.GetCurrentState`'s stdout (as printed by
@@ -720,5 +713,18 @@ mod tests {
         assert_eq!(conns.len(), 2);
         assert_eq!(conns[0], ("Meta-0".to_string(), 2560, 1440));
         assert_eq!(conns[1], ("Meta-1".to_string(), 1920, 1080));
+    }
+
+    #[test]
+    fn parse_connectors_picks_is_current_mode() {
+        // Monitor with two modes: first (3840x2160) is NOT current, second (1920x1080) IS current.
+        // Ensures parser selects the is-current mode rather than blindly taking the first mode.
+        let blob = "(uint32 5, [(('Meta-0', 'MetaVendor', 'Virtual remote monitor', '0x000001'), \
+[('3840x2160@60.000', 3840, 2160, 60.0, 1.0, [1.0], {'is-preferred': <true>}), \
+('1920x1080@60.000', 1920, 1080, 60.0, 1.0, [1.0], {'is-current': <true>})], \
+{'is-builtin': <false>})], [(0, 0, 1.0, uint32 0, true, [('Meta-0', 'x', 'y', '0x1')], @a{sv} {})], {'layout-mode': <uint32 1>})";
+        let conns = parse_connectors(blob);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0], ("Meta-0".to_string(), 1920, 1080));
     }
 }
