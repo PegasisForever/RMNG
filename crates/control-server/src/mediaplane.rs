@@ -403,6 +403,44 @@ fn write_json_frame<T: serde::Serialize>(viewer: &Viewer, tag: u8, msg: &T) {
     }
 }
 
+/// Pre-frame one H.264 AU: `[0u8][u32be monitor_id][u32be len][AnnexB]`. Built once
+/// and cloned (refcount) into each viewer's channel.
+#[allow(dead_code)]
+fn frame_video(monitor_id: u32, au: &[u8]) -> Arc<[u8]> {
+    let mut framed = Vec::with_capacity(9 + au.len());
+    framed.push(T_VIDEO);
+    framed.extend_from_slice(&monitor_id.to_be_bytes());
+    framed.extend_from_slice(&(au.len() as u32).to_be_bytes());
+    framed.extend_from_slice(au);
+    Arc::from(framed)
+}
+
+/// Pre-frame a tagged JSON message: `[tag][u32be len][json]`. `None` if serialization
+/// fails (never for our types).
+#[allow(dead_code)]
+fn frame_json<T: serde::Serialize>(tag: u8, msg: &T) -> Option<Arc<[u8]>> {
+    let json = serde_json::to_vec(msg).ok()?;
+    let mut framed = Vec::with_capacity(5 + json.len());
+    framed.push(tag);
+    framed.extend_from_slice(&(json.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&json);
+    Some(Arc::from(framed))
+}
+
+/// Fan one AU out to every viewer.
+#[allow(dead_code)]
+fn broadcast_video(viewers: &Viewers, monitor_id: u32, au: &[u8]) {
+    broadcast_bytes(viewers, &frame_video(monitor_id, au));
+}
+
+/// Fan one tagged JSON message out to every viewer.
+#[allow(dead_code)]
+fn broadcast_json<T: serde::Serialize>(viewers: &Viewers, tag: u8, msg: &T) {
+    if let Some(buf) = frame_json(tag, msg) {
+        broadcast_bytes(viewers, &buf);
+    }
+}
+
 /// Send a clipboard message to one endpoint (a clone by id, or the viewer).
 fn send_clip_to(handle: &MediaHandle, viewer: &Viewer, dest: &str, msg: ClipboardMsg) {
     if dest == VIEWER_SRC {
@@ -960,5 +998,25 @@ mod tests {
         remove_viewer(&viewers, 5);
         remove_viewer(&viewers, 5); // second call must be a no-op, not a panic
         assert!(viewers.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn frame_video_layout_matches_wire() {
+        let au = [0xAAu8, 0xBB, 0xCC];
+        let f = frame_video(0x01020304, &au);
+        // [tag=0][monitor_id be][len be][au]
+        assert_eq!(f[0], T_VIDEO);
+        assert_eq!(&f[1..5], &0x01020304u32.to_be_bytes());
+        assert_eq!(&f[5..9], &(au.len() as u32).to_be_bytes());
+        assert_eq!(&f[9..], &au);
+    }
+
+    #[test]
+    fn frame_json_layout_matches_wire() {
+        let f = frame_json(T_CURSOR, &serde_json::json!({"x": 1})).unwrap();
+        let json = serde_json::to_vec(&serde_json::json!({"x": 1})).unwrap();
+        assert_eq!(f[0], T_CURSOR);
+        assert_eq!(&f[1..5], &(json.len() as u32).to_be_bytes());
+        assert_eq!(&f[5..], &json[..]);
     }
 }
