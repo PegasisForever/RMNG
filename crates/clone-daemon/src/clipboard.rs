@@ -28,7 +28,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use wire::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, DaemonMsg};
 use zbus::zvariant::{OwnedValue, Value};
 
-use crate::mutter::RemoteDesktopSessionProxy;
+use crate::ActiveSession;
 use crate::transport::Transport;
 
 /// A clipboard message arriving from control-server (routed by `main`'s reader).
@@ -39,14 +39,22 @@ pub enum FromServer {
 }
 
 /// Wire up the four clipboard flows. Runs for the process lifetime.
+///
+/// Reads the CURRENT Mutter session from `active` per selection op (and re-subscribes its
+/// signal streams when they end), so it follows the make-before-break session swap: after
+/// a swap the old session's rd is stopped, and all ops must target the new one. The new
+/// session's clipboard is enabled by `reconfigure` (`EnableClipboard` on the new rd).
 pub async fn run(
-    rd: RemoteDesktopSessionProxy<'static>,
+    active: ActiveSession,
     transport: Arc<Transport>,
     mut from_server: UnboundedReceiver<FromServer>,
 ) {
-    if let Err(e) = rd.enable_clipboard(HashMap::new()).await {
-        tracing::warn!("EnableClipboard failed (clipboard sync off): {e}");
-        return;
+    {
+        let rd = active.lock().await.rd.clone();
+        if let Err(e) = rd.enable_clipboard(HashMap::new()).await {
+            tracing::warn!("EnableClipboard failed (clipboard sync off): {e}");
+            return;
+        }
     }
     tracing::info!("clipboard sync enabled (rich + lazy)");
 
@@ -56,58 +64,81 @@ pub async fn run(
     // SelectionTransfers awaiting broker data, keyed by MIME → Mutter serials.
     let pending: Arc<Mutex<HashMap<String, Vec<u32>>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Flow 1: a clone app copied → advertise its MIME types (lazy, no bytes).
+    // Flow 1: a clone app copied → advertise its MIME types (lazy, no bytes). Wrapped in a
+    // re-subscribe loop: on a session swap the old session's signal stream ends, so we
+    // re-lock `active` for the new rd and subscribe afresh.
     {
-        let (rd, transport, local_serial) = (rd.clone(), transport.clone(), local_serial.clone());
+        let (active, transport, local_serial) = (active.clone(), transport.clone(), local_serial.clone());
         tokio::spawn(async move {
-            let mut sig = match rd.receive_selection_owner_changed().await {
-                Ok(s) => s,
-                Err(e) => return tracing::warn!("SelectionOwnerChanged subscribe: {e}"),
-            };
-            while let Some(ev) = sig.next().await {
-                let Ok(args) = ev.args() else { continue };
-                let opts = args.options;
-                // Skip our own SetSelection (flow 3) — avoid an offer echo.
-                if opt_bool(&opts, "session-is-owner") {
-                    continue;
-                }
-                let mimes = opt_mime_types(&opts);
-                if mimes.is_empty() {
-                    continue;
-                }
-                let serial = local_serial.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(target: "clip", "clone copied: offering {mimes:?} serial={serial}");
-                let _ = transport.send(&DaemonMsg::ClipboardOffer(ClipboardOffer { serial, mime_types: mimes }), &[]);
-            }
-        });
-    }
-
-    // Flow 4: a clone app pastes the remote selection → request its bytes lazily.
-    {
-        let (rd, transport, remote, pending) = (rd.clone(), transport.clone(), remote.clone(), pending.clone());
-        tokio::spawn(async move {
-            let mut sig = match rd.receive_selection_transfer().await {
-                Ok(s) => s,
-                Err(e) => return tracing::warn!("SelectionTransfer subscribe: {e}"),
-            };
-            while let Some(ev) = sig.next().await {
-                let Ok(args) = ev.args() else { continue };
-                let (mime, mutter_serial) = (args.mime_type, args.serial);
-                let serial = match remote.lock().await.as_ref() {
-                    Some(o) => o.serial,
-                    None => {
-                        let _ = rd.selection_write_done(mutter_serial, false).await;
+            loop {
+                let rd = active.lock().await.rd.clone();
+                let mut sig = match rd.receive_selection_owner_changed().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("SelectionOwnerChanged subscribe: {e}");
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         continue;
                     }
                 };
-                pending.lock().await.entry(mime.clone()).or_default().push(mutter_serial);
-                let _ = transport.send(&DaemonMsg::ClipboardRequest(ClipboardRequest { serial, mime_type: mime }), &[]);
+                while let Some(ev) = sig.next().await {
+                    let Ok(args) = ev.args() else { continue };
+                    let opts = args.options;
+                    // Skip our own SetSelection (flow 3) — avoid an offer echo.
+                    if opt_bool(&opts, "session-is-owner") {
+                        continue;
+                    }
+                    let mimes = opt_mime_types(&opts);
+                    if mimes.is_empty() {
+                        continue;
+                    }
+                    let serial = local_serial.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(target: "clip", "clone copied: offering {mimes:?} serial={serial}");
+                    let _ = transport.send(&DaemonMsg::ClipboardOffer(ClipboardOffer { serial, mime_types: mimes }), &[]);
+                }
+                // Stream ended (session swapped/closed): re-subscribe against the current rd.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         });
     }
 
-    // Flows 2 & 3 & the data reply for flow 4.
+    // Flow 4: a clone app pastes the remote selection → request its bytes lazily. Same
+    // re-subscribe loop as flow 1 so it follows a session swap.
+    {
+        let (active, transport, remote, pending) = (active.clone(), transport.clone(), remote.clone(), pending.clone());
+        tokio::spawn(async move {
+            loop {
+                let rd = active.lock().await.rd.clone();
+                let mut sig = match rd.receive_selection_transfer().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("SelectionTransfer subscribe: {e}");
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        continue;
+                    }
+                };
+                while let Some(ev) = sig.next().await {
+                    let Ok(args) = ev.args() else { continue };
+                    let (mime, mutter_serial) = (args.mime_type, args.serial);
+                    let serial = match remote.lock().await.as_ref() {
+                        Some(o) => o.serial,
+                        None => {
+                            let _ = rd.selection_write_done(mutter_serial, false).await;
+                            continue;
+                        }
+                    };
+                    pending.lock().await.entry(mime.clone()).or_default().push(mutter_serial);
+                    let _ = transport.send(&DaemonMsg::ClipboardRequest(ClipboardRequest { serial, mime_type: mime }), &[]);
+                }
+                // Stream ended (session swapped/closed): re-subscribe against the current rd.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+    }
+
+    // Flows 2 & 3 & the data reply for flow 4. Each op uses the CURRENT session's rd so it
+    // follows a swap.
     while let Some(msg) = from_server.recv().await {
+        let rd = active.lock().await.rd.clone();
         match msg {
             // Flow 3: a remote clipboard is available — own it in the clone.
             FromServer::Offer(o) => {
