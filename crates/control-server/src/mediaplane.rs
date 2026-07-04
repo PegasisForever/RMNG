@@ -67,6 +67,11 @@ fn broadcast_bytes(viewers: &Viewers, buf: &Arc<[u8]>) {
         }
     }
     for id in dead {
+        // NB: if this viewer's writer thread is currently blocked in `write_all` on a
+        // full socket send buffer (not a full channel — that's what got it removed
+        // here), dropping `tx` doesn't wake it. Its writer + reader threads and the
+        // forward ref-count are only reclaimed once the socket itself errors, which
+        // the keepalive backstop guarantees within ~20 s.
         guard.remove(&id);
     }
 }
@@ -88,7 +93,7 @@ fn remove_viewer(viewers: &Viewers, id: u64) {
 
 /// Central clipboard broker state (rich + lazy). One current `offer` (the selection
 /// owner) + the in-flight `pending` requests so `Data` replies route back to whoever
-/// asked. Source/requester ids are clone ids or [`VIEWER_SRC`].
+/// asked. Source/requester ids are clone ids or a per-viewer [`viewer_src`] id.
 #[derive(Default)]
 struct ClipState {
     offer: Option<(ClipboardOffer, String)>, // (offer, owner source)
@@ -242,14 +247,14 @@ pub fn spawn(app: App) {
                         let _ = write_half.shutdown(std::net::Shutdown::Both);
                     });
 
-                    // Prime this viewer (mode first, then metadata + a shared keyframe),
-                    // then register it so live frames start fanning to it.
                     let state = app.store.get();
-                    prime_viewer(
-                        &handle, &encoders, &viewers, &tx,
-                        app.store.selected(), chroma, &state, forward_port,
-                    );
+                    let selected = app.store.selected();
+                    // Queue mode + metadata straight into this viewer's channel (mode is first).
+                    prime_viewer_metadata(&handle, &tx, selected.clone(), chroma, &state, forward_port);
+                    // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
+                    // (independent of encode latency); mode already leads its channel.
                     viewers.lock().unwrap().insert(id, ViewerConn { id, tx });
+                    prime_viewer_video(&handle, &encoders, &viewers, selected, chroma);
 
                     // Reader thread owns teardown.
                     let (handle, app, viewers) = (handle.clone(), app.clone(), viewers.clone());
@@ -533,15 +538,13 @@ fn encoder_for(
     }
 }
 
-/// Prime a freshly-connected viewer: push its mode + the selected clone's last-known
-/// metadata (layout, cursor shape, clipboard offer, forward set) straight into its
-/// channel, then force a shared keyframe and re-encode the last frame so it paints at
-/// once even on a static, damage-driven desktop. The re-encode broadcasts (existing
-/// viewers get one redundant keyframe per join — negligible).
-fn prime_viewer(
+/// Prime a freshly-connected viewer's metadata: push its mode + the selected clone's
+/// last-known layout/cursor/clipboard offer + the forward set straight into its own
+/// channel (mode FIRST so the viewer picks its decode path before any AU). Touches
+/// only this viewer's `tx` — no encoder, no registry, so it's safe to call before the
+/// viewer is inserted into `viewers`.
+fn prime_viewer_metadata(
     handle: &MediaHandle,
-    encoders: &Encoders,
-    viewers: &Viewers,
     tx: &SyncSender<Arc<[u8]>>,
     selected: Option<String>,
     chroma: ChromaMode,
@@ -573,6 +576,24 @@ fn prime_viewer(
             let _ = tx.try_send(b);
         }
     }
+}
+
+/// Prime a freshly-connected viewer's video: force a shared keyframe and re-encode
+/// the selected clone's last frame per monitor so it paints at once even on a static,
+/// damage-driven desktop. The re-encode BROADCASTS via the shared encoder (existing
+/// viewers get one redundant keyframe per join — negligible), so the caller must
+/// register the new viewer in `viewers` before calling this — otherwise the new
+/// viewer's own first keyframe would depend on beating the encode (ms) against the
+/// registry insert (µs), a latent race. (`force_idr` only forces the *next* pushed
+/// frame to be a keyframe; it does not retroactively mark frames already encoded.)
+fn prime_viewer_video(
+    handle: &MediaHandle,
+    encoders: &Encoders,
+    viewers: &Viewers,
+    selected: Option<String>,
+    chroma: ChromaMode,
+) {
+    let Some(sel) = selected else { return };
     // Video: re-encode each monitor's latest frame (broadcasts via the shared encoder).
     let frames: Vec<(u32, OwnedFd, u32, u64, u32, u32)> = {
         let latest = handle.latest.lock().unwrap();
@@ -717,6 +738,7 @@ fn serve_clone(
             Err(e) => {
                 if let Some(id) = &clone_id {
                     teardown_if_current(&handle.conns, &handle.latest, id, &conn);
+                    clip_forget_source(&handle.clip, id);
                     tracing::info!("clone-daemon '{id}' disconnected: {e}");
                 }
                 break;
@@ -734,8 +756,8 @@ fn serve_clone(
 /// `latest` is removed while the `conns` lock is still held: a new session can only prime
 /// `latest[id]` after its `Hello` inserted into `conns` (which needs this lock), so no
 /// fresh frame can appear between the identity check and either removal. No other site
-/// nests these two locks (verified: `prime_viewer` holds `latest` in a scoped block that
-/// never touches `conns`), so the conns→latest order cannot invert.
+/// nests these two locks (verified: [`prime_viewer_video`] holds `latest` in a scoped
+/// block that never touches `conns`), so the conns→latest order cannot invert.
 fn teardown_if_current(
     conns: &Mutex<HashMap<String, Arc<Conn>>>,
     latest: &Mutex<HashMap<String, HashMap<u32, LatestFrame>>>,
