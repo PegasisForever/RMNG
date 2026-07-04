@@ -164,6 +164,26 @@ impl MediaHandle {
             None => Err(format!("clone '{clone}' not connected")),
         }
     }
+
+    /// Push a live layout to **every** connected clone-daemon. Best-effort; returns a
+    /// per-clone result so the caller can report partial failures. Cheap: `Conn::send`
+    /// is a single non-blocking `sendmsg`.
+    pub fn set_monitors_all(
+        &self,
+        monitors: &[wire::MonitorSpec],
+    ) -> Vec<(String, Result<(), String>)> {
+        let conns: Vec<(String, std::sync::Arc<Conn>)> =
+            self.conns.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        conns
+            .into_iter()
+            .map(|(id, c)| {
+                let r = c
+                    .send(&ServerMsg::SetMonitors { monitors: monitors.to_vec() })
+                    .map_err(|e| e.to_string());
+                (id, r)
+            })
+            .collect()
+    }
     // NB: on-demand screenshots moved into the clone-daemon's own MCP (the fleet MCP
     // proxies to it); the control-server no longer encodes screenshots itself.
 
@@ -672,6 +692,12 @@ fn serve_clone(
             Ok((DaemonMsg::Hello(h), _)) => {
                 tracing::info!("clone-daemon '{}' connected", h.clone_id);
                 handle.conns.lock().unwrap().insert(h.clone_id.clone(), conn.clone());
+                // Correct a clone that booted with a stale baked RMNG_MONITORS: push the
+                // current active layout so it live-reconfigures to match the fleet.
+                let mons = app.config().effective_monitors();
+                if let Err(e) = conn.send(&ServerMsg::SetMonitors { monitors: mons }) {
+                    tracing::warn!("SetMonitors on Hello for '{}' failed: {e}", h.clone_id);
+                }
                 clone_id = Some(h.clone_id);
             }
             Ok((DaemonMsg::Frame(f), fds)) => {
@@ -731,6 +757,11 @@ fn serve_clone(
                 if let Some(id) = clone_id.clone() {
                     handle.layout.lock().unwrap().insert(id.clone(), l.clone());
                     if app.store.selected().as_deref() == Some(id.as_str()) {
+                        // Drop encoders for monitors that no longer exist on the selected
+                        // clone (added/resized ones are (re)built lazily by encoder_for on
+                        // the next frame). Prevents stale encoders lingering after a switch.
+                        let live: std::collections::HashSet<u32> = l.iter().map(|m| m.id).collect();
+                        encoders.lock().unwrap().retain(|mid, _| live.contains(mid));
                         broadcast_json(&viewers, T_LAYOUT, &l);
                     }
                 }

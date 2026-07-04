@@ -74,9 +74,15 @@ export function SetupWizard({
   const [hostnamePrefix, setHostnamePrefix] = useState(initialConfig.docker.hostnamePrefix);
   const [cloneCpus, setCloneCpus] = useState(initialConfig.docker.cloneCpus);
   const [cloneMemoryMb, setCloneMemoryMb] = useState(initialConfig.docker.cloneMemoryMb);
+  // Mirror the server's `effective_monitors()`: the active preset, else the first, else a
+  // single-1080p default (the wizard only edits one layout, so there's no picker here).
+  const activePreset =
+    initialConfig.layoutPresets.find((p) => p.name === initialConfig.activeLayout) ??
+    initialConfig.layoutPresets[0];
+  const layoutName = activePreset?.name || "Default";
   const [monitors, setMonitors] = useState<Mon[]>(
-    initialConfig.monitors.length
-      ? initialConfig.monitors.map((m) => ({ ...m }))
+    activePreset?.monitors.length
+      ? activePreset.monitors.map((m) => ({ ...m }))
       : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
   );
   const [chroma, setChroma] = useState<ChromaMode>(initialConfig.chroma);
@@ -102,6 +108,23 @@ export function SetupWizard({
       y: Math.max(0, m.y),
       primary: m.primary,
     }));
+
+  // Round-trip every existing preset — like SettingsPanel's save — instead of sending just
+  // the one being edited. The server's `merge_update` replaces the whole `layoutPresets`
+  // array wholesale (that's how SettingsPanel expresses deletes), so a single-element patch
+  // here would silently delete every other named preset on a mature config.
+  const layoutPresetsPatch = () => {
+    const existing = initialConfig.layoutPresets;
+    if (!existing.length) {
+      return [{ name: layoutName || "Default", monitors: monitorsPatch() }];
+    }
+    const updated = existing.map((p) =>
+      p.name === layoutName ? { ...p, monitors: monitorsPatch() } : p,
+    );
+    return existing.some((p) => p.name === layoutName)
+      ? updated
+      : [...updated, { name: layoutName, monitors: monitorsPatch() }];
+  };
 
   // The pull op is kind "pull" with target === the pulled reference (jobs.rs start_pull →
   // make_op(Pull, reference, None)).
@@ -141,7 +164,7 @@ export function SetupWizard({
     } else if (step === 1) {
       const ok = await persist({
         docker: { hostnamePrefix, cloneCpus, cloneMemoryMb },
-        monitors: monitorsPatch(),
+        layoutPresets: layoutPresetsPatch(),
         chroma,
         detectorInferenceUrl,
         listen,

@@ -40,6 +40,12 @@ export interface SidebarProps {
   selectedId: string | null;
   /** `docker.cloneCpus` — normalizes each host row's CPU usage figure. */
   cloneCpus: number;
+  /** Layout preset names (config order) — the segmented switcher buttons. */
+  presetNames: string[];
+  /** The active preset name (highlighted). */
+  activeLayout: string;
+  /** Activate a layout preset (live-applies to all running clones). */
+  onActivateLayout: (name: string) => void;
 
   onOpenSettings: () => void;
   onOpenClone: () => void;
@@ -70,6 +76,9 @@ export function Sidebar({
   operations,
   selectedId,
   cloneCpus,
+  presetNames,
+  activeLayout,
+  onActivateLayout,
   onOpenSettings,
   onOpenClone,
   onRefreshClaude,
@@ -122,6 +131,34 @@ export function Sidebar({
           <Settings className="size-4" />
         </button>
       </div>
+
+      {presetNames.length > 0 ? (
+        <div className="px-1">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            Layout
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {presetNames.map((name) => {
+              const active = name === activeLayout;
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => onActivateLayout(name)}
+                  aria-pressed={active}
+                  className={`rounded px-2 py-1 text-xs font-medium ${
+                    active
+                      ? "bg-emerald-600 text-white"
+                      : "border border-slate-300 text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
+                  }`}
+                >
+                  {name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
 
       <ClaudeAccountsPanel
         accounts={accounts}

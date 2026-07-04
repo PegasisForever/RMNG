@@ -23,7 +23,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/reorder` | Reorder the host list | 200 `ControlState` |
 | PUT | `/api/hosts/:id/forwards` | Replace a host's port-forward rules | 200 `ControlState` |
 | POST | `/api/clone` | Start a clone from an image (Linear ticket / new ticket / plain) | 200 `{ok, op}` |
-| POST | `/api/monitors/apply` | Push the saved monitor layout to all running clones | 200 `{ok,applied,errors}` |
+| POST | `/api/layout/activate` | Make a layout preset active and live-apply it to all running clones | 200 `{ok,applied,errors}` |
 | POST | `/api/delete` | Destroy a clone / unregister a plain host | 200 `Operation` |
 | GET | `/api/setup/env` | Setup wizard environment preflight rows | 200 `SetupEnv` |
 | GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
@@ -72,7 +72,9 @@ keeps the connection alive. This is what the dashboard subscribes to.
 | Field | Type | Notes |
 |---|---|---|
 | `selected` | `string?` | host id shown in the viewer |
-| `monitors` | `MonitorSpec[]` | global desired layout |
+| `monitors` | `MonitorSpec[]` | legacy field, kept for JSON back-compat; no longer populated (always `[]`) — use `activeLayout` + the config's `layoutPresets` |
+| `activeLayout` | `string` | name of the active layout preset, mirrored from config so the sidebar switcher updates over SSE |
+| `layoutPresetNames` | `string[]` | names of all layout presets, in config order — drives the sidebar's segmented preset buttons |
 | `hosts` | `Host[]` | all registered clones + plain hosts |
 | `operations` | `Operation[]` | in-flight + recent clone/delete/pull/commit jobs |
 | `claude_accounts` | `ClaudeUsage[]` | per-account 5h/7d usage + spend |
@@ -162,10 +164,20 @@ plain title, with a numeric suffix on collision). Returns `{ "ok": true, "op": O
 > check on the daemon's `Hello` plus a periodic sweep — see
 > [DEPLOY.md#upgrades](DEPLOY.md#upgrades).
 
-### `POST /api/monitors/apply`
-Push `config.monitors` to every running clone (those with a `container`): rewrites each
-clone's `RMNG_MONITORS` + dummy mode specs and restarts its GNOME + daemon. Returns
-`{ "ok": bool, "applied": string[], "errors": string[] }` (partial success allowed).
+### `POST /api/layout/activate` — body `{ "name": string }`
+Make the named layout preset the active one and live-apply it to every running clone — no
+session restart, no app loss. Validates `name` against `config.layoutPresets` (`400` if
+unknown), persists it as `config.activeLayout`, mirrors `activeLayout` +
+`layoutPresetNames` into `ControlState` (SSE), then pushes `ServerMsg::SetMonitors` with the
+preset's monitors to every connected clone-daemon over the clone socket. Each daemon does a
+make-before-break session swap (builds a fresh Mutter session with the new monitors, switches
+capture + input to it, stops the old one) — running apps never close. Returns
+`{ "ok": bool, "applied": string[], "errors": string[] }`. `ok` is currently always `true`
+(the activation itself succeeded; per-clone results are in `applied`/`errors`). `applied`/
+`errors` cover only clones whose daemon is currently connected: a daemon whose connection has
+already dropped is silently skipped (absent from both lists), since the server only pushes to
+currently-connected daemons. `errors` captures an immediate socket-send failure only (there is
+no ack).
 
 ### `POST /api/delete` — body `{ "id": string }`
 Destroy a managed clone (stops it with `SIGRTMIN+3`, removes the container and its
@@ -258,7 +270,7 @@ clone IPs are dynamic Docker IPAM, so there is no source-IP mapping). Fields: `c
 
 ### `GET /api/config` → `AppConfigRedacted`
 The full config with the only secret (preset Linear keys) replaced by `linearKeySet: bool`.
-Everything else is returned verbatim — ports, monitors, the `docker` block
+Everything else is returned verbatim — ports, `layoutPresets`/`activeLayout`, the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
 socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`, `detectorInferenceUrl`,
 `agentPlaybook` (the editable agent playbook seeded with the shipped default and injected into new

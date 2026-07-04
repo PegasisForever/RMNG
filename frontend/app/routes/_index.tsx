@@ -15,7 +15,7 @@ import { SetupWizard } from "~/components/SetupWizard";
 import { Sidebar } from "~/components/Sidebar";
 import {
   activate,
-  applyMonitors,
+  activateLayout,
   cloneHost,
   commitImage,
   deleteHost,
@@ -301,6 +301,9 @@ function Dashboard({
           operations={state.operations}
           selectedId={state.selected}
           cloneCpus={cloneCpus}
+          presetNames={state.layoutPresetNames ?? []}
+          activeLayout={state.activeLayout ?? ""}
+          onActivateLayout={(name) => run(activateLayout(name))}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenClone={() => setCloneOpen(true)}
           onRefreshClaude={() => run(refreshClaudeUsage())}
@@ -412,7 +415,6 @@ function Dashboard({
           getConfig={getConfig}
           putConfig={putConfig}
           testConfig={testConfig}
-          applyMonitors={applyMonitors}
           getUpdateStatus={getUpdateStatus}
           updateServer={updateServer}
           restartServer={restartServer}

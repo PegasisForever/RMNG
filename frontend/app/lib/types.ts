@@ -178,6 +178,10 @@ export interface ControlState {
   operations: Operation[];
   /** Per-Claude-account usage view (no tokens). Refreshed by the usage poller. */
   claudeAccounts: ClaudeUsage[];
+  /** Name of the currently active layout preset. */
+  activeLayout: string;
+  /** Layout preset names in config order — powers the sidebar switcher. */
+  layoutPresetNames: string[];
 }
 
 export function emptyState(): ControlState {
@@ -187,6 +191,8 @@ export function emptyState(): ControlState {
     hosts: [],
     operations: [],
     claudeAccounts: [],
+    activeLayout: "",
+    layoutPresetNames: [],
   };
 }
 

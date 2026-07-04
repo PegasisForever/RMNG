@@ -110,8 +110,6 @@ export interface SettingsPanelProps {
   putConfig: (patch: unknown) => Promise<ConfigPutResponse & { networkWarning?: string }>;
   /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
   testConfig: (what: string) => Promise<{ ok: boolean; message: string }>;
-  /** Apply the saved monitor layout to all running clones. */
-  applyMonitors: () => Promise<{ ok: boolean; applied: string[]; errors: string[] }>;
   /** Read the control-server's own version + update-available status. */
   getUpdateStatus: () => Promise<UpdateStatus>;
   /** Pull the latest control-server image and swap the running container onto it. */
@@ -134,7 +132,6 @@ export function SettingsPanel({
   getConfig,
   putConfig,
   testConfig,
-  applyMonitors,
   getUpdateStatus,
   updateServer,
   restartServer,
@@ -150,8 +147,6 @@ export function SettingsPanel({
   const [saved, setSaved] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
-  const [applying, setApplying] = useState(false);
-  const [applyMsg, setApplyMsg] = useState<string | null>(null);
   // True after a save that touched a restart-required setting (ports / cloneSocket /
   // staticDir / chroma) — surfaces a persistent banner until a later save clears it.
   const [restartRequired, setRestartRequired] = useState(false);
@@ -196,7 +191,7 @@ export function SettingsPanel({
   }
 
   // Editable form state. Secrets (preset linearKey) start blank = "unchanged".
-  const [monitors, setMonitors] = useState<Mon[]>([]);
+  const [layoutPresets, setLayoutPresets] = useState<{ name: string; monitors: Mon[] }[]>([]);
   // Presets: labels edited as a comma-separated string; linearKey is write-only
   // (blank = keep stored), keySet mirrors whether the server holds one.
   const [presets, setPresets] = useState<
@@ -236,10 +231,10 @@ export function SettingsPanel({
 
   function load(c: AppConfigRedacted) {
     setCfg(c);
-    setMonitors(
-      c.monitors.length
-        ? c.monitors.map((m) => ({ ...m }))
-        : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+    setLayoutPresets(
+      c.layoutPresets.length
+        ? c.layoutPresets.map((p) => ({ name: p.name, monitors: p.monitors.map((m) => ({ ...m })) }))
+        : [{ name: "Default", monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }] }],
     );
     setHostnamePrefix(c.docker.hostnamePrefix);
     setTemplateReference(c.docker.templateReference);
@@ -315,6 +310,18 @@ export function SettingsPanel({
       ),
     );
 
+  // Layout preset editors.
+  const addLayoutPreset = () =>
+    setLayoutPresets((ps) => [
+      ...ps,
+      { name: "", monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }] },
+    ]);
+  const rmLayoutPreset = (i: number) => setLayoutPresets((ps) => ps.filter((_, j) => j !== i));
+  const setLayoutPresetName = (i: number, name: string) =>
+    setLayoutPresets((ps) => ps.map((p, j) => (j === i ? { ...p, name } : p)));
+  const setLayoutPresetMonitors = (i: number, mons: Mon[]) =>
+    setLayoutPresets((ps) => ps.map((p, j) => (j === i ? { ...p, monitors: mons } : p)));
+
   // Claude group editors (a group = a name + a set of member account emails).
   const addGroup = () => setClaudeGroups((gs) => [...gs, { name: "", accounts: [] }]);
   const rmGroup = (i: number) => setClaudeGroups((gs) => gs.filter((_, j) => j !== i));
@@ -359,13 +366,18 @@ export function SettingsPanel({
     setSaved(false);
     try {
       const patch = {
-        monitors: monitors.map((m) => ({
-          width: Math.max(1, m.width),
-          height: Math.max(1, m.height),
-          x: Math.max(0, m.x),
-          y: Math.max(0, m.y),
-          primary: m.primary,
-        })),
+        layoutPresets: layoutPresets
+          .filter((p) => p.name.trim())
+          .map((p) => ({
+            name: p.name.trim(),
+            monitors: p.monitors.map((m) => ({
+              width: Math.max(1, m.width),
+              height: Math.max(1, m.height),
+              x: Math.max(0, m.x),
+              y: Math.max(0, m.y),
+              primary: m.primary,
+            })),
+          })),
         // subnet is one-time: only sent (non-empty) pre-setup; after setup it's read-only,
         // and the server rejects a change anyway. Blank = unchanged.
         docker: {
@@ -423,38 +435,6 @@ export function SettingsPanel({
     }
   }
 
-  // Persist the current monitor edits, then apply the layout to all running clones
-  // (rewrites RMNG_MONITORS + restarts each clone's GNOME session + daemon).
-  async function applyNow() {
-    if (
-      !confirm(
-        "Apply this monitor layout to all running clones now?\n\nThis restarts each clone's headless GNOME session + daemon — open apps on the clone will close.",
-      )
-    )
-      return;
-    setApplying(true);
-    setApplyMsg("applying…");
-    try {
-      await putConfig({
-        monitors: monitors.map((m) => ({
-          width: Math.max(1, m.width),
-          height: Math.max(1, m.height),
-          x: Math.max(0, m.x),
-          y: Math.max(0, m.y),
-          primary: m.primary,
-        })),
-      });
-      const r = await applyMonitors();
-      setApplyMsg(
-        `✓ applied to ${r.applied.length} clone(s)${r.errors.length ? ` · ${r.errors.length} error(s): ${r.errors.join("; ")}` : ""}`,
-      );
-    } catch (e) {
-      setApplyMsg(`✗ ${(e as Error).message}`);
-    } finally {
-      setApplying(false);
-    }
-  }
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
@@ -502,19 +482,48 @@ export function SettingsPanel({
           <p className="py-8 text-center text-sm text-slate-400 dark:text-slate-500">Loading…</p>
         ) : (
           <div className="space-y-4">
-            {/* Monitors — size, position + primary per monitor, with a live preview. */}
+            {/* Layout presets — named monitor arrangements; switch the active one from
+                the sidebar. Each preset uses the same editor as before. */}
             <Section
-              title="Monitors"
+              title="Layout presets"
               effect="immediate"
-              hint="Set each monitor's size, position (x,y in the unified desktop) and which is primary. Applies to newly provisioned clones; restart an existing clone's daemon to pick up changes."
+              hint="Named monitor arrangements. Switch the active preset from the sidebar — running clones reconfigure live without closing apps."
             >
-              <MonitorsEditor
-                monitors={monitors}
-                onChange={setMonitors}
-                onApply={applyNow}
-                applying={applying}
-                applyMsg={applyMsg}
-              />
+              <div className="space-y-3">
+                {layoutPresets.length === 0 ? (
+                  <p className="text-xs text-slate-400 dark:text-slate-500">No layout presets.</p>
+                ) : null}
+                {layoutPresets.map((p, i) => (
+                  <div key={i} className="rounded border border-slate-200 p-3 dark:border-slate-700">
+                    <div className="mb-2 flex items-center gap-2">
+                      <input
+                        className={input}
+                        placeholder="preset name (e.g. Dual 1440p)"
+                        value={p.name}
+                        onChange={(e) => setLayoutPresetName(i, e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => rmLayoutPreset(i)}
+                        className="rounded px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <MonitorsEditor
+                      monitors={p.monitors}
+                      onChange={(mons) => setLayoutPresetMonitors(i, mons)}
+                    />
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={addLayoutPreset}
+                  className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  + Add layout preset
+                </button>
+              </div>
             </Section>
 
             {/* Agent instructions — the desktop agent's operating notes / ticket

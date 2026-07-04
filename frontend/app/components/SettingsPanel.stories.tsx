@@ -15,8 +15,6 @@ const putConfig = (restartRequired = false) =>
   fn(async () => ({ config: appConfig, restartRequired }));
 const testConfig = () =>
   fn(async () => ({ ok: true, message: "Docker reachable (Engine 27.1.1)" }));
-const applyMonitors = () =>
-  fn(async () => ({ ok: true, applied: ["pega-we-142", "pega-dev-88"], errors: [] }));
 const getUpdateStatus = () =>
   fn(async () => ({
     currentRevision: "a1b2c3d",
@@ -39,7 +37,6 @@ const meta = {
     getConfig: getConfig(),
     putConfig: putConfig(),
     testConfig: testConfig(),
-    applyMonitors: applyMonitors(),
     getUpdateStatus: getUpdateStatus(),
     updateServer: fn(),
     restartServer: fn(async () => ({ ok: true })),

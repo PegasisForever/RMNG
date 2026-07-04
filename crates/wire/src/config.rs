@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::control::MonitorSpec;
+use crate::control::{LayoutPreset, MonitorSpec};
 
 /// The control-server listen ports: video, web, per-clone MCP, global/fleet MCP, the
 /// in-clone daemon MCP, and the forward data plane (see README).
@@ -296,8 +296,13 @@ pub struct AppConfig {
     /// unless the wizard set it.
     #[serde(default)]
     pub setup_complete: bool,
+    /// Named monitor-layout presets. The operator switches the active one from the
+    /// sidebar (`POST /api/layout/activate`); the active preset drives `effective_monitors()`.
     #[serde(default)]
-    pub monitors: Vec<MonitorSpec>,
+    pub layout_presets: Vec<LayoutPreset>,
+    /// Name of the active layout preset (the fleet-wide live layout).
+    #[serde(default)]
+    pub active_layout: String,
     #[serde(default)]
     pub docker: DockerConfig,
     #[serde(default)]
@@ -343,7 +348,8 @@ impl Default for AppConfig {
             static_dir: default_static_dir(),
             clone_socket: default_clone_socket(),
             setup_complete: false,
-            monitors: Vec::new(),
+            layout_presets: Vec::new(),
+            active_layout: String::new(),
             docker: DockerConfig::default(),
             claude: ClaudeConfig::default(),
             codex: CodexConfig::default(),
@@ -380,17 +386,19 @@ fn default_clone_socket() -> String {
 }
 
 impl AppConfig {
-    /// Default monitor layout if none configured: dual 2560×1440 side-by-side,
-    /// primary on the right (monitor 0 at x=2560, monitor 1 at x=0).
+    /// The active preset's monitors. Falls back to the first preset, then to a dual
+    /// 2560×1440 side-by-side default (primary on the right) when no presets exist.
     pub fn effective_monitors(&self) -> Vec<MonitorSpec> {
-        if self.monitors.is_empty() {
-            vec![
-                MonitorSpec { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
-                MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: false },
-            ]
-        } else {
-            self.monitors.clone()
+        if let Some(p) = self.layout_presets.iter().find(|p| p.name == self.active_layout) {
+            return p.monitors.clone();
         }
+        if let Some(p) = self.layout_presets.first() {
+            return p.monitors.clone();
+        }
+        vec![
+            MonitorSpec { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
+            MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: false },
+        ]
     }
 
     /// Produce the redacted view for `GET /api/config` (no plaintext secrets).
@@ -402,7 +410,8 @@ impl AppConfig {
             static_dir: self.static_dir.clone(),
             clone_socket: self.clone_socket.clone(),
             setup_complete: self.setup_complete,
-            monitors: self.monitors.clone(),
+            layout_presets: self.layout_presets.clone(),
+            active_layout: self.active_layout.clone(),
             docker: self.docker.clone(),
             claude: self.claude.clone(),
             codex: self.codex.clone(),
@@ -428,7 +437,8 @@ pub struct AppConfigRedacted {
     pub static_dir: String,
     pub clone_socket: String,
     pub setup_complete: bool,
-    pub monitors: Vec<MonitorSpec>,
+    pub layout_presets: Vec<LayoutPreset>,
+    pub active_layout: String,
     pub docker: DockerConfig,
     pub claude: ClaudeConfig,
     pub codex: CodexConfig,
@@ -681,6 +691,38 @@ mod tests {
         let r = c.redacted();
         assert_eq!(r.agent_playbook, "GLOBAL NOTES");
         assert_eq!(r.presets[0].agent_playbook, "PRESET APPEND");
+    }
+
+    #[test]
+    fn effective_monitors_from_active_preset() {
+        let mut c = AppConfig::default();
+        c.layout_presets = vec![
+            LayoutPreset { name: "A".into(), monitors: vec![
+                MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }] },
+            LayoutPreset { name: "B".into(), monitors: vec![
+                MonitorSpec { width: 3840, height: 2160, x: 0, y: 0, primary: true }] },
+        ];
+        c.active_layout = "B".into();
+        assert_eq!(c.effective_monitors(), c.layout_presets[1].monitors);
+    }
+
+    #[test]
+    fn effective_monitors_defaults_when_empty() {
+        // No presets → dual-1440p default (unchanged behavior).
+        let c = AppConfig::default();
+        assert_eq!(c.effective_monitors().len(), 2);
+        assert!(c.effective_monitors()[0].primary);
+    }
+
+    #[test]
+    fn effective_monitors_falls_back_to_first_when_active_missing() {
+        let mut c = AppConfig::default();
+        c.layout_presets = vec![LayoutPreset {
+            name: "Only".into(),
+            monitors: vec![MonitorSpec { width: 1280, height: 720, x: 0, y: 0, primary: true }],
+        }];
+        c.active_layout = "Nonexistent".into();
+        assert_eq!(c.effective_monitors(), c.layout_presets[0].monitors);
     }
 }
 

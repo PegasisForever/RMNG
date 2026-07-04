@@ -235,10 +235,16 @@ export const appConfig: AppConfigRedacted = {
   staticDir: "",
   cloneSocket: "/srv/rmng-sock/clones.sock",
   setupComplete: true,
-  monitors: [
-    { width: 2560, height: 1440, x: 0, y: 0, primary: true },
-    { width: 1920, height: 1080, x: 2560, y: 0, primary: false },
+  layoutPresets: [
+    {
+      name: "Default",
+      monitors: [
+        { width: 2560, height: 1440, x: 0, y: 0, primary: true },
+        { width: 1920, height: 1080, x: 2560, y: 0, primary: false },
+      ],
+    },
   ],
+  activeLayout: "Default",
   docker: {
     socket: "/var/run/docker.sock",
     subnet: "10.99.0.0/24",

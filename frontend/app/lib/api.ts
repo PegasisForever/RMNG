@@ -159,7 +159,10 @@ export const putConfig = (patch: unknown) =>
 /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
 export const testConfig = (what: string) =>
   postJson("/api/config/test", { what }) as Promise<{ ok: boolean; message: string }>;
-/** Apply the saved monitor layout to all running clones (rewrites RMNG_MONITORS +
- *  restarts each clone's GNOME session + daemon). Restarts the clones' desktops. */
-export const applyMonitors = () =>
-  postJson("/api/monitors/apply", {}) as Promise<{ ok: boolean; applied: string[]; errors: string[] }>;
+/** Make `name` the active layout preset and live-apply it to all running clones. */
+export const activateLayout = (name: string) =>
+  postJson("/api/layout/activate", { name }) as Promise<{
+    ok: boolean;
+    applied: string[];
+    errors: string[];
+  }>;

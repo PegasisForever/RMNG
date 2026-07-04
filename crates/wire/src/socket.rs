@@ -179,6 +179,9 @@ pub enum ServerMsg {
     FrameRequest(FrameRequest),
     Ack(Ack),
     Input(InputMsg),
+    /// Apply a new monitor layout live (no session restart). The daemon diffs against
+    /// its current virtual monitors and adds/stops/recreates only the changed ones.
+    SetMonitors { monitors: Vec<crate::control::MonitorSpec> },
     ClipboardOffer(ClipboardOffer),
     ClipboardRequest(ClipboardRequest),
     ClipboardData(ClipboardData),
@@ -271,5 +274,18 @@ mod tests {
             let back: ClipboardData = serde_json::from_str(&s).unwrap();
             assert_eq!(back.bytes, case);
         }
+    }
+
+    #[test]
+    fn server_msg_set_monitors_tag() {
+        use crate::control::MonitorSpec;
+        let m = ServerMsg::SetMonitors {
+            monitors: vec![MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["t"], "set_monitors");
+        assert_eq!(v["monitors"][0]["width"], 1920);
+        let back: ServerMsg = serde_json::from_value(v).unwrap();
+        assert_eq!(back, m);
     }
 }

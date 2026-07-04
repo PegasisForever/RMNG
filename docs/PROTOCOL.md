@@ -90,7 +90,11 @@ control-server **and** every clone (a named volume, not a bind, so siblings can 
 `ServerMsg` (server → daemon), serde tag `t`: `subscribe {stream:bool}` (start/stop the
 continuous feed), `frame_request {monitor_id}` (one-shot, screenshot path), `ack
 {monitor_id, seq}` (flow control — the daemon waits for the ack before the next frame),
-`input(InputMsg)`, and the three `clipboard_*` messages.
+`input(InputMsg)`, the three `clipboard_*` messages, and `set_monitors {monitors:
+MonitorSpec[]}` — apply a layout **live**: the daemon does a make-before-break session swap
+(rebuilds a fresh Mutter session with the desired monitors, switches capture + input to it,
+then stops the old one — running apps never close). Sent once on the daemon's `Hello` (to
+correct a stale baked boot layout) and again on every `POST /api/layout/activate`.
 
 `FrameMsg`: `monitor_id`, `fourcc` (DRM, e.g. `0x34325241` "AR24"), `modifier` (DRM format
 modifier), `width`, `height`, `planes: [{offset, stride}]`, `seq` (echoed in `ack`).
@@ -137,7 +141,8 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 | `clone_socket` | string | `/srv/rmng-sock/clones.sock` | media-plane unix socket the clone-daemons connect to; baked into the template at provision. Set in the setup wizard. **One-time** (a pre-latch edit is **restart-required** — the old path is bound at startup) |
 | `chroma` | `ChromaMode` | `4:2:0` | viewer video chroma subsampling. Settings → Video. **Restart-required** |
 | `setup_complete` | bool | `false` | latched `true` by the first-run setup wizard; gates the frontend to the wizard until then |
-| `monitors` | `MonitorSpec[]` | `[]` → dual 1440p | desired global layout |
+| `layout_presets` | `LayoutPreset[]` | `[]` | named monitor-layout presets (`{name, monitors: MonitorSpec[]}`); the operator switches the active one from the sidebar (`POST /api/layout/activate`) |
+| `active_layout` | string | `""` | name of the active layout preset; drives `effective_monitors()` (see below) |
 | `docker` | `DockerConfig` | see below | daemon socket + `rmng`-network subnet + hostname prefix + per-clone limits |
 | `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select labels (**key secret**) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
@@ -217,6 +222,10 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   Claude equivalents. One clone can hold both a Claude and a Codex account simultaneously.
 
 - **`MonitorSpec`**: `width`, `height`, `x`, `y`, `primary`.
+- **`LayoutPreset`**: `name`, `monitors: MonitorSpec[]` — a full named arrangement the
+  operator can switch to live. `AppConfig::effective_monitors()` returns the active preset's
+  (`active_layout`) monitors, falling back to the first preset, then a built-in dual
+  2560×1440 default when `layout_presets` is empty.
 
 Template params are mostly not config: the base OS is fixed in the template build
 (`ubuntu:26.04` in `template/Dockerfile` — the patched gnome-shell is compiled against 26.04's
@@ -241,7 +250,8 @@ still restart-required, since the old path is bound at startup). Only `RUST_LOG`
 setting).
 
 **clone-daemon:** `RMNG_SOCKET` (media socket; **absent → capture self-test mode**),
-`RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (layout CSV, below),
+`RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (boot-default layout CSV, below —
+corrected to the config's active layout preset by the server's `SetMonitors` on `Hello`),
 `RMNG_DAEMON_MCP_PORT` (`9004`), `RMNG_EMBEDDED_CURSOR` (composite cursor into frames
 instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NUDGE`
 (oscillate cursor to force damage — test only), `RUST_LOG`.
@@ -257,12 +267,17 @@ instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NU
 Source: [clone-daemon/src/main.rs](../crates/clone-daemon/src/main.rs).
 
 **Shipping mode (default, no subcommand):** if `RMNG_SOCKET` is set, connect to the media
-socket, RecordVirtual the `RMNG_MONITORS`, ship dmabuf frames + cursor, inject input, and
-serve the daemon MCP on `:9004`. With no socket it runs a capture-fps self-test.
+socket, RecordVirtual the `RMNG_MONITORS` boot layout, ship dmabuf frames + cursor, inject
+input, and serve the daemon MCP on `:9004`. With no socket it runs a capture-fps self-test.
 
 **`RMNG_MONITORS` format:** comma-separated `WxH+X+Y[*]` (offset optional; trailing `*` =
 primary; first is primary if none marked). E.g. `1920x1080+0+0*,1280x1024+1920+0`. Empty →
-one 1920×1080 primary. The unique `WxH` sizes also seed `MUTTER_DEBUG_DUMMY_MODE_SPECS`.
+one 1920×1080 primary. The unique `WxH` sizes also seed `MUTTER_DEBUG_DUMMY_MODE_SPECS`. This
+env var is now only a **pre-connect boot default** baked into the clone template — it is not
+re-read or hot-reloaded after that. As soon as the daemon's first `Hello` reaches the server,
+the server replies with `ServerMsg::SetMonitors` carrying `config.effective_monitors()` (the
+active layout preset), live-correcting a stale baked layout without a restart. Every
+subsequent `POST /api/layout/activate` pushes a fresh `SetMonitors` the same way.
 
 **`rmng-clone-daemon wait-for-stuck`** — the needs-human detector. Pulls screenshots from the
 local MCP, tiles them, asks the inference LLM, exits 0 when stuck. Flags: `--inference-url

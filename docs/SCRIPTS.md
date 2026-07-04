@@ -28,7 +28,6 @@ control-server binary and streamed to a container over `docker exec bash -s` —
 
 | Script | Runs where | Invoked by | Purpose |
 |---|---|---|---|
-| `crates/control-server/scripts/apply-monitors.sh` | in a clone container (`docker exec`) | `provision::apply_monitors` | Re-apply a monitor layout to a running clone without reprovisioning |
 | `crates/control-server/scripts/claude-import.sh` | in a clone container (`docker exec`) | `provision::run_clone_op` (`claude.rs`) | Read `claude auth status` / the credentials file, clear it, or install a token |
 | `crates/control-server/scripts/codex-import.sh` | in a clone container (`docker exec`) | `clone_ops::run_clone_op` (`codex.rs`) | Read `~/.codex/auth.json` status / the auth file, clear it, or install a token |
 | `template/setup/{lib,10-desktop,15-gnome-patch,20-toolbox,30-user}.sh` | in the template build (`RUN`) | `template/Dockerfile` | Provision the clone template rootfs: desktop, patched shell, dev toolbox, the clone user + its units (binaries themselves are `COPY`'d in by the Dockerfile after) |
@@ -45,13 +44,6 @@ they never touch the control-server binary or a live container.
 ---
 
 ## In-container guest scripts
-
-### `apply-monitors.sh <username> <monitors-csv>`
-Runs as root inside a **running clone** container. Rewrites the clone-daemon's `RMNG_MONITORS`
-+ the `gnome-headless` dummy mode specs from the new layout, then restarts the headless GNOME
-session + the daemon (which re-creates the virtual monitors at startup). Talks to the target
-user's `systemd --user` manager via `runuser` + its `XDG_RUNTIME_DIR` / session-bus address.
-Driven by `POST /api/monitors/apply`.
 
 ### `claude-import.sh <user> status|read|clear|apply [b64]`
 Runs inside the target **clone** container as the clone user, printing the raw result to

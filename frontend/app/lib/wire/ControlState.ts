@@ -12,7 +12,16 @@ export type ControlState = {
  * Id of the host that should be displayed. May be absent or point at a host
  * not in the list; consumers must tolerate both.
  */
-selected: string | null, monitors: Array<MonitorSpec>, hosts: Array<Host>, operations: Array<Operation>, 
+selected: string | null, monitors: Array<MonitorSpec>, 
+/**
+ * Name of the active layout preset (mirrored from config so the sidebar switcher
+ * updates live over `/events`). Empty when no presets exist.
+ */
+activeLayout: string, 
+/**
+ * Names of all layout presets, in config order — the sidebar's segmented buttons.
+ */
+layoutPresetNames: Array<string>, hosts: Array<Host>, operations: Array<Operation>, 
 /**
  * Per-Claude-account usage view (no tokens).
  */

@@ -19,6 +19,7 @@ use axum::{Json, Router, extract::State, routing::post};
 use serde_json::{Value, json};
 use wire::socket::{CursorMeta, DaemonMsg};
 
+use crate::ActiveSession;
 use crate::keysym;
 use crate::mutter::{RemoteDesktopSessionProxy, VirtualMonitor};
 use crate::transport::Transport;
@@ -59,33 +60,31 @@ struct Mon {
 
 #[derive(Clone)]
 struct McpState {
-    rd: RemoteDesktopSessionProxy<'static>,
-    /// Session bus (shared with Mutter) — used for gnome-shell `Eval` window tools.
-    conn: zbus::Connection,
-    mons: Arc<Vec<Mon>>,
+    /// The live session (input `rd` + session `conn`), swapped by `reconfigure`. Each
+    /// handler snapshots `rd`/`conn` under a short-lived lock so it follows a swap — and,
+    /// crucially, never pins the OLD `zbus::Connection` past a swap (holding it would block
+    /// the clipboard signal-stream re-subscribe).
+    active: ActiveSession,
+    /// The live virtual-monitor set, refreshed by `reconfigure`. Snapshotted per request.
+    live_monitors: Arc<Mutex<Vec<VirtualMonitor>>>,
     latest: LatestFrames,
     transport: Arc<Transport>,
     /// Last injected pointer position per monitor (for eased `mouse_move`).
     last_pos: Arc<Mutex<HashMap<u32, (f64, f64)>>>,
 }
 
-/// Serve the MCP over HTTP, sharing the daemon's Mutter session + latest frames.
+/// Serve the MCP over HTTP, reading the daemon's CURRENT Mutter session (`active`) + live
+/// monitor set per request so it follows a live layout swap.
 pub async fn serve(
-    rd: RemoteDesktopSessionProxy<'static>,
-    conn: zbus::Connection,
-    monitors: &[VirtualMonitor],
+    active: ActiveSession,
+    live_monitors: Arc<Mutex<Vec<VirtualMonitor>>>,
     latest: LatestFrames,
     transport: Arc<Transport>,
     port: u16,
 ) -> anyhow::Result<()> {
-    let mons: Vec<Mon> = monitors
-        .iter()
-        .map(|m| Mon { id: m.monitor_id, stream: m.stream_path.clone(), width: m.width, height: m.height })
-        .collect();
     let state = McpState {
-        rd,
-        conn,
-        mons: Arc::new(mons),
+        active,
+        live_monitors,
         latest,
         transport,
         last_pos: Arc::new(Mutex::new(HashMap::new())),
@@ -96,6 +95,24 @@ pub async fn serve(
     tracing::info!("clone-daemon MCP on http://{addr}");
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
+}
+
+/// Snapshot the CURRENT session's `rd` + `conn` under a short-lived lock, then drop the
+/// guard — so the long `notify_*` / `windows::call` awaits never hold the session lock, and
+/// the OLD conn is free to drop once `reconfigure` repoints `active`.
+async fn session_snapshot(st: &McpState) -> (RemoteDesktopSessionProxy<'static>, zbus::Connection) {
+    let rt = st.active.lock().await;
+    (rt.rd.clone(), rt.conn.clone())
+}
+
+/// Snapshot the live monitor set as `Mon`s under a short-lived lock.
+fn mons_snapshot(st: &McpState) -> Vec<Mon> {
+    st.live_monitors
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|m| Mon { id: m.monitor_id, stream: m.stream_path.clone(), width: m.width, height: m.height })
+        .collect()
 }
 
 // --- JSON-RPC plumbing ------------------------------------------------------
@@ -159,17 +176,18 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
     match name {
         "list_monitors" => {
             let list: Vec<Value> =
-                st.mons.iter().map(|m| json!({ "id": m.id, "width": m.width, "height": m.height })).collect();
+                mons_snapshot(st).iter().map(|m| json!({ "id": m.id, "width": m.width, "height": m.height })).collect();
             Ok(text(json!(list).to_string()))
         }
         "screenshot" => {
-            let m = resolve_mon(st, &args)?;
+            let m = resolve_mon(&mons_snapshot(st), &args)?;
             Ok(image_content(&screenshot_png(st, &m)?))
         }
         "mouse_move" => {
-            let m = resolve_mon(st, &args)?;
+            let m = resolve_mon(&mons_snapshot(st), &args)?;
+            let (rd, _) = session_snapshot(st).await;
             let (x, y) = (n("x").ok_or("x required")?, n("y").ok_or("y required")?);
-            ease_move(st, &m, x, y).await?;
+            ease_move(st, &rd, &m, x, y).await?;
             Ok(settle_shot(st, &m).await)
         }
         "left_click" => click(st, &args, BTN_LEFT, 1).await,
@@ -177,42 +195,47 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
         "middle_click" => click(st, &args, BTN_MIDDLE, 1).await,
         "left_double_click" => click(st, &args, BTN_LEFT, 2).await,
         "scroll" => {
-            let m = resolve_mon(st, &args)?;
+            let m = resolve_mon(&mons_snapshot(st), &args)?;
+            let (rd, _) = session_snapshot(st).await;
             if n("x").is_some() && n("y").is_some() {
-                ease_move(st, &m, n("x").unwrap(), n("y").unwrap()).await?;
+                ease_move(st, &rd, &m, n("x").unwrap(), n("y").unwrap()).await?;
             }
             let amount = args.get("amount").and_then(Value::as_i64).unwrap_or(0).clamp(-15, 15);
             let step = if amount >= 0 { 1 } else { -1 };
             for _ in 0..amount.abs() {
-                st.rd.notify_pointer_axis_discrete(0, step as i32).await.map_err(e)?;
+                rd.notify_pointer_axis_discrete(0, step as i32).await.map_err(e)?;
                 sleep(SCROLL_STEP_MS).await;
             }
             Ok(settle_shot(st, &m).await)
         }
         "key" => {
+            let (rd, _) = session_snapshot(st).await;
             let combo = args.get("keys").and_then(Value::as_str).ok_or("keys required")?;
             let syms = keysym::parse_key_combo(combo).map_err(|e| e.to_string())?;
             for &s in &syms {
-                st.rd.notify_keyboard_keysym(s, true).await.map_err(e)?;
+                rd.notify_keyboard_keysym(s, true).await.map_err(e)?;
             }
             for &s in syms.iter().rev() {
-                st.rd.notify_keyboard_keysym(s, false).await.map_err(e)?;
+                rd.notify_keyboard_keysym(s, false).await.map_err(e)?;
             }
-            Ok(settle_shot(st, &st.mons[0].clone()).await)
+            let first = mons_snapshot(st).into_iter().next().ok_or("no monitors")?;
+            Ok(settle_shot(st, &first).await)
         }
         "type" => {
+            let (rd, _) = session_snapshot(st).await;
             let txt = args.get("text").and_then(Value::as_str).ok_or("text required")?;
             for ch in txt.chars() {
                 let Some(ks) = keysym::char_to_keysym(ch) else { continue };
-                st.rd.notify_keyboard_keysym(ks, true).await.map_err(e)?;
-                st.rd.notify_keyboard_keysym(ks, false).await.map_err(e)?;
+                rd.notify_keyboard_keysym(ks, true).await.map_err(e)?;
+                rd.notify_keyboard_keysym(ks, false).await.map_err(e)?;
                 sleep(TYPE_KEY_MS).await;
             }
             Ok(text(format!("typed {} chars", txt.chars().count())))
         }
         // Window management (gnome-shell Eval).
         "list_windows" | "move_window" | "list_apps" | "launch_app" => {
-            windows::call(&st.conn, name, &args).await
+            let (_, conn) = session_snapshot(st).await;
+            windows::call(&conn, name, &args).await
         }
         other => Err(format!("unknown tool '{other}'")),
     }
@@ -220,33 +243,36 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
 
 // --- desktop actions --------------------------------------------------------
 
-/// A click of `count` presses of `button`, optionally moving to x,y first.
+/// A click of `count` presses of `button`, optionally moving to x,y first. Snapshots the
+/// CURRENT session's `rd` once, then acts (no session lock held across the presses).
 async fn click(st: &McpState, args: &Value, button: i32, count: u32) -> Result<Value, String> {
-    let m = resolve_mon(st, args)?;
+    let m = resolve_mon(&mons_snapshot(st), args)?;
+    let (rd, _) = session_snapshot(st).await;
     if let (Some(x), Some(y)) = (args.get("x").and_then(Value::as_f64), args.get("y").and_then(Value::as_f64)) {
-        ease_move(st, &m, x, y).await?;
+        ease_move(st, &rd, &m, x, y).await?;
     }
     for i in 0..count {
         if i > 0 {
             sleep(DOUBLE_GAP_MS).await;
         }
-        st.rd.notify_pointer_button(button, true).await.map_err(e)?;
+        rd.notify_pointer_button(button, true).await.map_err(e)?;
         sleep(CLICK_PRESS_MS).await;
-        st.rd.notify_pointer_button(button, false).await.map_err(e)?;
+        rd.notify_pointer_button(button, false).await.map_err(e)?;
     }
     Ok(settle_shot(st, &m).await)
 }
 
 /// Glide the pointer to (tx,ty) over MOVE_STEPS eased steps, emitting a cursor warp
-/// each step so the viewer animates the agent's move.
-async fn ease_move(st: &McpState, m: &Mon, tx: f64, ty: f64) -> Result<(), String> {
+/// each step so the viewer animates the agent's move. `rd` is a caller-held snapshot of the
+/// current session (so no session lock is held across the eased-motion awaits).
+async fn ease_move(st: &McpState, rd: &RemoteDesktopSessionProxy<'static>, m: &Mon, tx: f64, ty: f64) -> Result<(), String> {
     let (tx, ty) = clamp(m, tx, ty);
     let (sx, sy) = st.last_pos.lock().unwrap().get(&m.id).copied().unwrap_or((tx, ty));
     for i in 1..=MOVE_STEPS {
         let t = i as f64 / MOVE_STEPS as f64;
         let ease = if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 }; // ease-in-out quad
         let (x, y) = (sx + (tx - sx) * ease, sy + (ty - sy) * ease);
-        st.rd.notify_pointer_motion_absolute(&m.stream, x, y).await.map_err(e)?;
+        rd.notify_pointer_motion_absolute(&m.stream, x, y).await.map_err(e)?;
         emit_warp(st, m.id, x, y);
         sleep(MOVE_STEP_MS).await;
     }
@@ -284,10 +310,10 @@ async fn settle_shot(st: &McpState, m: &Mon) -> Value {
     }
 }
 
-fn resolve_mon(st: &McpState, args: &Value) -> Result<Mon, String> {
+fn resolve_mon(mons: &[Mon], args: &Value) -> Result<Mon, String> {
     match args.get("monitor").and_then(Value::as_u64) {
-        Some(id) => st.mons.iter().find(|m| m.id as u64 == id).cloned().ok_or_else(|| format!("no monitor {id}")),
-        None => st.mons.first().cloned().ok_or_else(|| "no monitors".into()),
+        Some(id) => mons.iter().find(|m| m.id as u64 == id).cloned().ok_or_else(|| format!("no monitor {id}")),
+        None => mons.first().cloned().ok_or_else(|| "no monitors".into()),
     }
 }
 

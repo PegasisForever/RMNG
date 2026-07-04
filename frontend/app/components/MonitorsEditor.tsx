@@ -61,24 +61,15 @@ function LayoutPreview({ monitors }: { monitors: Mon[] }) {
   );
 }
 
-/** The monitor layout editor: live preview, per-monitor size/position/primary rows,
- *  resolution add-buttons, and (optionally) an "Apply to running clones" action.
- *  Fully controlled — `monitors` in, `onChange` out — so both the Settings dialog and
- *  the first-run wizard can drive it. `onApply` is omitted by the wizard (nothing to
- *  apply to yet). */
+/** The monitor layout editor: live preview, per-monitor size/position/primary rows, and
+ *  resolution add-buttons. Fully controlled — `monitors` in, `onChange` out — so both the
+ *  Settings dialog and the first-run wizard can drive it. */
 export function MonitorsEditor({
   monitors,
   onChange,
-  onApply,
-  applying = false,
-  applyMsg,
 }: {
   monitors: Mon[];
   onChange: (next: Mon[]) => void;
-  /** Persist + apply the layout to running clones. When omitted the block is hidden. */
-  onApply?: () => Promise<void> | void;
-  applying?: boolean;
-  applyMsg?: string | null;
 }) {
   const setMon = (i: number, k: "width" | "height" | "x" | "y", v: number) =>
     onChange(monitors.map((m, j) => (j === i ? { ...m, [k]: v } : m)));
@@ -150,23 +141,6 @@ export function MonitorsEditor({
           </button>
         ))}
       </div>
-      {/* Apply to running clones (saves + restarts each clone's desktop). Hidden when
-          the host has no clones to apply to (the wizard omits onApply). */}
-      {onApply ? (
-        <div className="mt-3 flex items-center gap-3 border-t border-slate-100 pt-3 dark:border-slate-800">
-          <button
-            type="button"
-            onClick={() => onApply()}
-            disabled={applying}
-            className="rounded bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-          >
-            {applying ? "Applying…" : "Apply to running clones"}
-          </button>
-          <span className="text-xs text-slate-500 dark:text-slate-400">
-            {applyMsg ?? "Saves the layout, then restarts each running clone's desktop to apply it."}
-          </span>
-        </div>
-      ) : null}
     </>
   );
 }

@@ -29,6 +29,16 @@ pub struct MonitorSpec {
     pub primary: bool,
 }
 
+/// A named monitor-layout preset: a full arrangement the operator can switch to.
+/// Distinct from clone-provisioning `Preset` (env/Linear) — this is display geometry only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct LayoutPreset {
+    pub name: String,
+    pub monitors: Vec<MonitorSpec>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -331,6 +341,13 @@ pub struct ControlState {
     pub selected: Option<String>,
     #[serde(default)]
     pub monitors: Vec<MonitorSpec>,
+    /// Name of the active layout preset (mirrored from config so the sidebar switcher
+    /// updates live over `/events`). Empty when no presets exist.
+    #[serde(default)]
+    pub active_layout: String,
+    /// Names of all layout presets, in config order — the sidebar's segmented buttons.
+    #[serde(default)]
+    pub layout_preset_names: Vec<String>,
     #[serde(default)]
     pub hosts: Vec<Host>,
     #[serde(default)]
@@ -530,6 +547,31 @@ mod tests {
         assert!(s.contains("\"fiveHour\""));
         let back: ControlState = serde_json::from_str(&s).unwrap();
         assert_eq!(st, back);
+    }
+
+    #[test]
+    fn controlstate_layout_fields_camelcase() {
+        let st = ControlState {
+            active_layout: "Dual 1440p".into(),
+            layout_preset_names: vec!["Dual 1440p".into(), "Single 4K".into()],
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&st).unwrap();
+        assert_eq!(v["activeLayout"], "Dual 1440p");
+        assert_eq!(v["layoutPresetNames"][1], "Single 4K");
+    }
+
+    #[test]
+    fn layout_preset_roundtrip_camelcase() {
+        let p = LayoutPreset {
+            name: "Dual 1440p".into(),
+            monitors: vec![MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: true }],
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["name"], "Dual 1440p");
+        assert_eq!(v["monitors"][0]["width"], 2560);
+        let back: LayoutPreset = serde_json::from_value(v).unwrap();
+        assert_eq!(back, p);
     }
 }
 

@@ -45,9 +45,11 @@ pub fn load() -> Result<AppConfig> {
 /// the single-token model) are dropped; the rewrite scrubs them from disk. The retired
 /// Proxmox backend is gone: any `proxmox` block is scrubbed (rewrite), and its
 /// `hostnamePrefix` is carried into `docker.hostnamePrefix` when the new config has no
-/// `docker` key. There is no `setupComplete` grandfather — an old `config.json` re-runs
-/// the wizard (new machine, no `rmng` network / base image), so `setupComplete` stays
-/// whatever the file said (default `false` when absent).
+/// `docker` key. Legacy top-level `monitors` array is migrated to a `"Default"` layout
+/// preset (one-shot only, when `layout_presets` is still empty). There is no
+/// `setupComplete` grandfather — an old `config.json` re-runs the wizard (new machine,
+/// no `rmng` network / base image), so `setupComplete` stays whatever the file said
+/// (default `false` when absent).
 fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
     let non_empty = |k: &str| match raw.get(k) {
         Some(serde_json::Value::Array(a)) => !a.is_empty(),
@@ -94,10 +96,28 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
             }
         }
     }
-    non_empty("envPresets")
+    let mut changed = non_empty("envPresets")
         || non_empty("linear")
         || non_empty("cloneAccounts")
-        || has_proxmox
+        || has_proxmox;
+    // Legacy single `monitors` array → a "Default" layout preset (one-shot). Only when
+    // the new `layout_presets` is still empty (don't clobber an already-migrated config).
+    if cfg.layout_presets.is_empty() {
+        if let Some(mons) = raw.get("monitors").and_then(|m| m.as_array()) {
+            if !mons.is_empty() {
+                if let Ok(parsed) = serde_json::from_value::<Vec<wire::MonitorSpec>>(
+                    serde_json::Value::Array(mons.clone()),
+                ) {
+                    cfg.layout_presets = vec![wire::LayoutPreset { name: "Default".into(), monitors: parsed }];
+                    if cfg.active_layout.is_empty() {
+                        cfg.active_layout = "Default".into();
+                    }
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -350,6 +370,45 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_monitors_into_default_preset() {
+        // Simulate an old config.json with a top-level `monitors` array and no presets.
+        let raw: serde_json::Value = serde_json::json!({
+            "monitors": [
+                { "width": 3440, "height": 1440, "x": 0, "y": 0, "primary": true }
+            ]
+        });
+        let mut cfg = AppConfig::default(); // layout_presets empty, active_layout ""
+        let changed = migrate_legacy(&raw, &mut cfg);
+        assert!(changed);
+        assert_eq!(cfg.layout_presets.len(), 1);
+        assert_eq!(cfg.layout_presets[0].name, "Default");
+        assert_eq!(cfg.layout_presets[0].monitors[0].width, 3440);
+        assert_eq!(cfg.active_layout, "Default");
+    }
+
+    #[test]
+    fn migration_noop_when_presets_present() {
+        // Use a non-empty, different monitors array to truly test the anti-clobber guard.
+        // If the outer `cfg.layout_presets.is_empty()` guard were removed, this test would fail.
+        let raw: serde_json::Value = serde_json::json!({
+            "monitors": [
+                { "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": true }
+            ]
+        });
+        let mut cfg = AppConfig::default();
+        cfg.layout_presets = vec![wire::LayoutPreset {
+            name: "X".into(),
+            monitors: vec![wire::MonitorSpec { width: 800, height: 600, x: 0, y: 0, primary: true }],
+        }];
+        cfg.active_layout = "X".into();
+        // Migration must not clobber an already-migrated config.
+        let _ = migrate_legacy(&raw, &mut cfg);
+        assert_eq!(cfg.layout_presets.len(), 1);
+        assert_eq!(cfg.layout_presets[0].name, "X");
+        assert_eq!(cfg.layout_presets[0].monitors[0].width, 800, "existing preset width must not be clobbered");
+    }
+
+    #[test]
     fn migrate_scrubs_proxmox() {
         // A legacy config with a proxmox block: it's scrubbed (rewrite flagged), its
         // hostnamePrefix is folded into docker.hostnamePrefix (no docker key present),
@@ -429,6 +488,78 @@ mod tests {
         n.docker.hostname_prefix = "other-".into();
         assert!(!restart_required(&base, &n));
     }
+
+    fn ms(w: u32, h: u32) -> wire::MonitorSpec {
+        wire::MonitorSpec { width: w, height: h, x: 0, y: 0, primary: true }
+    }
+
+    #[test]
+    fn merge_reconciles_active_layout_when_active_preset_removed() {
+        let mut base = AppConfig::default();
+        base.layout_presets = vec![
+            wire::LayoutPreset { name: "A".into(), monitors: vec![ms(1920, 1080)] },
+            wire::LayoutPreset { name: "B".into(), monitors: vec![ms(3840, 2160)] },
+        ];
+        base.active_layout = "B".into();
+        // The UI removes preset "B", sending only "A".
+        let incoming = serde_json::json!({
+            "layoutPresets": [ { "name": "A", "monitors": [
+                { "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": true } ] } ]
+        });
+        let merged = merge_update(&base, incoming).unwrap();
+        assert_eq!(merged.layout_presets.len(), 1);
+        assert_eq!(merged.active_layout, "A"); // reconciled off the removed "B"
+    }
+
+    #[test]
+    fn merge_rejects_invalid_layout_presets() {
+        let base = AppConfig::default();
+        let one = |primary: bool| {
+            serde_json::json!({ "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": primary })
+        };
+
+        // Two presets sharing a (case-sensitive) name → Err.
+        let dup = serde_json::json!({ "layoutPresets": [
+            { "name": "A", "monitors": [one(true)] },
+            { "name": "A", "monitors": [one(true)] },
+        ] });
+        let e = merge_update(&base, dup).unwrap_err();
+        assert!(e.to_string().contains("duplicate"), "err: {e}");
+
+        // Empty / whitespace name → Err.
+        let empty_name = serde_json::json!({ "layoutPresets": [
+            { "name": "   ", "monitors": [one(true)] },
+        ] });
+        assert!(merge_update(&base, empty_name).is_err());
+
+        // Zero-monitor preset → Err.
+        let no_mons = serde_json::json!({ "layoutPresets": [
+            { "name": "A", "monitors": [] },
+        ] });
+        assert!(merge_update(&base, no_mons).is_err());
+
+        // Two primaries → Ok, normalized to exactly one (first kept, rest cleared).
+        let two_primaries = serde_json::json!({ "layoutPresets": [
+            { "name": "A", "monitors": [one(true), one(true)] },
+        ] });
+        let merged = merge_update(&base, two_primaries).unwrap();
+        let mons = &merged.layout_presets[0].monitors;
+        assert_eq!(mons.iter().filter(|m| m.primary).count(), 1, "exactly one primary");
+        assert!(mons[0].primary && !mons[1].primary, "first primary kept, rest cleared");
+
+        // Zero primaries → Ok, normalized so the first monitor becomes primary.
+        let no_primary = serde_json::json!({ "layoutPresets": [
+            { "name": "A", "monitors": [one(false), one(false)] },
+        ] });
+        let merged = merge_update(&base, no_primary).unwrap();
+        let mons = &merged.layout_presets[0].monitors;
+        assert_eq!(mons.iter().filter(|m| m.primary).count(), 1, "exactly one primary");
+        assert!(mons[0].primary, "first monitor promoted to primary");
+
+        // An empty layout_presets array is allowed (fresh install has none).
+        let none = serde_json::json!({ "layoutPresets": [] });
+        assert!(merge_update(&base, none).is_ok());
+    }
 }
 
 /// Resolve the state.json path: always `<data_dir>/state.json`.
@@ -468,9 +599,55 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
     if let Some(serde_json::Value::Array(rows)) = incoming_presets {
         merged.presets = merge_presets(&base.presets, &rows);
     }
+    // Keep active_layout valid after preset edits: if it no longer names a preset,
+    // point it at the first (or clear it when there are none).
+    if !merged.layout_presets.iter().any(|p| p.name == merged.active_layout) {
+        merged.active_layout =
+            merged.layout_presets.first().map(|p| p.name.clone()).unwrap_or_default();
+    }
     enforce_categories(base, &merged)?;
     validate_docker_subnet(&merged.docker.subnet)?;
+    validate_layout_presets(&mut merged.layout_presets)?;
     Ok(merged)
+}
+
+/// Validate + normalize the merged `layout_presets` (mirrors the clone-`presets` uniqueness
+/// style). Rejects a preset with an empty/whitespace name, two presets sharing a name
+/// (case-sensitive), or a preset with zero monitors. NORMALIZES each preset in-place to
+/// exactly one primary: zero primaries → the first monitor becomes primary; more than one →
+/// keep the first primary, clear the rest. An empty `layout_presets` array is allowed (a
+/// fresh install legitimately has none — the "can't delete the last preset" rule is UI-only).
+fn validate_layout_presets(presets: &mut [wire::LayoutPreset]) -> Result<()> {
+    let mut seen: Vec<String> = Vec::new();
+    for p in presets.iter_mut() {
+        if p.name.trim().is_empty() {
+            bail!("layout preset name must not be empty");
+        }
+        if seen.contains(&p.name) {
+            bail!("duplicate layout preset name {:?}", p.name);
+        }
+        seen.push(p.name.clone());
+        if p.monitors.is_empty() {
+            bail!("layout preset {:?} must have at least one monitor", p.name);
+        }
+        // Normalize to exactly one primary.
+        let primaries = p.monitors.iter().filter(|m| m.primary).count();
+        if primaries == 0 {
+            p.monitors[0].primary = true;
+        } else if primaries > 1 {
+            let mut kept = false;
+            for m in p.monitors.iter_mut() {
+                if m.primary {
+                    if kept {
+                        m.primary = false;
+                    } else {
+                        kept = true;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reject a `docker.subnet` that isn't an IPv4 CIDR with a `/16`–`/24` prefix (the

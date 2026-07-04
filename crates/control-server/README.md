@@ -93,7 +93,7 @@ Clone sources are **images** (`rmng.image=1`, identified by their own `repo:tag`
 ahead of time (`template/Dockerfile`, not by this crate — see
 [DEPLOY.md#publishing-the-template](../../docs/DEPLOY.md#publishing-the-template)),
 `pull_template` pulls it (no local retag — it keeps its own `repo:tag`), clones are `docker run`
-off an image, and any clone commits to a new image. In-container guest scripts (`apply-monitors.sh`, `claude-import.sh`)
+off an image, and any clone commits to a new image. In-container guest scripts (`claude-import.sh`)
 run over `docker exec bash -s`. See [DEPLOY.md](../../docs/DEPLOY.md) and
 [SCRIPTS.md](../../docs/SCRIPTS.md).
 

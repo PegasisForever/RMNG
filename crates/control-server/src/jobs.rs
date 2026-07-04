@@ -9,7 +9,7 @@
 //! record + the progress→op-log plumbing; the flows themselves live in `provision`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use wire::{Host, Operation, OperationKind, OperationStatus};
 
@@ -124,34 +124,6 @@ pub(crate) fn schedule_prune(app: App, op_id: String, delay_ms: u64) {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         app.store.mutate(|s| s.operations.retain(|o| o.id != op_id));
     });
-}
-
-/// After `apply_monitors` restarts headless GNOME (which drops the clone-daemon's mediaplane
-/// connection and clears its cached frame), wait for the daemon to RE-register so that declaring
-/// the clone `done`/100% actually means it's streamable. Bounded + best-effort: if it doesn't
-/// come back in time we return anyway — the clone still completes (same posture as
-/// `clone_container`'s wait-ready timeout path), just with a warning in the log.
-async fn wait_daemon_reregister(app: &App, hostname: &str) {
-    const REREGISTER_TIMEOUT: Duration = Duration::from_secs(45);
-    const REREGISTER_POLL: Duration = Duration::from_secs(1);
-    // Let the freshly-restarted GNOME session settle + push a first frame once the daemon is back.
-    const SETTLE: Duration = Duration::from_secs(2);
-    let deadline = Instant::now() + REREGISTER_TIMEOUT;
-    loop {
-        if app.media.is_connected(hostname) {
-            tokio::time::sleep(SETTLE).await;
-            return;
-        }
-        if Instant::now() >= deadline {
-            tracing::warn!(
-                "clone {hostname}: daemon did not re-register within {}s after monitor apply \
-                 (still booting)",
-                REREGISTER_TIMEOUT.as_secs()
-            );
-            return;
-        }
-        tokio::time::sleep(REREGISTER_POLL).await;
-    }
 }
 
 /// A progress callback for op `op_id` of `kind`: maps a streamed `(step, message)` onto the
@@ -326,49 +298,18 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         };
 
     // The container is up and its daemon has registered (or timed out still-booting) — the op
-    // now sits at the `ready` step (~80%). The clone is NOT connectable yet: applying the
-    // monitor layout below restarts headless GNOME (which drops the daemon + clears its cached
-    // frame), and the account tokens still have to be pushed. The client treats a host's
-    // PRESENCE in `s.hosts` as "ready to connect", so we keep the host OUT of state and the op
-    // RUNNING until this whole tail settles — otherwise a viewer connecting at "100%" hits a
-    // torn-down daemon and paints nothing. The host is registered + the op marked `done` at the
-    // very end, below, once the clone is genuinely streamable.
+    // now sits at the `ready` step (~80%). The clone is NOT connectable yet: the account tokens
+    // still have to be pushed. The client treats a host's PRESENCE in `s.hosts` as "ready to
+    // connect", so we keep the host OUT of state and the op RUNNING until this whole tail
+    // settles — otherwise a viewer connecting at "100%" hits a not-yet-provisioned clone. The
+    // host is registered + the op marked `done` at the very end, below, once the clone is
+    // genuinely streamable.
     //
     // (`progress` at the top of this fn was moved into `clone_container`; make a fresh one for
-    // the remaining `monitors`/`accounts` steps.)
+    // the remaining `accounts` step. New clones get their monitor layout from the daemon's
+    // `Hello` → server `SetMonitors` live push (no restart-based apply here); the baked
+    // `RMNG_MONITORS` default just covers the brief pre-connect window.)
     let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
-    // Bring the fresh clone to the CONFIGURED monitor layout. The pulled template bakes a
-    // fixed default (`ARG` on the gnome-shell user unit's `Environment=`), which only matches
-    // a deployment's config by coincidence — the old in-product bootstrap baked the config's
-    // layout into every clone at build time, so this replaces that. Only reprovision when the
-    // operator actually set a layout (`cfg.monitors` non-empty); an empty config means the
-    // template default is intentionally fine, so skip the extra exec + GNOME-session restart.
-    // Best-effort: log the outcome but never fail the clone over it — the operator can always
-    // re-apply from Settings.
-    //
-    // Awaited inline (NOT spawned off) so the agent kickoff further down this tail observes
-    // the FINAL configured layout rather than racing this apply.
-    if !app.config().monitors.is_empty() {
-        progress("monitors", "applying configured monitor layout");
-        match provision::apply_monitors(&app, &spec.new_hostname, |_step, _msg| {}).await {
-            Ok(()) => patch_op(&app, &op_id, |op| {
-                op.log.push("monitors: applied configured layout".into())
-            }),
-            Err(e) => {
-                tracing::warn!("apply_monitors({}) failed: {e}", spec.new_hostname);
-                patch_op(&app, &op_id, |op| {
-                    op.log.push(format!(
-                        "WARN monitors apply failed: {e} — apply manually from Settings"
-                    ))
-                });
-            }
-        }
-        // `apply_monitors` restarted headless GNOME + the clone-daemon, so the daemon's
-        // mediaplane connection dropped and its cached frame was cleared. Wait (bounded) for it
-        // to re-register before we can call the clone `done` — otherwise 100% would again
-        // precede a streamable desktop.
-        wait_daemon_reregister(&app, &spec.new_hostname).await;
-    }
 
     progress("accounts", "assigning agent accounts");
 
@@ -480,14 +421,14 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         }
     }
 
-    // Register the fully-provisioned host and mark the op done — the tail (monitor restart +
-    // daemon re-registration + account pushes) is complete, so the clone is now genuinely
-    // connectable. A host's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
-    // it is added HERE, at the same instant the bar reaches 100%. `host` is display-only for
-    // managed clones (dials go by container name == id); clones ship with fixed `rmng`/`rmng`
-    // credentials baked into the base image. RDP port stays 3389 for the media path. The Claude
-    // /Codex selection collected above is baked in so the UI shows it the moment the host
-    // appears. `daemon_up` reflects whether the clone actually re-registered (vs. still booting).
+    // Register the fully-provisioned host and mark the op done — the tail (account pushes) is
+    // complete, so the clone is now genuinely connectable. A host's PRESENCE in `s.hosts` is the
+    // client's "ready to connect" signal, so it is added HERE, at the same instant the bar
+    // reaches 100%. `host` is display-only for managed clones (dials go by container name == id);
+    // clones ship with fixed `rmng`/`rmng` credentials baked into the base image. RDP port stays
+    // 3389 for the media path. The Claude/Codex selection collected above is baked in so the UI
+    // shows it the moment the host appears. `daemon_up` reflects whether the clone's daemon has
+    // registered (vs. still booting).
     let daemon_up = app.media.is_connected(&spec.new_hostname);
     app.store.mutate(|s| {
         let mut host = Host {

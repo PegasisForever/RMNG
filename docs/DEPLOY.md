@@ -412,16 +412,19 @@ inherits it (there's no per-install control-server payload any more; see
 
 ## Day-2 operations (from the dashboard / API / fleet MCP)
 
-- **Clone**: `POST /api/clone` — Linear ticket / new ticket / plain, from a chosen image. If
-  `config.monitors` is set, the new clone is brought to that layout automatically before the
-  op completes (best-effort — see the op log on failure); the template's baked-in default
-  layout only matters when no monitors are configured.
+- **Clone**: `POST /api/clone` — Linear ticket / new ticket / plain, from a chosen image. The
+  new clone is always brought to `config.effective_monitors()` (the active layout preset, or
+  the built-in default when no presets exist) as soon as its clone-daemon connects — the
+  control-server pushes the active layout via `SetMonitors` on the daemon's first `Hello`, so
+  the template's baked-in `RMNG_MONITORS` boot value is corrected immediately and never
+  actually persists.
 - **Pull a template**: `POST /api/images/pull {reference?}` — from the Images panel, any
   time (not just first-run setup).
 - **Commit a clone → image**: `POST /api/images/commit {host, name}`.
-- **Apply a monitor layout** to already-running clones: `POST /api/monitors/apply` (rewrites
-  each clone's `RMNG_MONITORS` + restarts its GNOME/daemon) — for pushing a layout change made
-  after those clones were created.
+- **Activate a layout preset** on already-running clones: `POST /api/layout/activate {name}`
+  — pushes `ServerMsg::SetMonitors` to every connected clone-daemon, which live-swaps to a
+  fresh Mutter session with the new monitors (make-before-break — no GNOME restart, no app
+  loss).
 - **Hot-swap a Claude account**: `POST /api/claude/swap {host, account}` — writes the clone's
   `~/.claude/.credentials.json` live via `docker exec`.
 - **Delete**: `POST /api/delete {id}` (stops + removes the container and its

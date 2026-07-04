@@ -48,7 +48,7 @@ pub fn router(app: App) -> Router {
         .route("/api/activate", post(activate))
         .route("/api/reorder", post(reorder))
         .route("/api/clone", post(clone))
-        .route("/api/monitors/apply", post(monitors_apply))
+        .route("/api/layout/activate", post(layout_activate))
         .route("/api/delete", post(delete))
         .route("/api/notes/:id", get(notes_get).post(notes_save))
         .route("/api/upload", post(upload))
@@ -616,26 +616,41 @@ async fn delete(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
-/// `POST /api/monitors/apply` — apply the saved monitor layout to every running clone
-/// (rewrites its `RMNG_MONITORS` + restarts its GNOME session + daemon). Restarts the
-/// clones' desktops, so it's an explicit button rather than part of Save.
-async fn monitors_apply(State(app): State<App>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let clones: Vec<String> =
-        app.store.get().hosts.iter().filter(|h| h.managed).map(|h| h.id.clone()).collect();
+#[derive(Deserialize)]
+struct LayoutActivateReq {
+    name: String,
+}
+
+/// `POST /api/layout/activate` — make `name` the active layout preset and live-apply it
+/// to every running clone (no session restart). Persists config, mirrors the active
+/// name into ControlState (so all sidebars update over SSE), then pushes `SetMonitors`
+/// to each daemon. Best-effort per clone; partial failures are reported.
+async fn layout_activate(
+    State(app): State<App>,
+    Json(req): Json<LayoutActivateReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // 1. Validate + persist the active_layout.
+    let mut cfg = app.config();
+    if !cfg.layout_presets.iter().any(|p| p.name == req.name) {
+        return Err((StatusCode::BAD_REQUEST, format!("unknown layout preset '{}'", req.name)));
+    }
+    cfg.active_layout = req.name.clone();
+    crate::config::save(&cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    *app.cfg.write().unwrap() = cfg.clone();
+
+    // 2. Mirror into ControlState for the sidebar (SSE broadcast).
+    mirror_layout_to_state(&app);
+
+    // 3. Live-apply to all running clones.
+    let monitors = cfg.effective_monitors();
+    let results = app.media.set_monitors_all(&monitors);
     let mut applied = Vec::new();
     let mut errors = Vec::new();
-    for id in clones {
-        match crate::provision::apply_monitors(&app, &id, |step, msg| {
-            tracing::info!("apply-monitors {id} {step}: {msg}");
-        })
-        .await
-        {
+    for (id, r) in results {
+        match r {
             Ok(()) => applied.push(id),
             Err(e) => errors.push(format!("{id}: {e}")),
         }
-    }
-    if applied.is_empty() && !errors.is_empty() {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, errors.join("; ")));
     }
     Ok(Json(serde_json::json!({ "ok": true, "applied": applied, "errors": errors })))
 }
@@ -740,6 +755,19 @@ async fn detector_feedback(
 
 // --- config API (redacted read / validated write / live-apply) -------------
 
+/// Copy the config's active layout + preset names into ControlState so the sidebar
+/// switcher renders + highlights over the live `/events` SSE. Idempotent; call after any
+/// change to `layout_presets` / `active_layout` and once at boot.
+pub(crate) fn mirror_layout_to_state(app: &App) {
+    let cfg = app.config();
+    let active = cfg.active_layout.clone();
+    let names: Vec<String> = cfg.layout_presets.iter().map(|p| p.name.clone()).collect();
+    app.store.mutate(|s| {
+        s.active_layout = active.clone();
+        s.layout_preset_names = names.clone();
+    });
+}
+
 /// `GET /api/config` — the redacted view (no plaintext secrets).
 async fn config_get(State(app): State<App>) -> Json<AppConfigRedacted> {
     Json(app.config().redacted())
@@ -795,6 +823,8 @@ async fn config_put(
         }
     }
     *app.cfg.write().unwrap() = merged.clone();
+    // Keep the sidebar's live layout list/active marker in sync with the just-saved presets.
+    mirror_layout_to_state(&app);
     let resp = ConfigPutResponse { restart_required, config: merged.redacted() };
     let mut body = serde_json::to_value(&resp).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let (Some(obj), Some(w)) = (body.as_object_mut(), network_warning) {

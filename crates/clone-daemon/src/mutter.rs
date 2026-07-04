@@ -127,6 +127,15 @@ pub struct Session {
     pub monitors: Vec<VirtualMonitor>,
 }
 
+impl Session {
+    /// Stop this Mutter session — tears down the RemoteDesktop session, its linked
+    /// ScreenCast session, and all virtual monitors. Used by the make-before-break swap
+    /// to drop the OLD session after the new one is capturing (Phase 0: apps survive).
+    pub async fn stop(&self) -> zbus::Result<()> {
+        self.rd.stop().await
+    }
+}
+
 fn build_modes(w: u32, h: u32) -> Vec<HashMap<String, Value<'static>>> {
     let mut m = HashMap::new();
     m.insert("size".to_string(), Value::new((w, h)));

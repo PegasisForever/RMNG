@@ -9,9 +9,9 @@
 //!
 //! Caller-facing division of responsibility (as with `orchestrate.rs`): `jobs.rs` owns the
 //! `Operation` record + the progress→op-log plumbing and calls the flows here; `claude.rs`
-//! drives credential ops via [`run_clone_op`]; `web.rs` calls [`apply_monitors`]. These
-//! functions address a clone by its container *name*, which equals the host id (`Host.managed`
-//! rows) — no container id is stored anywhere.
+//! drives credential ops via [`run_clone_op`]. These functions address a clone by its
+//! container *name*, which equals the host id (`Host.managed` rows) — no container id is
+//! stored anywhere.
 //!
 //! Guest scripts are embedded (`include_str!`) and streamed over `docker exec bash -s`:
 //! [`crate::docker::DockerCtl::exec_script`]. Binaries (clone-daemon, agent-wrapper) are
@@ -23,12 +23,11 @@
 use anyhow::{Result, bail};
 use std::time::{Duration, Instant};
 
-use wire::{AppConfig, EnvVar};
+use wire::EnvVar;
 
 use crate::app::App;
 use crate::docker::{CreateSpec, PullEvent, TarEntry, CLONE_USER};
 
-const APPLY_MONITORS_SCRIPT: &str = include_str!("../scripts/apply-monitors.sh");
 const IMPORT_SCRIPT: &str = include_str!("../scripts/claude-import.sh");
 
 /// The clone user's uid/gid inside every image (created uid 1000 by `template/setup/30-user.sh`
@@ -46,16 +45,6 @@ const WAIT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 const WAIT_READY_POLL: Duration = Duration::from_secs(2);
 
 // --- pure ports -----------------------------------------------------------------------
-
-/// The monitor layout as the clone-daemon's `RMNG_MONITORS` env: CSV of `WxH+X+Y[*]`
-/// (position in the unified desktop, `*` = primary). Ported verbatim from `orchestrate.rs`.
-pub fn monitors_csv(cfg: &AppConfig) -> String {
-    cfg.effective_monitors()
-        .iter()
-        .map(|m| format!("{}x{}+{}+{}{}", m.width, m.height, m.x, m.y, if m.primary { "*" } else { "" }))
-        .collect::<Vec<_>>()
-        .join(",")
-}
 
 /// A DNS label (host-id / hostname validity + path-traversal guard). Ported verbatim.
 pub fn is_dns_label(s: &str) -> bool {
@@ -751,36 +740,6 @@ pub const CLONE_BINARIES: &[CloneBinary] = &[
     CloneBinary { payload: "agent-wrapper", bin: "agent-wrapper" },
 ];
 
-// --- monitors -------------------------------------------------------------------------
-
-/// Apply the configured monitor layout to a RUNNING clone without reprovisioning: streams
-/// [`APPLY_MONITORS_SCRIPT`] over `docker exec bash -s` as root with args `<user> <csv>`. Its
-/// `[ct]` lines flow to the progress callback (as `apply` steps).
-pub async fn apply_monitors(
-    app: &App,
-    container: &str,
-    mut on_progress: impl FnMut(&str, &str),
-) -> Result<()> {
-    let cfg = app.config();
-    let csv = monitors_csv(&cfg);
-    on_progress("queued", "applying monitor layout");
-    let args = vec![CLONE_USER.to_string(), csv];
-    let code = app
-        .docker
-        .exec_script(container, APPLY_MONITORS_SCRIPT, &[], &args, |_stream, line| {
-            let msg = line.trim_start().strip_prefix("[ct] ").unwrap_or(line);
-            if !msg.trim().is_empty() {
-                on_progress("apply", msg);
-            }
-        })
-        .await?;
-    if code != 0 {
-        bail!("apply-monitors.sh failed in {container} (exit {code})");
-    }
-    on_progress("done", "monitor layout applied");
-    Ok(())
-}
-
 // --- claude-import backend ------------------------------------------------------------
 
 /// Run one [`claude-import.sh`] op (`status`|`read`|`clear`|`apply`) inside clone `container`
@@ -835,13 +794,6 @@ async fn sock_source_dir(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wire::MonitorSpec;
-
-    fn cfg_with_monitors(mons: Vec<MonitorSpec>) -> AppConfig {
-        let mut c = AppConfig::default();
-        c.monitors = mons;
-        c
-    }
 
     #[test]
     fn dns_label_validation() {
@@ -887,22 +839,6 @@ mod tests {
         assert_eq!(resolve_reference(&images, ""), None);
         // Empty image list → None.
         assert_eq!(resolve_reference(&[], "rmng/template:base"), None);
-    }
-
-    #[test]
-    fn monitors_csv_format() {
-        let cfg = cfg_with_monitors(vec![
-            MonitorSpec { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
-            MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: false },
-        ]);
-        assert_eq!(monitors_csv(&cfg), "2560x1440+2560+0*,1920x1080+0+0");
-    }
-
-    #[test]
-    fn monitors_csv_falls_back_to_default() {
-        // Empty config → effective_monitors' dual-1440p default.
-        let cfg = cfg_with_monitors(vec![]);
-        assert_eq!(monitors_csv(&cfg), "2560x1440+2560+0*,2560x1440+0+0");
     }
 
     #[test]
