@@ -442,24 +442,35 @@ async fn run_shipping(
         let active = active.clone();
         tokio::spawn(async move {
             while let Some(msg) = in_rx.recv().await {
-                let rt = active.lock().await;
+                // Snapshot the CURRENT session's `rd` (plus this event's stream, for
+                // PointerMove) under a SHORT lock, then drop the guard BEFORE the D-Bus
+                // await — so a slow `notify_*` never holds the `active` lock that
+                // `reconfigure` needs to swap the session. Mirrors mcp.rs's `session_snapshot`.
+                let (rd, stream) = {
+                    let rt = active.lock().await;
+                    let stream = match &msg {
+                        InputMsg::PointerMove { monitor_id, .. } => rt.streams.get(monitor_id).cloned(),
+                        _ => None,
+                    };
+                    (rt.rd.clone(), stream)
+                };
                 let r = match msg {
-                    InputMsg::PointerMove { monitor_id, x, y } => match rt.streams.get(&monitor_id) {
-                        Some(s) => rt.rd.notify_pointer_motion_absolute(s, x, y).await,
+                    InputMsg::PointerMove { x, y, .. } => match stream {
+                        Some(s) => rd.notify_pointer_motion_absolute(&s, x, y).await,
                         None => Ok(()),
                     },
                     InputMsg::PointerRelative { dx, dy } => {
-                        rt.rd.notify_pointer_motion_relative(dx, dy).await
+                        rd.notify_pointer_motion_relative(dx, dy).await
                     }
                     InputMsg::Button { button, pressed } => {
-                        rt.rd.notify_pointer_button(button, pressed).await
+                        rd.notify_pointer_button(button, pressed).await
                     }
-                    InputMsg::Axis { axis, step } => rt.rd.notify_pointer_axis_discrete(axis, step).await,
+                    InputMsg::Axis { axis, step } => rd.notify_pointer_axis_discrete(axis, step).await,
                     InputMsg::Key { keysym, pressed } => {
-                        rt.rd.notify_keyboard_keysym(keysym, pressed).await
+                        rd.notify_keyboard_keysym(keysym, pressed).await
                     }
                     InputMsg::KeyCode { keycode, pressed } => {
-                        rt.rd.notify_keyboard_keycode(keycode, pressed).await
+                        rd.notify_keyboard_keycode(keycode, pressed).await
                     }
                 };
                 if let Err(e) = r {
@@ -687,16 +698,27 @@ async fn reconfigure(
         tracing::warn!("reconfigure: EnableClipboard on new session failed: {e}");
     }
 
-    // 2. Start capture on the NEW nodes with fresh gates.
+    // 2. Start capture on the NEW nodes with fresh gates. If any capture fails to spawn,
+    //    tear down `new` (Session has no Drop → orphaned virtual monitors otherwise) and any
+    //    captures already started before propagating the error — we haven't committed yet, so
+    //    nothing shared (active/in_flight/session) has been repointed at `new`.
     let mut new_capture: HashMap<u32, CaptureHandle> = HashMap::new();
     let mut new_flags: HashMap<u32, Arc<AtomicBool>> = HashMap::new();
     for mon in &new.monitors {
         let gate = Arc::new(AtomicBool::new(false));
         new_flags.insert(mon.monitor_id, gate.clone());
-        new_capture.insert(
-            mon.monitor_id,
-            spawn_capture_for(mon, embedded, transport.clone(), latest.clone(), gate)?,
-        );
+        match spawn_capture_for(mon, embedded, transport.clone(), latest.clone(), gate) {
+            Ok(h) => {
+                new_capture.insert(mon.monitor_id, h);
+            }
+            Err(e) => {
+                for (_, h) in new_capture.drain() {
+                    stop_capture(h);
+                }
+                let _ = new.stop().await; // best-effort; drops the new virtual monitors
+                return Err(e);
+            }
+        }
     }
 
     // 3. Point input + clipboard + MCP at the new session BEFORE dropping the old. Setting
@@ -705,12 +727,29 @@ async fn reconfigure(
     //    Also update `live_monitors` here (same critical section) to pair with the new `active`,
     //    preventing MCP requests from pairing NEW rd/conn with OLD monitor paths during the
     //    .await calls in steps 4-6.
+    //
+    //    CRITICAL: publish `in_flight = new_flags` HERE too, in the SAME breath as `active`
+    //    — because ack routing keys off `in_flight`. The new capture (spawned in step 2)
+    //    ships frames keyed by the NEW monitor_ids; each frame's `Ack` must find that
+    //    monitor's gate in `in_flight` to clear its 1-deep gate. If we deferred this publish
+    //    until AFTER the step-4 awaits (`session.stop` + `apply_layout` spawn gdbus
+    //    subprocesses, ~100-400ms), a new/grown monitor's id would be ABSENT from the old
+    //    gate map → its Ack is dropped → its gate (set true by its first shipped frame) never
+    //    clears → that monitor ships ONE frame then FREEZES for the whole stop/apply window.
+    //    The old gate Arcs leave `in_flight` here, but the old capture threads hold their own
+    //    clones; we still stop those via `stop_capture` in step 5 (and set the old gates true
+    //    below so they can't ship during the stop window).
     {
         let mut rt = active.lock().await;
         rt.rd = new.rd.clone();
         rt.conn = new.conn.clone();
         rt.streams = new.monitors.iter().map(|m| (m.monitor_id, m.stream_path.clone())).collect();
         *live_monitors.lock().unwrap() = new.monitors.clone();
+        let mut gates = in_flight.lock().unwrap();
+        for (_, f) in gates.drain() {
+            f.store(true, Ordering::Relaxed); // close old gates → old capture can't ship in the window
+        }
+        *gates = new_flags;
     }
 
     // 4. Stop the OLD session (old outputs drop; gnome-shell reflows onto the new set),
@@ -721,22 +760,16 @@ async fn reconfigure(
     let _ = session.stop().await;
     apply_layout(desired).await;
 
-    // 5. Stop old capture + release old gates (old nodes already gone; deterministic
-    //    backstop). Replace the shared gate set with the new one so Acks now target it.
+    // 5. Stop old capture (old nodes already gone; deterministic backstop). The shared gate
+    //    set was already swapped to `new_flags` in step 3 for correct ack routing, so nothing
+    //    to do here beyond tearing down the old handles.
     for (_, h) in capture.drain() {
         stop_capture(h);
-    }
-    {
-        let mut m = in_flight.lock().unwrap();
-        for (_, f) in m.drain() {
-            f.store(true, Ordering::Relaxed);
-        }
-        *m = new_flags;
     }
 
     // 6. Swap in the new session/capture + prune `latest` frames for monitors that no
     //    longer exist (a shrink), so stale dmabuf fds for removed monitors don't linger.
-    //    (`live_monitors` was already updated in step 3 to pair with the new `active`.)
+    //    (`live_monitors` and `in_flight` were already updated in step 3 to pair with `active`.)
     *session = new;
     *capture = new_capture;
     {
