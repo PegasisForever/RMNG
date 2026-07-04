@@ -488,6 +488,28 @@ mod tests {
         n.docker.hostname_prefix = "other-".into();
         assert!(!restart_required(&base, &n));
     }
+
+    fn ms(w: u32, h: u32) -> wire::MonitorSpec {
+        wire::MonitorSpec { width: w, height: h, x: 0, y: 0, primary: true }
+    }
+
+    #[test]
+    fn merge_reconciles_active_layout_when_active_preset_removed() {
+        let mut base = AppConfig::default();
+        base.layout_presets = vec![
+            wire::LayoutPreset { name: "A".into(), monitors: vec![ms(1920, 1080)] },
+            wire::LayoutPreset { name: "B".into(), monitors: vec![ms(3840, 2160)] },
+        ];
+        base.active_layout = "B".into();
+        // The UI removes preset "B", sending only "A".
+        let incoming = serde_json::json!({
+            "layoutPresets": [ { "name": "A", "monitors": [
+                { "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": true } ] } ]
+        });
+        let merged = merge_update(&base, incoming).unwrap();
+        assert_eq!(merged.layout_presets.len(), 1);
+        assert_eq!(merged.active_layout, "A"); // reconciled off the removed "B"
+    }
 }
 
 /// Resolve the state.json path: always `<data_dir>/state.json`.
@@ -526,6 +548,12 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
     let mut merged: AppConfig = serde_json::from_value(cur)?;
     if let Some(serde_json::Value::Array(rows)) = incoming_presets {
         merged.presets = merge_presets(&base.presets, &rows);
+    }
+    // Keep active_layout valid after preset edits: if it no longer names a preset,
+    // point it at the first (or clear it when there are none).
+    if !merged.layout_presets.iter().any(|p| p.name == merged.active_layout) {
+        merged.active_layout =
+            merged.layout_presets.first().map(|p| p.name.clone()).unwrap_or_default();
     }
     enforce_categories(base, &merged)?;
     validate_docker_subnet(&merged.docker.subnet)?;
