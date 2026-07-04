@@ -143,6 +143,9 @@ async fn main() -> Result<()> {
             tracing::info!(?sizes, embedded, "clone-daemon: setting up Mutter session");
             let session = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
             tracing::info!("session ready: {} virtual monitor(s)", session.monitors.len());
+            // A fast restart can race the PREVIOUS daemon's session teardown (its
+            // monitors die when our old D-Bus connection dropped, but asynchronously).
+            wait_monitors_settle(monitors.len()).await;
             apply_layout(&monitors).await;
             run_shipping(session, transport, &path, &monitors, embedded).await
         }
@@ -256,6 +259,29 @@ async fn connect_retry(socket_path: &str) -> Arc<transport::Transport> {
 /// are read back from `GetCurrentState` (Task 3.2) rather than assumed `Meta-<i>`, since
 /// after a session-swap reconfiguration Mutter may hand out connectors in a different
 /// order (or reuse different ones) than creation order.
+/// Wait until exactly `expected` monitors remain in `GetCurrentState` (the new session's).
+///
+/// Stopping a Mutter session tears its virtual monitors down ASYNCHRONOUSLY —
+/// `session.stop()` returning does NOT mean the old connectors are gone. Calling
+/// `apply_layout` while they linger matches desired slots against DYING connectors
+/// (guaranteed when old and new sizes coincide, e.g. two same-size presets): Mutter
+/// then either rejects the config as "stale information" (layout silently not applied)
+/// or, if the teardown lands mid-apply, crashes gnome-shell outright — both found live
+/// on GNOME 48 (fleet-wide shell crash on a position-swapped same-size preset switch).
+/// The same race hits the boot path when a restarted daemon's predecessor session is
+/// still collapsing. On timeout, warn and proceed: apply_layout stays best-effort.
+async fn wait_monitors_settle(expected: usize) {
+    for _ in 0..40 {
+        if let Some((_, stdout)) = get_current_state().await {
+            if parse_connectors(&stdout).len() == expected {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tracing::warn!("stale monitors still present after ~2s; applying layout anyway");
+}
+
 async fn apply_layout(monitors: &[MonitorCfg]) {
     let Some((serial, stdout)) = get_current_state().await else {
         tracing::warn!("layout: couldn't read DisplayConfig state; leaving Mutter's default layout");
@@ -266,7 +292,9 @@ async fn apply_layout(monitors: &[MonitorCfg]) {
     let mut first = true;
     for m in monitors {
         // Pick (and consume) the first available connector whose current mode matches
-        // this monitor's (w, h), so duplicate sizes still map 1:1 in order.
+        // this monitor's (w, h). `parse_connectors` returns creation order (ascending
+        // Meta-N), and slots were RecordVirtual'd in order, so duplicate sizes map 1:1:
+        // slot i's connector IS the one whose stream ships as monitor_id i.
         let Some(idx) = available.iter().position(|(_, w, h)| *w == m.w && *h == m.h) else {
             tracing::warn!("layout: no Mutter connector currently at {}x{}; skipping that monitor", m.w, m.h);
             continue;
@@ -370,7 +398,20 @@ fn parse_connectors(get_current_state_stdout: &str) -> Vec<(String, u32, u32)> {
             out.push((connector, w, h));
         }
     }
+    // Creation order, not enumeration order: apply_layout consumes the first size match
+    // per slot, so duplicate sizes only map 1:1 to slots if this list ascends in creation
+    // order. Mutter allocates virtual connector names `Meta-N` lowest-free, so sequential
+    // RecordVirtual calls always get ascending N (verified live on GNOME 48) — while
+    // GetCurrentState's enumeration order carries no such contract. Stable sort keeps
+    // suffix-less names (never seen for virtual monitors) in enumeration order at the end.
+    out.sort_by_key(|(c, _, _)| connector_index(c));
     out
+}
+
+/// The numeric suffix of a connector name (`"Meta-10"` → 10), recovering creation order
+/// for [`parse_connectors`]. Names without one sort last.
+fn connector_index(name: &str) -> u64 {
+    name.rsplit_once('-').and_then(|(_, n)| n.parse().ok()).unwrap_or(u64::MAX)
 }
 
 /// The first single-quoted string in `s`, e.g. `"'Meta-0', 'MetaVendor'"` → `"Meta-0"`.
@@ -752,12 +793,12 @@ async fn reconfigure(
         *gates = new_flags;
     }
 
-    // 4. Stop the OLD session (old outputs drop; gnome-shell reflows onto the new set),
-    //    then position the new monitors. apply_layout AFTER stop → only the new connectors
-    //    exist, so the connector match (Task 3.2) is unambiguous. (If on-device testing
-    //    shows the new monitors need positioning before the old drop, move apply_layout
-    //    before session.stop.)
+    // 4. Stop the OLD session, WAIT for its monitors to actually disappear (stop is
+    //    asynchronous — see wait_monitors_settle: applying against lingering dying
+    //    connectors crashed gnome-shell live), then position the new monitors. Only
+    //    after settle do just the new connectors exist, making the match unambiguous.
     let _ = session.stop().await;
+    wait_monitors_settle(desired.len()).await;
     apply_layout(desired).await;
 
     // 5. Stop old capture (old nodes already gone; deterministic backstop). The shared gate
@@ -956,6 +997,26 @@ mod tests {
         assert_eq!(conns.len(), 2);
         assert_eq!(conns[0], ("Meta-0".to_string(), 2560, 1440));
         assert_eq!(conns[1], ("Meta-1".to_string(), 1920, 1080));
+    }
+
+    #[test]
+    fn parse_connectors_orders_by_creation_not_enumeration() {
+        // Two monitors at the SAME size: slot→connector matching in apply_layout consumes
+        // the first size match, so parse_connectors must return connectors in creation
+        // order (ascending numeric suffix — Mutter allocates Meta-N lowest-free, so
+        // sequential RecordVirtual calls always yield ascending N; verified live on
+        // GNOME 48). Enumeration order in GetCurrentState is NOT a contract, so this blob
+        // lists Meta-10 before Meta-2; numeric order must win (lexicographic would too).
+        let blob = "(uint32 3, [(('Meta-10', 'MetaVendor', 'Virtual remote monitor', '0x00000b'), \
+[('1920x1080@60.000', 1920, 1080, 60.0, 1.0, [1.0], {'is-current': <true>, 'is-preferred': <true>})], \
+{'is-builtin': <false>}), (('Meta-2', 'MetaVendor', 'Virtual remote monitor', '0x000003'), \
+[('1920x1080@60.000', 1920, 1080, 60.0, 1.0, [1.0], {'is-current': <true>, 'is-preferred': <true>})], \
+{'is-builtin': <false>})], [(0, 0, 1.0, uint32 0, true, [('Meta-10', 'x', 'y', '0xb')], @a{sv} {}), \
+(1920, 0, 1.0, 0, false, [('Meta-2', 'x', 'y', '0x3')], {})], {'layout-mode': <uint32 1>})";
+        let conns = parse_connectors(blob);
+        assert_eq!(conns.len(), 2);
+        assert_eq!(conns[0], ("Meta-2".to_string(), 1920, 1080), "created first (lower N) must come first");
+        assert_eq!(conns[1], ("Meta-10".to_string(), 1920, 1080));
     }
 
     #[test]
