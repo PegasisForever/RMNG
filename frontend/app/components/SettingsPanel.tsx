@@ -218,12 +218,10 @@ export function SettingsPanel({
   const [claude, setClaude] = useState({
     pollSecs: 600,
     pinnedEmail: "",
-    autoSwapOnExhaustion: false,
   });
   const [codex, setCodex] = useState({
     pollSecs: 600,
     pinnedEmail: "",
-    autoSwapOnExhaustion: false,
     usagePolling: true,
   });
   const [codexGroups, setCodexGroups] = useState<{ name: string; accounts: string[] }[]>([]);
@@ -821,14 +819,6 @@ export function SettingsPanel({
                     className={input}
                   />
                 </Field>
-                <label className="col-span-2 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={claude.autoSwapOnExhaustion}
-                    onChange={(e) => setClaude({ ...claude, autoSwapOnExhaustion: e.target.checked })}
-                  />
-                  Auto-swap a clone to another account when usage is exhausted
-                </label>
               </div>
             </Section>
 
@@ -906,14 +896,6 @@ export function SettingsPanel({
                     className={input}
                   />
                 </Field>
-                <label className="col-span-2 flex items-center gap-2 text-sm text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={codex.autoSwapOnExhaustion}
-                    onChange={(e) => setCodex({ ...codex, autoSwapOnExhaustion: e.target.checked })}
-                  />
-                  Auto-swap a clone to another account when usage is exhausted
-                </label>
                 <label className="col-span-2 flex items-center gap-2 text-sm text-slate-600">
                   <input
                     type="checkbox"

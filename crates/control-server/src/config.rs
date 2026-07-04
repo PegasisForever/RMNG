@@ -225,7 +225,7 @@ mod tests {
         // Editor sends the full group list + a codex config patch.
         let incoming = serde_json::json!({
             "codexGroups": [{ "name": "team", "accounts": ["a@o", "b@o"] }],
-            "codex": { "pollSecs": 300, "usagePolling": false, "autoSwapOnExhaustion": true },
+            "codex": { "pollSecs": 300, "usagePolling": false },
         });
         let merged = merge_update(&base, incoming).unwrap();
         assert_eq!(merged.codex_groups.len(), 1);
@@ -233,7 +233,6 @@ mod tests {
         assert_eq!(merged.codex_groups[0].accounts, vec!["a@o".to_string(), "b@o".to_string()]);
         assert_eq!(merged.codex.poll_secs, 300);
         assert!(!merged.codex.usage_polling);
-        assert!(merged.codex.auto_swap_on_exhaustion);
         // An empty array clears all codex groups.
         let cleared = merge_update(&merged, serde_json::json!({ "codexGroups": [] })).unwrap();
         assert!(cleared.codex_groups.is_empty());

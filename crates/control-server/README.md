@@ -80,8 +80,7 @@ used server-side **only** to read 5h/7d usage (429 backoff), never sent to a clo
 **long-lived token** that actually runs Claude Code. Delivery writes the clone's
 `~/.claude/.credentials.json` (long-lived token, refresh **emptied** so the SDK never rotates
 it) — read at request time, so a **running** clone hot-swaps with no restart. **Auto-assign**
-at clone time by usage+load score; **hot-swap** from the UI/`/api/claude/swap`/fleet MCP;
-**auto-swap** to the next-best account on exhaustion (`claude.auto_swap_on_exhaustion`).
+at clone time by usage+load score; **hot-swap** from the UI/`/api/claude/swap`/fleet MCP.
 
 ## Orchestration (`docker`, `provision`, `jobs`)
 

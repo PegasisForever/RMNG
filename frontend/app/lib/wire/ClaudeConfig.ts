@@ -8,8 +8,4 @@ pollSecs: bigint,
 /**
  * Account email pinned to the top of the usage list.
  */
-pinnedEmail: string | null, 
-/**
- * Hot-swap a clone to another account when its usage is exhausted.
- */
-autoSwapOnExhaustion: boolean, };
+pinnedEmail: string | null, };

@@ -10,10 +10,6 @@ pollSecs: bigint,
  */
 pinnedEmail: string | null, 
 /**
- * Hot-swap a clone to another account when its usage is exhausted.
- */
-autoSwapOnExhaustion: boolean, 
-/**
  * Poll the ChatGPT usage endpoint. When false, the poller still refreshes + pushes
  * tokens and publishes base views (with an explanatory `error`), but skips the usage
  * fetch — an escape hatch if the unofficial `/wham/usage` shape drifts.
