@@ -45,7 +45,7 @@ One central encoder feeds both the viewer and the agents' screenshots; raw H.264
 - 5h + 7d usage bars, spend vs. limit, stale/rate-limited flags
 - Live hot-swap of a running clone's account, no restart
 - Named account groups with sticky rotation
-- Auto-assign (usage + load) at clone creation, auto-swap on exhaustion
+- Auto-assign at clone creation; "auto" rotates a clone across all imported accounts as they exhaust
 - Pin, or bind a clone to auto / a group / none
 
 
