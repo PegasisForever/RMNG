@@ -94,10 +94,28 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
             }
         }
     }
-    non_empty("envPresets")
+    let mut changed = non_empty("envPresets")
         || non_empty("linear")
         || non_empty("cloneAccounts")
-        || has_proxmox
+        || has_proxmox;
+    // Legacy single `monitors` array → a "Default" layout preset (one-shot). Only when
+    // the new `layout_presets` is still empty (don't clobber an already-migrated config).
+    if cfg.layout_presets.is_empty() {
+        if let Some(mons) = raw.get("monitors").and_then(|m| m.as_array()) {
+            if !mons.is_empty() {
+                if let Ok(parsed) = serde_json::from_value::<Vec<wire::MonitorSpec>>(
+                    serde_json::Value::Array(mons.clone()),
+                ) {
+                    cfg.layout_presets = vec![wire::LayoutPreset { name: "Default".into(), monitors: parsed }];
+                    if cfg.active_layout.is_empty() {
+                        cfg.active_layout = "Default".into();
+                    }
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -347,6 +365,38 @@ mod tests {
         assert!(ok.setup_complete);
         let ok = merge_update(&base, serde_json::json!({})).unwrap();
         assert!(ok.setup_complete);
+    }
+
+    #[test]
+    fn migrates_legacy_monitors_into_default_preset() {
+        // Simulate an old config.json with a top-level `monitors` array and no presets.
+        let raw: serde_json::Value = serde_json::json!({
+            "monitors": [
+                { "width": 3440, "height": 1440, "x": 0, "y": 0, "primary": true }
+            ]
+        });
+        let mut cfg = AppConfig::default(); // layout_presets empty, active_layout ""
+        let changed = migrate_legacy(&raw, &mut cfg);
+        assert!(changed);
+        assert_eq!(cfg.layout_presets.len(), 1);
+        assert_eq!(cfg.layout_presets[0].name, "Default");
+        assert_eq!(cfg.layout_presets[0].monitors[0].width, 3440);
+        assert_eq!(cfg.active_layout, "Default");
+    }
+
+    #[test]
+    fn migration_noop_when_presets_present() {
+        let raw: serde_json::Value = serde_json::json!({ "monitors": [] });
+        let mut cfg = AppConfig::default();
+        cfg.layout_presets = vec![wire::LayoutPreset {
+            name: "X".into(),
+            monitors: vec![wire::MonitorSpec { width: 800, height: 600, x: 0, y: 0, primary: true }],
+        }];
+        cfg.active_layout = "X".into();
+        // Migration must not clobber an already-migrated config.
+        let _ = migrate_legacy(&raw, &mut cfg);
+        assert_eq!(cfg.layout_presets.len(), 1);
+        assert_eq!(cfg.layout_presets[0].name, "X");
     }
 
     #[test]
