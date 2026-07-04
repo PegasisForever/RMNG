@@ -611,11 +611,6 @@ fn best_scored(app: &App) -> Option<String> {
     pool.first().map(|s| s.email.clone())
 }
 
-/// The recommended account (email) for a new clone (or None if none imported).
-pub fn recommend(app: &App) -> Option<String> {
-    best_scored(app)
-}
-
 /// Resolve a clone request's account selection to a concrete account email.
 pub fn resolve_clone_account(app: &App, requested: Option<&str>) -> Option<String> {
     let emails = app.claude.emails();

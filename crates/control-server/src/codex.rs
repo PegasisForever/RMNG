@@ -590,10 +590,6 @@ fn best_scored(app: &App) -> Option<String> {
     pool.first().map(|s| s.email.clone())
 }
 
-pub fn recommend(app: &App) -> Option<String> {
-    best_scored(app)
-}
-
 pub fn resolve_clone_account(app: &App, requested: Option<&str>) -> Option<String> {
     let emails = app.codex.emails();
     if emails.is_empty() {

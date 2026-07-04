@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { ImagePicker } from "~/components/ImagePicker";
-import { getConfig, recommendedClaudeAccount, recommendedCodexAccount, type ClonePayload } from "~/lib/api";
+import { getConfig, type ClonePayload } from "~/lib/api";
 import type { ClaudeUsage } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
@@ -49,17 +49,13 @@ export function CloneModal({
   const [message, setMessage] = useState("");
   const [agentInstructions, setAgentInstructions] = useState("");
   const [claudeInstructions, setClaudeInstructions] = useState("");
-  // The Claude account email to clone under. Initialized to the first account,
-  // then pre-set to the server's recommendation once it loads (operator can
-  // still change it). The recommendation is fetched, not decided at clone time.
-  // Account selection: "auto" | "<email>" | "group:<name>". Defaults to auto; the
-  // recommendation (below) pre-selects a concrete account when one is available.
+  // The account to clone under: "auto" (rotate across all accounts) | "<email>" |
+  // "group:<name>". Always defaults to auto; the operator picks a specific account
+  // only when they want to override.
   const [account, setAccount] = useState("auto");
-  const [recommended, setRecommended] = useState<string | null>(null);
   // Account groups (from config), for the group options in the picker.
   const [groups, setGroups] = useState<CloneGroup[]>([]);
   const [codexAccount, setCodexAccount] = useState("auto");
-  const [codexRecommended, setCodexRecommended] = useState<string | null>(null);
   const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
   // Presets (from config) + the chosen one ("" = auto-by-ticket-labels; create/plain
   // require an explicit pick, defaulted to the first preset below).
@@ -85,48 +81,6 @@ export function CloneModal({
       setPreset(presets[0].name);
     }
   }, [mode, presets, preset]);
-
-  useEffect(() => {
-    if (accounts.length === 0) return;
-    let cancelled = false;
-    recommendedClaudeAccount()
-      .then((r) => {
-        if (cancelled || !r.email) return;
-        if (accounts.some((a) => a.email === r.email)) {
-          setRecommended(r.email);
-          setAccount(r.email); // pre-select the recommendation
-        }
-      })
-      .catch(() => {
-        // No recommendation available — keep the default (first account).
-      });
-    return () => {
-      cancelled = true;
-    };
-    // Mount-only: the dialog is short-lived; one fetch when it opens.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (codexAccounts.length === 0) return;
-    let cancelled = false;
-    recommendedCodexAccount()
-      .then((r) => {
-        if (cancelled || !r.email) return;
-        if (codexAccounts.some((a) => a.email === r.email)) {
-          setCodexRecommended(r.email);
-          setCodexAccount(r.email); // pre-select the recommendation
-        }
-      })
-      .catch(() => {
-        // No recommendation available — keep the default.
-      });
-    return () => {
-      cancelled = true;
-    };
-    // Mount-only: the dialog is short-lived; one fetch when it opens.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const parsed = parseTicketInput(ticket);
   // A source image is always required; then: `existing` needs a parseable ticket;
@@ -329,7 +283,6 @@ export function CloneModal({
               accounts={accounts}
               value={account}
               onChange={setAccount}
-              recommended={recommended}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100"
             />
           </label>
@@ -343,7 +296,6 @@ export function CloneModal({
               accounts={codexAccounts}
               value={codexAccount}
               onChange={setCodexAccount}
-              recommended={codexRecommended}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none"
             />
           </label>

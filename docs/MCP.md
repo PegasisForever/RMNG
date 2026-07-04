@@ -63,7 +63,6 @@ clone → `"unknown clone"`; an unreachable daemon → `"clone-daemon MCP unreac
 | `select` | `clone` | set the viewer's selected host |
 | `clone` | `image`, `hostname` | clone from a source image (e.g. `pegasis0/rmng-template:latest`) → `"clone started: op …"` |
 | `delete` | `clone` | delete a host → `"delete started: op …"` |
-| `claude_recommended` | — | `{email}` recommended account |
 | `claude_swap` | `clone`, `account?` (email/`auto`) | hot-swap the clone's Claude account |
 | `set_state` | `clone`, `report?`, `note?` | as per-clone, but clone from the arg |
 | `send_message` | `clone`, `text` | send a chat message to the clone's host agent (async — the turn runs detached; `409`-style error if one is already running) → `"message sent to …"` |

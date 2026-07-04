@@ -137,7 +137,6 @@ fn tools_for(scope: Scope) -> Value {
             json!(["image", "hostname"]),
         ));
         tools.push(tool("delete", "Delete a host", clone_arg.clone(), json!(["clone"])));
-        tools.push(tool("claude_recommended", "Recommended Claude account for a new clone", json!({}), json!([])));
         tools.push(tool(
             "claude_swap",
             "Hot-swap a clone's Claude account",
@@ -150,7 +149,6 @@ fn tools_for(scope: Scope) -> Value {
             }),
             json!(["clone", "account"]),
         ));
-        tools.push(tool("codex_recommended", "Recommended Codex account for a new clone", json!({}), json!([])));
         tools.push(tool(
             "codex_swap",
             "Hot-swap a clone's Codex account",
@@ -306,9 +304,6 @@ async fn call_tool(st: &McpState, caller: Option<&str>, name: &str, args: Value)
             let op = jobs::start_delete(app, clone).map_err(|e| e.to_string())?;
             Ok(text(format!("delete started: op {}", op.id)))
         }
-        "claude_recommended" => {
-            Ok(text(json!({ "email": crate::claude::recommend(app) }).to_string()))
-        }
         "claude_swap" => {
             let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;
             let account = args.get("account").and_then(Value::as_str).unwrap_or("auto");
@@ -353,9 +348,6 @@ async fn call_tool(st: &McpState, caller: Option<&str>, name: &str, args: Value)
                 (None, Some(e)) => format!("swapped {clone} → {e}"),
                 _ => format!("swapped {clone} → none (no token)"),
             }))
-        }
-        "codex_recommended" => {
-            Ok(text(json!({ "email": crate::codex::recommend(app) }).to_string()))
         }
         "codex_swap" => {
             let clone = args.get("clone").and_then(Value::as_str).ok_or("clone required")?;

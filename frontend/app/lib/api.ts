@@ -102,9 +102,6 @@ export const checkClaudeImport = (host: string) =>
  *  OAuth pair (and owns its refresh lifecycle), then clears the clone's credentials file. */
 export const importClaudeAccount = (host: string) =>
   postJson("/api/claude/import", { host }) as Promise<{ email: string; cleared: boolean }>;
-/** The account the clone dialog should pre-select (scored by usage + load). */
-export const recommendedClaudeAccount = () =>
-  getJson("/api/claude/recommended") as Promise<{ email: string | null }>;
 /** Change a clone's Claude account/group. `account` is "auto", "none", an email, or
  *  "group:<name>". `account` in the reply is null when set to "none". */
 export const swapClaudeAccount = (host: string, account: string) =>
@@ -126,9 +123,6 @@ export const checkCodexImport = (host: string) =>
 
 export const importCodexAccount = (host: string) =>
   postJson("/api/codex/import", { host }) as Promise<{ email: string; cleared: boolean }>;
-
-export const recommendedCodexAccount = () =>
-  getJson("/api/codex/recommended") as Promise<{ email: string | null }>;
 
 export const swapCodexAccount = (host: string, account: string) =>
   postJson("/api/codex/swap", { host, account }) as Promise<{

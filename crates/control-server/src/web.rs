@@ -67,13 +67,11 @@ pub fn router(app: App) -> Router {
         .route("/api/claude/import/check", post(claude_import_check))
         .route("/api/claude/import", post(claude_import))
         .route("/api/claude/refresh", post(claude_refresh))
-        .route("/api/claude/recommended", get(claude_recommended))
         .route("/api/claude/swap", post(claude_swap))
         .route("/api/claude/rotate", post(claude_rotate))
         .route("/api/codex/import/check", post(codex_import_check))
         .route("/api/codex/import", post(codex_import))
         .route("/api/codex/refresh", post(codex_refresh))
-        .route("/api/codex/recommended", get(codex_recommended))
         .route("/api/codex/swap", post(codex_swap))
         .route("/api/codex/rotate", post(codex_rotate))
         .route("/api/chat/:id", get(chat_get).post(chat_send))
@@ -947,11 +945,6 @@ async fn claude_refresh(State(app): State<App>) -> Json<serde_json::Value> {
     Json(json!({ "ok": true, "rateLimited": any429 }))
 }
 
-/// `GET /api/claude/recommended` — the account the clone dialog should pre-select.
-async fn claude_recommended(State(app): State<App>) -> Json<serde_json::Value> {
-    Json(json!({ "email": crate::claude::recommend(&app) }))
-}
-
 #[derive(Deserialize)]
 struct SwapReq {
     host: String,
@@ -1057,11 +1050,6 @@ async fn codex_import(State(app): State<App>, Json(req): Json<CodexImportReq>) -
 async fn codex_refresh(State(app): State<App>) -> Json<serde_json::Value> {
     let any429 = crate::codex::poll_once(&app).await.unwrap_or(false);
     Json(json!({ "ok": true, "rateLimited": any429 }))
-}
-
-/// `GET /api/codex/recommended` — the account the clone dialog should pre-select.
-async fn codex_recommended(State(app): State<App>) -> Json<serde_json::Value> {
-    Json(json!({ "email": crate::codex::recommend(&app) }))
 }
 
 #[derive(Deserialize)]

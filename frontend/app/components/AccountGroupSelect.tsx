@@ -18,7 +18,6 @@ export function AccountGroupSelect({
   accounts,
   value,
   onChange,
-  recommended,
   className,
 }: {
   groups: CloneGroup[];
@@ -26,7 +25,6 @@ export function AccountGroupSelect({
   accounts: ClaudeUsage[];
   value: string;
   onChange: (value: string) => void;
-  recommended?: string | null;
   className?: string;
 }) {
   return (
@@ -47,7 +45,6 @@ export function AccountGroupSelect({
           {accounts.map((a) => (
             <option key={a.id} value={a.email}>
               {accountLabel(a)}
-              {a.email === recommended ? " · recommended" : ""}
             </option>
           ))}
         </optgroup>

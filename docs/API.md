@@ -41,13 +41,11 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/claude/import/check` | Check a clone is signed in via claude.ai | 200 `{ok,email,orgName,subscriptionType}` |
 | POST | `/api/claude/import` | Import a Claude account from a signed-in clone | 200 `{ok,email,cleared}` |
 | POST | `/api/claude/refresh` | Force one usage poll now | 200 `{ok,rateLimited}` |
-| GET | `/api/claude/recommended` | Recommended account for a new clone | 200 `{email}` |
 | POST | `/api/claude/swap` | Change a clone's Claude account/group (email/`auto`/`group:<name>`/`none`) | 200 `{ok,account,group,selection}` |
 | POST | `/api/claude/rotate` | Run one group-rotation pass now | 200 `{ok}` |
 | POST | `/api/codex/import/check` | Check a clone is signed in via ChatGPT | 200 `{ok,email,plan,accountId}` |
 | POST | `/api/codex/import` | Import a Codex account from a signed-in clone | 200 `{ok,email,cleared}` |
 | POST | `/api/codex/refresh` | Force one Codex usage poll now | 200 `{ok,rateLimited}` |
-| GET | `/api/codex/recommended` | Recommended Codex account for a new clone | 200 `{email}` |
 | POST | `/api/codex/swap` | Change a clone's Codex account/group | 200 `{ok,account,group,selection}` |
 | POST | `/api/codex/rotate` | Run one Codex group-rotation pass now | 200 `{ok}` |
 | GET | `/api/chat/:id` | Chat snapshot for a host | 200 `ChatSnapshot` |
@@ -294,7 +292,6 @@ and collapses the environment report (daemon reachable, sock mount, render node)
 | `POST /api/claude/import/check` | `{host}` | `{ok, email, orgName, subscriptionType}` | Run `claude auth status` in the clone; require a claude.ai login and return its identity |
 | `POST /api/claude/import` | `{host}` | `{ok, email, cleared}` | Harvest the clone's OAuth pair (read off its disk) into the server's secret store, then delete the clone's credentials file |
 | `POST /api/claude/refresh` | — | `{ok, rateLimited}` | Force one usage poll; `rateLimited` if any account hit 429 |
-| `GET /api/claude/recommended` | — | `{email}` | Pinned account, else lowest-usage; `null` if none |
 | `POST /api/claude/swap` | `{host, account}` | `{ok, account, group, selection}` | Resolve `account` (email / `auto` / `group:<name>` / `none`) and write the clone's `~/.claude/.credentials.json` via `docker exec`. A `group:` selection binds the clone to that group for rotation; `none` removes the credentials file (`account` null); the verbatim choice is echoed as `selection` and stored on the host (`502` if unreachable) |
 | `POST /api/claude/rotate` | — | `{ok}` | Run one group-rotation pass immediately (the rotator otherwise runs every 10 min). Sticky: a clone keeps its account while it stays eligible (member, imported, 5h usage ≤ 90%); only clones whose account fell out of eligibility move, to the least-loaded / least-used member |
 
@@ -314,7 +311,6 @@ account's OAuth pair; clones receive only a short-lived injected `~/.codex/auth.
 | `POST /api/codex/import/check` | `{host}` | `{ok, email, plan, accountId}` | Confirms the clone is signed in to Codex via ChatGPT (reads `~/.codex/auth.json`, decodes the id_token JWT). Errors if signed in with an API key |
 | `POST /api/codex/import` | `{host}` | `{ok, email, cleared}` | Harvests the OAuth triple, stores it (0600 `codex-accounts.json`), clears the clone's auth.json |
 | `POST /api/codex/refresh` | — | `{ok, rateLimited}` | Force one usage poll; `rateLimited` if any account hit 429 |
-| `GET /api/codex/recommended` | — | `{email}` | Pinned account, else lowest-usage; `null` if none |
 | `POST /api/codex/swap` | `{host, account}` | `{ok, account, group, selection}` | Resolve `account` (email / `auto` / `group:<name>` / `none`) and write the clone's `~/.codex/auth.json` via `docker exec`. A `group:` selection binds the clone to that group for rotation; `none` removes the auth file; the verbatim choice is echoed as `selection` and stored on the host (`502` if unreachable) |
 | `POST /api/codex/rotate` | — | `{ok}` | Run one Codex group-rotation pass immediately |
 
