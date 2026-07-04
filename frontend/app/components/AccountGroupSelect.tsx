@@ -1,7 +1,7 @@
 // A Claude-account picker shared by the clone modal and the per-host change control.
-// Value is one of: "auto" (server picks the best account), "none" (install no token),
-// an account email, or "group:<name>" (binds the clone to a group, which the server
-// rotates).
+// Value is one of: "auto" (rotate across all imported accounts), "none" (install no
+// token), an account email, or "group:<name>" (binds the clone to a named pool). The
+// server rotates "auto" and group clones; a pinned email is left fixed.
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { ClaudeUsage } from "~/lib/types";
 
@@ -31,7 +31,7 @@ export function AccountGroupSelect({
 }) {
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)} className={className}>
-      <option value="auto">Auto (best account)</option>
+      <option value="auto">Auto (all accounts)</option>
       <option value="none">None (no token)</option>
       {groups.length > 0 ? (
         <optgroup label="Groups">

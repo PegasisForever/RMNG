@@ -39,8 +39,8 @@ The two-pane layout stays Notes/Chat (`pane: "notes" | "chat"`) — the planned 
   clone from — the clone streams as an `Operation`.
 - **Claude account controls** (extending `ClaudeAccountsPanel` + the per-host card): show the
   assigned account, **hot-swap** a running clone's token to another account (`POST
-  /api/claude/swap`), and a per-host/global **auto-swap** toggle (swap when usage is
-  exhausted). Usage bars drive both the recommendation and the auto-swap trigger.
+  /api/claude/swap`). Usage bars drive the recommendation; "auto" clones rotate across
+  all imported accounts as they exhaust.
 
 ## Types
 

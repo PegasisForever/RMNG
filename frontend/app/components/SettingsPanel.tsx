@@ -825,7 +825,7 @@ export function SettingsPanel({
             {/* Claude groups (named account pools; sticky — a clone moves only when its account exhausts). */}
             <Section
               title="Claude groups"
-              hint="A pool of accounts. A clone bound to a group keeps its account (preserving its prompt cache) until that account passes 90% 5h usage, then moves to the least-used member."
+              hint="A pool of accounts. A clone bound to a group keeps its account (preserving its prompt cache) until that account is exhausted (80% 5h or 95% 7d), then moves to the least-used member."
             >
               <div className="space-y-3">
                 {claudeGroups.length === 0 ? (

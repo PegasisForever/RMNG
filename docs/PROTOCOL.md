@@ -180,8 +180,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   (blank `linearKey` keeps the stored one; omitted row deletes). One-shot migration at
   load: legacy `envPresets` seed `presets` (no labels/keys); legacy per-workspace `linear`
   keys are dropped (re-enter per preset in Settings).
-- **`ClaudeConfig`**: `poll_secs` (`600`, floored 15), `pinned_email?`,
-  `auto_swap_on_exhaustion` (bool).
+- **`ClaudeConfig`**: `poll_secs` (`600`, floored 15), `pinned_email?`.
 - <a id="claude-accounts"></a>**Claude accounts** live outside config, in the server's 0600
   secret store `claude-accounts.json`: per account an OAuth pair (`access_token` +
   single-use `refresh_token`, both **secret**), harvested from a signed-in clone at import.
@@ -191,8 +190,10 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   clone hot-swaps without restart (written via `docker exec` into the clone).
 - **`CloneGroup`**: `name`, `accounts` (member emails). A clone bound to a group
   (`Host.claude_group`) sticks to its account (preserving its prompt cache) until that
-  account passes 90% 5h usage or leaves the group; the 10-min rotator then moves it to
-  the least-loaded / least-used member. Selected at clone/swap time as `group:<name>`.
+  account is exhausted (80% 5h or 95% 7d) or leaves the group; the 10-min rotator then
+  moves it to the least-loaded / least-used member. Selected at clone/swap time as
+  `group:<name>`. A clone selected as `auto` rotates across all imported accounts using
+  this same sticky rotation.
 
 <a id="codex-accounts"></a>**Codex accounts** — server-owned single-token model, identical in spirit to Claude accounts.
 
@@ -209,8 +210,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 - **Usage:** `GET https://chatgpt.com/backend-api/wham/usage` (Bearer + `ChatGPT-Account-Id`);
   windows map to 5h/weekly by `limit_window_seconds`. Disable with `codex.usagePolling=false`
   (refresh + push still run).
-- **`CodexConfig`**: `poll_secs`, `pinned_email?`, `auto_swap_on_exhaustion` (bool),
-  `usage_polling` (bool, default `true`).
+- **`CodexConfig`**: `poll_secs`, `pinned_email?`, `usage_polling` (bool, default `true`).
 - **`codexGroups`** (`CloneGroup[]`): same structure as `clone_groups`, used for Codex
   account rotation. Selected at clone/swap time as `group:<name>`.
 - **`Host`** carries `codexAccountEmail` / `codexGroup` / `codexSelection` alongside the
