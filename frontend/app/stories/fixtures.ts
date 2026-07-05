@@ -240,7 +240,7 @@ export const deleteOperation: Operation = {
 // --- redacted app config (for the Settings story) --------------------------
 
 export const appConfig: AppConfigRedacted = {
-  listen: { web: 9000, video: 9001, cloneMcp: 9002, globalMcp: 9003, daemonMcp: 9004, forward: 9005 },
+  listen: { web: 9000, video: 9001, cloneMcp: 9002, globalMcp: 9003, daemonMcp: 9004, forward: 9005, bastion: 2222 },
   agentPort: 4096,
   dataDir: "/data",
   staticDir: "",
@@ -282,6 +282,11 @@ export const appConfig: AppConfigRedacted = {
     },
   ],
   chroma: "yuv420",
+  ssh: {
+    enabled: true,
+    authorizedKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop"],
+    publicHost: "rmng.example.com",
+  },
   detectorInferenceUrl: "http://detector.internal:8080",
   agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
 };

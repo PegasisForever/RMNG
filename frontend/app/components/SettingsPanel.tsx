@@ -221,7 +221,14 @@ export function SettingsPanel({
     autoReset: false,
   });
   const [codexGroups, setCodexGroups] = useState<{ name: string; accounts: string[] }[]>([]);
-  const [listen, setListen] = useState({ web: 9000, video: 9001, cloneMcp: 9002, globalMcp: 9003, daemonMcp: 9004 });
+  const [listen, setListen] = useState({
+    web: 9000,
+    video: 9001,
+    cloneMcp: 9002,
+    globalMcp: 9003,
+    daemonMcp: 9004,
+    bastion: 2222,
+  });
   const [agentPort, setAgentPort] = useState(4096);
   const [dataDir, setDataDir] = useState("");
   const [staticDir, setStaticDir] = useState("");
@@ -229,6 +236,13 @@ export function SettingsPanel({
   const [chroma, setChroma] = useState<ChromaMode>("yuv420");
   const [detectorInferenceUrl, setDetectorInferenceUrl] = useState("");
   const [agentPlaybook, setAgentPlaybook] = useState("");
+  // SSH access: pasted authorized_keys (one per line) installed on the bastion + every
+  // clone, plus an optional public-host override for the copied `ssh -J …` command.
+  const [ssh, setSsh] = useState<{ enabled: boolean; authorizedKeys: string[]; publicHost: string }>({
+    enabled: false,
+    authorizedKeys: [],
+    publicHost: "",
+  });
 
   function load(c: AppConfigRedacted) {
     setCfg(c);
@@ -261,6 +275,11 @@ export function SettingsPanel({
     setChroma(c.chroma);
     setDetectorInferenceUrl(c.detectorInferenceUrl);
     setAgentPlaybook(c.agentPlaybook);
+    setSsh({
+      enabled: c.ssh?.enabled ?? false,
+      authorizedKeys: c.ssh?.authorizedKeys ?? [],
+      publicHost: c.ssh?.publicHost ?? "",
+    });
     setPresets(
       c.presets.map((p) => ({
         name: p.name,
@@ -399,6 +418,7 @@ export function SettingsPanel({
         staticDir,
         cloneSocket,
         chroma,
+        ssh,
         detectorInferenceUrl,
         agentPlaybook,
         presets: presets
@@ -1011,6 +1031,65 @@ export function SettingsPanel({
                   className={input}
                 />
               </Field>
+            </Section>
+
+            {/* SSH Access — public keys installed on the bastion + every clone, so
+                "Copy SSH command" (per-clone) and `rmng ssh <clone>` work with no
+                laptop-side config. Keys apply live (bastion re-render + push to running
+                clones); the bastion port itself is fixed at startup, shown for reference. */}
+            <Section
+              title="SSH Access"
+              effect="immediate"
+              hint="Paste public keys to allow `ssh -J rmng@<host>:<port> rmng@<clone>` (or the per-clone Copy SSH command button). Installed on the bastion and every clone; propagates to running clones within ~10s (or immediately on save)."
+            >
+              <div className="space-y-3">
+                <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={ssh.enabled}
+                    onChange={(e) => setSsh({ ...ssh, enabled: e.target.checked })}
+                  />
+                  Enable SSH access
+                </label>
+                <Field label="Authorized public keys (one per line)">
+                  <textarea
+                    value={ssh.authorizedKeys.join("\n")}
+                    onChange={(e) =>
+                      setSsh({
+                        ...ssh,
+                        authorizedKeys: e.target.value.split("\n").filter((line) => line.trim() !== ""),
+                      })
+                    }
+                    placeholder="ssh-ed25519 AAAA… me@laptop"
+                    spellCheck={false}
+                    rows={4}
+                    className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+                  />
+                </Field>
+                <Field label="Public host override">
+                  <input
+                    value={ssh.publicHost}
+                    onChange={(e) => setSsh({ ...ssh, publicHost: e.target.value })}
+                    placeholder="auto — inferred from this page's address"
+                    spellCheck={false}
+                    className={input}
+                  />
+                </Field>
+                <div>
+                  <span className="mb-0.5 block text-xs font-medium text-slate-500 dark:text-slate-400">
+                    Bastion port
+                  </span>
+                  <input
+                    value={listen.bastion}
+                    readOnly
+                    disabled
+                    className={`${input} disabled:bg-slate-50 dark:disabled:bg-slate-900 disabled:text-slate-400 dark:disabled:text-slate-500`}
+                  />
+                  <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
+                    The bastion `sshd` port clones are reached through. Fixed at startup.
+                  </p>
+                </div>
+              </div>
             </Section>
 
             {/* Advanced (ports + dirs; need a full control-server restart). */}

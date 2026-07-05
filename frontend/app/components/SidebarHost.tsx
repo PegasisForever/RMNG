@@ -1,10 +1,11 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowRight, EllipsisVertical } from "lucide-react";
+import { ArrowRight, EllipsisVertical, Terminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.png";
 import claudeLogo from "../assets/claude.png";
+import { buildSshCommand } from "~/lib/ssh";
 import type { Host, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
@@ -209,6 +210,42 @@ export interface SidebarHostProps {
   /** Live runtime status for this host's forwards (from the `forwards` SSE event),
    *  merged into the compact forwards chips by rule id. */
   forwardRuntime?: ForwardRuntime[];
+  /** `ssh.publicHost` (config) — the `-J` jump target for the copied command. Empty ⇒
+   *  falls back to `window.location.hostname` (this page's own address). */
+  sshPublicHost: string;
+  /** `listen.bastion` — the bastion `sshd` port the copied command jumps through. */
+  bastionPort: number;
+}
+
+/** A single overflow-menu item that copies `command` to the clipboard and shows a
+ *  brief "Copied!" label before asking the menu to close. Kept separate from the
+ *  plain-text `item()` helper because it needs its own transient state + delayed
+ *  close (the other items close immediately on click). */
+function CopySshMenuItem({ command, onDone }: { command: string; onDone: () => void }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={async (e) => {
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(command);
+        } catch {
+          // Clipboard write failed (e.g. insecure context) — still close normally;
+          // the command is short enough to retype from the CLI (`rmng ssh <clone>`).
+        }
+        setCopied(true);
+        setTimeout(onDone, 900);
+      }}
+      title={command}
+      className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
+    >
+      <Terminal className="size-4 shrink-0" />
+      {copied ? "Copied!" : "Copy SSH command"}
+    </button>
+  );
 }
 
 /** The per-host overflow menu (⋯) — collapses the commit / change-account / delete
@@ -222,6 +259,7 @@ function OverflowMenu({
   onChangeAccount,
   onPortForward,
   onDelete,
+  sshCommand,
 }: {
   hostId: string;
   managed: boolean;
@@ -230,6 +268,9 @@ function OverflowMenu({
   onChangeAccount: () => void;
   onPortForward: () => void;
   onDelete: () => void;
+  /** The ready-to-paste `ssh -J …` one-liner for this clone. Undefined for unmanaged
+   *  rows (no real container/sshd to jump to), which hides the menu item. */
+  sshCommand?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -299,6 +340,7 @@ function OverflowMenu({
               {item("Commit to image…", onCommit)}
               {item("Change account…", onChangeAccount)}
               {item("Port forward…", onPortForward)}
+              {sshCommand ? <CopySshMenuItem command={sshCommand} onDone={() => setOpen(false)} /> : null}
               <div className="my-1 h-px bg-slate-100 dark:bg-slate-700" />
             </>
           ) : null}
@@ -321,11 +363,18 @@ export function SidebarHost({
   onChangeAccount,
   onPortForward,
   forwardRuntime,
+  sshPublicHost,
+  bastionPort,
 }: SidebarHostProps) {
   const busy = op?.status === "running";
   // Managed clones (backed by a container named after the host id) get the commit /
   // account actions; plain unmanaged rows only get remove.
   const managed = host.managed === true;
+  // Only managed clones run a real sshd to jump into (Task 7/8 provisioning) — an
+  // unmanaged row has no container, so no command is offered for it.
+  const sshCommand = managed
+    ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, host.id)
+    : undefined;
   const status = effectiveStatus(host);
   const claudeSel = accountSelection(host.claudeAccountEmail, host.claudeSelection, host.claudeGroup);
   const codexSel = accountSelection(host.codexAccountEmail, host.codexSelection, host.codexGroup);
@@ -416,6 +465,7 @@ export function SidebarHost({
             onChangeAccount={onChangeAccount}
             onPortForward={onPortForward}
             onDelete={onDelete}
+            sshCommand={sshCommand}
           />
         </div>
 

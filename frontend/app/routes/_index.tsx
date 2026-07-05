@@ -133,6 +133,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       stats={stats}
       forwards={forwards}
       cloneCpus={cfg.docker.cloneCpus}
+      sshPublicHost={cfg.ssh?.publicHost ?? ""}
+      bastionPort={cfg.listen.bastion}
     />
   );
 }
@@ -142,11 +144,18 @@ function Dashboard({
   stats,
   forwards,
   cloneCpus,
+  sshPublicHost,
+  bastionPort,
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
   forwards: Record<string, ForwardRuntime[]>;
   cloneCpus: number;
+  /** `ssh.publicHost` (config) — threaded down to each sidebar row's copied SSH
+   *  command; empty ⇒ falls back to `window.location.hostname`. */
+  sshPublicHost: string;
+  /** `listen.bastion` — the bastion `sshd` port the copied SSH commands jump through. */
+  bastionPort: number;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
@@ -301,6 +310,8 @@ function Dashboard({
           operations={state.operations}
           selectedId={state.selected}
           cloneCpus={cloneCpus}
+          sshPublicHost={sshPublicHost}
+          bastionPort={bastionPort}
           presetNames={state.layoutPresetNames ?? []}
           activeLayout={state.activeLayout ?? ""}
           onActivateLayout={(name) => run(activateLayout(name))}

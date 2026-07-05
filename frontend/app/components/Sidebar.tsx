@@ -40,6 +40,12 @@ export interface SidebarProps {
   selectedId: string | null;
   /** `docker.cloneCpus` — normalizes each host row's CPU usage figure. */
   cloneCpus: number;
+  /** `ssh.publicHost` (config) — the `-J` jump target for each row's copied SSH
+   *  command. Empty ⇒ each row falls back to `window.location.hostname`. */
+  sshPublicHost: string;
+  /** `listen.bastion` — the bastion `sshd` port each row's copied SSH command jumps
+   *  through. */
+  bastionPort: number;
   /** Layout preset names (config order) — the segmented switcher buttons. */
   presetNames: string[];
   /** The active preset name (highlighted). */
@@ -76,6 +82,8 @@ export function Sidebar({
   operations,
   selectedId,
   cloneCpus,
+  sshPublicHost,
+  bastionPort,
   presetNames,
   activeLayout,
   onActivateLayout,
@@ -203,6 +211,8 @@ export function Sidebar({
                     stats={stats[host.id]}
                     forwardRuntime={forwards[host.id]}
                     cloneCpus={cloneCpus}
+                    sshPublicHost={sshPublicHost}
+                    bastionPort={bastionPort}
                     selected={selectedId === host.id}
                     op={opForHost(host.id)}
                     onSelect={() => onSelectHost(host)}
