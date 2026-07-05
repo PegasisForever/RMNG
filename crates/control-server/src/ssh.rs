@@ -103,7 +103,8 @@ pub fn ensure_hostkey(key_path: &Path) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("chmod 0700 {}", parent.display()))?;
         }
     }
     let status = std::process::Command::new("ssh-keygen")
