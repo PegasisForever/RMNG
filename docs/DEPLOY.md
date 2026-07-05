@@ -142,8 +142,8 @@ no clone restart). Existing clones created before the upgrade are migrated the s
   clone's CPU/memory limit and competes fleet-wide (fine for a small trusted fleet).
 - If `rmng-buildkit` is down, in-clone `docker build` fails until it is back; the clone's local
   `default` builder remains as a manual fallback: `docker buildx use default`.
-- Turn the whole feature off with `docker.buildInfraEnabled = false` in config.json (or
-  Settings). This is a pure "stop managing": the reconciler stops touching clones and no infra
+- Turn the whole feature off with `docker.buildInfraEnabled = false` in config.json.
+  This is a pure "stop managing": the reconciler stops touching clones and no infra
   is ensured; already-created infra containers and already-migrated clone config are left in
   place (remove them manually if you want them gone).
 

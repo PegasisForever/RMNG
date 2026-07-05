@@ -76,6 +76,11 @@ pub const LABEL_MANAGED: &str = "rmng.managed";
 /// (`list_managed_containers`) and the boot reconcile's "unknown managed container" warning,
 /// exactly like the `rmng-self-upgrade` helper.
 pub const LABEL_INFRA: &str = "rmng.infra";
+/// Config fingerprint stamped on an infra container whose spec has settings beyond its
+/// image (e.g. `rmng-buildkit`'s GC cap baked into `buildkitd.toml`). A change here forces
+/// a recreate even when the image tag is unchanged, so a `buildkit_cache_gb` bump actually
+/// takes effect. Absent on containers with no such settings (e.g. `rmng-registry`).
+pub const LABEL_INFRA_CONFIG: &str = "rmng.infra-config";
 
 /// The clone-daemon media socket bind target inside every clone.
 const SOCK_DIR: &str = "/srv/rmng-sock";
@@ -277,6 +282,10 @@ struct InfraSpec {
     privileged: bool,
     /// Files dropped into the created-but-not-started container (e.g. `buildkitd.toml`).
     files: Vec<TarEntry>,
+    /// Fingerprint of image-independent config baked into this container (e.g. the buildkit
+    /// GC cap). When it differs from the running container's `rmng.infra-config` label, the
+    /// container is recreated even if the image is unchanged. `None` = image is the only spec.
+    config_fingerprint: Option<String>,
 }
 
 /// A captured control-server run-spec: everything `create_container` needs to recreate our
@@ -843,6 +852,7 @@ impl DockerCtl {
             }],
             privileged: false,
             files: vec![],
+            config_fingerprint: None,
         })
         .await?;
 
@@ -871,6 +881,7 @@ impl DockerCtl {
                 uid: 0,
                 gid: 0,
             }],
+            config_fingerprint: Some(cfg.buildkit_cache_gb.to_string()),
         })
         .await?;
         Ok(())
@@ -889,11 +900,17 @@ impl DockerCtl {
                 let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
                 let cur_image =
                     info.config.as_ref().and_then(|c| c.image.clone()).unwrap_or_default();
-                if cur_image != spec.image {
+                let cur_fingerprint = info
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.labels.as_ref())
+                    .and_then(|l| l.get(LABEL_INFRA_CONFIG))
+                    .cloned();
+                if cur_image != spec.image || cur_fingerprint != spec.config_fingerprint {
                     tracing::info!(
                         target: "docker",
-                        "{}: image {cur_image:?} → {:?}, recreating",
-                        spec.name, spec.image
+                        "{}: image {cur_image:?}→{:?} / config {cur_fingerprint:?}→{:?}, recreating",
+                        spec.name, spec.image, spec.config_fingerprint
                     );
                     self.stop_container(spec.name).await.ok();
                     self.remove_container(spec.name).await.ok();
@@ -924,7 +941,13 @@ impl DockerCtl {
             image: Some(spec.image.clone()),
             cmd: spec.cmd.clone(),
             env: if spec.env.is_empty() { None } else { Some(spec.env.clone()) },
-            labels: Some(HashMap::from([(LABEL_INFRA.to_string(), "1".to_string())])),
+            labels: Some({
+                let mut m = HashMap::from([(LABEL_INFRA.to_string(), "1".to_string())]);
+                if let Some(fp) = &spec.config_fingerprint {
+                    m.insert(LABEL_INFRA_CONFIG.to_string(), fp.clone());
+                }
+                m
+            }),
             host_config: Some(host_config),
             networking_config: Some(NetworkingConfig {
                 endpoints_config: Some(HashMap::from([(

@@ -104,14 +104,18 @@ pub async fn run(app: App) {
         if !app.config().docker.build_infra_enabled {
             continue;
         }
-        for host in app.store.get().hosts.into_iter().filter(|h| h.managed) {
+        let managed: Vec<_> = app.store.get().hosts.into_iter().filter(|h| h.managed).collect();
+        for host in &managed {
             if done.contains(&host.id) {
                 continue;
             }
             if app.docker.is_running(&host.id).await.unwrap_or(false) && try_apply(&app, &host.id).await {
-                done.insert(host.id);
+                done.insert(host.id.clone());
             }
         }
+        // Keep the once-applied set bounded to clones that still exist + are managed.
+        let current_managed_ids: HashSet<String> = managed.iter().map(|h| h.id.clone()).collect();
+        done.retain(|id| current_managed_ids.contains(id));
     }
 }
 
@@ -257,6 +261,18 @@ mod tests {
             merge_mirror_daemon_json(existing).unwrap().is_none(),
             "already-applied config must produce no write (⇒ no SIGHUP)"
         );
+    }
+
+    #[test]
+    fn merge_replaces_malformed_scalar_with_array() {
+        // `registry-mirrors` present but a scalar string (not an array) → the malformed value
+        // is replaced by a proper array carrying our mirror.
+        let existing = r#"{"registry-mirrors":"http://legacy:5000"}"#;
+        let out = merge_mirror_daemon_json(existing).unwrap().expect("must write");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let mirrors = v["registry-mirrors"].as_array().expect("scalar replaced by array");
+        assert!(mirrors.iter().any(|m| m == "http://rmng-registry:5000"), "ours present");
+        assert_eq!(v["insecure-registries"][0], "rmng-registry:5000");
     }
 
     #[test]
