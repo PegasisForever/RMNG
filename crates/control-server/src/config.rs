@@ -560,6 +560,53 @@ mod tests {
         let none = serde_json::json!({ "layoutPresets": [] });
         assert!(merge_update(&base, none).is_ok());
     }
+
+    #[test]
+    fn merge_replaces_ssh_authorized_keys_wholesale() {
+        let mut base = AppConfig::default();
+        base.ssh.authorized_keys = vec!["ssh-ed25519 OLD a".into()];
+        let incoming = serde_json::json!({
+            "ssh": { "authorizedKeys": ["ssh-ed25519 NEW b", "ssh-ed25519 NEW c"] }
+        });
+        let merged = merge_update(&base, incoming).unwrap();
+        assert_eq!(
+            merged.ssh.authorized_keys,
+            vec!["ssh-ed25519 NEW b".to_string(), "ssh-ed25519 NEW c".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_can_clear_ssh_authorized_keys() {
+        let mut base = AppConfig::default();
+        base.ssh.authorized_keys = vec!["ssh-ed25519 OLD a".into()];
+        let merged = merge_update(&base, serde_json::json!({ "ssh": { "authorizedKeys": [] } })).unwrap();
+        assert!(merged.ssh.authorized_keys.is_empty());
+    }
+
+    #[test]
+    fn restart_required_flips_on_bastion_port() {
+        let base = AppConfig::default();
+        let mut n = base.clone();
+        n.listen.bastion = 2200;
+        assert!(restart_required(&base, &n));
+        // Changing keys alone is live-apply, NOT restart-required.
+        let mut k = base.clone();
+        k.ssh.authorized_keys = vec!["ssh-ed25519 AAAA x".into()];
+        assert!(!restart_required(&base, &k));
+    }
+
+    #[test]
+    fn ssh_keys_editable_after_setup_complete() {
+        // The one-time category guard must not block SSH key edits post-setup.
+        let mut base = AppConfig::default();
+        base.setup_complete = true;
+        let merged = merge_update(
+            &base,
+            serde_json::json!({ "ssh": { "authorizedKeys": ["ssh-ed25519 AAAA x"] } }),
+        )
+        .unwrap();
+        assert_eq!(merged.ssh.authorized_keys, vec!["ssh-ed25519 AAAA x".to_string()]);
+    }
 }
 
 /// Resolve the state.json path: always `<data_dir>/state.json`.
@@ -700,6 +747,7 @@ pub fn restart_required(old: &AppConfig, new: &AppConfig) -> bool {
         || old.listen.video != new.listen.video
         || old.listen.clone_mcp != new.listen.clone_mcp
         || old.listen.global_mcp != new.listen.global_mcp
+        || old.listen.bastion != new.listen.bastion
         || old.clone_socket != new.clone_socket
         || old.docker.socket != new.docker.socket
         || old.static_dir != new.static_dir
