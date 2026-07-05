@@ -38,12 +38,16 @@ session, that owns everything desktop-side. It does four things:
 - **Default (shipping mode):** with `RMNG_SOCKET` set, capture + ship + inject + serve the
   MCP. With no socket, run a capture-fps self-test. Monitors come from `RMNG_MONITORS`
   (`WxH+X+Y[*]`, comma-separated). See [docs/PROTOCOL.md](../../docs/PROTOCOL.md#clone-daemon-cli).
-- **`wait-for-stuck`** — needs-human detector: pull screenshots from the local MCP, tile,
-  ask the inference LLM, exit 0 when stuck (`--inference-url`, `--ignore-reason`,
+- **`wait-for-stuck`** — needs-human detector: screen mode (default) pulls screenshots from
+  the local MCP, tiles, asks the inference vision-LLM; text mode (`--text-cmd`, e.g. a
+  `tmux capture-pane` command) judges the command's text output against `--criteria` (the
+  operator's semantic working/stuck definition) with a text-only completion + a
+  did-the-text-change signal. Exits 0 when stuck (`--inference-url`, `--ignore-reason`,
   `--interval`, `--timeout`).
 - **`report-detection`** — POST a wrong-verdict record to the control-server's
-  `/api/detector-feedback` (`--kind`, `--note`, `--control`). The agent-wrapper spawns
-  `wait-for-stuck` for monitoring. (These replace the retired `computer-use` binary.)
+  `/api/detector-feedback` (`--kind`, `--note`, `--control`); uploads the screenshot (screen
+  mode) or pane capture + criteria (text mode). The agent-wrapper spawns `wait-for-stuck`
+  for monitoring. (These replace the retired `computer-use` binary.)
 
 ## Capture & socket model
 

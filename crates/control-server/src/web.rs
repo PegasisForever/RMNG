@@ -746,20 +746,25 @@ async fn detector_feedback(
     let mut clone_field: Option<String> = None;
     let mut fb = files::DetectorFeedback {
         kind: String::new(),
+        mode: "screen".into(),
         detector_verdict: "working".into(),
         detector_reason: String::new(),
         actual_state: "working".into(),
         ignore_reasons: Vec::new(),
+        criteria: String::new(),
         note: String::new(),
     };
     let mut screenshot: Option<Vec<u8>> = None;
+    let mut capture: Option<String> = None;
     while let Some(field) = mp.next_field().await.map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))? {
         match field.name().unwrap_or("") {
             "clone" => clone_field = field.text().await.ok().map(|s| s.trim().to_string()),
             "kind" => fb.kind = field.text().await.unwrap_or_default(),
+            "mode" => fb.mode = field.text().await.unwrap_or_default(),
             "detectorVerdict" => fb.detector_verdict = field.text().await.unwrap_or_default(),
             "detectorReason" => fb.detector_reason = field.text().await.unwrap_or_default(),
             "actualState" => fb.actual_state = field.text().await.unwrap_or_default(),
+            "criteria" => fb.criteria = field.text().await.unwrap_or_default(),
             "note" => fb.note = field.text().await.unwrap_or_default(),
             "ignoreReason" => {
                 if let Ok(s) = field.text().await {
@@ -769,8 +774,14 @@ async fn detector_feedback(
             "screenshot" => {
                 screenshot = field.bytes().await.ok().map(|b| b.to_vec());
             }
+            "capture" => {
+                capture = field.text().await.ok();
+            }
             _ => {}
         }
+    }
+    if fb.mode.is_empty() {
+        fb.mode = "screen".into();
     }
     if fb.kind != "false-positive" && fb.kind != "false-negative" {
         return Err((StatusCode::BAD_REQUEST, "kind must be false-positive|false-negative".into()));
@@ -786,9 +797,10 @@ async fn detector_feedback(
         .find(|h| h.id == clone)
         .map(|h| h.id)
         .ok_or((StatusCode::NOT_FOUND, format!("no host named '{clone}'")))?;
-    let id = files::save_detector_feedback(&app.config().data_dir, &host_id, &fb, screenshot.as_deref())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    tracing::info!("detector-feedback from {host_id}: {} (id {id})", fb.kind);
+    let id =
+        files::save_detector_feedback(&app.config().data_dir, &host_id, &fb, screenshot.as_deref(), capture.as_deref())
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tracing::info!("detector-feedback from {host_id}: {} [{}] (id {id})", fb.kind, fb.mode);
     Ok(Json(json!({ "ok": true, "id": id, "host": host_id })))
 }
 

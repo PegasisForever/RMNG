@@ -273,10 +273,13 @@ Serve an uploaded image by its generated `<16-hex>.<ext>` name, with the right C
 A clone's `clone-daemon report-detection` posts here when the needs-human detector's verdict
 was wrong. The caller **self-identifies** with a `clone` field (its hostname == host id —
 clone IPs are dynamic Docker IPAM, so there is no source-IP mapping). Fields: `clone`
-(required), `kind` (`false-positive`|`false-negative`, required), `detectorVerdict`,
-`detectorReason`, `actualState`, repeated `ignoreReason`, `note`, and an optional
-`screenshot` file. Persists a JSON record + screenshot under
-`data/detector-feedback/`. Returns `{ "ok": true, "id": "...", "host": "..." }`.
+(required), `kind` (`false-positive`|`false-negative`, required), `mode`
+(`screen`|`text`, default `screen`), `detectorVerdict`, `detectorReason`, `actualState`,
+repeated `ignoreReason`, `criteria` (text mode: the operator criteria judged against),
+`note`, and the artifact the verdict was made on: an optional `screenshot` file (screen
+mode) or an optional `capture` text field (text mode — the exact pane text). Persists a
+JSON record + artifact (`{id}.jpg` / `{id}.txt`) under `data/detector-feedback/`.
+Returns `{ "ok": true, "id": "...", "host": "..." }`.
 
 ---
 

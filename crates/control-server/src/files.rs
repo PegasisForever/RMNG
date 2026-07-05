@@ -144,22 +144,35 @@ pub fn detector_feedback_root(data_dir: &str) -> PathBuf {
 pub struct DetectorFeedback {
     /// "false-positive" | "false-negative".
     pub kind: String,
+    /// "screen" | "text" — which detector mode produced the verdict. Older
+    /// clone-daemons don't send it; default to "screen".
+    #[serde(default = "default_feedback_mode")]
+    pub mode: String,
     /// "working" | "needs-human".
     pub detector_verdict: String,
     pub detector_reason: String,
     pub actual_state: String,
     #[serde(default)]
     pub ignore_reasons: Vec<String>,
+    /// Text mode: the operator criteria the verdict was judged against.
+    #[serde(default)]
+    pub criteria: String,
     #[serde(default)]
     pub note: String,
 }
 
-/// Persist one feedback record + its screenshot. Returns the record id.
+fn default_feedback_mode() -> String {
+    "screen".into()
+}
+
+/// Persist one feedback record + its artifact (screenshot in screen mode, the
+/// captured pane text in text mode; either may be absent). Returns the record id.
 pub fn save_detector_feedback(
     data_dir: &str,
     host_id: &str,
     fb: &DetectorFeedback,
     screenshot: Option<&[u8]>,
+    capture: Option<&str>,
 ) -> Result<String> {
     let id = rand_hex();
     let dir = detector_feedback_root(data_dir);
@@ -175,12 +188,22 @@ pub fn save_detector_feedback(
             std::fs::write(dir.join(&image), shot)?;
         }
     }
+    let mut capture_file = String::new();
+    if let Some(text) = capture {
+        if !text.is_empty() {
+            if text.len() > MAX_UPLOAD_BYTES {
+                bail!("capture too large (max 15 MB)");
+            }
+            capture_file = format!("{id}.txt");
+            std::fs::write(dir.join(&capture_file), text)?;
+        }
+    }
 
     let record = serde_json::json!({
-        "id": id, "host": host_id, "image": image,
-        "kind": fb.kind, "detectorVerdict": fb.detector_verdict,
+        "id": id, "host": host_id, "image": image, "capture": capture_file,
+        "kind": fb.kind, "mode": fb.mode, "detectorVerdict": fb.detector_verdict,
         "detectorReason": fb.detector_reason, "actualState": fb.actual_state,
-        "ignoreReasons": fb.ignore_reasons, "note": fb.note,
+        "ignoreReasons": fb.ignore_reasons, "criteria": fb.criteria, "note": fb.note,
     });
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
@@ -205,6 +228,40 @@ mod tests {
         assert_eq!(load_notes(d, "h1").unwrap(), blocks);
         delete_notes(d, "h1");
         assert!(load_notes(d, "h1").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detector_feedback_persists_text_capture_and_mode() {
+        let dir = std::env::temp_dir().join(format!("rmng-fb-{}", rand_hex()));
+        let d = dir.to_str().unwrap();
+        let fb = DetectorFeedback {
+            kind: "false-positive".into(),
+            mode: "text".into(),
+            detector_verdict: "needs-human".into(),
+            detector_reason: "idle input box".into(),
+            actual_state: "working".into(),
+            ignore_reasons: vec![],
+            criteria: "STUCK if a dialog is shown".into(),
+            note: "was mid-turn".into(),
+        };
+        let id = save_detector_feedback(d, "h1", &fb, None, Some("pane text here")).unwrap();
+        // The capture landed as {id}.txt and the record carries mode/capture/criteria.
+        let fb_dir = Path::new(d).join("detector-feedback");
+        assert_eq!(std::fs::read_to_string(fb_dir.join(format!("{id}.txt"))).unwrap(), "pane text here");
+        let index = std::fs::read_to_string(fb_dir.join("index.jsonl")).unwrap();
+        let rec: serde_json::Value = serde_json::from_str(index.lines().last().unwrap()).unwrap();
+        assert_eq!(rec["mode"], "text");
+        assert_eq!(rec["capture"], format!("{id}.txt"));
+        assert_eq!(rec["criteria"], "STUCK if a dialog is shown");
+        assert_eq!(rec["image"], "");
+        // Screen-mode record with neither artifact still saves (both optional).
+        let fb2 = DetectorFeedback { mode: "screen".into(), criteria: String::new(), ..fb };
+        let id2 = save_detector_feedback(d, "h1", &fb2, None, None).unwrap();
+        let index = std::fs::read_to_string(fb_dir.join("index.jsonl")).unwrap();
+        let rec2: serde_json::Value = serde_json::from_str(index.lines().last().unwrap()).unwrap();
+        assert_eq!(rec2["id"], id2.as_str());
+        assert_eq!(rec2["capture"], "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
