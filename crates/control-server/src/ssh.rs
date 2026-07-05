@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+use crate::docker::TarEntry;
 
 /// Absolute path the bastion `sshd` reads authorized keys from. Outside any home (the
 /// `rmng` account has none), root-owned — so `StrictModes` is satisfied.
@@ -116,6 +117,60 @@ pub fn ensure_hostkey(key_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The tar entries that provision SSH into one clone: its `authorized_keys` (clone-user
+/// owned, 0600) and its stable host key + public half (root, 0600 / 0644). Generates and
+/// persists the host key on first call for this clone id. The `~rmng/.ssh` dir is
+/// pre-created 700 by the template, so only the file is dropped here.
+pub fn clone_ssh_tar_entries(
+    data_dir: &str,
+    clone_id: &str,
+    keys: &[String],
+) -> Result<Vec<TarEntry>> {
+    let key_path = clone_hostkey_path(data_dir, clone_id);
+    ensure_hostkey(&key_path)?;
+    let priv_bytes = std::fs::read(&key_path)
+        .with_context(|| format!("reading clone host key {}", key_path.display()))?;
+    let pub_bytes = std::fs::read(key_path.with_extension("pub"))
+        .with_context(|| format!("reading clone host pubkey for {clone_id}"))?;
+
+    Ok(vec![
+        TarEntry {
+            path: "home/rmng/.ssh/authorized_keys".into(),
+            data: render_authorized_keys(keys).into_bytes(),
+            mode: 0o600,
+            uid: 1000,
+            gid: 1000,
+        },
+        TarEntry {
+            path: "etc/ssh/ssh_host_ed25519_key".into(),
+            data: priv_bytes,
+            mode: 0o600,
+            uid: 0,
+            gid: 0,
+        },
+        TarEntry {
+            path: "etc/ssh/ssh_host_ed25519_key.pub".into(),
+            data: pub_bytes,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        },
+    ])
+}
+
+/// Order-independent hash of a key set (for "did this clone's keys change?" tracking).
+pub fn keys_hash(keys: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<&str> = keys.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for k in sorted {
+        k.hash(&mut h);
+    }
+    h.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +261,38 @@ mod tests {
         assert_eq!(std::fs::read(&key).unwrap(), first, "second call regenerated the key");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clone_tar_entries_have_correct_paths_modes_owners() {
+        if std::process::Command::new("ssh-keygen").arg("-?").output().is_err() {
+            eprintln!("skipping: ssh-keygen not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rmng-ssh-tar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let entries =
+            clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()]).unwrap();
+
+        let ak = entries.iter().find(|e| e.path == "home/rmng/.ssh/authorized_keys").expect("authorized_keys entry");
+        assert_eq!(ak.mode, 0o600);
+        assert_eq!((ak.uid, ak.gid), (1000, 1000));
+        assert_eq!(ak.data, b"ssh-ed25519 AAAA a\n");
+
+        let hk = entries.iter().find(|e| e.path == "etc/ssh/ssh_host_ed25519_key").expect("host key entry");
+        assert_eq!(hk.mode, 0o600);
+        assert_eq!((hk.uid, hk.gid), (0, 0));
+        assert!(entries.iter().any(|e| e.path == "etc/ssh/ssh_host_ed25519_key.pub" && e.mode == 0o644));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keys_hash_is_order_independent_and_change_sensitive() {
+        let a = keys_hash(&["k1".into(), "k2".into()]);
+        let b = keys_hash(&["k2".into(), "k1".into()]);
+        assert_eq!(a, b, "order must not matter");
+        let c = keys_hash(&["k1".into()]);
+        assert_ne!(a, c, "a changed key set must change the hash");
     }
 }
