@@ -46,4 +46,28 @@ templateReference: string,
  * fresh per check/update); no secret (public image over the local daemon), so it
  * passes through the redacted view.
  */
-serverImage: string, };
+serverImage: string, 
+/**
+ * Master switch for the shared Docker build infra (pull-through Hub mirror + remote
+ * BuildKit). When true (default), the control-server ensures the `rmng-registry` /
+ * `rmng-buildkit` containers at startup and the `buildinfra` reconciler applies the
+ * mirror + remote builder to every running clone. When false, none of that runs and
+ * already-created infra / already-migrated clones are left in place (a pure "stop
+ * managing" — no destructive teardown). Immediate-apply (read fresh each tick).
+ */
+buildInfraEnabled: boolean, 
+/**
+ * Image for the pull-through Docker Hub cache container (`rmng-registry`). Overridable
+ * (an operator may pin a digest); a change triggers a recreate at next boot.
+ */
+registryImage: string, 
+/**
+ * Image for the shared BuildKit daemon container (`rmng-buildkit`). Overridable; a
+ * change triggers a recreate at next boot.
+ */
+buildkitImage: string, 
+/**
+ * BuildKit cache GC ceiling in GiB (`keepBytes`). Caps the shared layer cache so it
+ * cannot grow unbounded. A change triggers a `rmng-buildkit` recreate at next boot.
+ */
+buildkitCacheGb: number, };

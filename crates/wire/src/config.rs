@@ -184,6 +184,26 @@ pub struct DockerConfig {
     /// passes through the redacted view.
     #[serde(default = "default_server_image")]
     pub server_image: String,
+    /// Master switch for the shared Docker build infra (pull-through Hub mirror + remote
+    /// BuildKit). When true (default), the control-server ensures the `rmng-registry` /
+    /// `rmng-buildkit` containers at startup and the `buildinfra` reconciler applies the
+    /// mirror + remote builder to every running clone. When false, none of that runs and
+    /// already-created infra / already-migrated clones are left in place (a pure "stop
+    /// managing" — no destructive teardown). Immediate-apply (read fresh each tick).
+    #[serde(default = "default_build_infra_enabled")]
+    pub build_infra_enabled: bool,
+    /// Image for the pull-through Docker Hub cache container (`rmng-registry`). Overridable
+    /// (an operator may pin a digest); a change triggers a recreate at next boot.
+    #[serde(default = "default_registry_image")]
+    pub registry_image: String,
+    /// Image for the shared BuildKit daemon container (`rmng-buildkit`). Overridable; a
+    /// change triggers a recreate at next boot.
+    #[serde(default = "default_buildkit_image")]
+    pub buildkit_image: String,
+    /// BuildKit cache GC ceiling in GiB (`keepBytes`). Caps the shared layer cache so it
+    /// cannot grow unbounded. A change triggers a `rmng-buildkit` recreate at next boot.
+    #[serde(default = "default_buildkit_cache_gb")]
+    pub buildkit_cache_gb: u32,
 }
 
 fn default_docker_socket() -> String {
@@ -207,6 +227,18 @@ fn default_template_reference() -> String {
 fn default_server_image() -> String {
     "pegasis0/rmng:latest".into()
 }
+fn default_build_infra_enabled() -> bool {
+    true
+}
+fn default_registry_image() -> String {
+    "registry:2.8.3".into()
+}
+fn default_buildkit_image() -> String {
+    "moby/buildkit:v0.17.2".into()
+}
+fn default_buildkit_cache_gb() -> u32 {
+    40
+}
 
 impl Default for DockerConfig {
     fn default() -> Self {
@@ -218,6 +250,10 @@ impl Default for DockerConfig {
             clone_memory_mb: default_clone_memory_mb(),
             template_reference: default_template_reference(),
             server_image: default_server_image(),
+            build_infra_enabled: default_build_infra_enabled(),
+            registry_image: default_registry_image(),
+            buildkit_image: default_buildkit_image(),
+            buildkit_cache_gb: default_buildkit_cache_gb(),
         }
     }
 }
@@ -555,6 +591,25 @@ mod tests {
     fn docker_config_default_server_image() {
         let d = DockerConfig::default();
         assert_eq!(d.server_image, "pegasis0/rmng:latest");
+    }
+
+    #[test]
+    fn docker_config_build_infra_defaults_when_absent() {
+        // An older config.json (no build-infra fields) must load with the feature ON.
+        let json = r#"{
+            "socket": "/var/run/docker.sock",
+            "subnet": "10.99.0.0/24",
+            "hostnamePrefix": "pega-",
+            "cloneCpus": 16,
+            "cloneMemoryMb": 32768,
+            "templateReference": "pegasis0/rmng-template:latest",
+            "serverImage": "pegasis0/rmng:latest"
+        }"#;
+        let cfg: DockerConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.build_infra_enabled, "feature defaults on");
+        assert_eq!(cfg.registry_image, "registry:2.8.3");
+        assert_eq!(cfg.buildkit_image, "moby/buildkit:v0.17.2");
+        assert_eq!(cfg.buildkit_cache_gb, 40);
     }
 
     #[test]
