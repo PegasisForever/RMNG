@@ -1165,6 +1165,14 @@ impl DockerCtl {
             nano_cpus: Some((spec.cpus as i64) * 1_000_000_000),
             memory: Some(mem),
             memory_swap: Some(mem + SWAP_BYTES),
+            // LXC parity: the old LXC clones booted systemd, which mounts /dev/shm as tmpfs at
+            // ~50% of RAM (≈16 GB for a 32 GB clone). Docker's default is a fixed 64 MB, which
+            // Chromium/Electron (Chrome, VSCode) exhaust fast — a failed shm allocation makes
+            // them SIGILL. Derived from `mem` (no config knob): tmpfs is lazily allocated so a
+            // large ceiling is free until used, and used pages are charged to THIS clone's own
+            // memory cgroup, so a runaway shm consumer only OOMs its own clone. Only desktop
+            // clones get this; the self-upgrade helper + lxcfs probe run no desktop.
+            shm_size: Some(mem / 2),
             mounts: Some(mounts),
             restart_policy: Some(RestartPolicy {
                 name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
@@ -1509,6 +1517,25 @@ impl DockerCtl {
     pub async fn container_pid(&self, name_or_id: &str) -> Result<Option<i64>> {
         match self.daemon()?.inspect_container(name_or_id, None::<bollard::query_parameters::InspectContainerOptions>).await {
             Ok(info) => Ok(info.state.and_then(|s| s.pid).filter(|&p| p > 0)),
+            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(None),
+            Err(e) => Err(anyhow!("inspecting container {name_or_id}: {e}")),
+        }
+    }
+
+    /// `(host PID, HostConfig.Memory bytes)` for a running container, from a single inspect.
+    /// `None` when the container is stopped/gone (pid 0 / 404) or its memory limit is unset
+    /// (0 / absent — unlimited, so there's no basis to size `/dev/shm` from). The `/dev/shm`
+    /// reconciler ([`crate::shm`]) uses the PID to enter the clone's mount namespace and
+    /// `Memory / 2` as the LXC-parity remount target. Like [`container_pid`], the PID is only
+    /// resolvable into `/proc` when the control-server shares the host PID namespace
+    /// (`pid: "host"`). A dead daemon is a real error (retried).
+    pub async fn container_pid_and_memory(&self, name_or_id: &str) -> Result<Option<(i64, i64)>> {
+        match self.daemon()?.inspect_container(name_or_id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+            Ok(info) => {
+                let pid = info.state.and_then(|s| s.pid).filter(|&p| p > 0);
+                let mem = info.host_config.and_then(|h| h.memory).filter(|&m| m > 0);
+                Ok(pid.zip(mem))
+            }
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(None),
             Err(e) => Err(anyhow!("inspecting container {name_or_id}: {e}")),
         }

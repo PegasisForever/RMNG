@@ -358,6 +358,13 @@ async fn clone_container_after_create(
     on_progress("inject", "starting container to inject identity + preset");
     docker.start_container(container).await?;
 
+    // Belt-and-suspenders: reconcile /dev/shm the moment the clone is up, so its desktop never
+    // touches the 64 MB default even for the first reconcile tick. This clone was just created
+    // WITH `shm_size` in its HostConfig, so it's normally already at target and this is a no-op
+    // — it exists so the guarantee doesn't hinge on the create-path constant alone. Autonomous
+    // (`unless-stopped`) restarts back to 64 MB are the reconcile loop's job, not this hook's.
+    crate::shm::ensure_now(app, container).await;
+
     // Build the single upload_tar: machine-id (always), preset env conf + PATH rc.
     let preset_conf = preset_env_conf(env);
     let path_rc = preset_path_rc(&preset_conf);
