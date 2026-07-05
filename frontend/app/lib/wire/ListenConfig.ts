@@ -16,4 +16,8 @@ daemonMcp: number,
  * connection here per accepted local socket; the server splices to the clone.
  * Restart-required (bound at startup).
  */
-forward: number, };
+forward: number, 
+/**
+ * The bastion `sshd` port (jump host into clones). Restart-required (bound at startup).
+ */
+bastion: number, };

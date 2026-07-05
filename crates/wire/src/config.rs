@@ -31,6 +31,9 @@ pub struct ListenConfig {
     /// Restart-required (bound at startup).
     #[serde(default = "default_forward")]
     pub forward: u16,
+    /// The bastion `sshd` port (jump host into clones). Restart-required (bound at startup).
+    #[serde(default = "default_bastion")]
+    pub bastion: u16,
 }
 
 fn default_daemon_mcp() -> u16 {
@@ -39,6 +42,10 @@ fn default_daemon_mcp() -> u16 {
 
 fn default_forward() -> u16 {
     9005
+}
+
+fn default_bastion() -> u16 {
+    2222
 }
 
 /// Chroma subsampling mode for the port-1 viewer video stream.
@@ -61,8 +68,35 @@ pub enum ChromaMode {
 
 impl Default for ListenConfig {
     fn default() -> Self {
-        Self { web: 9000, video: 9001, clone_mcp: 9002, global_mcp: 9003, daemon_mcp: default_daemon_mcp(), forward: default_forward() }
+        Self {
+            web: 9000,
+            video: 9001,
+            clone_mcp: 9002,
+            global_mcp: 9003,
+            daemon_mcp: default_daemon_mcp(),
+            forward: default_forward(),
+            bastion: default_bastion(),
+        }
     }
+}
+
+/// SSH access settings. The control-server runs a jump-only bastion `sshd`; these keys
+/// are installed on the bastion AND every clone. Public keys are NOT secret — the whole
+/// struct passes through [`AppConfigRedacted`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct SshConfig {
+    /// Whether the bastion runs and keys are provisioned into clones.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Authorized SSH public keys, one full line each (`ssh-ed25519 AAAA… comment`).
+    #[serde(default)]
+    pub authorized_keys: Vec<String>,
+    /// Public host/IP the copied command's `-J` jump targets. Empty ⇒ the UI infers it
+    /// from the address it's already served on. Not secret.
+    #[serde(default)]
+    pub public_host: String,
 }
 
 /// One environment variable in a preset.
@@ -330,6 +364,10 @@ pub struct AppConfig {
     /// (the media plane's encode path is wired at startup).
     #[serde(default)]
     pub chroma: ChromaMode,
+    /// SSH bastion access settings (jump host into clones). Non-secret — public keys pass
+    /// through [`AppConfigRedacted`] intact.
+    #[serde(default)]
+    pub ssh: SshConfig,
     /// Vision-LLM inference server the needs-human detector (`clone-daemon wait-for-stuck`)
     /// polls — OpenAI-compatible `/v1/chat/completions`. Injected into each clone as
     /// `RMNG_INFERENCE_URL` at clone time. External infra the control-server can't
@@ -362,6 +400,7 @@ impl Default for AppConfig {
             codex_groups: Vec::new(),
             presets: Vec::new(),
             chroma: ChromaMode::default(),
+            ssh: SshConfig::default(),
             detector_inference_url: default_inference_url(),
             agent_playbook: default_agent_playbook(),
         }
@@ -424,6 +463,7 @@ impl AppConfig {
             codex_groups: self.codex_groups.clone(),
             presets: self.presets.iter().map(Preset::redacted).collect(),
             chroma: self.chroma,
+            ssh: self.ssh.clone(),
             detector_inference_url: self.detector_inference_url.clone(),
             agent_playbook: self.agent_playbook.clone(),
         }
@@ -451,6 +491,7 @@ pub struct AppConfigRedacted {
     pub codex_groups: Vec<CloneGroup>,
     pub presets: Vec<PresetRedacted>,
     pub chroma: ChromaMode,
+    pub ssh: SshConfig,
     pub detector_inference_url: String,
     pub agent_playbook: String,
 }
@@ -730,6 +771,43 @@ mod tests {
         }];
         c.active_layout = "Nonexistent".into();
         assert_eq!(c.effective_monitors(), c.layout_presets[0].monitors);
+    }
+
+    #[test]
+    fn listen_default_bastion_is_2222() {
+        assert_eq!(ListenConfig::default().bastion, 2222);
+    }
+
+    #[test]
+    fn ssh_config_defaults_are_empty_and_disabled() {
+        let s = SshConfig::default();
+        assert!(!s.enabled);
+        assert!(s.authorized_keys.is_empty());
+        assert!(s.public_host.is_empty());
+    }
+
+    #[test]
+    fn app_config_ssh_round_trips_camel_case() {
+        let mut c = AppConfig::default();
+        c.ssh = SshConfig {
+            enabled: true,
+            authorized_keys: vec!["ssh-ed25519 AAAA me@laptop".into()],
+            public_host: "rmng.example.com".into(),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"authorizedKeys\""), "camelCase key missing: {json}");
+        assert!(json.contains("\"publicHost\":\"rmng.example.com\""), "{json}");
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ssh, c.ssh);
+    }
+
+    #[test]
+    fn redacted_carries_ssh_keys_unredacted() {
+        // Public keys are not secret — they must survive redaction (the UI needs them).
+        let mut c = AppConfig::default();
+        c.ssh.authorized_keys = vec!["ssh-ed25519 AAAA me@laptop".into()];
+        let r = c.redacted();
+        assert_eq!(r.ssh.authorized_keys, c.ssh.authorized_keys);
     }
 }
 
