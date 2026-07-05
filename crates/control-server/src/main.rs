@@ -23,6 +23,7 @@ mod mediaplane;
 mod monitor;
 mod provision;
 mod smb;
+mod ssh;
 mod state;
 mod update;
 mod web;
