@@ -62,10 +62,10 @@ Needs a Linux host with Docker and a GPU render node (`/dev/dri/renderD128`). Pu
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 pegasis0/rmng
+  -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
-Ports: `9000` web UI/API · `9001` video · `9002`/`9003` MCP · `9005` port-forward data plane · `445` SMB clone-home share (host `445` must be free).
+Ports: `9000` web UI/API · `9001` video · `9002`/`9003` MCP · `9005` port-forward data plane · `445` SMB clone-home share (host `445` must be free) · `2222` SSH bastion (jump into clones).
 
 Open `http://<host>:9000` → the **first-run setup wizard** (environment checklist → server settings → download the clone template → finish) does the rest; then **Settings** for Linear/Claude credentials. There are zero `-e` config flags — everything is set in the UI. Full flow, the image build, publishing the template, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).
 

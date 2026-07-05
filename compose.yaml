@@ -8,7 +8,7 @@
 #   docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-#     -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 rmng:latest
+#     -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 -p 2222:2222 rmng:latest
 
 services:
   rmng:
@@ -36,10 +36,12 @@ services:
       # control-server's media plane. Must be a named volume (not bind) so clones share it.
       - rmng-sock:/srv/rmng-sock
     ports:
-      # 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP, 9005 forward, 445 SMB.
+      # 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP, 9005 forward, 445 SMB,
+      # 2222 SSH bastion.
       - "9000-9003:9000-9003"
       - "9005:9005"
       - "445:445"  # 445 SMB — clone-home share
+      - "2222:2222"  # 2222 SSH bastion (jump into clones)
 
 volumes:
   rmng-data:
