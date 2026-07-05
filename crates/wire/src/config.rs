@@ -80,16 +80,14 @@ impl Default for ListenConfig {
     }
 }
 
-/// SSH access settings. The control-server runs a jump-only bastion `sshd`; these keys
-/// are installed on the bastion AND every clone. Public keys are NOT secret — the whole
-/// struct passes through [`AppConfigRedacted`].
+/// SSH access settings. The control-server always runs a jump-only bastion `sshd`
+/// (no enable/disable toggle — same as the SMB share); these keys are installed on the
+/// bastion AND every clone. An empty `authorized_keys` means no keys get pasted in.
+/// Public keys are NOT secret — the whole struct passes through [`AppConfigRedacted`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct SshConfig {
-    /// Whether the bastion runs and keys are provisioned into clones.
-    #[serde(default)]
-    pub enabled: bool,
     /// Authorized SSH public keys, one full line each (`ssh-ed25519 AAAA… comment`).
     #[serde(default)]
     pub authorized_keys: Vec<String>,
@@ -779,9 +777,8 @@ mod tests {
     }
 
     #[test]
-    fn ssh_config_defaults_are_empty_and_disabled() {
+    fn ssh_config_defaults_are_empty() {
         let s = SshConfig::default();
-        assert!(!s.enabled);
         assert!(s.authorized_keys.is_empty());
         assert!(s.public_host.is_empty());
     }
@@ -790,7 +787,6 @@ mod tests {
     fn app_config_ssh_round_trips_camel_case() {
         let mut c = AppConfig::default();
         c.ssh = SshConfig {
-            enabled: true,
             authorized_keys: vec!["ssh-ed25519 AAAA me@laptop".into()],
             public_host: "rmng.example.com".into(),
         };

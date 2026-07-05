@@ -283,7 +283,6 @@ export const appConfig: AppConfigRedacted = {
   ],
   chroma: "yuv420",
   ssh: {
-    enabled: true,
     authorizedKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop"],
     publicHost: "rmng.example.com",
   },

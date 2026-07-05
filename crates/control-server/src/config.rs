@@ -737,7 +737,7 @@ fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
 }
 
 /// Whether applying `new` over `old` requires a server restart to take effect. The
-/// restart-required settings are the ones wired once at startup: the four listen ports,
+/// restart-required settings are the ones wired once at startup: the five listen ports,
 /// the clone-daemon unix socket, the Docker daemon socket (the bollard client is built
 /// at startup), the static-file directory, and the chroma mode. Everything else applies
 /// live. Consumed by web.rs's `PUT /api/config` handler, which surfaces the result as

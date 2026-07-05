@@ -238,8 +238,7 @@ export function SettingsPanel({
   const [agentPlaybook, setAgentPlaybook] = useState("");
   // SSH access: pasted authorized_keys (one per line) installed on the bastion + every
   // clone, plus an optional public-host override for the copied `ssh -J …` command.
-  const [ssh, setSsh] = useState<{ enabled: boolean; authorizedKeys: string[]; publicHost: string }>({
-    enabled: false,
+  const [ssh, setSsh] = useState<{ authorizedKeys: string[]; publicHost: string }>({
     authorizedKeys: [],
     publicHost: "",
   });
@@ -276,7 +275,6 @@ export function SettingsPanel({
     setDetectorInferenceUrl(c.detectorInferenceUrl);
     setAgentPlaybook(c.agentPlaybook);
     setSsh({
-      enabled: c.ssh?.enabled ?? false,
       authorizedKeys: c.ssh?.authorizedKeys ?? [],
       publicHost: c.ssh?.publicHost ?? "",
     });
@@ -1043,14 +1041,6 @@ export function SettingsPanel({
               hint="Paste public keys to allow `ssh -J rmng@<host>:<port> rmng@<clone>` (or the per-clone Copy SSH command button). Installed on the bastion and every clone; propagates to running clones within ~10s (or immediately on save)."
             >
               <div className="space-y-3">
-                <label className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={ssh.enabled}
-                    onChange={(e) => setSsh({ ...ssh, enabled: e.target.checked })}
-                  />
-                  Enable SSH access
-                </label>
                 <Field label="Authorized public keys (one per line)">
                   <textarea
                     value={ssh.authorizedKeys.join("\n")}
