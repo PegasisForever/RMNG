@@ -106,6 +106,12 @@ recheck `features: nesting=1` and that the CT was restarted. RMNG's per-clone
 `rmng-dind-<id>` volume at `/var/lib/docker` is the overlay-on-overlay fix for the clones'
 own inner Docker, but the CT's *outer* Docker still needs overlay2.
 
+The fleet's Docker Hub pulls are de-duplicated by the shared `rmng-registry` pull-through cache
+(the fix for `docker.io` rate limits), and build layers are shared via the `rmng-buildkit`
+daemon — **not** by sharing `/var/lib/docker`, which concurrent daemons cannot do (hence the
+per-clone `rmng-dind-*` / `rmng-ctd-*` volumes remain fully isolated). See DEPLOY.md → "Shared
+build cache & Docker Hub mirror".
+
 ## 4. Deploy RMNG
 
 Now the CT is just a Docker host. Continue with [DEPLOY.md](DEPLOY.md): pull/build the image,

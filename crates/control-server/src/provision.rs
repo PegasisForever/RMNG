@@ -299,7 +299,13 @@ pub async fn clone_container(
     // From here on, a failure must tear the half-built clone down. Run the rest under
     // a guard that removes the container + its dind volumes on any early return.
     match clone_container_after_create(app, &container, hostname, env, agent_playbook, &mut on_progress).await {
-        Ok(()) => Ok(reference),
+        Ok(()) => {
+            // Shared build infra: optimistically apply the Hub mirror + remote buildx builder
+            // now (idempotent, best-effort; the buildinfra reconciler is the backstop if the
+            // inner dockerd isn't up yet). No-op when the feature is off.
+            crate::buildinfra::apply_to_clone(app, &container).await;
+            Ok(reference)
+        }
         Err(e) => {
             tracing::warn!("clone {hostname} failed after create; cleaning up: {e}");
             docker.remove_container(&container).await.ok();

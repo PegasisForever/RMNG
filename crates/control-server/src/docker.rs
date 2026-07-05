@@ -71,6 +71,16 @@ pub const LABEL_BASE: &str = "rmng.base";
 pub const LABEL_CREATED_FROM: &str = "rmng.created-from";
 /// Label stamped on every RMNG-managed container (clone + build workers).
 pub const LABEL_MANAGED: &str = "rmng.managed";
+/// Label stamped on RMNG shared-infra containers (`rmng-registry`, `rmng-buildkit`).
+/// Deliberately NOT `rmng.managed` — infra is excluded from clone sweeps
+/// (`list_managed_containers`) and the boot reconcile's "unknown managed container" warning,
+/// exactly like the `rmng-self-upgrade` helper.
+pub const LABEL_INFRA: &str = "rmng.infra";
+/// Config fingerprint stamped on an infra container whose spec has settings beyond its
+/// image (e.g. `rmng-buildkit`'s GC cap baked into `buildkitd.toml`). A change here forces
+/// a recreate even when the image tag is unchanged, so a `buildkit_cache_gb` bump actually
+/// takes effect. Absent on containers with no such settings (e.g. `rmng-registry`).
+pub const LABEL_INFRA_CONFIG: &str = "rmng.infra-config";
 
 /// The clone-daemon media socket bind target inside every clone.
 const SOCK_DIR: &str = "/srv/rmng-sock";
@@ -259,6 +269,23 @@ pub struct CreateSpec {
     /// The shared clone media socket *directory* on the host to bind at `/srv/rmng-sock`.
     /// The daemon path is `<this>/clones.sock`; empty skips the mount (dev/test).
     pub sock_source: String,
+}
+
+/// A desired shared-infra container, the input to [`DockerCtl::ensure_infra_container`].
+struct InfraSpec {
+    name: &'static str,
+    image: String,
+    /// Args appended to the image ENTRYPOINT (`None` = image default).
+    cmd: Option<Vec<String>>,
+    env: Vec<String>,
+    mounts: Vec<Mount>,
+    privileged: bool,
+    /// Files dropped into the created-but-not-started container (e.g. `buildkitd.toml`).
+    files: Vec<TarEntry>,
+    /// Fingerprint of image-independent config baked into this container (e.g. the buildkit
+    /// GC cap). When it differs from the running container's `rmng.infra-config` label, the
+    /// container is recreated even if the image is unchanged. `None` = image is the only spec.
+    config_fingerprint: Option<String>,
 }
 
 /// A captured control-server run-spec: everything `create_container` needs to recreate our
@@ -801,6 +828,158 @@ impl DockerCtl {
         self.daemon()?.create_network(req).await.with_context(|| format!("creating the {NETWORK} network"))?;
         tracing::info!(target: "docker", "created the {NETWORK} bridge with subnet {}", plan.cidr());
         Ok(())
+    }
+
+    /// Ensure the shared build-infra containers + volumes exist and run: `rmng-registry`
+    /// (pull-through Docker Hub cache) and `rmng-buildkit` (shared BuildKit daemon), both on
+    /// the `rmng` bridge, labeled `rmng.infra=1`, `restart: unless-stopped`. Idempotent:
+    /// create-if-absent, start-if-stopped, recreate-if-image-drifted (cache volumes survive a
+    /// recreate). MUST run after `ensure_network` (the containers attach to `NETWORK`).
+    pub async fn ensure_build_infra(&self, cfg: &wire::DockerConfig) -> Result<()> {
+        self.ensure_volume(crate::buildinfra::REGISTRY_DATA_VOL).await?;
+        self.ensure_volume(crate::buildinfra::BUILDKIT_CACHE_VOL).await?;
+
+        self.ensure_infra_container(InfraSpec {
+            name: crate::buildinfra::REGISTRY_CONTAINER,
+            image: cfg.registry_image.clone(),
+            cmd: None,
+            env: vec!["REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io".to_string()],
+            mounts: vec![Mount {
+                target: Some("/var/lib/registry".to_string()),
+                source: Some(crate::buildinfra::REGISTRY_DATA_VOL.to_string()),
+                typ: Some(MountTypeEnum::VOLUME),
+                ..Default::default()
+            }],
+            privileged: false,
+            files: vec![],
+            config_fingerprint: None,
+        })
+        .await?;
+
+        self.ensure_infra_container(InfraSpec {
+            name: crate::buildinfra::BUILDKIT_CONTAINER,
+            image: cfg.buildkit_image.clone(),
+            // moby/buildkit's ENTRYPOINT is `buildkitd`; these are its args.
+            cmd: Some(vec![
+                "--addr".to_string(),
+                "tcp://0.0.0.0:1234".to_string(),
+                "--config".to_string(),
+                "/etc/buildkit/buildkitd.toml".to_string(),
+            ]),
+            env: vec![],
+            mounts: vec![Mount {
+                target: Some("/var/lib/buildkit".to_string()),
+                source: Some(crate::buildinfra::BUILDKIT_CACHE_VOL.to_string()),
+                typ: Some(MountTypeEnum::VOLUME),
+                ..Default::default()
+            }],
+            privileged: true,
+            files: vec![TarEntry {
+                path: "etc/buildkit/buildkitd.toml".to_string(),
+                data: crate::buildinfra::render_buildkitd_toml(cfg.buildkit_cache_gb).into_bytes(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+            }],
+            config_fingerprint: Some(cfg.buildkit_cache_gb.to_string()),
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Ensure one infra container matches `spec`: create-if-absent (dropping `spec.files` in
+    /// before start), start-if-stopped, recreate-if-image-drifted. Best-effort image pull
+    /// first. Cache volumes are external (survive the recreate).
+    async fn ensure_infra_container(&self, spec: InfraSpec) -> Result<()> {
+        let docker = self.daemon()?;
+        match docker
+            .inspect_container(spec.name, None::<bollard::query_parameters::InspectContainerOptions>)
+            .await
+        {
+            Ok(info) => {
+                let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
+                let cur_image =
+                    info.config.as_ref().and_then(|c| c.image.clone()).unwrap_or_default();
+                let cur_fingerprint = info
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.labels.as_ref())
+                    .and_then(|l| l.get(LABEL_INFRA_CONFIG))
+                    .cloned();
+                if cur_image != spec.image || cur_fingerprint != spec.config_fingerprint {
+                    tracing::info!(
+                        target: "docker",
+                        "{}: image {cur_image:?}→{:?} / config {cur_fingerprint:?}→{:?}, recreating",
+                        spec.name, spec.image, spec.config_fingerprint
+                    );
+                    self.stop_container(spec.name).await.ok();
+                    self.remove_container(spec.name).await.ok();
+                    // fall through to (re)create
+                } else if running {
+                    return Ok(()); // present, correct image, running
+                } else {
+                    self.start_container(spec.name).await?; // present + correct but stopped
+                    return Ok(());
+                }
+            }
+            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {} // absent
+            Err(e) => return Err(anyhow!("inspecting infra container {}: {e}", spec.name)),
+        }
+
+        self.pull_if_absent(&spec.image).await?;
+
+        let host_config = HostConfig {
+            privileged: Some(spec.privileged),
+            mounts: Some(spec.mounts.clone()),
+            restart_policy: Some(RestartPolicy {
+                name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let body = ContainerCreateBody {
+            image: Some(spec.image.clone()),
+            cmd: spec.cmd.clone(),
+            env: if spec.env.is_empty() { None } else { Some(spec.env.clone()) },
+            labels: Some({
+                let mut m = HashMap::from([(LABEL_INFRA.to_string(), "1".to_string())]);
+                if let Some(fp) = &spec.config_fingerprint {
+                    m.insert(LABEL_INFRA_CONFIG.to_string(), fp.clone());
+                }
+                m
+            }),
+            host_config: Some(host_config),
+            networking_config: Some(NetworkingConfig {
+                endpoints_config: Some(HashMap::from([(
+                    NETWORK.to_string(),
+                    EndpointSettings::default(),
+                )])),
+            }),
+            ..Default::default()
+        };
+        let opts = CreateContainerOptionsBuilder::new().name(spec.name).build();
+        let id = docker
+            .create_container(Some(opts), body)
+            .await
+            .with_context(|| format!("creating infra container {}", spec.name))?
+            .id;
+        if !spec.files.is_empty() {
+            // upload_tar works on a created-but-stopped container.
+            self.upload_tar(&id, spec.files).await?;
+        }
+        self.start_container(&id).await?;
+        tracing::info!(target: "docker", "ensured infra container {} ({})", spec.name, spec.image);
+        Ok(())
+    }
+
+    /// Pull `reference` only if the daemon doesn't already have it (infra images are pinned;
+    /// no need to re-pull each boot). Streams events into the void — infra pulls are silent.
+    async fn pull_if_absent(&self, reference: &str) -> Result<()> {
+        if self.daemon()?.inspect_image(reference).await.is_ok() {
+            return Ok(());
+        }
+        tracing::info!(target: "docker", "pulling infra image {reference}");
+        self.pull_image(reference, |_| {}).await
     }
 
     // --- images -----------------------------------------------------------------------

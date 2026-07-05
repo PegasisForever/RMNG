@@ -7,6 +7,7 @@
 
 mod app;
 mod assets;
+mod buildinfra;
 mod chat;
 mod claude;
 mod clone_ops;
@@ -97,6 +98,27 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Shared build infra (pull-through Hub mirror + remote BuildKit): ensure the two infra
+    // containers exist + run. Gated on setup-complete + the master toggle; runs after
+    // `self_setup` (which ensured the `rmng` network). Non-fatal + bounded — a down/slow
+    // daemon (or a first-run image pull) logs and retries next boot, same posture as
+    // `ensure_network`. 120 s covers a cold pull of registry + buildkit.
+    {
+        let cfg = app.config();
+        if cfg.setup_complete && cfg.docker.build_infra_enabled {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                app.docker.ensure_build_infra(&cfg.docker),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("build-infra ensure failed: {e:#} (retries next boot)"),
+                Err(_) => tracing::warn!("build-infra ensure timed out after 120s (retries next boot)"),
+            }
+        }
+    }
+
     // A persisted `Running` operation is a corpse from a server that crashed/was killed
     // mid-op (an `Operation` lives only while its driving task runs). Mark such ops `Error`
     // + prune them, so a same-named clone/pull/commit isn't blocked forever by the in-flight
@@ -169,6 +191,7 @@ async fn main() -> Result<()> {
     tokio::spawn(monitor::run(app.clone()));
     tokio::spawn(homes::run(app.clone()));
     tokio::spawn(shm::run(app.clone()));
+    tokio::spawn(buildinfra::run(app.clone()));
     tokio::spawn(smb::run(app.clone()));
     tokio::spawn(ssh::run(app.clone()));
 

@@ -122,6 +122,33 @@ clone, not entered here. Secrets are write-only and redacted on read. The one-ti
 [SCRIPTS.md](SCRIPTS.md) for the in-container guest scripts and [API.md](API.md) for every
 endpoint.
 
+## Shared build cache & Docker Hub mirror
+
+The control-server automatically runs two shared infra containers on the `rmng` bridge
+(labeled `rmng.infra=1`, started at boot, `restart: unless-stopped`):
+
+- **`rmng-registry`** — a pull-through cache for Docker Hub. Every clone's base-image pulls
+  are served from here after the first fleet-wide fetch, so `docker.io` rate limits stop
+  biting. Cache lives in the `rmng-registry-data` volume.
+- **`rmng-buildkit`** — a shared BuildKit daemon. Each clone's `docker build` transparently
+  routes to it (via a `--driver remote` buildx builder named `rmng`), so identical layers are
+  built once and reused across the whole fleet. Cache lives in `rmng-buildkit-cache`, capped
+  at `docker.buildkitCacheGb` GiB (default 40).
+
+No setup is needed — a fresh control-server ensures both containers, and a background
+reconciler migrates the mirror config + builder onto every running clone within ~30 s (live,
+no clone restart). Existing clones created before the upgrade are migrated the same way.
+
+**Operator notes**
+- Builds run on the shared `rmng-buildkit` daemon, so a build is **not** bounded by a single
+  clone's CPU/memory limit and competes fleet-wide (fine for a small trusted fleet).
+- If `rmng-buildkit` is down, in-clone `docker build` fails until it is back; the clone's local
+  `default` builder remains as a manual fallback: `docker buildx use default`.
+- Turn the whole feature off with `docker.buildInfraEnabled = false` in config.json.
+  This is a pure "stop managing": the reconciler stops touching clones and no infra
+  is ensured; already-created infra containers and already-migrated clone config are left in
+  place (remove them manually if you want them gone).
+
 ## Images & clones
 
 RMNG uses **image-only templates** — there is no golden-CT / CoW model. A clone-source image
