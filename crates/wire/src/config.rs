@@ -107,8 +107,7 @@ pub struct EnvVar {
 
 /// A clone preset: a Linear identity (API key + the ticket-id prefixes that auto-select
 /// this preset when cloning from a ticket) plus a named set of environment variables,
-/// applied to a clone's session at creation (written to
-/// `~/.config/environment.d/30-rmng-preset.conf`; the Linear key is additionally
+/// applied to a clone's session at creation (written to `/etc/environment`; the Linear key is additionally
 /// injected as `LINEAR_API_KEY`, which auths the clone's `linear` MCP). Vars that must
 /// ALWAYS be present (e.g. `XDG_CURRENT_DESKTOP`) are NOT presets — they're baked into the
 /// template's base session env by `template/setup/30-user.sh` at template build, inherited by

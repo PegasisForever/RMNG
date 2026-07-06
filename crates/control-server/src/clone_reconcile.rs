@@ -11,6 +11,8 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 
 use crate::app::App;
 use crate::docker::TarEntry;
@@ -234,27 +236,73 @@ echo "moved stale PATH-shadowing rmng CLI to $backup"
 "#
 }
 
-fn etc_environment_sync_script() -> &'static str {
-    r#"set -e
-envd=/home/rmng/.config/environment.d/30-rmng-preset.conf
+fn etc_environment_sync_script(desired_env: &str) -> String {
+    let desired_b64 = B64.encode(desired_env);
+    format!(
+        r#"set -e
 etc=/etc/environment
-test -f "$envd" || exit 0
+legacy=/home/rmng/.config/environment.d/30-rmng-preset.conf
+desired="$(mktemp)"
+base="$(mktemp)"
 tmp="$(mktemp)"
 keys_file="$(mktemp)"
-trap 'rm -f "$tmp" "$keys_file"' EXIT
-grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$envd" | sed 's/=.*//' | sort -u > "$keys_file"
+legacy_keys="$(mktemp)"
+trap 'rm -f "$desired" "$base" "$tmp" "$keys_file" "$legacy_keys"' EXIT
+base64 -d > "$desired" <<'RMNG_DESIRED_ENV'
+{desired_b64}
+RMNG_DESIRED_ENV
 if [ -f "$etc" ]; then
-  awk -F= 'NR==FNR { drop[$1]=1; next } !($1 in drop)' "$keys_file" "$etc" > "$tmp"
+  cp "$etc" "$base"
 fi
+if [ -f "$legacy" ]; then
+  grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$legacy" | sed 's/=.*//' | sort -u > "$legacy_keys"
+  awk -F= 'NR==FNR {{ drop[$1]=1; next }} !($1 in drop)' "$legacy_keys" "$base" > "$tmp"
+  cat "$tmp" > "$base"
+  awk '/^[A-Za-z_][A-Za-z0-9_]*=/' "$legacy" >> "$base"
+fi
+grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$desired" | sed 's/=.*//' | sort -u > "$keys_file"
+awk -F= 'NR==FNR {{ drop[$1]=1; next }} !($1 in drop)' "$keys_file" "$base" > "$tmp"
 if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | wc -l)" -eq 0 ]; then
   printf '\n' >> "$tmp"
 fi
-awk '/^[A-Za-z_][A-Za-z0-9_]*=/' "$envd" >> "$tmp"
+awk '/^[A-Za-z_][A-Za-z0-9_]*=/' "$desired" >> "$tmp"
+rm -f "$legacy"
+rmdir /home/rmng/.config/environment.d 2>/dev/null || true
+if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | wc -l)" -eq 0 ]; then
+  printf '\n' >> "$tmp"
+fi
 if [ -f "$etc" ] && cmp -s "$tmp" "$etc"; then
   exit 0
 fi
 install -m 0644 -o root -g root "$tmp" "$etc"
 "#
+    )
+}
+
+fn preset_for_host<'a>(cfg: &'a wire::AppConfig, host: &wire::Host) -> Option<&'a wire::Preset> {
+    if let Some(name) = host.preset_name.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(preset) = cfg.presets.iter().find(|p| p.name == name) {
+            return Some(preset);
+        }
+    }
+    if let Some(prefix) = host.linear_workspace.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(preset) = crate::linear::pick_preset_by_prefix(&cfg.presets, prefix) {
+            return Some(preset);
+        }
+        if let Some(preset) = cfg.presets.iter().find(|p| p.name.eq_ignore_ascii_case(prefix)) {
+            return Some(preset);
+        }
+    }
+    if let Some(label) = host.linear_label.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(preset) = cfg
+            .presets
+            .iter()
+            .find(|p| p.labels.iter().any(|candidate| candidate.eq_ignore_ascii_case(label)))
+        {
+            return Some(preset);
+        }
+    }
+    None
 }
 
 async fn exec_ok(app: &App, clone_id: &str, script: &str, label: &str) -> Result<()> {
@@ -429,6 +477,9 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         .filter(|h| h.managed && is_safe_id(&h.id))
         .collect();
 
+    let cfg = app.config();
+    let control_env = crate::provision::control_env_vars(app).await;
+
     for h in &hosts {
         let id = h.id.as_str();
         if !app.docker.is_running(id).await.unwrap_or(false) {
@@ -447,11 +498,23 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         }
         warned.remove(&format!("{id}:ssh"));
 
+        let mut desired_env = control_env.clone();
+        if let Some(preset) = preset_for_host(&cfg, h) {
+            desired_env.extend(crate::provision::preset_env_vars(preset));
+        } else if h.preset_name.as_ref().is_some_and(|s| !s.trim().is_empty()) {
+            tracing::warn!(
+                target: "clone_reconcile",
+                "clone {id}: preset {:?} no longer exists; preserving unmanaged /etc/environment keys",
+                h.preset_name
+            );
+        }
+        let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
+        let env_script = etc_environment_sync_script(&desired_env);
         match exec_ok(
             app,
             id,
-            etc_environment_sync_script(),
-            "sync environment.d to /etc/environment",
+            &env_script,
+            "sync /etc/environment",
         )
         .await
         {
@@ -630,14 +693,15 @@ mod tests {
     }
 
     #[test]
-    fn etc_environment_sync_mirrors_environment_d_without_clobbering_unmanaged_keys() {
-        let script = etc_environment_sync_script();
-        assert!(script.contains("/home/rmng/.config/environment.d/30-rmng-preset.conf"));
+    fn etc_environment_sync_uses_desired_env_and_removes_legacy_environment_d() {
+        let script = etc_environment_sync_script("RMNG_CONTROL_URL=http://rmng-control:9000\nLINEAR_API_KEY=secret\n");
+        assert!(script.contains("base64 -d"));
         assert!(script.contains("/etc/environment"));
         assert!(script.contains("drop[$1]=1"));
-        assert!(script.contains("awk '/^[A-Za-z_][A-Za-z0-9_]*=/' \"$envd\" >> \"$tmp\""));
+        assert!(script.contains("awk '/^[A-Za-z_][A-Za-z0-9_]*=/' \"$desired\" >> \"$tmp\""));
         assert!(script.contains("cmp -s \"$tmp\" \"$etc\""));
         assert!(script.contains("install -m 0644"));
+        assert!(script.contains("rm -f \"$legacy\""));
     }
 
     #[test]

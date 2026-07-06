@@ -165,6 +165,11 @@ pub struct Host {
     pub linear_ticket_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_branch: Option<String>,
+    /// Clone preset name used at creation. New control-server versions persist this so
+    /// reconciliation can rebuild `/etc/environment` without relying on a guest-side
+    /// legacy env file. Older hosts may not have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

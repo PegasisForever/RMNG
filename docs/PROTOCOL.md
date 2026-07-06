@@ -180,7 +180,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   case-insensitively against the ticket's prefix like `DEV-196` → `dev`, first match in
   config order wins), `linear_key` (personal API key, **secret** — fetches/creates tickets server-side
   and is injected into the clone as `LINEAR_API_KEY`, authing its `linear` MCP), `vars`
-  (env vars written to the clone's session env), and `agent_playbook` (optional,
+  (env vars written to the clone's `/etc/environment`), and `agent_playbook` (optional,
   non-secret — text appended after a blank line to the global `agent_playbook` for
   clones of this preset; empty ⇒ global only). `PUT /api/config` merges rows by name
   (blank `linearKey` keeps the stored one; omitted row deletes). One-shot migration at

@@ -106,8 +106,23 @@ pub fn resolve_reference(images: &[wire::ImageInfo], input: &str) -> Option<Stri
         .map(|i| i.reference.clone())
 }
 
+/// Base desktop session env every clone needs before its preset/control values are added.
+pub(crate) fn base_session_env_vars() -> Vec<EnvVar> {
+    [
+        ("XDG_CURRENT_DESKTOP", "GNOME"),
+        ("XDG_SESSION_DESKTOP", "gnome"),
+        ("DESKTOP_SESSION", "gnome"),
+        ("XDG_SESSION_CLASS", "user"),
+        ("XDG_MENU_PREFIX", "gnome-"),
+        ("XDG_SESSION_TYPE", "wayland"),
+    ]
+    .into_iter()
+    .map(|(key, value)| EnvVar { key: key.to_string(), value: value.to_string() })
+    .collect()
+}
+
 /// The clone→control-server + detector-inference env every clone needs, as
-/// `environment.d`-style `KEY=VALUE` [`EnvVar`]s. Points the detector's feedback + agent
+/// [`EnvVar`]s. Points the detector's feedback + agent
 /// `set_state` MCP at THIS control-server and the detector's vision model at the configured
 /// inference server. The control host is `docker.control_host()` — the `rmng-control`
 /// DNS alias on the rmng bridge (the gateway IP in dev mode; see `docker.rs`). Empty
@@ -134,20 +149,39 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
     vars
 }
 
-/// `~/.config/environment.d/30-rmng-preset.conf` body: `KEY=VALUE` lines for the control +
-/// preset env, skipping keys with an empty name. This is the per-clone preset env, read by
-/// `systemd --user` (environment.d) into the session + every user unit at boot.
-fn preset_env_conf(vars: &[EnvVar]) -> String {
-    vars.iter().filter(|v| !v.key.is_empty()).map(|v| format!("{}={}\n", v.key, v.value)).collect()
+/// The preset's env plus its Linear key as `LINEAR_API_KEY` (auths the clone's
+/// `linear` MCP). A `LINEAR_API_KEY` var set explicitly in the preset wins.
+pub(crate) fn preset_env_vars(p: &wire::Preset) -> Vec<EnvVar> {
+    let mut vars = p.vars.clone();
+    if !p.linear_key.is_empty() && !vars.iter().any(|v| v.key == "LINEAR_API_KEY") {
+        vars.push(EnvVar { key: "LINEAR_API_KEY".into(), value: p.linear_key.clone() });
+    }
+    vars
+}
+
+/// `/etc/environment` body: `KEY=VALUE` lines, skipping empty keys. Last duplicate key wins,
+/// which lets preset/control values override the base desktop session defaults.
+pub(crate) fn etc_environment_conf(vars: &[EnvVar]) -> String {
+    let mut rows: Vec<(&str, &str)> = Vec::new();
+    for v in vars.iter().filter(|v| !v.key.is_empty()) {
+        rows.retain(|(key, _)| *key != v.key);
+        rows.push((&v.key, &v.value));
+    }
+    rows.into_iter().map(|(key, value)| format!("{key}={value}\n")).collect()
+}
+
+pub(crate) fn clone_etc_environment_conf(vars: &[EnvVar]) -> String {
+    let mut all = base_session_env_vars();
+    all.extend(vars.iter().cloned());
+    etc_environment_conf(&all)
 }
 
 /// Shell-rc files that prepend a preset's `PATH` dirs for interactive shells. The Rust port
 /// of the deleted `clone.sh::write_preset_path_rc`.
 ///
-/// A preset `PATH` needs more than environment.d: interactive shells rewrite `PATH` on
-/// startup (login bash re-runs `/etc/profile`, which hard-resets it; fish rebuilds `$PATH`),
-/// so the inherited value reaches GUI apps but not a terminal — every OTHER preset var
-/// survives. Mirror the template's `rmng-local-bin` blocks: prepend the preset's dirs inside
+/// A preset `PATH` needs more than `/etc/environment`: interactive shells rewrite `PATH` on
+/// startup (login bash re-runs `/etc/profile`, which hard-resets it; fish rebuilds `$PATH`).
+/// Mirror the template's `rmng-local-bin` blocks: prepend the preset's dirs inside
 /// fish (`conf.d`), login sh/bash (`profile.d`), and non-login interactive bash
 /// (`/etc/bash.bashrc`). We always PREPEND (never replace) so the shell keeps its system dirs
 /// even if the preset set `PATH` outright, and drop any `$PATH` token; dirs are reversed so
@@ -240,9 +274,9 @@ fn clone_pct(step: &str) -> Option<f64> {
 ///
 /// `image` must be a clone source (`rmng.image=1`); `env` is the resolved control + preset
 /// env (control URLs first so a preset can still override). One `upload_tar` injects: a
-/// fresh random `/etc/machine-id` (always — a committed image carries a baked one), the preset
-/// `30-rmng-preset.conf` (uid 1000, home entries), and — when the preset sets `PATH` — the
-/// fish/profile preset-PATH rc (root-owned `/etc`). After start, when the preset set `PATH`,
+/// fresh random `/etc/machine-id` (always — a committed image carries a baked one),
+/// `/etc/environment`, and — when the preset sets `PATH` — the fish/profile preset-PATH rc
+/// (root-owned `/etc`). After start, when the preset set `PATH`,
 /// the bashrc marker block is appended via an exec (a plain tar can't append). wait-ready
 /// polls the mediaplane for the daemon's `Hello{clone_id == hostname}` ≤ 90 s; a timeout with
 /// the container still running SUCCEEDS with a warning in the op log; a dead container FAILS
@@ -363,8 +397,8 @@ async fn clone_container_after_create(
         docker.upload_tar(container, bins).await?;
     }
 
-    // systemd PID 1 comes up; we then inject the identity/preset files and the units pick
-    // them up (environment.d is read by `systemd --user` under linger at boot).
+    // systemd PID 1 comes up; we then inject identity + preset files before the user units
+    // settle, so their PAM-created environment sees `/etc/environment`.
     on_progress("inject", "starting container to inject identity + preset");
     docker.start_container(container).await?;
 
@@ -396,8 +430,8 @@ async fn clone_container_after_create(
         tracing::warn!("clone {hostname}: Codex CLI install exited {code} (reconciler will retry)");
     }
 
-    // Build the single upload_tar: machine-id (always), preset env conf + PATH rc.
-    let preset_conf = preset_env_conf(env);
+    // Build the single upload_tar: machine-id (always), /etc/environment + PATH rc.
+    let preset_conf = clone_etc_environment_conf(env);
     let path_rc = preset_path_rc(&preset_conf);
     let mut entries: Vec<TarEntry> = vec![
         // Fresh random machine-id: a committed image bakes one in, and systemd-in-docker
@@ -406,18 +440,19 @@ async fn clone_container_after_create(
         // across restarts). Writing a unique id per clone gives stable, collision-free
         // D-Bus/journald identity; commit truncates it again, so images never carry it.
         TarEntry { path: "etc/machine-id".into(), data: fresh_machine_id()?, mode: 0o444, uid: 0, gid: 0 },
-        // Per-clone preset env (control URLs + preset vars), owned by the clone user.
+        // Per-clone env (base desktop session + control URLs + preset vars), read by PAM for
+        // SSH sessions and the lingering user manager.
         TarEntry {
-            path: format!("home/{CLONE_USER}/.config/environment.d/30-rmng-preset.conf"),
+            path: "etc/environment".into(),
             data: preset_conf.clone().into_bytes(),
             mode: 0o644,
-            uid: CLONE_UID,
-            gid: CLONE_GID,
+            uid: 0,
+            gid: 0,
         },
     ];
     // The Settings-editable agent playbook (global + preset append), read by the agent-wrapper
     // at startup (AGENT_INSTRUCTIONS_PATH). Empty ⇒ skip; the wrapper then uses its baked-in
-    // default. Distinct from environment.d (this is a multi-KB markdown blob, not a KEY=VALUE).
+    // default. Distinct from /etc/environment (this is a multi-KB markdown blob, not a KEY=VALUE).
     if !agent_playbook.trim().is_empty() {
         entries.push(TarEntry {
             path: format!("home/{CLONE_USER}/.config/rmng/agent-instructions.md"),
@@ -802,7 +837,7 @@ pub const CLONE_BINARIES: &[CloneBinary] = &[
     CloneBinary { payload: "clone-daemon", bin: "rmng-clone-daemon", dir: "opt/rmng/bin" },
     CloneBinary { payload: "agent-wrapper", bin: "agent-wrapper", dir: "opt/rmng/bin" },
     // The fleet CLI: talks to this control-server via RMNG_CONTROL_URL (preset into every
-    // clone's session env), so in-clone agents can manage the fleet with plain commands.
+    // clone's /etc/environment), so in-clone agents can manage the fleet with plain commands.
     CloneBinary { payload: "rmng-cli", bin: "rmng", dir: "usr/local/bin" },
 ];
 
@@ -937,13 +972,26 @@ mod tests {
     }
 
     #[test]
-    fn preset_env_conf_skips_empty_keys_and_formats() {
+    fn etc_environment_conf_skips_empty_keys_and_formats() {
         let vars = vec![
             EnvVar { key: "FOO".into(), value: "1".into() },
             EnvVar { key: "".into(), value: "dropped".into() },
             EnvVar { key: "BAR".into(), value: "a b".into() },
         ];
-        assert_eq!(preset_env_conf(&vars), "FOO=1\nBAR=a b\n");
+        assert_eq!(etc_environment_conf(&vars), "FOO=1\nBAR=a b\n");
+    }
+
+    #[test]
+    fn clone_etc_environment_conf_includes_base_session_and_lets_preset_override() {
+        let vars = vec![
+            EnvVar { key: "XDG_CURRENT_DESKTOP".into(), value: "custom".into() },
+            EnvVar { key: "RMNG_CONTROL_URL".into(), value: "http://rmng-control:9000".into() },
+        ];
+        let body = clone_etc_environment_conf(&vars);
+        assert!(body.contains("XDG_SESSION_DESKTOP=gnome\n"));
+        assert!(body.contains("RMNG_CONTROL_URL=http://rmng-control:9000\n"));
+        assert!(body.contains("XDG_CURRENT_DESKTOP=custom\n"));
+        assert_eq!(body.matches("XDG_CURRENT_DESKTOP=").count(), 1);
     }
 
     #[test]

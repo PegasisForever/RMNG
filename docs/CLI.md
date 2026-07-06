@@ -35,7 +35,7 @@ clone reconciler refreshes those files on old running clones.
 ## Server resolution
 
 `--server <URL>` > `$RMNG_CONTROL_URL` > `http://localhost:9000`. Every clone gets
-`RMNG_CONTROL_URL` preset in its session env (pointing at this control-server's web port),
+`RMNG_CONTROL_URL` preset through `/etc/environment` (pointing at this control-server's web port),
 so inside a clone `rmng ps` just works. Blank values fall through; a trailing `/` is
 stripped. A connection failure prints the resolved base with a `set --server or
 $RMNG_CONTROL_URL` hint.

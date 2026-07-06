@@ -230,7 +230,7 @@ chmod 600 "$CODEX_DIR/config.toml"
 # agent; the agent-wrapper registers the same server programmatically). mcpServers lives in
 # ~/.claude.json — a top-level key; settings.json does NOT support it. ${LINEAR_API_KEY}
 # stays literal here (single-quoted jq arg): claude expands it at runtime from the session
-# env, where the per-clone 30-rmng-preset.conf (written by the control-server) put the chosen
+# env, where per-clone /etc/environment (written by the control-server) put the chosen
 # preset's key. No key in the env (e.g. on the base image) ⇒ claude skips the server with a
 # "missing environment variables" warning.
 log "user-scope linear MCP → ~/.claude.json"
@@ -339,13 +339,13 @@ UNIT
 
 # Base session env every clone gets (NOT a preset): identifies the desktop so apps,
 # xdg-desktop-portal (it picks the GNOME backend from XDG_CURRENT_DESKTOP), dark-mode/
-# settings portal, and theming behave like a real GNOME session. We launch
-# `gnome-shell --headless` directly — no GDM / gnome-session / pam_systemd — so nothing else
-# sets these. systemd --user reads environment.d → the session + all user units. Per-clone
-# env presets live in 30-rmng-preset.conf (written by the control-server at clone create);
-# higher number wins.
-ENVDIR="/home/$USERNAME/.config/environment.d"; install -d "$ENVDIR"
-cat > "$ENVDIR/10-rmng-session.conf" <<'ENVD'
+# settings portal, and theming behave like a real GNOME session. Per-clone /etc/environment
+# is written by the control-server at clone create with these defaults plus the selected
+# preset/control vars; the template keeps the same defaults for direct/manual boots.
+tmp_env="$(mktemp)"
+keys_env="$(mktemp)"
+trap 'rm -f "$tmp_env" "$keys_env"' EXIT
+cat > "$tmp_env.rmng" <<'ENVD'
 XDG_CURRENT_DESKTOP=GNOME
 XDG_SESSION_DESKTOP=gnome
 DESKTOP_SESSION=gnome
@@ -353,6 +353,13 @@ XDG_SESSION_CLASS=user
 XDG_MENU_PREFIX=gnome-
 XDG_SESSION_TYPE=wayland
 ENVD
+sed 's/=.*//' "$tmp_env.rmng" | sort -u > "$keys_env"
+if [ -f /etc/environment ]; then
+  awk -F= 'NR==FNR { drop[$1]=1; next } !($1 in drop)' "$keys_env" /etc/environment > "$tmp_env"
+fi
+cat "$tmp_env.rmng" >> "$tmp_env"
+install -m 0644 -o root -g root "$tmp_env" /etc/environment
+rm -f "$tmp_env.rmng"
 
 chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config"
 # Enable for auto-start by creating the wants symlinks directly (a plain `ln`, no bus or

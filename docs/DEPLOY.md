@@ -165,7 +165,8 @@ is any image labeled `rmng.image=1`, identified by its own `repo:tag` (e.g.
 - **Clone from an image**: `POST /api/clone` takes `image` (a `repo:tag` reference such as
   `pegasis0/rmng-template:latest` from the image list) plus a task mode (Linear ticket / new
   ticket / plain). The clone joins the `rmng` bridge (addressed by container name — Docker DNS;
-  its IP is plain Docker IPAM) with fixed `rmng`/`rmng` credentials, its preset env, and a
+  its IP is plain Docker IPAM) with fixed `rmng`/`rmng` credentials, its `/etc/environment`
+  preset env, and a
   Claude account.
 - **Commit a clone to a new image**: `POST /api/images/commit {host, name}` — freezes the
   running clone and commits it to `<name>:latest` (the name is the full repo; `rmng.created-from`
@@ -501,7 +502,7 @@ the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no 
   lazily at wizard finish and before each clone. Addressing is Docker's embedded DNS, not
   static IPs: every clone resolves by its container name (== host id), and the
   control-server attaches itself under the `rmng-control` alias (so recreating its container
-  never strands the baked `RMNG_CONTROL_URL`s). Clone IPs are plain Docker IPAM — nothing
+  never strands the managed `RMNG_CONTROL_URL`s). Clone IPs are plain Docker IPAM — nothing
   allocates or stores them. If an `rmng` network already exists with a **different** subnet,
   `ensure_network` errors — delete it with `docker network rm rmng` and re-run setup.
 - **Clone media socket**: clone-daemon ships dmabuf frames to the control-server over a

@@ -444,7 +444,8 @@ async fn clone(
             first_message: None,
             agent_instructions,
             claude_instructions,
-            env: explicit.map(preset_env).unwrap_or_default(),
+            preset_name: explicit.map(|p| p.name.clone()),
+            env: explicit.map(crate::provision::preset_env_vars).unwrap_or_default(),
             agent_playbook: compose_playbook(&cfg, explicit),
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
@@ -459,7 +460,7 @@ async fn clone(
             return Err(bad("plain.title is required".into()));
         }
         let env = match explicit {
-            Some(p) => preset_env(p),
+            Some(p) => crate::provision::preset_env_vars(p),
             None if cfg.presets.is_empty() => Vec::new(),
             None => return Err(bad(format!("a preset is required (configured: {})", preset_names(&cfg)))),
         };
@@ -473,6 +474,7 @@ async fn clone(
             first_message: Some(message).filter(|m| !m.is_empty()),
             agent_instructions,
             claude_instructions,
+            preset_name: explicit.map(|p| p.name.clone()),
             env,
             agent_playbook: compose_playbook(&cfg, explicit),
         };
@@ -505,21 +507,12 @@ async fn clone(
         first_message: None,
         agent_instructions,
         claude_instructions,
-        env: preset_env(&preset),
+        preset_name: Some(preset.name.clone()),
+        env: crate::provision::preset_env_vars(&preset),
         agent_playbook: compose_playbook(&cfg, Some(&preset)),
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
-}
-
-/// The preset's env plus its Linear key as `LINEAR_API_KEY` (auths the clone's
-/// `linear` MCP). A `LINEAR_API_KEY` var set explicitly in the preset wins.
-fn preset_env(p: &wire::Preset) -> Vec<wire::EnvVar> {
-    let mut vars = p.vars.clone();
-    if !p.linear_key.is_empty() && !vars.iter().any(|v| v.key == "LINEAR_API_KEY") {
-        vars.push(wire::EnvVar { key: "LINEAR_API_KEY".into(), value: p.linear_key.clone() });
-    }
-    vars
 }
 
 fn preset_names(cfg: &wire::AppConfig) -> String {

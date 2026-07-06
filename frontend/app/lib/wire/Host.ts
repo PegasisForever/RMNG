@@ -59,7 +59,13 @@ codexSelection: string | null,
  * Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
  * string: the workspace set is config (Settings → Linear API keys), not an enum.
  */
-linearWorkspace: string | null, linearTicket: string | null, linearTicketUrl: string | null, linearBranch: string | null, displayName: string | null, linearLabel: string | null, agentReport: AgentReport | null, stateNote: string | null, monitorState: MonitorState | null, 
+linearWorkspace: string | null, linearTicket: string | null, linearTicketUrl: string | null, linearBranch: string | null,
+/**
+ * Clone preset name used at creation. New control-server versions persist this so
+ * reconciliation can rebuild `/etc/environment` without relying on a guest-side
+ * legacy env file. Older hosts may not have it.
+ */
+presetName: string | null, displayName: string | null, linearLabel: string | null, agentReport: AgentReport | null, stateNote: string | null, monitorState: MonitorState | null,
 /**
  * True when this clone fell out of `working` (→ idle/offline) since the
  * operator last viewed it — drives the sidebar "unread" dot. Set by the

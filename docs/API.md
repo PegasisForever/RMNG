@@ -163,7 +163,7 @@ Body (one of four modes + optional account/instructions):
 `image` accepts a `repo:tag` reference (e.g. `pegasis0/rmng-template:latest`), a full `sha256:…` id, or a bare 64-hex id;
 whatever form is passed is canonicalized to the reference and recorded on the host as
 `source`. The image must carry the `rmng.image=1` label (a raw non-image id is rejected). The
-selected preset's vars are written into the clone's session env, plus `LINEAR_API_KEY=<preset
+selected preset's vars are written into the clone's `/etc/environment`, plus `LINEAR_API_KEY=<preset
 key>` (auths the clone's `linear` MCP). Hostname is derived (`pega-{ticket}` or a slug of the
 plain title, with a numeric suffix on collision). Returns `{ "ok": true, "op": Operation }` or
 `400 {error}`.

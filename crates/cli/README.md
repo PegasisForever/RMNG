@@ -8,7 +8,7 @@ is the MCP's job ([docs/MCP.md](../../docs/MCP.md)).
 
 - **Build:** `cargo build -p rmng-cli` (package `rmng-cli`, binary `rmng`).
 - **Server resolution:** `--server` flag > `$RMNG_CONTROL_URL` (preset into every clone's
-  session env) > `http://localhost:9000`.
+  `/etc/environment`) > `http://localhost:9000`.
 - **In clones:** the control-server injects the binary as `/usr/local/bin/rmng` at
   clone-create time (`provision.rs` `CLONE_BINARIES`; the Dockerfile ships the payload at
   `/usr/local/share/rmng/rmng-cli`), so it's on PATH in every shell.

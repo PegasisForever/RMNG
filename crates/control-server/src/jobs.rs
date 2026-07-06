@@ -59,7 +59,9 @@ pub struct CloneSpec {
     pub first_message: Option<String>,
     pub agent_instructions: Option<String>,
     pub claude_instructions: Option<String>,
-    /// Resolved env-preset vars to write into the clone's session env at creation.
+    /// Clone preset name used to derive env/playbook, persisted for future reconciliation.
+    pub preset_name: Option<String>,
+    /// Resolved env-preset vars to write into the clone's `/etc/environment` at creation.
     pub env: Vec<wire::EnvVar>,
     /// Composed agent playbook (global + preset append) injected into the clone at creation
     /// as ~/.config/rmng/agent-instructions.md. Empty ⇒ no file injected.
@@ -445,6 +447,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             codex_selection: codex_selection.clone(),
             codex_account_email: codex_account_email.clone(),
             codex_group: codex_group.clone(),
+            preset_name: spec.preset_name.clone(),
             ..Default::default()
         };
         if let Some(m) = &spec.linear {
