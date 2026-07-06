@@ -18,7 +18,7 @@ use crate::app::App;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(4);
 const FETCH_TIMEOUT: Duration = Duration::from_millis(2500);
-const DISK_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const DISK_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const DISK_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Volatile per-host resource-usage bus. The monitor poller samples each running managed
