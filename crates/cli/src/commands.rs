@@ -11,7 +11,7 @@ use control_client::Client;
 use serde_json::Value;
 use wire::{ControlState, Operation, Provider};
 
-use crate::args::{AccountCmd, DesktopCmd, ImageCmd, WaitArgs};
+use crate::args::{AccountCmd, DesktopCmd, ImageCmd, RescaleArgs, WaitArgs};
 use crate::output::{human_size, pct, short_id, table};
 use crate::wait::{WaitOutcome, wait_for_op};
 
@@ -482,19 +482,54 @@ fn content_image(content: &Value) -> Option<&str> {
     })
 }
 
+/// Decode a JPEG, resize to `(w, h)` pixels with bilinear filtering, and
+/// re-encode as JPEG (quality 85 — good enough for screen content, much
+/// smaller than the daemon's 95-quality default). `None` for `target` is a
+/// pass-through. Returns an error if the bytes aren't a valid JPEG (the
+/// daemon always sends JPEG; if we ever switch to PNG/WebP this is the
+/// place to extend the format list).
+fn rescale_jpeg(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Vec<u8>> {
+    let Some((w, h)) = target else {
+        return Ok(bytes.to_vec());
+    };
+    let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| anyhow!("--rescale-screen: decoding source JPEG: {e}"))?;
+    let resized = img.resize_exact(w, h, image::imageops::FilterType::Triangle);
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    let mut cursor = std::io::Cursor::new(&mut out);
+    {
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
+        encoder
+            .encode(
+                resized.as_bytes(),
+                resized.width(),
+                resized.height(),
+                resized.color().into(),
+            )
+            .map_err(|e| anyhow!("--rescale-screen: encoding resized JPEG: {e}"))?;
+    }
+    Ok(out)
+}
+
 /// Decode the image in `content`, write it to `out` (or the default
-/// `$TMPDIR/rmng-<clone>-mon<N>.jpg`), and return its absolute path.
+/// `$TMPDIR/rmng-<clone>-mon<N>.jpg`), and return its absolute path. When
+/// `rescale` is `Some((w, h))` the JPEG is decoded, resized, and re-encoded
+/// before being written — used by `--rescale-screen` to shrink the file
+/// for a downstream vision model (or upscale for clarity).
 fn write_screenshot(
     content: &Value,
     clone: &str,
     monitor: Option<u32>,
     out: Option<&Path>,
+    rescale: Option<(u32, u32)>,
 ) -> Result<PathBuf> {
     let data = content_image(content)
         .ok_or_else(|| anyhow!("daemon returned no image content for the screenshot"))?;
     let bytes = B64
         .decode(data)
         .map_err(|e| anyhow!("daemon image was not valid base64: {e}"))?;
+    let bytes = rescale_jpeg(&bytes, rescale)?;
     let path = out.map(PathBuf::from).unwrap_or_else(|| {
         std::env::temp_dir().join(format!("rmng-{clone}-mon{}.jpg", monitor.unwrap_or(0)))
     });
@@ -515,24 +550,149 @@ fn args_obj(pairs: Vec<(&str, Value)>) -> Value {
     Value::Object(m)
 }
 
+/// Rescale a single axis from a normalized source space to a target pixel
+/// range, rounding to nearest. `src_max` is the upper bound of the source
+/// space (e.g. 1000 for MiniMax M3); `dst_max` is the destination size in
+/// pixels. Returns a plain `i32` — callers that want None semantics use
+/// [`rescale_optional`].
+fn rescale_axis(v: i32, src_min: i32, src_max: i32, dst_max: i32) -> i32 {
+    let span = (src_max - src_min) as i64;
+    let offset = (v - src_min) as i64;
+    // round-to-nearest: (offset * dst_max + span/2) / span
+    let scaled = (offset * dst_max as i64 + span / 2) / span;
+    src_min + scaled as i32
+}
+
+/// Walk the daemon's `list_monitors` and return the W×H of the monitor the
+/// caller is targeting (the one they passed via `--monitor`, or the first one
+/// if they didn't). Used to convert normalized input coords (e.g. M3's
+/// 0–1000) into pixel space. Bails with a useful message when the daemon
+/// reports no monitors (clone not ready, MCP wedged, etc.).
+async fn monitor_size(
+    client: &Client,
+    clone: &str,
+    monitor: Option<u32>,
+) -> Result<(i32, i32)> {
+    let content = client
+        .desktop(clone, "list_monitors", Value::Object(Default::default()))
+        .await?;
+    let text = content
+        .get(0)
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("list_monitors: no text in response"))?;
+    let mons: Vec<Value> = serde_json::from_str(text)
+        .map_err(|e| anyhow!("list_monitors: not JSON: {e}: {text}"))?;
+    if mons.is_empty() {
+        bail!("list_monitors: clone has no monitors");
+    }
+    let pick = monitor
+        .and_then(|id| mons.iter().find(|m| m.get("id").and_then(Value::as_u64) == Some(id as u64)))
+        .unwrap_or_else(|| &mons[0]);
+    let w = pick
+        .get("width")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("list_monitors: monitor missing width"))?
+        as i32;
+    let h = pick
+        .get("height")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("list_monitors: monitor missing height"))?
+        as i32;
+    Ok((w, h))
+}
+
+/// Rescale `(x, y)` from `src` (a `(min, max)` tuple, or `None` for
+/// pass-through) to pixel coords on the targeted monitor. If `screen` is
+/// `Some((w, h))` use that directly (the `--rescale-screen` path); otherwise
+/// ask the daemon for the target monitor's W×H. Required for `mouse_move`
+/// (which always takes x/y) — for verbs where the coords are optional, use
+/// [`rescale_optional`] instead.
+async fn rescale_coords(
+    client: &Client,
+    clone: &str,
+    src: Option<(i32, i32)>,
+    screen: Option<(i32, i32)>,
+    monitor: Option<u32>,
+    x: i32,
+    y: i32,
+) -> Result<(i32, i32)> {
+    let Some((lo, hi)) = src else {
+        return Ok((x, y));
+    };
+    let (w, h) = match screen {
+        Some(s) => s,
+        None => monitor_size(client, clone, monitor).await?,
+    };
+    Ok((rescale_axis(x, lo, hi, w), rescale_axis(y, lo, hi, h)))
+}
+
+/// Same as [`rescale_coords`] but accepts `Option<i32>` for click verbs whose
+/// `x`/`y` are optional (a bare `rmng desktop c click` re-clicks the current
+/// pointer position). `None` is passed through untouched.
+async fn rescale_optional(
+    client: &Client,
+    clone: &str,
+    src: Option<(i32, i32)>,
+    screen: Option<(i32, i32)>,
+    monitor: Option<u32>,
+    x: Option<i32>,
+    y: Option<i32>,
+) -> Result<(Option<i32>, Option<i32>)> {
+    let Some((lo, hi)) = src else {
+        return Ok((x, y));
+    };
+    let (w, h) = match screen {
+        Some(s) => s,
+        None => monitor_size(client, clone, monitor).await?,
+    };
+    Ok((
+        x.map(|v| rescale_axis(v, lo, hi, w)),
+        y.map(|v| rescale_axis(v, lo, hi, h)),
+    ))
+}
+
 /// `rmng desktop <clone> <verb …>`. Maps the verb to a daemon tool, calls it, and
 /// renders the result: query verbs print JSON, `screenshot` writes+prints a path, and
 /// action verbs print any text then guarantee a post-action screenshot path.
 pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool) -> Result<u8> {
     let n = |v: Option<u32>| v.map(Value::from).unwrap_or(Value::Null);
     let i = |v: Option<i32>| v.map(Value::from).unwrap_or(Value::Null);
-    let click_args = |x: &Option<i32>, y: &Option<i32>, monitor: &Option<u32>| {
-        args_obj(vec![
-            ("x", i(*x)),
-            ("y", i(*y)),
-            ("monitor", n(*monitor)),
-        ])
+
+    // Parse the verb's `--rescale-cursor` value (or None when unset). We capture
+    // it as a closure so each arm of the match can apply it without re-writing
+    // the `?` plumbing. `rescale` (the field on each verb) and `parse_rescale_cursor`
+    // (this closure) share a name intentionally: shadowing the field with the
+    // closure would also work, but keeping them distinct makes the type
+    // signature explicit at every call site.
+    let parse_rescale_cursor = |r: &RescaleArgs| r.parsed_cursor().map_err(anyhow::Error::msg);
+    // Same trick for `--rescale-screen` — the user's override of monitor size
+    // (skips the `list_monitors` auto-detect round-trip).
+    let parse_rescale_screen = |r: &RescaleArgs| r.parsed_screen().map_err(anyhow::Error::msg);
+    // `--rescale-screen` is independent of the verb, so we resolve it once
+    // up front and use the same value for every daemon call's response —
+    // both the explicit `screenshot` verb and the auto-snap after an action.
+    // We sniff it from the verb's own `rescale` field; a no-op for verbs
+    // that don't carry it (Monitors/Windows/Apps/Key/Type/Launch/Movewin)
+    // because their match arms synthesize a default `RescaleArgs` below.
+    let screen_target: Option<(u32, u32)> = match cmd {
+        DesktopCmd::Screenshot { rescale, .. }
+        | DesktopCmd::Move { rescale, .. }
+        | DesktopCmd::Click { rescale, .. }
+        | DesktopCmd::Rclick { rescale, .. }
+        | DesktopCmd::Mclick { rescale, .. }
+        | DesktopCmd::Dclick { rescale, .. }
+        | DesktopCmd::Scroll { rescale, .. } => match parse_rescale_screen(rescale) {
+            Ok(t) => t.map(|(w, h)| (w as u32, h as u32)),
+            Err(e) => return Err(anyhow::Error::msg(e)),
+        },
+        _ => None,
     };
 
     // (tool, args, kind, monitor-for-screenshots, out path)
     let (tool, args, kind, monitor, out): (&str, Value, Kind, Option<u32>, Option<PathBuf>) =
         match cmd {
-            DesktopCmd::Screenshot { monitor, out } => (
+            DesktopCmd::Screenshot { monitor, out, .. } => (
                 "screenshot",
                 args_obj(vec![("monitor", n(*monitor))]),
                 Kind::Screenshot,
@@ -547,59 +707,113 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 y,
                 monitor,
                 out,
-            } => (
-                "mouse_move",
-                args_obj(vec![("x", (*x).into()), ("y", (*y).into()), ("monitor", n(*monitor))]),
-                Kind::Action,
-                *monitor,
-                out.clone(),
-            ),
-            DesktopCmd::Click { x, y, monitor, out } => (
-                "left_click",
-                click_args(x, y, monitor),
-                Kind::Action,
-                *monitor,
-                out.clone(),
-            ),
-            DesktopCmd::Rclick { x, y, monitor, out } => (
-                "right_click",
-                click_args(x, y, monitor),
-                Kind::Action,
-                *monitor,
-                out.clone(),
-            ),
-            DesktopCmd::Mclick { x, y, monitor, out } => (
-                "middle_click",
-                click_args(x, y, monitor),
-                Kind::Action,
-                *monitor,
-                out.clone(),
-            ),
-            DesktopCmd::Dclick { x, y, monitor, out } => (
-                "left_double_click",
-                click_args(x, y, monitor),
-                Kind::Action,
-                *monitor,
-                out.clone(),
-            ),
+                rescale,
+            } => {
+                let (x, y) =
+                    rescale_coords(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                (
+                    "mouse_move",
+                    args_obj(vec![
+                        ("x", x.into()),
+                        ("y", y.into()),
+                        ("monitor", n(*monitor)),
+                    ]),
+                    Kind::Action,
+                    *monitor,
+                    out.clone(),
+                )
+            }
+            DesktopCmd::Click {
+                x,
+                y,
+                monitor,
+                out,
+                rescale,
+            } => {
+                let (x, y) =
+                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                (
+                    "left_click",
+                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    Kind::Action,
+                    *monitor,
+                    out.clone(),
+                )
+            }
+            DesktopCmd::Rclick {
+                x,
+                y,
+                monitor,
+                out,
+                rescale,
+            } => {
+                let (x, y) =
+                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                (
+                    "right_click",
+                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    Kind::Action,
+                    *monitor,
+                    out.clone(),
+                )
+            }
+            DesktopCmd::Mclick {
+                x,
+                y,
+                monitor,
+                out,
+                rescale,
+            } => {
+                let (x, y) =
+                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                (
+                    "middle_click",
+                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    Kind::Action,
+                    *monitor,
+                    out.clone(),
+                )
+            }
+            DesktopCmd::Dclick {
+                x,
+                y,
+                monitor,
+                out,
+                rescale,
+            } => {
+                let (x, y) =
+                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                (
+                    "left_double_click",
+                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    Kind::Action,
+                    *monitor,
+                    out.clone(),
+                )
+            }
             DesktopCmd::Scroll {
                 amount,
                 x,
                 y,
                 monitor,
                 out,
-            } => (
-                "scroll",
-                args_obj(vec![
-                    ("amount", (*amount).into()),
-                    ("x", i(*x)),
-                    ("y", i(*y)),
-                    ("monitor", n(*monitor)),
-                ]),
-                Kind::Action,
-                *monitor,
-                out.clone(),
-            ),
+                rescale,
+            } => {
+                let (x, y) =
+                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                (
+                    "scroll",
+                    args_obj(vec![
+                        ("amount", (*amount).into()),
+                        ("x", i(x),),
+                        ("y", i(y),),
+                        ("monitor", n(*monitor)),
+                    ]),
+                    Kind::Action,
+                    *monitor,
+                    out.clone(),
+                )
+            }
             DesktopCmd::Key { keys, out } => (
                 "key",
                 args_obj(vec![("keys", keys.clone().into())]),
@@ -652,7 +866,7 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             Ok(0)
         }
         Kind::Screenshot => {
-            let path = write_screenshot(&content, clone, monitor, out.as_deref())?;
+            let path = write_screenshot(&content, clone, monitor, out.as_deref(), screen_target)?;
             println!("{}", path.display());
             Ok(0)
         }
@@ -670,7 +884,7 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                     .desktop(clone, "screenshot", args_obj(vec![("monitor", n(monitor))]))
                     .await?
             };
-            let path = write_screenshot(&shot, clone, monitor, out.as_deref())?;
+            let path = write_screenshot(&shot, clone, monitor, out.as_deref(), screen_target)?;
             println!("{}", path.display());
             Ok(0)
         }
@@ -774,5 +988,175 @@ mod tests {
             "rmng.example.com"
         );
         assert_eq!(host_from_base("localhost:9000"), "localhost");
+    }
+
+    #[test]
+    fn rescale_axis_0_1000_to_2560x1440_endpoints() {
+        // 0 → 0 and 1000 → dst_max, by definition.
+        assert_eq!(rescale_axis(0, 0, 1000, 2560), 0);
+        assert_eq!(rescale_axis(1000, 0, 1000, 2560), 2560);
+        assert_eq!(rescale_axis(0, 0, 1000, 1440), 0);
+        assert_eq!(rescale_axis(1000, 0, 1000, 1440), 1440);
+    }
+
+    #[test]
+    fn rescale_axis_0_1000_to_1920x1080_midpoint_is_pixels() {
+        // 500/1000 * 1920 = 960, 500/1000 * 1080 = 540 — the whole point of
+        // the flag is that the caller's "center" lands on the actual center.
+        assert_eq!(rescale_axis(500, 0, 1000, 1920), 960);
+        assert_eq!(rescale_axis(500, 0, 1000, 1080), 540);
+    }
+
+    #[test]
+    fn rescale_axis_quarter_and_three_quarters() {
+        // 250/1000 * 1920 = 480, 750/1000 * 1920 = 1440
+        assert_eq!(rescale_axis(250, 0, 1000, 1920), 480);
+        assert_eq!(rescale_axis(750, 0, 1000, 1920), 1440);
+    }
+
+    #[test]
+    fn rescale_axis_arbitrary_min_max_range() {
+        // 0..=99 (UIKit points) to 0..=2560 (Retina pixels) at 128 points:
+        // 128/99 * 2560 ≈ 3309.9, with round-to-nearest that's 3310.
+        assert_eq!(rescale_axis(128, 0, 99, 2560), 3310);
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_accepts_0_1000() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("0-1000".into()),
+            rescale_screen: None,
+        };
+        assert_eq!(r.parsed_cursor().unwrap(), Some((0, 1000)));
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_bare_max_assumes_zero_origin() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("1000".into()),
+            rescale_screen: None,
+        };
+        assert_eq!(r.parsed_cursor().unwrap(), Some((0, 1000)));
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_unset_is_none() {
+        let r = RescaleArgs::default();
+        assert!(r.parsed_cursor().unwrap().is_none());
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_rejects_inverted_range() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("1000-0".into()),
+            rescale_screen: None,
+        };
+        assert!(r.parsed_cursor().is_err());
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_rejects_zero_max() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("0".into()),
+            rescale_screen: None,
+        };
+        assert!(r.parsed_cursor().is_err());
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_rejects_garbage() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("not-a-number".into()),
+            rescale_screen: None,
+        };
+        assert!(r.parsed_cursor().is_err());
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_screen_accepts_lowercase_x() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("0-1000".into()),
+            rescale_screen: Some("1920x1080".into()),
+        };
+        assert_eq!(r.parsed_screen().unwrap(), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_screen_accepts_uppercase_x() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("0-1000".into()),
+            rescale_screen: Some("2560X1440".into()),
+        };
+        assert_eq!(r.parsed_screen().unwrap(), Some((2560, 1440)));
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_screen_unset_is_none() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("0-1000".into()),
+            rescale_screen: None,
+        };
+        assert!(r.parsed_screen().unwrap().is_none());
+    }
+
+    #[test]
+    fn rescale_args_parsed_cursor_screen_rejects_missing_separator() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("0-1000".into()),
+            rescale_screen: Some("1920-1080".into()),
+        };
+        assert!(r.parsed_screen().is_err());
+    }
+
+    #[test]
+    fn rescale_args_parsed_screen_rejects_zero() {
+        let r = RescaleArgs {
+            rescale_cursor: Some("0-1000".into()),
+            rescale_screen: Some("0x1080".into()),
+        };
+        assert!(r.parsed_screen().is_err());
+    }
+
+    #[test]
+    fn rescale_jpeg_passthrough_when_target_is_none() {
+        // `target = None` should be a copy; the bytes come out untouched.
+        // We can't easily produce a "real" JPEG here without pulling in an
+        // encoder, so just feed an opaque payload and confirm the function
+        // returns it as-is. (The format check only happens when a target is
+        // set; that's the point of this test.)
+        let payload = b"\xff\xd8\xff\xe0 not a real jpeg but the function won't see it";
+        let out = rescale_jpeg(payload, None).unwrap();
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn rescale_jpeg_resizes_a_known_image() {
+        // Build a 4×2 solid-red RGB image, encode as JPEG, then rescale to
+        // 2×1 and confirm the output is a valid JPEG with the requested
+        // dimensions. This exercises the full decode→resize→encode path
+        // without needing any external test fixture.
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(4, 2, |_, _| {
+            Rgb([255u8, 0, 0])
+        });
+        let mut src_jpeg = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut src_jpeg);
+        encoder
+            .encode(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let src_len = src_jpeg.len();
+        assert!(src_len > 0);
+
+        // None → no-op
+        let passthrough = rescale_jpeg(&src_jpeg, None).unwrap();
+        assert_eq!(passthrough, src_jpeg);
+
+        // Resize to 2×1, then decode the result and check dimensions.
+        let resized = rescale_jpeg(&src_jpeg, Some((2, 1))).unwrap();
+        assert!(!resized.is_empty());
+        let decoded = image::load_from_memory_with_format(&resized, image::ImageFormat::Jpeg)
+            .expect("rescaled output is a valid JPEG");
+        assert_eq!(decoded.width(), 2);
+        assert_eq!(decoded.height(), 1);
     }
 }

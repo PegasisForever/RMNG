@@ -112,6 +112,84 @@ pub enum Cmd {
     },
 }
 
+/// Optional `--rescale-cursor <range>` (and optional `--rescale-screen <W>x<H>`)
+/// for desktop action verbs. Two independent knobs:
+///
+///   * `--rescale-cursor <range>` rescales the verb's **input** X Y from a
+///     normalized coord space (e.g. MiniMax M3's 0–1000) into pixel coords
+///     before calling the daemon. Two modes:
+///       - alone: the CLI issues one extra `list_monitors` call per action to
+///         discover the target monitor's W×H.
+///       - with `--rescale-screen`: uses the caller's W×H directly, skipping
+///         the auto-detect RPC. Useful for repeated calls where the screen
+///         size is known and stable.
+///
+///   * `--rescale-screen <W>x<H>` rescales the **output screenshot** the
+///     daemon returns (both explicit `screenshot` and the auto-snap after
+///     action verbs) to the requested W×H. Saves tokens when feeding the
+///     image back to a model. Independent of `--rescale-cursor` — you can use
+///     either, both, or neither.
+#[derive(Args, Debug, Clone, Default)]
+pub struct RescaleArgs {
+    /// Rescale input X Y from this coord space into the target monitor's pixel
+    /// space. Accepts `<max>` (assumes 0-based) or `<min>-<max>` (e.g. `0-1000`
+    /// for MiniMax M3).
+    #[arg(long, value_name = "RANGE")]
+    pub rescale_cursor: Option<String>,
+    /// Rescale the **screenshot** the daemon returns to `<W>x<H>` pixels.
+    /// Independent of `--rescale-cursor`: useful for shrinking the JPEG before
+    /// feeding it to a vision model (saves tokens), or upscaling for a clearer
+    /// view. Works on every desktop verb (the action verbs auto-snap a settle
+    /// screenshot after the call).
+    #[arg(long, value_name = "WxH")]
+    pub rescale_screen: Option<String>,
+}
+
+impl RescaleArgs {
+    /// Parse `--rescale-cursor` into `(min, max)` source-space bounds, or
+    /// `None` if unset. Returns an error for malformed input so the CLI can
+    /// fail fast rather than silently sending nonsense coords to the daemon.
+    pub fn parsed_cursor(&self) -> Result<Option<(i32, i32)>, String> {
+        let Some(s) = self.rescale_cursor.as_deref() else {
+            return Ok(None);
+        };
+        if let Some((lo, hi)) = s.split_once('-') {
+            let lo: i32 = lo.parse().map_err(|e| format!("--rescale-cursor: bad min: {e}"))?;
+            let hi: i32 = hi.parse().map_err(|e| format!("--rescale-cursor: bad max: {e}"))?;
+            if hi <= lo {
+                return Err("--rescale-cursor: max must be > min".into());
+            }
+            Ok(Some((lo, hi)))
+        } else {
+            let hi: i32 = s.parse().map_err(|e| format!("--rescale-cursor: bad max: {e}"))?;
+            if hi <= 0 {
+                return Err("--rescale-cursor: max must be > 0".into());
+            }
+            Ok(Some((0, hi)))
+        }
+    }
+
+    /// Parse `--rescale-screen` into `(W, H)` pixels, or `None` if unset. Only
+    /// meaningful when `--rescale-from` is also set (enforced by clap's
+    /// `requires`); we still tolerate the call without `rescale_from` for
+    /// unit-testability.
+    pub fn parsed_screen(&self) -> Result<Option<(i32, i32)>, String> {
+        let Some(s) = self.rescale_screen.as_deref() else {
+            return Ok(None);
+        };
+        let (w, h) = s
+            .split_once('x')
+            .or_else(|| s.split_once('X'))
+            .ok_or_else(|| format!("--rescale-screen: expected WxH, got '{s}'"))?;
+        let w: i32 = w.parse().map_err(|e| format!("--rescale-screen: bad W: {e}"))?;
+        let h: i32 = h.parse().map_err(|e| format!("--rescale-screen: bad H: {e}"))?;
+        if w <= 0 || h <= 0 {
+            return Err("--rescale-screen: W and H must be > 0".into());
+        }
+        Ok(Some((w, h)))
+    }
+}
+
 /// The `rmng desktop <clone> …` verbs. Each maps 1:1 to a daemon-MCP tool; action
 /// verbs guarantee a post-action screenshot (see `commands::desktop`).
 #[derive(Subcommand, Debug)]
@@ -122,6 +200,8 @@ pub enum DesktopCmd {
         monitor: Option<u32>,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rescale: RescaleArgs,
     },
     /// List monitors (→ `list_monitors`)
     Monitors,
@@ -137,6 +217,8 @@ pub enum DesktopCmd {
         monitor: Option<u32>,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rescale: RescaleArgs,
     },
     /// Left click, optionally at X Y (→ `left_click`)
     Click {
@@ -146,6 +228,8 @@ pub enum DesktopCmd {
         monitor: Option<u32>,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rescale: RescaleArgs,
     },
     /// Right click, optionally at X Y (→ `right_click`)
     Rclick {
@@ -155,6 +239,8 @@ pub enum DesktopCmd {
         monitor: Option<u32>,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rescale: RescaleArgs,
     },
     /// Middle click, optionally at X Y (→ `middle_click`)
     Mclick {
@@ -164,6 +250,8 @@ pub enum DesktopCmd {
         monitor: Option<u32>,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rescale: RescaleArgs,
     },
     /// Left double click, optionally at X Y (→ `left_double_click`)
     Dclick {
@@ -173,6 +261,8 @@ pub enum DesktopCmd {
         monitor: Option<u32>,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rescale: RescaleArgs,
     },
     /// Scroll by AMOUNT, optionally at X Y (→ `scroll`)
     Scroll {
@@ -183,6 +273,8 @@ pub enum DesktopCmd {
         monitor: Option<u32>,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        rescale: RescaleArgs,
     },
     /// Press a key chord, e.g. `ctrl+c` (→ `key`)
     Key {
@@ -359,7 +451,7 @@ mod tests {
             Cmd::Desktop { clone, cmd } => {
                 assert_eq!(clone, "w-cp");
                 match cmd {
-                    DesktopCmd::Click { x, y, monitor, out } => {
+                    DesktopCmd::Click { x, y, monitor, out, .. } => {
                         assert_eq!(x, Some(10));
                         assert_eq!(y, Some(20));
                         assert_eq!(monitor, None);
@@ -418,11 +510,110 @@ mod tests {
         match cli.cmd {
             Cmd::Desktop {
                 clone,
-                cmd: DesktopCmd::Screenshot { monitor, out },
+                cmd: DesktopCmd::Screenshot { monitor, out, .. },
             } => {
                 assert_eq!(clone, "w-cp");
                 assert_eq!(monitor, Some(1));
                 assert_eq!(out.as_deref(), Some(std::path::Path::new("/tmp/s.jpg")));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn desktop_click_accepts_rescale_cursor() {
+        let cli = Cli::parse_from([
+            "rmng", "desktop", "w-cp", "click", "500", "500", "--rescale-cursor", "0-1000",
+        ]);
+        match cli.cmd {
+            Cmd::Desktop {
+                cmd:
+                    DesktopCmd::Click {
+                        x,
+                        y,
+                        rescale,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(x, Some(500));
+                assert_eq!(y, Some(500));
+                assert_eq!(rescale.rescale_cursor.as_deref(), Some("0-1000"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn desktop_scroll_accepts_rescale_cursor() {
+        let cli = Cli::parse_from([
+            "rmng", "desktop", "w-cp", "scroll", "3", "500", "500", "--rescale-cursor", "0-1000",
+        ]);
+        match cli.cmd {
+            Cmd::Desktop {
+                cmd:
+                    DesktopCmd::Scroll {
+                        amount,
+                        x,
+                        y,
+                        rescale,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(amount, 3);
+                assert_eq!(x, Some(500));
+                assert_eq!(y, Some(500));
+                assert_eq!(rescale.rescale_cursor.as_deref(), Some("0-1000"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn desktop_click_accepts_both_rescale_flags() {
+        let cli = Cli::parse_from([
+            "rmng",
+            "desktop",
+            "w-cp",
+            "click",
+            "500",
+            "500",
+            "--rescale-cursor",
+            "0-1000",
+            "--rescale-screen",
+            "1920x1080",
+        ]);
+        match cli.cmd {
+            Cmd::Desktop {
+                cmd: DesktopCmd::Click { rescale, .. },
+                ..
+            } => {
+                assert_eq!(rescale.rescale_cursor.as_deref(), Some("0-1000"));
+                assert_eq!(rescale.rescale_screen.as_deref(), Some("1920x1080"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn desktop_screenshot_accepts_rescale_screen_alone() {
+        // --rescale-screen is independent of --rescale-cursor; valid on its own.
+        let cli = Cli::parse_from([
+            "rmng",
+            "desktop",
+            "w-cp",
+            "screenshot",
+            "--rescale-screen",
+            "1280x720",
+        ]);
+        match cli.cmd {
+            Cmd::Desktop {
+                cmd: DesktopCmd::Screenshot { rescale, .. },
+                ..
+            } => {
+                assert_eq!(rescale.rescale_screen.as_deref(), Some("1280x720"));
+                assert_eq!(rescale.rescale_cursor, None);
             }
             other => panic!("wrong cmd: {other:?}"),
         }
