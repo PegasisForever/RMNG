@@ -241,6 +241,19 @@ impl Client {
     }
 }
 
+/// True when `err` is a transport failure — the server was unreachable (connection
+/// refused) or timed out — rather than an error the server itself returned (a 4xx/5xx
+/// surfaced by [`Client::check`], which is a plain string error with no `reqwest::Error`
+/// in its chain). The CLI uses this to decide whether the "check your --server" hint is
+/// actually relevant: a `404 no host 'x'` from a perfectly reachable server should not
+/// nudge the caller toward a connectivity fix.
+pub fn is_transport_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        e.downcast_ref::<reqwest::Error>()
+            .is_some_and(|re| re.is_connect() || re.is_timeout())
+    })
+}
+
 /// One parsed SSE event: optional `event:` name + the joined `data:` payload.
 #[derive(Debug, PartialEq)]
 pub struct SseEvent {
@@ -299,6 +312,14 @@ mod sse_tests {
     fn parse_all(chunks: &[&str]) -> Vec<SseEvent> {
         let mut p = SseParser::default();
         chunks.iter().flat_map(|c| p.push(c.as_bytes())).collect()
+    }
+
+    #[test]
+    fn api_error_is_not_a_transport_error() {
+        // A server-returned error (the shape `check` produces) must not be treated as a
+        // connectivity failure — otherwise the CLI would wrongly print the --server hint.
+        let err = anyhow::anyhow!("404 Not Found: no host 'x'");
+        assert!(!is_transport_error(&err));
     }
 
     #[test]

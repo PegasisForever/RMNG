@@ -264,6 +264,10 @@ export const appConfig: AppConfigRedacted = {
     cloneMemoryMb: 32768,
     templateReference: "pegasis0/rmng-template:latest",
     serverImage: "pegasis0/rmng:latest",
+    buildInfraEnabled: true,
+    registryImage: "registry:2.8.3",
+    buildkitImage: "moby/buildkit:v0.17.2",
+    buildkitCacheGb: 40,
   },
   claude: {
     pollSecs: BigInt(600),

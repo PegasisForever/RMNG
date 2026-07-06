@@ -21,7 +21,13 @@ async fn main() {
     let code = match run(&cli, &client).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {}", commands::connect_hint(client.base(), &e));
+            // Only nudge toward `--server`/env when the server was actually unreachable;
+            // an API error (e.g. 404 "no host 'x'") from a reachable server should not.
+            if control_client::is_transport_error(&e) {
+                eprintln!("error: {}", commands::connect_hint(client.base(), &e));
+            } else {
+                eprintln!("error: {e:#}");
+            }
             1
         }
     };
