@@ -2,11 +2,16 @@
 //! process exit code (0 ok, 3 operation failed, 4 timeout); transport/API errors
 //! bubble up as `anyhow` errors and exit 1 from `main`.
 
-use anyhow::{Result, bail};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, anyhow, bail};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use control_client::Client;
+use serde_json::Value;
 use wire::{ControlState, Operation, Provider};
 
-use crate::args::{AccountCmd, ImageCmd, WaitArgs};
+use crate::args::{AccountCmd, DesktopCmd, ImageCmd, WaitArgs};
 use crate::output::{human_size, pct, short_id, table};
 use crate::wait::{WaitOutcome, wait_for_op};
 
@@ -431,6 +436,286 @@ pub async fn ssh_cmd(client: &Client, host: &str) -> Result<u8> {
         build_ssh_command(&public_host, cfg.listen.bastion, host)
     );
     Ok(0)
+}
+
+/// What a desktop verb does with the daemon's `content` array once it comes back.
+enum Kind {
+    /// `monitors`/`windows`/`apps`: print the JSON text result, no screenshot.
+    Query,
+    /// `screenshot`: write the image and print its path.
+    Screenshot,
+    /// Everything else: print any text, then guarantee a post-action screenshot.
+    Action,
+}
+
+/// The joined text of every `{type:"text"}` item in a daemon `content` array.
+fn content_text(content: &Value) -> String {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            (item.get("type").and_then(Value::as_str) == Some("text"))
+                .then(|| item.get("text").and_then(Value::as_str))
+                .flatten()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The base64 `data` of the first `{type:"image"}` item, if any.
+fn content_image(content: &Value) -> Option<&str> {
+    content.as_array().into_iter().flatten().find_map(|item| {
+        (item.get("type").and_then(Value::as_str) == Some("image"))
+            .then(|| item.get("data").and_then(Value::as_str))
+            .flatten()
+    })
+}
+
+/// Decode the image in `content`, write it to `out` (or the default
+/// `$TMPDIR/rmng-<clone>-mon<N>.jpg`), and return its absolute path.
+fn write_screenshot(
+    content: &Value,
+    clone: &str,
+    monitor: Option<u32>,
+    out: Option<&Path>,
+) -> Result<PathBuf> {
+    let data = content_image(content)
+        .ok_or_else(|| anyhow!("daemon returned no image content for the screenshot"))?;
+    let bytes = B64
+        .decode(data)
+        .map_err(|e| anyhow!("daemon image was not valid base64: {e}"))?;
+    let path = out.map(PathBuf::from).unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("rmng-{clone}-mon{}.jpg", monitor.unwrap_or(0)))
+    });
+    std::fs::write(&path, &bytes)
+        .map_err(|e| anyhow!("writing screenshot to {}: {e}", path.display()))?;
+    Ok(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+/// Build a JSON args object from `(key, value)` pairs, dropping any null values so the
+/// daemon only sees the keys the operator actually supplied.
+fn args_obj(pairs: Vec<(&str, Value)>) -> Value {
+    let mut m = serde_json::Map::new();
+    for (k, v) in pairs {
+        if !v.is_null() {
+            m.insert(k.to_string(), v);
+        }
+    }
+    Value::Object(m)
+}
+
+/// `rmng desktop <clone> <verb …>`. Maps the verb to a daemon tool, calls it, and
+/// renders the result: query verbs print JSON, `screenshot` writes+prints a path, and
+/// action verbs print any text then guarantee a post-action screenshot path.
+pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool) -> Result<u8> {
+    let n = |v: Option<u32>| v.map(Value::from).unwrap_or(Value::Null);
+    let i = |v: Option<i32>| v.map(Value::from).unwrap_or(Value::Null);
+    let click_args = |x: &Option<i32>, y: &Option<i32>, monitor: &Option<u32>| {
+        args_obj(vec![
+            ("x", i(*x)),
+            ("y", i(*y)),
+            ("monitor", n(*monitor)),
+        ])
+    };
+
+    // (tool, args, kind, monitor-for-screenshots, out path)
+    let (tool, args, kind, monitor, out): (&str, Value, Kind, Option<u32>, Option<PathBuf>) =
+        match cmd {
+            DesktopCmd::Screenshot { monitor, out } => (
+                "screenshot",
+                args_obj(vec![("monitor", n(*monitor))]),
+                Kind::Screenshot,
+                *monitor,
+                out.clone(),
+            ),
+            DesktopCmd::Monitors => ("list_monitors", args_obj(vec![]), Kind::Query, None, None),
+            DesktopCmd::Windows => ("list_windows", args_obj(vec![]), Kind::Query, None, None),
+            DesktopCmd::Apps => ("list_apps", args_obj(vec![]), Kind::Query, None, None),
+            DesktopCmd::Move {
+                x,
+                y,
+                monitor,
+                out,
+            } => (
+                "mouse_move",
+                args_obj(vec![("x", (*x).into()), ("y", (*y).into()), ("monitor", n(*monitor))]),
+                Kind::Action,
+                *monitor,
+                out.clone(),
+            ),
+            DesktopCmd::Click { x, y, monitor, out } => (
+                "left_click",
+                click_args(x, y, monitor),
+                Kind::Action,
+                *monitor,
+                out.clone(),
+            ),
+            DesktopCmd::Rclick { x, y, monitor, out } => (
+                "right_click",
+                click_args(x, y, monitor),
+                Kind::Action,
+                *monitor,
+                out.clone(),
+            ),
+            DesktopCmd::Mclick { x, y, monitor, out } => (
+                "middle_click",
+                click_args(x, y, monitor),
+                Kind::Action,
+                *monitor,
+                out.clone(),
+            ),
+            DesktopCmd::Dclick { x, y, monitor, out } => (
+                "left_double_click",
+                click_args(x, y, monitor),
+                Kind::Action,
+                *monitor,
+                out.clone(),
+            ),
+            DesktopCmd::Scroll {
+                amount,
+                x,
+                y,
+                monitor,
+                out,
+            } => (
+                "scroll",
+                args_obj(vec![
+                    ("amount", (*amount).into()),
+                    ("x", i(*x)),
+                    ("y", i(*y)),
+                    ("monitor", n(*monitor)),
+                ]),
+                Kind::Action,
+                *monitor,
+                out.clone(),
+            ),
+            DesktopCmd::Key { keys, out } => (
+                "key",
+                args_obj(vec![("keys", keys.clone().into())]),
+                Kind::Action,
+                None,
+                out.clone(),
+            ),
+            DesktopCmd::Type { text, out } => (
+                "type",
+                args_obj(vec![("text", text.clone().into())]),
+                Kind::Action,
+                None,
+                out.clone(),
+            ),
+            DesktopCmd::Launch { id } => (
+                "launch_app",
+                args_obj(vec![("id", id.clone().into())]),
+                Kind::Action,
+                None,
+                None,
+            ),
+            DesktopCmd::Movewin { id, monitor, mode } => (
+                "move_window",
+                args_obj(vec![
+                    ("id", id.clone().into()),
+                    ("monitor", n(*monitor)),
+                    ("mode", mode.clone().map(Value::from).unwrap_or(Value::Null)),
+                ]),
+                Kind::Action,
+                *monitor,
+                None,
+            ),
+        };
+
+    let content = client.desktop(clone, tool, args).await?;
+
+    match kind {
+        Kind::Query => {
+            let text = content_text(&content);
+            if json {
+                // The daemon returns a JSON string inside a text item; re-emit it
+                // parsed when it is valid JSON, else print it as-is.
+                match serde_json::from_str::<Value>(&text) {
+                    Ok(v) => emit_json(&v)?,
+                    Err(_) => println!("{text}"),
+                }
+            } else {
+                println!("{text}");
+            }
+            Ok(0)
+        }
+        Kind::Screenshot => {
+            let path = write_screenshot(&content, clone, monitor, out.as_deref())?;
+            println!("{}", path.display());
+            Ok(0)
+        }
+        Kind::Action => {
+            let text = content_text(&content);
+            if !text.is_empty() {
+                println!("{text}");
+            }
+            // Guarantee a settle screenshot: reuse the action's own image if it has
+            // one, else make a follow-up `screenshot` call.
+            let shot = if content_image(&content).is_some() {
+                content
+            } else {
+                client
+                    .desktop(clone, "screenshot", args_obj(vec![("monitor", n(monitor))]))
+                    .await?
+            };
+            let path = write_screenshot(&shot, clone, monitor, out.as_deref())?;
+            println!("{}", path.display());
+            Ok(0)
+        }
+    }
+}
+
+/// `rmng exec <clone> [flags] -- <cmd…>`. Reads piped stdin (base64), runs the command
+/// in the clone, splits stdout/stderr to our own streams (or one JSON object with
+/// `--json`), and exits with the command's own exit code.
+#[allow(clippy::too_many_arguments)]
+pub async fn exec(
+    client: &Client,
+    clone: &str,
+    user: Option<&str>,
+    workdir: Option<&str>,
+    env: &[String],
+    cmd: &[String],
+    json: bool,
+) -> Result<u8> {
+    use std::io::{IsTerminal, Read, Write};
+
+    // Pass through piped stdin so `echo hi | rmng exec c -- cat` works; a TTY stdin is
+    // left untouched (this command is non-interactive).
+    let stdin_b64 = if std::io::stdin().is_terminal() {
+        None
+    } else {
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        (!buf.is_empty()).then(|| B64.encode(&buf))
+    };
+
+    let req = wire::ExecRequest {
+        cmd: cmd.to_vec(),
+        user: user.map(str::to_string),
+        workdir: workdir.map(str::to_string),
+        env: env.to_vec(),
+        stdin_b64,
+    };
+    let result = client.exec(clone, &req).await?;
+
+    if json {
+        emit_json(&result)?;
+    } else {
+        print!("{}", result.stdout);
+        std::io::stdout().flush().ok();
+        eprint!("{}", result.stderr);
+        std::io::stderr().flush().ok();
+    }
+    // Surface the command's own status. A value outside 0..=255 means docker gave no
+    // exit code (server sentinel -1) — report 125 (docker's own "exec failure" code)
+    // rather than masking an unknown outcome as success.
+    Ok(match result.exit_code {
+        c @ 0..=255 => c as u8,
+        _ => 125,
+    })
 }
 
 /// Used by `main` for a friendlier connection-refused hint.

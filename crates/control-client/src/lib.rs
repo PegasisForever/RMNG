@@ -5,7 +5,7 @@
 use anyhow::{Result, anyhow, bail};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
-use wire::{AppConfigRedacted, ControlState, ImageInfo, Operation};
+use wire::{AppConfigRedacted, ControlState, ExecRequest, ExecResult, ImageInfo, Operation};
 
 /// A connected control-server client.
 #[derive(Clone)]
@@ -220,6 +220,38 @@ impl Client {
     pub async fn config(&self) -> Result<AppConfigRedacted> {
         self.get_json("/api/config").await
     }
+
+    /// Proxy a desktop-automation tool call to a clone's daemon MCP
+    /// (`POST /api/hosts/:id/mcp`). Returns the daemon's `content` array verbatim (a
+    /// JSON array of `{type:"text",…}` / `{type:"image",…}` items). Unknown clone → the
+    /// server's 404, daemon error → its 502, both surfaced as errors by `check`.
+    pub async fn desktop(&self, host: &str, tool: &str, args: Value) -> Result<Value> {
+        self.post_json(
+            &format!("/api/hosts/{host}/mcp"),
+            &json!({ "tool": tool, "args": args }),
+        )
+        .await
+    }
+
+    /// Run a single non-interactive command inside a clone (`POST /api/hosts/:id/exec`).
+    /// Returns the command's exit code plus its captured stdout/stderr.
+    pub async fn exec(&self, host: &str, req: &ExecRequest) -> Result<ExecResult> {
+        self.post_json(&format!("/api/hosts/{host}/exec"), &serde_json::to_value(req)?)
+            .await
+    }
+}
+
+/// True when `err` is a transport failure — the server was unreachable (connection
+/// refused) or timed out — rather than an error the server itself returned (a 4xx/5xx
+/// surfaced by [`Client::check`], which is a plain string error with no `reqwest::Error`
+/// in its chain). The CLI uses this to decide whether the "check your --server" hint is
+/// actually relevant: a `404 no host 'x'` from a perfectly reachable server should not
+/// nudge the caller toward a connectivity fix.
+pub fn is_transport_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        e.downcast_ref::<reqwest::Error>()
+            .is_some_and(|re| re.is_connect() || re.is_timeout())
+    })
 }
 
 /// One parsed SSE event: optional `event:` name + the joined `data:` payload.
@@ -280,6 +312,14 @@ mod sse_tests {
     fn parse_all(chunks: &[&str]) -> Vec<SseEvent> {
         let mut p = SseParser::default();
         chunks.iter().flat_map(|c| p.push(c.as_bytes())).collect()
+    }
+
+    #[test]
+    fn api_error_is_not_a_transport_error() {
+        // A server-returned error (the shape `check` produces) must not be treated as a
+        // connectivity failure — otherwise the CLI would wrongly print the --server hint.
+        let err = anyhow::anyhow!("404 Not Found: no host 'x'");
+        assert!(!is_transport_error(&err));
     }
 
     #[test]

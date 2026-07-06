@@ -52,7 +52,7 @@ AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb,
             codex{pollSecs, pinnedEmail, usagePolling},
             codex_groups: [{name, accounts: [email]}],
             clone_socket, data_dir, static_dir, chroma, setup_complete, detector_inference_url,
-            monitors: [MonitorSpec], listen{video, web, clone_mcp, global_mcp}, agent{port} }
+            monitors: [MonitorSpec], listen{video, web, clone_mcp, daemon_mcp}, agent{port} }
 # Clone sources are images (identified by their own repo:tag, e.g. pegasis0/rmng-template:latest),
 # not a config template block — pulled from a registry (docker.template_reference, default
 # pegasis0/rmng-template:latest) via POST /api/images/pull; see ImageInfo below + docs/API.md.

@@ -240,7 +240,7 @@ export const deleteOperation: Operation = {
 // --- redacted app config (for the Settings story) --------------------------
 
 export const appConfig: AppConfigRedacted = {
-  listen: { web: 9000, video: 9001, cloneMcp: 9002, globalMcp: 9003, daemonMcp: 9004, forward: 9005, bastion: 2222 },
+  listen: { web: 9000, video: 9001, cloneMcp: 9002, daemonMcp: 9004, forward: 9005, bastion: 2222 },
   agentPort: 4096,
   dataDir: "/data",
   staticDir: "",
@@ -264,6 +264,10 @@ export const appConfig: AppConfigRedacted = {
     cloneMemoryMb: 32768,
     templateReference: "pegasis0/rmng-template:latest",
     serverImage: "pegasis0/rmng:latest",
+    buildInfraEnabled: true,
+    registryImage: "registry:2.8.3",
+    buildkitImage: "moby/buildkit:v0.17.2",
+    buildkitCacheGb: 40,
   },
   claude: {
     pollSecs: BigInt(600),

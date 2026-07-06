@@ -14,6 +14,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use futures::stream::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
@@ -78,7 +80,9 @@ pub fn router(app: App) -> Router {
         .route("/api/chat/:id", get(chat_get).post(chat_send))
         .route("/api/chat/:id/events", get(chat_events))
         .route("/api/chat/:id/abort", post(chat_abort))
-        .route("/api/hosts/:id/forwards", put(forwards_put));
+        .route("/api/hosts/:id/forwards", put(forwards_put))
+        .route("/api/hosts/:id/mcp", post(host_mcp))
+        .route("/api/hosts/:id/exec", post(host_exec));
 
     // Frontend from the filesystem: a non-empty `static_dir` overrides (dev hot-reload
     // without a rebuild); otherwise the assets search path resolves it (the image's
@@ -298,6 +302,84 @@ async fn forwards_put(
         }
     });
     Ok(Json(next))
+}
+
+// --- desktop proxy + exec (the `rmng desktop` / `rmng exec` backends) -------
+
+/// `POST /api/hosts/:id/mcp` — proxy a desktop/window tool call to the clone's daemon MCP
+/// (`:9004`). Body is [`wire::McpCallRequest`]; the response is the daemon's `content`
+/// array. Unknown clone → 404; daemon unreachable / JSON-RPC error → 502. The daemon MCP
+/// stays the single source of truth for the desktop tool schema — this handler is a thin
+/// pass-through (`proxy_to_daemon`).
+async fn host_mcp(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+    Json(req): Json<wire::McpCallRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
+    let content = proxy_to_daemon(&app, &host, &req.tool, &req.args)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(content))
+}
+
+/// Proxy a desktop/window `tools/call` to a clone's clone-daemon MCP (dialed by container
+/// name via Docker DNS — `App::dial_host`) and return its `result.content`. Moved here from
+/// `mcp.rs` when the global MCP was retired; behavior is unchanged.
+async fn proxy_to_daemon(
+    app: &App,
+    host: &wire::Host,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let port = app.config().listen.daemon_mcp;
+    let url = format!("http://{}:{port}/", app.dial_host(host).await);
+    let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
+    let resp = app
+        .http
+        .post(&url)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("clone-daemon MCP unreachable at {url}: {e}"))?;
+    let body: serde_json::Value =
+        resp.json().await.map_err(|e| format!("decoding clone-daemon MCP reply: {e}"))?;
+    if let Some(err) = body.get("error") {
+        return Err(format!("clone-daemon MCP error: {err}"));
+    }
+    body.get("result")
+        .and_then(|r| r.get("content"))
+        .cloned()
+        .ok_or_else(|| "clone-daemon MCP result missing content".to_string())
+}
+
+/// `POST /api/hosts/:id/exec` — run a single non-interactive command inside the clone via
+/// docker exec (`rmng exec`). Body is [`wire::ExecRequest`]; returns [`wire::ExecResult`]
+/// (exit code + captured stdout/stderr). Empty argv → 400; unknown clone → 404; a bad
+/// stdin payload → 400; a daemon/exec failure (e.g. container not running) → 502. Defaults
+/// the run-as user to uid `1000` (the clone's agent user) when unset.
+async fn host_exec(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+    Json(req): Json<wire::ExecRequest>,
+) -> Result<Json<wire::ExecResult>, (StatusCode, String)> {
+    if req.cmd.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "cmd must not be empty".into()));
+    }
+    let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
+    let stdin = match &req.stdin_b64 {
+        Some(b64) => Some(
+            B64.decode(b64).map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid stdinB64: {e}")))?,
+        ),
+        None => None,
+    };
+    let user = req.user.clone().unwrap_or_else(|| "1000".to_string());
+    let result = app
+        .docker
+        .exec_capture(&host.id, &req.cmd, &user, req.workdir.as_deref(), &req.env, stdin.as_deref())
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(result))
 }
 
 /// `POST /api/clone` — start a clone from a source image. Body is one of:
@@ -1407,6 +1489,71 @@ mod tests {
         let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
+    }
+
+    // --- POST /api/hosts/:id/mcp + /exec (the rmng desktop / exec backends) ---
+
+    #[tokio::test]
+    async fn host_mcp_unknown_clone_is_404() {
+        let app = test_app(); // no hosts registered
+        let err = host_mcp(
+            State(app.clone()),
+            AxPath("ghost".into()),
+            Json(wire::McpCallRequest { tool: "screenshot".into(), args: json!({}) }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert!(err.1.contains("ghost"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn host_exec_unknown_clone_is_404() {
+        let app = test_app();
+        let err = host_exec(
+            State(app.clone()),
+            AxPath("ghost".into()),
+            Json(wire::ExecRequest { cmd: vec!["echo".into(), "hi".into()], ..Default::default() }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn host_exec_empty_cmd_is_400() {
+        let app = test_app();
+        let err = host_exec(
+            State(app.clone()),
+            AxPath("anything".into()),
+            Json(wire::ExecRequest::default()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("cmd"), "msg: {}", err.1);
+    }
+
+    #[test]
+    fn exec_request_result_map_camel_case() {
+        // Request: snake-cased Rust fields serialize as the camelCase wire the CLI sends.
+        let req = wire::ExecRequest {
+            cmd: vec!["cat".into()],
+            user: Some("1000".into()),
+            workdir: Some("/tmp".into()),
+            env: vec!["A=1".into()],
+            stdin_b64: Some("aGk=".into()),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["cmd"][0], "cat");
+        assert_eq!(v["stdinB64"], "aGk=");
+        assert!(v.get("stdin_b64").is_none(), "must use camelCase key");
+        // Result: exitCode maps back onto the i64 exit_code field.
+        let res: wire::ExecResult =
+            serde_json::from_str(r#"{ "exitCode": 3, "stdout": "out", "stderr": "err" }"#).unwrap();
+        assert_eq!(res.exit_code, 3);
+        assert_eq!(res.stdout, "out");
+        assert_eq!(res.stderr, "err");
     }
 }
 

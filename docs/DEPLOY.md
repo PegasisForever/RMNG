@@ -20,8 +20,8 @@ server, with no manual redeploy step (see [Upgrades](#upgrades)).
 - A **GPU render node** `/dev/dri/renderD128` on the host (AMD radeonsi/Mesa VA-API). The
   control-server VA-API-**encodes** every clone's frames and each clone **captures** its own
   desktop — both need the render node. Validated on the AMD Radeon Pro **W6800**.
-- Ports **9000–9003**, **9005** (port-forward), **445** (SMB), and **2222** (SSH bastion) free
-  (web/API, video, per-clone MCP, global MCP, port-forward data plane, clone-home share, jump
+- Ports **9000–9002**, **9005** (port-forward), **445** (SMB), and **2222** (SSH bastion) free
+  (web/API, video, per-clone MCP, port-forward data plane, clone-home share, jump
   into clones).
 
 ## 1. Get the image
@@ -59,7 +59,7 @@ and run `docker compose up -d` (no `--build`). The equivalent one-liner off the 
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9003:9000-9003 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
+  -p 9000-9002:9000-9002 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
 What each piece is for:
@@ -72,7 +72,7 @@ What each piece is for:
 | `-v /var/run/docker.sock:…` | the daemon the server drives via bollard |
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
-| `-p 9000-9003:9000-9003` | the web API, video, per-clone MCP, and global MCP ports |
+| `-p 9000-9002:9000-9002` | the web API, video, and per-clone MCP ports |
 | `-p 9005:9005` | the port-forward data plane (viewer↔clone TCP splice) |
 | `-p 445:445` | the SMB shares — `clones` (browse every running clone's `/home/rmng`) and `feedback` (the detector-feedback records) — from `smb://<host>/clones` and `smb://<host>/feedback` (below) |
 | `-p 2222:2222` | the SSH bastion — jump host for `ssh`/`scp`/`rsync`/VSCode Remote-SSH into any clone's own `sshd` (see [SSH into clones](#ssh-into-clones)) |
@@ -264,7 +264,7 @@ Settings page has **Restart control-server** and **Update** buttons:
 - **Restart** does an in-place `docker restart` of the control-server container (applies
   changed port/socket/static-dir/chroma settings, re-read from config.json on boot). It does
   NOT change the container's host-published port mapping — a `listen` port moved outside the
-  published `9000-9003` range still needs a host-level recreate.
+  published `9000-9002` range still needs a host-level recreate.
 - **Update** pulls `docker.serverImage` (default `pegasis0/rmng:latest`) and swaps the
   running container onto it via a detached helper. Running clones and the data volumes
   survive.

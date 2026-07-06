@@ -3,9 +3,12 @@
 The `rmng` binary ([crates/cli](../crates/cli/README.md), package `rmng-cli`) is the fleet
 management surface: hosts, clones, images, Claude/Codex accounts, and operations, all over
 the control-server's **port-2 web API** (via [control-client](../crates/control-client/README.md)).
-It is fleet management **only** — driving the desktop *inside* a clone is the MCP's job
-([MCP.md](MCP.md)), host-agent chat is the web API's (`/api/chat/:id`,
-[API.md](API.md#per-host-agent-chat)), and code moves via git.
+It also carries the **operator/fleet desktop control** (`rmng desktop`, folded in from the
+retired global MCP) and a docker-exec-style **`rmng exec`** — both reach clones through the
+same web API, which proxies to the clone's daemon MCP / Docker exec. What stays elsewhere:
+the **in-clone** agent's own desktop automation is the daemon MCP's job ([MCP.md](MCP.md)),
+host-agent chat is the web API's (`/api/chat/:id`, [API.md](API.md#per-host-agent-chat)), and
+code moves via git.
 
 - **Source files:** command tree in [crates/cli/src/args.rs](../crates/cli/src/args.rs);
   handlers in [commands.rs](../crates/cli/src/commands.rs); wait machinery in
@@ -110,6 +113,72 @@ jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are pruned quickly
 ### `rmng wait <op-id> [--timeout <N>]`
 Block until an operation reaches a terminal state (default timeout 600 s). Same semantics
 as `--wait` on the starting command.
+
+### `rmng desktop <clone> <verb>` (alias `dt`)
+Drive any clone's desktop from an operator machine. The clone id is the first positional;
+each verb maps 1:1 to a daemon-MCP tool, forwarded by the control-server to that clone's
+daemon MCP (`http://{clone}:9004`). This is the operator-facing replacement for the retired
+global MCP — see [MCP.md](MCP.md).
+
+| Verb | Args | Daemon tool | Does |
+|---|---|---|---|
+| `screenshot` | `[--monitor N] [--out PATH]` | `screenshot` | JPEG of the monitor's latest frame |
+| `monitors` | — | `list_monitors` | `[{id,width,height}]` |
+| `windows` | — | `list_windows` | open windows (`id,title,wm_class,monitor,frame,…`) |
+| `apps` | — | `list_apps` | installed launcher apps |
+| `move` | `X Y [--monitor N] [--out PATH]` | `mouse_move` | eased glide to `x,y` |
+| `click` | `[X Y] [--monitor N] [--out PATH]` | `left_click` | optional glide, then left click |
+| `rclick` | `[X Y] [--monitor N] [--out PATH]` | `right_click` | right click |
+| `mclick` | `[X Y] [--monitor N] [--out PATH]` | `middle_click` | middle click |
+| `dclick` | `[X Y] [--monitor N] [--out PATH]` | `left_double_click` | left double-click |
+| `scroll` | `AMOUNT [X Y] [--monitor N] [--out PATH]` | `scroll` | `amount` vertical notches |
+| `key` | `"ctrl+c" [--out PATH]` | `key` | press a key combo |
+| `type` | `"some text" [--out PATH]` | `type` | type a Unicode string |
+| `launch` | `firefox.desktop [--out PATH]` | `launch_app` | launch an app by `.desktop` id |
+| `movewin` | `<win-id> [--monitor N] [--mode maximize\|center-half] [--out PATH]` | `move_window` | move/place a window |
+
+**Screenshot on every action.** Every **action verb** (`move`, `click`, `rclick`, `mclick`,
+`dclick`, `scroll`, `key`, `type`, `launch`, `movewin`) — plus `screenshot` itself — always
+produces a post-action JPEG: the CLI writes it to a file and prints the file's **absolute
+path** on stdout, so the calling agent can `Read` it. Most action tools return the daemon's
+settle-screenshot inline; for tools whose result carries no image (`type`, `launch`,
+`movewin`) the CLI issues a follow-up `screenshot` (monitor `0` or `--monitor N`) so the
+guarantee holds uniformly, printing any text/JSON result before the path. **Query verbs**
+(`monitors`, `windows`, `apps`) print their JSON result and take no screenshot.
+
+- `--monitor N` — which monitor to act on / screenshot (default `0`).
+- `--out PATH` — where to write the JPEG. Default `$TMPDIR/rmng-<clone>-mon<N>.jpg`
+  (`std::env::temp_dir()`), overwritten each call.
+
+```sh
+rmng desktop w-cp-claude screenshot          # → prints /tmp/rmng-w-cp-claude-mon0.jpg
+rmng dt w-cp-claude click 640 480            # click, then prints the settle screenshot path
+rmng dt w-cp-claude type "hello"             # types, follow-up screenshot, prints path
+rmng dt w-cp-claude windows                  # prints JSON, no screenshot
+```
+
+### `rmng exec <clone> [-u|--user USER] [-w|--workdir DIR] [-e|--env KEY=VAL ...] -- <cmd> [args...]`
+Run a **single non-interactive** command inside a clone, docker-exec style (no TTY). The
+control-server runs it via the Docker exec primitive; `rmng ssh` covers interactive sessions.
+
+- `--` separates rmng's own flags from the command argv; everything after it is the command.
+- `-u|--user USER` — user to run as. Default **uid `1000`** (the clone's agent user — the
+  same account `rmng ssh` lands as).
+- `-w|--workdir DIR` — working directory for the command.
+- `-e|--env KEY=VAL` — set an env var; **repeatable** (accumulates).
+- **stdin passthrough:** a non-terminal stdin is read and forwarded, so
+  `echo hi | rmng exec c -- cat` works.
+- Command **stdout → CLI stdout**, **stderr → CLI stderr** (kept separate), and the CLI
+  **exits with the command's own exit code**.
+- Global `--json` — emit one `{exit_code, stdout, stderr}` object instead of splitting the
+  streams onto stdout/stderr.
+
+```sh
+rmng exec w-cp-claude -- echo hi                      # stdout "hi", exit 0
+rmng exec w-cp-claude -w /home/rmng -e FOO=bar -- env # runs `env` with FOO=bar in /home/rmng
+echo hi | rmng exec w-cp-claude -- cat                # stdin passthrough
+rmng exec w-cp-claude --json -- false                 # {"exit_code":1,"stdout":"","stderr":""}
+```
 
 ## Wait semantics (`--wait` / `wait`)
 

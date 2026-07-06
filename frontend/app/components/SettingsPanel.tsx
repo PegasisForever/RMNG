@@ -225,7 +225,6 @@ export function SettingsPanel({
     web: 9000,
     video: 9001,
     cloneMcp: 9002,
-    globalMcp: 9003,
     daemonMcp: 9004,
     bastion: 2222,
   });
@@ -1094,9 +1093,9 @@ export function SettingsPanel({
               </button>
               {advanced ? (
                 <div className="mt-2 grid grid-cols-2 gap-3">
-                  {/* web/video/cloneMcp/globalMcp are wired once at startup → restart-required.
+                  {/* web/video/cloneMcp are wired once at startup → restart-required.
                       daemonMcp applies live, but must match what clones bake in. */}
-                  {(["web", "video", "cloneMcp", "globalMcp"] as const).map((k) => (
+                  {(["web", "video", "cloneMcp"] as const).map((k) => (
                     <div key={k}>
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Port: {k}</span>

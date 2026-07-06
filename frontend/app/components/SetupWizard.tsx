@@ -398,7 +398,7 @@ export function SetupWizard({
                 </button>
                 {portsOpen ? (
                   <div className="mt-2 grid grid-cols-2 gap-3">
-                    {(["web", "video", "cloneMcp", "globalMcp", "daemonMcp"] as const).map((k) => (
+                    {(["web", "video", "cloneMcp", "daemonMcp"] as const).map((k) => (
                       <Field key={k} label={`Port: ${k}`}>
                         <input
                           type="number"

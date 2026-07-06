@@ -1,26 +1,33 @@
-# MCP reference — the three desktop-automation surfaces
+# MCP reference — the two surviving desktop-automation surfaces
 
-RMNG exposes **three** MCP servers, all speaking **JSON-RPC 2.0 over HTTP POST** at
-path `/`. Two are on the control-server; one is in each clone-daemon.
+RMNG exposes **two** MCP servers, both speaking **JSON-RPC 2.0 over HTTP POST** at
+path `/`. One is on the control-server; one is in each clone-daemon.
+
+> **Migration:** the former **global MCP** (`:9003`) — the operator/fleet-facing desktop
+> proxy — has been **removed**. Its 14 desktop/window tools now live in the **`rmng desktop`
+> CLI** ([CLI.md](CLI.md#rmng-desktop-clone-verb-alias-dt)). External configs that registered
+> `:9003` as an MCP server must switch to the `rmng desktop` CLI; there are no in-repo
+> consumers.
 
 | Server | Where | Default port | Scope | Source |
 |---|---|---|---|---|
 | **per-clone MCP** | control-server | `9002` (`listen.clone_mcp`) | `set_state` only; clone resolved from the **`x-rmng-clone` header** | [control-server/src/mcp.rs](../crates/control-server/src/mcp.rs) |
-| **global MCP** | control-server | `9003` (`listen.global_mcp`) | the 14 desktop/window tools, each with a required `clone` arg, **proxied** to the clone's daemon MCP | [control-server/src/mcp.rs](../crates/control-server/src/mcp.rs) |
 | **daemon MCP** | each clone-daemon | `9004` (`RMNG_DAEMON_MCP_PORT`) | the **full desktop-automation surface** (input/screenshot/window-mgmt) | [clone-daemon/src/mcp.rs](../crates/clone-daemon/src/mcp.rs), [windows.rs](../crates/clone-daemon/src/windows.rs) |
 
 MCP is for tools whose results belong in model context (screenshots), not orchestration:
-**fleet management** (hosts, clone/delete, images, accounts, operations) lives in the
-**`rmng` CLI** over the port-2 web API — see [CLI.md](CLI.md) — and **host-agent chat**
-lives on the web API too (`/api/chat/:id` — see [API.md](API.md#per-host-agent-chat)).
+**fleet management** (hosts, clone/delete, images, accounts, operations) and **operator/fleet
+desktop control** both live in the **`rmng` CLI** over the port-2 web API — see
+[CLI.md](CLI.md) — and **host-agent chat** lives on the web API too (`/api/chat/:id` — see
+[API.md](API.md#per-host-agent-chat)).
 
 **Who calls what:**
 - The **in-clone agent-wrapper** calls its clone's **daemon MCP** directly on
   `http://127.0.0.1:9004` for desktop actions, and the control-server's **per-clone MCP**
   (`:9002`) for `set_state`.
-- **Operators / fleet agents** call the **global MCP** (`:9003`) with a `clone` selector to
-  drive any clone's desktop; it proxies to `http://{clone}:9004`. Everything else goes
-  through the `rmng` CLI / web API.
+- **Operators / fleet agents** drive any clone's desktop through the **`rmng desktop` CLI**
+  ([CLI.md](CLI.md#rmng-desktop-clone-verb-alias-dt)); the control-server proxies each verb to that
+  clone's daemon MCP at `http://{clone}:9004`. Everything else goes through the `rmng` CLI /
+  web API.
 
 ## JSON-RPC envelope (all servers)
 
@@ -51,23 +58,6 @@ argument. Exposes exactly one tool.
 Record the agent's desktop verdict + note for the calling clone (sets `agentReport` /
 `stateNote`, visible on the dashboard). Returns `"state updated for {clone}"`. Errors if the
 `x-rmng-clone` header is missing or names no known host.
-
----
-
-## Global MCP (control-server `:9003`)
-
-Serves **only** the 14 proxied desktop/window tools: `screenshot`, `list_monitors`,
-`mouse_move`, `left_click`, `right_click`, `middle_click`, `left_double_click`, `scroll`,
-`key`, `type`, `list_windows`, `list_apps`, `launch_app`, `move_window` — same arguments as
-the daemon MCP below, **plus a required `clone`** (the host id). Each call is forwarded
-verbatim to that clone's daemon MCP (`is_daemon_tool` → POST to `http://{host}:{daemon_mcp}/`)
-and the result is returned unchanged. A missing clone → `"unknown clone"`; an unreachable
-daemon → `"clone-daemon MCP unreachable at …"`.
-
-> The former fleet tools (`list_hosts`, `select`, `clone`, `delete`, `claude_swap`,
-> `codex_swap`, `set_state`, `send_message`, `read_chat`) are **removed** from this port —
-> fleet management moved to the **`rmng` CLI** ([CLI.md](CLI.md)), and host-agent chat to
-> the web API (`/api/chat/:id` routes, [API.md](API.md#per-host-agent-chat)).
 
 ---
 
@@ -122,13 +112,16 @@ error (see [gnome-patch](../gnome-patch/README.md)).
 ## curl examples
 
 ```sh
-# Global MCP: list every tool
-curl -s localhost:9003/ -H 'content-type: application/json' \
+# Daemon MCP (on the clone): list every tool
+curl -s localhost:9004/ -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq
 
-# Global MCP: screenshot clone "rmng-e2e" monitor 0 (proxied to its daemon)
-curl -s localhost:9003/ -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,
-  "method":"tools/call","params":{"name":"screenshot","arguments":{"clone":"rmng-e2e","monitor":0}}}'
+# Daemon MCP (on the clone): screenshot monitor 0
+curl -s localhost:9004/ -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,
+  "method":"tools/call","params":{"name":"screenshot","arguments":{"monitor":0}}}'
+
+# To drive a clone's desktop from an operator machine, use the CLI instead:
+#   rmng desktop rmng-e2e screenshot   (proxied to the clone's daemon MCP — see CLI.md)
 
 # Daemon MCP (on the clone): left-click at 640,480
 curl -s localhost:9004/ -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,

@@ -521,6 +521,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "bollard",
  "futures",
  "media",
@@ -2767,6 +2768,7 @@ name = "rmng-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "control-client",
  "futures",

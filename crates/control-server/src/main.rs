@@ -198,11 +198,10 @@ async fn main() -> Result<()> {
     // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
     mediaplane::spawn(app.clone());
 
-    // Ports 3 (per-clone MCP, header-routed via `x-rmng-clone`) + 4 (global MCP).
+    // Port 3 (per-clone MCP, header-routed via `x-rmng-clone`).
     {
         let cfg = app.config();
-        tokio::spawn(mcp::serve(app.clone(), cfg.listen.clone_mcp, mcp::Scope::PerClone));
-        tokio::spawn(mcp::serve(app.clone(), cfg.listen.global_mcp, mcp::Scope::Global));
+        tokio::spawn(mcp::serve(app.clone(), cfg.listen.clone_mcp));
     }
 
     web::serve(app).await

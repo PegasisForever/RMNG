@@ -468,9 +468,6 @@ mod tests {
         n.listen.clone_mcp = 8082;
         assert!(restart_required(&base, &n));
         let mut n = base.clone();
-        n.listen.global_mcp = 8083;
-        assert!(restart_required(&base, &n));
-        let mut n = base.clone();
         n.clone_socket = "/tmp/other.sock".into();
         assert!(restart_required(&base, &n));
         let mut n = base.clone();
@@ -737,7 +734,7 @@ fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
 }
 
 /// Whether applying `new` over `old` requires a server restart to take effect. The
-/// restart-required settings are the ones wired once at startup: the five listen ports,
+/// restart-required settings are the ones wired once at startup: the four listen ports,
 /// the clone-daemon unix socket, the Docker daemon socket (the bollard client is built
 /// at startup), the static-file directory, and the chroma mode. Everything else applies
 /// live. Consumed by web.rs's `PUT /api/config` handler, which surfaces the result as
@@ -746,7 +743,6 @@ pub fn restart_required(old: &AppConfig, new: &AppConfig) -> bool {
     old.listen.web != new.listen.web
         || old.listen.video != new.listen.video
         || old.listen.clone_mcp != new.listen.clone_mcp
-        || old.listen.global_mcp != new.listen.global_mcp
         || old.listen.bastion != new.listen.bastion
         || old.clone_socket != new.clone_socket
         || old.docker.socket != new.docker.socket

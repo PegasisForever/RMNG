@@ -47,7 +47,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
-use wire::{ContainerStats, DockerConfig, EnvCheckRow, ImageInfo, SetupEnv, UpdateStatus};
+use wire::{ContainerStats, DockerConfig, EnvCheckRow, ExecResult, ImageInfo, SetupEnv, UpdateStatus};
 
 // --- Constants ------------------------------------------------------------------------
 
@@ -1886,6 +1886,107 @@ impl DockerCtl {
 
         let code = self.daemon()?.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
         Ok(code)
+    }
+
+    /// Run an arbitrary command (argv, no TTY) in `container` via docker exec, capturing
+    /// stdout and stderr into **separate buffered strings** (bollard `LogOutput` tags each
+    /// frame by stream and chunks are NOT line-aligned — gotcha #1 — so [`LineSplitter`]
+    /// reassembles complete lines per stream). Honors `user` (uid or name), optional
+    /// `workdir`, `env` (`KEY=VAL`), and optional `stdin` bytes (fed concurrently with the
+    /// output drain, same as [`Self::exec_script`], to avoid the one-connection deadlock).
+    /// Output is UTF-8-lossy (binary is out of scope). The real exit code comes from
+    /// `inspect_exec`. This is the backend for `POST /api/hosts/:id/exec` (`rmng exec`).
+    pub async fn exec_capture(
+        &self,
+        container: &str,
+        cmd: &[String],
+        user: &str,
+        workdir: Option<&str>,
+        env: &[String],
+        stdin: Option<&[u8]>,
+    ) -> Result<ExecResult> {
+        let exec = self
+            .daemon()?
+            .create_exec(
+                container,
+                CreateExecOptions {
+                    cmd: Some(cmd.to_vec()),
+                    user: Some(user.to_string()),
+                    working_dir: workdir.map(str::to_string),
+                    env: if env.is_empty() { None } else { Some(env.to_vec()) },
+                    attach_stdin: Some(stdin.is_some()),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("creating exec in {container}"))?;
+
+        let StartExecResults::Attached { mut output, mut input } =
+            self.daemon()?.start_exec(&exec.id, None).await?
+        else {
+            bail!("exec started detached unexpectedly");
+        };
+
+        // Feed stdin (if any) CONCURRENTLY with draining output; always signal EOF so the
+        // command sees end-of-input. See `exec_script` for the deadlock rationale.
+        let write_fut = async {
+            let res = match stdin {
+                Some(data) => input.write_all(data).await,
+                None => Ok(()),
+            };
+            input.shutdown().await.ok();
+            res
+        };
+
+        // Reassemble complete lines per stream, then rebuild the buffered output: each
+        // completed line gets its `\n` restored; a trailing partial (no newline) does not.
+        let mut out_buf = LineSplitter::default();
+        let mut err_buf = LineSplitter::default();
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let read_fut = async {
+            while let Some(chunk) = output.next().await {
+                match chunk? {
+                    LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                        out_buf.push(&message, |line| {
+                            stdout.push_str(line);
+                            stdout.push('\n');
+                        });
+                    }
+                    LogOutput::StdErr { message } => {
+                        err_buf.push(&message, |line| {
+                            stderr.push_str(line);
+                            stderr.push('\n');
+                        });
+                    }
+                    LogOutput::StdIn { .. } => {}
+                }
+            }
+            Ok::<(), BollardError>(())
+        };
+        let (write_res, read_res) = tokio::join!(write_fut, read_fut);
+
+        // Flush trailing partials (output that ended without a newline) BEFORE error
+        // handling, so already-captured output always reaches the caller.
+        out_buf.flush(|line| stdout.push_str(line));
+        err_buf.flush(|line| stderr.push_str(line));
+
+        read_res.with_context(|| format!("streaming exec output from {container}"))?;
+        if let Err(e) = write_res {
+            if is_benign_stdin_write_error(&e) {
+                // The command stopped reading stdin before consuming it all: the daemon
+                // tears the stdin stream down and the tail write fails. Not fatal —
+                // `inspect_exec` reports the real exit code.
+                tracing::debug!(target: "docker", "exec stdin closed early: {e}");
+            } else {
+                return Err(anyhow!("writing to exec stdin: {e}"));
+            }
+        }
+
+        let exit_code = self.daemon()?.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
+        Ok(ExecResult { exit_code, stdout, stderr })
     }
 }
 

@@ -7,8 +7,8 @@
 //! - [`config`] — `AppConfig` (+ a redacted view) edited via the Settings UI.
 //! - [`socket`] — the clone-daemon ⇄ control-server unix-socket protocol.
 //! - [`viewer`] — the native viewer ⇄ control-server protocol (port 1).
-//! - [`mcp`] — desktop-tool DTOs shared by the per-clone (port 3) and global
-//!   (port 4) MCP servers.
+//! - [`mcp`] — desktop-tool DTOs + the `/api/hosts/:id/mcp` proxy request.
+//! - [`exec`] — the `rmng exec` request/result (`/api/hosts/:id/exec`).
 //! - [`net`] — the one IO helper: keepalive tuning both ends of port 1 apply.
 //!
 //! Control-plane + config types derive `ts-rs::TS` and export TypeScript bindings
@@ -18,6 +18,7 @@
 pub mod avc444;
 pub mod config;
 pub mod control;
+pub mod exec;
 pub mod forward;
 pub mod mcp;
 pub mod net;
@@ -29,6 +30,8 @@ pub use config::{
     ConfigPutResponse, DockerConfig, EnvCheckRow, EnvVar, ImageInfo, ListenConfig, Preset,
     PresetRedacted, SetupEnv, SshConfig,
 };
+pub use exec::{ExecRequest, ExecResult};
+pub use mcp::McpCallRequest;
 pub use control::{
     AgentReport, Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
     CodexResetMark, ContainerStats, ControlState, Host, LayoutPreset, MonitorSpec, MonitorState,

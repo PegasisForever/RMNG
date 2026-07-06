@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The 4-port control-server: web API/SSE + media + per-clone MCP + global MCP + orchestration."
+description = "The control-server: web API/SSE + media + per-clone MCP + orchestration."
 
 [[bin]]
 name = "rmng-control-server"
@@ -38,6 +38,9 @@ tar = "0.4"
 # sha256 of clone binaries for the automatic hot-swap engine (src/binswap.rs): hash the
 # staged payloads once at startup + the on-disk `/opt/rmng/bin` binaries each check.
 sha2 = "0.10"
+# Decode the `rmng exec` stdin payload (wire::ExecRequest.stdin_b64) before feeding it to
+# the docker exec stdin (src/web.rs host_exec). Same version as clone-daemon.
+base64 = "0.22"
 
 [dev-dependencies]
 # SOCK_SEQPACKET client connects for mediaplane's teardown-guard unit test: the server

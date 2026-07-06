@@ -13,7 +13,7 @@ say "1. wait for control-server API"
 docker rm -f rmng >/dev/null 2>&1
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9003:9000-9003 -p 9005:9005 rmng:latest >/dev/null
+  -p 9000-9002:9000-9002 -p 9005:9005 rmng:latest >/dev/null
 for i in $(seq 1 40); do curl -fsS $API/api/config >/dev/null 2>&1 && { echo "API up after ${i}s"; break; }; sleep 1; done
 curl -fsS $API/api/config >/dev/null 2>&1 || { echo "API NEVER CAME UP"; docker logs rmng 2>&1 | tail -30; exit 1; }
 

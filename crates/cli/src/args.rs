@@ -1,6 +1,8 @@
 //! The clap command tree. Fleet management only — driving the agents *inside*
 //! clones is the desktop MCP's job (computer use), and code moves via git.
 
+use std::path::PathBuf;
+
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -82,6 +84,134 @@ pub enum Cmd {
     Ssh {
         /// Host id of the clone
         host: String,
+    },
+    /// Drive a clone's desktop via its daemon MCP (screenshot-on-every-action)
+    #[command(alias = "dt")]
+    Desktop {
+        /// Host id of the clone
+        clone: String,
+        #[command(subcommand)]
+        cmd: DesktopCmd,
+    },
+    /// Run a single non-interactive command inside a clone (docker-exec-style)
+    Exec {
+        /// Host id of the clone
+        clone: String,
+        /// Run-as user (uid or name); defaults to the clone's agent user server-side
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+        /// Working directory inside the container
+        #[arg(short = 'w', long)]
+        workdir: Option<String>,
+        /// Extra environment `KEY=VAL` (repeatable)
+        #[arg(short = 'e', long)]
+        env: Vec<String>,
+        /// The command argv, after `--` (e.g. `rmng exec c -- ls -la`)
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+}
+
+/// The `rmng desktop <clone> …` verbs. Each maps 1:1 to a daemon-MCP tool; action
+/// verbs guarantee a post-action screenshot (see `commands::desktop`).
+#[derive(Subcommand, Debug)]
+pub enum DesktopCmd {
+    /// Capture a screenshot (→ `screenshot`)
+    Screenshot {
+        #[arg(long)]
+        monitor: Option<u32>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// List monitors (→ `list_monitors`)
+    Monitors,
+    /// List windows (→ `list_windows`)
+    Windows,
+    /// List launchable apps (→ `list_apps`)
+    Apps,
+    /// Move the mouse to X Y (→ `mouse_move`)
+    Move {
+        x: i32,
+        y: i32,
+        #[arg(long)]
+        monitor: Option<u32>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Left click, optionally at X Y (→ `left_click`)
+    Click {
+        x: Option<i32>,
+        y: Option<i32>,
+        #[arg(long)]
+        monitor: Option<u32>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Right click, optionally at X Y (→ `right_click`)
+    Rclick {
+        x: Option<i32>,
+        y: Option<i32>,
+        #[arg(long)]
+        monitor: Option<u32>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Middle click, optionally at X Y (→ `middle_click`)
+    Mclick {
+        x: Option<i32>,
+        y: Option<i32>,
+        #[arg(long)]
+        monitor: Option<u32>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Left double click, optionally at X Y (→ `left_double_click`)
+    Dclick {
+        x: Option<i32>,
+        y: Option<i32>,
+        #[arg(long)]
+        monitor: Option<u32>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Scroll by AMOUNT, optionally at X Y (→ `scroll`)
+    Scroll {
+        amount: i32,
+        x: Option<i32>,
+        y: Option<i32>,
+        #[arg(long)]
+        monitor: Option<u32>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Press a key chord, e.g. `ctrl+c` (→ `key`)
+    Key {
+        /// Key chord (e.g. `ctrl+c`, `Return`)
+        keys: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Type literal text (→ `type`)
+    Type {
+        /// The text to type
+        text: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Launch an app by id, e.g. `firefox.desktop` (→ `launch_app`)
+    Launch {
+        /// App/desktop-entry id
+        id: String,
+    },
+    /// Move/arrange a window by id (→ `move_window`)
+    Movewin {
+        /// Window id
+        id: String,
+        #[arg(long)]
+        monitor: Option<u32>,
+        /// Placement mode, e.g. `maximize` / `center-half`
+        #[arg(long)]
+        mode: Option<String>,
     },
 }
 
@@ -220,6 +350,123 @@ mod tests {
     #[test]
     fn rm_requires_host() {
         assert!(Cli::try_parse_from(["rmng", "rm"]).is_err());
+    }
+
+    #[test]
+    fn desktop_click_parses_verb_and_coords() {
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "click", "10", "20"]);
+        match cli.cmd {
+            Cmd::Desktop { clone, cmd } => {
+                assert_eq!(clone, "w-cp");
+                match cmd {
+                    DesktopCmd::Click { x, y, monitor, out } => {
+                        assert_eq!(x, Some(10));
+                        assert_eq!(y, Some(20));
+                        assert_eq!(monitor, None);
+                        assert_eq!(out, None);
+                    }
+                    other => panic!("wrong desktop cmd: {other:?}"),
+                }
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn desktop_type_and_key_accept_out_flag() {
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "type", "hello", "--out", "/x.jpg"]);
+        match cli.cmd {
+            Cmd::Desktop {
+                cmd: DesktopCmd::Type { text, out },
+                ..
+            } => {
+                assert_eq!(text, "hello");
+                assert_eq!(out.as_deref(), Some(std::path::Path::new("/x.jpg")));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "key", "ctrl+c", "--out", "/k.jpg"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Desktop {
+                cmd: DesktopCmd::Key { out: Some(_), .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn desktop_click_coords_are_optional() {
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "click"]);
+        match cli.cmd {
+            Cmd::Desktop {
+                cmd: DesktopCmd::Click { x, y, .. },
+                ..
+            } => {
+                assert_eq!(x, None);
+                assert_eq!(y, None);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn desktop_dt_alias_and_flags() {
+        let cli = Cli::parse_from([
+            "rmng", "dt", "w-cp", "screenshot", "--monitor", "1", "--out", "/tmp/s.jpg",
+        ]);
+        match cli.cmd {
+            Cmd::Desktop {
+                clone,
+                cmd: DesktopCmd::Screenshot { monitor, out },
+            } => {
+                assert_eq!(clone, "w-cp");
+                assert_eq!(monitor, Some(1));
+                assert_eq!(out.as_deref(), Some(std::path::Path::new("/tmp/s.jpg")));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_separates_command_after_dashes() {
+        let cli = Cli::parse_from(["rmng", "exec", "c", "--", "ls", "-la"]);
+        match cli.cmd {
+            Cmd::Exec { clone, cmd, .. } => {
+                assert_eq!(clone, "c");
+                assert_eq!(cmd, vec!["ls".to_string(), "-la".to_string()]);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_repeated_env_accumulates_with_user_and_workdir() {
+        let cli = Cli::parse_from([
+            "rmng", "exec", "c", "-u", "root", "-w", "/srv", "-e", "A=1", "-e", "B=2", "--",
+            "env",
+        ]);
+        match cli.cmd {
+            Cmd::Exec {
+                clone,
+                user,
+                workdir,
+                env,
+                cmd,
+            } => {
+                assert_eq!(clone, "c");
+                assert_eq!(user.as_deref(), Some("root"));
+                assert_eq!(workdir.as_deref(), Some("/srv"));
+                assert_eq!(env, vec!["A=1".to_string(), "B=2".to_string()]);
+                assert_eq!(cmd, vec!["env".to_string()]);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_requires_a_command() {
+        assert!(Cli::try_parse_from(["rmng", "exec", "c"]).is_err());
     }
 
     #[test]

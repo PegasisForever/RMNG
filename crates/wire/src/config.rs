@@ -11,8 +11,8 @@ use ts_rs::TS;
 
 use crate::control::{LayoutPreset, MonitorSpec};
 
-/// The control-server listen ports: video, web, per-clone MCP, global/fleet MCP, the
-/// in-clone daemon MCP, and the forward data plane (see README).
+/// The control-server listen ports: video, web, per-clone MCP, the in-clone daemon MCP,
+/// and the forward data plane (see README).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -20,10 +20,9 @@ pub struct ListenConfig {
     pub web: u16,
     pub video: u16,
     pub clone_mcp: u16,
-    pub global_mcp: u16,
-    /// The clone-daemon's in-clone HTTP MCP port. The fleet MCP proxies desktop/window
-    /// tools to `http://{clone-ip}:{daemon_mcp}`; each clone-daemon listens here (set via
-    /// `RMNG_DAEMON_MCP_PORT`). Same value for every clone.
+    /// The clone-daemon's in-clone HTTP MCP port. The control-server proxies desktop/window
+    /// tools (`POST /api/hosts/:id/mcp`) to `http://{clone}:{daemon_mcp}`; each clone-daemon
+    /// listens here (set via `RMNG_DAEMON_MCP_PORT`). Same value for every clone.
     #[serde(default = "default_daemon_mcp")]
     pub daemon_mcp: u16,
     /// The control-server's port-forward data plane. The viewer opens one TCP
@@ -72,7 +71,6 @@ impl Default for ListenConfig {
             web: 9000,
             video: 9001,
             clone_mcp: 9002,
-            global_mcp: 9003,
             daemon_mcp: default_daemon_mcp(),
             forward: default_forward(),
             bastion: default_bastion(),
@@ -871,8 +869,7 @@ mod listen_tests {
         assert_eq!(ListenConfig::default().forward, 9005);
         // absent in JSON → default
         let lc: ListenConfig =
-            serde_json::from_str(r#"{"web":9000,"video":9001,"cloneMcp":9002,"globalMcp":9003}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"web":9000,"video":9001,"cloneMcp":9002}"#).unwrap();
         assert_eq!(lc.forward, 9005);
     }
 }

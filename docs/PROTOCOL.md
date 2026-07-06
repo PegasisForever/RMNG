@@ -15,10 +15,9 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 | video | `9001` | `listen.video` | control-server mediaplane | native viewer | framed H.264/JSON over TCP |
 | web | `9000` | `listen.web` | control-server web | browser / `rmng` CLI / control-client | HTTP + SSE |
 | per-clone MCP | `9002` | `listen.clone_mcp` | control-server mcp | in-clone agent-wrapper | HTTP JSON-RPC (header-routed) |
-| global MCP | `9003` | `listen.global_mcp` | control-server mcp | operator / fleet agents (desktop tools) | HTTP JSON-RPC |
 | forward | `9005` | `listen.forward` | control-server mediaplane | native viewer | framed TCP over TCP (one conn per forwarded local socket, spliced to the clone) |
 | bastion | `2222` | `listen.bastion` | control-server ssh.rs | operator ssh client (jump) | OpenSSH; pubkey-only; forwards to `clone:22` |
-| daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agent-wrapper + global MCP proxy | HTTP JSON-RPC |
+| daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agent-wrapper + `rmng desktop` proxy (via web API) | HTTP JSON-RPC |
 | agent-wrapper | `4096` | `agent_port` (config) / `AGENT_PORT` | agent-wrapper (in clone) | control-server chat proxy | HTTP + SSE |
 | clone socket | `/srv/rmng-sock/clones.sock` | `cloneSocket` config (server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
 
@@ -153,7 +152,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 | `detector_inference_url` | string | `http://10.0.0.42:8080` | vision-LLM the needs-human detector polls; injected into clones as `RMNG_INFERENCE_URL` |
 | `agent_playbook` | string | shipped default | the desktop agent's base playbook (operating notes + ticket procedure), injected into each new clone at creation as its system-prompt append (written to the clone's `~/.config/rmng/agent-instructions.md`, where the agent-wrapper reads it, overriding its baked-in fallback). Seeded from the wrapper's `agent-instructions.md`; editable in Settings; **non-secret** (passes through the redacted view); applies to the next clone (**not restart-required**) |
 
-- **`ListenConfig`**: `web 9000`, `video 9001`, `clone_mcp 9002`, `global_mcp 9003`,
+- **`ListenConfig`**: `web 9000`, `video 9001`, `clone_mcp 9002`,
   `daemon_mcp 9004`, `forward 9005`, `bastion 2222`.
 - **`DockerConfig`** (no secret — the local daemon is reached over a unix socket, so the
   whole struct passes through the redacted view): `socket`

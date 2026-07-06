@@ -76,8 +76,8 @@
   <text x="500" y="250" text-anchor="middle" font-size="10.5" class="h2">dmabuf → VA-API H.264 encode</text>
 
   <rect class="box" x="380" y="276" width="240" height="56" rx="9"/>
-  <text x="500" y="300" text-anchor="middle" font-size="13.5" class="h1">MCP surfaces</text>
-  <text x="500" y="318" text-anchor="middle" font-size="10.5" class="h2">per-clone :9002 · fleet :9003</text>
+  <text x="500" y="300" text-anchor="middle" font-size="13.5" class="h1">MCP surface</text>
+  <text x="500" y="318" text-anchor="middle" font-size="10.5" class="h2">per-clone :9002</text>
 
   <rect class="box" x="380" y="344" width="240" height="56" rx="9"/>
   <text x="500" y="368" text-anchor="middle" font-size="13.5" class="h1">Docker orchestration</text>
