@@ -32,7 +32,11 @@ RMNG sits in the gap between desktop infrastructure and agent orchestration: rea
 | Self hosted                                                                 | ✅    | ✅                                               | ❌ cloud                                 | ❌ cloud           | ❌ mostly hosted                           | ✅                          |
 | Built for AI agents from the ground up                                      | ✅    | ✅                                               | ✅                                       | ✅                 | ✅                                         | ❌ VDI heritage             |
 
+## Does it work?
 
+RMNG builds Hyperhost, an unreleased cloud provider infrastructure. One Fable 5 agent controls 20 agents running in RMNG clones, producing more than 100k lines of code per day.
+
+![](docs/does-it-work.png)
 
 ## Features
 
