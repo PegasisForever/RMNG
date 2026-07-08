@@ -1,6 +1,6 @@
 # RMNG
 
-> One human, a fleet of agents.
+> Infrastructure to make everyone a 10x engineer.
 
 ![RMNG](docs/hero.webp)
 
@@ -90,8 +90,4 @@ docker run -d --name rmng --privileged --init --pid host --restart unless-stoppe
 
 Ports: `9000` web UI/API · `9001` video · `9002` per-clone MCP · `9005` port-forward data plane · `445` SMB clone-home share (host `445` must be free) · `2222` SSH bastion (jump into clones).
 
-Open `http://<host>:9000`. The **first-run setup wizard** walks through the environment checklist, server settings, clone-template download, and setup completion; use **Settings** afterward for Linear/Claude credentials. There are zero `-e` config flags — runtime configuration lives in the UI-backed config file. Full flow, image build, template publishing, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).
-
-## Documentation
-
-Architecture, the full port/protocol map, the workspace layout, build prerequisites, and the clean-room policy live in **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**, which also links every deep-reference doc ([API](docs/API.md) · [CLI](docs/CLI.md) · [MCP](docs/MCP.md) · [PROTOCOL](docs/PROTOCOL.md) · [SCRIPTS](docs/SCRIPTS.md) · [DEPLOY](docs/DEPLOY.md) · [PROXMOX-LXC](docs/PROXMOX-LXC.md)).
+Open `http://<host>:9000`. The **first-run setup wizard** walks through the environment checklist, server settings, clone-template download, and setup completion. Full flow, image build, template publishing, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).
