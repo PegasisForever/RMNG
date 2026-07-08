@@ -1,79 +1,77 @@
 # RMNG
 
-![RMNG](docs/hero.webp)
-
 > **Self-hosted GPU Linux desktops for supervised AI-agent fleets.**
 
-A self-contained Rust system for running, viewing, and automating a fleet of containerized GNOME desktops. A single **control-server** container orchestrates **clone containers** on a local Docker daemon, hardware-encodes the selected clone's GPU frames to a **native hardware-decode GTK viewer**, and brokers the desktop-automation **MCP** that per-clone Claude agents drive. Each clone runs a thin **clone-daemon** that captures frames, injects input, and bridges the clipboard.
+![RMNG](docs/hero.webp)
+
+RMNG runs containerized GNOME desktops on one Docker/GPU host. The **control-server** creates **clone containers**, encodes the selected clone's GPU frames for a native GTK viewer. Each clone runs a thin **clone-daemon** for frame capture, input, clipboard, and local MCP.
 
 ## What problem does this solve?
 
-AI coding agents are useful enough to run in parallel, but the supervision surface is still mostly one-at-a-time. Terminal orchestrators can multiplex text panes, IDE agents usually live inside a single editor session, and cloud agents often hide the live desktop state behind a managed workflow. That is a poor fit when the task needs a real browser, GUI application, desktop login state, or a human to take over the mouse at the exact point where the agent gets stuck.
+Running one agent to develop software is easy. Running a dozen of them is painful:
 
-RMNG treats each agent as a full desktop workload instead of only a shell process. Every clone gets its own isolated GNOME session with browsers, GUI apps, account state, clipboard, SSH, SMB home access, and local automation APIs. The operator gets one control plane for creating clones, assigning Claude/Codex accounts, watching usage, chatting with per-clone agents, switching the native viewer between desktops, and taking over input without restarting the work.
+You need a **separate sandbox** for each agent. RMNG gives each agent a full GNOME desktop, gpu acceleration, seperate network namespace, and seperate filesystem. Agents run real services side by side and never step on each other.
 
-The intended use case is one technical operator supervising many long-running agent desktops on infrastructure they control. The important properties are:
+You need to **see and steer** each agent. A coding agent designing a web app or driving a GUI app is invisible from a terminal, and a laggy remote desktop makes supervising several of them miserable. RMNG's viewer is native and hardware-accelerated, runs at 60fps on LAN, and switches between clones instantly.
 
-- **Parallel supervision:** many clones can run independently while the dashboard, viewer, notes, state, and "needs human" detector route attention to the clone that needs intervention.
-- **Real desktop state:** agents can use browsers, IDEs, OAuth sessions, GUI tools, screenshots, and clipboard flows that do not fit a terminal-only loop.
-- **Fast human takeover:** the viewer is a native hardware-decode client with multi-monitor support and instant clone switching, not a browser tab per desktop.
-- **Self-hosted control boundary:** code, repo checkouts, browser profiles, and harvested account tokens stay on the operator's Docker/GPU host rather than inside a managed cloud-agent vendor.
-- **Agent-native plumbing:** per-clone MCP surfaces, the `rmng desktop` CLI, hot account swaps, account groups, usage polling, and sticky auto-rotation are part of the runtime instead of external scripts around a VDI product.
+You need to **pack** a lot of agents onto one machine. RMNG's custom GPU accelerated remote desktop stack with a patched GNOME encodes only the clone you are watching, and lets you fit far more of them on the same hardware.
+
+You need to **efficiently multi-task** with the fleet. RMNG watchs every desktop for you, and flags the exact clone that needs you your attention. An `rmng` CLI and a web dashboard drive the whole fleet, and automated Claude/Codex account rotation keeps agents working instead of stalling on limits.
+
+## How does it solve it?
+
+A remote-desktop stack written from scratch is the core of RMNG. It collects frames from every clone, encodes the selected clone's frames, and decodes them in a custom-built viewer with multi-monitor support over a zero-copy, GPU-accelerated H.264 pipeline that hits 60fps on LAN and preserves full-chroma 4:4:4 color even on hardware that only encodes 4:2:0. See the [Features](#features) section for the full list.
 
 ## How does it compare?
 
-RMNG overlaps with several categories, but it is not a drop-in replacement for all of them. It is heavier than terminal tools and less turnkey than hosted products because it runs real desktops on your own GPU host.
+RMNG sits in the gap between desktop infrastructure and agent orchestration: real GPU desktops, local control, and a fast operator console.
 
-| Category | Good fit | Where RMNG differs |
-|---|---|---|
-| Terminal agent orchestrators (for example Conductor, Async) | Running many shell/git agents with text logs and patches | RMNG adds a full Linux desktop per agent, GUI/browser state, native visual takeover, and per-desktop automation. It is heavier because every agent is a desktop container, not just a process. |
-| IDE background agents (Cursor, Copilot) | Working inside one editor workspace | RMNG can run IDEs inside clones, but its control unit is the clone: one isolated desktop, repo, browser profile, account assignment, and agent loop per task. |
-| Managed cloud agents (for example Devin/Cognition) | Outsourcing the runtime and workflow to a hosted service | RMNG is self-hosted and inspectable. You can watch and take over the live desktop, but you operate the Docker host, GPU path, updates, and credentials yourself. |
-| Agent desktop infrastructure (for example Scrapybara, Bytebot) | Hosted or API-driven desktops for agents | RMNG is focused on operator supervision of a local fleet: native viewer, dashboard state, clone notes, needs-human routing, account lifecycle, and direct desktop takeover. |
-| Cloud desktop / VDI systems (for example Kasm) | Human remote desktops, browser/WebRTC access, existing VDI management | RMNG is not a general VDI suite. It builds the media path, clone lifecycle, and MCP/agent integration around AI-agent workloads rather than human office desktops. |
+| Capability                                                                  | RMNG | Terminal agent orchestrators (Conductor, Async) | IDE background agents (Cursor, Copilot) | Devin / Cognition | Agent desktop infra (Scrapybara, Bytebot) | Cloud desktop / VDI (Kasm) |
+| --------------------------------------------------------------------------- | ---- | ----------------------------------------------- | --------------------------------------- | ----------------- | ----------------------------------------- | -------------------------- |
+| Full GPU Linux desktop per agent                                            | ✅    | ❌ terminal/git only                             | ❌ inside the editor                     | ⚠️ opaque cloud VM | ✅                                         | ✅                          |
+| One human oversees many agents at once                                      | ✅    | ⚠️ text panes                                    | ❌ one at a time                         | ❌ per-task        | ❌ infra, not oversight                    | ❌                          |
+| Native hardware-accelerated viewer (60fps, multi-monitor, instant takeover) | ✅    | ❌                                               | ❌                                       | ❌                 | ⚠️ browser/WebRTC                          | ⚠️ browser/WebRTC           |
+| Self hosted                                                                 | ✅    | ✅                                               | ❌ cloud                                 | ❌ cloud           | ❌ mostly hosted                           | ✅                          |
+| Built for AI agents from the ground up                                      | ✅    | ✅                                               | ✅                                       | ✅                 | ✅                                         | ❌ VDI heritage             |
 
-## Architecture
 
-One central encoder feeds both the viewer and the agents' screenshots; raw H.264 over TCP into zero-copy VA-API decode gives RFX-class feel without RDP, and media/input cross a host unix socket so only the control-server is exposed. Full port map, protocols, and workspace layout: **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
-
-**Built from scratch** — encoder, decoder, viewer, and wire protocol are all original Rust; no code from VNC, RDP, or gnome-remote-desktop.
 
 ## Features
 
 **Remote Desktop**
 
-- Zero-copy full-chroma 4:4:4 hardware H.264 video pipeline end to end (even on hardware that only supports 4:2:0!)
+- Zero-copy full-chroma 4:4:4 hardware H.264 pipeline end to end (even on hardware that only supports 4:2:0!)
 - Native hardware-accelerated viewer on Linux and macOS
-- Full 60fps in local network
+- 60fps on local network
 - Multi-monitor
 - Instant swap between clones
-- Absolute + relative pointer
+- Absolute and relative pointer
 - Rich clipboard bridge, remote↔remote and local↔remote
 - Port forwarding
 
 **Fleet Management**
 
-- One control-server Docker container manages everything, and is the access point to everything
-- Web-based control dashboard, note for each clone
-- Docker + lxcfs for clone sandboxing
+- One control-server Docker container is the web/API/media entrypoint
+- Web dashboard with per-clone notes
+- Docker + lxcfs clone isolation
 - Full GNOME in each clone
-- Central SMB share for every clone's home dir
-- One command to SSH into every clone
+- Central SMB share for clone file systems
+- SSH bastion for clone access
 
 **Agent Native**
 
-- `rmng` fleet management CLI in every clone (hosts, clones, images, accounts — over the control-server web API)
-- Fleet-wide desktop automation through the `rmng desktop` CLI, backed by each clone's daemon MCP on localhost:9004
-- Chat with per-clone agent over web UI
-- "Needs human" detector
+- `rmng` fleet management CLI in every clone
+- `rmng desktop` can target any clone for computer use
+- Computer use MCP inside each clone
+- Per-clone agent chat in the web UI
+- Needs human detector
 
 **Accounts & integrations**
 
-- Import Claude and Codex/ChatGPT accounts once from a signed-in clone; the server owns token refresh after import
-- 5h + 7d usage visualizer for all accounts, including stale and rate-limited state
-- Live hot-swap of a running clone's account, no restart
+- Import Claude and ChatGPT accounts once and use in all the clones
+- 5h + 7d usage visualizer for all accounts
+- Live account hot-swap on a running clone, no restart needed
 - Named account groups with sticky auto-rotation
-- Pin a clone, or bind it to auto / a group / none
 
 ## Quick start
 
@@ -90,7 +88,7 @@ docker run -d --name rmng --privileged --init --pid host --restart unless-stoppe
 
 Ports: `9000` web UI/API · `9001` video · `9002` per-clone MCP · `9005` port-forward data plane · `445` SMB clone-home share (host `445` must be free) · `2222` SSH bastion (jump into clones).
 
-Open `http://<host>:9000` → the **first-run setup wizard** (environment checklist → server settings → download the clone template → finish) does the rest; then **Settings** for Linear/Claude credentials. There are zero `-e` config flags — everything is set in the UI. Full flow, the image build, publishing the template, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).
+Open `http://<host>:9000`. The **first-run setup wizard** walks through the environment checklist, server settings, clone-template download, and setup completion; use **Settings** afterward for Linear/Claude credentials. There are zero `-e` config flags — runtime configuration lives in the UI-backed config file. Full flow, image build, template publishing, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).
 
 ## Documentation
 
