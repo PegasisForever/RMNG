@@ -891,6 +891,34 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
     }
 }
 
+/// How long `rmng exec` waits for piped stdin to present its first byte before deciding
+/// there is nothing to forward. Real pipes (`echo hi | rmng exec …`) are ready at once, so
+/// this only bounds the wait for an *idle* open pipe (a harness / driver / script that
+/// holds stdin open without writing), which must never hang the command.
+const STDIN_POLL_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether stdin has input ready to read — data buffered, or the write end closed (EOF) —
+/// waiting up to `grace`. Returns `false` only for an idle open pipe (nothing ready within
+/// `grace`), so [`exec`] can skip the otherwise-unbounded `read_to_end` that would hang the
+/// command. A regular-file/`/dev/null` redirect and a live pipe both report ready promptly;
+/// once ready the caller drains the whole stream, so large piped input is unaffected.
+/// Unix readiness comes from `poll(2)`; other platforms conservatively report ready
+/// (the historical always-read behavior).
+#[cfg(unix)]
+fn stdin_has_input(grace: std::time::Duration) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let mut pfd = libc::pollfd { fd: std::io::stdin().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let ms = grace.as_millis().min(i32::MAX as u128) as i32;
+    // >0: readable or hung-up (EOF) → drain it. 0: timed out (idle pipe) → forward no stdin.
+    // <0: poll error → fall back to attempting the read (the old behavior).
+    unsafe { libc::poll(&mut pfd, 1, ms) != 0 }
+}
+
+#[cfg(not(unix))]
+fn stdin_has_input(_grace: std::time::Duration) -> bool {
+    true
+}
+
 /// `rmng exec <clone> [flags] -- <cmd…>`. Reads piped stdin (base64), runs the command
 /// in the clone, splits stdout/stderr to our own streams (or one JSON object with
 /// `--json`), and exits with the command's own exit code.
@@ -907,8 +935,16 @@ pub async fn exec(
     use std::io::{IsTerminal, Read, Write};
 
     // Pass through piped stdin so `echo hi | rmng exec c -- cat` works; a TTY stdin is
-    // left untouched (this command is non-interactive).
-    let stdin_b64 = if std::io::stdin().is_terminal() {
+    // left untouched (this command is non-interactive). Crucially we must NOT blindly
+    // `read_to_end` every non-terminal stdin: when `rmng exec` is launched from a
+    // script, an agent/tool harness, or a fleet driver, stdin is typically an *open*
+    // pipe with nothing to send, and a blocking read there hangs the command forever
+    // before it ever runs (the historical `rmng exec` hang). Gate the drain on a
+    // readiness poll — only read stdin once it actually has data (or has hit EOF); an
+    // idle open pipe yields nothing within the grace window and we forward no stdin. A
+    // ready fd still drains fully, so large piped input is fine (the poll only bounds
+    // the wait for the first byte).
+    let stdin_b64 = if std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE) {
         None
     } else {
         let mut buf = Vec::new();
