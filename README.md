@@ -34,7 +34,7 @@ RMNG sits in the gap between desktop infrastructure and agent orchestration: rea
 
 ## Does it work?
 
-RMNG builds Hyperhost, an unreleased cloud provider infrastructure. One Fable 5 agent controls 20 agents running in RMNG clones, producing more than 100k lines of code per day.
+RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One Fable 5 agent controls 20 agents running in RMNG clones, producing more than 100k lines of code per day.
 
 ![](docs/does-it-work.png)
 
