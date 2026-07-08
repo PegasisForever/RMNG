@@ -77,7 +77,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 
 ## Quick start
 
-> **Hardware support:** the **encode** path (control-server, VA-API H.264) has only been tested on an **AMD Radeon Pro W6800**; the **decode** path (viewer) has only been tested on **Intel integrated graphics** (Linux) and **Apple M-series** (macOS). Other GPUs may work but are untested.
+> **Hardware support:** the encode path (control-server, VA-API H.264) has only been tested on an AMD Radeon Pro W6800; the decode path (viewer) has only been tested on Intel integrated graphics (Linux) and Apple M-series (macOS). Other GPUs may work but are untested.
 
 Needs a Linux host with Docker and a GPU render node (`/dev/dri/renderD128`). Pull the published image (or `docker build -t rmng:latest .` from a checkout), then run the hub:
 
