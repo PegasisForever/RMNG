@@ -1,12 +1,10 @@
 # RMNG
 
-> **Self-hosted GPU Linux desktops for supervised AI-agent fleets.**
+> One human, a fleet of agents.
 
 ![RMNG](docs/hero.webp)
 
-RMNG runs containerized GNOME desktops on one Docker/GPU host. The **control-server** creates **clone containers**, encodes the selected clone's GPU frames for a native GTK viewer. Each clone runs a thin **clone-daemon** for frame capture, input, clipboard, and local MCP.
-
-## What problem does this solve?
+## What problem does it solve?
 
 Running one agent to develop software is easy. Running a dozen of them is painful:
 
