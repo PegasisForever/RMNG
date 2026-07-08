@@ -1,6 +1,6 @@
 # RMNG
 
-> Infrastructure to make everyone a 10x engineer.
+> Infrastructure for every 10x engineer.
 
 ![RMNG](docs/hero.webp)
 
