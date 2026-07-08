@@ -25,3 +25,10 @@ base64 = "0.22"
 # (PNG + JPEG encoders + decoders) — the daemon always sends JPEG today
 # but PNG support is one less thing to revisit if it ever changes.
 image = "0.25"
+
+# `poll(2)` on stdin so `rmng exec` only drains piped input that is actually
+# ready, instead of blocking forever on an idle open pipe (a script / agent
+# harness / fleet driver that holds stdin open without writing) — see
+# `commands::stdin_has_input`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
