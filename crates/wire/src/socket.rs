@@ -87,11 +87,22 @@ pub enum InputMsg {
     Button { button: i32, pressed: bool },
     /// Discrete scroll: axis 0 = vertical, 1 = horizontal; step ±1.
     Axis { axis: u32, step: i32 },
+    /// Smooth/finger scroll (touchpad). Deltas are surface pixels; `flags` match Mutter
+    /// RemoteDesktop `NotifyPointerAxis` (1=finish, 2=wheel, 4=finger, 8=continuous).
+    AxisContinuous { dx: f64, dy: f64, flags: u32 },
     /// Key by X11 keysym (used by the MCP `key`/`type` tools for text/combos).
     Key { keysym: u32, pressed: bool },
     /// Key by evdev keycode (the viewer supplies `hardware_keycode - 8`) — faithful
     /// physical-key identity so games that read raw keys (Minecraft/GLFW) behave.
     KeyCode { keycode: u32, pressed: bool },
+}
+
+/// Mutter `NotifyPointerAxis` flags (org.gnome.Mutter.RemoteDesktop.Session).
+pub mod axis_flags {
+    pub const FINISH: u32 = 1 << 0;
+    pub const SOURCE_WHEEL: u32 = 1 << 1;
+    pub const SOURCE_FINGER: u32 = 1 << 2;
+    pub const SOURCE_CONTINUOUS: u32 = 1 << 3;
 }
 
 /// Releases the held PipeWire buffer for `(monitor_id, seq)`.
@@ -265,6 +276,11 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"kind\":\"pointer_move\""));
         assert_eq!(serde_json::from_str::<InputMsg>(&s).unwrap(), m);
+
+        let c = InputMsg::AxisContinuous { dx: 1.5, dy: -3.0, flags: axis_flags::SOURCE_FINGER };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains("\"kind\":\"axis_continuous\""), "{s}");
+        assert_eq!(serde_json::from_str::<InputMsg>(&s).unwrap(), c);
     }
 
     #[test]

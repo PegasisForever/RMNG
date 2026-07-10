@@ -53,6 +53,10 @@ pub trait RemoteDesktopSession {
     fn notify_pointer_button(&self, button: i32, state: bool) -> zbus::Result<()>;
     #[zbus(no_reply)]
     fn notify_pointer_axis_discrete(&self, axis: u32, steps: i32) -> zbus::Result<()>;
+    /// Smooth pointer axis (touchpad / high-res wheel). `flags`: 1=finish, 2=wheel,
+    /// 4=finger, 8=continuous (Mutter RemoteDesktop); default source is finger.
+    #[zbus(no_reply)]
+    fn notify_pointer_axis(&self, dx: f64, dy: f64, flags: u32) -> zbus::Result<()>;
     /// Relative (unaccelerated) pointer motion — for pointer-lock / games.
     #[zbus(no_reply)]
     fn notify_pointer_motion_relative(&self, dx: f64, dy: f64) -> zbus::Result<()>;

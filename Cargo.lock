@@ -3239,6 +3239,7 @@ dependencies = [
  "control-client",
  "futures",
  "image",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

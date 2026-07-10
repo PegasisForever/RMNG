@@ -525,6 +525,9 @@ async fn run_shipping(
                         rd.notify_pointer_button(button, pressed).await
                     }
                     InputMsg::Axis { axis, step } => rd.notify_pointer_axis_discrete(axis, step).await,
+                    InputMsg::AxisContinuous { dx, dy, flags } => {
+                        rd.notify_pointer_axis(dx, dy, flags).await
+                    }
                     InputMsg::Key { keysym, pressed } => {
                         rd.notify_keyboard_keysym(keysym, pressed).await
                     }

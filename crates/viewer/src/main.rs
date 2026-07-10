@@ -1265,17 +1265,61 @@ fn install_pointer(
     }
     video.add_controller(click);
 
+    // Touchpad (ScrollUnit::Surface) → Mutter NotifyPointerAxis (smooth/finger).
+    // Mouse wheel (ScrollUnit::Wheel) → discrete notches, accumulated for high-res wheels.
     let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::BOTH_AXES);
     {
         let w = writer.clone();
-        scroll.connect_scroll(move |_c, dx, dy| {
-            if dy != 0.0 {
-                send(&w, format!(r#"{{"kind":"axis","axis":0,"step":{}}}"#, if dy > 0.0 { 1 } else { -1 }));
+        let rem = Cell::new((0.0_f64, 0.0_f64));
+        let finger = Rc::new(Cell::new(false));
+        {
+            let finger = finger.clone();
+            scroll.connect_scroll(move |c, dx, dy| {
+                match c.unit() {
+                    gdk::ScrollUnit::Surface => {
+                        finger.set(true);
+                        if dx != 0.0 || dy != 0.0 {
+                            send(
+                                &w,
+                                format!(
+                                    r#"{{"kind":"axis_continuous","dx":{dx},"dy":{dy},"flags":{}}}"#,
+                                    wire::socket::axis_flags::SOURCE_FINGER
+                                ),
+                            );
+                        }
+                    }
+                    _ => {
+                        finger.set(false);
+                        let (mut rx, mut ry) = rem.get();
+                        rx += dx;
+                        ry += dy;
+                        let sx = rx.trunc() as i32;
+                        let sy = ry.trunc() as i32;
+                        rem.set((rx - f64::from(sx), ry - f64::from(sy)));
+                        if sy != 0 {
+                            send(&w, format!(r#"{{"kind":"axis","axis":0,"step":{sy}}}"#));
+                        }
+                        if sx != 0 {
+                            send(&w, format!(r#"{{"kind":"axis","axis":1,"step":{sx}}}"#));
+                        }
+                    }
+                }
+                glib::Propagation::Proceed
+            });
+        }
+        // Fingers lifted: finish the remote scroll gesture (kinetic / end). Skip for wheel.
+        let w = writer.clone();
+        scroll.connect_scroll_end(move |_c| {
+            if !finger.replace(false) {
+                return;
             }
-            if dx != 0.0 {
-                send(&w, format!(r#"{{"kind":"axis","axis":1,"step":{}}}"#, if dx > 0.0 { 1 } else { -1 }));
-            }
-            glib::Propagation::Proceed
+            send(
+                &w,
+                format!(
+                    r#"{{"kind":"axis_continuous","dx":0.0,"dy":0.0,"flags":{}}}"#,
+                    wire::socket::axis_flags::FINISH | wire::socket::axis_flags::SOURCE_FINGER
+                ),
+            );
         });
     }
     video.add_controller(scroll);
