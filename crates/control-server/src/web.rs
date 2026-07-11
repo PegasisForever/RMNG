@@ -54,7 +54,7 @@ pub fn router(app: App) -> Router {
         .route("/api/clone", post(clone))
         .route("/api/layout/activate", post(layout_activate))
         .route("/api/delete", post(delete))
-        .route("/api/notes/:id", get(notes_get).post(notes_save))
+        .route("/api/notes/:id", get(notes_get).put(notes_save))
         .route("/api/upload", post(upload))
         .route("/uploads/:file", get(uploads_serve))
         .route("/api/detector-feedback", post(detector_feedback))
@@ -865,19 +865,29 @@ async fn layout_activate(
 
 // --- notes + uploads (side stores, not in ControlState) --------------------
 
+/// The notes editor's wire envelope, both directions: `{ "blocks": [...] }`. The
+/// BlockNote document is stored on disk as a bare array; the `blocks` key is the HTTP
+/// shape the frontend reads (`GET`) and writes (`PUT`) — keep them in lockstep.
+#[derive(Deserialize)]
+struct NotesBody {
+    #[serde(default)]
+    blocks: Vec<serde_json::Value>,
+}
+
 async fn notes_get(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
-) -> Json<Vec<serde_json::Value>> {
-    Json(files::load_notes(&app.config().data_dir, &id).unwrap_or_default())
+) -> Json<serde_json::Value> {
+    let blocks = files::load_notes(&app.config().data_dir, &id).unwrap_or_default();
+    Json(json!({ "blocks": blocks }))
 }
 
 async fn notes_save(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
-    Json(blocks): Json<Vec<serde_json::Value>>,
+    Json(body): Json<NotesBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    files::save_notes(&app.config().data_dir, &id, &blocks)
+    files::save_notes(&app.config().data_dir, &id, &body.blocks)
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
@@ -1915,6 +1925,52 @@ mod tests {
         assert_eq!(res.exit_code, 3);
         assert_eq!(res.stdout, "out");
         assert_eq!(res.stderr, "err");
+    }
+
+    /// End-to-end through the real router: the notes editor saves with `PUT` and the
+    /// `{ blocks }` envelope, and reads the same shape back. Goes over a live loopback
+    /// socket (not a direct handler call) so it also pins the route *method* — a `POST`-
+    /// only route would 405 the frontend's `PUT`, which is exactly the save bug.
+    #[tokio::test]
+    async fn notes_put_then_get_round_trips_over_http() {
+        let app = test_app();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
+        let base = format!("http://{addr}");
+        let http = reqwest::Client::new();
+
+        // A host with no notes yet reads back an empty `blocks` array (not a bare `[]`).
+        let empty: serde_json::Value = http
+            .get(format!("{base}/api/notes/h1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(empty, serde_json::json!({ "blocks": [] }));
+
+        // Save via PUT with the frontend's `{ blocks }` envelope → 204, no body.
+        let doc = serde_json::json!({ "blocks": [{ "type": "paragraph", "id": "b1" }] });
+        let put = http
+            .put(format!("{base}/api/notes/h1"))
+            .json(&doc)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put.status(), reqwest::StatusCode::NO_CONTENT);
+
+        // ...and the next GET returns exactly what was saved.
+        let got: serde_json::Value = http
+            .get(format!("{base}/api/notes/h1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(got, doc);
     }
 }
 
