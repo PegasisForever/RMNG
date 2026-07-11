@@ -180,6 +180,13 @@ pub struct Host {
     pub state_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor_state: Option<MonitorState>,
+    /// The clone container's IPv4 on the rmng bridge network — the address other
+    /// clones can dial it at directly (alongside its `id`, which Docker's embedded
+    /// DNS resolves to the same host). Populated by the monitor poller from a Docker
+    /// inspect each tick; `None` for unmanaged rows or a stopped/detached container.
+    /// A recreated container's new IP self-heals on the next poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_ip: Option<String>,
     /// True when this clone fell out of `working` (→ idle/offline) since the
     /// operator last viewed it — drives the sidebar "unread" dot. Set by the
     /// monitor poller on that transition, cleared when the clone is activated.

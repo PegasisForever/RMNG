@@ -59,13 +59,21 @@ codexSelection: string | null,
  * Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
  * string: the workspace set is config (Settings → Linear API keys), not an enum.
  */
-linearWorkspace: string | null, linearTicket: string | null, linearTicketUrl: string | null, linearBranch: string | null,
+linearWorkspace: string | null, linearTicket: string | null, linearTicketUrl: string | null, linearBranch: string | null, 
 /**
  * Clone preset name used at creation. New control-server versions persist this so
  * reconciliation can rebuild `/etc/environment` without relying on a guest-side
  * legacy env file. Older hosts may not have it.
  */
-presetName: string | null, displayName: string | null, linearLabel: string | null, agentReport: AgentReport | null, stateNote: string | null, monitorState: MonitorState | null,
+presetName: string | null, displayName: string | null, linearLabel: string | null, agentReport: AgentReport | null, stateNote: string | null, monitorState: MonitorState | null, 
+/**
+ * The clone container's IPv4 on the rmng bridge network — the address other
+ * clones can dial it at directly (alongside its `id`, which Docker's embedded
+ * DNS resolves to the same host). Populated by the monitor poller from a Docker
+ * inspect each tick; `None` for unmanaged rows or a stopped/detached container.
+ * A recreated container's new IP self-heals on the next poll.
+ */
+localIp: string | null, 
 /**
  * True when this clone fell out of `working` (→ idle/offline) since the
  * operator last viewed it — drives the sidebar "unread" dot. Set by the

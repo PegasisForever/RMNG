@@ -47,6 +47,7 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
             };
             vec![
                 format!("{}{}", h.id, sel),
+                h.local_ip.clone().unwrap_or_default(),
                 h.monitor_state
                     .map(|m| format!("{m:?}").to_lowercase())
                     .unwrap_or_default(),
@@ -72,7 +73,7 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
     print!(
         "{}",
         table(
-            &["ID", "STATE", "AGENT", "IMAGE", "CLAUDE", "CODEX", "NOTE"],
+            &["ID", "IP", "STATE", "AGENT", "IMAGE", "CLAUDE", "CODEX", "NOTE"],
             &rows
         )
     );

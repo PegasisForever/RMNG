@@ -57,6 +57,13 @@ impl StatsBus {
         (self.latest.read().unwrap().1.clone(), self.tx.subscribe())
     }
 
+    /// A clone of the last published stats map. `poll_once` reads it to carry a still-
+    /// reachable host's previous reading forward across a transient sampling gap, so a
+    /// one-off `docker stats` timeout doesn't blank that clone's CPU/RAM in the UI.
+    fn latest_map(&self) -> HashMap<String, ContainerStats> {
+        self.latest.read().unwrap().0.clone()
+    }
+
     fn docker_disk_used(&self) -> u64 {
         self.docker_disk_used.load(Ordering::Relaxed)
     }
@@ -115,6 +122,23 @@ async fn probe_host(app: &App, host: &Host, agent_port: u16) -> MonitorState {
     }
 }
 
+/// Which CPU/RAM reading to publish for one host this tick. A fresh sample always wins.
+/// With no fresh sample, a still-reachable clone keeps its `prev` reading — a transient
+/// `docker stats` timeout under daemon load shouldn't blank a running clone's metrics —
+/// while an offline clone (stopped/gone container) drops to `None` so its numbers clear.
+/// Returns `None` too when a reachable host has no prior reading yet (nothing to show).
+fn pick_stat(
+    fresh: Option<ContainerStats>,
+    state: MonitorState,
+    prev: Option<&ContainerStats>,
+) -> Option<ContainerStats> {
+    match fresh {
+        Some(s) => Some(s),
+        None if state != MonitorState::Offline => prev.cloned(),
+        None => None,
+    }
+}
+
 async fn poll_once(app: &App) {
     let hosts = app.store.get().hosts;
     if hosts.is_empty() {
@@ -126,8 +150,9 @@ async fn poll_once(app: &App) {
     let agent_port = app.config().agent_port;
     // Per host, probe the agent-wrapper `/status` AND sample container stats, all
     // concurrently. Stats are sampled only for managed clones (a container named after the
-    // host id backs them); a stopped/missing container yields `None` and is simply skipped,
-    // so a stopped or unmanaged host contributes no stats entry (no UI churn). Cost: one
+    // host id backs them); a stopped/missing container yields `None`. A `None` for a still-
+    // reachable clone is treated as a transient gap and its last reading is carried forward
+    // (see the loop below); only an offline/unmanaged host contributes no entry. Cost: one
     // `docker stats` call per managed host per tick — cheap, one-shot, and concurrent.
     //
     // Two bounds keep stats from ever holding the monitor state hostage:
@@ -148,18 +173,40 @@ async fn poll_once(app: &App) {
                 .ok() // timed out → no sample this tick
                 .flatten()
         };
-        let (state, stats) = tokio::join!(probe_host(app, h, agent_port), stats_fut);
-        (h.id.clone(), state, stats)
+        // The clone's bridge IP, refreshed each tick alongside stats. `Some(_)` is a
+        // definitive inspect result (`Some(ip)` running & attached, `None` gone/detached);
+        // the outer `None` means "no reading this tick" (unmanaged, timed out, or a daemon
+        // hiccup) and leaves the persisted value untouched so a transient failure can't
+        // churn `state.json` by flapping the IP to empty and back.
+        let ip_fut = async {
+            if !h.managed {
+                return None;
+            }
+            match tokio::time::timeout(FETCH_TIMEOUT, app.docker.inspect_ip(&h.id)).await {
+                Ok(Ok(ip)) => Some(ip),
+                _ => None,
+            }
+        };
+        let (state, stats, ip) =
+            tokio::join!(probe_host(app, h, agent_port), stats_fut, ip_fut);
+        (h.id.clone(), state, stats, ip)
     }));
     let probes = probes_fut.await;
     let docker_disk_used = app.stats.docker_disk_used();
+    // Last tick's published readings, to bridge a transient gap (see below).
+    let prev_stats = app.stats.latest_map();
 
     let mut next: HashMap<String, MonitorState> = HashMap::with_capacity(probes.len());
     let mut stats_map: HashMap<String, ContainerStats> = HashMap::new();
-    for (id, state, stats) in probes {
-        if let Some(mut s) = stats {
+    // Only hosts with a definitive IP reading this tick; absent = "leave as-is".
+    let mut ip_updates: HashMap<String, Option<String>> = HashMap::new();
+    for (id, state, stats, ip) in probes {
+        if let Some(mut s) = pick_stat(stats, state, prev_stats.get(&id)) {
             s.docker_disk_used = docker_disk_used;
             stats_map.insert(id.clone(), s);
+        }
+        if let Some(ip) = ip {
+            ip_updates.insert(id.clone(), ip);
         }
         next.insert(id, state);
     }
@@ -174,13 +221,11 @@ async fn poll_once(app: &App) {
         }
     }
 
-    // Only persist when something changed.
-    let changed = app
-        .store
-        .get()
-        .hosts
-        .iter()
-        .any(|h| next.get(&h.id).is_some_and(|s| Some(*s) != h.monitor_state));
+    // Only persist when the monitor state or a clone's IP actually changed.
+    let changed = app.store.get().hosts.iter().any(|h| {
+        next.get(&h.id).is_some_and(|s| Some(*s) != h.monitor_state)
+            || ip_updates.get(&h.id).is_some_and(|ip| *ip != h.local_ip)
+    });
     if !changed {
         return;
     }
@@ -197,6 +242,9 @@ async fn poll_once(app: &App) {
                     h.unread = true;
                 }
                 h.monitor_state = Some(state);
+            }
+            if let Some(ip) = ip_updates.get(&h.id) {
+                h.local_ip = ip.clone();
             }
         }
     });
@@ -246,6 +294,37 @@ mod tests {
             mem_limit: 8u64 << 30,
             docker_disk_used: 0,
         }
+    }
+
+    #[test]
+    fn pick_stat_prefers_a_fresh_sample() {
+        // A fresh reading always wins, whatever the state or the prior value.
+        let prev = stat(10.0);
+        let got = pick_stat(Some(stat(55.0)), MonitorState::Working, Some(&prev));
+        assert_eq!(got, Some(stat(55.0)));
+    }
+
+    #[test]
+    fn pick_stat_carries_prev_forward_for_a_reachable_host() {
+        // No sample this tick (transient docker-stats gap) but the clone is still
+        // reachable → keep its last reading so the UI doesn't flicker to blank.
+        let prev = stat(33.0);
+        for state in [MonitorState::Working, MonitorState::Idle] {
+            assert_eq!(pick_stat(None, state, Some(&prev)), Some(stat(33.0)));
+        }
+    }
+
+    #[test]
+    fn pick_stat_drops_an_offline_host() {
+        // Offline (stopped/gone container) → clear its numbers even if we had a prior.
+        let prev = stat(33.0);
+        assert_eq!(pick_stat(None, MonitorState::Offline, Some(&prev)), None);
+    }
+
+    #[test]
+    fn pick_stat_reachable_host_with_no_prior_stays_empty() {
+        // A just-started clone whose first sample missed has nothing to carry forward.
+        assert_eq!(pick_stat(None, MonitorState::Working, None), None);
     }
 
     #[test]
