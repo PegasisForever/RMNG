@@ -55,6 +55,7 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
                     .map(|r| format!("{r:?}").to_lowercase())
                     .unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
+                h.preset_name.clone().unwrap_or_default(),
                 h.claude_account_email
                     .clone()
                     .or(h.claude_selection.clone())
@@ -73,7 +74,7 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
     print!(
         "{}",
         table(
-            &["ID", "IP", "STATE", "AGENT", "IMAGE", "CLAUDE", "CODEX", "NOTE"],
+            &["ID", "IP", "STATE", "AGENT", "IMAGE", "PRESET", "CLAUDE", "CODEX", "NOTE"],
             &rows
         )
     );
