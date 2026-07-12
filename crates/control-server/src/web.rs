@@ -143,7 +143,9 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
 ///
 /// Stats and forwards ride separate SSE-only buses ([`crate::monitor::StatsBus`],
 /// [`crate::forward::ForwardBus`]) so they never enter `ControlState` / `state.json`
-/// (which persists on every mutation). 20s keep-alive ping.
+/// (which persists on every mutation). Plus a named `ping` event every 15s (an
+/// observable heartbeat the client's reconnect watchdog measures) and a 20s low-level
+/// keep-alive comment.
 async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (snapshot, rx) = app.store.subscribe();
     let state_initial = futures::stream::once(async move { Ok(Event::default().data(snapshot)) });
@@ -181,9 +183,25 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     });
     let fwd_stream = fwd_initial.chain(fwd_updates);
 
+    // Observable heartbeat: a named `ping` event every 15s. Unlike the low-level keep-alive
+    // *comment* below (which `EventSource` swallows silently), the client can see this — so
+    // its watchdog can tell a wedged/half-open socket (pings stop arriving → reconnect)
+    // apart from a merely idle fleet (pings keep arriving → stay put). First tick at 15s;
+    // the initial snapshots above already prove liveness on connect.
+    let heartbeat = futures::stream::unfold((), |()| async {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        Some((
+            Ok::<Event, Infallible>(Event::default().event("ping").data("{}")),
+            (),
+        ))
+    });
+
     Sse::new(futures::stream::select(
         state_stream,
-        futures::stream::select(stats_stream, fwd_stream),
+        futures::stream::select(
+            futures::stream::select(stats_stream, fwd_stream),
+            heartbeat,
+        ),
     ))
     .keep_alive(
         KeepAlive::new()
@@ -1972,6 +1990,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, doc);
+    }
+
+    /// Spin up `/events` and read the opening bytes. All three multiplexed streams send a
+    /// snapshot on connect: the default (unnamed) `ControlState` frame plus the named
+    /// `stats` and `forwards` snapshots. Guards the stream `select` wiring.
+    #[tokio::test]
+    async fn events_stream_multiplexes_snapshots_on_connect() {
+        use futures::stream::StreamExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/events"))
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        while let Ok(Some(chunk)) =
+            tokio::time::timeout(Duration::from_secs(5), stream.next()).await
+        {
+            buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+            let seen = buf.replace(' ', "");
+            if seen.contains("event:stats") && seen.contains("event:forwards") {
+                break;
+            }
+        }
+        let seen = buf.replace(' ', "");
+        assert!(seen.contains("data:"), "no default state frame in: {buf:?}");
+        assert!(seen.contains("event:stats"), "no stats snapshot in: {buf:?}");
+        assert!(seen.contains("event:forwards"), "no forwards snapshot in: {buf:?}");
+    }
+
+    /// The observable heartbeat: a named `ping` event arrives within the first interval.
+    /// Distinct from the low-level keep-alive *comment* (`:ping`) — we assert the `event:`
+    /// form so a comment can't satisfy it. Ignored by default: it waits ~15s for the first
+    /// tick. Run with `cargo test -p control-server -- --ignored events_stream_emits_ping`.
+    #[tokio::test]
+    #[ignore = "waits ~15s for the first server heartbeat tick"]
+    async fn events_stream_emits_ping_heartbeat() {
+        use futures::stream::StreamExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/events"))
+            .header("accept", "text/event-stream")
+            .send()
+            .await
+            .unwrap();
+
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        while let Ok(Some(chunk)) =
+            tokio::time::timeout(Duration::from_secs(18), stream.next()).await
+        {
+            buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+            if buf.replace(' ', "").contains("event:ping") {
+                break;
+            }
+        }
+        assert!(
+            buf.replace(' ', "").contains("event:ping"),
+            "no ping heartbeat event within ~18s: {buf:?}"
+        );
     }
 }
 

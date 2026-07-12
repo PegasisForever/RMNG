@@ -64,37 +64,100 @@ export function clientLoader() {
   return emptyState();
 }
 
+// If no frame or heartbeat has arrived for this long, treat the socket as wedged and
+// rebuild it. The server pings every 15s, so ~3 missed pings — comfortably clear of
+// jitter but quick enough to recover.
+const SSE_STALE_MS = 45_000;
+
 /** Initial state from the SSR loader, kept live by the SSE stream. The same connection
  *  carries the persisted `ControlState` (default event) and a volatile per-host CPU/RAM
- *  map (named `stats` event) — the latter never touches `state.json`. */
+ *  map (named `stats` event) — the latter never touches `state.json`.
+ *
+ *  A plain `EventSource` auto-reconnects when the browser *notices* the socket died — but
+ *  after a Wi-Fi drop the TCP connection often goes half-open: it stays `OPEN`, delivers
+ *  nothing, and never fires `onerror`, so the UI silently stops updating. We defend against
+ *  that with an observable heartbeat + three recovery triggers: a staleness watchdog, the
+ *  `online` event (Wi-Fi came back), and tab re-focus. Each rebuilds the connection, and a
+ *  fresh `/events` connection replays the full snapshot, so the UI resyncs on reconnect. */
 function useLiveState(initial: ControlState) {
   const [state, setState] = useState(initial);
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
   const [forwards, setForwards] = useState<Record<string, ForwardRuntime[]>>({});
   useEffect(() => {
-    const es = new EventSource("/events");
-    es.onmessage = (e) => {
-      try {
-        setState(JSON.parse(e.data));
-      } catch {
-        // ignore malformed frame
+    let es: EventSource | null = null;
+    let lastActivity = Date.now();
+    let disposed = false; // set on unmount so late callbacks don't reopen
+
+    const connect = () => {
+      if (disposed) return;
+      es?.close();
+      lastActivity = Date.now();
+      es = new EventSource("/events");
+      es.onopen = () => {
+        lastActivity = Date.now();
+      };
+      es.onmessage = (e) => {
+        lastActivity = Date.now();
+        try {
+          setState(JSON.parse(e.data));
+        } catch {
+          // ignore malformed frame
+        }
+      };
+      es.addEventListener("stats", (e) => {
+        lastActivity = Date.now();
+        try {
+          setStats(JSON.parse((e as MessageEvent).data));
+        } catch {
+          // ignore malformed frame
+        }
+      });
+      es.addEventListener("forwards", (e) => {
+        lastActivity = Date.now();
+        try {
+          setForwards(JSON.parse((e as MessageEvent).data));
+        } catch {
+          // ignore malformed frame
+        }
+      });
+      // Heartbeat carries no payload — it exists only to keep `lastActivity` fresh so the
+      // watchdog can distinguish a wedged socket from an idle-but-healthy one.
+      es.addEventListener("ping", () => {
+        lastActivity = Date.now();
+      });
+    };
+
+    connect();
+
+    // Watchdog: rebuild a socket the browser has given up on (CLOSED), or one that still
+    // claims to be OPEN but has gone silent past the staleness window (the half-open case).
+    // A CONNECTING socket is the browser's own retry in flight — leave it be.
+    const watchdog = window.setInterval(() => {
+      if (disposed) return;
+      const stale = Date.now() - lastActivity > SSE_STALE_MS;
+      if (es?.readyState === EventSource.CLOSED || (es?.readyState === EventSource.OPEN && stale)) {
+        connect();
+      }
+    }, 5_000);
+
+    // Wi-Fi/network regained → rebuild immediately (the current socket is likely half-open).
+    const onOnline = () => connect();
+    // Tab re-focus after a sleep/background stretch that outran the staleness window.
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastActivity > SSE_STALE_MS) {
+        connect();
       }
     };
-    es.addEventListener("stats", (e) => {
-      try {
-        setStats(JSON.parse((e as MessageEvent).data));
-      } catch {
-        // ignore malformed frame
-      }
-    });
-    es.addEventListener("forwards", (e) => {
-      try {
-        setForwards(JSON.parse((e as MessageEvent).data));
-      } catch {
-        // ignore malformed frame
-      }
-    });
-    return () => es.close();
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(watchdog);
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisible);
+      es?.close();
+    };
   }, []);
   return { state, stats, forwards };
 }
