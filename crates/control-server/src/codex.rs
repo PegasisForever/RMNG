@@ -840,14 +840,21 @@ pub enum Assignment {
     None,
 }
 
-pub fn resolve_assignment(app: &App, requested: Option<&str>) -> Option<Assignment> {
+/// `current` is the clone's account now (for a swap); resolving a group makes the pick
+/// sticky — a clone moving from a pinned account into a group that already contains it
+/// keeps that account instead of cold-starting. Pass `None` for a fresh clone at create.
+pub fn resolve_assignment(
+    app: &App,
+    requested: Option<&str>,
+    current: Option<&str>,
+) -> Option<Assignment> {
     let want = requested.unwrap_or("").trim();
     if want.eq_ignore_ascii_case(NONE) {
         return Some(Assignment::None);
     }
     if let Some(name) = want.strip_prefix("group:") {
         let name = name.trim();
-        let initial = pick_group_account(app, name)?;
+        let initial = pick_group_account(app, name, current)?;
         return Some(Assignment::Group {
             name: name.to_string(),
             initial,
@@ -995,11 +1002,19 @@ fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
     eligible_members(app, &group.accounts)
 }
 
-fn pick_group_account(app: &App, group_name: &str) -> Option<String> {
+/// Stickiness first (see the Claude twin): if the clone's `current` account is an
+/// eligible member of the group, keep it instead of rebalancing off it. Otherwise pick
+/// the least-loaded / least-used eligible member.
+fn pick_group_account(app: &App, group_name: &str, current: Option<&str>) -> Option<String> {
     let cfg = app.config();
     let group = cfg.codex_groups.iter().find(|g| g.name == group_name)?;
     let counts = clone_counts(app);
     let mut pool = eligible_group_accounts(app, group);
+    if let Some(cur) = current {
+        if pool.iter().any(|e| e == cur) {
+            return Some(cur.to_string());
+        }
+    }
     if pool.is_empty() {
         return best_saturated_email(&rotation_candidates(app, &group.accounts), &counts);
     }

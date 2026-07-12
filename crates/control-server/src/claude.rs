@@ -702,14 +702,23 @@ pub enum Assignment {
 /// a group (with an initial account picked from it), else an email / `auto` → a single
 /// account. Explicit `auto` without imported accounts is kept as pending auto; outer
 /// `None` means no usable concrete assignment and no explicit pending-auto intent.
-pub fn resolve_assignment(app: &App, requested: Option<&str>) -> Option<Assignment> {
+///
+/// `current` is the clone's account right now (for a swap); when resolving a group it
+/// makes the pick sticky — a clone moving from a pinned account into a group that
+/// already contains that account keeps it, rather than cold-starting its prompt cache.
+/// Pass `None` when there's no incumbent (a fresh clone at create time).
+pub fn resolve_assignment(
+    app: &App,
+    requested: Option<&str>,
+    current: Option<&str>,
+) -> Option<Assignment> {
     let want = requested.unwrap_or("").trim();
     if want.eq_ignore_ascii_case(NONE) {
         return Some(Assignment::None);
     }
     if let Some(name) = want.strip_prefix("group:") {
         let name = name.trim();
-        let initial = pick_group_account(app, name)?;
+        let initial = pick_group_account(app, name, current)?;
         return Some(Assignment::Group {
             name: name.to_string(),
             initial,
@@ -867,15 +876,24 @@ fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
     eligible_members(app, &group.accounts)
 }
 
-/// Pick one account from group `group_name` for a new assignment: among eligible
-/// members (or any member if none are eligible), fewest assigned clones first, then
-/// lowest 5h usage, random tiebreak. `None` if the group is empty / has no imported
+/// Pick one account from group `group_name` for a new assignment. Stickiness first: if
+/// the clone's `current` account is an eligible member of the group, keep it — switching
+/// accounts cold-starts the clone's Anthropic prompt cache, so a clone moving from a
+/// pinned account into a group that already contains it shouldn't be rebalanced off it
+/// (mirrors the rotator's keep-if-eligible rule in [`assign_rotation`]). Otherwise: among
+/// eligible members (or any member if none are eligible), fewest assigned clones first,
+/// then lowest 5h usage, random tiebreak. `None` if the group is empty / has no imported
 /// members.
-fn pick_group_account(app: &App, group_name: &str) -> Option<String> {
+fn pick_group_account(app: &App, group_name: &str, current: Option<&str>) -> Option<String> {
     let cfg = app.config();
     let group = cfg.clone_groups.iter().find(|g| g.name == group_name)?;
     let counts = clone_counts(app);
     let mut pool = eligible_group_accounts(app, group);
+    if let Some(cur) = current {
+        if pool.iter().any(|e| e == cur) {
+            return Some(cur.to_string());
+        }
+    }
     if pool.is_empty() {
         // All over the cap → still need a valid token; fall back to any imported member.
         return best_saturated_email(&rotation_candidates(app, &group.accounts), &counts);
@@ -1465,6 +1483,76 @@ mod tests {
         ];
         let got = assign_rotation(&clones, &eligible, &HashMap::new());
         assert!(got.iter().all(|(_, e)| e == "only@x"));
+    }
+
+    fn stored(email: &str) -> StoredClaudeAccount {
+        StoredClaudeAccount {
+            id: email.into(),
+            email: email.into(),
+            org_uuid: String::new(),
+            org_name: String::new(),
+            active: true,
+            access_token: "sk-ant-oat01-x".into(),
+            refresh_token: String::new(),
+            expires_at: 0,
+            scopes: Vec::new(),
+        }
+    }
+
+    /// An App over a temp data dir with a `team` group of the given imported accounts.
+    fn app_with_group(members: &[&str]) -> App {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!(
+            "rmng-claude-sticky-{}-{}",
+            std::process::id(),
+            rand_u64()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
+        let cfg = wire::AppConfig {
+            data_dir: dir.to_string_lossy().into_owned(),
+            clone_groups: vec![CloneGroup {
+                name: "team".into(),
+                accounts: members.iter().map(|s| s.to_string()).collect(),
+            }],
+            ..Default::default()
+        };
+        let app = App::new(store, cfg);
+        for m in members {
+            app.claude.update_account(&stored(m)).unwrap();
+        }
+        app
+    }
+
+    #[test]
+    fn group_swap_keeps_current_account_when_it_is_an_eligible_member() {
+        // Switching a clone pinned to b@x into group:team must KEEP b@x — it's already a
+        // member, so rebalancing to a@x would cold-start the prompt cache for nothing.
+        // Repeated: a non-sticky pick would randomize across {a@x, b@x} and flake.
+        let app = app_with_group(&["a@x", "b@x"]);
+        for _ in 0..25 {
+            match resolve_assignment(&app, Some("group:team"), Some("b@x")) {
+                Some(Assignment::Group { name, initial }) => {
+                    assert_eq!(name, "team");
+                    assert_eq!(initial, "b@x", "must keep the current member on group swap");
+                }
+                _ => panic!("expected a group assignment"),
+            }
+        }
+    }
+
+    #[test]
+    fn group_swap_picks_a_member_when_current_is_outside_or_absent() {
+        // A current account not in the group (or no incumbent) → a real group member.
+        let app = app_with_group(&["a@x", "b@x"]);
+        for current in [Some("z@outside"), None] {
+            match resolve_assignment(&app, Some("group:team"), current) {
+                Some(Assignment::Group { initial, .. }) => {
+                    assert!(matches!(initial.as_str(), "a@x" | "b@x"), "picked non-member {initial}");
+                }
+                _ => panic!("expected a group assignment"),
+            }
+        }
     }
 
     fn rotation_candidate(

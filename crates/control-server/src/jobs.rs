@@ -364,7 +364,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     let mut claude_account_email: Option<String> = None;
     let mut claude_group: Option<String> = None;
     if let Some(assignment) =
-        crate::claude::resolve_assignment(&app, spec.claude_account.as_deref())
+        crate::claude::resolve_assignment(&app, spec.claude_account.as_deref(), None)
     {
         let selection = crate::claude::normalize_selection(spec.claude_account.as_deref());
         let (group, account, pending_auto) = match assignment {
@@ -431,7 +431,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     let mut codex_selection: Option<String> = None;
     let mut codex_account_email: Option<String> = None;
     let mut codex_group: Option<String> = None;
-    if let Some(assignment) = crate::codex::resolve_assignment(&app, spec.codex_account.as_deref())
+    if let Some(assignment) =
+        crate::codex::resolve_assignment(&app, spec.codex_account.as_deref(), None)
     {
         let selection = crate::codex::normalize_selection(spec.codex_account.as_deref());
         let (group, account, pending_auto) = match assignment {
@@ -942,7 +943,7 @@ mod tests {
         // With no imported codex accounts, resolve_assignment(None) → None, so a clone's
         // codex_account_email stays None (the block is a no-op) — independent of claude.
         let app = test_app();
-        assert!(crate::codex::resolve_assignment(&app, None).is_none());
+        assert!(crate::codex::resolve_assignment(&app, None, None).is_none());
     }
 
     #[tokio::test]

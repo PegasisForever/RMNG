@@ -1325,12 +1325,13 @@ async fn claude_swap(
         ));
     }
     let assignment =
-        crate::claude::resolve_assignment(&app, Some(&req.account)).ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "no imported Claude accounts".into(),
-            )
-        })?;
+        crate::claude::resolve_assignment(&app, Some(&req.account), host.claude_account_email.as_deref())
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "no imported Claude accounts".into(),
+                )
+            })?;
     let selection = crate::claude::normalize_selection(Some(&req.account));
     let (group, email) = match assignment {
         crate::claude::Assignment::None => {
@@ -1464,7 +1465,7 @@ async fn codex_swap(
             format!("'{}' is not a managed clone", host.id),
         ));
     }
-    let assignment = crate::codex::resolve_assignment(&app, Some(&req.account))
+    let assignment = crate::codex::resolve_assignment(&app, Some(&req.account), host.codex_account_email.as_deref())
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "no imported Codex accounts".into()))?;
     let selection = crate::codex::normalize_selection(Some(&req.account));
     let (group, email) = match assignment {
