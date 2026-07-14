@@ -18,6 +18,8 @@ import {
   activateLayout,
   cloneHost,
   commitImage,
+  deleteClaudeAccount,
+  deleteCodexAccount,
   deleteHost,
   deleteImage,
   getConfig,
@@ -499,6 +501,8 @@ function Dashboard({
           )}
           onPullTemplate={(reference) => run(pullTemplate(reference))}
           onDeleteImage={(reference) => run(deleteImage(reference))}
+          onDeleteAccount={(email) => run(deleteClaudeAccount(email))}
+          onDeleteCodexAccount={(email) => run(deleteCodexAccount(email))}
         />
       ) : null}
 

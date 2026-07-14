@@ -45,6 +45,8 @@ const meta = {
     pullBusy: false,
     onPullTemplate: fn(),
     onDeleteImage: fn(),
+    onDeleteAccount: fn(),
+    onDeleteCodexAccount: fn(),
   },
 } satisfies Meta<typeof SettingsPanel>;
 

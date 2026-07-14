@@ -151,6 +151,19 @@ impl CodexStore {
     pub fn forget_pushed(&self, host_id: &str) {
         self.pushed.lock().unwrap().remove(host_id);
     }
+
+    /// Remove every imported account matching `email` and persist. Returns whether any
+    /// were present. The Codex twin of [`crate::claude::ClaudeStore::delete`].
+    fn delete(&self, email: &str) -> Result<bool> {
+        let mut accounts = self.accounts.lock().unwrap();
+        let before = accounts.len();
+        accounts.retain(|a| a.email != email);
+        if accounts.len() == before {
+            return Ok(false);
+        }
+        self.save(&accounts)?;
+        Ok(true)
+    }
 }
 
 // --- import from a signed-in clone ----------------------------------------
@@ -1249,6 +1262,54 @@ pub async fn rotate_once(app: &App) {
     if !auto.is_empty() {
         rotate_pool(app, "auto", &app.codex.emails(), &auto).await;
     }
+}
+
+/// Delete an imported Codex account by email, then heal the fleet — the Codex twin of
+/// [`crate::claude::delete_account`]. Refuses if any clone is pinned to it; otherwise
+/// removes the token and reassigns auto/group clones off it via [`rotate_once`], clearing
+/// any dangling reference that couldn't be re-placed. Returns the ids of moved clones.
+pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
+    let pinned: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .filter(|h| h.codex_selection.as_deref() == Some(email))
+        .map(|h| h.id.clone())
+        .collect();
+    if !pinned.is_empty() {
+        bail!(
+            "{n} clone(s) are pinned to {email}: {ids}. Reassign them (swap to another \
+             account, a group, or auto) before deleting the account.",
+            n = pinned.len(),
+            ids = pinned.join(", "),
+        );
+    }
+    if !app.codex.delete(email)? {
+        bail!("no imported Codex account '{email}'");
+    }
+
+    let on_it: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .filter(|h| h.codex_account_email.as_deref() == Some(email))
+        .map(|h| h.id.clone())
+        .collect();
+    for id in &on_it {
+        app.codex.forget_pushed(id);
+    }
+    rotate_once(app).await;
+
+    app.store.mutate(|s| {
+        for h in &mut s.hosts {
+            if h.codex_account_email.as_deref() == Some(email) {
+                h.codex_account_email = None;
+            }
+        }
+    });
+    Ok(on_it)
 }
 
 pub async fn run_rotator(app: App) {

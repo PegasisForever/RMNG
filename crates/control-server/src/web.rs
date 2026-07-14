@@ -72,11 +72,13 @@ pub fn router(app: App) -> Router {
         .route("/api/claude/import", post(claude_import))
         .route("/api/claude/refresh", post(claude_refresh))
         .route("/api/claude/swap", post(claude_swap))
+        .route("/api/claude/delete", post(claude_delete))
         .route("/api/claude/rotate", post(claude_rotate))
         .route("/api/codex/import/check", post(codex_import_check))
         .route("/api/codex/import", post(codex_import))
         .route("/api/codex/refresh", post(codex_refresh))
         .route("/api/codex/swap", post(codex_swap))
+        .route("/api/codex/delete", post(codex_delete))
         .route("/api/codex/rotate", post(codex_rotate))
         .route("/api/chat/:id", get(chat_get).post(chat_send))
         .route("/api/chat/:id/events", get(chat_events))
@@ -1391,6 +1393,22 @@ async fn claude_swap(
     ))
 }
 
+/// A request naming a single imported account by email — the body for the delete endpoints.
+#[derive(Deserialize)]
+struct AccountRef {
+    account: String,
+}
+
+/// `POST /api/claude/delete` — remove an imported Claude account by email. 400 if any clone
+/// is pinned to it (the message lists them); otherwise deletes the token and reassigns
+/// auto/group clones off it. Returns the ids of clones that were moved.
+async fn claude_delete(State(app): State<App>, Json(req): Json<AccountRef>) -> JsonResult {
+    let moved = crate::claude::delete_account(&app, req.account.trim())
+        .await
+        .map_err(|e| err_json(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({ "ok": true, "moved": moved })))
+}
+
 /// `POST /api/claude/rotate` — run one group-rotation pass immediately (the rotator
 /// otherwise runs every 10 min). Useful for ops + testing.
 async fn claude_rotate(State(app): State<App>) -> Json<serde_json::Value> {
@@ -1524,6 +1542,15 @@ async fn codex_swap(
     Ok(Json(
         json!({ "ok": true, "account": email, "group": group, "selection": selection }),
     ))
+}
+
+/// `POST /api/codex/delete` — remove an imported Codex account by email (the Codex twin of
+/// [`claude_delete`]). 400 if any clone is pinned to it; otherwise deletes + reassigns.
+async fn codex_delete(State(app): State<App>, Json(req): Json<AccountRef>) -> JsonResult {
+    let moved = crate::codex::delete_account(&app, req.account.trim())
+        .await
+        .map_err(|e| err_json(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({ "ok": true, "moved": moved })))
 }
 
 /// `POST /api/codex/rotate` — run one Codex group-rotation pass immediately.
@@ -1990,6 +2017,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, doc);
+    }
+
+    /// `POST /api/claude/delete` for an account that isn't imported returns a 400 with a
+    /// JSON `{error}` body (so the UI surfaces it). Exercises the route + handler wiring;
+    /// the happy path needs a live clone to reassign, so it's covered by `claude::tests`.
+    #[tokio::test]
+    async fn claude_delete_unknown_account_is_a_json_400() {
+        let app = test_app();
+        let resp = claude_delete(State(app), Json(AccountRef { account: "nobody@x".into() })).await;
+        let (code, body) = resp.expect_err("unknown account must error");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            body.0["error"].as_str().unwrap_or("").contains("no imported Claude account"),
+            "body: {}",
+            body.0
+        );
     }
 
     /// Spin up `/events` and read the opening bytes. All three multiplexed streams send a

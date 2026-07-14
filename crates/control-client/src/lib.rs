@@ -216,6 +216,19 @@ impl Client {
         .await
     }
 
+    /// Delete an imported Claude account by email. Errors (surfaced by `check`) if a clone
+    /// is pinned to it. Returns the API's `{ ok, moved: [host ids] }`.
+    pub async fn claude_delete(&self, account: &str) -> Result<Value> {
+        self.post_json("/api/claude/delete", &json!({ "account": account }))
+            .await
+    }
+
+    /// Delete an imported Codex account by email.
+    pub async fn codex_delete(&self, account: &str) -> Result<Value> {
+        self.post_json("/api/codex/delete", &json!({ "account": account }))
+            .await
+    }
+
     /// The redacted server config (presets, account groups, docker settings — no secrets).
     pub async fn config(&self) -> Result<AppConfigRedacted> {
         self.get_json("/api/config").await

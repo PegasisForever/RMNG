@@ -173,6 +173,20 @@ impl ClaudeStore {
     pub fn forget_pushed(&self, host_id: &str) {
         self.pushed.lock().unwrap().remove(host_id);
     }
+
+    /// Remove every imported account matching `email` and persist. Returns whether any
+    /// were present (false ⇒ nothing to delete). The token is gone from disk immediately;
+    /// re-adding it requires a fresh import from a signed-in clone.
+    fn delete(&self, email: &str) -> Result<bool> {
+        let mut accounts = self.accounts.lock().unwrap();
+        let before = accounts.len();
+        accounts.retain(|a| a.email != email);
+        if accounts.len() == before {
+            return Ok(false);
+        }
+        self.save(&accounts)?;
+        Ok(true)
+    }
 }
 
 // --- import from a signed-in clone ----------------------------------------
@@ -1150,6 +1164,67 @@ pub async fn rotate_once(app: &App) {
     }
 }
 
+/// Delete an imported Claude account by email, then heal the fleet.
+///
+/// Refuses (Err) if any clone is **pinned** to it (`claude_selection == email`) — a pin
+/// is an explicit operator choice, so it must be reassigned first (swap it to another
+/// account, a group, or `auto`). Clones running the account via `auto`/a group need no
+/// pre-work: once the token is gone a [`rotate_once`] pass moves them onto a surviving
+/// account (its assign step treats a no-longer-imported account as ineligible). Any clone
+/// that still can't be placed — its whole pool was this one account — is left cleanly
+/// unassigned (`claude_account_email = None`) rather than pointing at a deleted account.
+///
+/// Returns the ids of clones that were moved off (or unassigned from) the account.
+pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
+    let pinned: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .filter(|h| h.claude_selection.as_deref() == Some(email))
+        .map(|h| h.id.clone())
+        .collect();
+    if !pinned.is_empty() {
+        bail!(
+            "{n} clone(s) are pinned to {email}: {ids}. Reassign them (swap to another \
+             account, a group, or auto) before deleting the account.",
+            n = pinned.len(),
+            ids = pinned.join(", "),
+        );
+    }
+    if !app.claude.delete(email)? {
+        bail!("no imported Claude account '{email}'");
+    }
+
+    // Clones currently running the (now-deleted) account. Drop their pushed-token records so
+    // the reassignment pushes the replacement token, then reassign auto/group pools now
+    // rather than waiting up to `ROTATE_SECS` for the background rotator.
+    let on_it: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .filter(|h| h.claude_account_email.as_deref() == Some(email))
+        .map(|h| h.id.clone())
+        .collect();
+    for id in &on_it {
+        app.claude.forget_pushed(id);
+    }
+    rotate_once(app).await;
+
+    // Degenerate case (the account was a pool's only imported member): rotate couldn't
+    // place those clones, so clear the dangling reference instead of leaving them pointed
+    // at a deleted account.
+    app.store.mutate(|s| {
+        for h in &mut s.hosts {
+            if h.claude_account_email.as_deref() == Some(email) {
+                h.claude_account_email = None;
+            }
+        }
+    });
+    Ok(on_it)
+}
+
 /// Self-scheduling 10-minute group-rotation loop.
 pub async fn run_rotator(app: App) {
     // Let the usage poller publish 5h numbers before the first rotation.
@@ -1494,7 +1569,8 @@ mod tests {
             active: true,
             access_token: "sk-ant-oat01-x".into(),
             refresh_token: String::new(),
-            expires_at: 0,
+            // Far-future so `fresh_access_token` never attempts a (network) refresh in tests.
+            expires_at: 4_102_444_800_000,
             scopes: Vec::new(),
         }
     }
@@ -1553,6 +1629,56 @@ mod tests {
                 _ => panic!("expected a group assignment"),
             }
         }
+    }
+
+    fn auto_clone(id: &str, account: &str) -> Host {
+        Host {
+            id: id.into(),
+            managed: true,
+            claude_account_email: Some(account.into()),
+            claude_selection: Some(AUTO.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn store_delete_removes_only_the_named_account() {
+        let app = app_with_group(&["a@x", "b@x"]);
+        assert!(app.claude.delete("a@x").unwrap(), "present → removed");
+        assert!(!app.claude.emails().contains(&"a@x".to_string()));
+        assert!(app.claude.emails().contains(&"b@x".to_string()));
+        assert!(!app.claude.delete("a@x").unwrap(), "already gone → false");
+    }
+
+    #[tokio::test]
+    async fn delete_account_refuses_when_a_clone_is_pinned() {
+        let app = app_with_group(&["a@x", "b@x"]);
+        app.store.mutate(|s| {
+            s.hosts.push(Host {
+                id: "c1".into(),
+                managed: true,
+                claude_account_email: Some("a@x".into()),
+                claude_selection: Some("a@x".into()), // pinned
+                ..Default::default()
+            })
+        });
+        let err = delete_account(&app, "a@x").await.unwrap_err();
+        assert!(err.to_string().contains("pinned"), "message: {err}");
+        // Aborted before touching the store — the account is untouched.
+        assert!(app.claude.emails().contains(&"a@x".to_string()));
+    }
+
+    #[tokio::test]
+    async fn delete_account_removes_token_and_detaches_unpinned_clones() {
+        let app = app_with_group(&["a@x", "b@x"]);
+        app.store.mutate(|s| s.hosts.push(auto_clone("c1", "a@x")));
+        let moved = delete_account(&app, "a@x").await.unwrap();
+        assert_eq!(moved, vec!["c1".to_string()]);
+        assert!(!app.claude.emails().contains(&"a@x".to_string()), "token deleted");
+        // The clone no longer points at the deleted account. (The reassignment push fails
+        // without a live clone/daemon in the test, so the dangling ref is cleared to None.)
+        let c1 = app.store.get().hosts.into_iter().find(|h| h.id == "c1").unwrap();
+        assert_ne!(c1.claude_account_email.as_deref(), Some("a@x"));
     }
 
     fn rotation_candidate(

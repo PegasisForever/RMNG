@@ -366,6 +366,15 @@ pub enum AccountCmd {
         #[arg(long)]
         codex: bool,
     },
+    /// Delete an imported account by email (Claude by default; --codex for Codex).
+    /// Fails if a clone is pinned to it; auto/group clones are moved off first.
+    Rm {
+        /// Account email to delete
+        account: String,
+        /// Delete the Codex account instead of Claude
+        #[arg(long)]
+        codex: bool,
+    },
 }
 
 /// `--server` > `$RMNG_CONTROL_URL` > localhost default.

@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
@@ -123,6 +123,57 @@ export interface SettingsPanelProps {
   pullBusy: boolean;
   onPullTemplate: (reference: string) => void;
   onDeleteImage: (reference: string) => void;
+  /** Delete an imported Claude account by email (removes its token; reassigns clones). */
+  onDeleteAccount: (email: string) => void;
+  /** Delete an imported Codex account by email. */
+  onDeleteCodexAccount: (email: string) => void;
+}
+
+/** Imported accounts as a removable list. Each row is one email + a trash button; the
+ *  delete is confirmed (it removes the stored token) and delegated to `onDelete`. */
+function AccountList({
+  emails,
+  onDelete,
+}: {
+  emails: string[];
+  onDelete: (email: string) => void;
+}) {
+  if (emails.length === 0) {
+    return (
+      <p className="text-xs text-slate-400 dark:text-slate-500">
+        None imported yet — use “Import account” on a signed-in clone.
+      </p>
+    );
+  }
+  return (
+    <ul className="space-y-1.5">
+      {emails.map((email) => (
+        <li
+          key={email}
+          className="flex items-center justify-between rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200"
+        >
+          <span className="truncate">{email}</span>
+          <button
+            type="button"
+            title="delete account"
+            aria-label={`delete ${email}`}
+            onClick={() => {
+              if (
+                window.confirm(
+                  `Delete ${email}?\n\nThis removes its stored token (re-adding needs a fresh import). Clones running it are reassigned to another account; a clone pinned to it must be reassigned first.`,
+                )
+              ) {
+                onDelete(email);
+              }
+            }}
+            className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export function SettingsPanel({
@@ -140,6 +191,8 @@ export function SettingsPanel({
   pullBusy,
   onPullTemplate,
   onDeleteImage,
+  onDeleteAccount,
+  onDeleteCodexAccount,
 }: SettingsPanelProps) {
   const [cfg, setCfg] = useState<AppConfigRedacted | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -849,6 +902,14 @@ export function SettingsPanel({
               </div>
             </Section>
 
+            {/* Imported Claude accounts — the pool clones/groups draw from; deletable here. */}
+            <Section
+              title="Claude accounts"
+              hint="Imported accounts available to clones and groups. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
+            >
+              <AccountList emails={accountEmails} onDelete={onDeleteAccount} />
+            </Section>
+
             {/* Claude groups (named account pools; sticky — a clone moves only when its account exhausts). */}
             <Section
               title="Claude groups"
@@ -941,6 +1002,14 @@ export function SettingsPanel({
                   reset within 24h, spend one banked reset to bring an account back)
                 </label>
               </div>
+            </Section>
+
+            {/* Imported Codex accounts — deletable here (twin of the Claude accounts list). */}
+            <Section
+              title="Codex accounts"
+              hint="Imported Codex accounts. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
+            >
+              <AccountList emails={codexAccountEmails} onDelete={onDeleteCodexAccount} />
             </Section>
 
             {/* Codex groups (named account pools). */}

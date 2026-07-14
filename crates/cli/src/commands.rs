@@ -296,6 +296,30 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
             }
             Ok(0)
         }
+        AccountCmd::Rm { account, codex } => {
+            let reply = if *codex {
+                client.codex_delete(account).await?
+            } else {
+                client.claude_delete(account).await?
+            };
+            if json {
+                emit_json(&reply)?;
+            } else {
+                let moved: Vec<String> = reply
+                    .get("moved")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let provider = if *codex { "codex" } else { "claude" };
+                print!("deleted {provider} account {account}");
+                if moved.is_empty() {
+                    println!();
+                } else {
+                    println!(" (moved {} clone(s): {})", moved.len(), moved.join(", "));
+                }
+            }
+            Ok(0)
+        }
     }
 }
 
