@@ -27,6 +27,7 @@
 //! and widgets live on the GTK main thread; the net thread only ships AU bytes over a queue.
 
 mod config;
+mod auto_lock;
 mod forward;
 mod glunpack;
 mod headless;
@@ -160,6 +161,8 @@ type Writer = Arc<Mutex<Option<TcpStream>>>;
 type ServerAddr = Arc<Mutex<String>>;
 /// Inbound clipboard messages, drained on the GUI thread (GTK clipboard ops run there).
 type ClipInbox = Arc<Mutex<VecDeque<ClipboardMsg>>>;
+/// Auto pointer-lock policy, shared net thread (latches) ⇄ GTK main (polls).
+type AutoLockShared = Arc<Mutex<auto_lock::AutoLock>>;
 fn is_text_mime(m: &str) -> bool {
     m.starts_with("text/plain") || m == "UTF8_STRING" || m == "TEXT"
 }
@@ -231,11 +234,14 @@ fn run_gui() -> Result<()> {
     let reported: ReportedLayout = Arc::new(Mutex::new(Vec::new()));
     let warp: WarpSuppress = Arc::new(Mutex::new(None));
     let srcs: VideoSrcs = Arc::new(Mutex::new(HashMap::new()));
+    // Auto pointer-lock policy: net thread latches remote cursor visibility,
+    // the GTK tick polls it and reconciles the actual lock.
+    let auto: AutoLockShared = Arc::new(Mutex::new(auto_lock::AutoLock::new(Instant::now())));
 
     // Net thread: reconnect loop; read [u8 tag][…] → video queue / clipboard / cursor / layout.
     {
-        let (aus, srcs, writer, inbox, cursors, reported, warp, addr, fwd_mgr) =
-            (aus.clone(), srcs.clone(), writer.clone(), inbox.clone(), cursors.clone(), reported.clone(), warp.clone(), addr.clone(), fwd_mgr.clone());
+        let (aus, srcs, writer, inbox, cursors, reported, warp, addr, fwd_mgr, auto) =
+            (aus.clone(), srcs.clone(), writer.clone(), inbox.clone(), cursors.clone(), reported.clone(), warp.clone(), addr.clone(), fwd_mgr.clone(), auto.clone());
         std::thread::spawn(move || {
             loop {
                 // Re-read the (possibly just-changed) address each reconnect, so the
@@ -301,6 +307,18 @@ fn run_gui() -> Result<()> {
                                     }
                                 } else if let Ok(c) = serde_json::from_slice::<CursorMeta>(&body) {
                                     let now = Instant::now();
+                                    // Latch remote-cursor visibility for auto pointer-lock.
+                                    // `hidden` is the daemon's explicit hide marker; an
+                                    // all-zero sprite is the same hide from an older daemon
+                                    // that forwarded it as a shape. Position-only updates
+                                    // say nothing about visibility.
+                                    if c.hidden {
+                                        auto.lock().unwrap().on_remote_cursor(true, now);
+                                    } else if let Some(s) = &c.shape {
+                                        let invisible =
+                                            s.width == 0 || s.height == 0 || s.rgba.iter().all(|&b| b == 0);
+                                        auto.lock().unwrap().on_remote_cursor(invisible, now);
+                                    }
                                     if c.warp {
                                         // Agent-driven move: draw the synthetic cursor on this
                                         // monitor (below) and hold off local motion sends for
@@ -370,7 +388,7 @@ fn run_gui() -> Result<()> {
     }
 
     let app = gtk4::Application::builder().application_id("dev.rmng.viewer").build();
-    app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &reported, &warp, &addr));
+    app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &reported, &warp, &addr, &auto));
     let empty: [&str; 0] = [];
     app.run_with_args(&empty);
     Ok(())
@@ -419,6 +437,7 @@ fn build_ui(
     reported: &ReportedLayout,
     warp: &WarpSuppress,
     addr: &ServerAddr,
+    auto: &AutoLockShared,
 ) {
     // Black background behind every letterboxed video (applies to all windows).
     // Pointer-lock (games): one instance per display, shared across monitor windows;
@@ -484,7 +503,7 @@ fn build_ui(
     let layout: SharedLayout = Rc::new(RefCell::new(Vec::new()));
 
     {
-        let (aus, srcs, writer, cursors, windows, layout, app, reported, warp, pointer_lock, startup, addr) = (
+        let (aus, srcs, writer, cursors, windows, layout, app, reported, warp, pointer_lock, startup, addr, auto) = (
             aus.clone(),
             srcs.clone(),
             writer.clone(),
@@ -497,6 +516,7 @@ fn build_ui(
             pointer_lock.clone(),
             startup.clone(),
             addr.clone(),
+            auto.clone(),
         );
         // ~8 ms tick: drain AUs → window per monitor (created lazily here, on the main
         // thread); refresh the layout; update client cursors.
@@ -521,7 +541,7 @@ fn build_ui(
                     // is main for its entire lifetime and never needs to be re-decided.
                     let is_main = mid == 0;
                     let win = w.entry(mid).or_insert_with(|| {
-                        let win = make_monitor_window(&app, mid, &layout, &writer, &addr, &pointer_lock, &warp, is_main);
+                        let win = make_monitor_window(&app, mid, &layout, &writer, &addr, &pointer_lock, &warp, &auto, is_main);
                         srcs.insert(mid, win.appsrc.clone());
                         // First monitor window exists: the pre-connection startup window
                         // has served its purpose. `destroy` (not `close`) skips the
@@ -584,6 +604,28 @@ fn build_ui(
                             srcs.remove(&id);
                         }
                     }
+                }
+            }
+            // Auto pointer-lock: reconcile the actual lock with the policy (remote
+            // cursor hidden ≥180ms → engage; shown ≥300ms → release; manual chords
+            // override — see auto_lock.rs). Engage targets the active (focused)
+            // window; with none active we leave the current state alone — a held
+            // Persistent lock deactivates while unfocused and self-reactivates on
+            // return, and engaging blind would just pend on a surface the pointer
+            // isn't over.
+            if let Some(pl) = pointer_lock.as_ref() {
+                let want = auto.lock().unwrap().want(Instant::now());
+                if want {
+                    if let Some(win) =
+                        windows.borrow().values().find(|w| w.window.is_active())
+                    {
+                        // Idempotent per surface; re-targets if focus moved windows.
+                        if let Some(surface) = win.window.surface() {
+                            pl.engage(&surface);
+                        }
+                    }
+                } else if pl.is_engaged() {
+                    pl.release();
                 }
             }
             // Cursor: (1) the native OS cursor over the video takes the remote's shape
@@ -670,6 +712,7 @@ fn make_monitor_window(
     addr: &ServerAddr,
     pointer_lock: &Option<Rc<PointerLock>>,
     warp: &WarpSuppress,
+    auto: &AutoLockShared,
     is_main: bool,
 ) -> MonitorWindow {
     let (appsrc, paintable, pipeline) = make_decoder(mid).expect("build decoder");
@@ -783,7 +826,7 @@ fn make_monitor_window(
 
     let state = Rc::new(WinInput::default());
     install_pointer(&video, mid, &paintable, &window, layout, writer, &state, pointer_lock, warp);
-    install_keyboard(&window, writer, &state, pointer_lock);
+    install_keyboard(&window, writer, &state, pointer_lock, auto);
 
     // macOS: register the native titlebar BEFORE present() so connect_realize fires once
     // the surface is actually ready. The closure runs asynchronously on the main thread.
@@ -1252,11 +1295,15 @@ fn install_pointer(
     {
         // A release ends a possible drag: position the cursor at the resolved cross-seam
         // target (so the button-up lands where the drag actually is), then release.
-        let (w, state, layout, video2, paintable2) =
-            (writer.clone(), state.clone(), layout.clone(), video.clone(), paintable.clone());
+        let (w, state, layout, video2, paintable2, pl) =
+            (writer.clone(), state.clone(), layout.clone(), video.clone(), paintable.clone(), pointer_lock.clone());
         click.connect_released(move |g, _n, x, y| {
-            if let Some((tmid, mx, my)) = drag_target(&video2, &paintable2, mid, &layout.borrow(), x, y) {
-                send(&w, format!(r#"{{"kind":"pointer_move","monitor_id":{tmid},"x":{mx:.1},"y":{my:.1}}}"#));
+            // Pointer-lock engaged (games): motion is relative-only; an absolute
+            // pointer_move here would yank the grabbed pointer on every click release.
+            if !pl.as_ref().is_some_and(|p| p.is_engaged()) {
+                if let Some((tmid, mx, my)) = drag_target(&video2, &paintable2, mid, &layout.borrow(), x, y) {
+                    send(&w, format!(r#"{{"kind":"pointer_move","monitor_id":{tmid},"x":{mx:.1},"y":{my:.1}}}"#));
+                }
             }
             let Some(b) = evdev_button(g.current_button()) else { return };
             state.buttons.borrow_mut().remove(&b);
@@ -1371,10 +1418,12 @@ fn install_keyboard(
     writer: &Writer,
     state: &Rc<WinInput>,
     pointer_lock: &Option<Rc<PointerLock>>,
+    auto: &AutoLockShared,
 ) {
     let key = gtk4::EventControllerKey::new();
     {
-        let (w, state, window2, pl) = (writer.clone(), state.clone(), window.clone(), pointer_lock.clone());
+        let (w, state, window2, pl, auto) =
+            (writer.clone(), state.clone(), window.clone(), pointer_lock.clone(), auto.clone());
         key.connect_key_pressed(move |_c, keyval, code, s| {
             // Local viewer shortcuts (handled here, NOT forwarded to the remote):
             //   F11 — fullscreen · Ctrl+Alt+G — toggle pointer-lock · Ctrl+Alt+P — release
@@ -1393,11 +1442,17 @@ fn install_keyboard(
                 release_all_input(&w, &state); // drop the leaked Ctrl/Alt before entering the game
                 #[cfg(target_os = "macos")]
                 keyboard_macos::release_all(); // keys are held in the NSEvent monitor's set, not `state`
+                // Manual override on top of the auto policy: flip the effective
+                // state and apply it immediately (the tick keeps it reconciled).
+                // The override self-clears once auto converges — a manual release
+                // during a game grab re-arms after the game shows its cursor.
                 if let Some(pl) = &pl {
-                    if pl.is_engaged() {
+                    if auto.lock().unwrap().toggle(Instant::now()) {
+                        if let Some(surface) = window2.surface() {
+                            pl.engage(&surface);
+                        }
+                    } else {
                         pl.release();
-                    } else if let Some(surface) = window2.surface() {
-                        pl.engage(&surface);
                     }
                 }
                 // The tick hides/restores the video cursor from `is_engaged()`.
@@ -1406,6 +1461,7 @@ fn install_keyboard(
             if ctrl_alt && (keyval == gdk::Key::p || keyval == gdk::Key::P) {
                 // Panic / unstick: release the pointer-lock AND every key+button the remote
                 // still thinks is held (use this any time a key gets stuck down).
+                auto.lock().unwrap().force_release();
                 if let Some(pl) = &pl {
                     pl.release();
                 }

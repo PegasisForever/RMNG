@@ -112,7 +112,12 @@ async fn main() -> Result<()> {
                         hy,
                         bytes.len(),
                     ),
-                    None => tracing::info!("cursor {},{} shape=None", cursor.x, cursor.y),
+                    None => tracing::info!(
+                        "cursor {},{} shape=None hidden={:?}",
+                        cursor.x,
+                        cursor.y,
+                        cursor.hidden,
+                    ),
                 }
             };
             if let Err(e) = capture_pw::run(node_id, on_frame, on_cursor) {

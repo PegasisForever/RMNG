@@ -287,7 +287,7 @@ async fn ease_move(st: &McpState, rd: &RemoteDesktopSessionProxy<'static>, m: &M
 /// Tell the viewer the cursor warped here (agent-driven) so it snaps + suppresses
 /// the user's local motion briefly (see the viewer's WarpSuppress).
 fn emit_warp(st: &McpState, monitor_id: u32, x: f64, y: f64) {
-    let c = CursorMeta { monitor_id, x: x.round() as i32, y: y.round() as i32, shape: None, warp: true };
+    let c = CursorMeta { monitor_id, x: x.round() as i32, y: y.round() as i32, shape: None, warp: true, hidden: false };
     let _ = st.transport.send(&DaemonMsg::Cursor(c), &[]);
 }
 

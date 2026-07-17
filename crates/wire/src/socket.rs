@@ -44,6 +44,12 @@ pub struct CursorMeta {
     /// the drawn cursor to it and briefly suppresses local pointer-motion sends.
     #[serde(default, skip_serializing_if = "is_false")]
     pub warp: bool,
+    /// True when the clone hid its cursor (empty or fully-transparent sprite). A
+    /// sustained hidden cursor is a pointer grab (a game): the viewer's auto
+    /// pointer-lock keys on this. Only hide transitions carry it; a `shape`-bearing
+    /// update marks the cursor visible again, and position-only updates say nothing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -281,6 +287,23 @@ mod tests {
         let s = serde_json::to_string(&c).unwrap();
         assert!(s.contains("\"kind\":\"axis_continuous\""), "{s}");
         assert_eq!(serde_json::from_str::<InputMsg>(&s).unwrap(), c);
+    }
+
+    #[test]
+    fn cursor_meta_hidden_roundtrip() {
+        // Hide transition: flag serialized, roundtrips.
+        let c = CursorMeta { monitor_id: 1, x: 5, y: 6, shape: None, warp: false, hidden: true };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains("\"hidden\":true"), "{s}");
+        assert_eq!(serde_json::from_str::<CursorMeta>(&s).unwrap(), c);
+
+        // Visible / position-only: flag omitted on the wire, defaults on decode
+        // (old daemons never send it).
+        let c = CursorMeta { monitor_id: 1, x: 5, y: 6, shape: None, warp: false, hidden: false };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(!s.contains("hidden"), "{s}");
+        let old = r#"{"monitor_id":1,"x":5,"y":6}"#;
+        assert_eq!(serde_json::from_str::<CursorMeta>(old).unwrap(), c);
     }
 
     #[test]

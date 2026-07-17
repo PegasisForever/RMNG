@@ -958,7 +958,8 @@ fn spawn_pw_monitor(
                     rgba, // BGRA8888 premultiplied (SPA cursor); the viewer uses that memory format
                 });
                 // Passive capture echo (the user's own / app cursor); not a warp.
-                let _ = cursor_tx.send(&DaemonMsg::Cursor(CursorMeta { monitor_id: mid, x: c.x, y: c.y, shape, warp: false }), &[]);
+                let hidden = c.hidden == Some(true);
+                let _ = cursor_tx.send(&DaemonMsg::Cursor(CursorMeta { monitor_id: mid, x: c.x, y: c.y, shape, warp: false, hidden }), &[]);
             };
             if let Err(e) = capture_pw::run(node_id, on_frame, on_cursor) {
                 tracing::error!("raw-pw capture for monitor {mid} exited: {e:#}");
