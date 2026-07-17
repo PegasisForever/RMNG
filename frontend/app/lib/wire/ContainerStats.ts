@@ -23,7 +23,7 @@ memUsed: bigint,
 /**
  * Memory limit in bytes; 0 when the daemon reports none.
  */
-memLimit: bigint,
+memLimit: bigint, 
 /**
  * Total Docker daemon disk usage in bytes. This is daemon-wide, not per-container;
  * the monitor repeats it on each live stats sample so the frontend can show one
