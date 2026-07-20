@@ -226,6 +226,30 @@ chown "$USERNAME:$USERNAME" "$CODEX_DIR/AGENTS.md" "$CODEX_DIR/config.toml"
 chmod 644 "$CODEX_DIR/AGENTS.md"
 chmod 600 "$CODEX_DIR/config.toml"
 
+# Shared user OpenCode instructions. OpenCode reads global rules from
+# ~/.config/opencode/AGENTS.md (opencode.ai/docs/rules) — the same shared operating note as
+# CLAUDE.md / Codex AGENTS.md. The control-server also refreshes it on reconcile (and writes the
+# clone-specific opencode.json provider); the template carries the static default.
+log "shared user OpenCode AGENTS.md"
+OPENCODE_DIR="/home/$USERNAME/.config/opencode"
+install -d -o "$USERNAME" -g "$USERNAME" -m755 "/home/$USERNAME/.config" "$OPENCODE_DIR"
+cat > "$OPENCODE_DIR/AGENTS.md" <<'OPENCODEAGENTS'
+# Working in this clone
+
+This machine is a **disposable, single-purpose dev sandbox** that belongs to you,
+with **passwordless `sudo`**. Install packages, toolchains, and global CLIs freely
+and reconfigure the system as needed — the machine itself is throwaway and there is
+no other user to disturb. Optimize for getting the task done.
+
+## When you're blocked
+
+If you're genuinely stuck — missing access or credentials, an ambiguous
+requirement, or a call that's the human's to make — **stop and ask** rather than
+guessing or thrashing. A precise question beats a confident wrong turn.
+OPENCODEAGENTS
+chown "$USERNAME:$USERNAME" "$OPENCODE_DIR/AGENTS.md"
+chmod 644 "$OPENCODE_DIR/AGENTS.md"
+
 # User-scope `linear` MCP for every `claude` on the clone (interactive shell, inner Cursor
 # agent; the agent-wrapper registers the same server programmatically). mcpServers lives in
 # ~/.claude.json — a top-level key; settings.json does NOT support it. ${LINEAR_API_KEY}

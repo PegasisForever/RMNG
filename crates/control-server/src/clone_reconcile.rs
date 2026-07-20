@@ -22,7 +22,11 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const CLONE_UID: u64 = 1000;
 const CLONE_GID: u64 = 1000;
 
-const CODEX_AGENTS_MD: &str = r#"# Working in this clone
+/// The shared "operating memory" every coding agent on a clone reads as its global system
+/// instruction. Mirrored into each agent's own rules location: Claude Code's `~/.claude/CLAUDE.md`
+/// (baked by the template), Codex's `~/.codex/AGENTS.md`, and OpenCode's
+/// `~/.config/opencode/AGENTS.md` (opencode.ai/docs/rules). Kept identical across all three.
+const SHARED_AGENTS_MD: &str = r#"# Working in this clone
 
 This machine is a **disposable, single-purpose dev sandbox** that belongs to you,
 with **passwordless `sudo`**. Install packages, toolchains, and global CLIs freely
@@ -259,7 +263,18 @@ pub(crate) fn codex_parity_entries(
     let mut entries = vec![
         TarEntry {
             path: "home/rmng/.codex/AGENTS.md".to_string(),
-            data: CODEX_AGENTS_MD.as_bytes().to_vec(),
+            data: SHARED_AGENTS_MD.as_bytes().to_vec(),
+            mode: 0o644,
+            uid: CLONE_UID,
+            gid: CLONE_GID,
+        },
+        // OpenCode reads global rules from ~/.config/opencode/AGENTS.md (opencode.ai/docs/rules):
+        // give it the same shared operating note as Claude Code (CLAUDE.md) and Codex. Written
+        // unconditionally (like the Codex AGENTS.md) — harmless whether or not OpenCode is used;
+        // the dir is created by `codex_prepare_script`.
+        TarEntry {
+            path: "home/rmng/.config/opencode/AGENTS.md".to_string(),
+            data: SHARED_AGENTS_MD.as_bytes().to_vec(),
             mode: 0o644,
             uid: CLONE_UID,
             gid: CLONE_GID,
