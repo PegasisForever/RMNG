@@ -51,11 +51,10 @@ pub struct CloneSpec {
     pub source_image: String,
     pub new_hostname: String,
     pub linear: Option<LinearMeta>,
-    /// Requested Claude account: an email, `"auto"`, or `None` (= auto).
-    pub claude_account: Option<String>,
-    /// Requested Codex account: an email, `"auto"`, `"group:<name>"`, `"none"`, or `None`
-    /// (= auto). Independent of `claude_account`.
-    pub codex_account: Option<String>,
+    /// The account pool this clone's agents route through (one CLIProxyAPI instance per
+    /// group). `None` = no inference until a group is bound. This is the sole account binding
+    /// under the group-proxy model — the `/cc` router maps clone → group → instance.
+    pub group: Option<String>,
     pub first_message: Option<String>,
     pub agent_instructions: Option<String>,
     pub claude_instructions: Option<String>,
@@ -319,6 +318,11 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // The clone→control-server + inference URLs (auto-detected) go into the clone's session
     // env first; the operator's chosen preset follows (so a preset key can still override).
     let mut env = control_env_vars(&app).await;
+    // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY), minted +
+    // persisted server-side and mapped back to this host id by the `/cc` router. Additive:
+    // it lives alongside the existing token push; a clone with no group just gets a 409 from
+    // the router until one is bound. Never serialized onto `Host`/state.
+    env.extend(crate::provision::router_env_vars(&app, &spec.new_hostname));
     env.extend(spec.env.iter().cloned());
     // `image_ref` is the CANONICAL reference of the image actually used (the caller may have
     // passed an id form — MCP/raw API); `Host.source` must record the reference so the
@@ -352,158 +356,27 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // `RMNG_MONITORS` default just covers the brief pre-connect window.)
     let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
 
-    progress("accounts", "assigning agent accounts");
+    progress("accounts", "binding agent account group");
 
-    // Assign a Claude account/group (or explicitly none). The operator's selection + the
-    // resolved account are COLLECTED into locals here and baked into the Host at the terminal
-    // add below (there is no host in `s.hosts` yet); the token itself is installed into the
-    // clone's ~/.claude/.credentials.json now (the server refreshes + re-pushes it thereafter).
-    // A group-bound clone records its group; the rotator re-balances it. "none" installs no
-    // token AND strips any credentials the image carried, so the clone boots provably tokenless.
-    let mut claude_selection: Option<String> = None;
-    let mut claude_account_email: Option<String> = None;
-    let mut claude_group: Option<String> = None;
-    if let Some(assignment) =
-        crate::claude::resolve_assignment(&app, spec.claude_account.as_deref(), None)
-    {
-        let selection = crate::claude::normalize_selection(spec.claude_account.as_deref());
-        let (group, account, pending_auto) = match assignment {
-            crate::claude::Assignment::Group { name, initial } => {
-                (Some(name), Some(initial), false)
-            }
-            crate::claude::Assignment::Account(a) => (None, Some(a), false),
-            crate::claude::Assignment::AutoPending => (None, None, true),
-            crate::claude::Assignment::None => (None, None, false),
-        };
-        claude_selection = Some(selection);
-        claude_account_email = account.clone();
-        claude_group = group.clone();
-        match account {
-            None if pending_auto => {
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push("account: auto (pending imported account)".into())
-                });
-            }
-            None => {
-                // Explicit "none": strip any credentials the image carried so the clone
-                // boots tokenless, instead of trusting the template to be clean. Idempotent
-                // (`rm -f`), so a clean image just reports "cleared". Best-effort like the
-                // assign arm — a failure is logged, not fatal to the clone create.
-                match crate::claude::clear_clone_token(&app, &spec.new_hostname).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push("account: none (credentials cleared)".into())
-                    }),
-                    Err(e) => {
-                        tracing::warn!("clear_clone_token({}) failed: {e}", spec.new_hostname);
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("account: none — failed to clear credentials: {e}"))
-                        });
-                    }
-                }
-                app.claude.forget_pushed(&spec.new_hostname);
-            }
-            Some(email) => {
-                let label = match &group {
-                    Some(g) => format!("{email} (group {g})"),
-                    None => email.clone(),
-                };
-                match crate::claude::push_account_to_clone(&app, &spec.new_hostname, &email).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push(format!("account: assigned {label}"))
-                    }),
-                    Err(e) => {
-                        tracing::warn!("push_account_to_clone({}) failed: {e}", spec.new_hostname);
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("account: failed to assign {label}: {e}"))
-                        });
-                    }
-                }
-            }
-        }
+    // Group-proxy binding: the clone's agents route through ONE account group's CLIProxyAPI
+    // instance via the control-server's `/cc` router (the per-clone router key was already
+    // injected into the clone's env above by `router_env_vars`). Binding is a pure map update
+    // — the group is recorded on the Host below and the router resolves clone → group →
+    // instance at request time; there is no clone-side credential push. `None` leaves the
+    // clone without inference until a group is bound (the router answers 409 until then).
+    let group = spec.group.clone();
+    match &group {
+        Some(g) => patch_op(&app, &op_id, |op| op.log.push(format!("account: group {g}"))),
+        None => patch_op(&app, &op_id, |op| op.log.push("account: no group bound".into())),
     }
 
-    // Assign a Codex account/group (or explicitly none), independently of Claude — a clone
-    // can hold both. Same shape as the Claude block above; collected into locals + baked into
-    // the Host at the terminal add below.
-    let mut codex_selection: Option<String> = None;
-    let mut codex_account_email: Option<String> = None;
-    let mut codex_group: Option<String> = None;
-    if let Some(assignment) =
-        crate::codex::resolve_assignment(&app, spec.codex_account.as_deref(), None)
-    {
-        let selection = crate::codex::normalize_selection(spec.codex_account.as_deref());
-        let (group, account, pending_auto) = match assignment {
-            crate::codex::Assignment::Group { name, initial } => (Some(name), Some(initial), false),
-            crate::codex::Assignment::Account(a) => (None, Some(a), false),
-            crate::codex::Assignment::AutoPending => (None, None, true),
-            crate::codex::Assignment::None => (None, None, false),
-        };
-        codex_selection = Some(selection);
-        codex_account_email = account.clone();
-        codex_group = group.clone();
-        match account {
-            None if pending_auto => {
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push("codex account: auto (pending imported account)".into())
-                });
-            }
-            None => {
-                // Explicit "none": strip any codex auth the image carried (see the Claude block).
-                match crate::codex::clear_clone_token(&app, &spec.new_hostname).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log
-                            .push("codex account: none (credentials cleared)".into())
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "codex clear_clone_token({}) failed: {e}",
-                            spec.new_hostname
-                        );
-                        patch_op(&app, &op_id, |op| {
-                            op.log.push(format!(
-                                "codex account: none — failed to clear credentials: {e}"
-                            ))
-                        });
-                    }
-                }
-                app.codex.forget_pushed(&spec.new_hostname);
-            }
-            Some(email) => {
-                let label = match &group {
-                    Some(g) => format!("{email} (group {g})"),
-                    None => email.clone(),
-                };
-                match crate::codex::push_account_to_clone(&app, &spec.new_hostname, &email).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push(format!("codex account: assigned {label}"))
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "codex push_account_to_clone({}) failed: {e}",
-                            spec.new_hostname
-                        );
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("codex account: failed to assign {label}: {e}"))
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // Register the fully-provisioned host and mark the op done — the tail (account pushes) is
-    // complete, so the clone is now genuinely connectable. A host's PRESENCE in `s.hosts` is the
-    // client's "ready to connect" signal, so it is added HERE, at the same instant the bar
-    // reaches 100%. `host` is display-only for managed clones (dials go by container name == id);
-    // clones ship with fixed `rmng`/`rmng` credentials baked into the base image. RDP port stays
-    // 3389 for the media path. The Claude/Codex selection collected above is baked in so the UI
-    // shows it the moment the host appears. `daemon_up` reflects whether the clone's daemon has
-    // registered (vs. still booting).
+    // Register the fully-provisioned host and mark the op done — the clone is now genuinely
+    // connectable. A host's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
+    // it is added HERE, at the same instant the bar reaches 100%. `host` is display-only for
+    // managed clones (dials go by container name == id); clones ship with fixed `rmng`/`rmng`
+    // credentials baked into the base image. RDP port stays 3389 for the media path. The
+    // group binding resolved above is baked in so the UI shows it the moment the host appears.
+    // `daemon_up` reflects whether the clone's daemon has registered (vs. still booting).
     let daemon_up = app.media.is_connected(&spec.new_hostname);
     app.store.mutate(|s| {
         let mut host = Host {
@@ -514,12 +387,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             password: "rmng".into(),
             managed: true,
             source: Some(image_ref.clone()),
-            claude_selection: claude_selection.clone(),
-            claude_account_email: claude_account_email.clone(),
-            claude_group: claude_group.clone(),
-            codex_selection: codex_selection.clone(),
-            codex_account_email: codex_account_email.clone(),
-            codex_group: codex_group.clone(),
+            group: group.clone(),
             preset_name: spec.preset_name.clone(),
             ..Default::default()
         };
@@ -930,20 +798,12 @@ mod tests {
     }
 
     #[test]
-    fn clonespec_default_has_no_codex_account() {
+    fn clonespec_default_has_no_group() {
         let spec = CloneSpec {
             new_hostname: "x".into(),
             ..Default::default()
         };
-        assert!(spec.codex_account.is_none());
-    }
-
-    #[tokio::test]
-    async fn run_clone_codex_none_leaves_no_email() {
-        // With no imported codex accounts, resolve_assignment(None) → None, so a clone's
-        // codex_account_email stays None (the block is a no-op) — independent of claude.
-        let app = test_app();
-        assert!(crate::codex::resolve_assignment(&app, None, None).is_none());
+        assert!(spec.group.is_none());
     }
 
     #[tokio::test]

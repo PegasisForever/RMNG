@@ -123,7 +123,7 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wire::CloneGroup;
+    use wire::Group;
 
     #[test]
     fn merge_preserves_blank_secrets_and_applies_changes() {
@@ -220,47 +220,42 @@ mod tests {
     }
 
     #[test]
-    fn merge_replaces_clone_groups_wholesale() {
+    fn merge_replaces_groups_wholesale() {
         // The editor always sends the full group list, so a plain array replace is right.
         let mut base = AppConfig::default();
-        base.clone_groups = vec![CloneGroup { name: "old".into(), accounts: vec!["a@b".into()] }];
+        base.groups = vec![Group { name: "old".into() }];
         let incoming = serde_json::json!({
-            "cloneGroups": [{ "name": "team", "accounts": ["a@b", "c@d"] }],
+            "groups": [{ "name": "team" }, { "name": "beta" }],
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.clone_groups.len(), 1);
-        assert_eq!(merged.clone_groups[0].name, "team");
-        assert_eq!(merged.clone_groups[0].accounts, vec!["a@b".to_string(), "c@d".to_string()]);
+        assert_eq!(merged.groups.len(), 2);
+        assert_eq!(merged.groups[0].name, "team");
+        assert_eq!(merged.groups[1].name, "beta");
         // An empty array clears all groups.
-        let cleared = merge_update(&merged, serde_json::json!({ "cloneGroups": [] })).unwrap();
-        assert!(cleared.clone_groups.is_empty());
+        let cleared = merge_update(&merged, serde_json::json!({ "groups": [] })).unwrap();
+        assert!(cleared.groups.is_empty());
     }
 
     #[test]
-    fn merge_replaces_codex_groups_and_config() {
+    fn merge_replaces_groups_alongside_codex_config() {
         use wire::CodexConfig;
         let mut base = AppConfig::default();
-        base.codex_groups = vec![CloneGroup { name: "old".into(), accounts: vec!["a@o".into()] }];
+        base.groups = vec![Group { name: "old".into() }];
         base.codex = CodexConfig { poll_secs: 600, usage_polling: true, ..Default::default() };
         // Editor sends the full group list + a codex config patch.
         let incoming = serde_json::json!({
-            "codexGroups": [{ "name": "team", "accounts": ["a@o", "b@o"] }],
+            "groups": [{ "name": "team" }],
             "codex": { "pollSecs": 300, "usagePolling": false },
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.codex_groups.len(), 1);
-        assert_eq!(merged.codex_groups[0].name, "team");
-        assert_eq!(merged.codex_groups[0].accounts, vec!["a@o".to_string(), "b@o".to_string()]);
+        assert_eq!(merged.groups.len(), 1);
+        assert_eq!(merged.groups[0].name, "team");
         assert_eq!(merged.codex.poll_secs, 300);
         assert!(!merged.codex.usage_polling);
-        // An empty array clears all codex groups.
-        let cleared = merge_update(&merged, serde_json::json!({ "codexGroups": [] })).unwrap();
-        assert!(cleared.codex_groups.is_empty());
-        // Claude groups are untouched by a codex-only patch.
-        let mut with_claude = base.clone();
-        with_claude.clone_groups = vec![CloneGroup { name: "cl".into(), accounts: vec!["c@a".into()] }];
-        let m2 = merge_update(&with_claude, serde_json::json!({ "codexGroups": [] })).unwrap();
-        assert_eq!(m2.clone_groups.len(), 1, "codex patch must not disturb claude groups");
+        // A codex-only patch leaves the groups untouched.
+        let m2 = merge_update(&merged, serde_json::json!({ "codex": { "pollSecs": 120 } })).unwrap();
+        assert_eq!(m2.groups.len(), 1, "codex patch must not disturb groups");
+        assert_eq!(m2.groups[0].name, "team");
     }
 
     /// A base config that has finished first-run setup (one-time fields locked).

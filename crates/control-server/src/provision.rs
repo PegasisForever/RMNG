@@ -28,8 +28,6 @@ use wire::EnvVar;
 use crate::app::App;
 use crate::docker::{CreateSpec, PullEvent, TarEntry, CLONE_USER};
 
-const IMPORT_SCRIPT: &str = include_str!("../scripts/claude-import.sh");
-
 /// The clone user's uid/gid inside every image (created uid 1000 by `template/setup/30-user.sh`
 /// at template build).
 /// tar entries under `home/rmng/**` carry this verbatim so the daemon extracts them owned
@@ -70,22 +68,6 @@ fn fresh_machine_id() -> Result<Vec<u8>> {
     let mut s: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     s.push('\n');
     Ok(s.into_bytes())
-}
-
-/// Standard base64 (no line wrapping). Ported verbatim from `orchestrate.rs` — used to
-/// pass the credentials JSON to `claude-import.sh apply`.
-pub fn b64_encode(bytes: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(A[(n >> 18 & 63) as usize] as char);
-        out.push(A[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { A[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
-    }
-    out
 }
 
 /// Resolve a caller-supplied image — a repo-tag reference (e.g. `pegasis0/rmng-template:latest`),
@@ -136,6 +118,15 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
         Ok(control) => {
             vars.push(ev("RMNG_CONTROL_URL", format!("http://{control}:{}", cfg.listen.web)));
             vars.push(ev("AGENT_CONTROL_MCP_URL", format!("http://{control}:{}", cfg.listen.clone_mcp)));
+            // Group-proxy router: every clone's agents reach the control-server's `/cc`
+            // reverse proxy at a constant URL; the router maps the clone's per-clone bearer
+            // key → its group instance. Claude Code appends `/v1/messages` + `/v1/models`
+            // to ANTHROPIC_BASE_URL; the gateway-discovery flag lets its picker learn the
+            // instance's `/v1/models` catalog. The per-clone bearer (ANTHROPIC_AUTH_TOKEN /
+            // RMNG_PROXY_KEY) is added separately by `router_env_vars` (it's per-clone, not
+            // shared). See `docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`.
+            vars.push(ev("ANTHROPIC_BASE_URL", format!("http://{control}:{}/cc", cfg.listen.web)));
+            vars.push(ev("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1".to_string()));
         }
         Err(e) => tracing::warn!(
             "control_env_vars: could not resolve the control-server host ({e}); \
@@ -147,6 +138,40 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
         vars.push(ev("RMNG_INFERENCE_URL", infer.to_string()));
     }
     vars
+}
+
+/// The PER-CLONE group-proxy env: the clone's stable router bearer key, exposed both as
+/// `ANTHROPIC_AUTH_TOKEN` (Claude Code) and `RMNG_PROXY_KEY` (referenced by the generated
+/// Codex + OpenCode provider configs). Minted + persisted by [`crate::cliproxy`] on first
+/// use (stable for the clone's life; the router maps it back to this host id). Kept OUT of
+/// [`control_env_vars`] because it is per-clone, not a shared constant — and NEVER put on
+/// `Host`/`state.json`/`/events` (it's a secret). Wired into the clone's `/etc/environment`
+/// at create (`jobs.rs`) and on every per-clone resync (`clone_reconcile.rs`).
+pub(crate) fn router_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
+    let key = app.cliproxy.mint_router_key(host_id);
+    vec![
+        EnvVar { key: "ANTHROPIC_AUTH_TOKEN".into(), value: key.clone() },
+        EnvVar { key: "RMNG_PROXY_KEY".into(), value: key },
+    ]
+}
+
+/// The clone-facing base URL of the group-proxy router's OpenAI-compatible surface
+/// (`http://{control}:{web}/cc/v1`) — what the generated Codex + OpenCode provider configs
+/// point their `base_url`/`baseURL` at. Derived from the same control-host resolution
+/// `control_env_vars` uses; `None` (with a warning) when the control host can't be resolved,
+/// so the config generators fall back to their old behavior instead of baking a broken URL.
+pub(crate) async fn cc_base_url(app: &App) -> Option<String> {
+    let cfg = app.config();
+    match app.docker.control_host().await {
+        Ok(control) => Some(format!("http://{control}:{}/cc/v1", cfg.listen.web)),
+        Err(e) => {
+            tracing::warn!(
+                "cc_base_url: could not resolve the control-server host ({e}); Codex/OpenCode \
+                 provider configs will omit the RMNG group-proxy provider this pass"
+            );
+            None
+        }
+    }
 }
 
 /// The preset's env plus its Linear key as `LINEAR_API_KEY` (auths the clone's
@@ -466,7 +491,14 @@ async fn clone_container_after_create(
         .iter()
         .find(|v| v.key == "AGENT_CONTROL_MCP_URL")
         .map(|v| v.value.as_str());
-    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(hostname, control_mcp_url);
+    // The group-proxy /cc/v1 base for the generated Codex/OpenCode provider configs, derived
+    // from the ANTHROPIC_BASE_URL (`.../cc`) that `control_env_vars` injected into this env.
+    let cc_base = env
+        .iter()
+        .find(|v| v.key == "ANTHROPIC_BASE_URL")
+        .map(|v| format!("{}/v1", v.value));
+    let mut codex_entries =
+        crate::clone_reconcile::codex_parity_entries(hostname, control_mcp_url, cc_base.as_deref());
     codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(&codex_entries));
     entries.append(&mut codex_entries);
     if let Some(rc) = &path_rc {
@@ -841,19 +873,6 @@ pub const CLONE_BINARIES: &[CloneBinary] = &[
     CloneBinary { payload: "rmng-cli", bin: "rmng", dir: "usr/local/bin" },
 ];
 
-// --- claude-import backend ------------------------------------------------------------
-
-/// Run one [`claude-import.sh`] op (`status`|`read`|`clear`|`apply`) inside clone `container`
-/// via `docker exec bash -s`, returning its raw stdout+stderr. `extra` are extra positional
-/// args (e.g. the base64 credentials for `apply`). This is `claude.rs`'s backend (Task 6
-/// delegates its token flows to it), replacing the retired SSH `run_clone_op`.
-///
-/// Script args: `<user> <op> [b64]`. `status` never fails (stderr merged in the script);
-/// the others surface a non-zero exit as an error.
-pub async fn run_clone_op(app: &App, container: &str, op: &str, extra: &[&str]) -> Result<String> {
-    crate::clone_ops::run_clone_op(app, container, IMPORT_SCRIPT, op, extra).await
-}
-
 // --- op-log pct helpers (exposed for jobs.rs step tables) -----------------------------
 
 /// The clone/pull/commit/delete step→pct tables, exposed so `jobs.rs` maps a streamed step
@@ -955,20 +974,6 @@ mod tests {
             .unwrap();
         assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys" && t.mode == 0o600 && t.uid == 1000));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn b64_parity() {
-        // Round-trip parity with the classic base64 alphabet + padding.
-        assert_eq!(b64_encode(b""), "");
-        assert_eq!(b64_encode(b"f"), "Zg==");
-        assert_eq!(b64_encode(b"fo"), "Zm8=");
-        assert_eq!(b64_encode(b"foo"), "Zm9v");
-        assert_eq!(b64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(b64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
-        // A KEY=VALUE line, as the credentials-json path uses it.
-        assert_eq!(b64_encode(b"PATH=/x/y"), "UEFUSD0veC95");
     }
 
     #[test]

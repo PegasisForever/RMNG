@@ -1,14 +1,10 @@
 import { Menu } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 
-import {
-  ChangeAccountModal,
-  currentCodexValue,
-  currentValue,
-} from "~/components/ChangeAccountModal";
+import { ChangeAccountModal } from "~/components/ChangeAccountModal";
 import { CloneModal } from "~/components/CloneModal";
 import { CommitImageModal } from "~/components/CommitImageModal";
-import { ImportAccountModal } from "~/components/ImportAccountModal";
+import { GroupLoginModal } from "~/components/GroupLoginModal";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
@@ -18,8 +14,9 @@ import {
   activateLayout,
   cloneHost,
   commitImage,
-  deleteClaudeAccount,
-  deleteCodexAccount,
+  createGroup,
+  deleteGroup,
+  deleteGroupAccount,
   deleteHost,
   deleteImage,
   getConfig,
@@ -28,19 +25,17 @@ import {
   pullTemplate,
   putConfig,
   putForwards,
-  refreshClaudeUsage,
-  refreshCodexUsage,
   reorder,
   restartServer,
-  swapClaudeAccount,
-  swapCodexAccount,
+  setHostGroup,
   testConfig,
   updateServer,
 } from "~/lib/api";
-import { type ControlState, type Host, emptyState } from "~/lib/types";
+import { type ClaudeUsage, type ControlState, type GroupUsage, type Host, emptyState } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
+import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
 import type { Route } from "./+types/_index";
@@ -200,6 +195,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       cloneCpus={cfg.docker.cloneCpus}
       sshPublicHost={cfg.ssh?.publicHost ?? ""}
       bastionPort={cfg.listen.bastion}
+      groups={cfg.groups}
+      onConfigChange={setCfg}
     />
   );
 }
@@ -211,6 +208,8 @@ function Dashboard({
   cloneCpus,
   sshPublicHost,
   bastionPort,
+  groups,
+  onConfigChange,
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
@@ -221,15 +220,21 @@ function Dashboard({
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied SSH commands jump through. */
   bastionPort: number;
+  /** Configured account groups (from `config.groups`); the authoritative group list for
+   *  the by-group panels + pickers. */
+  groups: Group[];
+  /** Update the gate's config after a group create/delete (returns the fresh redacted config). */
+  onConfigChange: (cfg: AppConfigRedacted) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
   const [commitHost, setCommitHost] = useState<Host | null>(null);
   const [committing, setCommitting] = useState(false);
   const [changeHost, setChangeHost] = useState<Host | null>(null);
   const [changing, setChanging] = useState(false);
+  // The group an "add account" OAuth login is in flight for (null = modal closed).
+  const [loginGroup, setLoginGroup] = useState<string | null>(null);
   const [forwardHost, setForwardHost] = useState<Host | null>(null);
   const [forwarding, setForwarding] = useState(false);
   const [forwardError, setForwardError] = useState<string | null>(null);
@@ -292,6 +297,44 @@ function Dashboard({
 
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
+
+  // The by-group display list: every configured group (authoritative, instant on
+  // create/delete), carrying its live usage accounts from `usageGroups` where present.
+  // The usage poll lags group creation (up to its interval), so an empty group shows up
+  // immediately with no accounts until the next poll fills them in.
+  const usageByName = new Map((state.usageGroups ?? []).map((g) => [g.name, g]));
+  const displayGroups: GroupUsage[] = groups.map(
+    (g) => usageByName.get(g.name) ?? { name: g.name, accounts: [] },
+  );
+
+  // The auth-dir credential file name CLIProxyAPI stores per account (used by the delete
+  // endpoint): `claude-<email>.json` / `codex-<email>.json`.
+  const authFileName = (a: ClaudeUsage) =>
+    `${a.provider === "codex" ? "codex" : "claude"}-${a.email}.json`;
+
+  const onCreateGroup = (name?: string) => {
+    const n = (name ?? window.prompt("New group name (A–Z, 0–9, . _ -)") ?? "").trim();
+    if (!n) return;
+    createGroup(n)
+      .then((cfg) => {
+        setError(null);
+        onConfigChange(cfg);
+      })
+      .catch((e: Error) => setError(e.message));
+  };
+
+  // Confirm-free — both call sites (sidebar panel, settings group manager) confirm first.
+  const onDeleteGroup = (name: string) => {
+    deleteGroup(name)
+      .then((cfg) => {
+        setError(null);
+        onConfigChange(cfg);
+      })
+      .catch((e: Error) => setError(e.message));
+  };
+
+  const onDeleteGroupAccount = (group: string, account: ClaudeUsage) =>
+    run(deleteGroupAccount(group, authFileName(account)));
 
   // Drag-reorder: optimistically adopt the new order (smooth UI), then persist —
   // the SSE frame confirms after the server writes it.
@@ -368,7 +411,7 @@ function Dashboard({
             Presentational — every server call is a callback wired up here. */}
         <Sidebar
           open={sidebarOpen}
-          accounts={state.claudeAccounts ?? []}
+          usageGroups={displayGroups}
           hosts={orderedHosts}
           stats={stats}
           forwards={forwards}
@@ -382,8 +425,9 @@ function Dashboard({
           onActivateLayout={(name) => run(activateLayout(name))}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenClone={() => setCloneOpen(true)}
-          onRefreshClaude={() => run(refreshClaudeUsage())}
-          onImportAccount={() => setImportOpen(true)}
+          onCreateGroup={() => onCreateGroup()}
+          onAddAccount={(group) => setLoginGroup(group)}
+          onDeleteGroup={onDeleteGroup}
           onSelectHost={(host) => {
             run(activate(host.id));
             setSidebarOpen(false);
@@ -465,12 +509,6 @@ function Dashboard({
           images={images}
           imagesLoading={imagesLoading}
           busy={runningClone}
-          accounts={(state.claudeAccounts ?? []).filter(
-            (a) => a.assignable && a.provider !== "codex",
-          )}
-          codexAccounts={(state.claudeAccounts ?? []).filter(
-            (a) => a.assignable && a.provider === "codex",
-          )}
           onClose={() => setCloneOpen(false)}
           onClone={(image, payload) => {
             run(cloneHost(image, payload));
@@ -481,12 +519,8 @@ function Dashboard({
 
       {settingsOpen ? (
         <SettingsPanel
-          accountEmails={(state.claudeAccounts ?? [])
-            .filter((a) => a.provider !== "codex")
-            .map((a) => a.email)}
-          codexAccountEmails={(state.claudeAccounts ?? [])
-            .filter((a) => a.provider === "codex")
-            .map((a) => a.email)}
+          groups={groups}
+          usageGroups={state.usageGroups ?? []}
           onClose={() => setSettingsOpen(false)}
           getConfig={getConfig}
           putConfig={putConfig}
@@ -501,8 +535,10 @@ function Dashboard({
           )}
           onPullTemplate={(reference) => run(pullTemplate(reference))}
           onDeleteImage={(reference) => run(deleteImage(reference))}
-          onDeleteAccount={(email) => run(deleteClaudeAccount(email))}
-          onDeleteCodexAccount={(email) => run(deleteCodexAccount(email))}
+          onCreateGroup={(name) => onCreateGroup(name)}
+          onDeleteGroup={onDeleteGroup}
+          onAddAccount={(group) => setLoginGroup(group)}
+          onDeleteAccount={onDeleteGroupAccount}
         />
       ) : null}
 
@@ -524,14 +560,14 @@ function Dashboard({
         />
       ) : null}
 
-      {importOpen ? (
-        <ImportAccountModal
-          hosts={state.hosts}
-          onClose={() => setImportOpen(false)}
-          onImported={() => {
-            setImportOpen(false);
-            run(refreshClaudeUsage());
-            run(refreshCodexUsage());
+      {loginGroup ? (
+        <GroupLoginModal
+          group={loginGroup}
+          onClose={() => setLoginGroup(null)}
+          onDone={() => {
+            // The credential lands in the group's auth-dir immediately; it surfaces in the
+            // usage panel at the next by-group usage poll (streamed over /events).
+            setError(null);
           }}
         />
       ) : null}
@@ -539,39 +575,17 @@ function Dashboard({
       {changeHost ? (
         <ChangeAccountModal
           host={changeHost}
-          accounts={(state.claudeAccounts ?? []).filter(
-            (a) => a.assignable && a.provider !== "codex",
-          )}
-          codexAccounts={(state.claudeAccounts ?? []).filter(
-            (a) => a.assignable && a.provider === "codex",
-          )}
           busy={changing}
           onClose={() => setChangeHost(null)}
-          onSubmit={(claude, codex) => {
+          onSubmit={(group) => {
             setChanging(true);
-            // Baselines must use the SAME group-aware derivation the modal shows
-            // (currentValue/currentCodexValue), or a legacy group-bound host whose
-            // selection is stored only as a group would spuriously fire — or mask — a swap.
-            const jobs: Promise<unknown>[] = [];
-            if (claude !== currentValue(changeHost))
-              jobs.push(swapClaudeAccount(changeHost.id, claude));
-            if (codex !== currentCodexValue(changeHost))
-              jobs.push(swapCodexAccount(changeHost.id, codex));
-            Promise.allSettled(jobs).then((results) => {
-              setChanging(false);
-              const failed = results.find((r) => r.status === "rejected");
-              if (failed) {
-                // Surface the failure and keep the modal open so the operator can retry
-                // (a silent close would look like the token swap succeeded).
-                setError(
-                  (failed as PromiseRejectedResult).reason?.message ??
-                    "account swap failed",
-                );
-              } else {
+            setHostGroup(changeHost.id, group)
+              .then(() => {
                 setError(null);
                 setChangeHost(null);
-              }
-            });
+              })
+              .catch((e: Error) => setError(e.message))
+              .finally(() => setChanging(false));
           }}
         />
       ) : null}

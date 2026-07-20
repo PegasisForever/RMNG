@@ -1,15 +1,19 @@
-// Compact, card-less Claude account usage list, driven by
-// ControlState.claudeAccounts (refreshed server-side every ~60s, delivered over
-// SSE). Display-only. Each window's bar carries a vertical "pace" marker = the
-// utilization you'd be at if you spent the quota uniformly across the window
-// (elapsed fraction of [resetsAt - windowLength, resetsAt]); fill past the marker
-// = burning faster than uniform.
-import { Plus, RefreshCw } from "lucide-react";
+// Compact, card-less account-usage list under the group-proxy model, driven by
+// ControlState.usageGroups (refreshed server-side, delivered over SSE). Display-only.
+// Organized BY GROUP: each account pool (a CLIProxyAPI instance) is a header with a
+// per-group "+ add account" (OAuth login) and delete control, and under it the accounts
+// authenticated into that pool, each with 5h/7d/fable bars. The same email can appear
+// under multiple groups (independent token sets) — that's expected.
+//
+// Each window's bar carries a vertical "pace" marker = the utilization you'd be at if
+// you spent the quota uniformly across the window (elapsed fraction of
+// [resetsAt - windowLength, resetsAt]); fill past the marker = burning faster than uniform.
+import { Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.png";
 import claudeLogo from "../assets/claude.png";
-import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow } from "~/lib/types";
+import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, GroupUsage } from "~/lib/types";
 
 const FIVE_H_MS = 5 * 60 * 60 * 1000;
 const SEVEN_D_MS = 7 * 24 * 60 * 60 * 1000;
@@ -130,67 +134,118 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
   );
 }
 
-export function ClaudeAccountsPanel({
-  accounts,
-  onRefresh,
-  onImport,
+/** One account pool: a header (name + add-account + delete) and its authenticated accounts. */
+function GroupBlock({
+  group,
+  now,
+  onAddAccount,
+  onDeleteGroup,
 }: {
-  accounts: ClaudeUsage[];
-  onRefresh: () => void | Promise<void>;
-  onImport: () => void | Promise<void>;
+  group: GroupUsage;
+  now: number | null;
+  onAddAccount: (group: string) => void;
+  onDeleteGroup: (group: string) => void;
+}) {
+  return (
+    <div className="rounded border border-slate-200/70 dark:border-slate-700/70">
+      <div className="flex items-center gap-1 border-b border-slate-200/70 px-1.5 py-1 dark:border-slate-700/70">
+        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+          {group.name}
+        </span>
+        <button
+          type="button"
+          onClick={() => onAddAccount(group.name)}
+          title="Add an account to this group (OAuth login)"
+          className="rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+        >
+          <Plus className="size-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (
+              window.confirm(
+                `Delete group "${group.name}"?\n\nStops its proxy instance. Clones bound to it lose inference until reassigned; the on-disk credentials are left in place.`,
+              )
+            )
+              onDeleteGroup(group.name);
+          }}
+          title="Delete this group"
+          className="rounded p-0.5 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+        >
+          <Trash2 className="size-3.5" />
+        </button>
+      </div>
+      {group.accounts.length === 0 ? (
+        <button
+          type="button"
+          onClick={() => onAddAccount(group.name)}
+          className="m-1 block w-[calc(100%-0.5rem)] rounded border border-dashed border-slate-300 px-2 py-1 text-[10px] text-slate-400 hover:bg-white dark:border-slate-600 dark:text-slate-500 dark:hover:bg-slate-800"
+        >
+          No accounts — add one
+        </button>
+      ) : (
+        <div className="divide-y divide-slate-200/70 dark:divide-slate-700/70">
+          {group.accounts.map((a) => (
+            <Row key={a.id} a={a} now={now} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ClaudeAccountsPanel({
+  groups,
+  onCreateGroup,
+  onAddAccount,
+  onDeleteGroup,
+}: {
+  /** Per-group usage view (from `ControlState.usageGroups`, merged with configured groups). */
+  groups: GroupUsage[];
+  /** Create a new account group. */
+  onCreateGroup: () => void;
+  /** Add an account to a group (opens the OAuth login flow). */
+  onAddAccount: (group: string) => void;
+  /** Delete a group. */
+  onDeleteGroup: (group: string) => void;
 }) {
   const now = useNow();
-  const [busy, setBusy] = useState(false);
-  const wrap = (fn: () => void | Promise<void>) => async () => {
-    setBusy(true);
-    try {
-      await fn();
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <div>
       <div className="flex items-center justify-between px-1">
         <h2 className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-          Usage{accounts.length ? ` (${accounts.length})` : ""}
+          Groups{groups.length ? ` (${groups.length})` : ""}
         </h2>
-        {accounts.length > 0 ? (
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              onClick={() => onImport()}
-              disabled={busy}
-              title="Import a Claude account from a clone"
-              className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-            >
-              <Plus className="size-4" />
-            </button>
-            <button
-              type="button"
-              onClick={wrap(onRefresh)}
-              disabled={busy}
-              className="rounded px-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-            >
-              {busy ? "…" : <RefreshCw className="size-4" />}
-            </button>
-          </div>
-        ) : null}
-      </div>
-
-      {accounts.length === 0 ? (
         <button
           type="button"
-          onClick={() => onImport()}
+          onClick={() => onCreateGroup()}
+          title="Create an account group"
+          className="rounded px-1 text-[11px] font-medium text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+        >
+          + Group
+        </button>
+      </div>
+
+      {groups.length === 0 ? (
+        <button
+          type="button"
+          onClick={() => onCreateGroup()}
           className="mt-0.5 w-full rounded border border-dashed border-slate-300 px-2 py-1 text-[10px] text-slate-400 hover:bg-white dark:border-slate-600 dark:text-slate-500 dark:hover:bg-slate-800"
         >
-          Import Claude account
+          Create an account group
         </button>
       ) : (
-        <div className="mt-0.5 divide-y divide-slate-200/70 dark:divide-slate-700/70">
-          {accounts.map((a) => (
-            <Row key={a.id} a={a} now={now} />
+        <div className="mt-0.5 space-y-1.5">
+          {groups.map((g) => (
+            <GroupBlock
+              key={g.name}
+              group={g}
+              now={now}
+              onAddAccount={onAddAccount}
+              onDeleteGroup={onDeleteGroup}
+            />
           ))}
         </div>
       )}

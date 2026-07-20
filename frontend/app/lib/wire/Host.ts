@@ -24,37 +24,13 @@ port: number, username: string, password: string, domain: string | null, gdm_use
  * `state.json` rows carrying the retired `ctid`/`container` keys load as
  * unmanaged — serde drops the stale keys.
  */
-managed: boolean, source: string | null, claudeAccountEmail: string | null, 
+managed: boolean, source: string | null, 
 /**
- * Name of the Claude group this clone is balanced within (sticky — it moves only
- * when its account exhausts); `None` when bound to a single fixed account. When
- * set, `claude_account_email` holds the current pick.
+ * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
+ * route through, via the control-server's `/cc` router. `None` = no inference. This is
+ * the sole account binding — CLIProxyAPI owns intra-group account selection + refresh.
  */
-claudeGroup: string | null, 
-/**
- * The operator's Claude *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`,
- * or an account email. Distinguishes an auto-managed clone (server picks the best
- * account and may hot-swap it) from one pinned to a fixed account or opted out of
- * a token entirely — `claude_account_email` alone can't tell these apart. `None` on
- * hosts created before this field / when no Claude account is configured.
- */
-claudeSelection: string | null, 
-/**
- * Email of the imported Codex (ChatGPT) account whose token is written into this
- * clone's `~/.codex/auth.json`. Independent of `claude_account_email` — a clone can
- * hold both. `None` when no Codex account is assigned.
- */
-codexAccountEmail: string | null, 
-/**
- * Name of the Codex group this clone is balanced within (sticky, like `claude_group`);
- * `None` when bound to a single fixed Codex account.
- */
-codexGroup: string | null, 
-/**
- * The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
- * an account email — the Codex twin of `claude_selection`.
- */
-codexSelection: string | null, 
+group: string | null, 
 /**
  * Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
  * string: the workspace set is config (Settings → Linear API keys), not an enum.

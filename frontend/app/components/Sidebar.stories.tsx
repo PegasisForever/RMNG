@@ -3,7 +3,7 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { Sidebar } from "./Sidebar";
-import { claudeAccounts, cloneOperation, hosts, stats } from "~/stories/fixtures";
+import { cloneOperation, hosts, stats, usageGroups } from "~/stories/fixtures";
 
 const meta = {
   title: "Sidebar/Sidebar",
@@ -19,7 +19,7 @@ const meta = {
   ],
   args: {
     open: true,
-    accounts: claudeAccounts,
+    usageGroups,
     hosts,
     stats,
     operations: [],
@@ -32,8 +32,9 @@ const meta = {
     onActivateLayout: fn(),
     onOpenSettings: fn(),
     onOpenClone: fn(),
-    onRefreshClaude: fn(),
-    onImportAccount: fn(),
+    onCreateGroup: fn(),
+    onAddAccount: fn(),
+    onDeleteGroup: fn(),
     onSelectHost: fn(),
     onDeleteHost: fn(),
     onCommitHost: fn(),
@@ -69,9 +70,9 @@ export const Default: Story = {
   },
 };
 
-/** Fresh install — no hosts or accounts yet. */
+/** Fresh install — no hosts or groups yet. */
 export const Empty: Story = {
-  args: { hosts: [], accounts: [], selectedId: null },
+  args: { hosts: [], usageGroups: [], selectedId: null },
 };
 
 /** A clone in flight — the Activity section renders and + Clone is disabled. */

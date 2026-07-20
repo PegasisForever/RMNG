@@ -21,9 +21,13 @@
 #                    (bun build --compile).
 #   2. rust-build  — rustup stable; dev deps; cargo build --release clone-daemon + rmng-cli
 #                    + control-server.
-#   3. runtime     — ubuntu:26.04, runtime libs + samba (smbd serves clone homes over SMB)
-#                    + /usr/local/share/rmng payloads (2 binaries + static/), a local rmng
-#                    uid-1000 user for the share, WORKDIR /data, EXPOSE 9000-9003 9005 445.
+#   3. go-build    — cliproxy-sidecar: one CLIProxyAPI (v7) instance per account group; the
+#                    control-server spawns/supervises these (see cliproxy.rs). Independent of
+#                    1/2, so BuildKit runs all three in parallel.
+#   4. runtime     — ubuntu:26.04, runtime libs + samba (smbd serves clone homes over SMB)
+#                    + /usr/local/bin/cliproxy-sidecar + /usr/local/share/rmng payloads
+#                    (2 binaries + static/), a local rmng uid-1000 user for the share,
+#                    WORKDIR /data, EXPOSE 9000-9003 9005 445.
 
 # ---------------------------------------------------------------------------------------
 # 1. bun stage: frontend build + agent-wrapper bun --compile
@@ -93,7 +97,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/rmng-control-server /out/rmng-control-server
 
 # ---------------------------------------------------------------------------------------
-# 3. runtime stage
+# 3. go build stage — cliproxy-sidecar (fully parallel with 1/2)
+# ---------------------------------------------------------------------------------------
+# One CLIProxyAPI service instance per account group. The control-server writes each
+# instance's config.yaml + auth-dir and spawns this binary per group (crates/control-server/
+# src/cliproxy.rs), routing clone traffic to it. Static (CGO off) so it drops straight into
+# the runtime stage; upstream TLS uses the runtime's ca-certificates.
+FROM golang:1.26 AS go-build
+WORKDIR /src/cliproxy-sidecar
+# Manifest first so the module-download layer caches across source-only edits.
+COPY cliproxy-sidecar/go.mod cliproxy-sidecar/go.sum ./
+RUN go mod download
+COPY cliproxy-sidecar/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/cliproxy-sidecar .
+
+# ---------------------------------------------------------------------------------------
+# 4. runtime stage
 # ---------------------------------------------------------------------------------------
 FROM ubuntu:26.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
@@ -141,6 +160,9 @@ LABEL org.opencontainers.image.revision="$GIT_SHA" \
       org.opencontainers.image.version="$GIT_SHA"
 
 COPY --from=rust-build /out/rmng-control-server /usr/local/bin/rmng-control-server
+
+# Per-group inference proxy (one process spawned per account group by cliproxy.rs).
+COPY --from=go-build   /out/cliproxy-sidecar    /usr/local/bin/cliproxy-sidecar
 
 # Payloads + frontend on the image filesystem, stored PLAIN (assets.rs / web.rs read
 # these). The control-server injects clone-daemon / agent-wrapper (→ /opt/rmng/bin) and

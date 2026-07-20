@@ -48,6 +48,11 @@ fn codex_parity_stamp_path() -> &'static str {
     "etc/rmng/codex-parity-hash"
 }
 
+/// Stamp marking the one-time group-proxy migration of a clone's dead provider credentials.
+fn dead_creds_stamp_path() -> &'static str {
+    "etc/rmng/group-proxy-migrated"
+}
+
 pub(crate) fn desired_payload_hash(entries: &[TarEntry]) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for e in entries {
@@ -100,11 +105,37 @@ pub(crate) fn ssh_stamp_entry() -> TarEntry {
     }
 }
 
-fn codex_config_toml(clone_id: &str, control_mcp_url: Option<&str>) -> String {
-    let mut body = String::from(
-        r#"# Managed by RMNG. Re-created by the control-server clone reconciler.
+/// The GPT model ids the RMNG group-proxy provider advertises to Codex + OpenCode. Codex/
+/// OpenCode list GPT models only (never Claude), so their pickers can't surface a Claude
+/// model — the soft per-agent visibility rule from the group-proxy plan. `[0]` is the default.
+///
+/// Current (2026-07) Codex GPT families: the GPT-5.6 tiers (sol/terra/luna, GA 2026-07-09) plus
+/// the previous-generation `gpt-5.5`. The deprecated `-codex` suffix variants (`gpt-5.x-codex`)
+/// are intentionally excluded. Ids per https://learn.chatgpt.com/docs/models; OpenAI's own
+/// sample config uses `model = "gpt-5.6"` (https://learn.chatgpt.com/docs/config-file/config-sample).
+/// TODO(cliproxy): the authoritative served ids are whatever the group's pinned CLIProxyAPI v7
+/// instance advertises at `/v1/models` for a ChatGPT-subscription account — confirm this list
+/// against that catalog. Visibility is soft: a mismatch only hides/omits a picker entry.
+const RMNG_GPT_MODELS: &[&str] =
+    &["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"];
 
-[mcp_servers.desktop]
+fn codex_config_toml(clone_id: &str, control_mcp_url: Option<&str>, cc_base_url: Option<&str>) -> String {
+    let mut body = String::from("# Managed by RMNG. Re-created by the control-server clone reconciler.\n\n");
+
+    // Group-proxy provider (bare top-level keys MUST precede any [table] in TOML). When the
+    // control host resolves, route Codex through the control-server's /cc/v1 OpenAI-compatible
+    // surface and make it the active provider defaulting to a GPT model, so a Claude model can
+    // never be picked from Codex. Additive: the old ~/.codex/auth.json push still runs; with
+    // this provider active Codex uses RMNG_PROXY_KEY over the proxy instead.
+    let cc_base = cc_base_url.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(base) = cc_base {
+        body.push_str("model_provider = \"rmng\"\n");
+        body.push_str(&format!("model = \"{}\"\n\n", RMNG_GPT_MODELS[0]));
+        let _ = base; // used in the table below
+    }
+
+    body.push_str(
+        r#"[mcp_servers.desktop]
 url = "http://127.0.0.1:9004"
 
 [mcp_servers.linear]
@@ -112,6 +143,34 @@ url = "https://mcp.linear.app/mcp"
 bearer_token_env_var = "LINEAR_API_KEY"
 "#,
     );
+
+    if let Some(base) = cc_base {
+        // The RMNG group-proxy provider. Schema per the Codex config reference
+        // (https://learn.chatgpt.com/docs/config-file/config-reference and .../config-sample):
+        //   - base_url ends in /v1; for the Responses wire protocol Codex appends `/responses`
+        //     (so it POSTs `{base}/responses`, which the /cc router forwards to the instance).
+        //   - wire_api = "responses" is the only supported value and matches the surface the
+        //     instance serves.
+        //   - env_key names the env var Codex reads at runtime and sends as the Bearer token
+        //     (RMNG_PROXY_KEY, injected into /etc/environment per clone).
+        //   - supports_websockets = false forces HTTP+SSE — it disables the Responses-API
+        //     WebSocket transport, satisfying the plan's "Codex custom providers with WebSockets
+        //     disabled" requirement (this is the real key; the sample config shows it commented).
+        // requires_openai_auth is intentionally omitted (defaults false — we auth with the
+        // env_key bearer, not a ChatGPT login). Codex has no per-provider model allow-list; the
+        // single top-level `model` + `model_provider` above selects the default GPT model.
+        body.push_str(&format!(
+            r#"
+[model_providers.rmng]
+name = "RMNG"
+base_url = "{base}"
+wire_api = "responses"
+env_key = "RMNG_PROXY_KEY"
+supports_websockets = false
+"#
+        ));
+    }
+
     if let Some(url) = control_mcp_url.map(str::trim).filter(|s| !s.is_empty()) {
         body.push_str(&format!(
             r#"
@@ -124,8 +183,50 @@ http_headers = {{ "x-rmng-clone" = "{clone_id}" }}
     body
 }
 
-pub(crate) fn codex_parity_entries(clone_id: &str, control_mcp_url: Option<&str>) -> Vec<TarEntry> {
-    vec![
+/// The managed OpenCode config: a single OpenAI-compatible provider named `rmng` pointing at
+/// the group-proxy router's /cc/v1 surface, keyed by RMNG_PROXY_KEY, listing GPT models only
+/// (no Anthropic provider), so OpenCode's picker never shows a Claude model. `None` when the
+/// control host can't be resolved (nothing to write this pass).
+///
+/// Schema per the OpenCode provider docs (https://opencode.ai/docs/providers):
+///   - `npm = "@ai-sdk/openai-compatible"` is the custom OpenAI-compatible provider; it POSTs
+///     `{baseURL}/chat/completions`, so `options.baseURL` ends in /v1 (the /cc router forwards
+///     the suffix to the instance).
+///   - `options.apiKey` accepts the `{env:VAR}` interpolation form (resolved from the clone env).
+///   - the `models` map keys are the ids sent verbatim in the request `model` field.
+///   - the top-level `model` sets the default as `"<provider>/<id>"`.
+/// The global managed path is ~/.config/opencode/opencode.json. Same GPT-only id caveat as
+/// [`RMNG_GPT_MODELS`] — the served set is ultimately the group instance's /v1/models.
+fn opencode_config_json(cc_base_url: Option<&str>) -> Option<String> {
+    let base = cc_base_url.map(str::trim).filter(|s| !s.is_empty())?;
+    let models: serde_json::Map<String, serde_json::Value> = RMNG_GPT_MODELS
+        .iter()
+        .map(|m| (m.to_string(), serde_json::json!({ "name": m })))
+        .collect();
+    let cfg = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "model": format!("rmng/{}", RMNG_GPT_MODELS[0]),
+        "provider": {
+            "rmng": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "RMNG",
+                "options": {
+                    "baseURL": base,
+                    "apiKey": "{env:RMNG_PROXY_KEY}"
+                },
+                "models": models
+            }
+        }
+    });
+    Some(serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into()))
+}
+
+pub(crate) fn codex_parity_entries(
+    clone_id: &str,
+    control_mcp_url: Option<&str>,
+    cc_base_url: Option<&str>,
+) -> Vec<TarEntry> {
+    let mut entries = vec![
         TarEntry {
             path: "home/rmng/.codex/AGENTS.md".to_string(),
             data: CODEX_AGENTS_MD.as_bytes().to_vec(),
@@ -135,12 +236,22 @@ pub(crate) fn codex_parity_entries(clone_id: &str, control_mcp_url: Option<&str>
         },
         TarEntry {
             path: "home/rmng/.codex/config.toml".to_string(),
-            data: codex_config_toml(clone_id, control_mcp_url).into_bytes(),
+            data: codex_config_toml(clone_id, control_mcp_url, cc_base_url).into_bytes(),
             mode: 0o600,
             uid: CLONE_UID,
             gid: CLONE_GID,
         },
-    ]
+    ];
+    if let Some(json) = opencode_config_json(cc_base_url) {
+        entries.push(TarEntry {
+            path: "home/rmng/.config/opencode/opencode.json".to_string(),
+            data: json.into_bytes(),
+            mode: 0o600,
+            uid: CLONE_UID,
+            gid: CLONE_GID,
+        });
+    }
+    entries
 }
 
 fn codex_parity_stamp_entry(hash: &str) -> TarEntry {
@@ -160,6 +271,7 @@ pub(crate) fn codex_parity_stamp_entry_for(entries: &[TarEntry]) -> TarEntry {
 pub(crate) fn codex_prepare_script() -> &'static str {
     r#"set -e
 install -d -o rmng -g rmng -m700 /home/rmng/.codex
+install -d -o rmng -g rmng -m755 /home/rmng/.config /home/rmng/.config/opencode
 mkdir -p /etc/rmng
 "#
 }
@@ -170,6 +282,18 @@ if ! runuser -u rmng -- bash -lc 'command -v codex >/dev/null 2>&1'; then
   runuser -u rmng -- bash -lc 'set -o pipefail; CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
     || { echo "codex install failed" >&2; exit 1; }
 fi
+"#
+}
+
+/// The group-proxy migration on an existing clone: delete the now-dead provider credential
+/// files. Under the group-proxy model CLIProxyAPI owns tokens and clones reach inference only
+/// through the `/cc` router (its env + agent configs are rewritten by the other reconcile
+/// steps), so a clone must never carry its own `~/.claude/.credentials.json` /
+/// `~/.codex/auth.json`. Idempotent (`rm -f`); combined with the additive env/config injection
+/// this makes an existing clone work after its agent restarts — no container recreate.
+fn dead_creds_cleanup_script() -> &'static str {
+    r#"set -e
+rm -f /home/rmng/.claude/.credentials.json /home/rmng/.codex/auth.json
 "#
 }
 
@@ -393,7 +517,8 @@ async fn control_mcp_url(app: &App) -> Option<String> {
 
 async fn ensure_codex_parity(app: &App, clone_id: &str) -> Result<bool> {
     let control_url = control_mcp_url(app).await;
-    let entries = codex_parity_entries(clone_id, control_url.as_deref());
+    let cc_base = crate::provision::cc_base_url(app).await;
+    let entries = codex_parity_entries(clone_id, control_url.as_deref(), cc_base.as_deref());
     let desired = desired_payload_hash(&entries);
     if read_stamp(app, clone_id, codex_parity_stamp_path(), "codex parity")
         .await?
@@ -412,6 +537,34 @@ async fn ensure_codex_parity(app: &App, clone_id: &str) -> Result<bool> {
         .upload_tar(clone_id, vec![codex_parity_stamp_entry(&desired)])
         .await
         .with_context(|| format!("{clone_id}: writing Codex parity stamp"))?;
+    Ok(true)
+}
+
+/// One-time group-proxy migration: remove the dead provider credential files from an existing
+/// clone (see [`dead_creds_cleanup_script`]). Stamped so it runs once; best-effort at the call
+/// site. Returns whether the cleanup ran this pass.
+async fn ensure_dead_creds_removed(app: &App, clone_id: &str) -> Result<bool> {
+    if read_stamp(app, clone_id, dead_creds_stamp_path(), "group-proxy migration")
+        .await?
+        .as_deref()
+        == Some("ok")
+    {
+        return Ok(false);
+    }
+    exec_ok(app, clone_id, dead_creds_cleanup_script(), "remove dead provider credentials").await?;
+    app.docker
+        .upload_tar(
+            clone_id,
+            vec![TarEntry {
+                path: dead_creds_stamp_path().to_string(),
+                data: b"ok\n".to_vec(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+            }],
+        )
+        .await
+        .with_context(|| format!("{clone_id}: writing group-proxy migration stamp"))?;
     Ok(true)
 }
 
@@ -509,6 +662,11 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         warned.remove(&format!("{id}:ssh"));
 
         let mut desired_env = control_env.clone();
+        // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY): recomputed
+        // into `/etc/environment` on every resync so an existing clone (created before the
+        // group-proxy model) picks it up without a recreate. Minted + persisted server-side;
+        // never serialized onto `Host`/state.
+        desired_env.extend(crate::provision::router_env_vars(app, id));
         if let Some(preset) = preset_for_host(&cfg, h) {
             desired_env.extend(crate::provision::preset_env_vars(preset));
         } else if h.preset_name.as_ref().is_some_and(|s| !s.trim().is_empty()) {
@@ -587,6 +745,27 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
+        // Group-proxy migration: strip the now-dead provider credential files so an existing
+        // clone stops using its own tokens and routes through the `/cc` proxy instead (its env
+        // + agent configs were rewritten above). Best-effort + stamped — a failure is logged
+        // and retried next pass, never fatal to the rest of the reconcile.
+        match ensure_dead_creds_removed(app, id).await {
+            Ok(true) => {
+                warned.remove(&format!("{id}:creds-migrate"));
+                tracing::info!(target: "clone_reconcile", "clone {id}: removed dead provider credentials (group-proxy migration)");
+            }
+            Ok(false) => {
+                warned.remove(&format!("{id}:creds-migrate"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:creds-migrate")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: group-proxy credential migration failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: group-proxy credential migration still failing: {e:#}");
+                }
+            }
+        }
+
         match ensure_payload_current(app, id).await {
             Ok(true) => {
                 warned.remove(&format!("{id}:payload"));
@@ -650,7 +829,7 @@ mod tests {
 
     #[test]
     fn codex_parity_entries_install_global_guidance_and_linear_mcp() {
-        let entries = codex_parity_entries("rmng-a", Some("http://rmng-control:9002"));
+        let entries = codex_parity_entries("rmng-a", Some("http://rmng-control:9002"), None);
         let agents = entries
             .iter()
             .find(|e| e.path == "home/rmng/.codex/AGENTS.md")
@@ -679,9 +858,54 @@ mod tests {
     }
 
     #[test]
+    fn codex_config_adds_active_rmng_provider_when_cc_base_present() {
+        let toml = codex_config_toml("rmng-a", None, Some("http://rmng-control:9000/cc/v1"));
+        assert!(toml.contains("model_provider = \"rmng\""));
+        assert!(toml.contains("[model_providers.rmng]"));
+        assert!(toml.contains("base_url = \"http://rmng-control:9000/cc/v1\""));
+        assert!(toml.contains("wire_api = \"responses\""));
+        assert!(toml.contains("env_key = \"RMNG_PROXY_KEY\""));
+        // HTTP+SSE only: the Responses-API WebSocket transport is explicitly disabled.
+        assert!(toml.contains("supports_websockets = false"));
+        // Default model is a GPT one so Claude models can't be picked from Codex.
+        assert!(toml.contains(&format!("model = \"{}\"", RMNG_GPT_MODELS[0])));
+        assert!(RMNG_GPT_MODELS[0].starts_with("gpt-"));
+        // Bare top-level keys must precede the first [table] (valid TOML).
+        let mp = toml.find("model_provider = ").unwrap();
+        let first_table = toml.find("[mcp_servers.desktop]").unwrap();
+        assert!(mp < first_table, "top-level keys must come before tables:\n{toml}");
+        // No cc base → the old behavior (no rmng provider at all).
+        let plain = codex_config_toml("rmng-a", None, None);
+        assert!(!plain.contains("model_providers.rmng"));
+        assert!(!plain.contains("model_provider"));
+    }
+
+    #[test]
+    fn opencode_config_is_gpt_only_openai_compatible_provider() {
+        assert!(opencode_config_json(None).is_none());
+        let json = opencode_config_json(Some("http://rmng-control:9000/cc/v1")).unwrap();
+        assert!(json.contains("\"npm\": \"@ai-sdk/openai-compatible\""));
+        assert!(json.contains("\"baseURL\": \"http://rmng-control:9000/cc/v1\""));
+        assert!(json.contains("{env:RMNG_PROXY_KEY}"));
+        assert!(json.contains(RMNG_GPT_MODELS[0]));
+        // Default model is set as "<provider>/<id>" pointing at the GPT default.
+        assert!(json.contains(&format!("\"model\": \"rmng/{}\"", RMNG_GPT_MODELS[0])));
+        // No Anthropic/Claude provider is generated for OpenCode.
+        let lower = json.to_lowercase();
+        assert!(!lower.contains("anthropic"));
+        assert!(!lower.contains("claude"));
+        // The parity entries carry the opencode file when a cc base is present.
+        let entries = codex_parity_entries("rmng-a", None, Some("http://rmng-control:9000/cc/v1"));
+        assert!(entries.iter().any(|e| e.path == "home/rmng/.config/opencode/opencode.json"));
+        // ...and omit it when there's no cc base.
+        let bare = codex_parity_entries("rmng-a", None, None);
+        assert!(!bare.iter().any(|e| e.path == "home/rmng/.config/opencode/opencode.json"));
+    }
+
+    #[test]
     fn codex_parity_stamp_hash_changes_when_config_changes() {
-        let original = codex_parity_stamp_entry_for(&codex_parity_entries("rmng-a", None));
-        let mut changed = codex_parity_entries("rmng-a", None);
+        let original = codex_parity_stamp_entry_for(&codex_parity_entries("rmng-a", None, None));
+        let mut changed = codex_parity_entries("rmng-a", None, None);
         changed
             .iter_mut()
             .find(|e| e.path == "home/rmng/.codex/config.toml")

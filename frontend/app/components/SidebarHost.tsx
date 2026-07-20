@@ -3,8 +3,6 @@ import { CSS } from "@dnd-kit/utilities";
 import { ArrowRight, EllipsisVertical, Terminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import chatgptLogo from "../assets/chatgpt.png";
-import claudeLogo from "../assets/claude.png";
 import { copyText } from "~/lib/clipboard";
 import { buildSshCommand } from "~/lib/ssh";
 import type { Host, Operation } from "~/lib/types";
@@ -27,34 +25,7 @@ function effectiveStatus(host: Host): { text: string; label: string } {
   return AGENT_STATUS[host.monitorState ?? "idle"];
 }
 
-/** How this clone's account for one provider was chosen + which account is actually in
- *  use, for a sidebar line. `mode` is the selection kind; `email` is the live account
- *  (absent for "none", or when auto/specific hasn't resolved one). Returns null when
- *  there's nothing to show (e.g. auto with no accounts configured). Provider-agnostic:
- *  the Claude and Codex lines both derive from this, off their respective host fields. */
-type AcctSel = { mode: "auto" | "group" | "specific" | "none"; group?: string; email?: string };
-function accountSelection(
-  accountEmail: string | null | undefined,
-  selection: string | null | undefined,
-  group: string | null | undefined,
-): AcctSel | null {
-  const email = accountEmail || undefined;
-  if (group) return { mode: "group", group, email };
-  if (selection === "none") return { mode: "none" };
-  if (selection === "auto") return email ? { mode: "auto", email } : null;
-  if (selection && !selection.startsWith("group:")) return { mode: "specific", email: email ?? selection };
-  // Legacy host (no selection recorded): show the account, without a mode badge.
-  return email ? { mode: "specific", email } : null;
-}
-
-/** Short badge for the non-default selection modes (specific renders as the plain
- *  email, so it — and legacy hosts — get no badge). Group shows the group name. */
-function selBadge(sel: AcctSel): string | null {
-  if (sel.mode === "auto") return "auto";
-  if (sel.mode === "none") return "none";
-  if (sel.mode === "group") return sel.group ?? "group";
-  return null; // specific
-}
+type Metric = { label: string; value: string; title: string };
 
 /** CPU (percent of the clone's cpu allowance) + memory-used strings, e.g.
  *  `{ cpu: "20%", mem: "3.2GB" }`. CPU rides the Claude line and MEM the Codex line;
@@ -85,64 +56,52 @@ function usageParts(
   return { cpu, mem };
 }
 
-function selTitle(sel: AcctSel, provider: string): string {
-  switch (sel.mode) {
-    case "group":
-      return `${provider} group: ${sel.group} (on ${sel.email ?? "?"})`;
-    case "auto":
-      return `${provider}: auto — server picks the best account${sel.email ? ` (on ${sel.email})` : ""}`;
-    case "none":
-      return `${provider}: none — no token installed`;
-    default:
-      return `${provider} account: ${sel.email} (fixed)`;
-  }
+/** The right-aligned usage metric (CPU or MEM) in a fixed-width tabular slot so the two
+ *  figures stack and line up across the two info lines. */
+function MetricSlot({ metric }: { metric: Metric }) {
+  return (
+    <span className="flex shrink-0 items-baseline gap-1 tabular-nums" title={metric.title}>
+      <span className="font-medium text-slate-400 dark:text-slate-500">{metric.label}</span>
+      <span className="w-8 text-right font-semibold text-slate-700 dark:text-slate-200">
+        {metric.value}
+      </span>
+    </span>
+  );
 }
 
-/** One provider's metadata line: the account (logo · optional mode badge · email, which
- *  truncates) on the left, and an optional right-aligned usage metric (CPU or MEM) in a
- *  fixed-width tabular slot so the Claude and Codex figures align. `sel === null` renders
- *  just a left spacer — e.g. a Codex-less clone whose Codex line still carries MEM. */
-function AccountLine({
-  sel,
-  logo,
-  provider,
-  metric,
-}: {
-  sel: AcctSel | null;
-  logo: string;
-  provider: string;
-  metric?: { label: string; value: string; title: string };
-}) {
+/** The clone's account-group binding on the left (a "group" badge + the group name, or a
+ *  muted "no group"), with an optional right-aligned usage metric. Provider-agnostic — a
+ *  group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns intra-group selection. */
+function BindingLine({ group, metric }: { group?: string; metric?: Metric }) {
   return (
     <div className="flex items-center gap-2 text-[10px]">
-      {sel ? (
-        <span
-          className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
-          title={selTitle(sel, provider)}
-        >
-          <img src={logo} alt={provider} className="h-3 w-3 shrink-0 object-contain" />
-          {selBadge(sel) ? (
+      <span
+        className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
+        title={group ? `account group: ${group}` : "no account group — no inference"}
+      >
+        {group ? (
+          <>
             <span className="shrink-0 rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-              {selBadge(sel)}
+              group
             </span>
-          ) : null}
-          {sel.email ? (
-            <span className="truncate">{sel.email}</span>
-          ) : sel.mode === "none" ? (
-            <span className="italic text-slate-300 dark:text-slate-600">no token</span>
-          ) : null}
-        </span>
-      ) : (
-        <span className="min-w-0 flex-1" />
-      )}
-      {metric ? (
-        <span className="flex shrink-0 items-baseline gap-1 tabular-nums" title={metric.title}>
-          <span className="font-medium text-slate-400 dark:text-slate-500">{metric.label}</span>
-          <span className="w-8 text-right font-semibold text-slate-700 dark:text-slate-200">
-            {metric.value}
-          </span>
-        </span>
-      ) : null}
+            <span className="truncate">{group}</span>
+          </>
+        ) : (
+          <span className="italic text-slate-300 dark:text-slate-600">no group</span>
+        )}
+      </span>
+      {metric ? <MetricSlot metric={metric} /> : null}
+    </div>
+  );
+}
+
+/** A metric-only line — a left spacer plus the right-aligned figure, so MEM stacks under
+ *  CPU even though the second info line carries no account text of its own. */
+function MetricLine({ metric }: { metric?: Metric }) {
+  return (
+    <div className="flex items-center gap-2 text-[10px]">
+      <span className="min-w-0 flex-1" />
+      {metric ? <MetricSlot metric={metric} /> : null}
     </div>
   );
 }
@@ -204,7 +163,7 @@ export interface SidebarHostProps {
   onDelete: () => void;
   /** Commit this managed clone to a new clone-source image. */
   onCommit: () => void;
-  /** Change this clone's Claude account/group. */
+  /** Change this clone's account-group binding. */
   onChangeAccount: () => void;
   /** Open the port-forward editor for this host. */
   onPortForward: () => void;
@@ -377,21 +336,20 @@ export function SidebarHost({
     ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, host.id)
     : undefined;
   const status = effectiveStatus(host);
-  const claudeSel = accountSelection(host.claudeAccountEmail, host.claudeSelection, host.claudeGroup);
-  const codexSel = accountSelection(host.codexAccountEmail, host.codexSelection, host.codexGroup);
+  const group = host.group || undefined;
   const usage = usageParts(stats, cloneCpus);
-  // CPU rides the Claude line, MEM the Codex line, so the two figures stack on the right
-  // across both lines. They share `usage`, so they appear and vanish together.
+  // CPU rides the binding line, MEM the line under it, so the two figures stack on the
+  // right. They share `usage`, so they appear and vanish together.
   const cpuMetric = usage
     ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of clone allowance)" }
     : undefined;
   const memMetric = usage
     ? { label: "MEM", value: usage.mem, title: "container memory used" }
     : undefined;
-  // Show a provider line when it has an account or its metric; drop it when empty so a
-  // Codex-less, stat-less clone doesn't sprout a blank row.
-  const showClaudeLine = !!claudeSel || !!cpuMetric;
-  const showCodexLine = !!codexSel || !!memMetric;
+  // Show the binding line when there's a group or a CPU figure; the MEM line only when
+  // there's a MEM figure — so a group-less, stat-less clone doesn't sprout blank rows.
+  const showBindingLine = !!group || !!cpuMetric;
+  const showMemLine = !!memMetric;
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: host.id, disabled: busy });
 
@@ -432,10 +390,11 @@ export function SidebarHost({
       }`}
     >
       <div className="min-w-0 flex-1">
-        {/* Top block: the Claude line and, under it, the Codex line — each an account on
-            the left with its usage figure (CPU on Claude, MEM on Codex) right-aligned in
-            a shared tabular slot. The ⋯ menu sits to the right, vertically centered so it
-            spans both lines. While busy, the op step replaces the two lines. */}
+        {/* Top block: the account-group binding line and, under it, a metric-only line —
+            the clone's group on the left with its usage figure (CPU on the binding line,
+            MEM under it) right-aligned in a shared tabular slot. The ⋯ menu sits to the
+            right, vertically centered so it spans both lines. While busy, the op step
+            replaces the two lines. */}
         <div className="mb-0.5 flex items-center gap-1">
           <div className="min-w-0 flex-1">
             {busy ? (
@@ -449,12 +408,8 @@ export function SidebarHost({
               </div>
             ) : (
               <>
-                {showClaudeLine ? (
-                  <AccountLine sel={claudeSel} logo={claudeLogo} provider="Claude" metric={cpuMetric} />
-                ) : null}
-                {showCodexLine ? (
-                  <AccountLine sel={codexSel} logo={chatgptLogo} provider="Codex" metric={memMetric} />
-                ) : null}
+                {showBindingLine ? <BindingLine group={group} metric={cpuMetric} /> : null}
+                {showMemLine ? <MetricLine metric={memMetric} /> : null}
               </>
             )}
           </div>

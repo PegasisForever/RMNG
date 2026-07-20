@@ -1,66 +1,41 @@
-// Change a clone's Claude and Codex account/group after creation (Codex picker shows
-// only when Codex accounts/groups are configured). Mirrors the clone modal's picker
-// (auto / account / group); binding to a group lets the server move the clone to
-// another member account when its current one exhausts (sticky otherwise).
+// Change a clone's account-group binding after creation. Under the group-proxy model a
+// clone binds exactly one pool (a CLIProxyAPI instance) or none; changing it is a pure
+// map update on the control-server — no clone-side change and no restart. CLIProxyAPI
+// owns intra-group account selection + failover.
 import { useEffect, useState } from "react";
 
-import { AccountGroupSelect } from "~/components/AccountGroupSelect";
+import { AccountGroupSelect, NO_GROUP } from "~/components/AccountGroupSelect";
 import { getConfig } from "~/lib/api";
-import type { ClaudeUsage, Host } from "~/lib/types";
-import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import type { Host } from "~/lib/types";
+import type { Group } from "~/lib/wire/Group";
 
-/** Current selection for a host: the verbatim selection when recorded ("auto", "none",
- *  `group:<name>`, or an email), else derived from its group/account for legacy hosts.
- *  A legacy host with no account is effectively tokenless, so showing "none" lets
- *  choosing "auto" submit the swap that enrolls it in rotation. */
+/** The host's current binding as a picker value: its group name, or "none". */
 export function currentValue(host: Host): string {
-  if (host.claudeSelection) return host.claudeSelection;
-  if (host.claudeGroup) return `group:${host.claudeGroup}`;
-  return host.claudeAccountEmail ?? "none";
-}
-
-export function currentCodexValue(host: Host): string {
-  if (host.codexSelection) return host.codexSelection;
-  if (host.codexGroup) return `group:${host.codexGroup}`;
-  return host.codexAccountEmail ?? "none";
+  return host.group ?? NO_GROUP;
 }
 
 export function ChangeAccountModal({
   host,
-  accounts,
-  codexAccounts,
   busy,
   onClose,
   onSubmit,
 }: {
   host: Host;
-  /** Assignable accounts (imported Claude accounts). */
-  accounts: ClaudeUsage[];
-  /** Assignable Codex accounts. */
-  codexAccounts: ClaudeUsage[];
   busy: boolean;
   onClose: () => void;
-  onSubmit: (claude: string, codex: string) => void;
+  /** The new binding: a group name, or `null` to clear it. */
+  onSubmit: (group: string | null) => void;
 }) {
   const [value, setValue] = useState(() => currentValue(host));
-  const [groups, setGroups] = useState<CloneGroup[]>([]);
-  const [codexValue, setCodexValue] = useState(() => currentCodexValue(host));
-  const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
 
   useEffect(() => {
     getConfig()
-      .then((c) => {
-        setGroups(c.cloneGroups);
-        setCodexGroups(c.codexGroups);
-      })
+      .then((c) => setGroups(c.groups))
       .catch(() => {
-        // Config unreachable — only accounts (no group options).
+        // Config unreachable — only the current value / "none" are offered.
       });
   }, []);
-
-  // The Codex picker only shows when Codex accounts/groups are configured; the title
-  // reflects both providers only when both are actually changeable here.
-  const showCodex = codexAccounts.length > 0 || codexGroups.length > 0;
 
   return (
     <div
@@ -75,36 +50,23 @@ export function ChangeAccountModal({
         }}
       >
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-          {showCodex ? "Accounts" : "Claude account"} · <span className="text-emerald-700 dark:text-emerald-400">{host.displayName ?? host.id}</span>
+          Account group ·{" "}
+          <span className="text-emerald-700 dark:text-emerald-400">{host.displayName ?? host.id}</span>
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Pick a single account, a group (stays on one account until it exhausts,
-          then swaps to the least-used member), or “none” to remove this clone’s token.
+          Bind this clone to an account pool, or “none” for no inference. The change is a
+          routing update — no clone restart, and it takes effect on the next request.
         </p>
 
         <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
-          Claude account
+          Account group
           <AccountGroupSelect
             groups={groups}
-            accounts={accounts}
             value={value}
             onChange={setValue}
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
           />
         </label>
-
-        {showCodex ? (
-          <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
-            Codex account
-            <AccountGroupSelect
-              groups={codexGroups}
-              accounts={codexAccounts}
-              value={codexValue}
-              onChange={setCodexValue}
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-            />
-          </label>
-        ) : null}
 
         <div className="mt-4 flex justify-end gap-2">
           <button
@@ -116,7 +78,7 @@ export function ChangeAccountModal({
           </button>
           <button
             type="button"
-            onClick={() => onSubmit(value, codexValue)}
+            onClick={() => onSubmit(value === NO_GROUP ? null : value)}
             disabled={busy}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >

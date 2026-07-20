@@ -128,33 +128,11 @@ pub struct Host {
     pub managed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
+    /// route through, via the control-server's `/cc` router. `None` = no inference. This is
+    /// the sole account binding — CLIProxyAPI owns intra-group account selection + refresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_account_email: Option<String>,
-    /// Name of the Claude group this clone is balanced within (sticky — it moves only
-    /// when its account exhausts); `None` when bound to a single fixed account. When
-    /// set, `claude_account_email` holds the current pick.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_group: Option<String>,
-    /// The operator's Claude *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`,
-    /// or an account email. Distinguishes an auto-managed clone (server picks the best
-    /// account and may hot-swap it) from one pinned to a fixed account or opted out of
-    /// a token entirely — `claude_account_email` alone can't tell these apart. `None` on
-    /// hosts created before this field / when no Claude account is configured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_selection: Option<String>,
-    /// Email of the imported Codex (ChatGPT) account whose token is written into this
-    /// clone's `~/.codex/auth.json`. Independent of `claude_account_email` — a clone can
-    /// hold both. `None` when no Codex account is assigned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_account_email: Option<String>,
-    /// Name of the Codex group this clone is balanced within (sticky, like `claude_group`);
-    /// `None` when bound to a single fixed Codex account.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_group: Option<String>,
-    /// The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
-    /// an account email — the Codex twin of `claude_selection`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_selection: Option<String>,
+    pub group: Option<String>,
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
     /// string: the workspace set is config (Settings → Linear API keys), not an enum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -357,6 +335,19 @@ pub struct ClaudeUsage {
     pub reset_credits: Option<i64>,
 }
 
+/// Per-group usage view: one account pool (a CLIProxyAPI instance) plus the accounts
+/// authenticated into its `auth-dir`, each with its 5h/7d/fable windows. The by-group
+/// replacement for the flat `claude_accounts` list — the same email can appear under
+/// several groups (independent token sets per instance), so ids are group-scoped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct GroupUsage {
+    pub name: String,
+    #[serde(default)]
+    pub accounts: Vec<ClaudeUsage>,
+}
+
 /// One recorded auto-consumed (or reserved) Codex reset. Persisted in `ControlState`
 /// so a server restart can't re-spend on an account already reset this 7d window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -396,9 +387,11 @@ pub struct ControlState {
     pub hosts: Vec<Host>,
     #[serde(default)]
     pub operations: Vec<Operation>,
-    /// Per-Claude-account usage view (no tokens).
+    /// Per-group usage view (no tokens) under the group-proxy model: for each account pool,
+    /// the accounts authenticated into its CLIProxyAPI instance's `auth-dir`, with 5h/7d/fable
+    /// windows. Refreshed by the by-group usage poller.
     #[serde(default)]
-    pub claude_accounts: Vec<ClaudeUsage>,
+    pub usage_groups: Vec<GroupUsage>,
     /// Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
     /// account per week, so it belongs in `state.json` (unlike per-tick stats).
     #[serde(default)]
@@ -464,7 +457,7 @@ mod tests {
         assert_eq!(state.hosts[0].port, 3389); // default
         assert_eq!(state.hosts[1].port, 3390);
         assert!(state.operations.is_empty());
-        assert!(state.claude_accounts.is_empty());
+        assert!(state.usage_groups.is_empty());
     }
 
     #[test]
@@ -495,14 +488,14 @@ mod tests {
             host: "1.2.3.4".into(),
             port: 3389,
             gdm_username: Some("u".into()),
-            claude_account_email: Some("a@b.c".into()),
+            group: Some("team".into()),
             linear_workspace: Some("we".into()),
             monitor_state: Some(MonitorState::Working),
             ..Default::default()
         };
         let v = serde_json::to_value(&h).unwrap();
         assert!(v.get("gdm_username").is_some(), "gdm_username stays snake_case");
-        assert_eq!(v["claudeAccountEmail"], "a@b.c");
+        assert_eq!(v["group"], "team");
         assert_eq!(v["linearWorkspace"], "we");
         assert_eq!(v["monitorState"], "working");
         // omitted optionals are not serialized
@@ -544,30 +537,24 @@ mod tests {
     }
 
     #[test]
-    fn host_codex_fields_camelcase() {
+    fn host_group_binding_camelcase() {
+        // The sole account binding is the group-proxy `group`.
         let h = Host {
             id: "h".into(),
             host: "1.2.3.4".into(),
             port: 3389,
-            claude_account_email: Some("a@b.c".into()),
-            codex_account_email: Some("z@openai.com".into()),
-            codex_group: Some("team".into()),
-            codex_selection: Some("group:team".into()),
+            group: Some("team".into()),
             ..Default::default()
         };
         let v = serde_json::to_value(&h).unwrap();
-        assert_eq!(v["codexAccountEmail"], "z@openai.com");
-        assert_eq!(v["codexGroup"], "team");
-        assert_eq!(v["codexSelection"], "group:team");
-        // Claude fields still present and untouched.
-        assert_eq!(v["claudeAccountEmail"], "a@b.c");
-        // Omitted codex fields are not serialized.
+        assert_eq!(v["group"], "team");
+        // Omitted when None.
         let bare = Host { id: "h2".into(), ..Default::default() };
         let bv = serde_json::to_value(&bare).unwrap();
-        assert!(bv.get("codexAccountEmail").is_none());
+        assert!(bv.get("group").is_none());
         // Round-trips.
         let back: Host = serde_json::from_value(v).unwrap();
-        assert_eq!(back.codex_selection.as_deref(), Some("group:team"));
+        assert_eq!(back.group.as_deref(), Some("team"));
     }
 
     #[test]
@@ -575,25 +562,28 @@ mod tests {
         let st = ControlState {
             selected: Some("h".into()),
             monitors: vec![MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }],
-            claude_accounts: vec![ClaudeUsage {
-                id: "a@b|org".into(),
-                email: "a@b".into(),
-                provider: Some(Provider::Claude),
-                active: true,
-                assignable: Some(true),
-                error: None,
-                stale: None,
-                last_updated: 123,
-                five_hour: Some(ClaudeUsageWindow { pct: 12.5, resets_at: None }),
-                seven_day: None,
-                fable: None,
-                spend: None,
-                reset_credits: Some(3),
+            usage_groups: vec![GroupUsage {
+                name: "team".into(),
+                accounts: vec![ClaudeUsage {
+                    id: "team|a@b".into(),
+                    email: "a@b".into(),
+                    provider: Some(Provider::Claude),
+                    active: true,
+                    assignable: Some(true),
+                    error: None,
+                    stale: None,
+                    last_updated: 123,
+                    five_hour: Some(ClaudeUsageWindow { pct: 12.5, resets_at: None }),
+                    seven_day: None,
+                    fable: None,
+                    spend: None,
+                    reset_credits: Some(3),
+                }],
             }],
             ..Default::default()
         };
         let s = serde_json::to_string(&st).unwrap();
-        assert!(s.contains("\"claudeAccounts\""));
+        assert!(s.contains("\"usageGroups\""));
         assert!(s.contains("\"fiveHour\""));
         assert!(s.contains("\"resetCredits\":3"));
         let back: ControlState = serde_json::from_str(&s).unwrap();

@@ -1,9 +1,11 @@
-import { ChevronDown, ChevronRight, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import type { ClaudeUsage, GroupUsage } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
+import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 import { ImagesSection } from "~/components/ImagesSection";
@@ -97,10 +99,11 @@ function Secret({
 }
 
 export interface SettingsPanelProps {
-  /** Emails of the imported Claude accounts (from live state) — the pool a group can draw from. */
-  accountEmails: string[];
-  /** Emails of the imported Codex accounts (from live state) — the pool a Codex group can draw from. */
-  codexAccountEmails: string[];
+  /** Configured account groups (authoritative names; updates immediately on create/delete). */
+  groups: Group[];
+  /** Live per-group usage view (from `ControlState.usageGroups`) — the authenticated
+   *  accounts in each group, streamed over SSE. */
+  usageGroups: GroupUsage[];
   onClose: () => void;
   // --- injected server calls (no API logic lives in this component, so it's
   //     renderable in isolation — e.g. Storybook — with mocked data) ---
@@ -123,62 +126,148 @@ export interface SettingsPanelProps {
   pullBusy: boolean;
   onPullTemplate: (reference: string) => void;
   onDeleteImage: (reference: string) => void;
-  /** Delete an imported Claude account by email (removes its token; reassigns clones). */
-  onDeleteAccount: (email: string) => void;
-  /** Delete an imported Codex account by email. */
-  onDeleteCodexAccount: (email: string) => void;
+  /** Create an account group by name (spawns its CLIProxyAPI instance). */
+  onCreateGroup: (name: string) => void;
+  /** Delete an account group. */
+  onDeleteGroup: (name: string) => void;
+  /** Add an account to a group (opens the OAuth login flow). */
+  onAddAccount: (group: string) => void;
+  /** Remove an authenticated account from a group. */
+  onDeleteAccount: (group: string, account: ClaudeUsage) => void;
 }
 
-/** Imported accounts as a removable list. Each row is one email + a trash button; the
- *  delete is confirmed (it removes the stored token) and delegated to `onDelete`. */
-function AccountList({
-  emails,
-  onDelete,
+/** The account-group manager: create/delete pools, add accounts via OAuth, and remove
+ *  authenticated accounts. Each group is one CLIProxyAPI instance; membership is derived
+ *  from the instance's auth-dir (live via `usageGroups`), not stored config. */
+function GroupManager({
+  groups,
+  usageGroups,
+  onCreateGroup,
+  onDeleteGroup,
+  onAddAccount,
+  onDeleteAccount,
 }: {
-  emails: string[];
-  onDelete: (email: string) => void;
+  groups: Group[];
+  usageGroups: GroupUsage[];
+  onCreateGroup: (name: string) => void;
+  onDeleteGroup: (name: string) => void;
+  onAddAccount: (group: string) => void;
+  onDeleteAccount: (group: string, account: ClaudeUsage) => void;
 }) {
-  if (emails.length === 0) {
-    return (
-      <p className="text-xs text-slate-400 dark:text-slate-500">
-        None imported yet — use “Import account” on a signed-in clone.
-      </p>
-    );
-  }
+  const [newName, setNewName] = useState("");
+  const usageByName = new Map(usageGroups.map((g) => [g.name, g]));
+
+  const create = () => {
+    const name = newName.trim();
+    if (!name) return;
+    onCreateGroup(name);
+    setNewName("");
+  };
+
   return (
-    <ul className="space-y-1.5">
-      {emails.map((email) => (
-        <li
-          key={email}
-          className="flex items-center justify-between rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200"
+    <div className="space-y-3">
+      {groups.length === 0 ? (
+        <p className="text-xs text-slate-400 dark:text-slate-500">No groups.</p>
+      ) : null}
+      {groups.map((g) => {
+        const accounts = usageByName.get(g.name)?.accounts ?? [];
+        return (
+          <div key={g.name} className="rounded border border-slate-200 dark:border-slate-700 p-3">
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-700 dark:text-slate-200">
+                {g.name}
+              </span>
+              <button
+                type="button"
+                onClick={() => onAddAccount(g.name)}
+                className="inline-flex items-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+              >
+                <Plus className="size-3.5" /> Add account
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Delete group "${g.name}"?\n\nStops its proxy instance. Clones bound to it lose inference until reassigned; the on-disk credentials are left in place.`,
+                    )
+                  )
+                    onDeleteGroup(g.name);
+                }}
+                title="delete group"
+                aria-label={`delete group ${g.name}`}
+                className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+            {accounts.length === 0 ? (
+              <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
+                No accounts yet — use “Add account” to log one in.
+              </p>
+            ) : (
+              <ul className="mt-2 space-y-1.5">
+                {accounts.map((a) => (
+                  <li
+                    key={a.id}
+                    className="flex items-center justify-between rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200"
+                  >
+                    <span className="min-w-0 flex-1 truncate">
+                      <span className="mr-1.5 rounded bg-slate-100 px-1 text-[10px] font-semibold uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                        {a.provider === "codex" ? "codex" : "claude"}
+                      </span>
+                      {a.email}
+                    </span>
+                    <button
+                      type="button"
+                      title="remove account from group"
+                      aria-label={`remove ${a.email} from ${g.name}`}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Remove ${a.email} from "${g.name}"?\n\nDeletes its credential from this group's proxy. Re-adding needs a fresh OAuth login.`,
+                          )
+                        )
+                          onDeleteAccount(g.name, a);
+                      }}
+                      className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+      <div className="flex items-center gap-2">
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") create();
+          }}
+          placeholder="new group name (A–Z, 0–9, . _ -)"
+          spellCheck={false}
+          className={input}
+        />
+        <button
+          type="button"
+          onClick={create}
+          disabled={!newName.trim()}
+          className="shrink-0 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40"
         >
-          <span className="truncate">{email}</span>
-          <button
-            type="button"
-            title="delete account"
-            aria-label={`delete ${email}`}
-            onClick={() => {
-              if (
-                window.confirm(
-                  `Delete ${email}?\n\nThis removes its stored token (re-adding needs a fresh import). Clones running it are reassigned to another account; a clone pinned to it must be reassigned first.`,
-                )
-              ) {
-                onDelete(email);
-              }
-            }}
-            className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
-        </li>
-      ))}
-    </ul>
+          + Add group
+        </button>
+      </div>
+    </div>
   );
 }
 
 export function SettingsPanel({
-  accountEmails,
-  codexAccountEmails,
+  groups,
+  usageGroups,
   onClose,
   getConfig,
   putConfig,
@@ -191,8 +280,10 @@ export function SettingsPanel({
   pullBusy,
   onPullTemplate,
   onDeleteImage,
+  onCreateGroup,
+  onDeleteGroup,
+  onAddAccount,
   onDeleteAccount,
-  onDeleteCodexAccount,
 }: SettingsPanelProps) {
   const [cfg, setCfg] = useState<AppConfigRedacted | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -257,7 +348,6 @@ export function SettingsPanel({
       agentPlaybook: string;
     }[]
   >([]);
-  const [claudeGroups, setClaudeGroups] = useState<{ name: string; accounts: string[] }[]>([]);
   const [hostnamePrefix, setHostnamePrefix] = useState("");
   const [templateReference, setTemplateReference] = useState("");
   const [subnet, setSubnet] = useState("");
@@ -273,7 +363,6 @@ export function SettingsPanel({
     usagePolling: true,
     autoReset: false,
   });
-  const [codexGroups, setCodexGroups] = useState<{ name: string; accounts: string[] }[]>([]);
   const [listen, setListen] = useState({
     web: 9000,
     video: 9001,
@@ -317,7 +406,6 @@ export function SettingsPanel({
       pollSecs: Number(c.codex.pollSecs),
       pinnedEmail: c.codex.pinnedEmail ?? "",
     });
-    setCodexGroups(c.codexGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })));
     setListen({ ...c.listen });
     setAgentPort(c.agentPort);
     setDataDir(c.dataDir);
@@ -340,7 +428,6 @@ export function SettingsPanel({
         agentPlaybook: p.agentPlaybook,
       })),
     );
-    setClaudeGroups(c.cloneGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })));
   }
 
   // Seed the form from the server ONCE, when the panel opens. This must NOT depend on
@@ -392,44 +479,6 @@ export function SettingsPanel({
   const setLayoutPresetMonitors = (i: number, mons: Mon[]) =>
     setLayoutPresets((ps) => ps.map((p, j) => (j === i ? { ...p, monitors: mons } : p)));
 
-  // Claude group editors (a group = a name + a set of member account emails).
-  const addGroup = () => setClaudeGroups((gs) => [...gs, { name: "", accounts: [] }]);
-  const rmGroup = (i: number) => setClaudeGroups((gs) => gs.filter((_, j) => j !== i));
-  const setGroupName = (i: number, name: string) =>
-    setClaudeGroups((gs) => gs.map((g, j) => (j === i ? { ...g, name } : g)));
-  const toggleGroupAccount = (i: number, email: string) =>
-    setClaudeGroups((gs) =>
-      gs.map((g, j) =>
-        j === i
-          ? {
-              ...g,
-              accounts: g.accounts.includes(email)
-                ? g.accounts.filter((e) => e !== email)
-                : [...g.accounts, email],
-            }
-          : g,
-      ),
-    );
-
-  // Codex group editors.
-  const addCodexGroup = () => setCodexGroups((gs) => [...gs, { name: "", accounts: [] }]);
-  const rmCodexGroup = (i: number) => setCodexGroups((gs) => gs.filter((_, j) => j !== i));
-  const setCodexGroupName = (i: number, name: string) =>
-    setCodexGroups((gs) => gs.map((g, j) => (j === i ? { ...g, name } : g)));
-  const toggleCodexGroupAccount = (i: number, email: string) =>
-    setCodexGroups((gs) =>
-      gs.map((g, j) =>
-        j === i
-          ? {
-              ...g,
-              accounts: g.accounts.includes(email)
-                ? g.accounts.filter((e) => e !== email)
-                : [...g.accounts, email],
-            }
-          : g,
-      ),
-    );
-
   async function save() {
     setSaving(true);
     setError(null);
@@ -459,9 +508,6 @@ export function SettingsPanel({
         },
         claude: { ...claude, pinnedEmail: claude.pinnedEmail || null },
         codex: { ...codex, pinnedEmail: codex.pinnedEmail || null },
-        codexGroups: codexGroups
-          .filter((g) => g.name.trim())
-          .map((g) => ({ name: g.name.trim(), accounts: [...new Set(g.accounts)] })),
         listen,
         agentPort,
         dataDir,
@@ -480,9 +526,6 @@ export function SettingsPanel({
             vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
             agentPlaybook: p.agentPlaybook,
           })),
-        cloneGroups: claudeGroups
-          .filter((g) => g.name.trim())
-          .map((g) => ({ name: g.name.trim(), accounts: [...new Set(g.accounts)] })),
       };
       const res = await putConfig(patch);
       load(res.config); // re-seed from the server's redacted view; clears write-only inputs
@@ -902,68 +945,22 @@ export function SettingsPanel({
               </div>
             </Section>
 
-            {/* Imported Claude accounts — the pool clones/groups draw from; deletable here. */}
+            {/* Account groups — the group-proxy manager. Each group is one CLIProxyAPI
+                instance (a provider-agnostic pool). Accounts enter via OAuth login; the
+                authed list is live from `usageGroups`. */}
             <Section
-              title="Claude accounts"
-              hint="Imported accounts available to clones and groups. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
+              title="Account groups"
+              effect="immediate"
+              hint="Each group is one proxy instance (a pool of Claude and/or GPT accounts). A clone binds one group; the instance owns account selection, per-model quota failover, and OAuth refresh. Add accounts by logging them in; membership lives in the instance, not config."
             >
-              <AccountList emails={accountEmails} onDelete={onDeleteAccount} />
-            </Section>
-
-            {/* Claude groups (named account pools; sticky — a clone moves only when its account exhausts). */}
-            <Section
-              title="Claude groups"
-              hint="A pool of accounts. A clone bound to a group keeps its account (preserving its prompt cache) until that account is exhausted (80% 5h or 95% 7d), then moves to the least-used member."
-            >
-              <div className="space-y-3">
-                {claudeGroups.length === 0 ? (
-                  <p className="text-xs text-slate-400 dark:text-slate-500">No groups.</p>
-                ) : null}
-                {claudeGroups.map((g, i) => (
-                  <div key={i} className="rounded border border-slate-200 dark:border-slate-700 p-3">
-                    <div className="flex items-center gap-2">
-                      <input
-                        value={g.name}
-                        onChange={(e) => setGroupName(i, e.target.value)}
-                        placeholder="group name"
-                        className={input}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => rmGroup(i)}
-                        className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                    {accountEmails.length === 0 ? (
-                      <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
-                        Import some accounts first to add them to a group.
-                      </p>
-                    ) : (
-                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
-                        {accountEmails.map((email) => (
-                          <label key={email} className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-                            <input
-                              type="checkbox"
-                              checked={g.accounts.includes(email)}
-                              onChange={() => toggleGroupAccount(i, email)}
-                            />
-                            {email}
-                          </label>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  onClick={addGroup}
-                  className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-                >
-                  + Add group
-                </button>
-              </div>
+              <GroupManager
+                groups={groups}
+                usageGroups={usageGroups}
+                onCreateGroup={onCreateGroup}
+                onDeleteGroup={onDeleteGroup}
+                onAddAccount={onAddAccount}
+                onDeleteAccount={onDeleteAccount}
+              />
             </Section>
 
             {/* Codex. */}
@@ -1001,70 +998,6 @@ export function SettingsPanel({
                   Auto-use Codex reset credits (when every account is &gt;95% weekly and none
                   reset within 24h, spend one banked reset to bring an account back)
                 </label>
-              </div>
-            </Section>
-
-            {/* Imported Codex accounts — deletable here (twin of the Claude accounts list). */}
-            <Section
-              title="Codex accounts"
-              hint="Imported Codex accounts. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
-            >
-              <AccountList emails={codexAccountEmails} onDelete={onDeleteCodexAccount} />
-            </Section>
-
-            {/* Codex groups (named account pools). */}
-            <Section
-              title="Codex groups"
-              hint="A pool of Codex accounts. A clone bound to a group keeps its account until that account passes 95% of its weekly (7d) limit, then moves to the least-used member."
-            >
-              <div className="space-y-3">
-                {codexGroups.length === 0 ? (
-                  <p className="text-xs text-slate-400 dark:text-slate-500">No groups.</p>
-                ) : null}
-                {codexGroups.map((g, i) => (
-                  <div key={i} className="rounded border border-slate-200 dark:border-slate-700 p-3">
-                    <div className="flex items-center gap-2">
-                      <input
-                        value={g.name}
-                        onChange={(e) => setCodexGroupName(i, e.target.value)}
-                        placeholder="group name"
-                        className={input}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => rmCodexGroup(i)}
-                        className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                    {codexAccountEmails.length === 0 ? (
-                      <p className="mt-2 text-xs text-slate-400">
-                        Import some Codex accounts first to add them to a group.
-                      </p>
-                    ) : (
-                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
-                        {codexAccountEmails.map((email) => (
-                          <label key={email} className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-                            <input
-                              type="checkbox"
-                              checked={g.accounts.includes(email)}
-                              onChange={() => toggleCodexGroupAccount(i, email)}
-                            />
-                            {email}
-                          </label>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  onClick={addCodexGroup}
-                  className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-                >
-                  + Add group
-                </button>
               </div>
             </Section>
 

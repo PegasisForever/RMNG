@@ -10,6 +10,7 @@ mod assets;
 mod buildinfra;
 mod chat;
 mod claude;
+mod cliproxy;
 mod clone_reconcile;
 mod clone_ops;
 mod codex;
@@ -177,18 +178,15 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Background loops: Claude usage poller, group-rotation loop, per-host agent-state
-    // poller, the clone-home reconciler (the Docker-port successor to the Proxmox-era sshfs
-    // mount loop — it symlinks data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so
-    // every clone's home is browsable in one place; needs the container's `pid: "host"`),
-    // the smbd supervisor that serves that same directory as the `clones` SMB share
-    // (port 445), so the homes are browsable over `smb://<host>/clones` too, and the /dev/shm
-    // reconciler that keeps each running clone's shared memory at LXC parity (~50% of RAM) so
-    // Chromium/Electron apps don't exhaust Docker's 64 MB default (also needs `pid: "host"`).
-    tokio::spawn(claude::run_poller(app.clone()));
-    tokio::spawn(claude::run_rotator(app.clone()));
-    tokio::spawn(codex::run_poller(app.clone()));
-    tokio::spawn(codex::run_rotator(app.clone()));
+    // Background loops: the per-host agent-state monitor poller, the clone-home reconciler
+    // (the Docker-port successor to the Proxmox-era sshfs mount loop — it symlinks
+    // data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so every clone's home is browsable
+    // in one place; needs the container's `pid: "host"`), the smbd supervisor that serves that
+    // same directory as the `clones` SMB share (port 445), so the homes are browsable over
+    // `smb://<host>/clones` too, and the /dev/shm reconciler that keeps each running clone's
+    // shared memory at LXC parity (~50% of RAM) so Chromium/Electron apps don't exhaust
+    // Docker's 64 MB default (also needs `pid: "host"`). Claude/Codex account usage is polled
+    // by-group via `cliproxy::run_usage_poller` (below), which owns all account display now.
     tokio::spawn(monitor::run(app.clone()));
     tokio::spawn(clone_reconcile::run(app.clone()));
     tokio::spawn(homes::run(app.clone()));
@@ -196,6 +194,11 @@ async fn main() -> Result<()> {
     tokio::spawn(buildinfra::run(app.clone()));
     tokio::spawn(smb::run(app.clone()));
     tokio::spawn(ssh::run(app.clone()));
+    // Group-proxy supervisor: one CLIProxyAPI instance per account group.
+    tokio::spawn(cliproxy::run(app.clone()));
+    // By-group usage poller: reads each instance's auth-dir tokens and publishes
+    // `ControlState.usage_groups` (the old flat claude_accounts pollers stay running).
+    tokio::spawn(cliproxy::run_usage_poller(app.clone()));
 
     // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
     mediaplane::spawn(app.clone());

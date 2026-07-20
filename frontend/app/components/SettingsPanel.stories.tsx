@@ -2,10 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
 import { SettingsPanel } from "./SettingsPanel";
-import { accountEmails, appConfig, images } from "~/stories/fixtures";
-
-/** Codex account emails for the Codex groups editor (empty pool in stories). */
-const codexAccountEmails: string[] = [];
+import { appConfig, groups, images, usageGroups } from "~/stories/fixtures";
 
 // Mocked server calls — the component never imports the real API, so a story just
 // injects these. `fn(impl)` both runs the implementation and records the call in the
@@ -31,8 +28,8 @@ const meta = {
   component: SettingsPanel,
   parameters: { layout: "fullscreen" },
   args: {
-    accountEmails,
-    codexAccountEmails,
+    groups,
+    usageGroups,
     onClose: fn(),
     getConfig: getConfig(),
     putConfig: putConfig(),
@@ -45,8 +42,10 @@ const meta = {
     pullBusy: false,
     onPullTemplate: fn(),
     onDeleteImage: fn(),
+    onCreateGroup: fn(),
+    onDeleteGroup: fn(),
+    onAddAccount: fn(),
     onDeleteAccount: fn(),
-    onDeleteCodexAccount: fn(),
   },
 } satisfies Meta<typeof SettingsPanel>;
 
@@ -66,7 +65,7 @@ export const PreSetup: Story = {
   args: { getConfig: fn(async () => ({ ...appConfig, setupComplete: false })) },
 };
 
-/** No Claude accounts imported yet — groups can't add members. */
-export const NoAccounts: Story = {
-  args: { accountEmails: [] },
+/** No account groups configured yet — the manager shows the empty state. */
+export const NoGroups: Story = {
+  args: { groups: [], usageGroups: [] },
 };

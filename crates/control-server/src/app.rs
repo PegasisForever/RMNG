@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 use wire::AppConfig;
 
 use crate::chat::ChatState;
-use crate::claude::ClaudeStore;
+use crate::cliproxy::CliProxyManager;
 use crate::docker::DockerCtl;
 use crate::state::StateStore;
 
@@ -16,10 +16,9 @@ pub struct App {
     /// Live config (mutable via `/api/config` in Phase 2; read per use elsewhere).
     pub cfg: Arc<RwLock<AppConfig>>,
     pub http: reqwest::Client,
-    /// Claude secret store + usage cache.
-    pub claude: Arc<ClaudeStore>,
-    /// Codex secret store + usage cache (sibling of `claude`).
-    pub codex: Arc<crate::codex::CodexStore>,
+    /// Group-proxy supervisor: per-group CLIProxyAPI instance lifecycle, per-clone router
+    /// keys, and management helpers (see [`crate::cliproxy`]).
+    pub cliproxy: Arc<CliProxyManager>,
     /// Per-host chat fan-out + in-flight state.
     pub chat: Arc<ChatState>,
     /// Media plane shared state (clone conns + latest frames).
@@ -40,8 +39,7 @@ pub struct App {
 
 impl App {
     pub fn new(store: Arc<StateStore>, cfg: AppConfig) -> Self {
-        let claude = Arc::new(ClaudeStore::load(&cfg.data_dir));
-        let codex = Arc::new(crate::codex::CodexStore::load(&cfg.data_dir));
+        let cliproxy = Arc::new(CliProxyManager::load(&cfg.data_dir));
         // `DockerCtl::connect` is infallible and I/O-free: even a missing socket FILE
         // (bare `docker run` without the sock bind) boots the server — the failure is
         // surfaced per call and by `self_setup`'s env report, so the wizard shows it.
@@ -53,8 +51,7 @@ impl App {
                 .user_agent("rmng-control-server")
                 .build()
                 .expect("reqwest client"),
-            claude,
-            codex,
+            cliproxy,
             chat: Arc::new(ChatState::default()),
             media: Arc::new(crate::mediaplane::MediaHandle::default()),
             docker,
@@ -71,6 +68,7 @@ impl App {
     /// A minimal App backed by a throwaway temp data dir, for unit tests in sibling
     /// modules (state + stores are file-isolated; Docker is constructed I/O-free).
     #[cfg(test)]
+    #[allow(dead_code)] // reusable test fixture; sibling-module tests may use it
     pub fn test_app() -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);

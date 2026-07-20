@@ -19,7 +19,7 @@ import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
 import { SidebarHost } from "~/components/SidebarHost";
 import { formatBytes } from "~/lib/format";
-import type { ClaudeUsage, Host, Operation } from "~/lib/types";
+import type { GroupUsage, Host, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 
@@ -63,8 +63,8 @@ export function formatHostsUsageSummary(
 export interface SidebarProps {
   /** Off-canvas drawer state (< lg); the panel is static + always visible ≥ lg. */
   open?: boolean;
-  /** Claude accounts usage list (from `ControlState.claudeAccounts`). */
-  accounts: ClaudeUsage[];
+  /** Account pools + their usage (configured groups merged with `ControlState.usageGroups`). */
+  usageGroups: GroupUsage[];
   /** Hosts in display order — already reconciled + reordered by the container. */
   hosts: Host[];
   /** Live per-host CPU/RAM map (the volatile `stats` SSE event). */
@@ -93,13 +93,17 @@ export interface SidebarProps {
 
   onOpenSettings: () => void;
   onOpenClone: () => void;
-  onRefreshClaude: () => void;
-  onImportAccount: () => void;
+  /** Create a new account group. */
+  onCreateGroup: () => void;
+  /** Add an account to a group (opens the OAuth login flow). */
+  onAddAccount: (group: string) => void;
+  /** Delete an account group. */
+  onDeleteGroup: (group: string) => void;
   onSelectHost: (host: Host) => void;
   onDeleteHost: (host: Host) => void;
   /** Commit a managed clone to a new clone-source image. */
   onCommitHost: (host: Host) => void;
-  /** Change a managed clone's Claude account / group. */
+  /** Change a managed clone's account-group binding. */
   onChangeAccountHost: (host: Host) => void;
   /** Open the port-forward editor for a host. */
   onPortForwardHost: (host: Host) => void;
@@ -107,13 +111,13 @@ export interface SidebarProps {
   onReorder: (nextIds: string[]) => void;
 }
 
-/** The left host-selection panel: Claude accounts, the drag-reorderable host list,
+/** The left host-selection panel: account groups, the drag-reorderable host list,
  *  and running-operation progress. Purely presentational — every server interaction
  *  is a prop callback, so it renders standalone (e.g. in Storybook) with mocked data.
  *  Off-canvas drawer < lg, static ≥ lg. */
 export function Sidebar({
   open = false,
-  accounts,
+  usageGroups,
   hosts,
   stats,
   forwards = {},
@@ -127,8 +131,9 @@ export function Sidebar({
   onActivateLayout,
   onOpenSettings,
   onOpenClone,
-  onRefreshClaude,
-  onImportAccount,
+  onCreateGroup,
+  onAddAccount,
+  onDeleteGroup,
   onSelectHost,
   onDeleteHost,
   onCommitHost,
@@ -212,9 +217,10 @@ export function Sidebar({
       ) : null}
 
       <ClaudeAccountsPanel
-        accounts={accounts}
-        onRefresh={onRefreshClaude}
-        onImport={onImportAccount}
+        groups={usageGroups}
+        onCreateGroup={onCreateGroup}
+        onAddAccount={onAddAccount}
+        onDeleteGroup={onDeleteGroup}
       />
 
       <div>

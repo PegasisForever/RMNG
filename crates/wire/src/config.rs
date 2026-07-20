@@ -158,18 +158,18 @@ pub struct PresetRedacted {
     pub agent_playbook: String,
 }
 
-/// A named pool of clone accounts (by email). A clone bound to a group sticks to its
-/// account until that account exceeds the 5h usage cap (or leaves the group), then
-/// moves to the group's least-loaded / least-used member — sticky, because an account
-/// switch cold-starts the clone's prompt cache. Carries no secrets — just a name +
-/// member emails — so it's TS-exported and shown verbatim in the redacted config.
+/// A named account pool backed by one CLIProxyAPI instance (see the group-proxy
+/// redesign, `docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`). A pool is
+/// provider-agnostic — it may hold Claude and/or GPT accounts, added by OAuth login into
+/// that instance's `auth-dir`. A clone binds exactly one group; the control-server routes
+/// every request from that clone's agents to the group's instance. Carries no secrets —
+/// just a name — so it's TS-exported and shown verbatim in the redacted config. Membership
+/// is NOT stored here; it's derived from the instance's `auth-dir` at runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct CloneGroup {
+pub struct Group {
     pub name: String,
-    #[serde(default)]
-    pub accounts: Vec<String>,
 }
 
 /// Docker backend settings for the clone fleet. No secrets — the local daemon is
@@ -379,14 +379,12 @@ pub struct AppConfig {
     pub claude: ClaudeConfig,
     #[serde(default)]
     pub codex: CodexConfig,
-    /// Named account pools a clone can be bound to for rotation (members are
-    /// emails of imported accounts, from the server's `claude-accounts.json`).
+    /// Provider-agnostic account pools, one CLIProxyAPI instance per group (the group-proxy
+    /// redesign). A clone binds exactly one group; the control-server routes every request
+    /// from that clone's agents to the group's instance, which owns account selection +
+    /// OAuth refresh.
     #[serde(default)]
-    pub clone_groups: Vec<CloneGroup>,
-    /// Named Codex account pools a clone can be bound to for rotation (members are emails
-    /// of imported Codex accounts, from the server's `codex-accounts.json`).
-    #[serde(default)]
-    pub codex_groups: Vec<CloneGroup>,
+    pub groups: Vec<Group>,
     /// Clone presets (env vars + Linear key + auto-select ticket labels). Auto-selected
     /// by ticket label when cloning from a ticket; required pick otherwise.
     #[serde(default)]
@@ -427,8 +425,7 @@ impl Default for AppConfig {
             docker: DockerConfig::default(),
             claude: ClaudeConfig::default(),
             codex: CodexConfig::default(),
-            clone_groups: Vec::new(),
-            codex_groups: Vec::new(),
+            groups: Vec::new(),
             presets: Vec::new(),
             chroma: ChromaMode::default(),
             ssh: SshConfig::default(),
@@ -490,8 +487,7 @@ impl AppConfig {
             docker: self.docker.clone(),
             claude: self.claude.clone(),
             codex: self.codex.clone(),
-            clone_groups: self.clone_groups.clone(),
-            codex_groups: self.codex_groups.clone(),
+            groups: self.groups.clone(),
             presets: self.presets.iter().map(Preset::redacted).collect(),
             chroma: self.chroma,
             ssh: self.ssh.clone(),
@@ -518,8 +514,7 @@ pub struct AppConfigRedacted {
     pub docker: DockerConfig,
     pub claude: ClaudeConfig,
     pub codex: CodexConfig,
-    pub clone_groups: Vec<CloneGroup>,
-    pub codex_groups: Vec<CloneGroup>,
+    pub groups: Vec<Group>,
     pub presets: Vec<PresetRedacted>,
     pub chroma: ChromaMode,
     pub ssh: SshConfig,
@@ -696,28 +691,24 @@ mod tests {
         assert!(c.codex.pinned_email.is_none());
         assert!(c.codex.usage_polling, "usage_polling defaults to true");
         assert!(!c.codex.auto_reset, "auto_reset defaults to false");
-        assert!(c.codex_groups.is_empty());
         // Missing keys fall back to defaults (older config.json stays valid).
         let d: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(d.codex.poll_secs, 600);
         assert!(d.codex.usage_polling);
-        assert!(d.codex_groups.is_empty());
         // usage_polling can be turned off from JSON (camelCase).
         let off: AppConfig =
             serde_json::from_str(r#"{ "codex": { "pollSecs": 300, "usagePolling": false, "autoReset": true } }"#).unwrap();
         assert_eq!(off.codex.poll_secs, 300);
         assert!(!off.codex.usage_polling);
         assert!(off.codex.auto_reset, "autoReset parses from camelCase JSON");
-        // Redaction passes codex + codex_groups through (non-secret).
+        // Redaction passes codex through (non-secret).
         let r = AppConfig {
             codex: CodexConfig { poll_secs: 120, usage_polling: false, ..Default::default() },
-            codex_groups: vec![CloneGroup { name: "g".into(), accounts: vec!["z@o".into()] }],
             ..Default::default()
         }
         .redacted();
         assert_eq!(r.codex.poll_secs, 120);
         assert!(!r.codex.usage_polling);
-        assert_eq!(r.codex_groups.len(), 1);
         // Round-trips as camelCase.
         let v = serde_json::to_value(&CodexConfig::default()).unwrap();
         assert!(v.get("usagePolling").is_some());

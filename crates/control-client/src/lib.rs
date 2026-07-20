@@ -198,34 +198,17 @@ impl Client {
         Ok(())
     }
 
-    /// Hot-swap a clone's Claude account. Returns the API's `{ ok, account, group, selection }`.
-    pub async fn claude_swap(&self, host: &str, account: &str) -> Result<Value> {
-        self.post_json(
-            "/api/claude/swap",
-            &json!({ "host": host, "account": account }),
-        )
-        .await
-    }
-
-    /// Hot-swap a clone's Codex account.
-    pub async fn codex_swap(&self, host: &str, account: &str) -> Result<Value> {
-        self.post_json(
-            "/api/codex/swap",
-            &json!({ "host": host, "account": account }),
-        )
-        .await
-    }
-
-    /// Delete an imported Claude account by email. Errors (surfaced by `check`) if a clone
-    /// is pinned to it. Returns the API's `{ ok, moved: [host ids] }`.
-    pub async fn claude_delete(&self, account: &str) -> Result<Value> {
-        self.post_json("/api/claude/delete", &json!({ "account": account }))
+    /// Bind a clone to an account group (or clear it with `None`). The group-proxy
+    /// replacement for the old per-provider account swap. `POST /api/hosts/:id/group`.
+    pub async fn set_host_group(&self, host: &str, group: Option<&str>) -> Result<Value> {
+        self.post_json(&format!("/api/hosts/{host}/group"), &json!({ "group": group }))
             .await
     }
 
-    /// Delete an imported Codex account by email.
-    pub async fn codex_delete(&self, account: &str) -> Result<Value> {
-        self.post_json("/api/codex/delete", &json!({ "account": account }))
+    /// Remove one authenticated account (a credential file) from a group's CLIProxyAPI
+    /// instance. `POST /api/groups/:name/accounts/delete`.
+    pub async fn delete_group_account(&self, group: &str, file: &str) -> Result<Value> {
+        self.post_json(&format!("/api/groups/{group}/accounts/delete"), &json!({ "file": file }))
             .await
     }
 

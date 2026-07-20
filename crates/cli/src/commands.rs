@@ -56,14 +56,7 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
                     .unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
                 h.preset_name.clone().unwrap_or_default(),
-                h.claude_account_email
-                    .clone()
-                    .or(h.claude_selection.clone())
-                    .unwrap_or_default(),
-                h.codex_account_email
-                    .clone()
-                    .or(h.codex_selection.clone())
-                    .unwrap_or_default(),
+                h.group.clone().unwrap_or_default(),
                 h.state_note
                     .as_deref()
                     .map(|n| truncate(n, 48))
@@ -74,7 +67,7 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
     print!(
         "{}",
         table(
-            &["ID", "IP", "STATE", "AGENT", "IMAGE", "PRESET", "CLAUDE", "CODEX", "NOTE"],
+            &["ID", "IP", "STATE", "AGENT", "IMAGE", "PRESET", "GROUP", "NOTE"],
             &rows
         )
     );
@@ -202,8 +195,9 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
             let st = client.state().await?;
             let is_codex = |a: &wire::ClaudeUsage| matches!(a.provider, Some(Provider::Codex));
             let accounts: Vec<_> = st
-                .claude_accounts
+                .usage_groups
                 .iter()
+                .flat_map(|g| g.accounts.iter())
                 .filter(|a| {
                     if *claude {
                         !is_codex(a)
@@ -259,66 +253,53 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                     &rows
                 )
             );
-            // Groups come from config (redacted view), not state.
-            if let Ok(cfg) = client.config().await {
-                let fmt = |gs: &[wire::CloneGroup]| {
-                    gs.iter()
-                        .map(|g| format!("{}={}", g.name, g.accounts.join("+")))
-                        .collect::<Vec<_>>()
-                        .join("  ")
-                };
-                if !cfg.clone_groups.is_empty() {
-                    println!("claude groups: {}", fmt(&cfg.clone_groups));
-                }
-                if !cfg.codex_groups.is_empty() {
-                    println!("codex groups:  {}", fmt(&cfg.codex_groups));
-                }
+            // Account groups come from config (redacted view), not state. Membership lives in
+            // each group's CLIProxyAPI instance auth-dir and is surfaced above via usage_groups.
+            if let Ok(cfg) = client.config().await
+                && !cfg.groups.is_empty()
+            {
+                let names = cfg.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join("  ");
+                println!("groups: {names}");
             }
             Ok(0)
         }
+        // `account` is now the GROUP name to bind this clone to ("" / "none" clears it).
+        // Groups are provider-agnostic under the group-proxy model, so `--codex` is ignored.
         AccountCmd::Swap {
             host,
             account,
-            codex,
+            codex: _,
         } => {
-            let reply = if *codex {
-                client.codex_swap(host, account).await?
-            } else {
-                client.claude_swap(host, account).await?
+            let group = match account.as_str() {
+                "" | "none" => None,
+                g => Some(g),
             };
+            let reply = client.set_host_group(host, group).await?;
             if json {
                 emit_json(&reply)?;
             } else {
-                let email = reply
-                    .get("account")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("none");
-                let provider = if *codex { "codex" } else { "claude" };
-                println!("swapped {host} {provider} → {email}");
+                println!("set {host} group → {}", group.unwrap_or("none"));
             }
             Ok(0)
         }
+        // Account membership is per-group now: remove this email's credential from every group
+        // it appears in (the auth file name follows the `<provider>-<email>.json` convention).
         AccountCmd::Rm { account, codex } => {
-            let reply = if *codex {
-                client.codex_delete(account).await?
-            } else {
-                client.claude_delete(account).await?
-            };
-            if json {
-                emit_json(&reply)?;
-            } else {
-                let moved: Vec<String> = reply
-                    .get("moved")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                    .unwrap_or_default();
-                let provider = if *codex { "codex" } else { "claude" };
-                print!("deleted {provider} account {account}");
-                if moved.is_empty() {
-                    println!();
-                } else {
-                    println!(" (moved {} clone(s): {})", moved.len(), moved.join(", "));
+            let file = format!("{}-{account}.json", if *codex { "codex" } else { "claude" });
+            let st = client.state().await?;
+            let mut removed: Vec<String> = Vec::new();
+            for g in &st.usage_groups {
+                if g.accounts.iter().any(|a| &a.email == account) {
+                    client.delete_group_account(&g.name, &file).await?;
+                    removed.push(g.name.clone());
                 }
+            }
+            if json {
+                emit_json(&serde_json::json!({ "ok": true, "account": account, "removedFrom": removed }))?;
+            } else if removed.is_empty() {
+                println!("no group currently lists {account}");
+            } else {
+                println!("removed {account} from {} group(s): {}", removed.len(), removed.join(", "));
             }
             Ok(0)
         }
