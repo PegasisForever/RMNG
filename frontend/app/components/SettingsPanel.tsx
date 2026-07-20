@@ -1,4 +1,21 @@
-import { ChevronDown, ChevronRight, Plus, Trash2, X } from "lucide-react";
+import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { ChevronDown, ChevronRight, GripVertical, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { ClaudeUsage, GroupUsage } from "~/lib/types";
@@ -136,9 +153,220 @@ export interface SettingsPanelProps {
   onDeleteAccount: (group: string, account: ClaudeUsage) => void;
 }
 
+// --- Cosmetic, client-only ordering for the Account-groups manager -------------------
+// The user can drag to reorder the group cards and the account rows within a group. This
+// is PURELY a display preference: a group is a pool and its accounts are an unordered set,
+// so order carries no backend meaning. It's persisted in localStorage and is NEVER sent
+// to the server (no API call, no config change).
+const GROUP_ORDER_KEY = "rmng.settings.groupOrder";
+const ACCT_ORDER_KEY = "rmng.settings.acctOrder";
+
+function loadOrder<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Order `items` by a saved list of keys. Items whose key appears in `savedOrderKeys` sort
+ *  to that position; items not in it (newly appeared groups/accounts) keep their original
+ *  relative order at the end. `Array.prototype.sort` is stable, so an SSE re-render or a
+ *  reload preserves the user's manual order instead of resetting it — and removed items
+ *  simply drop out. */
+function ordered<T>(items: T[], savedOrderKeys: string[], keyOf: (item: T) => string): T[] {
+  const pos = new Map(savedOrderKeys.map((k, i) => [k, i] as const));
+  const END = Number.MAX_SAFE_INTEGER;
+  return [...items].sort((a, b) => (pos.get(keyOf(a)) ?? END) - (pos.get(keyOf(b)) ?? END));
+}
+
+/** The reorder DnD sensors — a pointer sensor with a 5px activation distance (so a click
+ *  on a button isn't read as a drag) plus a keyboard sensor for accessible reordering.
+ *  Mirrors `Sidebar`. */
+function useReorderSensors() {
+  return useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+}
+
+/** One draggable account row within a group. The `GripVertical` handle is the ONLY element
+ *  carrying the sortable listeners, so the delete button stays clickable and dragging a row
+ *  reorders just the accounts (never grabbing the parent group). */
+function SortableAccountRow({
+  account,
+  groupName,
+  onDeleteAccount,
+}: {
+  account: ClaudeUsage;
+  groupName: string;
+  onDeleteAccount: (group: string, account: ClaudeUsage) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: account.id,
+  });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    position: "relative",
+    zIndex: isDragging ? 50 : undefined,
+  };
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className={`flex items-center gap-2 rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200 ${
+        isDragging ? "bg-white shadow-md ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600" : ""
+      }`}
+    >
+      <button
+        type="button"
+        {...attributes}
+        {...listeners}
+        aria-label={`reorder ${account.email} in ${groupName}`}
+        className="shrink-0 cursor-grab touch-none rounded p-0.5 text-slate-300 hover:text-slate-500 active:cursor-grabbing dark:text-slate-600 dark:hover:text-slate-400"
+      >
+        <GripVertical className="h-3.5 w-3.5" />
+      </button>
+      <span className="min-w-0 flex-1 truncate">
+        <span className="mr-1.5 rounded bg-slate-100 px-1 text-[10px] font-semibold uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+          {account.provider === "codex" ? "codex" : "claude"}
+        </span>
+        {account.email}
+      </span>
+      <button
+        type="button"
+        title="remove account from group"
+        aria-label={`remove ${account.email} from ${groupName}`}
+        onClick={() => {
+          if (
+            window.confirm(
+              `Remove ${account.email} from "${groupName}"?\n\nDeletes its credential from this group's proxy. Re-adding needs a fresh OAuth login.`,
+            )
+          )
+            onDeleteAccount(groupName, account);
+        }}
+        className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+    </li>
+  );
+}
+
+/** One draggable group card. Its `GripVertical` handle is the ONLY element carrying the
+ *  group-sortable listeners, so "Add account"/delete stay clickable and dragging an account
+ *  row inside doesn't also grab the card. Contains a NESTED `DndContext` + `SortableContext`
+ *  so the account rows reorder independently within this group. `accounts` arrives already
+ *  ordered by the parent's saved account order. */
+function SortableGroupBlock({
+  group,
+  accounts,
+  onAddAccount,
+  onDeleteGroup,
+  onDeleteAccount,
+  onAccountDragEnd,
+}: {
+  group: Group;
+  accounts: ClaudeUsage[];
+  onAddAccount: (group: string) => void;
+  onDeleteGroup: (name: string) => void;
+  onDeleteAccount: (group: string, account: ClaudeUsage) => void;
+  onAccountDragEnd: (groupName: string, orderedIds: string[], event: DragEndEvent) => void;
+}) {
+  const sensors = useReorderSensors();
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: group.name,
+  });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    position: "relative",
+    zIndex: isDragging ? 50 : undefined,
+  };
+  const accountIds = accounts.map((a) => a.id);
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`rounded border border-slate-200 dark:border-slate-700 p-3 ${
+        isDragging ? "bg-white shadow-lg ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600" : ""
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          aria-label={`reorder group ${group.name}`}
+          className="shrink-0 cursor-grab touch-none rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 active:cursor-grabbing dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-700 dark:text-slate-200">
+          {group.name}
+        </span>
+        <button
+          type="button"
+          onClick={() => onAddAccount(group.name)}
+          className="inline-flex items-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+        >
+          <Plus className="size-3.5" /> Add account
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (
+              window.confirm(
+                `Delete group "${group.name}"?\n\nStops its proxy instance. Clones bound to it lose inference until reassigned; the on-disk credentials are left in place.`,
+              )
+            )
+              onDeleteGroup(group.name);
+          }}
+          title="delete group"
+          aria-label={`delete group ${group.name}`}
+          className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
+      </div>
+      {accounts.length === 0 ? (
+        <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
+          No accounts yet — use “Add account” to log one in.
+        </p>
+      ) : (
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={(event) => onAccountDragEnd(group.name, accountIds, event)}
+        >
+          <SortableContext items={accountIds} strategy={verticalListSortingStrategy}>
+            <ul className="mt-2 space-y-1.5">
+              {accounts.map((a) => (
+                <SortableAccountRow
+                  key={a.id}
+                  account={a}
+                  groupName={group.name}
+                  onDeleteAccount={onDeleteAccount}
+                />
+              ))}
+            </ul>
+          </SortableContext>
+        </DndContext>
+      )}
+    </div>
+  );
+}
+
 /** The account-group manager: create/delete pools, add accounts via OAuth, and remove
  *  authenticated accounts. Each group is one CLIProxyAPI instance; membership is derived
- *  from the instance's auth-dir (live via `usageGroups`), not stored config. */
+ *  from the instance's auth-dir (live via `usageGroups`), not stored config.
+ *
+ *  Group cards and the account rows within each group are drag-reorderable. That order is
+ *  a purely cosmetic client-side preference (localStorage) — a group is an unordered pool,
+ *  so order is NEVER sent to the server. */
 function GroupManager({
   groups,
   usageGroups,
@@ -157,6 +385,30 @@ function GroupManager({
   const [newName, setNewName] = useState("");
   const usageByName = new Map(usageGroups.map((g) => [g.name, g]));
 
+  // Cosmetic ordering (client-only, localStorage). Seeded from storage once on mount —
+  // safe under `ssr:false`. Persisted on change. Never leaves the browser.
+  const sensors = useReorderSensors();
+  const [groupOrder, setGroupOrder] = useState<string[]>(() => loadOrder<string[]>(GROUP_ORDER_KEY, []));
+  const [acctOrder, setAcctOrder] = useState<Record<string, string[]>>(() =>
+    loadOrder<Record<string, string[]>>(ACCT_ORDER_KEY, {}),
+  );
+  useEffect(() => {
+    try {
+      localStorage.setItem(GROUP_ORDER_KEY, JSON.stringify(groupOrder));
+    } catch {
+      // ignore (private mode / quota) — ordering is best-effort cosmetics
+    }
+  }, [groupOrder]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACCT_ORDER_KEY, JSON.stringify(acctOrder));
+    } catch {
+      // ignore
+    }
+  }, [acctOrder]);
+
+  const orderedGroups = ordered(groups, groupOrder, (g) => g.name);
+
   const create = () => {
     const name = newName.trim();
     if (!name) return;
@@ -164,83 +416,50 @@ function GroupManager({
     setNewName("");
   };
 
+  function onGroupDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const names = orderedGroups.map((g) => g.name);
+    const oldIndex = names.indexOf(String(active.id));
+    const newIndex = names.indexOf(String(over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+    setGroupOrder(arrayMove(names, oldIndex, newIndex));
+  }
+
+  function onAccountDragEnd(groupName: string, orderedIds: string[], event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = orderedIds.indexOf(String(active.id));
+    const newIndex = orderedIds.indexOf(String(over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+    setAcctOrder((prev) => ({ ...prev, [groupName]: arrayMove(orderedIds, oldIndex, newIndex) }));
+  }
+
   return (
     <div className="space-y-3">
       {groups.length === 0 ? (
         <p className="text-xs text-slate-400 dark:text-slate-500">No groups.</p>
       ) : null}
-      {groups.map((g) => {
-        const accounts = usageByName.get(g.name)?.accounts ?? [];
-        return (
-          <div key={g.name} className="rounded border border-slate-200 dark:border-slate-700 p-3">
-            <div className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-700 dark:text-slate-200">
-                {g.name}
-              </span>
-              <button
-                type="button"
-                onClick={() => onAddAccount(g.name)}
-                className="inline-flex items-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-              >
-                <Plus className="size-3.5" /> Add account
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      `Delete group "${g.name}"?\n\nStops its proxy instance. Clones bound to it lose inference until reassigned; the on-disk credentials are left in place.`,
-                    )
-                  )
-                    onDeleteGroup(g.name);
-                }}
-                title="delete group"
-                aria-label={`delete group ${g.name}`}
-                className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </div>
-            {accounts.length === 0 ? (
-              <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
-                No accounts yet — use “Add account” to log one in.
-              </p>
-            ) : (
-              <ul className="mt-2 space-y-1.5">
-                {accounts.map((a) => (
-                  <li
-                    key={a.id}
-                    className="flex items-center justify-between rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200"
-                  >
-                    <span className="min-w-0 flex-1 truncate">
-                      <span className="mr-1.5 rounded bg-slate-100 px-1 text-[10px] font-semibold uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                        {a.provider === "codex" ? "codex" : "claude"}
-                      </span>
-                      {a.email}
-                    </span>
-                    <button
-                      type="button"
-                      title="remove account from group"
-                      aria-label={`remove ${a.email} from ${g.name}`}
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `Remove ${a.email} from "${g.name}"?\n\nDeletes its credential from this group's proxy. Re-adding needs a fresh OAuth login.`,
-                          )
-                        )
-                          onDeleteAccount(g.name, a);
-                      }}
-                      className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onGroupDragEnd}>
+        <SortableContext
+          items={orderedGroups.map((g) => g.name)}
+          strategy={verticalListSortingStrategy}
+        >
+          <div className="space-y-3">
+            {orderedGroups.map((g) => (
+              <SortableGroupBlock
+                key={g.name}
+                group={g}
+                accounts={ordered(usageByName.get(g.name)?.accounts ?? [], acctOrder[g.name] ?? [], (a) => a.id)}
+                onAddAccount={onAddAccount}
+                onDeleteGroup={onDeleteGroup}
+                onDeleteAccount={onDeleteAccount}
+                onAccountDragEnd={onAccountDragEnd}
+              />
+            ))}
           </div>
-        );
-      })}
+        </SortableContext>
+      </DndContext>
       <div className="flex items-center gap-2">
         <input
           value={newName}
