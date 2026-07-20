@@ -654,12 +654,12 @@ async fn poll_usage_once(app: &App, last_good: &mut HashMap<String, wire::Claude
 
 // --- live model catalog ----------------------------------------------------------------
 
-/// The non-`claude-` model ids in an OpenAI-style `/v1/models` body
-/// (`{"data":[{"id":"..."},...]}`). An instance's catalog is already blacklist-filtered
-/// (`oauth-excluded-models`), so dropping the Claude channel leaves exactly the GPT/codex-channel
-/// models OpenCode/Codex are allowed to pick. Deduped + stably sorted; a body that doesn't parse
-/// (or carries no `data` array) yields an empty vec. Pure so it can be unit-tested.
-fn gpt_ids_from_models_json(body: &str) -> Vec<String> {
+/// Every model id in an OpenAI-style `/v1/models` body (`{"data":[{"id":"..."},...]}`) — BOTH
+/// the claude and gpt/codex channels. An instance's catalog is already blacklist-filtered
+/// (`oauth-excluded-models`), so this is exactly the set a group serves. Deduped + stably sorted;
+/// a body that doesn't parse (or carries no `data` array) yields an empty vec. Pure so it can be
+/// unit-tested, and the shared base for [`gpt_ids_from_models_json`].
+fn ids_from_models_json(body: &str) -> Vec<String> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
         return Vec::new();
     };
@@ -669,7 +669,6 @@ fn gpt_ids_from_models_json(body: &str) -> Vec<String> {
     let mut ids: Vec<String> = data
         .iter()
         .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
-        .filter(|id| !id.starts_with("claude-"))
         .map(str::to_string)
         .collect();
     ids.sort();
@@ -677,16 +676,31 @@ fn gpt_ids_from_models_json(body: &str) -> Vec<String> {
     ids
 }
 
-/// The live GPT model ids a group's CLIProxyAPI instance advertises for the OpenCode/Codex
-/// (codex-channel) provider: GET its loopback `/v1/models` and keep every non-`claude-` id (see
-/// [`gpt_ids_from_models_json`]). Because the catalog is already blacklist-filtered by
-/// `oauth-excluded-models`, this is exactly the allowed GPT set — new GPT models appear here
-/// automatically and only the operator blacklist removes them.
+/// The non-`claude-` subset of [`ids_from_models_json`] — dropping the Claude channel leaves
+/// exactly the GPT/codex-channel models OpenCode/Codex are allowed to pick. Deduped + stably
+/// sorted (inherited from [`ids_from_models_json`]); a body that doesn't parse yields an empty
+/// vec. Pure so it can be unit-tested.
+///
+/// The reconciler no longer calls this directly — it caches the full [`group_catalog`] once per
+/// group and derives the GPT list from that `Vec` (the same `!starts_with("claude-")` split) so a
+/// group is queried only once per pass — but this stays as the documented JSON-boundary filter.
+#[allow(dead_code)] // retained pure filter for the /v1/models GPT split; exercised by its test
+fn gpt_ids_from_models_json(body: &str) -> Vec<String> {
+    ids_from_models_json(body).into_iter().filter(|id| !id.starts_with("claude-")).collect()
+}
+
+/// The FULL live model catalog (both `claude-` and gpt/codex ids) a group's CLIProxyAPI instance
+/// advertises: GET its loopback `/v1/models` and return every id (see [`ids_from_models_json`]).
+/// Because the catalog is already blacklist-filtered by `oauth-excluded-models`, this is exactly
+/// the set a group serves — new models appear here automatically and only the operator blacklist
+/// removes them. The reconciler derives BOTH the OpenCode/Codex GPT list (the non-`claude-` ids)
+/// and Claude Code's default model (`clone_reconcile::default_claude_model`) from this one fetch,
+/// so a group is queried at most once per reconcile pass.
 ///
 /// Returns `vec![]` on any miss — no instance/port/key yet, the instance is still starting, a
 /// timeout, a non-2xx, or an empty catalog — and the caller falls back to
-/// `clone_reconcile::FALLBACK_GPT_MODELS`.
-pub(crate) async fn group_gpt_models(app: &App, group: &str) -> Vec<String> {
+/// `clone_reconcile::FALLBACK_GPT_MODELS` (Codex/OpenCode) / `FALLBACK_CLAUDE_MODEL` (Claude Code).
+pub(crate) async fn group_catalog(app: &App, group: &str) -> Vec<String> {
     let (Some(port), Some(key)) =
         (app.cliproxy.port_for(group), app.cliproxy.inbound_key_for(group))
     else {
@@ -708,7 +722,7 @@ pub(crate) async fn group_gpt_models(app: &App, group: &str) -> Vec<String> {
         resp.text().await.ok()
     }
     .await;
-    body.map(|b| gpt_ids_from_models_json(&b)).unwrap_or_default()
+    body.map(|b| ids_from_models_json(&b)).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -826,6 +840,29 @@ mod tests {
         // Malformed body / missing `data` array → empty.
         assert!(gpt_ids_from_models_json("not json").is_empty());
         assert!(gpt_ids_from_models_json(r#"{"object":"list"}"#).is_empty());
+    }
+
+    #[test]
+    fn ids_from_models_json_keeps_both_channels() {
+        let body = r#"{"data":[
+            {"id":"gpt-5.6-terra"},
+            {"id":"claude-opus-4-8"},
+            {"id":"gpt-5.5"},
+            {"id":"claude-sonnet-5"}
+        ]}"#;
+        // Both the claude and gpt channels are kept, deduped + stably sorted.
+        assert_eq!(
+            ids_from_models_json(body),
+            vec!["claude-opus-4-8", "claude-sonnet-5", "gpt-5.5", "gpt-5.6-terra"]
+        );
+        // Duplicates collapse.
+        assert_eq!(
+            ids_from_models_json(r#"{"data":[{"id":"claude-opus-4-8"},{"id":"claude-opus-4-8"}]}"#),
+            vec!["claude-opus-4-8"]
+        );
+        // Malformed body / missing `data` array → empty.
+        assert!(ids_from_models_json("not json").is_empty());
+        assert!(ids_from_models_json(r#"{"object":"list"}"#).is_empty());
     }
 
     #[test]

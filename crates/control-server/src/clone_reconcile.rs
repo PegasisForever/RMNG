@@ -111,7 +111,7 @@ pub(crate) fn ssh_stamp_entry() -> TarEntry {
 
 /// Fallback GPT model list for Codex + OpenCode, used ONLY when the group's live `/v1/models`
 /// catalog can't be read — the group has no GPT accounts authenticated yet, or its CLIProxyAPI
-/// instance is still starting (see [`crate::cliproxy::group_gpt_models`]). In steady state the
+/// instance is still starting (see [`crate::cliproxy::group_catalog`]). In steady state the
 /// model list is derived live from that catalog (already blacklist-filtered), so new GPT models
 /// appear automatically; this const is just the safety net so a clone never gets a broken config.
 ///
@@ -134,12 +134,40 @@ pub(crate) fn fallback_gpt_models() -> Vec<String> {
 /// The GPT model a picker defaults to: prefer `gpt-5.6-terra` when the group serves it, else the
 /// first served id. `None` only for an empty list (callers guarantee a non-empty list via the
 /// [`FALLBACK_GPT_MODELS`] fallback, and both config generators guard on this being `Some`).
+/// This is the Codex + OpenCode default and is intentionally left unchanged — only Claude Code's
+/// default (see [`default_claude_model`]) prefers Opus.
 fn default_gpt_model(models: &[String]) -> Option<&str> {
     models
         .iter()
         .map(String::as_str)
         .find(|m| *m == "gpt-5.6-terra")
         .or_else(|| models.first().map(String::as_str))
+}
+
+/// Claude Code's default model when a group's live `/v1/models` catalog can't be read (no
+/// accounts authenticated yet / its CLIProxyAPI instance is still starting, see
+/// [`crate::cliproxy::group_catalog`]). A mixed group still defaults Claude Code to Opus before
+/// its first successful catalog read, matching the live-catalog precedence in
+/// [`default_claude_model`]. Only the catalog fetch falls back to this; it is never a hard-coded
+/// model list — a served catalog always wins.
+const FALLBACK_CLAUDE_MODEL: &str = "claude-opus-4-8";
+
+/// Claude Code's default model (its `ANTHROPIC_MODEL`), resolved group-aware from the group's
+/// live catalog with the precedence: an id containing `opus` (case-insensitive) if the group
+/// serves one, else the first `claude-` id, else `gpt_fallback` — a GPT-only group, so Claude
+/// Code still has a working default (its own picker is held to the served set). `None` only for a
+/// truly empty resolution (an unreadable catalog with no GPT fallback), in which case the caller
+/// uses [`FALLBACK_CLAUDE_MODEL`]. Pure so it can be unit-tested.
+///
+/// This is Claude-Code-only. Codex + OpenCode keep defaulting to [`default_gpt_model`]
+/// (`gpt-5.6-terra`); they never see this value.
+fn default_claude_model(catalog: &[String], gpt_fallback: Option<&str>) -> Option<String> {
+    catalog
+        .iter()
+        .find(|id| id.to_lowercase().contains("opus"))
+        .or_else(|| catalog.iter().find(|id| id.starts_with("claude-")))
+        .map(String::to_string)
+        .or_else(|| gpt_fallback.map(str::to_string))
 }
 
 fn codex_config_toml(
@@ -688,9 +716,11 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
     let cfg = app.config();
     let control_env = crate::provision::control_env_vars(app).await;
 
-    // Per-pass group → live GPT model list cache, so N clones sharing a group hit the group's
-    // `/v1/models` at most once per reconcile pass (the loop runs every RECONCILE_INTERVAL).
-    let mut gpt_models_cache: HashMap<String, Vec<String>> = HashMap::new();
+    // Per-pass group → full live `/v1/models` catalog cache (both claude + gpt ids), so N clones
+    // sharing a group hit the group's `/v1/models` at most once per reconcile pass (the loop runs
+    // every RECONCILE_INTERVAL). Both the Codex/OpenCode GPT list and Claude Code's default model
+    // are derived from this one fetch.
+    let mut catalog_cache: HashMap<String, Vec<String>> = HashMap::new();
 
     for h in &hosts {
         let id = h.id.as_str();
@@ -710,6 +740,33 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         }
         warned.remove(&format!("{id}:ssh"));
 
+        // Resolve this clone's group model catalog once per pass — N clones sharing a group hit
+        // the group's `/v1/models` at most once. The FULL catalog (both claude + gpt ids, already
+        // blacklist-filtered) yields BOTH the OpenCode/Codex GPT list and Claude Code's default
+        // model. No group, or a group whose instance can't be read yet (no accounts / still
+        // starting), leaves the catalog empty: the GPT list falls back to FALLBACK_GPT_MODELS and
+        // (for grouped clones) the Claude default to FALLBACK_CLAUDE_MODEL (Opus).
+        let group = h.group.as_deref().map(str::trim).filter(|g| !g.is_empty());
+        let catalog = match group {
+            Some(group) => {
+                if let Some(cached) = catalog_cache.get(group) {
+                    cached.clone()
+                } else {
+                    let cat = crate::cliproxy::group_catalog(app, group).await;
+                    catalog_cache.insert(group.to_string(), cat.clone());
+                    cat
+                }
+            }
+            None => Vec::new(),
+        };
+        // The group's live GPT ids (non-`claude-`), empty when the catalog can't be read.
+        let catalog_gpt: Vec<String> =
+            catalog.iter().filter(|id| !id.starts_with("claude-")).cloned().collect();
+        // Codex/OpenCode default to the live GPT list, or the fallback safety net when empty. This
+        // preserves the pre-live Codex/OpenCode behavior (they still default to `gpt-5.6-terra`).
+        let gpt_models =
+            if catalog_gpt.is_empty() { fallback_gpt_models() } else { catalog_gpt.clone() };
+
         let mut desired_env = control_env.clone();
         // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY): recomputed
         // into `/etc/environment` on every resync so an existing clone (created before the
@@ -724,6 +781,16 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                 "clone {id}: preset {:?} no longer exists; preserving unmanaged /etc/environment keys",
                 h.preset_name
             );
+        }
+        // Claude Code's default model (ANTHROPIC_MODEL), group-aware from the live catalog: Opus
+        // when the group serves one, else the first Claude id, else the group's default GPT
+        // (GPT-only group), else the Opus fallback before the first catalog read. Only grouped
+        // clones get it — a clone with no group keeps Claude Code's built-in default. Codex and
+        // OpenCode are unaffected (they default to `gpt-5.6-terra` via `default_gpt_model`).
+        if group.is_some() {
+            let claude_model = default_claude_model(&catalog, default_gpt_model(&catalog_gpt))
+                .unwrap_or_else(|| FALLBACK_CLAUDE_MODEL.to_string());
+            desired_env.push(wire::EnvVar { key: "ANTHROPIC_MODEL".into(), value: claude_model });
         }
         let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
         let env_script = etc_environment_sync_script(&desired_env);
@@ -773,26 +840,8 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
-        // Resolve the GPT model list for this clone's group from the group's live (already
-        // blacklist-filtered) `/v1/models` catalog, cached per pass so a group is queried once.
-        // No group, or a group whose instance can't be read (no GPT accounts yet / still
-        // starting) → the FALLBACK_GPT_MODELS safety net, preserving the pre-live behavior.
-        let gpt_models = match h.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
-            Some(group) => {
-                if let Some(cached) = gpt_models_cache.get(group) {
-                    cached.clone()
-                } else {
-                    let mut models = crate::cliproxy::group_gpt_models(app, group).await;
-                    if models.is_empty() {
-                        models = fallback_gpt_models();
-                    }
-                    gpt_models_cache.insert(group.to_string(), models.clone());
-                    models
-                }
-            }
-            None => fallback_gpt_models(),
-        };
-
+        // `gpt_models` (this clone's group GPT list, or the FALLBACK_GPT_MODELS safety net) was
+        // resolved once per pass above, alongside the Claude Code default, from the group catalog.
         match ensure_codex_parity(app, id, &gpt_models).await {
             Ok(true) => {
                 warned.remove(&format!("{id}:codex"));
@@ -885,6 +934,48 @@ mod tests {
         assert_eq!(default_gpt_model(&without_terra), Some("gpt-5.6-sol"));
         let empty: Vec<String> = Vec::new();
         assert_eq!(default_gpt_model(&empty), None);
+    }
+
+    #[test]
+    fn default_claude_model_prefers_opus_then_first_claude_then_gpt() {
+        // Opus preferred whenever the group serves one — over other Claude ids, regardless of
+        // catalog order or case.
+        let mixed = vec![
+            "claude-haiku-4-5".to_string(),
+            "claude-opus-4-8".to_string(),
+            "claude-sonnet-5".to_string(),
+            "gpt-5.6-terra".to_string(),
+        ];
+        assert_eq!(
+            default_claude_model(&mixed, Some("gpt-5.6-terra")).as_deref(),
+            Some("claude-opus-4-8")
+        );
+        let upper = vec!["claude-sonnet-5".to_string(), "Claude-Opus-4-8".to_string()];
+        assert_eq!(default_claude_model(&upper, None).as_deref(), Some("Claude-Opus-4-8"));
+
+        // No opus → the first `claude-` id, ahead of the GPT fallback.
+        let no_opus = vec![
+            "claude-haiku-4-5".to_string(),
+            "claude-sonnet-5".to_string(),
+            "gpt-5.6-terra".to_string(),
+        ];
+        assert_eq!(
+            default_claude_model(&no_opus, Some("gpt-5.6-terra")).as_deref(),
+            Some("claude-haiku-4-5")
+        );
+
+        // GPT-only group (no `claude-` id) → the group's default GPT model, so Claude Code still
+        // has a working default.
+        let gpt_only = vec!["gpt-5.5".to_string(), "gpt-5.6-terra".to_string()];
+        assert_eq!(
+            default_claude_model(&gpt_only, default_gpt_model(&gpt_only)).as_deref(),
+            Some("gpt-5.6-terra")
+        );
+
+        // Empty resolution (unreadable catalog, no GPT fallback) → None; the caller then uses
+        // FALLBACK_CLAUDE_MODEL (Opus).
+        assert_eq!(default_claude_model(&[], None), None);
+        assert_eq!(FALLBACK_CLAUDE_MODEL, "claude-opus-4-8");
     }
 
     #[test]
