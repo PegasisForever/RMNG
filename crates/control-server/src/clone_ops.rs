@@ -192,6 +192,7 @@ mod tests {
                 last_updated: 0,
                 five_hour: None,
                 seven_day: None,
+                fable: None,
                 spend: None,
                 reset_credits: None,
             }

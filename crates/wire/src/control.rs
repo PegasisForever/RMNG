@@ -343,6 +343,12 @@ pub struct ClaudeUsage {
     pub five_hour: Option<ClaudeUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seven_day: Option<ClaudeUsageWindow>,
+    /// Claude only: the model-scoped weekly limit for the Fable model family. Purely
+    /// informational — it never gates account rotation (see the rotator, which keys off
+    /// `five_hour`/`seven_day` only). `None` for Codex and when the account has no such
+    /// scoped limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fable: Option<ClaudeUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend: Option<ClaudeSpend>,
     /// Codex only: banked rate-limit reset credits ("usage resets") left on the
@@ -580,6 +586,7 @@ mod tests {
                 last_updated: 123,
                 five_hour: Some(ClaudeUsageWindow { pct: 12.5, resets_at: None }),
                 seven_day: None,
+                fable: None,
                 spend: None,
                 reset_credits: Some(3),
             }],

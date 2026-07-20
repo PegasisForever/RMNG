@@ -168,6 +168,10 @@ export interface ClaudeUsage {
   lastUpdated: number;
   fiveHour?: ClaudeUsageWindow;
   sevenDay?: ClaudeUsageWindow;
+  /** Claude only: the model-scoped weekly (7d) limit for the Fable model family.
+   *  Display-only — it never affects account rotation. Absent for Codex accounts and
+   *  when the account has no such scoped limit. */
+  fable?: ClaudeUsageWindow;
   spend?: ClaudeSpend;
   /** Codex only: banked rate-limit reset credits ("usage resets") left on the
    *  account. Absent/null for Claude (no such concept) and when usage is

@@ -63,7 +63,7 @@ function Bar({
   const pace = now != null ? pacePct(win.resetsAt, windowMs, now) : null;
   return (
     <div className="flex items-center gap-1.5">
-      <span className="w-4 shrink-0 text-[10px] font-medium text-slate-500 dark:text-slate-400">{label}</span>
+      <span className="w-8 shrink-0 text-[10px] font-medium text-slate-500 dark:text-slate-400">{label}</span>
       <div className="relative h-1.5 flex-1 overflow-hidden rounded-sm bg-slate-200 dark:bg-slate-700">
         <div className={`h-full ${barColor(pct)}`} style={{ width: `${Math.max(1, pct)}%` }} />
         {pace != null ? (
@@ -111,7 +111,7 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
           </span>
         ) : null}
       </div>
-      {!a.fiveHour && !a.sevenDay ? (
+      {!a.fiveHour && !a.sevenDay && !a.fable ? (
         <div className="text-[10px] text-rose-400" title={a.error}>
           usage unavailable
         </div>
@@ -122,6 +122,8 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
         >
           <Bar label="5h" win={a.fiveHour} windowMs={FIVE_H_MS} now={now} />
           <Bar label="7d" win={a.sevenDay} windowMs={SEVEN_D_MS} now={now} />
+          {/* Claude-only model-scoped weekly cap; a 7d window like sevenDay. Codex has none. */}
+          <Bar label="fable" win={a.fable} windowMs={SEVEN_D_MS} now={now} />
         </div>
       )}
     </div>

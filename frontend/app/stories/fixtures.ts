@@ -165,6 +165,7 @@ export const claudeAccounts: ClaudeUsage[] = [
     lastUpdated: 1_700_000_000_000,
     fiveHour: { pct: 42, resetsAt: null },
     sevenDay: { pct: 61, resetsAt: null },
+    fable: { pct: 8, resetsAt: null },
   },
   {
     id: "sam@example.com|org-a",
@@ -183,7 +184,7 @@ export const claudeAccounts: ClaudeUsage[] = [
     active: true,
     assignable: false,
     lastUpdated: 1_700_000_000_000,
-    fiveHour: { pct: 24, resetsAt: null },
+    // Codex exposes only a weekly (7d) limit now — the 5h window was removed upstream.
     sevenDay: { pct: 40, resetsAt: null },
     resetCredits: 3n,
   },

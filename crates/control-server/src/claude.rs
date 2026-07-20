@@ -437,6 +437,29 @@ struct RawExtra {
     #[serde(default)]
     resets_at: Option<String>,
 }
+/// The model a scoped limit applies to, e.g. `{ "display_name": "Fable" }`.
+#[derive(Deserialize)]
+struct RawLimitModel {
+    #[serde(default)]
+    display_name: Option<String>,
+}
+#[derive(Deserialize)]
+struct RawLimitScope {
+    #[serde(default)]
+    model: Option<RawLimitModel>,
+}
+/// One entry of the `limits` array. The Fable weekly cap only appears here (as a
+/// `weekly_scoped` limit whose `scope.model.display_name` is "Fable") — there is no
+/// top-level `fable` field, so we read it out of this list.
+#[derive(Deserialize)]
+struct RawLimit {
+    #[serde(default)]
+    percent: Option<f64>,
+    #[serde(default)]
+    resets_at: Option<String>,
+    #[serde(default)]
+    scope: Option<RawLimitScope>,
+}
 #[derive(Deserialize)]
 struct RawUsage {
     #[serde(default)]
@@ -445,6 +468,8 @@ struct RawUsage {
     seven_day: Option<RawWindow>,
     #[serde(default)]
     extra_usage: Option<RawExtra>,
+    #[serde(default)]
+    limits: Vec<RawLimit>,
 }
 
 async fn fetch_usage(http: &reqwest::Client, token: &str) -> Result<RawUsage> {
@@ -471,7 +496,27 @@ fn to_window(w: Option<RawWindow>) -> Option<ClaudeUsageWindow> {
     })
 }
 
+/// Pull the Fable model-scoped weekly limit out of the `limits` array, matching on the
+/// scope's model display name (robust to a version suffix like "Fable 5"). `None` when
+/// the account has no Fable-scoped limit.
+fn fable_window(limits: &[RawLimit]) -> Option<ClaudeUsageWindow> {
+    limits
+        .iter()
+        .find(|l| {
+            l.scope
+                .as_ref()
+                .and_then(|s| s.model.as_ref())
+                .and_then(|m| m.display_name.as_deref())
+                .is_some_and(|name| name.to_ascii_lowercase().contains("fable"))
+        })
+        .map(|l| ClaudeUsageWindow {
+            pct: l.percent.unwrap_or(0.0).round(),
+            resets_at: l.resets_at.clone(),
+        })
+}
+
 fn to_usage(acct: &StoredClaudeAccount, raw: RawUsage) -> ClaudeUsage {
+    let fable = fable_window(&raw.limits);
     let spend = raw
         .extra_usage
         .filter(|e| e.is_enabled)
@@ -493,6 +538,7 @@ fn to_usage(acct: &StoredClaudeAccount, raw: RawUsage) -> ClaudeUsage {
         last_updated: now_ms(),
         five_hour: to_window(raw.five_hour),
         seven_day: to_window(raw.seven_day),
+        fable,
         spend,
         reset_credits: None,
     }
@@ -510,6 +556,7 @@ fn claude_base(acct: &StoredClaudeAccount) -> ClaudeUsage {
         last_updated: now_ms(),
         five_hour: None,
         seven_day: None,
+        fable: None,
         spend: None,
         reset_credits: None,
     }
@@ -793,14 +840,18 @@ struct RotationCandidate {
     seven_reset: Option<i64>,
 }
 
+/// Parse an RFC-3339 timestamp to epoch seconds. Accepts the fixed
+/// `YYYY-MM-DDTHH:MM:SS` head, then an optional `.fraction`, then an optional zone
+/// (`Z`/`z`, `±HH:MM`, or `±HHMM`; absent means UTC). The Anthropic usage API returns
+/// e.g. `2026-07-24T22:00:00.469612+00:00`, while Codex resets arrive as `...Z` — both
+/// must parse. Sub-second precision is dropped (the rotator compares whole seconds).
 fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
-    if s.len() != 20
+    if s.len() < 19
         || s.get(4..5)? != "-"
         || s.get(7..8)? != "-"
         || s.get(10..11)? != "T"
         || s.get(13..14)? != ":"
         || s.get(16..17)? != ":"
-        || s.get(19..20)? != "Z"
     {
         return None;
     }
@@ -818,8 +869,43 @@ fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
     {
         return None;
     }
+    // Tail after the seconds: an optional `.fraction`, then an optional zone offset.
+    let mut rest = s.get(19..)?;
+    if let Some(frac) = rest.strip_prefix('.') {
+        let end = frac.find(|c: char| !c.is_ascii_digit()).unwrap_or(frac.len());
+        if end == 0 {
+            return None; // a bare '.' with no digits is malformed
+        }
+        rest = &frac[end..];
+    }
+    let offset_secs = parse_zone_offset(rest)?;
     let days = days_from_civil(year, month, day);
-    Some(days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second))
+    let secs =
+        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    Some(secs - offset_secs)
+}
+
+/// A trailing RFC-3339 zone designator → its offset from UTC in seconds (`+05:30` →
+/// 19800). Empty or `Z`/`z` is UTC; otherwise `±HH:MM` or `±HHMM`.
+fn parse_zone_offset(z: &str) -> Option<i64> {
+    if z.is_empty() || z == "Z" || z == "z" {
+        return Some(0);
+    }
+    let sign = match z.as_bytes()[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let digits: String = z[1..].chars().filter(|c| *c != ':').collect();
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hh: i64 = digits.get(0..2)?.parse().ok()?;
+    let mm: i64 = digits.get(2..4)?.parse().ok()?;
+    if hh > 23 || mm > 59 {
+        return None;
+    }
+    Some(sign * (hh * 3_600 + mm * 60))
 }
 
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
@@ -968,25 +1054,35 @@ fn pct_key(pct: f64) -> u32 {
     (pct.max(0.0) * 100.0).round() as u32
 }
 
-fn saturated_rank(
-    candidate: &RotationCandidate,
-    load: u32,
-) -> (u8, i64, u32, u8, i64, u32, u32, u32) {
-    let (five_missing, five_reset) = match candidate.five_reset {
-        Some(reset) => (0, reset),
-        None => (1, i64::MAX),
+/// Rank an exhausted account for the saturated fallback (every account is over a cap, but
+/// a clone still needs *some* token). The overriding goal is to land on the account that
+/// becomes usable **soonest**:
+///
+/// - An account at the 7d weekly cap is stuck until its weekly reset (days away) no matter
+///   how empty its 5h window is, so it must never be preferred over an account that is
+///   merely over the 5h session cap (which frees up at the next 5h reset, hours away at
+///   most). `seven_capped` is therefore the first sort key.
+/// - Within a class, order by the *binding* window: soonest reset, then lowest usage
+///   (the fallback when the reset timestamp is unknown), then fewest clones.
+fn saturated_rank(candidate: &RotationCandidate, load: u32) -> (u8, u8, i64, u32, u32, u32) {
+    let seven_capped = candidate.seven_pct >= SEVEN_DAY_CAP_PCT;
+    // The window that actually gates this account: the 7d window when it's weekly-capped,
+    // else the 5h session window (an exhausted, non-weekly-capped account is over the 5h
+    // cap by definition, so the 5h reset is when it frees up).
+    let (reset, pct) = if seven_capped {
+        (candidate.seven_reset, candidate.seven_pct)
+    } else {
+        (candidate.five_reset, candidate.five_pct)
     };
-    let (seven_missing, seven_reset) = match candidate.seven_reset {
+    let (missing, reset) = match reset {
         Some(reset) => (0, reset),
         None => (1, i64::MAX),
     };
     (
-        five_missing,
-        five_reset,
-        pct_key(candidate.five_pct),
-        seven_missing,
-        seven_reset,
-        pct_key(candidate.seven_pct),
+        seven_capped as u8,
+        missing,
+        reset,
+        pct_key(pct),
         load,
         rand_u64() as u32,
     )
@@ -1008,15 +1104,34 @@ fn best_saturated_email(
     best_saturated_candidate(candidates, used).map(|candidate| candidate.email.clone())
 }
 
+/// Keep a clone on its current (saturated) account rather than churning it — but only when
+/// the current account isn't meaningfully worse than the best. A current account stuck at
+/// the weekly cap is dropped in favour of one that frees up at the 5h reset; within the
+/// same class, keep it if its binding reset is within [`RESET_STICKY_MARGIN_SECS`] of best's
+/// (or, when resets are unknown, its usage within [`UTIL_STICKY_MARGIN_PCT`]).
 fn keep_saturated_current(current: &RotationCandidate, best: &RotationCandidate) -> bool {
     if current.email == best.email {
         return true;
     }
-    match (current.five_reset, best.five_reset) {
+    let current_capped = current.seven_pct >= SEVEN_DAY_CAP_PCT;
+    let best_capped = best.seven_pct >= SEVEN_DAY_CAP_PCT;
+    if current_capped != best_capped {
+        // Different classes: keep current only if it's the sooner-freeing (5h-only) one.
+        // `best` is the top-ranked candidate, so `best_capped` implies every account is
+        // weekly-capped; the only reachable mismatch is a weekly-capped current against a
+        // non-capped best → switch.
+        return !current_capped;
+    }
+    let (current_reset, current_pct, best_reset, best_pct) = if current_capped {
+        (current.seven_reset, current.seven_pct, best.seven_reset, best.seven_pct)
+    } else {
+        (current.five_reset, current.five_pct, best.five_reset, best.five_pct)
+    };
+    match (current_reset, best_reset) {
         (Some(current_reset), Some(best_reset)) => {
             current_reset <= best_reset + RESET_STICKY_MARGIN_SECS
         }
-        (None, None) => current.five_pct <= best.five_pct + UTIL_STICKY_MARGIN_PCT,
+        (None, None) => current_pct <= best_pct + UTIL_STICKY_MARGIN_PCT,
         _ => false,
     }
 }
@@ -1066,7 +1181,8 @@ fn assign_saturated_rotation(
 /// Rotate one pool of clones over candidate account emails `members`. Drops members
 /// that aren't imported. When at least one account is under the hard limits, clones
 /// stick to eligible accounts exactly as before. When every imported candidate is over
-/// a limit, the saturated fallback picks the account closest to reset or least used.
+/// a limit, the saturated fallback picks the account that frees up soonest — one over
+/// only the 5h cap (back at its next 5h reset) ahead of any stuck at the weekly cap.
 async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[Host]) {
     let candidates = rotation_candidates(app, members);
     if candidates.is_empty() {
@@ -1433,7 +1549,40 @@ mod tests {
         let u = to_usage(&acct, raw);
         assert_eq!(u.five_hour.unwrap().pct, 7.0);
         assert_eq!(u.seven_day.unwrap().pct, 2.0);
+        assert!(u.fable.is_none()); // no `limits` array → no fable window
         assert!(u.spend.is_none()); // extra usage disabled → no spend line
+    }
+
+    #[test]
+    fn parses_fable_from_scoped_limits() {
+        // The real /oauth/usage response carries the model-scoped Fable weekly cap only
+        // inside `limits` (as a `weekly_scoped` entry) — never as a top-level field. Its
+        // `percent` is a bare integer and `resets_at` an offset timestamp with fractional
+        // seconds. The unscoped `weekly_all` entry must NOT be mistaken for it.
+        let body = r#"{
+            "five_hour": {"utilization": 23.0, "resets_at": "2026-07-20T01:20:00.469592+00:00"},
+            "seven_day": {"utilization": 61.0, "resets_at": "2026-07-24T22:00:00.469612+00:00"},
+            "limits": [
+                {"kind": "weekly_all", "percent": 61, "resets_at": "2026-07-24T22:00:00.469612+00:00", "scope": null},
+                {"kind": "weekly_scoped", "percent": 8, "resets_at": "2026-07-24T22:00:00.469890+00:00",
+                 "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}}
+            ]
+        }"#;
+        let raw: RawUsage = serde_json::from_str(body).unwrap();
+        let acct = StoredClaudeAccount {
+            id: "a@b|o".into(),
+            email: "a@b".into(),
+            org_uuid: "o".into(),
+            org_name: String::new(),
+            active: false,
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: 0,
+            scopes: vec![],
+        };
+        let fable = to_usage(&acct, raw).fable.expect("fable window present");
+        assert_eq!(fable.pct, 8.0);
+        assert_eq!(fable.resets_at.as_deref(), Some("2026-07-24T22:00:00.469890+00:00"));
     }
 
     #[test]
@@ -1698,10 +1847,28 @@ mod tests {
     }
 
     #[test]
-    fn saturated_assignment_prefers_soonest_5h_reset() {
+    fn saturated_never_picks_weekly_capped_over_session_capped() {
+        // stuck@x is at the weekly cap (unusable for days) but barely touched its 5h
+        // window; soon@x is only over the 5h session cap and frees up at the next 5h reset.
+        // The clone must land on soon@x — never the account a low 5h number makes look
+        // "least used" while its weekly cap keeps it dark for days.
         let candidates = [
-            rotation_candidate("soon@x", 97.0, 96.0, Some(1_000), Some(10_000)),
-            rotation_candidate("late@x", 90.0, 96.0, Some(2_000), Some(10_000)),
+            rotation_candidate("stuck@x", 5.0, 97.0, Some(1_000), Some(600_000)),
+            rotation_candidate("soon@x", 85.0, 50.0, Some(2_000), Some(700_000)),
+        ];
+        let clones = [clone_host("c1", Some("stuck@x"))];
+
+        let got = assign_saturated_rotation(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@x");
+    }
+
+    #[test]
+    fn saturated_prefers_soonest_5h_reset_among_session_capped() {
+        // Both only over the 5h cap (7d has room) → soonest 5h reset frees up first.
+        let candidates = [
+            rotation_candidate("soon@x", 90.0, 50.0, Some(1_000), Some(700_000)),
+            rotation_candidate("late@x", 90.0, 50.0, Some(2_000), Some(700_000)),
         ];
         let clones = [clone_host("c1", Some("late@x"))];
 
@@ -1711,10 +1878,26 @@ mod tests {
     }
 
     #[test]
-    fn saturated_assignment_uses_lower_5h_when_resets_are_missing() {
+    fn saturated_prefers_soonest_7d_reset_when_all_weekly_capped() {
+        // Everyone is weekly-capped → the binding window is 7d; soonest weekly reset wins
+        // and the (here deliberately inverted) 5h resets are ignored.
         let candidates = [
-            rotation_candidate("hot@x", 98.0, 96.0, None, Some(10_000)),
-            rotation_candidate("cool@x", 90.0, 96.0, None, Some(10_000)),
+            rotation_candidate("soon@x", 50.0, 97.0, Some(9_000), Some(500_000)),
+            rotation_candidate("late@x", 50.0, 97.0, Some(1_000), Some(600_000)),
+        ];
+        let clones = [clone_host("c1", Some("late@x"))];
+
+        let got = assign_saturated_rotation(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@x");
+    }
+
+    #[test]
+    fn saturated_uses_lower_usage_when_binding_reset_missing() {
+        // Both only 5h-capped, no 5h reset timestamp → fall back to the lower 5h usage.
+        let candidates = [
+            rotation_candidate("hot@x", 98.0, 50.0, None, Some(700_000)),
+            rotation_candidate("cool@x", 90.0, 50.0, None, Some(700_000)),
         ];
         let clones = [clone_host("c1", Some("hot@x"))];
 
@@ -1724,10 +1907,12 @@ mod tests {
     }
 
     #[test]
-    fn saturated_assignment_keeps_current_within_reset_margin() {
+    fn saturated_keeps_current_within_reset_margin() {
+        // Same class (both 5h-capped); current's 5h reset is within the sticky margin of
+        // best's, so the clone keeps its account (avoids a cold prompt-cache switch).
         let candidates = [
-            rotation_candidate("current@x", 98.0, 96.0, Some(1_800), Some(10_000)),
-            rotation_candidate("best@x", 99.0, 96.0, Some(1_000), Some(10_000)),
+            rotation_candidate("current@x", 90.0, 50.0, Some(1_800), Some(700_000)),
+            rotation_candidate("best@x", 90.0, 50.0, Some(1_000), Some(700_000)),
         ];
         let clones = [clone_host("c1", Some("current@x"))];
 
@@ -1737,10 +1922,11 @@ mod tests {
     }
 
     #[test]
-    fn saturated_assignment_moves_missing_reset_current_to_known_reset() {
+    fn saturated_moves_missing_reset_current_to_known_reset() {
+        // Same class; current has no 5h reset while a peer does → move to the known one.
         let candidates = [
-            rotation_candidate("unknown@x", 90.0, 96.0, None, Some(10_000)),
-            rotation_candidate("known@x", 94.0, 96.0, Some(1_000), Some(10_000)),
+            rotation_candidate("unknown@x", 90.0, 50.0, None, Some(700_000)),
+            rotation_candidate("known@x", 94.0, 50.0, Some(1_000), Some(700_000)),
         ];
         let clones = [clone_host("c1", Some("unknown@x"))];
 
@@ -1756,6 +1942,40 @@ mod tests {
         assert!(!is_exhausted(0.0, 94.9), "under the 7d cap is eligible");
         assert!(is_exhausted(0.0, 95.0), "hitting the 7d cap is exhausted");
         assert!(!is_exhausted(79.9, 94.9), "both under caps is eligible");
+    }
+
+    #[test]
+    fn parses_rfc3339_z_and_offset_forms() {
+        // Bare Z (Codex's epoch_to_rfc3339 form).
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"), Some(1_609_459_200));
+        // The Anthropic usage API's real shape: fractional seconds + `+00:00` offset.
+        assert_eq!(
+            parse_rfc3339_utc_secs("2026-07-24T22:00:00.469890+00:00"),
+            Some(1_784_930_400)
+        );
+        // Fractional seconds are dropped, not rounded.
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00.5+00:00"),
+            Some(1_609_459_200)
+        );
+        // Non-UTC offsets shift to UTC: -05:00 is 5h later in epoch, +05:30 is earlier.
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"), Some(1_609_477_200));
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00+05:30"), Some(1_609_439_400));
+        // `±HHMM` (no colon) is accepted too.
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00-0500"), Some(1_609_477_200));
+        // No zone → treated as UTC.
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00"), Some(1_609_459_200));
+    }
+
+    #[test]
+    fn rejects_malformed_rfc3339() {
+        assert_eq!(parse_rfc3339_utc_secs("not-a-timestamp"), None);
+        assert_eq!(parse_rfc3339_utc_secs("2021-13-01T00:00:00Z"), None); // month 13
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T25:00:00Z"), None); // hour 25
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00."), None); // bare fraction dot
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00+5:00"), None); // 1-digit hour offset
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00+99:00"), None); // offset hour 99
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01"), None); // no time
     }
 
     // --- "auto" pool ---------------------------------------------------------

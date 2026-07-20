@@ -238,6 +238,7 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                             .and_then(|w| w.resets_at.clone())
                             .unwrap_or_default(),
                         pct(&a.seven_day),
+                        pct(&a.fable),
                         a.error.clone().unwrap_or_default(),
                     ]
                 })
@@ -252,6 +253,7 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                         "5H",
                         "5H-RESETS",
                         "7D",
+                        "FABLE",
                         "ERROR"
                     ],
                     &rows

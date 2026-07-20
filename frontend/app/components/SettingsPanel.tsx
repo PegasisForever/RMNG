@@ -1015,7 +1015,7 @@ export function SettingsPanel({
             {/* Codex groups (named account pools). */}
             <Section
               title="Codex groups"
-              hint="A pool of Codex accounts. A clone bound to a group keeps its account until that account passes 90% usage, then moves to the least-used member."
+              hint="A pool of Codex accounts. A clone bound to a group keeps its account until that account passes 95% of its weekly (7d) limit, then moves to the least-used member."
             >
               <div className="space-y-3">
                 {codexGroups.length === 0 ? (

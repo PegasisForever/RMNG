@@ -31,8 +31,8 @@ const REFRESH_LEAD_MS: i64 = 60 * 60 * 1000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGGER: Duration = Duration::from_millis(400);
 
-// scoring knobs — copied from claude.rs (identical semantics).
-const SESSION_HEADROOM_PCT: f64 = 20.0;
+// scoring knobs. Codex exposes only a weekly (7d) limit — the 5h session window Claude
+// still has was removed upstream — so rotation scores/gates purely on the 7d window.
 const SEVEN_DAY_CAP_PCT: f64 = 95.0;
 const RESET_STICKY_MARGIN_SECS: i64 = 15 * 60;
 const UTIL_STICKY_MARGIN_PCT: f64 = 5.0;
@@ -649,6 +649,7 @@ fn to_usage(acct: &StoredCodexAccount, raw: RawUsage) -> ClaudeUsage {
         last_updated: now_ms(),
         five_hour,
         seven_day,
+        fable: None, // Fable is a Claude-model limit; never present for Codex.
         spend: None,
         reset_credits,
     }
@@ -666,6 +667,7 @@ fn codex_base(acct: &StoredCodexAccount) -> ClaudeUsage {
         last_updated: now_ms(),
         five_hour: None,
         seven_day: None,
+        fable: None,
         spend: None,
         reset_credits: None,
     }
@@ -792,18 +794,14 @@ fn score_accounts(app: &App) -> Vec<Scored> {
         .into_iter()
         .map(|email| {
             let u = usage.get(email.as_str());
-            let five = u
-                .and_then(|u| u.five_hour.as_ref())
-                .map(|w| w.pct)
-                .unwrap_or(0.0);
             let seven = u
                 .and_then(|u| u.seven_day.as_ref())
                 .map(|w| w.pct)
                 .unwrap_or(0.0);
-            let headroom = clamp01((100.0 - five) / 100.0);
+            let headroom = clamp01((100.0 - seven) / 100.0);
             let n = *clones.get(email.as_str()).unwrap_or(&0) as f64;
             let score = headroom - 0.5 * n;
-            let eligible = (100.0 - five >= SESSION_HEADROOM_PCT) && seven < SEVEN_DAY_CAP_PCT;
+            let eligible = seven < SEVEN_DAY_CAP_PCT;
             Scored {
                 email,
                 score,
@@ -892,18 +890,6 @@ fn clone_counts(app: &App) -> HashMap<String, u32> {
     m
 }
 
-fn five_hour_pct(app: &App, email: &str) -> f64 {
-    app.store
-        .get()
-        .claude_accounts
-        .iter()
-        .filter(|u| u.provider == Some(wire::Provider::Codex))
-        .find(|u| u.email == email)
-        .and_then(|u| u.five_hour.as_ref())
-        .map(|w| w.pct)
-        .unwrap_or(0.0)
-}
-
 fn seven_day_pct(app: &App, email: &str) -> f64 {
     app.store
         .get()
@@ -919,20 +905,23 @@ fn seven_day_pct(app: &App, email: &str) -> f64 {
 #[derive(Debug, Clone)]
 struct RotationCandidate {
     email: String,
-    five_pct: f64,
     seven_pct: f64,
-    five_reset: Option<i64>,
     seven_reset: Option<i64>,
 }
 
+/// Parse an RFC-3339 timestamp to epoch seconds. Accepts the fixed
+/// `YYYY-MM-DDTHH:MM:SS` head, then an optional `.fraction`, then an optional zone
+/// (`Z`/`z`, `±HH:MM`, or `±HHMM`; absent means UTC). Codex resets arrive as `...Z` (from
+/// [`crate::docker::epoch_to_rfc3339`]); the offset forms keep this in lockstep with the
+/// Claude copy, which must also read the Anthropic API's `+00:00` timestamps. Sub-second
+/// precision is dropped (the rotator compares whole seconds).
 fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
-    if s.len() != 20
+    if s.len() < 19
         || s.get(4..5)? != "-"
         || s.get(7..8)? != "-"
         || s.get(10..11)? != "T"
         || s.get(13..14)? != ":"
         || s.get(16..17)? != ":"
-        || s.get(19..20)? != "Z"
     {
         return None;
     }
@@ -950,8 +939,43 @@ fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
     {
         return None;
     }
+    // Tail after the seconds: an optional `.fraction`, then an optional zone offset.
+    let mut rest = s.get(19..)?;
+    if let Some(frac) = rest.strip_prefix('.') {
+        let end = frac.find(|c: char| !c.is_ascii_digit()).unwrap_or(frac.len());
+        if end == 0 {
+            return None; // a bare '.' with no digits is malformed
+        }
+        rest = &frac[end..];
+    }
+    let offset_secs = parse_zone_offset(rest)?;
     let days = days_from_civil(year, month, day);
-    Some(days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second))
+    let secs =
+        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    Some(secs - offset_secs)
+}
+
+/// A trailing RFC-3339 zone designator → its offset from UTC in seconds (`+05:30` →
+/// 19800). Empty or `Z`/`z` is UTC; otherwise `±HH:MM` or `±HHMM`.
+fn parse_zone_offset(z: &str) -> Option<i64> {
+    if z.is_empty() || z == "Z" || z == "z" {
+        return Some(0);
+    }
+    let sign = match z.as_bytes()[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let digits: String = z[1..].chars().filter(|c| *c != ':').collect();
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hh: i64 = digits.get(0..2)?.parse().ok()?;
+    let mm: i64 = digits.get(2..4)?.parse().ok()?;
+    if hh > 23 || mm > 59 {
+        return None;
+    }
+    Some(sign * (hh * 3_600 + mm * 60))
 }
 
 fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
@@ -976,15 +1000,10 @@ fn rotation_candidates(app: &App, members: &[String]) -> Vec<RotationCandidate> 
                 .iter()
                 .filter(|u| u.provider == Some(wire::Provider::Codex))
                 .find(|u| u.email == *email);
-            let five = usage.and_then(|u| u.five_hour.as_ref());
             let seven = usage.and_then(|u| u.seven_day.as_ref());
             RotationCandidate {
                 email: email.clone(),
-                five_pct: five.map(|w| w.pct).unwrap_or(0.0),
                 seven_pct: seven.map(|w| w.pct).unwrap_or(0.0),
-                five_reset: five
-                    .and_then(|w| w.resets_at.as_deref())
-                    .and_then(parse_rfc3339_utc_secs),
                 seven_reset: seven
                     .and_then(|w| w.resets_at.as_deref())
                     .and_then(parse_rfc3339_utc_secs),
@@ -993,12 +1012,12 @@ fn rotation_candidates(app: &App, members: &[String]) -> Vec<RotationCandidate> 
         .collect()
 }
 
-fn is_exhausted(five: f64, seven: f64) -> bool {
-    (100.0 - five) < SESSION_HEADROOM_PCT || seven >= SEVEN_DAY_CAP_PCT
+fn is_exhausted(seven: f64) -> bool {
+    seven >= SEVEN_DAY_CAP_PCT
 }
 
 fn exhausted(app: &App, email: &str) -> bool {
-    is_exhausted(five_hour_pct(app, email), seven_day_pct(app, email))
+    is_exhausted(seven_day_pct(app, email))
 }
 
 fn eligible_members(app: &App, members: &[String]) -> Vec<String> {
@@ -1034,7 +1053,7 @@ fn pick_group_account(app: &App, group_name: &str, current: Option<&str>) -> Opt
     shuffle(&mut pool);
     pool.into_iter().min_by_key(|email| {
         let load = *counts.get(email).unwrap_or(&0);
-        let pct = five_hour_pct(app, email).round() as u32;
+        let pct = seven_day_pct(app, email).round() as u32;
         (load, pct)
     })
 }
@@ -1080,22 +1099,12 @@ fn pct_key(pct: f64) -> u32 {
     (pct.max(0.0) * 100.0).round() as u32
 }
 
-fn saturated_rank(
-    candidate: &RotationCandidate,
-    load: u32,
-) -> (u8, i64, u32, u8, i64, u32, u32, u32) {
-    let (five_missing, five_reset) = match candidate.five_reset {
-        Some(reset) => (0, reset),
-        None => (1, i64::MAX),
-    };
+fn saturated_rank(candidate: &RotationCandidate, load: u32) -> (u8, i64, u32, u32, u32) {
     let (seven_missing, seven_reset) = match candidate.seven_reset {
         Some(reset) => (0, reset),
         None => (1, i64::MAX),
     };
     (
-        five_missing,
-        five_reset,
-        pct_key(candidate.five_pct),
         seven_missing,
         seven_reset,
         pct_key(candidate.seven_pct),
@@ -1124,11 +1133,11 @@ fn keep_saturated_current(current: &RotationCandidate, best: &RotationCandidate)
     if current.email == best.email {
         return true;
     }
-    match (current.five_reset, best.five_reset) {
+    match (current.seven_reset, best.seven_reset) {
         (Some(current_reset), Some(best_reset)) => {
             current_reset <= best_reset + RESET_STICKY_MARGIN_SECS
         }
-        (None, None) => current.five_pct <= best.five_pct + UTIL_STICKY_MARGIN_PCT,
+        (None, None) => current.seven_pct <= best.seven_pct + UTIL_STICKY_MARGIN_PCT,
         _ => false,
     }
 }
@@ -1187,7 +1196,7 @@ async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[Host]
 
     let eligible: Vec<String> = candidates
         .iter()
-        .filter(|candidate| !is_exhausted(candidate.five_pct, candidate.seven_pct))
+        .filter(|candidate| !is_exhausted(candidate.seven_pct))
         .map(|candidate| candidate.email.clone())
         .collect();
     let assignments = if eligible.is_empty() {
@@ -1200,7 +1209,7 @@ async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[Host]
         let usage: HashMap<String, f64> = candidates
             .iter()
             .filter(|candidate| eligible.contains(&candidate.email))
-            .map(|candidate| (candidate.email.clone(), candidate.five_pct))
+            .map(|candidate| (candidate.email.clone(), candidate.seven_pct))
             .collect();
         assign_rotation(clones, &eligible, &usage)
     };
@@ -1691,25 +1700,21 @@ mod tests {
 
     fn codex_rotation_candidate(
         email: &str,
-        five_pct: f64,
         seven_pct: f64,
-        five_reset: Option<i64>,
         seven_reset: Option<i64>,
     ) -> RotationCandidate {
         RotationCandidate {
             email: email.to_string(),
-            five_pct,
             seven_pct,
-            five_reset,
             seven_reset,
         }
     }
 
     #[test]
-    fn codex_saturated_assignment_prefers_soonest_5h_reset() {
+    fn codex_saturated_assignment_prefers_soonest_7d_reset() {
         let candidates = [
-            codex_rotation_candidate("soon@o", 97.0, 96.0, Some(1_000), Some(10_000)),
-            codex_rotation_candidate("late@o", 90.0, 96.0, Some(2_000), Some(10_000)),
+            codex_rotation_candidate("soon@o", 96.0, Some(1_000)),
+            codex_rotation_candidate("late@o", 96.0, Some(2_000)),
         ];
         let clones = [clone_host("c1", Some("late@o"))];
 
@@ -1719,10 +1724,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_saturated_assignment_uses_lower_5h_when_resets_are_missing() {
+    fn codex_saturated_assignment_uses_lower_7d_when_resets_are_missing() {
         let candidates = [
-            codex_rotation_candidate("hot@o", 98.0, 96.0, None, Some(10_000)),
-            codex_rotation_candidate("cool@o", 90.0, 96.0, None, Some(10_000)),
+            codex_rotation_candidate("hot@o", 98.0, None),
+            codex_rotation_candidate("cool@o", 90.0, None),
         ];
         let clones = [clone_host("c1", Some("hot@o"))];
 
@@ -1734,8 +1739,8 @@ mod tests {
     #[test]
     fn codex_saturated_assignment_keeps_current_within_reset_margin() {
         let candidates = [
-            codex_rotation_candidate("current@o", 98.0, 96.0, Some(1_800), Some(10_000)),
-            codex_rotation_candidate("best@o", 99.0, 96.0, Some(1_000), Some(10_000)),
+            codex_rotation_candidate("current@o", 96.0, Some(1_800)),
+            codex_rotation_candidate("best@o", 96.0, Some(1_000)),
         ];
         let clones = [clone_host("c1", Some("current@o"))];
 
@@ -1747,8 +1752,8 @@ mod tests {
     #[test]
     fn codex_saturated_assignment_moves_missing_reset_current_to_known_reset() {
         let candidates = [
-            codex_rotation_candidate("unknown@o", 90.0, 96.0, None, Some(10_000)),
-            codex_rotation_candidate("known@o", 94.0, 96.0, Some(1_000), Some(10_000)),
+            codex_rotation_candidate("unknown@o", 96.0, None),
+            codex_rotation_candidate("known@o", 96.0, Some(1_000)),
         ];
         let clones = [clone_host("c1", Some("unknown@o"))];
 
@@ -1758,11 +1763,22 @@ mod tests {
     }
 
     #[test]
-    fn codex_exhaustion_threshold_is_80_5h_or_95_7d() {
-        assert!(!is_exhausted(80.0, 0.0));
-        assert!(is_exhausted(80.1, 0.0));
-        assert!(!is_exhausted(0.0, 94.9));
-        assert!(is_exhausted(0.0, 95.0));
+    fn codex_exhaustion_threshold_is_95_7d() {
+        assert!(!is_exhausted(94.9));
+        assert!(is_exhausted(95.0));
+    }
+
+    #[test]
+    fn parses_rfc3339_z_and_offset_forms() {
+        // Codex resets arrive as `...Z`, but the parser is kept identical to Claude's, so
+        // it must also read fractional seconds and numeric offsets.
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"), Some(1_609_459_200));
+        assert_eq!(
+            parse_rfc3339_utc_secs("2026-07-24T22:00:00.469890+00:00"),
+            Some(1_784_930_400)
+        );
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"), Some(1_609_477_200));
+        assert_eq!(parse_rfc3339_utc_secs("2021-13-01T00:00:00Z"), None);
     }
 
     fn host_sel(id: &str, managed: bool, group: Option<&str>, sel: Option<&str>) -> Host {
