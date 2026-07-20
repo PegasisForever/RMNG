@@ -15,6 +15,7 @@ import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
 import geminiLogo from "../assets/gemini.svg";
 import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, GroupUsage } from "~/lib/types";
+import { ordered, useAccountOrder } from "~/lib/accountOrder";
 
 const FIVE_H_MS = 5 * 60 * 60 * 1000;
 const SEVEN_D_MS = 7 * 24 * 60 * 60 * 1000;
@@ -229,6 +230,10 @@ export function ClaudeAccountsPanel({
   onRefresh: () => void | Promise<void>;
 }) {
   const now = useNow();
+  // Apply the shared cosmetic order (same store the Settings manager writes) so drag-reorder
+  // there is reflected here — groups, and the accounts within each group.
+  const { groupOrder, acctOrder } = useAccountOrder();
+  const orderedGroups = ordered(groups, groupOrder, (g) => g.name);
   const [refreshing, setRefreshing] = useState(false);
   const refresh = async () => {
     setRefreshing(true);
@@ -277,10 +282,10 @@ export function ClaudeAccountsPanel({
         </button>
       ) : (
         <div className="mt-0.5 space-y-1.5">
-          {groups.map((g) => (
+          {orderedGroups.map((g) => (
             <GroupBlock
               key={g.name}
-              group={g}
+              group={{ ...g, accounts: ordered(g.accounts, acctOrder[g.name] ?? [], (a) => a.id) }}
               now={now}
               onAddAccount={onAddAccount}
               onDeleteGroup={onDeleteGroup}

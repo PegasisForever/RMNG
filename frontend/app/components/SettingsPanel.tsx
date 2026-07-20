@@ -19,6 +19,7 @@ import { ChevronDown, ChevronRight, GripVertical, Plus, Trash2, X } from "lucide
 import { useEffect, useState } from "react";
 
 import type { ClaudeUsage, GroupUsage } from "~/lib/types";
+import { ordered, useAccountOrder } from "~/lib/accountOrder";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
@@ -153,33 +154,9 @@ export interface SettingsPanelProps {
   onDeleteAccount: (group: string, account: ClaudeUsage) => void;
 }
 
-// --- Cosmetic, client-only ordering for the Account-groups manager -------------------
-// The user can drag to reorder the group cards and the account rows within a group. This
-// is PURELY a display preference: a group is a pool and its accounts are an unordered set,
-// so order carries no backend meaning. It's persisted in localStorage and is NEVER sent
-// to the server (no API call, no config change).
-const GROUP_ORDER_KEY = "rmng.settings.groupOrder";
-const ACCT_ORDER_KEY = "rmng.settings.acctOrder";
-
-function loadOrder<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-/** Order `items` by a saved list of keys. Items whose key appears in `savedOrderKeys` sort
- *  to that position; items not in it (newly appeared groups/accounts) keep their original
- *  relative order at the end. `Array.prototype.sort` is stable, so an SSE re-render or a
- *  reload preserves the user's manual order instead of resetting it — and removed items
- *  simply drop out. */
-function ordered<T>(items: T[], savedOrderKeys: string[], keyOf: (item: T) => string): T[] {
-  const pos = new Map(savedOrderKeys.map((k, i) => [k, i] as const));
-  const END = Number.MAX_SAFE_INTEGER;
-  return [...items].sort((a, b) => (pos.get(keyOf(a)) ?? END) - (pos.get(keyOf(b)) ?? END));
-}
+// Cosmetic drag-to-reorder for group cards and account rows is a client-only display
+// preference (localStorage), NEVER sent to the server. It lives in a shared reactive store
+// so the left sidebar's usage panel reflects the same order — see `~/lib/accountOrder`.
 
 /** The reorder DnD sensors — a pointer sensor with a 5px activation distance (so a click
  *  on a button isn't read as a drag) plus a keyboard sensor for accessible reordering.
@@ -389,27 +366,10 @@ function GroupManager({
   const [newName, setNewName] = useState("");
   const usageByName = new Map(usageGroups.map((g) => [g.name, g]));
 
-  // Cosmetic ordering (client-only, localStorage). Seeded from storage once on mount —
-  // safe under `ssr:false`. Persisted on change. Never leaves the browser.
+  // Shared cosmetic ordering (drag to reorder). The sidebar reads the same store, so a
+  // reorder here reflects there live — persistence + notification happen in the store.
   const sensors = useReorderSensors();
-  const [groupOrder, setGroupOrder] = useState<string[]>(() => loadOrder<string[]>(GROUP_ORDER_KEY, []));
-  const [acctOrder, setAcctOrder] = useState<Record<string, string[]>>(() =>
-    loadOrder<Record<string, string[]>>(ACCT_ORDER_KEY, {}),
-  );
-  useEffect(() => {
-    try {
-      localStorage.setItem(GROUP_ORDER_KEY, JSON.stringify(groupOrder));
-    } catch {
-      // ignore (private mode / quota) — ordering is best-effort cosmetics
-    }
-  }, [groupOrder]);
-  useEffect(() => {
-    try {
-      localStorage.setItem(ACCT_ORDER_KEY, JSON.stringify(acctOrder));
-    } catch {
-      // ignore
-    }
-  }, [acctOrder]);
+  const { groupOrder, acctOrder, setGroupOrder, setAcctOrder } = useAccountOrder();
 
   const orderedGroups = ordered(groups, groupOrder, (g) => g.name);
 
