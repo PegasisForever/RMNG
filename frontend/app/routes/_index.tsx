@@ -25,6 +25,7 @@ import {
   pullTemplate,
   putConfig,
   putForwards,
+  refreshUsage,
   reorder,
   restartServer,
   setHostGroup,
@@ -428,6 +429,7 @@ function Dashboard({
           onCreateGroup={() => onCreateGroup()}
           onAddAccount={(group) => setLoginGroup(group)}
           onDeleteGroup={onDeleteGroup}
+          onRefresh={() => refreshUsage()}
           onSelectHost={(host) => {
             run(activate(host.id));
             setSidebarOpen(false);

@@ -8,7 +8,7 @@
 // Each window's bar carries a vertical "pace" marker = the utilization you'd be at if
 // you spent the quota uniformly across the window (elapsed fraction of
 // [resetsAt - windowLength, resetsAt]); fill past the marker = burning faster than uniform.
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.png";
@@ -200,6 +200,7 @@ export function ClaudeAccountsPanel({
   onCreateGroup,
   onAddAccount,
   onDeleteGroup,
+  onRefresh,
 }: {
   /** Per-group usage view (from `ControlState.usageGroups`, merged with configured groups). */
   groups: GroupUsage[];
@@ -209,8 +210,20 @@ export function ClaudeAccountsPanel({
   onAddAccount: (group: string) => void;
   /** Delete a group. */
   onDeleteGroup: (group: string) => void;
+  /** Trigger an immediate server-side usage poll (the refreshed view arrives over SSE). */
+  onRefresh: () => void | Promise<void>;
 }) {
   const now = useNow();
+  const [refreshing, setRefreshing] = useState(false);
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } finally {
+      // Brief spin; the numbers themselves update when the poll's ControlState arrives over SSE.
+      setTimeout(() => setRefreshing(false), 800);
+    }
+  };
 
   return (
     <div>
@@ -218,14 +231,25 @@ export function ClaudeAccountsPanel({
         <h2 className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
           Groups{groups.length ? ` (${groups.length})` : ""}
         </h2>
-        <button
-          type="button"
-          onClick={() => onCreateGroup()}
-          title="Create an account group"
-          className="rounded px-1 text-[11px] font-medium text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-        >
-          + Group
-        </button>
+        <div className="flex items-center gap-0.5">
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={refreshing}
+            title="Refresh usage now"
+            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+          >
+            <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+          </button>
+          <button
+            type="button"
+            onClick={() => onCreateGroup()}
+            title="Create an account group"
+            className="rounded px-1 text-[11px] font-medium text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+          >
+            + Group
+          </button>
+        </div>
       </div>
 
       {groups.length === 0 ? (

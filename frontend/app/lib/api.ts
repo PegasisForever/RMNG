@@ -141,6 +141,11 @@ export const groupLoginStatus = (group: string, state: string) =>
 export const deleteGroupAccount = (group: string, file: string) =>
   postJson(`/api/groups/${encodeURIComponent(group)}/accounts/delete`, { file });
 
+/** Trigger an immediate server-side usage poll (the manual refresh button, and auto-fired
+ *  after an account is added). The refreshed `usageGroups` arrive over SSE within ~a second. */
+export const refreshUsage = (): Promise<void> =>
+  postJson("/api/usage/refresh", {}).then(() => undefined);
+
 /** Bind a clone to an account group (or clear it with `null`). Replaces the old
  *  per-provider account swap — one group backs all of a clone's agents. */
 export const setHostGroup = (hostId: string, group: string | null) =>

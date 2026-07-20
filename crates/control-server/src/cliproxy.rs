@@ -23,7 +23,7 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -107,6 +107,8 @@ struct Inner {
 /// Shared supervisor + key state hung off `App`.
 pub struct CliProxyManager {
     inner: Mutex<Inner>,
+    /// Wakes the by-group usage poller for an immediate poll (account added / manual refresh).
+    usage_poke: Arc<tokio::sync::Notify>,
 }
 
 impl CliProxyManager {
@@ -119,7 +121,22 @@ impl CliProxyManager {
             .unwrap_or_default();
         let token_index =
             file.router_keys.iter().map(|(host, key)| (key.clone(), host.clone())).collect();
-        Self { inner: Mutex::new(Inner { file, token_index, data_dir: data_dir.to_string() }) }
+        Self {
+            inner: Mutex::new(Inner { file, token_index, data_dir: data_dir.to_string() }),
+            usage_poke: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    /// Wake the by-group usage poller for an immediate poll — called right after an account is
+    /// added to a group or on a manual refresh, so the account/usage shows up in ~a second
+    /// instead of at the next scheduled poll. Multiple pokes coalesce into one poll.
+    pub fn poke_usage(&self) {
+        self.usage_poke.notify_one();
+    }
+
+    /// The notify handle the poller awaits between cycles.
+    pub(crate) fn usage_poke_handle(&self) -> Arc<tokio::sync::Notify> {
+        self.usage_poke.clone()
     }
 
     fn state_path(data_dir: &str) -> PathBuf {
@@ -244,7 +261,7 @@ fn config_path(data_dir: &str, group: &str) -> PathBuf {
 /// quota failover (the Fable case). The sidecar bcrypt-hashes `secret-key` in place on
 /// startup; we always know the plaintext from `InstanceMeta`.
 fn render_config_yaml(meta: &InstanceMeta, auth_dir: &str) -> String {
-    format!(
+    let mut body = format!(
         "# Managed by RMNG (cliproxy.rs). Regenerated on every (re)spawn.\n\
          host: \"{BIND_HOST}\"\n\
          port: {port}\n\
@@ -257,7 +274,48 @@ fn render_config_yaml(meta: &InstanceMeta, auth_dir: &str) -> String {
         port = meta.port,
         inbound = meta.inbound_key,
         secret = meta.mgmt_secret,
-    )
+    );
+    // Blacklist the operator-excluded models from this instance's /v1/models catalog — this is
+    // what shapes Claude Code's gateway-discovery picker. (OpenCode/Codex are separately held to
+    // GPT-only by their own generated client configs; see clone_reconcile.rs::RMNG_GPT_MODELS.)
+    body.push_str(&oauth_excluded_models_yaml());
+    body
+}
+
+/// Models hidden from every group instance's `/v1/models` catalog. Per OAuth channel;
+/// `oauth-excluded-models` accepts exact ids + `*` wildcards (prefix/suffix/substring) and is
+/// listing-scoped. KEPT: claude-opus-4-8 / claude-sonnet-5 / claude-haiku-4-5 / claude-fable-5
+/// (claude) and the gpt-5.6 tiers + gpt-5.5 (codex).
+const EXCLUDED_CLAUDE_MODELS: &[&str] = &[
+    "*-4-7",
+    "*-4-6",
+    "*-4-5-20251101",
+    "*-4-20250514",
+    "*-4-1-20250805",
+    "*-4-5-20250929",
+    "claude-3-7-sonnet*",
+    "claude-3-5-haiku*",
+];
+const EXCLUDED_CODEX_MODELS: &[&str] = &[
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
+    "codex-auto-review",
+    "gpt-image-1.5",
+    "gpt-image-2",
+];
+
+/// Render the `oauth-excluded-models:` block for a generated `config.yaml`.
+fn oauth_excluded_models_yaml() -> String {
+    let mut s = String::from("oauth-excluded-models:\n  claude:\n");
+    for m in EXCLUDED_CLAUDE_MODELS {
+        s.push_str(&format!("    - \"{m}\"\n"));
+    }
+    s.push_str("  codex:\n");
+    for m in EXCLUDED_CODEX_MODELS {
+        s.push_str(&format!("    - \"{m}\"\n"));
+    }
+    s
 }
 
 /// Write `config.yaml` + ensure `auth-dir` exists (both under `data/cliproxy/<group>/`).
@@ -493,9 +551,16 @@ pub async fn run_usage_poller(app: App) {
     // Per-(group|email) last-good view, so a transient 401/timeout shows the previous numbers
     // marked `stale` instead of blanking the account.
     let mut last_good: HashMap<String, wire::ClaudeUsage> = HashMap::new();
+    let poke = app.cliproxy.usage_poke_handle();
     loop {
         poll_usage_once(&app, &mut last_good).await;
-        tokio::time::sleep(USAGE_POLL_INTERVAL).await;
+        // Wake early on a poke (account added / manual refresh); otherwise poll on the timer.
+        tokio::select! {
+            _ = tokio::time::sleep(USAGE_POLL_INTERVAL) => {}
+            _ = poke.notified() => {
+                tracing::debug!(target: "cliproxy", "usage poll poked (account change / manual refresh)");
+            }
+        }
     }
 }
 
@@ -587,6 +652,65 @@ async fn poll_usage_once(app: &App, last_good: &mut HashMap<String, wire::Claude
     app.store.mutate(|s| s.usage_groups = out);
 }
 
+// --- live model catalog ----------------------------------------------------------------
+
+/// The non-`claude-` model ids in an OpenAI-style `/v1/models` body
+/// (`{"data":[{"id":"..."},...]}`). An instance's catalog is already blacklist-filtered
+/// (`oauth-excluded-models`), so dropping the Claude channel leaves exactly the GPT/codex-channel
+/// models OpenCode/Codex are allowed to pick. Deduped + stably sorted; a body that doesn't parse
+/// (or carries no `data` array) yields an empty vec. Pure so it can be unit-tested.
+fn gpt_ids_from_models_json(body: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(data) = v.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = data
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
+        .filter(|id| !id.starts_with("claude-"))
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// The live GPT model ids a group's CLIProxyAPI instance advertises for the OpenCode/Codex
+/// (codex-channel) provider: GET its loopback `/v1/models` and keep every non-`claude-` id (see
+/// [`gpt_ids_from_models_json`]). Because the catalog is already blacklist-filtered by
+/// `oauth-excluded-models`, this is exactly the allowed GPT set — new GPT models appear here
+/// automatically and only the operator blacklist removes them.
+///
+/// Returns `vec![]` on any miss — no instance/port/key yet, the instance is still starting, a
+/// timeout, a non-2xx, or an empty catalog — and the caller falls back to
+/// `clone_reconcile::FALLBACK_GPT_MODELS`.
+pub(crate) async fn group_gpt_models(app: &App, group: &str) -> Vec<String> {
+    let (Some(port), Some(key)) =
+        (app.cliproxy.port_for(group), app.cliproxy.inbound_key_for(group))
+    else {
+        return Vec::new();
+    };
+    let url = format!("http://{BIND_HOST}:{port}/v1/models");
+    let body = async {
+        let resp = app
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {key}"))
+            .timeout(Duration::from_secs(4))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        resp.text().await.ok()
+    }
+    .await;
+    body.map(|b| gpt_ids_from_models_json(&b)).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +736,10 @@ mod tests {
         assert!(y.contains("max-retry-credentials: 0"));
         assert!(y.contains("- \"IK\""));
         assert!(y.contains("secret-key: \"MS\""));
+        // The model blacklist shapes the /v1/models catalog (Claude Code's discovery picker).
+        assert!(y.contains("oauth-excluded-models:"));
+        assert!(y.contains("claude-3-5-haiku*"));
+        assert!(y.contains("gpt-5.4-mini"));
     }
 
     #[test]
@@ -675,6 +803,29 @@ mod tests {
         assert_eq!(got[1].email, "c@d");
         assert_eq!(got[1].account_id.as_deref(), Some("id1"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gpt_ids_from_models_json_drops_claude_keeps_gpt() {
+        let body = r#"{"data":[
+            {"id":"claude-opus-4-8"},
+            {"id":"gpt-5.6-terra"},
+            {"id":"claude-sonnet-5"},
+            {"id":"gpt-5.5"},
+            {"id":"gpt-5.6-sol"}
+        ]}"#;
+        let ids = gpt_ids_from_models_json(body);
+        // Claude channel dropped; GPT channel kept, deduped + stably sorted.
+        assert_eq!(ids, vec!["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"]);
+        assert!(ids.iter().all(|id| !id.starts_with("claude-")));
+        // Duplicates collapse.
+        assert_eq!(
+            gpt_ids_from_models_json(r#"{"data":[{"id":"gpt-5.5"},{"id":"gpt-5.5"}]}"#),
+            vec!["gpt-5.5"]
+        );
+        // Malformed body / missing `data` array → empty.
+        assert!(gpt_ids_from_models_json("not json").is_empty());
+        assert!(gpt_ids_from_models_json(r#"{"object":"list"}"#).is_empty());
     }
 
     #[test]

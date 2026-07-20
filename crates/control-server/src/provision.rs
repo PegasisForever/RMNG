@@ -497,8 +497,15 @@ async fn clone_container_after_create(
         .iter()
         .find(|v| v.key == "ANTHROPIC_BASE_URL")
         .map(|v| format!("{}/v1", v.value));
-    let mut codex_entries =
-        crate::clone_reconcile::codex_parity_entries(hostname, control_mcp_url, cc_base.as_deref());
+    // One-shot initial config: use the fallback GPT model list here; the clone reconciler
+    // refreshes it with the group's live (blacklist-filtered) `/v1/models` set on its next pass.
+    let gpt_models = crate::clone_reconcile::fallback_gpt_models();
+    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(
+        hostname,
+        control_mcp_url,
+        cc_base.as_deref(),
+        &gpt_models,
+    );
     codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(&codex_entries));
     entries.append(&mut codex_entries);
     if let Some(rc) = &path_rc {

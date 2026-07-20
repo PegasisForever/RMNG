@@ -6,7 +6,7 @@
 //! the injected payload binaries, then restart only `rmng-clone-daemon` to pick up the daemon
 //! binary. `agent-wrapper` is refreshed on disk but intentionally not restarted.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
@@ -105,33 +105,60 @@ pub(crate) fn ssh_stamp_entry() -> TarEntry {
     }
 }
 
-/// The GPT model ids the RMNG group-proxy provider advertises to Codex + OpenCode. Codex/
-/// OpenCode list GPT models only (never Claude), so their pickers can't surface a Claude
-/// model — the soft per-agent visibility rule from the group-proxy plan. `[0]` is the default.
+/// Fallback GPT model list for Codex + OpenCode, used ONLY when the group's live `/v1/models`
+/// catalog can't be read — the group has no GPT accounts authenticated yet, or its CLIProxyAPI
+/// instance is still starting (see [`crate::cliproxy::group_gpt_models`]). In steady state the
+/// model list is derived live from that catalog (already blacklist-filtered), so new GPT models
+/// appear automatically; this const is just the safety net so a clone never gets a broken config.
 ///
-/// Current (2026-07) Codex GPT families: the GPT-5.6 tiers (sol/terra/luna, GA 2026-07-09) plus
-/// the previous-generation `gpt-5.5`. The deprecated `-codex` suffix variants (`gpt-5.x-codex`)
-/// are intentionally excluded. Ids per https://learn.chatgpt.com/docs/models; OpenAI's own
-/// sample config uses `model = "gpt-5.6"` (https://learn.chatgpt.com/docs/config-file/config-sample).
-/// TODO(cliproxy): the authoritative served ids are whatever the group's pinned CLIProxyAPI v7
-/// instance advertises at `/v1/models` for a ChatGPT-subscription account — confirm this list
-/// against that catalog. Visibility is soft: a mismatch only hides/omits a picker entry.
-const RMNG_GPT_MODELS: &[&str] =
-    &["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"];
+/// Codex/OpenCode list GPT models only (never Claude), so their pickers can't surface a Claude
+/// model — the soft per-agent visibility rule from the group-proxy plan. There is NO bare
+/// `gpt-5.6` — it ships as the tiers `gpt-5.6-terra` / `-sol` / `-luna`, plus the previous
+/// generation `gpt-5.5`. `terra` is the preferred default. The blacklisted GPT ids
+/// (gpt-5.4[-mini], gpt-5.3-codex-spark, codex-auto-review, gpt-image-*) are hidden from every
+/// catalog via `cliproxy::EXCLUDED_CODEX_MODELS`.
+const FALLBACK_GPT_MODELS: &[&str] = &["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5"];
 
-fn codex_config_toml(clone_id: &str, control_mcp_url: Option<&str>, cc_base_url: Option<&str>) -> String {
+/// [`FALLBACK_GPT_MODELS`] as an owned `Vec<String>` — what callers pass to the config
+/// generators when a group's live `/v1/models` catalog can't be read (or isn't queried, e.g. the
+/// one-shot initial provision, which the reconciler refreshes with the live list on its next
+/// pass).
+pub(crate) fn fallback_gpt_models() -> Vec<String> {
+    FALLBACK_GPT_MODELS.iter().map(|s| s.to_string()).collect()
+}
+
+/// The GPT model a picker defaults to: prefer `gpt-5.6-terra` when the group serves it, else the
+/// first served id. `None` only for an empty list (callers guarantee a non-empty list via the
+/// [`FALLBACK_GPT_MODELS`] fallback, and both config generators guard on this being `Some`).
+fn default_gpt_model(models: &[String]) -> Option<&str> {
+    models
+        .iter()
+        .map(String::as_str)
+        .find(|m| *m == "gpt-5.6-terra")
+        .or_else(|| models.first().map(String::as_str))
+}
+
+fn codex_config_toml(
+    clone_id: &str,
+    control_mcp_url: Option<&str>,
+    cc_base_url: Option<&str>,
+    gpt_models: &[String],
+) -> String {
     let mut body = String::from("# Managed by RMNG. Re-created by the control-server clone reconciler.\n\n");
 
     // Group-proxy provider (bare top-level keys MUST precede any [table] in TOML). When the
     // control host resolves, route Codex through the control-server's /cc/v1 OpenAI-compatible
     // surface and make it the active provider defaulting to a GPT model, so a Claude model can
     // never be picked from Codex. Additive: the old ~/.codex/auth.json push still runs; with
-    // this provider active Codex uses RMNG_PROXY_KEY over the proxy instead.
+    // this provider active Codex uses RMNG_PROXY_KEY over the proxy instead. Gated on a resolved
+    // default model too, so an empty model list never yields a provider with no default (broken).
     let cc_base = cc_base_url.map(str::trim).filter(|s| !s.is_empty());
-    if let Some(base) = cc_base {
+    let provider = cc_base.zip(default_gpt_model(gpt_models));
+    if let Some((_base, model)) = provider {
         body.push_str("model_provider = \"rmng\"\n");
-        body.push_str(&format!("model = \"{}\"\n\n", RMNG_GPT_MODELS[0]));
-        let _ = base; // used in the table below
+        body.push_str(&format!("model = \"{model}\"\n"));
+        // Default Codex to HIGH reasoning effort on the default GPT tier (gpt-5.6-terra).
+        body.push_str("model_reasoning_effort = \"high\"\n\n");
     }
 
     body.push_str(
@@ -144,7 +171,7 @@ bearer_token_env_var = "LINEAR_API_KEY"
 "#,
     );
 
-    if let Some(base) = cc_base {
+    if let Some((base, _model)) = provider {
         // The RMNG group-proxy provider. Schema per the Codex config reference
         // (https://learn.chatgpt.com/docs/config-file/config-reference and .../config-sample):
         //   - base_url ends in /v1; for the Responses wire protocol Codex appends `/responses`
@@ -184,9 +211,10 @@ http_headers = {{ "x-rmng-clone" = "{clone_id}" }}
 }
 
 /// The managed OpenCode config: a single OpenAI-compatible provider named `rmng` pointing at
-/// the group-proxy router's /cc/v1 surface, keyed by RMNG_PROXY_KEY, listing GPT models only
-/// (no Anthropic provider), so OpenCode's picker never shows a Claude model. `None` when the
-/// control host can't be resolved (nothing to write this pass).
+/// the group-proxy router's /cc/v1 surface, keyed by RMNG_PROXY_KEY, listing the resolved GPT
+/// models only (no Anthropic provider), so OpenCode's picker never shows a Claude model. `None`
+/// when the control host can't be resolved OR the model list is empty (nothing to write / would
+/// be a broken provider this pass).
 ///
 /// Schema per the OpenCode provider docs (https://opencode.ai/docs/providers):
 ///   - `npm = "@ai-sdk/openai-compatible"` is the custom OpenAI-compatible provider; it POSTs
@@ -195,17 +223,18 @@ http_headers = {{ "x-rmng-clone" = "{clone_id}" }}
 ///   - `options.apiKey` accepts the `{env:VAR}` interpolation form (resolved from the clone env).
 ///   - the `models` map keys are the ids sent verbatim in the request `model` field.
 ///   - the top-level `model` sets the default as `"<provider>/<id>"`.
-/// The global managed path is ~/.config/opencode/opencode.json. Same GPT-only id caveat as
-/// [`RMNG_GPT_MODELS`] — the served set is ultimately the group instance's /v1/models.
-fn opencode_config_json(cc_base_url: Option<&str>) -> Option<String> {
+/// The global managed path is ~/.config/opencode/opencode.json. `gpt_models` is the group's live
+/// (blacklist-filtered) `/v1/models` GPT set, or [`FALLBACK_GPT_MODELS`] when that can't be read.
+fn opencode_config_json(cc_base_url: Option<&str>, gpt_models: &[String]) -> Option<String> {
     let base = cc_base_url.map(str::trim).filter(|s| !s.is_empty())?;
-    let models: serde_json::Map<String, serde_json::Value> = RMNG_GPT_MODELS
+    let default_model = default_gpt_model(gpt_models)?;
+    let models: serde_json::Map<String, serde_json::Value> = gpt_models
         .iter()
-        .map(|m| (m.to_string(), serde_json::json!({ "name": m })))
+        .map(|m| (m.clone(), serde_json::json!({ "name": m })))
         .collect();
     let cfg = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
-        "model": format!("rmng/{}", RMNG_GPT_MODELS[0]),
+        "model": format!("rmng/{default_model}"),
         "provider": {
             "rmng": {
                 "npm": "@ai-sdk/openai-compatible",
@@ -225,6 +254,7 @@ pub(crate) fn codex_parity_entries(
     clone_id: &str,
     control_mcp_url: Option<&str>,
     cc_base_url: Option<&str>,
+    gpt_models: &[String],
 ) -> Vec<TarEntry> {
     let mut entries = vec![
         TarEntry {
@@ -236,13 +266,13 @@ pub(crate) fn codex_parity_entries(
         },
         TarEntry {
             path: "home/rmng/.codex/config.toml".to_string(),
-            data: codex_config_toml(clone_id, control_mcp_url, cc_base_url).into_bytes(),
+            data: codex_config_toml(clone_id, control_mcp_url, cc_base_url, gpt_models).into_bytes(),
             mode: 0o600,
             uid: CLONE_UID,
             gid: CLONE_GID,
         },
     ];
-    if let Some(json) = opencode_config_json(cc_base_url) {
+    if let Some(json) = opencode_config_json(cc_base_url, gpt_models) {
         entries.push(TarEntry {
             path: "home/rmng/.config/opencode/opencode.json".to_string(),
             data: json.into_bytes(),
@@ -515,10 +545,10 @@ async fn control_mcp_url(app: &App) -> Option<String> {
     }
 }
 
-async fn ensure_codex_parity(app: &App, clone_id: &str) -> Result<bool> {
+async fn ensure_codex_parity(app: &App, clone_id: &str, gpt_models: &[String]) -> Result<bool> {
     let control_url = control_mcp_url(app).await;
     let cc_base = crate::provision::cc_base_url(app).await;
-    let entries = codex_parity_entries(clone_id, control_url.as_deref(), cc_base.as_deref());
+    let entries = codex_parity_entries(clone_id, control_url.as_deref(), cc_base.as_deref(), gpt_models);
     let desired = desired_payload_hash(&entries);
     if read_stamp(app, clone_id, codex_parity_stamp_path(), "codex parity")
         .await?
@@ -643,6 +673,10 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
     let cfg = app.config();
     let control_env = crate::provision::control_env_vars(app).await;
 
+    // Per-pass group → live GPT model list cache, so N clones sharing a group hit the group's
+    // `/v1/models` at most once per reconcile pass (the loop runs every RECONCILE_INTERVAL).
+    let mut gpt_models_cache: HashMap<String, Vec<String>> = HashMap::new();
+
     for h in &hosts {
         let id = h.id.as_str();
         if !app.docker.is_running(id).await.unwrap_or(false) {
@@ -724,7 +758,27 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
-        match ensure_codex_parity(app, id).await {
+        // Resolve the GPT model list for this clone's group from the group's live (already
+        // blacklist-filtered) `/v1/models` catalog, cached per pass so a group is queried once.
+        // No group, or a group whose instance can't be read (no GPT accounts yet / still
+        // starting) → the FALLBACK_GPT_MODELS safety net, preserving the pre-live behavior.
+        let gpt_models = match h.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+            Some(group) => {
+                if let Some(cached) = gpt_models_cache.get(group) {
+                    cached.clone()
+                } else {
+                    let mut models = crate::cliproxy::group_gpt_models(app, group).await;
+                    if models.is_empty() {
+                        models = fallback_gpt_models();
+                    }
+                    gpt_models_cache.insert(group.to_string(), models.clone());
+                    models
+                }
+            }
+            None => fallback_gpt_models(),
+        };
+
+        match ensure_codex_parity(app, id, &gpt_models).await {
             Ok(true) => {
                 warned.remove(&format!("{id}:codex"));
                 tracing::info!(
@@ -809,6 +863,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_gpt_model_prefers_terra_else_first() {
+        let with_terra = vec!["gpt-5.5".to_string(), "gpt-5.6-terra".to_string()];
+        assert_eq!(default_gpt_model(&with_terra), Some("gpt-5.6-terra"));
+        let without_terra = vec!["gpt-5.6-sol".to_string(), "gpt-5.5".to_string()];
+        assert_eq!(default_gpt_model(&without_terra), Some("gpt-5.6-sol"));
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(default_gpt_model(&empty), None);
+    }
+
+    #[test]
+    fn empty_gpt_models_never_emit_a_broken_provider() {
+        // With a cc base but no models, Codex omits the provider and OpenCode writes nothing —
+        // an empty list must never yield a provider with no default model.
+        let toml = codex_config_toml("rmng-a", None, Some("http://rmng-control:9000/cc/v1"), &[]);
+        assert!(!toml.contains("model_provider"));
+        assert!(!toml.contains("model_providers.rmng"));
+        assert!(opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &[]).is_none());
+    }
+
+    #[test]
     fn payload_stamp_path_is_under_opt_rmng() {
         assert_eq!(payload_stamp_path(), "opt/rmng/.payload-hash");
     }
@@ -829,7 +903,8 @@ mod tests {
 
     #[test]
     fn codex_parity_entries_install_global_guidance_and_linear_mcp() {
-        let entries = codex_parity_entries("rmng-a", Some("http://rmng-control:9002"), None);
+        let entries =
+            codex_parity_entries("rmng-a", Some("http://rmng-control:9002"), None, &fallback_gpt_models());
         let agents = entries
             .iter()
             .find(|e| e.path == "home/rmng/.codex/AGENTS.md")
@@ -859,7 +934,8 @@ mod tests {
 
     #[test]
     fn codex_config_adds_active_rmng_provider_when_cc_base_present() {
-        let toml = codex_config_toml("rmng-a", None, Some("http://rmng-control:9000/cc/v1"));
+        let models = fallback_gpt_models();
+        let toml = codex_config_toml("rmng-a", None, Some("http://rmng-control:9000/cc/v1"), &models);
         assert!(toml.contains("model_provider = \"rmng\""));
         assert!(toml.contains("[model_providers.rmng]"));
         assert!(toml.contains("base_url = \"http://rmng-control:9000/cc/v1\""));
@@ -867,45 +943,52 @@ mod tests {
         assert!(toml.contains("env_key = \"RMNG_PROXY_KEY\""));
         // HTTP+SSE only: the Responses-API WebSocket transport is explicitly disabled.
         assert!(toml.contains("supports_websockets = false"));
-        // Default model is a GPT one so Claude models can't be picked from Codex.
-        assert!(toml.contains(&format!("model = \"{}\"", RMNG_GPT_MODELS[0])));
-        assert!(RMNG_GPT_MODELS[0].starts_with("gpt-"));
+        // Default model prefers gpt-5.6-terra at HIGH reasoning effort (Claude models can't be
+        // picked from Codex).
+        assert_eq!(default_gpt_model(&models), Some("gpt-5.6-terra"));
+        assert!(toml.contains("model = \"gpt-5.6-terra\""));
+        assert!(toml.contains("model_reasoning_effort = \"high\""));
+        // GPT-only, never a Claude model.
+        assert!(!toml.to_lowercase().contains("claude"));
         // Bare top-level keys must precede the first [table] (valid TOML).
         let mp = toml.find("model_provider = ").unwrap();
         let first_table = toml.find("[mcp_servers.desktop]").unwrap();
         assert!(mp < first_table, "top-level keys must come before tables:\n{toml}");
         // No cc base → the old behavior (no rmng provider at all).
-        let plain = codex_config_toml("rmng-a", None, None);
+        let plain = codex_config_toml("rmng-a", None, None, &models);
         assert!(!plain.contains("model_providers.rmng"));
         assert!(!plain.contains("model_provider"));
     }
 
     #[test]
     fn opencode_config_is_gpt_only_openai_compatible_provider() {
-        assert!(opencode_config_json(None).is_none());
-        let json = opencode_config_json(Some("http://rmng-control:9000/cc/v1")).unwrap();
+        let models = fallback_gpt_models();
+        assert!(opencode_config_json(None, &models).is_none());
+        let json = opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &models).unwrap();
         assert!(json.contains("\"npm\": \"@ai-sdk/openai-compatible\""));
         assert!(json.contains("\"baseURL\": \"http://rmng-control:9000/cc/v1\""));
         assert!(json.contains("{env:RMNG_PROXY_KEY}"));
-        assert!(json.contains(RMNG_GPT_MODELS[0]));
+        assert!(json.contains("gpt-5.6-terra"));
         // Default model is set as "<provider>/<id>" pointing at the GPT default.
-        assert!(json.contains(&format!("\"model\": \"rmng/{}\"", RMNG_GPT_MODELS[0])));
+        assert!(json.contains("\"model\": \"rmng/gpt-5.6-terra\""));
         // No Anthropic/Claude provider is generated for OpenCode.
         let lower = json.to_lowercase();
         assert!(!lower.contains("anthropic"));
         assert!(!lower.contains("claude"));
         // The parity entries carry the opencode file when a cc base is present.
-        let entries = codex_parity_entries("rmng-a", None, Some("http://rmng-control:9000/cc/v1"));
+        let entries =
+            codex_parity_entries("rmng-a", None, Some("http://rmng-control:9000/cc/v1"), &models);
         assert!(entries.iter().any(|e| e.path == "home/rmng/.config/opencode/opencode.json"));
         // ...and omit it when there's no cc base.
-        let bare = codex_parity_entries("rmng-a", None, None);
+        let bare = codex_parity_entries("rmng-a", None, None, &models);
         assert!(!bare.iter().any(|e| e.path == "home/rmng/.config/opencode/opencode.json"));
     }
 
     #[test]
     fn codex_parity_stamp_hash_changes_when_config_changes() {
-        let original = codex_parity_stamp_entry_for(&codex_parity_entries("rmng-a", None, None));
-        let mut changed = codex_parity_entries("rmng-a", None, None);
+        let original =
+            codex_parity_stamp_entry_for(&codex_parity_entries("rmng-a", None, None, &fallback_gpt_models()));
+        let mut changed = codex_parity_entries("rmng-a", None, None, &fallback_gpt_models());
         changed
             .iter_mut()
             .find(|e| e.path == "home/rmng/.codex/config.toml")

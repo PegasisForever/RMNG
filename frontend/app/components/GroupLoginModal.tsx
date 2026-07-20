@@ -202,7 +202,7 @@ export function GroupLoginModal({
 
         {phase === "done" ? (
           <p className="mt-4 rounded-md bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
-            Account added. It appears under the group at the next usage poll.
+            Account added — its usage should appear under the group in a moment.
           </p>
         ) : null}
 

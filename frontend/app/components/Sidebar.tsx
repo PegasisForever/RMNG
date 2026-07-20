@@ -99,6 +99,8 @@ export interface SidebarProps {
   onAddAccount: (group: string) => void;
   /** Delete an account group. */
   onDeleteGroup: (group: string) => void;
+  /** Trigger an immediate usage refresh (the panel's refresh button). */
+  onRefresh: () => void | Promise<void>;
   onSelectHost: (host: Host) => void;
   onDeleteHost: (host: Host) => void;
   /** Commit a managed clone to a new clone-source image. */
@@ -134,6 +136,7 @@ export function Sidebar({
   onCreateGroup,
   onAddAccount,
   onDeleteGroup,
+  onRefresh,
   onSelectHost,
   onDeleteHost,
   onCommitHost,
@@ -221,6 +224,7 @@ export function Sidebar({
         onCreateGroup={onCreateGroup}
         onAddAccount={onAddAccount}
         onDeleteGroup={onDeleteGroup}
+        onRefresh={onRefresh}
       />
 
       <div>

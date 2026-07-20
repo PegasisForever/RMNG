@@ -82,6 +82,7 @@ pub fn router(app: App) -> Router {
         .route("/api/groups/:name/accounts/login/status", get(group_login_status))
         .route("/api/groups/:name/accounts/login/complete", post(group_login_complete))
         .route("/api/groups/:name/accounts/delete", post(group_account_delete))
+        .route("/api/usage/refresh", post(usage_refresh))
         // Group-proxy request router: reverse-proxy a clone's agent traffic to its group's
         // CLIProxyAPI instance. ANY method; registered BEFORE the SPA fallback below.
         .route("/cc/*rest", any(cc_proxy));
@@ -1448,6 +1449,34 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
 /// GET a group instance's management API (`{base}{path_and_query}`) with the plaintext
 /// `X-Management-Key`, returning its JSON. 503 when the group has no instance meta yet; 502
 /// on a dial/parse failure or a non-2xx from the instance.
+/// Send a management request, retrying on a *connection* error for up to ~20s. A freshly
+/// created group's CLIProxyAPI instance takes a couple seconds to spawn + bind (the supervisor
+/// reconciles on a short interval), so the first onboarding call right after `POST /api/groups`
+/// would otherwise hit connection-refused and surface a gateway error; this waits it out. Only
+/// connect errors are retried — a real HTTP response (even non-2xx) returns immediately.
+async fn mgmt_send_retry(
+    http: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    secret: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<reqwest::Response, (StatusCode, String)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let mut rb = http.request(method.clone(), url).header("X-Management-Key", secret);
+        if let Some(b) = body {
+            rb = rb.json(b);
+        }
+        match rb.send().await {
+            Ok(resp) => return Ok(resp),
+            Err(e) if e.is_connect() && std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            }
+            Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("group instance: {e}"))),
+        }
+    }
+}
+
 async fn mgmt_get_json(
     app: &App,
     group: &str,
@@ -1457,13 +1486,14 @@ async fn mgmt_get_json(
         .cliproxy
         .management(group)
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, "group instance unavailable".into()))?;
-    let resp = app
-        .http
-        .get(format!("{base}{path_and_query}"))
-        .header("X-Management-Key", secret)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("group instance: {e}")))?;
+    let resp = mgmt_send_retry(
+        &app.http,
+        reqwest::Method::GET,
+        &format!("{base}{path_and_query}"),
+        &secret,
+        None,
+    )
+    .await?;
     mgmt_body(resp).await
 }
 
@@ -1568,7 +1598,13 @@ async fn group_login_status(
     }
     let enc = urlencode(state);
     let v = mgmt_get_json(&app, &name, &format!("/get-auth-status?state={enc}")).await?;
-    Ok(Json(normalize_login_status(&v)))
+    let normalized = normalize_login_status(&v);
+    // The moment the login completes the credential file is in the group's auth-dir — poke the
+    // usage poller so the new account shows up in ~a second instead of at the next 600s poll.
+    if normalized.get("state").and_then(serde_json::Value::as_str) == Some("done") {
+        app.cliproxy.poke_usage();
+    }
+    Ok(Json(normalized))
 }
 
 /// Collapse CLIProxyAPI's `get-auth-status` body (`{"status":"ok"|"wait"|"error",…}`) into
@@ -1628,14 +1664,14 @@ async fn group_login_complete(
             "provide either redirectUrl or both code and state".into(),
         ));
     };
-    let resp = app
-        .http
-        .post(format!("{base}/oauth-callback"))
-        .header("X-Management-Key", secret)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("group instance: {e}")))?;
+    let resp = mgmt_send_retry(
+        &app.http,
+        reqwest::Method::POST,
+        &format!("{base}/oauth-callback"),
+        &secret,
+        Some(&body),
+    )
+    .await?;
     Ok(Json(mgmt_body(resp).await?))
 }
 
@@ -1660,14 +1696,23 @@ async fn group_account_delete(
         .cliproxy
         .management(&name)
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, "group instance unavailable".into()))?;
-    let resp = app
-        .http
-        .delete(format!("{base}/auth-files?name={}", urlencode(file)))
-        .header("X-Management-Key", secret)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("group instance: {e}")))?;
+    let resp = mgmt_send_retry(
+        &app.http,
+        reqwest::Method::DELETE,
+        &format!("{base}/auth-files?name={}", urlencode(file)),
+        &secret,
+        None,
+    )
+    .await?;
     Ok(Json(mgmt_body(resp).await?))
+}
+
+/// `POST /api/usage/refresh` — trigger an immediate by-group usage poll (the manual refresh
+/// button). Fire-and-forget: the poll runs in the background poller and the refreshed
+/// `usage_groups` arrive over SSE within ~a second.
+async fn usage_refresh(State(app): State<App>) -> impl IntoResponse {
+    app.cliproxy.poke_usage();
+    Json(json!({ "ok": true }))
 }
 
 /// Minimal percent-encoding for a query-string value (state tokens / file names). Encodes

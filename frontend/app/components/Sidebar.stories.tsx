@@ -35,6 +35,7 @@ const meta = {
     onCreateGroup: fn(),
     onAddAccount: fn(),
     onDeleteGroup: fn(),
+    onRefresh: fn(),
     onSelectHost: fn(),
     onDeleteHost: fn(),
     onCommitHost: fn(),
