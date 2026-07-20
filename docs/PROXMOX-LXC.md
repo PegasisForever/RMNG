@@ -19,6 +19,14 @@ features: nesting=1,keyctl=1,fuse=1
 # GPU render node passthrough for VA-API (encode on the control-server, capture in clones).
 dev0: /dev/dri/renderD128,mode=0666
 
+# GPU compute node passthrough (AMD KFD → ROCm/HIP) so clones can run GPU compute, not just
+# render. Clones are privileged Docker containers, so they inherit EVERY device node present
+# in the CT's /dev — the same mechanism that delivers renderD128 above — so passing kfd into
+# the CT is all that's needed; there is no per-clone device wiring in the control-server.
+# (Use the path-based `dev` entry, not a raw `lxc.cgroup2.devices.allow c <major>:0`: KFD's
+# major is dynamically allocated and changes across boots.)
+dev1: /dev/kfd,mode=0666
+
 # Let the guest's Docker/systemd operate without the host AppArmor profile fighting it.
 # The unconfined profile alone is NOT enough for nested Docker: the runtime still probes
 # /sys/kernel/security/apparmor and dies with "Could not check if docker-default AppArmor
@@ -30,7 +38,7 @@ lxc.mount.auto: cgroup:mixed proc:rw sys:mixed
 ```
 
 Set them via `pct set <id> --features nesting=1,keyctl=1,fuse=1` and edit the conf for the `dev0` /
-`lxc.apparmor.profile` lines, then restart the CT. Give it enough cores/RAM/disk for the
+`dev1` / `lxc.apparmor.profile` lines, then restart the CT. Give it enough cores/RAM/disk for the
 fleet you intend to run (clones default to 16 cores / 32 GiB each — tune
 `docker.cloneCpus` / `docker.cloneMemoryMb` in the wizard).
 
