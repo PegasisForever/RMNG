@@ -56,8 +56,8 @@ function usageParts(
   return { cpu, mem };
 }
 
-/** The right-aligned usage metric (CPU or MEM) in a fixed-width tabular slot so the two
- *  figures stack and line up across the two info lines. */
+/** A usage metric (CPU or MEM): a label + a fixed-width tabular value, so the CPU and MEM
+ *  figures line up next to each other on the group/usage row. */
 function MetricSlot({ metric }: { metric: Metric }) {
   return (
     <span className="flex shrink-0 items-baseline gap-1 tabular-nums" title={metric.title}>
@@ -69,40 +69,27 @@ function MetricSlot({ metric }: { metric: Metric }) {
   );
 }
 
-/** The clone's account-group binding on the left (a "group" badge + the group name, or a
- *  muted "no group"), with an optional right-aligned usage metric. Provider-agnostic — a
- *  group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns intra-group selection. */
-function BindingLine({ group, metric }: { group?: string; metric?: Metric }) {
+/** The clone's account-group binding: a "group" badge + the group name (or a muted "no
+ *  group"), taking the remaining width and truncating so the usage figures + ⋯ menu stay
+ *  on the same row. Provider-agnostic — a group is one pool of Claude and/or GPT accounts;
+ *  CLIProxyAPI owns intra-group selection. */
+function GroupTag({ group }: { group?: string }) {
   return (
-    <div className="flex items-center gap-2 text-[10px]">
-      <span
-        className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
-        title={group ? `account group: ${group}` : "no account group — no inference"}
-      >
-        {group ? (
-          <>
-            <span className="shrink-0 rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-              group
-            </span>
-            <span className="truncate">{group}</span>
-          </>
-        ) : (
-          <span className="italic text-slate-300 dark:text-slate-600">no group</span>
-        )}
-      </span>
-      {metric ? <MetricSlot metric={metric} /> : null}
-    </div>
-  );
-}
-
-/** A metric-only line — a left spacer plus the right-aligned figure, so MEM stacks under
- *  CPU even though the second info line carries no account text of its own. */
-function MetricLine({ metric }: { metric?: Metric }) {
-  return (
-    <div className="flex items-center gap-2 text-[10px]">
-      <span className="min-w-0 flex-1" />
-      {metric ? <MetricSlot metric={metric} /> : null}
-    </div>
+    <span
+      className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
+      title={group ? `account group: ${group}` : "no account group — no inference"}
+    >
+      {group ? (
+        <>
+          <span className="shrink-0 rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+            group
+          </span>
+          <span className="truncate">{group}</span>
+        </>
+      ) : (
+        <span className="italic text-slate-300 dark:text-slate-600">no group</span>
+      )}
+    </span>
   );
 }
 
@@ -338,18 +325,17 @@ export function SidebarHost({
   const status = effectiveStatus(host);
   const group = host.group || undefined;
   const usage = usageParts(stats, cloneCpus);
-  // CPU rides the binding line, MEM the line under it, so the two figures stack on the
-  // right. They share `usage`, so they appear and vanish together.
+  // CPU + MEM share `usage`, so they appear and vanish together — both sit inline on the
+  // group row (group on the left, CPU then MEM right-aligned, then the ⋯ menu).
   const cpuMetric = usage
     ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of clone allowance)" }
     : undefined;
   const memMetric = usage
     ? { label: "MEM", value: usage.mem, title: "container memory used" }
     : undefined;
-  // Show the binding line when there's a group or a CPU figure; the MEM line only when
-  // there's a MEM figure — so a group-less, stat-less clone doesn't sprout blank rows.
+  // Show the group/usage row when there's a group or a usage sample; a group-less, stat-less
+  // clone shows neither (just the ⋯ menu).
   const showBindingLine = !!group || !!cpuMetric;
-  const showMemLine = !!memMetric;
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: host.id, disabled: busy });
 
@@ -390,29 +376,28 @@ export function SidebarHost({
       }`}
     >
       <div className="min-w-0 flex-1">
-        {/* Top block: the account-group binding line and, under it, a metric-only line —
-            the clone's group on the left with its usage figure (CPU on the binding line,
-            MEM under it) right-aligned in a shared tabular slot. The ⋯ menu sits to the
-            right, vertically centered so it spans both lines. While busy, the op step
-            replaces the two lines. */}
+        {/* Top row: the clone's account group on the left, its live CPU + MEM figures
+            right-aligned, and the ⋯ menu — all on one line. While busy, the op step
+            replaces the group/usage content. */}
         <div className="mb-0.5 flex items-center gap-1">
-          <div className="min-w-0 flex-1">
-            {busy ? (
-              <div className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 break-words text-sm font-medium text-slate-800 dark:text-slate-100">
-                  {host.displayName ?? host.id}
-                </span>
-                <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400">
-                  {op?.kind === "delete" ? "deleting…" : op?.step}
-                </span>
-              </div>
-            ) : (
-              <>
-                {showBindingLine ? <BindingLine group={group} metric={cpuMetric} /> : null}
-                {showMemLine ? <MetricLine metric={memMetric} /> : null}
-              </>
-            )}
-          </div>
+          {busy ? (
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <span className="min-w-0 flex-1 break-words text-sm font-medium text-slate-800 dark:text-slate-100">
+                {host.displayName ?? host.id}
+              </span>
+              <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400">
+                {op?.kind === "delete" ? "deleting…" : op?.step}
+              </span>
+            </div>
+          ) : showBindingLine ? (
+            <div className="flex min-w-0 flex-1 items-center gap-2 text-[10px]">
+              <GroupTag group={group} />
+              {cpuMetric ? <MetricSlot metric={cpuMetric} /> : null}
+              {memMetric ? <MetricSlot metric={memMetric} /> : null}
+            </div>
+          ) : (
+            <div className="min-w-0 flex-1" />
+          )}
           <OverflowMenu
             hostId={host.id}
             managed={managed}
