@@ -11,8 +11,8 @@
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import chatgptLogo from "../assets/chatgpt.png";
-import claudeLogo from "../assets/claude.png";
+import chatgptLogo from "../assets/chatgpt.svg";
+import claudeLogo from "../assets/claude.svg";
 import geminiLogo from "../assets/gemini.svg";
 import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, GroupUsage } from "~/lib/types";
 
@@ -107,7 +107,9 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
                 ? "Gemini"
                 : "Claude"
           }
-          className="h-4 w-4 shrink-0 rounded-[3px] object-contain"
+          className={`h-4 w-4 shrink-0 rounded-[3px] object-contain ${
+            a.provider === "codex" ? "dark:invert" : ""
+          }`}
         />
         <span className="min-w-0 flex-1 truncate text-[11px] text-slate-700 dark:text-slate-200">
           {a.email}
@@ -128,7 +130,7 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
           </span>
         ) : null}
       </div>
-      {!a.fiveHour && !a.sevenDay && !a.fable ? (
+      {a.provider === "antigravity" ? null : !a.fiveHour && !a.sevenDay && !a.fable ? (
         <div className="text-[10px] text-rose-400" title={a.error}>
           usage unavailable
         </div>
