@@ -102,7 +102,7 @@ export const restartServer = () => postJson("/api/server/restart", {}) as Promis
 // Usage per group is display-only and streams in `ControlState.usageGroups`.
 
 /** OAuth provider for a group login. */
-export type LoginProvider = "anthropic" | "codex";
+export type LoginProvider = "anthropic" | "codex" | "antigravity";
 
 /** Create an account group (spawns its CLIProxyAPI instance). Returns the redacted config. */
 export const createGroup = (name: string) =>
@@ -137,7 +137,7 @@ export const groupLoginStatus = (group: string, state: string) =>
     `/api/groups/${encodeURIComponent(group)}/accounts/login/status?state=${encodeURIComponent(state)}`,
   ) as Promise<{ state: "pending" | "done" | "error"; error?: string }>;
 /** Remove an authenticated account from a group by its auth-dir credential file name
- *  (`claude-<email>.json` / `codex-<email>.json`). */
+ *  (`claude-<email>.json` / `codex-<email>.json` / `antigravity-<email>.json`). */
 export const deleteGroupAccount = (group: string, file: string) =>
   postJson(`/api/groups/${encodeURIComponent(group)}/accounts/delete`, { file });
 

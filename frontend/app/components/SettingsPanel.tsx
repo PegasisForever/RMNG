@@ -231,7 +231,11 @@ function SortableAccountRow({
       </button>
       <span className="min-w-0 flex-1 truncate">
         <span className="mr-1.5 rounded bg-slate-100 px-1 text-[10px] font-semibold uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-          {account.provider === "codex" ? "codex" : "claude"}
+          {account.provider === "codex"
+            ? "codex"
+            : account.provider === "antigravity"
+              ? "gemini"
+              : "claude"}
         </span>
         {account.email}
       </span>

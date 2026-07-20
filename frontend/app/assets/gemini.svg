@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Gemini">
+  <defs>
+    <linearGradient id="gemini-spark" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1BA1E3"/>
+      <stop offset="0.3" stop-color="#5C6BC0"/>
+      <stop offset="0.6" stop-color="#9168C0"/>
+      <stop offset="1" stop-color="#E64C82"/>
+    </linearGradient>
+  </defs>
+  <path d="M12 0 C12 6.6 6.6 12 0 12 C6.6 12 12 17.4 12 24 C12 17.4 17.4 12 24 12 C17.4 12 12 6.6 12 0 Z" fill="url(#gemini-spark)"/>
+</svg>

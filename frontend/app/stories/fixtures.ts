@@ -189,6 +189,13 @@ export const usageGroups: GroupUsage[] = [
         sevenDay: { pct: 40, resetsAt: null },
         resetCredits: 3n,
       }),
+      usage("team", {
+        email: "alex@gmail.com",
+        provider: "antigravity",
+        assignable: true,
+        lastUpdated: 1_700_000_000_000,
+        // Antigravity (Gemini) exposes no pollable quota — a display-only presence row (no bars).
+      }),
     ],
   },
 ];

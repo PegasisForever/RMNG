@@ -45,6 +45,9 @@ pub struct LayoutPreset {
 pub enum Provider {
     Claude,
     Codex,
+    /// Google Gemini via Antigravity (Code Assist) OAuth. Usage is display-only — Antigravity
+    /// exposes no per-account quota endpoint to poll (see `control-server/src/antigravity.rs`).
+    Antigravity,
 }
 
 /// The agent's last self-reported verdict (via the `set_state` MCP tool).

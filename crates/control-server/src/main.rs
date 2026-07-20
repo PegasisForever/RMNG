@@ -7,6 +7,7 @@
 
 mod app;
 mod assets;
+mod antigravity;
 mod buildinfra;
 mod chat;
 mod claude;

@@ -472,7 +472,8 @@ const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(600);
 /// refresh); an expired token just yields a 401 → `stale`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AuthAccount {
-    /// `"claude"` or `"codex"` (from the file's `type`, else inferred from the file name).
+    /// `"claude"`, `"codex"`, or `"antigravity"` (from the file's `type`, else inferred from
+    /// the file name prefix).
     pub kind: String,
     pub email: String,
     pub access_token: String,
@@ -493,7 +494,8 @@ struct RawAuthFile {
 }
 
 /// Parse one `auth-dir` credential file body + its file name into an [`AuthAccount`]. `kind`
-/// comes from the JSON `type` when present, else the file-name prefix (`claude-`/`codex-`).
+/// comes from the JSON `type` when present, else the file-name prefix
+/// (`claude-`/`codex-`/`antigravity-`).
 /// `None` when the body has no access token or we can't determine an email.
 pub(crate) fn parse_auth_file(file_name: &str, body: &str) -> Option<AuthAccount> {
     let raw: RawAuthFile = serde_json::from_str(body).ok()?;
@@ -504,6 +506,8 @@ pub(crate) fn parse_auth_file(file_name: &str, body: &str) -> Option<AuthAccount
         .unwrap_or_else(|| {
             if file_name.starts_with("codex-") {
                 "codex".to_string()
+            } else if file_name.starts_with("antigravity-") {
+                "antigravity".to_string()
             } else {
                 "claude".to_string()
             }
@@ -582,26 +586,34 @@ async fn poll_usage_once(app: &App, last_good: &mut HashMap<String, wire::Claude
             // Group-scoped-unique id: the same email can be authenticated into several groups
             // (independent token sets per instance).
             let id = format!("{group}|{}", acct.email);
-            let fetched = if acct.kind == "codex" {
-                let account_id = acct.account_id.clone().unwrap_or_default();
-                crate::codex::fetch_usage_view(
-                    &app.http,
-                    id.clone(),
-                    acct.email.clone(),
-                    true,
-                    &acct.access_token,
-                    &account_id,
-                )
-                .await
-            } else {
-                crate::claude::fetch_usage_view(
-                    &app.http,
-                    id.clone(),
-                    acct.email.clone(),
-                    true,
-                    &acct.access_token,
-                )
-                .await
+            let fetched = match acct.kind.as_str() {
+                "codex" => {
+                    let account_id = acct.account_id.clone().unwrap_or_default();
+                    crate::codex::fetch_usage_view(
+                        &app.http,
+                        id.clone(),
+                        acct.email.clone(),
+                        true,
+                        &acct.access_token,
+                        &account_id,
+                    )
+                    .await
+                }
+                // Antigravity (Gemini) has no pollable usage endpoint — publish a display-only
+                // presence row. No network call, always `Ok`. See `crate::antigravity`.
+                "antigravity" => {
+                    Ok(crate::antigravity::usage_view(id.clone(), acct.email.clone(), true))
+                }
+                _ => {
+                    crate::claude::fetch_usage_view(
+                        &app.http,
+                        id.clone(),
+                        acct.email.clone(),
+                        true,
+                        &acct.access_token,
+                    )
+                    .await
+                }
             };
             match fetched {
                 Ok(u) => {
@@ -620,10 +632,10 @@ async fn poll_usage_once(app: &App, last_good: &mut HashMap<String, wire::Claude
                         None => wire::ClaudeUsage {
                             id,
                             email: acct.email.clone(),
-                            provider: Some(if acct.kind == "codex" {
-                                wire::Provider::Codex
-                            } else {
-                                wire::Provider::Claude
+                            provider: Some(match acct.kind.as_str() {
+                                "codex" => wire::Provider::Codex,
+                                "antigravity" => wire::Provider::Antigravity,
+                                _ => wire::Provider::Claude,
                             }),
                             active: true,
                             assignable: None,

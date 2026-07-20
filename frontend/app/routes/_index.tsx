@@ -309,9 +309,12 @@ function Dashboard({
   );
 
   // The auth-dir credential file name CLIProxyAPI stores per account (used by the delete
-  // endpoint): `claude-<email>.json` / `codex-<email>.json`.
-  const authFileName = (a: ClaudeUsage) =>
-    `${a.provider === "codex" ? "codex" : "claude"}-${a.email}.json`;
+  // endpoint): `claude-<email>.json` / `codex-<email>.json` / `antigravity-<email>.json`.
+  const authFileName = (a: ClaudeUsage) => {
+    const prefix =
+      a.provider === "codex" ? "codex" : a.provider === "antigravity" ? "antigravity" : "claude";
+    return `${prefix}-${a.email}.json`;
+  };
 
   const onCreateGroup = (name?: string) => {
     const n = (name ?? window.prompt("New group name (A–Z, 0–9, . _ -)") ?? "").trim();

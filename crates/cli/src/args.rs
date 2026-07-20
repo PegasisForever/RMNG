@@ -350,11 +350,14 @@ pub enum AccountCmd {
     /// List imported accounts with usage windows (both providers by default)
     Ls {
         /// Only Claude accounts
-        #[arg(long, conflicts_with = "codex")]
+        #[arg(long, conflicts_with_all = ["codex", "gemini"])]
         claude: bool,
         /// Only Codex accounts
-        #[arg(long)]
+        #[arg(long, conflicts_with = "gemini")]
         codex: bool,
+        /// Only Gemini (Antigravity) accounts
+        #[arg(long)]
+        gemini: bool,
     },
     /// Hot-swap a clone's account (Claude by default; --codex for Codex)
     Swap {

@@ -1560,7 +1560,7 @@ struct LoginStartReq {
 }
 
 /// `POST /api/groups/:name/accounts/login/start` — begin an OAuth login into the group's
-/// instance. Proxies the instance's `{anthropic,codex}-auth-url`; returns `{status, url,
+/// instance. Proxies the instance's `{anthropic,codex,antigravity}-auth-url`; returns `{status, url,
 /// state}`. The operator opens `url`, completes the login, and pastes the redirect back via
 /// `login/complete`.
 async fn group_login_start(
@@ -1571,6 +1571,7 @@ async fn group_login_start(
     let path = match req.provider.trim().to_ascii_lowercase().as_str() {
         "anthropic" | "claude" => "/anthropic-auth-url",
         "codex" | "openai" | "chatgpt" => "/codex-auth-url",
+        "antigravity" | "gemini" | "google" => "/antigravity-auth-url",
         other => return Err((StatusCode::BAD_REQUEST, format!("unknown provider '{other}'"))),
     };
     let v = mgmt_get_json(&app, &name, path).await?;

@@ -191,18 +191,20 @@ pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
 
 pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8> {
     match cmd {
-        AccountCmd::Ls { claude, codex } => {
+        AccountCmd::Ls { claude, codex, gemini } => {
             let st = client.state().await?;
-            let is_codex = |a: &wire::ClaudeUsage| matches!(a.provider, Some(Provider::Codex));
             let accounts: Vec<_> = st
                 .usage_groups
                 .iter()
                 .flat_map(|g| g.accounts.iter())
                 .filter(|a| {
                     if *claude {
-                        !is_codex(a)
+                        // A missing provider defaults to Claude (legacy rows).
+                        matches!(a.provider, Some(Provider::Claude) | None)
                     } else if *codex {
-                        is_codex(a)
+                        matches!(a.provider, Some(Provider::Codex))
+                    } else if *gemini {
+                        matches!(a.provider, Some(Provider::Antigravity))
                     } else {
                         true
                     }
@@ -218,10 +220,10 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                 .map(|a| {
                     vec![
                         a.email.clone(),
-                        if is_codex(a) {
-                            "codex".into()
-                        } else {
-                            "claude".into()
+                        match a.provider {
+                            Some(Provider::Codex) => "codex".into(),
+                            Some(Provider::Antigravity) => "gemini".into(),
+                            _ => "claude".into(),
                         },
                         a.assignable
                             .map(|b| if b { "yes" } else { "no" }.to_string())

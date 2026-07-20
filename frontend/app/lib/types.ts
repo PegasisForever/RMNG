@@ -138,7 +138,7 @@ export interface ClaudeUsage {
   id: string;
   email: string;
   /** Which provider this account belongs to (default treated as "claude"). */
-  provider?: "claude" | "codex";
+  provider?: "claude" | "codex" | "antigravity";
   /** True for the account claude-swap had active at import time. */
   active: boolean;
   /** True if this account can be picked when cloning a host — every imported

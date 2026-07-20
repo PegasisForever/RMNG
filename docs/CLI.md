@@ -104,10 +104,11 @@ exits 1. **Refuses to run non-interactively without `--yes`** (stdin not a termi
   image `<name>:latest`.
 - `image rm <reference>` — remove a clone-source image (`409` while clones use it).
 
-### `rmng account ls [--claude|--codex]`
+### `rmng account ls [--claude|--codex|--gemini]`
 Imported accounts with usage windows: `EMAIL PROVIDER ASSIGNABLE 5H 5H-RESETS 7D ERROR`.
-Both providers by default; the flags conflict. Human output appends the configured
-Claude/Codex account groups (from `GET /api/config`).
+All providers by default; the flags conflict. Gemini (Antigravity) accounts show as a
+display-only presence row with no usage windows — Antigravity exposes no pollable quota.
+Human output appends the configured account groups (from `GET /api/config`).
 
 ### `rmng account swap <host> <account> [--codex]`
 Hot-swap a running clone's account (`POST /api/{claude,codex}/swap`). `<account>` is an

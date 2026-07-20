@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.png";
 import claudeLogo from "../assets/claude.png";
+import geminiLogo from "../assets/gemini.svg";
 import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, GroupUsage } from "~/lib/types";
 
 const FIVE_H_MS = 5 * 60 * 60 * 1000;
@@ -92,8 +93,20 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
     <div className="px-1 py-1">
       <div className="flex items-center gap-1.5">
         <img
-          src={a.provider === "codex" ? chatgptLogo : claudeLogo}
-          alt={a.provider === "codex" ? "ChatGPT" : "Claude"}
+          src={
+            a.provider === "codex"
+              ? chatgptLogo
+              : a.provider === "antigravity"
+                ? geminiLogo
+                : claudeLogo
+          }
+          alt={
+            a.provider === "codex"
+              ? "ChatGPT"
+              : a.provider === "antigravity"
+                ? "Gemini"
+                : "Claude"
+          }
           className="h-4 w-4 shrink-0 rounded-[3px] object-contain"
         />
         <span className="min-w-0 flex-1 truncate text-[11px] text-slate-700 dark:text-slate-200">

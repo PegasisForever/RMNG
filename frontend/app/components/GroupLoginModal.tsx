@@ -2,7 +2,7 @@
 //
 // The group instance runs headless in the server container, so its OAuth callback
 // redirects to a `localhost` URL on the OPERATOR'S machine (Claude → :54545, Codex →
-// :1455) that won't load. The flow is therefore: start → the operator opens the login
+// :1455, Gemini/Antigravity → :51121) that won't load. The flow is therefore: start → the operator opens the login
 // URL and signs in → the browser lands on a dead localhost URL → the operator copies
 // that full URL back here → complete → poll until the credential lands in the auth-dir.
 import { useEffect, useRef, useState } from "react";
@@ -142,7 +142,7 @@ export function GroupLoginModal({
         {phase === "start" ? (
           <>
             <div className="mt-4 flex gap-2">
-              {(["anthropic", "codex"] as const).map((p) => (
+              {(["anthropic", "codex", "antigravity"] as const).map((p) => (
                 <button
                   key={p}
                   type="button"
@@ -154,7 +154,11 @@ export function GroupLoginModal({
                       : "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300")
                   }
                 >
-                  {p === "anthropic" ? "Claude (Anthropic)" : "Codex (OpenAI)"}
+                  {p === "anthropic"
+                    ? "Claude (Anthropic)"
+                    : p === "codex"
+                      ? "Codex (OpenAI)"
+                      : "Gemini (Antigravity)"}
                 </button>
               ))}
             </div>
