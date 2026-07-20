@@ -304,6 +304,23 @@ const EXCLUDED_CODEX_MODELS: &[&str] = &[
     "gpt-image-1.5",
     "gpt-image-2",
 ];
+/// Antigravity (Google Code Assist) is a multi-model surface: besides `gemini-*` it also
+/// serves Claude (`claude-opus-4-6-thinking`, `claude-sonnet-4-6`) and OpenAI OSS
+/// (`gpt-oss-*`). We keep Antigravity as a **Gemini-only** channel — the `claude-*` / `gpt-*`
+/// prefixes drop every non-Gemini model it offers (now and future) without touching the real
+/// `anthropic`/`openai` channels (exclusions are keyed per serving provider). The remaining
+/// `gemini-*` entries hide the low-effort / flash / lite / image tiers; KEPT: gemini-3-flash-agent
+/// and gemini-pro-agent.
+const EXCLUDED_ANTIGRAVITY_MODELS: &[&str] = &[
+    "claude-*",
+    "gpt-*",
+    "gemini-3-flash",
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-pro-low",
+    "gemini-3.5-flash-extra-low",
+    "gemini-3.5-flash-low",
+];
 
 /// Render the `oauth-excluded-models:` block for a generated `config.yaml`.
 fn oauth_excluded_models_yaml() -> String {
@@ -313,6 +330,10 @@ fn oauth_excluded_models_yaml() -> String {
     }
     s.push_str("  codex:\n");
     for m in EXCLUDED_CODEX_MODELS {
+        s.push_str(&format!("    - \"{m}\"\n"));
+    }
+    s.push_str("  antigravity:\n");
+    for m in EXCLUDED_ANTIGRAVITY_MODELS {
         s.push_str(&format!("    - \"{m}\"\n"));
     }
     s
