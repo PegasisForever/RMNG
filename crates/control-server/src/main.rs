@@ -29,6 +29,7 @@ mod shm;
 mod smb;
 mod ssh;
 mod state;
+mod token_migrate;
 mod update;
 mod web;
 
@@ -176,6 +177,19 @@ async fn main() -> Result<()> {
             Ok(Err(e)) => tracing::warn!("reconcile: listing managed containers failed: {e:#}"),
             Err(_) => tracing::warn!("reconcile: listing managed containers timed out after 10s"),
         }
+    }
+
+    // One-shot legacy-token migration: convert the OLD RMNG-managed OAuth stores
+    // (claude-accounts.json / codex-accounts.json + the old config's cloneGroups/codexGroups)
+    // into the NEW per-group CLIProxyAPI `auth-dir` credential files, so an upgraded deployment
+    // carries every account + its group across with no operator re-login. Stamp-gated (runs
+    // once) and best-effort: it must NOT block boot, so any panic is caught and logged. Runs
+    // here — after config load, BEFORE the `cliproxy` supervisor spawns below — so the migrated
+    // groups + auth-dirs exist when the supervisor first reads `config.groups`.
+    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        token_migrate::migrate_legacy_tokens(&app)
+    })) {
+        tracing::error!("legacy token migration panicked (booting anyway): {e:?}");
     }
 
     // Background loops: the per-host agent-state monitor poller, the clone-home reconciler
