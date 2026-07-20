@@ -151,7 +151,11 @@ export const stats: Record<string, ContainerStats> = {
 const usage = (
   group: string,
   a: Omit<ClaudeUsage, "id" | "active"> & Partial<Pick<ClaudeUsage, "active">>,
-): ClaudeUsage => ({ id: `${group}|${a.email}`, active: a.active ?? true, ...a });
+): ClaudeUsage => ({
+  id: `${group}|${a.provider ?? "claude"}|${a.email}`,
+  active: a.active ?? true,
+  ...a,
+});
 
 export const usageGroups: GroupUsage[] = [
   {

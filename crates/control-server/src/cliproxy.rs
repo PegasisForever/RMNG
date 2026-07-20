@@ -604,9 +604,11 @@ async fn poll_usage_once(app: &App, last_good: &mut HashMap<String, wire::Claude
         let accounts = read_auth_accounts(&auth_dir);
         let mut views = Vec::with_capacity(accounts.len());
         for acct in accounts {
-            // Group-scoped-unique id: the same email can be authenticated into several groups
-            // (independent token sets per instance).
-            let id = format!("{group}|{}", acct.email);
+            // Group- AND provider-scoped-unique id: the same email can be authenticated into
+            // several groups (independent token sets per instance) and, within one group, under
+            // more than one provider (e.g. Gemini + Claude for the same address). Both `group`
+            // and `kind` are needed or the two rows collide (breaks React keys + drag reorder).
+            let id = format!("{group}|{}|{}", acct.kind, acct.email);
             let fetched = match acct.kind.as_str() {
                 "codex" => {
                     let account_id = acct.account_id.clone().unwrap_or_default();

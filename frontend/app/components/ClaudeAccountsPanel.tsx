@@ -107,7 +107,7 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
                 ? "Gemini"
                 : "Claude"
           }
-          className={`h-4 w-4 shrink-0 rounded-[3px] object-contain ${
+          className={`h-3 w-3 shrink-0 rounded-[3px] object-contain ${
             a.provider === "codex" ? "dark:invert" : ""
           }`}
         />

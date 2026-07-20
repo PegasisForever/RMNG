@@ -8,7 +8,9 @@ import type { Provider } from "./Provider";
  */
 export type ClaudeUsage = { 
 /**
- * Stable id: claude `${email}|${orgUuid}`, codex `codex:<id>`.
+ * Stable, unique id: `${group}|${provider}|${email}` (group- and provider-scoped, since
+ * one email can be authenticated into several groups and, within a group, under more than
+ * one provider). Used only as an opaque key — never parsed positionally.
  */
 id: string, email: string, provider: Provider | null, active: boolean, 
 /**

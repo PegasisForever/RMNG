@@ -305,7 +305,9 @@ pub struct ClaudeSpend {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ClaudeUsage {
-    /// Stable id: claude `${email}|${orgUuid}`, codex `codex:<id>`.
+    /// Stable, unique id: `${group}|${provider}|${email}` (group- and provider-scoped, since
+    /// one email can be authenticated into several groups and, within a group, under more than
+    /// one provider). Used only as an opaque key — never parsed positionally.
     pub id: String,
     pub email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
