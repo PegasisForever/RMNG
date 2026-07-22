@@ -20,6 +20,7 @@ import { OperationProgress } from "~/components/OperationProgress";
 import { SidebarHost } from "~/components/SidebarHost";
 import type { GroupUsage, Host, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
+import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 
@@ -62,6 +63,8 @@ export interface SidebarProps {
   stats: Record<string, ContainerStats>;
   /** Live CT 105-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
   lxcStats: LxcStats | null;
+  /** Live per-clone new-token totals (the `tokens` SSE event). */
+  tokens: Record<string, CloneTokenUsage>;
   /** Live per-host forward-runtime map (the `forwards` SSE event), fanned out to each
    *  host row's compact forwards chips. */
   forwards?: Record<string, ForwardRuntime[]>;
@@ -118,6 +121,7 @@ export function Sidebar({
   hosts,
   stats,
   lxcStats,
+  tokens,
   forwards = {},
   operations,
   selectedId,
@@ -232,7 +236,7 @@ export function Sidebar({
                 className="truncate text-[11px] font-semibold tabular-nums text-slate-500 dark:text-slate-400"
                 title="CT 105 LXC totals: CPU and memory include all LXC processes; memory is RAM + swap excluding reclaimable file cache; disk is physical, compression-aware ZFS rootfs use"
               >
-                LXC CPU {lxcUsage.cpu} · MEM {lxcUsage.mem} · DISK {lxcUsage.disk}
+                CPU {lxcUsage.cpu} · MEM {lxcUsage.mem} · DISK {lxcUsage.disk}
               </span>
             ) : null}
           </div>
@@ -266,6 +270,7 @@ export function Sidebar({
                     key={host.id}
                     host={host}
                     stats={stats[host.id]}
+                    tokenUsage={tokens[host.id]}
                     forwardRuntime={forwards[host.id]}
                     sshPublicHost={sshPublicHost}
                     bastionPort={bastionPort}
@@ -296,6 +301,7 @@ export function Sidebar({
               <SidebarHost
                 key={host.id}
                 host={host}
+                tokenUsage={tokens[host.id]}
                 selected={selectedId === host.id}
                 op={opForHost(host.id)}
                 onSelect={() => onSelectHost(host)}

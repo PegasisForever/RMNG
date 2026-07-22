@@ -6,6 +6,7 @@
 import type { ClaudeUsage, GroupUsage, Host, Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
+import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 import type { Group } from "~/lib/wire/Group";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
@@ -138,6 +139,31 @@ export const stats: Record<string, ContainerStats> = {
     cpuPct: 18,
     memUsed: BigInt(Math.round(3.2 * GiB)),
     memLimit: BigInt(40 * GiB),
+  },
+};
+
+// --- clone token totals (the volatile `tokens` SSE map) ---------------------
+
+export const tokens: Record<string, CloneTokenUsage> = {
+  [hostWorking.id]: {
+    newInputTokens: 128_400n,
+    outputTokens: 22_800n,
+    requestCount: 4n,
+  },
+  [hostIdle.id]: {
+    newInputTokens: 54_600n,
+    outputTokens: 7_500n,
+    requestCount: 2n,
+  },
+  [hostOffline.id]: {
+    newInputTokens: 20_000n,
+    outputTokens: 3_100n,
+    requestCount: 1n,
+  },
+  [hostDualProvider.id]: {
+    newInputTokens: 948_000n,
+    outputTokens: 41_000n,
+    requestCount: 7n,
   },
 };
 

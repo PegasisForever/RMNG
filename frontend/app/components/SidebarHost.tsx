@@ -1,12 +1,14 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowRight, EllipsisVertical, Terminal } from "lucide-react";
+import { ArrowRight, Ellipsis, Terminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { copyText } from "~/lib/clipboard";
+import { formatTokenCount } from "~/lib/format";
 import { buildSshCommand } from "~/lib/ssh";
 import type { Host, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
+import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { ForwardState } from "~/lib/wire/ForwardState";
 import type { PortForward } from "~/lib/wire/PortForward";
@@ -54,10 +56,10 @@ function MetricSlot({ metric }: { metric: Metric }) {
   );
 }
 
-/** The clone's account-group binding: a "group" badge + the group name (or a muted "no
- *  group"), taking the remaining width and truncating so the usage figures + ⋯ menu stay
- *  on the same row. Provider-agnostic — a group is one pool of Claude and/or GPT accounts;
- *  CLIProxyAPI owns intra-group selection. */
+/** The clone's account-group binding: a badge carrying the group name (or a muted "no group"),
+ *  taking the remaining width and truncating so the usage figures + ⋯ menu stay on the same row.
+ *  Provider-agnostic — a group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns
+ *  intra-group selection. */
 function GroupTag({ group }: { group?: string }) {
   return (
     <span
@@ -65,12 +67,9 @@ function GroupTag({ group }: { group?: string }) {
       title={group ? `account group: ${group}` : "no account group — no inference"}
     >
       {group ? (
-        <>
-          <span className="shrink-0 rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-            group
-          </span>
-          <span className="truncate">{group}</span>
-        </>
+        <span className="max-w-full truncate rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+          {group}
+        </span>
       ) : (
         <span className="italic text-slate-300 dark:text-slate-600">no group</span>
       )}
@@ -123,6 +122,8 @@ export interface SidebarHostProps {
   /** Live CPU/RAM usage for this host's container, pushed over the `stats` SSE event.
    *  Absent for a stopped/unmanaged host or before the first sample — renders nothing. */
   stats?: ContainerStats;
+  /** Cache-excluded input/output totals for this managed clone from the `tokens` SSE event. */
+  tokenUsage?: CloneTokenUsage;
   selected: boolean;
   /** A running operation targeting this host (delete, or a clone finishing its
    *  post-add `wait-swap` step), if any. */
@@ -266,7 +267,7 @@ function OverflowMenu({
           open ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300" : ""
         }`}
       >
-        <EllipsisVertical className="size-4" />
+        <Ellipsis className="size-4" />
       </button>
       {open ? (
         <div
@@ -299,6 +300,7 @@ function OverflowMenu({
 export function SidebarHost({
   host,
   stats,
+  tokenUsage,
   selected,
   op,
   onSelect,
@@ -324,8 +326,6 @@ export function SidebarHost({
   const status = host.archived ? undefined : STATUS_DOT[host.monitorState ?? "idle"];
   const group = host.group || undefined;
   const usage = host.archived ? null : formatHostUsage(stats);
-  // CPU + MEM share `usage`, so they appear and vanish together — both sit inline on the
-  // group row (group on the left, CPU then MEM right-aligned, then the ⋯ menu).
   const cpuMetric = usage
     ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of total host capacity)" }
     : undefined;
@@ -336,9 +336,22 @@ export function SidebarHost({
         title: "RAM + swap; includes tmpfs/shared memory and excludes reclaimable file cache",
       }
     : undefined;
-  // Show the group/usage row when there's a group or a usage sample; a group-less, stat-less
-  // clone shows neither (just the ⋯ menu).
-  const showBindingLine = !host.archived && (!!group || !!cpuMetric);
+  const inputTokenMetric = managed
+    ? {
+        label: "↓",
+        value: formatTokenCount(tokenUsage?.newInputTokens ?? 0),
+        title: "newly processed model input tokens; cache reads are excluded",
+      }
+    : undefined;
+  const outputTokenMetric = managed
+    ? {
+        label: "↑",
+        value: formatTokenCount(tokenUsage?.outputTokens ?? 0),
+        title: "newly generated model output tokens",
+      }
+    : undefined;
+  // All managed clones retain their token slots even before their first observed request.
+  const showBindingLine = !!group || !!cpuMetric || !!inputTokenMetric;
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: host.id, disabled: busy || host.archived });
 
@@ -365,7 +378,7 @@ export function SidebarHost({
       aria-pressed={selected}
       onClick={onSelect}
       title={`${host.id} · ${host.host}:${host.port}`}
-      className={`group flex touch-none cursor-grab items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent px-1.5 py-1.5 last:border-b-0 active:cursor-grabbing dark:border-b-slate-700 ${
+      className={`group flex touch-none cursor-grab items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent px-1.5 pb-2.5 pt-1.5 last:border-b-0 active:cursor-grabbing dark:border-b-slate-700 ${
         // Per-side borders (explicit colors so they never collide): a slate-200 bottom
         // divider between rows + a left accent for the selected row. Exactly one
         // background wins (dragging ▸ selected ▸ default); the default is a solid
@@ -382,7 +395,7 @@ export function SidebarHost({
         {/* Top row: the clone's account group on the left, its live CPU + MEM figures
             right-aligned, and the ⋯ menu — all on one line. While busy, the op step
             replaces the group/usage content. */}
-        <div className="mb-0.5 flex items-center gap-1">
+        <div className="mb-0 flex items-center gap-1">
           {busy ? (
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <span className="min-w-0 flex-1 break-words text-sm font-medium text-slate-800 dark:text-slate-100">
@@ -395,6 +408,8 @@ export function SidebarHost({
           ) : showBindingLine ? (
             <div className="flex min-w-0 flex-1 items-center gap-2 text-[10px]">
               <GroupTag group={group} />
+              {inputTokenMetric ? <MetricSlot metric={inputTokenMetric} /> : null}
+              {outputTokenMetric ? <MetricSlot metric={outputTokenMetric} /> : null}
               {cpuMetric ? <MetricSlot metric={cpuMetric} /> : null}
               {memMetric ? <MetricSlot metric={memMetric} /> : null}
             </div>
@@ -423,7 +438,7 @@ export function SidebarHost({
           <p className="break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
             {host.unread && !selected ? (
               <span
-                className="mr-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white"
+                className="mr-1 inline-flex size-3 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white"
                 title="was working and is no longer working"
                 aria-label="unread: working transitioned to not working"
               >
@@ -431,7 +446,7 @@ export function SidebarHost({
               </span>
             ) : status ? (
               <span
-                className={`mr-1 inline-block size-2 rounded-full align-middle ${status.dot}`}
+                className={`mr-1 inline-block size-3 rounded-full align-middle ${status.dot}`}
                 title={status.label}
                 aria-label={status.label}
               />
@@ -446,12 +461,6 @@ export function SidebarHost({
               </span>
             ) : null}
             {host.displayName ?? host.id}
-          </p>
-        ) : null}
-
-        {!busy && host.linearLabel ? (
-          <p className="mt-1 line-clamp-2 text-xs leading-snug text-slate-500 dark:text-slate-400">
-            {host.linearLabel}
           </p>
         ) : null}
 

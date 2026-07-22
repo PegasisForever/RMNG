@@ -42,7 +42,6 @@ import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
-import { formatTokenCount } from "~/lib/format";
 
 import type { Route } from "./+types/_index";
 
@@ -305,10 +304,6 @@ function Dashboard({
     return h ? [h] : [];
   });
   const selectedHost = state.selected ? hostsById.get(state.selected) ?? null : null;
-  const selectedTokens = selectedHost ? tokens[selectedHost.id] : undefined;
-  const selectedTokenTotal = selectedTokens
-    ? Number(selectedTokens.newInputTokens) + Number(selectedTokens.outputTokens)
-    : 0;
 
   // Refetch images when an image-mutating op (pull/commit/delete) leaves the
   // running set — that's when the image list changed. Keyed on the set of running
@@ -449,6 +444,7 @@ function Dashboard({
           hosts={orderedHosts}
           stats={stats}
           lxcStats={lxcStats}
+          tokens={tokens}
           forwards={forwards}
           operations={state.operations}
           selectedId={state.selected}
@@ -495,12 +491,6 @@ function Dashboard({
                 </h2>
                 <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
                   {selectedHost.host}:{selectedHost.port}
-                </span>
-                <span
-                  className="ml-auto shrink-0 font-mono text-xs tabular-nums text-slate-500 dark:text-slate-400"
-                  title="Newly processed model tokens; cache reads are excluded"
-                >
-                  IN {formatTokenCount(selectedTokens?.newInputTokens ?? 0)} · OUT {formatTokenCount(selectedTokens?.outputTokens ?? 0)} · TOTAL {formatTokenCount(selectedTokenTotal)}
                 </span>
               </div>
               <div className="flex min-h-0 flex-1">

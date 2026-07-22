@@ -3,7 +3,7 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { Sidebar } from "./Sidebar";
-import { cloneOperation, hosts, lxcStats, stats, usageGroups } from "~/stories/fixtures";
+import { cloneOperation, hosts, lxcStats, stats, tokens, usageGroups } from "~/stories/fixtures";
 
 const meta = {
   title: "Sidebar/Sidebar",
@@ -23,6 +23,7 @@ const meta = {
     hosts,
     stats,
     lxcStats,
+    tokens,
     operations: [],
     selectedId: hosts[0].id,
     sshPublicHost: "rmng.example.com",
