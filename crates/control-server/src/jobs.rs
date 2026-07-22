@@ -401,7 +401,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             host.display_name = m.display_name.clone();
             host.linear_label = m.label.clone();
         }
-        s.hosts.push(host);
+        s.hosts.insert(0, host);
         if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
             op.status = OperationStatus::Done;
             op.step = "done".into();
