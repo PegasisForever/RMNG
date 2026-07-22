@@ -3,8 +3,8 @@
 //! New clones get current binaries and SSH material during `provision::clone_container`.
 //! Existing running clones need an idempotent reconcile path so a control-server update can
 //! make them operational without destructive recreate: install/enable clone-side sshd, refresh
-//! the injected payload binaries, then restart only `rmng-clone-daemon` to pick up the daemon
-//! binary. `agent-wrapper` is refreshed on disk but intentionally not restarted.
+//! injected payload binaries, then restart the clone daemon and agent wrapper so their running
+//! processes use the current payload and configuration.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -170,13 +170,9 @@ fn default_claude_model(catalog: &[String], gpt_fallback: Option<&str>) -> Optio
         .or_else(|| gpt_fallback.map(str::to_string))
 }
 
-fn codex_config_toml(
-    clone_id: &str,
-    control_mcp_url: Option<&str>,
-    cc_base_url: Option<&str>,
-    gpt_models: &[String],
-) -> String {
-    let mut body = String::from("# Managed by RMNG. Re-created by the control-server clone reconciler.\n\n");
+fn codex_config_toml(cc_base_url: Option<&str>, gpt_models: &[String]) -> String {
+    let mut body =
+        String::from("# Managed by RMNG. Re-created by the control-server clone reconciler.\n\n");
 
     // Group-proxy provider (bare top-level keys MUST precede any [table] in TOML). When the
     // control host resolves, route Codex through the control-server's /cc/v1 OpenAI-compatible
@@ -230,15 +226,6 @@ supports_websockets = false
         ));
     }
 
-    if let Some(url) = control_mcp_url.map(str::trim).filter(|s| !s.is_empty()) {
-        body.push_str(&format!(
-            r#"
-[mcp_servers."control-server"]
-url = "{url}"
-http_headers = {{ "x-rmng-clone" = "{clone_id}" }}
-"#
-        ));
-    }
     body
 }
 
@@ -283,8 +270,6 @@ fn opencode_config_json(cc_base_url: Option<&str>, gpt_models: &[String]) -> Opt
 }
 
 pub(crate) fn codex_parity_entries(
-    clone_id: &str,
-    control_mcp_url: Option<&str>,
     cc_base_url: Option<&str>,
     gpt_models: &[String],
 ) -> Vec<TarEntry> {
@@ -309,7 +294,7 @@ pub(crate) fn codex_parity_entries(
         },
         TarEntry {
             path: "home/rmng/.codex/config.toml".to_string(),
-            data: codex_config_toml(clone_id, control_mcp_url, cc_base_url, gpt_models).into_bytes(),
+            data: codex_config_toml(cc_base_url, gpt_models).into_bytes(),
             mode: 0o600,
             uid: CLONE_UID,
             gid: CLONE_GID,
@@ -410,6 +395,12 @@ runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart r
 "#
 }
 
+fn restart_agent_wrapper_script() -> &'static str {
+    r#"set -e
+runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart agent-wrapper.service
+"#
+}
+
 fn rmng_cli_shadow_cleanup_script() -> &'static str {
     r#"set -e
 managed=/usr/local/bin/rmng
@@ -492,20 +483,32 @@ fn preset_for_host<'a>(cfg: &'a wire::AppConfig, host: &wire::Host) -> Option<&'
             return Some(preset);
         }
     }
-    if let Some(prefix) = host.linear_workspace.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(prefix) = host
+        .linear_workspace
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         if let Some(preset) = crate::linear::pick_preset_by_prefix(&cfg.presets, prefix) {
             return Some(preset);
         }
-        if let Some(preset) = cfg.presets.iter().find(|p| p.name.eq_ignore_ascii_case(prefix)) {
-            return Some(preset);
-        }
-    }
-    if let Some(label) = host.linear_label.as_deref().filter(|s| !s.trim().is_empty()) {
         if let Some(preset) = cfg
             .presets
             .iter()
-            .find(|p| p.labels.iter().any(|candidate| candidate.eq_ignore_ascii_case(label)))
+            .find(|p| p.name.eq_ignore_ascii_case(prefix))
         {
+            return Some(preset);
+        }
+    }
+    if let Some(label) = host
+        .linear_label
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        if let Some(preset) = cfg.presets.iter().find(|p| {
+            p.labels
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(label))
+        }) {
             return Some(preset);
         }
     }
@@ -572,26 +575,9 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn control_mcp_url(app: &App) -> Option<String> {
-    match app.docker.control_host().await {
-        Ok(control) => Some(format!(
-            "http://{control}:{}",
-            app.config().listen.clone_mcp
-        )),
-        Err(e) => {
-            tracing::warn!(
-                target: "clone_reconcile",
-                "could not resolve control-server host for Codex MCP config: {e}"
-            );
-            None
-        }
-    }
-}
-
 async fn ensure_codex_parity(app: &App, clone_id: &str, gpt_models: &[String]) -> Result<bool> {
-    let control_url = control_mcp_url(app).await;
     let cc_base = crate::provision::cc_base_url(app).await;
-    let entries = codex_parity_entries(clone_id, control_url.as_deref(), cc_base.as_deref(), gpt_models);
+    let entries = codex_parity_entries(cc_base.as_deref(), gpt_models);
     let desired = desired_payload_hash(&entries);
     if read_stamp(app, clone_id, codex_parity_stamp_path(), "codex parity")
         .await?
@@ -617,14 +603,25 @@ async fn ensure_codex_parity(app: &App, clone_id: &str, gpt_models: &[String]) -
 /// clone (see [`dead_creds_cleanup_script`]). Stamped so it runs once; best-effort at the call
 /// site. Returns whether the cleanup ran this pass.
 async fn ensure_dead_creds_removed(app: &App, clone_id: &str) -> Result<bool> {
-    if read_stamp(app, clone_id, dead_creds_stamp_path(), "group-proxy migration")
-        .await?
-        .as_deref()
+    if read_stamp(
+        app,
+        clone_id,
+        dead_creds_stamp_path(),
+        "group-proxy migration",
+    )
+    .await?
+    .as_deref()
         == Some("ok")
     {
         return Ok(false);
     }
-    exec_ok(app, clone_id, dead_creds_cleanup_script(), "remove dead provider credentials").await?;
+    exec_ok(
+        app,
+        clone_id,
+        dead_creds_cleanup_script(),
+        "remove dead provider credentials",
+    )
+    .await?;
     app.docker
         .upload_tar(
             clone_id,
@@ -688,6 +685,13 @@ async fn ensure_payload_current(app: &App, clone_id: &str) -> Result<bool> {
         clone_id,
         restart_clone_daemon_script(),
         "restart rmng-clone-daemon",
+    )
+    .await?;
+    exec_ok(
+        app,
+        clone_id,
+        restart_agent_wrapper_script(),
+        "restart agent-wrapper",
     )
     .await?;
     app.docker
@@ -760,12 +764,18 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             None => Vec::new(),
         };
         // The group's live GPT ids (non-`claude-`), empty when the catalog can't be read.
-        let catalog_gpt: Vec<String> =
-            catalog.iter().filter(|id| !id.starts_with("claude-")).cloned().collect();
+        let catalog_gpt: Vec<String> = catalog
+            .iter()
+            .filter(|id| !id.starts_with("claude-"))
+            .cloned()
+            .collect();
         // Codex/OpenCode default to the live GPT list, or the fallback safety net when empty. This
         // preserves the pre-live Codex/OpenCode behavior (they still default to `gpt-5.6-terra`).
-        let gpt_models =
-            if catalog_gpt.is_empty() { fallback_gpt_models() } else { catalog_gpt.clone() };
+        let gpt_models = if catalog_gpt.is_empty() {
+            fallback_gpt_models()
+        } else {
+            catalog_gpt.clone()
+        };
 
         let mut desired_env = control_env.clone();
         // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY): recomputed
@@ -790,18 +800,14 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         if group.is_some() {
             let claude_model = default_claude_model(&catalog, default_gpt_model(&catalog_gpt))
                 .unwrap_or_else(|| FALLBACK_CLAUDE_MODEL.to_string());
-            desired_env.push(wire::EnvVar { key: "ANTHROPIC_MODEL".into(), value: claude_model });
+            desired_env.push(wire::EnvVar {
+                key: "ANTHROPIC_MODEL".into(),
+                value: claude_model,
+            });
         }
         let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
         let env_script = etc_environment_sync_script(&desired_env);
-        match exec_ok(
-            app,
-            id,
-            &env_script,
-            "sync /etc/environment",
-        )
-        .await
-        {
+        match exec_ok(app, id, &env_script, "sync /etc/environment").await {
             Ok(()) => {
                 warned.remove(&format!("{id}:etc-env"));
             }
@@ -951,7 +957,10 @@ mod tests {
             Some("claude-opus-4-8")
         );
         let upper = vec!["claude-sonnet-5".to_string(), "Claude-Opus-4-8".to_string()];
-        assert_eq!(default_claude_model(&upper, None).as_deref(), Some("Claude-Opus-4-8"));
+        assert_eq!(
+            default_claude_model(&upper, None).as_deref(),
+            Some("Claude-Opus-4-8")
+        );
 
         // No opus → the first `claude-` id, ahead of the GPT fallback.
         let no_opus = vec![
@@ -982,7 +991,7 @@ mod tests {
     fn empty_gpt_models_never_emit_a_broken_provider() {
         // With a cc base but no models, Codex omits the provider and OpenCode writes nothing —
         // an empty list must never yield a provider with no default model.
-        let toml = codex_config_toml("rmng-a", None, Some("http://rmng-control:9000/cc/v1"), &[]);
+        let toml = codex_config_toml(Some("http://rmng-control:9000/cc/v1"), &[]);
         assert!(!toml.contains("model_provider"));
         assert!(!toml.contains("model_providers.rmng"));
         assert!(opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &[]).is_none());
@@ -1009,8 +1018,7 @@ mod tests {
 
     #[test]
     fn codex_parity_entries_install_global_guidance_and_linear_mcp() {
-        let entries =
-            codex_parity_entries("rmng-a", Some("http://rmng-control:9002"), None, &fallback_gpt_models());
+        let entries = codex_parity_entries(None, &fallback_gpt_models());
         let agents = entries
             .iter()
             .find(|e| e.path == "home/rmng/.codex/AGENTS.md")
@@ -1033,15 +1041,13 @@ mod tests {
         assert!(config_body.contains("[mcp_servers.linear]"));
         assert!(config_body.contains("url = \"https://mcp.linear.app/mcp\""));
         assert!(config_body.contains("bearer_token_env_var = \"LINEAR_API_KEY\""));
-        assert!(config_body.contains("[mcp_servers.\"control-server\"]"));
-        assert!(config_body.contains("url = \"http://rmng-control:9002\""));
-        assert!(config_body.contains("\"x-rmng-clone\" = \"rmng-a\""));
+        assert!(!config_body.contains("control-server"));
     }
 
     #[test]
     fn codex_config_adds_active_rmng_provider_when_cc_base_present() {
         let models = fallback_gpt_models();
-        let toml = codex_config_toml("rmng-a", None, Some("http://rmng-control:9000/cc/v1"), &models);
+        let toml = codex_config_toml(Some("http://rmng-control:9000/cc/v1"), &models);
         assert!(toml.contains("model_provider = \"rmng\""));
         assert!(toml.contains("[model_providers.rmng]"));
         assert!(toml.contains("base_url = \"http://rmng-control:9000/cc/v1\""));
@@ -1059,9 +1065,12 @@ mod tests {
         // Bare top-level keys must precede the first [table] (valid TOML).
         let mp = toml.find("model_provider = ").unwrap();
         let first_table = toml.find("[mcp_servers.desktop]").unwrap();
-        assert!(mp < first_table, "top-level keys must come before tables:\n{toml}");
+        assert!(
+            mp < first_table,
+            "top-level keys must come before tables:\n{toml}"
+        );
         // No cc base → the old behavior (no rmng provider at all).
-        let plain = codex_config_toml("rmng-a", None, None, &models);
+        let plain = codex_config_toml(None, &models);
         assert!(!plain.contains("model_providers.rmng"));
         assert!(!plain.contains("model_provider"));
     }
@@ -1082,19 +1091,26 @@ mod tests {
         assert!(!lower.contains("anthropic"));
         assert!(!lower.contains("claude"));
         // The parity entries carry the opencode file when a cc base is present.
-        let entries =
-            codex_parity_entries("rmng-a", None, Some("http://rmng-control:9000/cc/v1"), &models);
-        assert!(entries.iter().any(|e| e.path == "home/rmng/.config/opencode/opencode.json"));
+        let entries = codex_parity_entries(Some("http://rmng-control:9000/cc/v1"), &models);
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.path == "home/rmng/.config/opencode/opencode.json")
+        );
         // ...and omit it when there's no cc base.
-        let bare = codex_parity_entries("rmng-a", None, None, &models);
-        assert!(!bare.iter().any(|e| e.path == "home/rmng/.config/opencode/opencode.json"));
+        let bare = codex_parity_entries(None, &models);
+        assert!(
+            !bare
+                .iter()
+                .any(|e| e.path == "home/rmng/.config/opencode/opencode.json")
+        );
     }
 
     #[test]
     fn codex_parity_stamp_hash_changes_when_config_changes() {
         let original =
-            codex_parity_stamp_entry_for(&codex_parity_entries("rmng-a", None, None, &fallback_gpt_models()));
-        let mut changed = codex_parity_entries("rmng-a", None, None, &fallback_gpt_models());
+            codex_parity_stamp_entry_for(&codex_parity_entries(None, &fallback_gpt_models()));
+        let mut changed = codex_parity_entries(None, &fallback_gpt_models());
         changed
             .iter_mut()
             .find(|e| e.path == "home/rmng/.codex/config.toml")
@@ -1140,7 +1156,9 @@ mod tests {
 
     #[test]
     fn etc_environment_sync_uses_desired_env_and_removes_legacy_environment_d() {
-        let script = etc_environment_sync_script("RMNG_CONTROL_URL=http://rmng-control:9000\nLINEAR_API_KEY=secret\n");
+        let script = etc_environment_sync_script(
+            "ANTHROPIC_BASE_URL=http://rmng-control:9000/cc\nLINEAR_API_KEY=secret\n",
+        );
         assert!(script.contains("base64 -d"));
         assert!(script.contains("/etc/environment"));
         assert!(script.contains("drop[$1]=1"));

@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand};
     version,
     about = "Fleet management for the RMNG control-server",
     long_about = "Fleet management for the RMNG control-server.\n\n\
-                  Server resolution: --server, else $RMNG_CONTROL_URL (preset in every \
-                  clone), else http://localhost:9000."
+                  Server resolution: --server, else optional $RMNG_CONTROL_URL, else \
+                  http://localhost:9000."
 )]
 pub struct Cli {
     /// Control-server web-API origin (e.g. http://rmng-control:9000)
@@ -27,7 +27,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// List hosts with their fleet status (agent report, accounts, note)
+    /// List hosts with their image, preset, and account-group assignment
     Ps,
     /// Point the operator's viewer at a host (`none` clears the selection)
     Select {

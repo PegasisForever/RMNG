@@ -14,7 +14,6 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 |---|---|---|---|---|---|
 | video | `9001` | `listen.video` | control-server mediaplane | native viewer | framed H.264/JSON over TCP |
 | web | `9000` | `listen.web` | control-server web | browser / `rmng` CLI / control-client | HTTP + SSE |
-| per-clone MCP | `9002` | `listen.clone_mcp` | control-server mcp | in-clone agent-wrapper | HTTP JSON-RPC (header-routed) |
 | forward | `9005` | `listen.forward` | control-server mediaplane | native viewer | framed TCP over TCP (one conn per forwarded local socket, spliced to the clone) |
 | bastion | `2222` | `listen.bastion` | control-server ssh.rs | operator ssh client (jump) | OpenSSH; pubkey-only; forwards to `clone:22` |
 | daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agent-wrapper + `rmng desktop` proxy (via web API) | HTTP JSON-RPC |
@@ -134,9 +133,9 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `listen` | `ListenConfig` | see below | the 6 ports |
+| `listen` | `ListenConfig` | see below | the web, video, daemon MCP, forward, and bastion ports |
 | `agent_port` | u16 | `4096` | agent-wrapper port on each clone |
-| `data_dir` | string | `"data"` | state/notes/uploads/chats/feedback root; `state.json` and the `claude-accounts.json` secret store live here. **One-time** (set in the setup wizard) |
+| `data_dir` | string | `"data"` | state, notes, uploads, chats, and private clone-token totals root; `state.json` and the `claude-accounts.json` secret store live here. **One-time** (set in the setup wizard) |
 | `static_dir` | string | `""` (embedded) | empty serves the frontend embedded in the binary; a non-empty disk path serves the bundle from there. Set in Settings → Advanced. **Restart-required** |
 | `clone_socket` | string | `/srv/rmng-sock/clones.sock` | media-plane unix socket the clone-daemons connect to; baked into the template at provision. Set in the setup wizard. **One-time** (a pre-latch edit is **restart-required** — the old path is bound at startup) |
 | `chroma` | `ChromaMode` | `4:2:0` | viewer video chroma subsampling. Settings → Video. **Restart-required** |
@@ -149,11 +148,9 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 | `clone_groups` | `CloneGroup[]` | `[]` | named account pools for Claude rotation (not secret) |
 | `codex` | `CodexConfig` | — | Codex usage polling config |
 | `codex_groups` | `CloneGroup[]` | `[]` | named account pools for Codex rotation (not secret) |
-| `detector_inference_url` | string | `http://10.0.0.42:8080` | vision-LLM the needs-human detector polls; injected into clones as `RMNG_INFERENCE_URL` |
 | `agent_playbook` | string | shipped default | the desktop agent's base playbook (operating notes + ticket procedure), injected into each new clone at creation as its system-prompt append (written to the clone's `~/.config/rmng/agent-instructions.md`, where the agent-wrapper reads it, overriding its baked-in fallback). Seeded from the wrapper's `agent-instructions.md`; editable in Settings; **non-secret** (passes through the redacted view); applies to the next clone (**not restart-required**) |
 
-- **`ListenConfig`**: `web 9000`, `video 9001`, `clone_mcp 9002`,
-  `daemon_mcp 9004`, `forward 9005`, `bastion 2222`.
+- **`ListenConfig`**: `web 9000`, `video 9001`, `daemon_mcp 9004`, `forward 9005`, and `bastion 2222`.
 - **`DockerConfig`** (no secret — the local daemon is reached over a unix socket, so the
   whole struct passes through the redacted view): `socket`
   (`"/var/run/docker.sock"` — the daemon the control-server drives, **restart-required**;
@@ -279,28 +276,6 @@ re-read or hot-reloaded after that. As soon as the daemon's first `Hello` reache
 the server replies with `ServerMsg::SetMonitors` carrying `config.effective_monitors()` (the
 active layout preset), live-correcting a stale baked layout without a restart. Every
 subsequent `POST /api/layout/activate` pushes a fresh `SetMonitors` the same way.
-
-**`rmng-clone-daemon wait-for-stuck`** — the needs-human detector, two modes:
-
-- **Screen mode** (default): pulls screenshots from the local MCP, tiles them, asks the
-  inference vision-LLM per cell, exits 0 when stuck. Flags: `--inference-url <url>` (default
-  the built-in inference CT), `--ignore-reason <str>` (repeatable), `--interval <secs>` (60),
-  `--timeout <secs>` (1200).
-- **Text mode** (`--text-cmd <shell cmd>`): each interval, runs the command (e.g.
-  `tmux capture-pane -pt work -S -200`) and judges its *text* against `--criteria <str>` —
-  the operator's semantic definition of what working/stuck look like for this session — via
-  a text-only completion on the same endpoint. The model also gets a deterministic
-  did-the-text-change signal (a frozen pane across checks is strong stuck evidence), and its
-  prompt pins pane text as untrusted data. No screenshots/MCP involved; one call per check.
-  Far more reliable than vision for terminal agents. `--criteria` requires `--text-cmd`;
-  `--ignore-reason` works in both modes.
-
-**`rmng-clone-daemon report-detection`** — POST a wrong-verdict record to the control-server's
-`/api/detector-feedback`. Flags: `--kind false-positive|false-negative` (required), `--note
-<str>`, `--control <url>`. Uploads the artifact the verdict was made on: the screenshot
-composite (screen mode) or the exact pane capture + criteria (text mode), plus a `mode`
-field. (These two subcommands replace the retired `computer-use` binary; the agent-wrapper
-spawns `wait-for-stuck` for monitoring.)
 
 ---
 

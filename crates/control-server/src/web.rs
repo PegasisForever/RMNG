@@ -2,6 +2,7 @@
 //! delete surface; the rest (Linear/Claude/chat/config/…) lands as those modules
 //! are ported.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::path::Path;
 use std::time::Duration;
@@ -57,7 +58,6 @@ pub fn router(app: App) -> Router {
         .route("/api/notes/:id", get(notes_get).put(notes_save))
         .route("/api/upload", post(upload))
         .route("/uploads/:file", get(uploads_serve))
-        .route("/api/detector-feedback", post(detector_feedback))
         .route("/api/config", get(config_get).put(config_put))
         .route("/api/config/test", post(config_test))
         .route("/api/setup/env", get(setup_env))
@@ -80,10 +80,22 @@ pub fn router(app: App) -> Router {
         // Group-proxy onboarding + CRUD (thin proxies to each group instance's management API).
         .route("/api/groups", post(groups_create))
         .route("/api/groups/:name", axum::routing::delete(groups_delete))
-        .route("/api/groups/:name/accounts/login/start", post(group_login_start))
-        .route("/api/groups/:name/accounts/login/status", get(group_login_status))
-        .route("/api/groups/:name/accounts/login/complete", post(group_login_complete))
-        .route("/api/groups/:name/accounts/delete", post(group_account_delete))
+        .route(
+            "/api/groups/:name/accounts/login/start",
+            post(group_login_start),
+        )
+        .route(
+            "/api/groups/:name/accounts/login/status",
+            get(group_login_status),
+        )
+        .route(
+            "/api/groups/:name/accounts/login/complete",
+            post(group_login_complete),
+        )
+        .route(
+            "/api/groups/:name/accounts/delete",
+            post(group_account_delete),
+        )
         .route("/api/usage/refresh", post(usage_refresh))
         // Group-proxy request router: reverse-proxy a clone's agent traffic to its group's
         // CLIProxyAPI instance. ANY method; registered BEFORE the SPA fallback below.
@@ -119,8 +131,8 @@ pub fn router(app: App) -> Router {
     };
 
     // 64MB body cap (axum defaults to 2MB): the multipart routes carry full-resolution
-    // clone screenshots — detector feedback evidence (~6MB PNG at 2560x1440) and note
-    // uploads. LAN-only service; JSON routes are unaffected in practice.
+    // clone screenshots and note uploads. LAN-only service; JSON routes are unaffected in
+    // practice.
     routes
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
@@ -137,18 +149,18 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `GET /events` — four multiplexed streams on one connection:
+/// `GET /events` — five multiplexed streams on one connection:
 ///   - the persisted `ControlState` as the default (unnamed) event → the client's
 ///     `onmessage`: full snapshot on connect, then one frame per change;
 ///   - the volatile per-host CPU/RAM map as a named `stats` event → the client's
 ///     `addEventListener("stats")`: latest snapshot on connect, then one per poll tick;
-///   - CT 105-wide CPU/RAM/disk as a named `lxcStats` event → the client's
-///     `addEventListener("lxcStats")`: latest snapshot on connect, then one per poll tick;
-///   - the volatile port-forward runtime map as a named `forwards` event → the client's
-///     `addEventListener("forwards")`: snapshot on connect, then one per status change.
+///   - CT-wide CPU/RAM/disk as a named `lxcStats` event;
+///   - the volatile port-forward runtime map as a named `forwards` event;
+///   - safe per-clone newly-processed token totals as a named `tokens` event.
 ///
-/// Stats, LXC stats, and forwards ride separate SSE-only buses ([`crate::monitor::StatsBus`],
-/// [`crate::monitor::LxcStatsBus`], [`crate::forward::ForwardBus`]) so they never enter `ControlState` / `state.json`
+/// Stats, LXC stats, forwards, and tokens ride separate SSE-only buses
+/// ([`crate::monitor::StatsBus`], [`crate::monitor::LxcStatsBus`],
+/// [`crate::forward::ForwardBus`], [`crate::tokens::TokenBus`]) so they never enter `ControlState` / `state.json`
 /// (which persists on every mutation). Plus a named `ping` event every 15s (an
 /// observable heartbeat the client's reconnect watchdog measures) and a 20s low-level
 /// keep-alive comment.
@@ -176,17 +188,17 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     });
     let stats_stream = stats_initial.chain(stats_updates);
 
-    let (lxc_stats_snapshot, lxc_stats_rx) = app.lxc_stats.subscribe();
-    let lxc_stats_initial = futures::stream::once(async move {
-        Ok(Event::default().event("lxcStats").data(lxc_stats_snapshot))
+    let (lxc_snapshot, lxc_rx) = app.lxc_stats.subscribe();
+    let lxc_initial = futures::stream::once(async move {
+        Ok(Event::default().event("lxcStats").data(lxc_snapshot))
     });
-    let lxc_stats_updates = BroadcastStream::new(lxc_stats_rx).filter_map(|r| async move {
+    let lxc_updates = BroadcastStream::new(lxc_rx).filter_map(|r| async move {
         match r {
             Ok(json) => Some(Ok(Event::default().event("lxcStats").data(json))),
-            Err(_) => None, // lagged: next tick resyncs
+            Err(_) => None,
         }
     });
-    let lxc_stats_stream = lxc_stats_initial.chain(lxc_stats_updates);
+    let lxc_stream = lxc_initial.chain(lxc_updates);
 
     let (fwd_snapshot, fwd_rx) = app.forwards.subscribe();
     let fwd_initial =
@@ -200,6 +212,19 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
         }
     });
     let fwd_stream = fwd_initial.chain(fwd_updates);
+
+    let (token_snapshot, token_rx) = app.tokens.subscribe();
+    let token_initial =
+        futures::stream::once(
+            async move { Ok(Event::default().event("tokens").data(token_snapshot)) },
+        );
+    let token_updates = BroadcastStream::new(token_rx).filter_map(|r| async move {
+        match r {
+            Ok(json) => Some(Ok(Event::default().event("tokens").data(json))),
+            Err(_) => None,
+        }
+    });
+    let token_stream = token_initial.chain(token_updates);
 
     // Observable heartbeat: a named `ping` event every 15s. Unlike the low-level keep-alive
     // *comment* below (which `EventSource` swallows silently), the client can see this — so
@@ -218,8 +243,11 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
         state_stream,
         futures::stream::select(
             futures::stream::select(
-                futures::stream::select(stats_stream, lxc_stats_stream),
-                fwd_stream,
+                futures::stream::select(
+                    futures::stream::select(stats_stream, lxc_stream),
+                    fwd_stream,
+                ),
+                token_stream,
             ),
             heartbeat,
         ),
@@ -246,7 +274,7 @@ struct ActivateReq {
 
 async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<ControlState> {
     Json(app.store.mutate(|s| {
-        // Switching to a clone clears its unread dot.
+        // Selecting a clone acknowledges its prior working→not-working transition.
         if let Some(id) = req.id.as_deref() {
             if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
                 h.unread = false;
@@ -370,7 +398,10 @@ async fn host_mcp(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
     if host.archived {
-        return Err((StatusCode::CONFLICT, format!("host '{id}' is archived; unarchive it first")));
+        return Err((
+            StatusCode::CONFLICT,
+            format!("host '{id}' is archived; unarchive it first"),
+        ));
     }
     let content = proxy_to_daemon(&app, &host, &req.tool, &req.args)
         .await
@@ -425,7 +456,10 @@ async fn host_exec(
     }
     let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
     if host.archived {
-        return Err((StatusCode::CONFLICT, format!("host '{id}' is archived; unarchive it first")));
+        return Err((
+            StatusCode::CONFLICT,
+            format!("host '{id}' is archived; unarchive it first"),
+        ));
     }
     let stdin = match &req.stdin_b64 {
         Some(b64) => Some(
@@ -938,10 +972,7 @@ struct NotesBody {
     blocks: Vec<serde_json::Value>,
 }
 
-async fn notes_get(
-    State(app): State<App>,
-    AxPath(id): AxPath<String>,
-) -> Json<serde_json::Value> {
+async fn notes_get(State(app): State<App>, AxPath(id): AxPath<String>) -> Json<serde_json::Value> {
     let blocks = files::load_notes(&app.config().data_dir, &id).unwrap_or_default();
     Json(json!({ "blocks": blocks }))
 }
@@ -986,92 +1017,6 @@ async fn uploads_serve(State(app): State<App>, AxPath(file): AxPath<String>) -> 
         Ok((bytes, ct)) => ([(header::CONTENT_TYPE, ct)], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
-}
-
-/// `POST /api/detector-feedback` — the clone's `clone-daemon report-detection` uploads a
-/// wrong needs-human verdict (multipart) for tuning. The caller self-identifies with a
-/// `clone` field (its hostname — clone IPs are dynamic Docker IPAM now, so there is no
-/// source-IP mapping). Mirrors the old Bun route + `computer-use`'s payload.
-async fn detector_feedback(
-    State(app): State<App>,
-    mut mp: Multipart,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut clone_field: Option<String> = None;
-    let mut fb = files::DetectorFeedback {
-        kind: String::new(),
-        mode: "screen".into(),
-        detector_verdict: "working".into(),
-        detector_reason: String::new(),
-        actual_state: "working".into(),
-        ignore_reasons: Vec::new(),
-        criteria: String::new(),
-        note: String::new(),
-    };
-    let mut screenshot: Option<Vec<u8>> = None;
-    let mut capture: Option<String> = None;
-    while let Some(field) = mp
-        .next_field()
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
-    {
-        match field.name().unwrap_or("") {
-            "clone" => clone_field = field.text().await.ok().map(|s| s.trim().to_string()),
-            "kind" => fb.kind = field.text().await.unwrap_or_default(),
-            "mode" => fb.mode = field.text().await.unwrap_or_default(),
-            "detectorVerdict" => fb.detector_verdict = field.text().await.unwrap_or_default(),
-            "detectorReason" => fb.detector_reason = field.text().await.unwrap_or_default(),
-            "actualState" => fb.actual_state = field.text().await.unwrap_or_default(),
-            "criteria" => fb.criteria = field.text().await.unwrap_or_default(),
-            "note" => fb.note = field.text().await.unwrap_or_default(),
-            "ignoreReason" => {
-                if let Ok(s) = field.text().await {
-                    fb.ignore_reasons.push(s);
-                }
-            }
-            "screenshot" => {
-                screenshot = field.bytes().await.ok().map(|b| b.to_vec());
-            }
-            "capture" => {
-                capture = field.text().await.ok();
-            }
-            _ => {}
-        }
-    }
-    if fb.mode.is_empty() {
-        fb.mode = "screen".into();
-    }
-    if fb.kind != "false-positive" && fb.kind != "false-negative" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "kind must be false-positive|false-negative".into(),
-        ));
-    }
-    let clone = clone_field.filter(|c| !c.is_empty()).ok_or((
-        StatusCode::BAD_REQUEST,
-        "missing 'clone' field (the caller's clone id)".into(),
-    ))?;
-    let host_id = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .find(|h| h.id == clone)
-        .map(|h| h.id)
-        .ok_or((StatusCode::NOT_FOUND, format!("no host named '{clone}'")))?;
-    let id = files::save_detector_feedback(
-        &app.config().data_dir,
-        &host_id,
-        &fb,
-        screenshot.as_deref(),
-        capture.as_deref(),
-    )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    tracing::info!(
-        "detector-feedback from {host_id}: {} [{}] (id {id})",
-        fb.kind,
-        fb.mode
-    );
-    Ok(Json(json!({ "ok": true, "id": id, "host": host_id })))
 }
 
 // --- config API (redacted read / validated write / live-apply) -------------
@@ -1291,12 +1236,20 @@ async fn host_group(
     AxPath(id): AxPath<String>,
     Json(req): Json<HostGroupReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let host = host_by_id(&app, &id)
-        .ok_or((StatusCode::BAD_REQUEST, format!("unknown host '{id}'")))?;
+    let host =
+        host_by_id(&app, &id).ok_or((StatusCode::BAD_REQUEST, format!("unknown host '{id}'")))?;
     if !host.managed {
-        return Err((StatusCode::BAD_REQUEST, format!("'{id}' is not a managed clone")));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("'{id}' is not a managed clone"),
+        ));
     }
-    let group = match req.group.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let group = match req
+        .group
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(name) => {
             if !app.config().groups.iter().any(|g| g.name == name) {
                 return Err((StatusCode::BAD_REQUEST, format!("unknown group '{name}'")));
@@ -1340,7 +1293,10 @@ async fn chat_send(
     let host = host_by_id(&app, &id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown host '{id}'")))?;
     if host.archived {
-        return Err((StatusCode::CONFLICT, format!("host '{id}' is archived; unarchive it first")));
+        return Err((
+            StatusCode::CONFLICT,
+            format!("host '{id}' is archived; unarchive it first"),
+        ));
     }
     crate::chat::send_chat(&app, &host, &req.text).map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(StatusCode::ACCEPTED)
@@ -1381,17 +1337,37 @@ async fn chat_abort(
 
 // --- group-proxy request router (/cc) --------------------------------------
 
-/// Headers we never forward verbatim in either direction: the framing/connection headers
-/// hyper + reqwest recompute per hop (so passing them through would double-frame or lie about
-/// length). `authorization` is handled separately by the router (dropped inbound, replaced
-/// with the instance's inbound key). Everything else — crucially `content-type`, so
-/// `text/event-stream` survives — passes through.
-fn is_hop_by_hop(name: &HeaderName) -> bool {
-    let n = name.as_str();
-    n.eq_ignore_ascii_case("host")
-        || n.eq_ignore_ascii_case("connection")
-        || n.eq_ignore_ascii_case("content-length")
-        || n.eq_ignore_ascii_case("transfer-encoding")
+/// Headers we never forward verbatim in either direction: framing/connection headers are
+/// recomputed per hop. `Connection` can nominate additional hop-by-hop headers, so collect its
+/// comma-separated tokens in addition to the RFC-defined set. `authorization` is handled
+/// separately by the router (dropped inbound, replaced with the instance's inbound key).
+fn hop_by_hop_headers(headers: &axum::http::HeaderMap) -> HashSet<HeaderName> {
+    let mut names = [
+        header::HOST,
+        header::CONNECTION,
+        header::CONTENT_LENGTH,
+        header::TRANSFER_ENCODING,
+        HeaderName::from_static("keep-alive"),
+        header::TE,
+        header::TRAILER,
+        header::UPGRADE,
+        HeaderName::from_static("proxy-authenticate"),
+        HeaderName::from_static("proxy-authorization"),
+        HeaderName::from_static("proxy-connection"),
+    ]
+    .into_iter()
+    .collect::<HashSet<_>>();
+    for value in headers.get_all(header::CONNECTION) {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for name in value.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+            if let Ok(name) = HeaderName::from_bytes(name.as_bytes()) {
+                names.insert(name);
+            }
+        }
+    }
+    names
 }
 
 /// `ANY /cc/*rest` — reverse-proxy a clone's agent traffic (Claude Code, Codex, OpenCode)
@@ -1413,25 +1389,29 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
         .map(str::trim)
         .filter(|t| !t.is_empty());
     let Some(host_id) = token.and_then(|t| app.cliproxy.host_for_token(t)) else {
-        return deny(StatusCode::UNAUTHORIZED, "unknown or missing router bearer key");
+        return deny(
+            StatusCode::UNAUTHORIZED,
+            "unknown or missing router bearer key",
+        );
     };
 
     // 2. Clone → active group binding.
-    let host = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .find(|h| h.id == host_id);
+    let host = app.store.get().hosts.into_iter().find(|h| h.id == host_id);
     let Some(host) = host else {
         return deny(StatusCode::UNAUTHORIZED, "unknown clone");
     };
     if host.archived {
-        return deny(StatusCode::CONFLICT, "clone is archived; unarchive it before using inference");
+        return deny(
+            StatusCode::CONFLICT,
+            "clone is archived; unarchive it before using inference",
+        );
     }
     let Some(group) = host.group else {
         return deny(
@@ -1439,11 +1419,15 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
             "clone has no group (bind one in Settings before running an agent)",
         );
     };
+    // Capture before the upstream request can wait on headers. Archive/unarchive advances the
+    // epoch, so a response from this request cannot be attributed to a later lifecycle.
+    let capture_epoch = app.tokens.capture_epoch(&host_id);
 
     // 3. Group → loopback instance.
-    let (Some(port), Some(inbound_key)) =
-        (app.cliproxy.port_for(&group), app.cliproxy.inbound_key_for(&group))
-    else {
+    let (Some(port), Some(inbound_key)) = (
+        app.cliproxy.port_for(&group),
+        app.cliproxy.inbound_key_for(&group),
+    ) else {
         return deny(
             StatusCode::SERVICE_UNAVAILABLE,
             "group instance unavailable (still starting) — retry",
@@ -1453,13 +1437,22 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
     // 4. Build + forward the streamed request.
     let (parts, body) = req.into_parts();
     let path = parts.uri.path();
-    let rest = path.strip_prefix("/cc").filter(|s| !s.is_empty()).unwrap_or("/");
-    let query = parts.uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let rest = path
+        .strip_prefix("/cc")
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/")
+        .to_string();
+    let query = parts
+        .uri
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
     let url = format!("http://127.0.0.1:{port}{rest}{query}");
 
+    let request_hop_headers = hop_by_hop_headers(&parts.headers);
     let mut headers = reqwest::header::HeaderMap::new();
     for (k, v) in parts.headers.iter() {
-        if is_hop_by_hop(k) || k == header::AUTHORIZATION {
+        if request_hop_headers.contains(k) || k == header::AUTHORIZATION {
             continue;
         }
         headers.insert(k.clone(), v.clone());
@@ -1473,7 +1466,7 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
 
     let upstream_body = reqwest::Body::wrap_stream(body.into_data_stream());
     let resp = match app
-        .http
+        .proxy_http
         .request(parts.method, &url)
         .headers(headers)
         .body(upstream_body)
@@ -1489,21 +1482,46 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
 
     tracing::debug!(target: "router", "clone {host_id} → group {group} {rest} → {}", resp.status());
 
-    // 5. Stream the response back (status + headers + body), unbuffered.
+    // 5. Stream the response back (status + headers + body), unbuffered. When the response is
+    // successful, uncompressed, and a supported client-facing route, attach a local observer to
+    // cloned chunks. It never mutates body bytes/errors or response headers, and it does no I/O.
     let status = resp.status();
+    let streaming = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+    let encoded = resp
+        .headers()
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| !value.eq_ignore_ascii_case("identity"));
+    let mut observer = if status.is_success() && !encoded {
+        capture_epoch.and_then(|epoch| {
+            app.tokens
+                .observer(app.store.clone(), host_id.clone(), epoch, &rest, streaming)
+        })
+    } else {
+        None
+    };
+    let response_hop_headers = hop_by_hop_headers(resp.headers());
     let mut builder = Response::builder().status(status);
     for (k, v) in resp.headers().iter() {
-        if is_hop_by_hop(k) {
+        if response_hop_headers.contains(k) {
             continue;
         }
         builder = builder.header(k.clone(), v.clone());
     }
-    builder
-        .body(Body::from_stream(resp.bytes_stream()))
-        .unwrap_or_else(|e| {
-            tracing::error!(target: "router", "building proxied response: {e}");
-            StatusCode::BAD_GATEWAY.into_response()
-        })
+    let stream = resp.bytes_stream().map(move |chunk| {
+        if let (Some(observer), Ok(bytes)) = (observer.as_mut(), &chunk) {
+            observer.feed(bytes);
+        }
+        chunk
+    });
+    builder.body(Body::from_stream(stream)).unwrap_or_else(|e| {
+        tracing::error!(target: "router", "building proxied response: {e}");
+        StatusCode::BAD_GATEWAY.into_response()
+    })
 }
 
 // --- group-proxy CRUD + onboarding -----------------------------------------
@@ -1525,7 +1543,9 @@ async fn mgmt_send_retry(
 ) -> Result<reqwest::Response, (StatusCode, String)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        let mut rb = http.request(method.clone(), url).header("X-Management-Key", secret);
+        let mut rb = http
+            .request(method.clone(), url)
+            .header("X-Management-Key", secret);
         if let Some(b) = body {
             rb = rb.json(b);
         }
@@ -1544,10 +1564,10 @@ async fn mgmt_get_json(
     group: &str,
     path_and_query: &str,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    let (base, secret) = app
-        .cliproxy
-        .management(group)
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "group instance unavailable".into()))?;
+    let (base, secret) = app.cliproxy.management(group).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "group instance unavailable".into(),
+    ))?;
     let resp = mgmt_send_retry(
         &app.http,
         reqwest::Method::GET,
@@ -1565,7 +1585,10 @@ async fn mgmt_body(resp: reqwest::Response) -> Result<serde_json::Value, (Status
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err((StatusCode::BAD_GATEWAY, format!("group instance {}: {text}", status.as_u16())));
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("group instance {}: {text}", status.as_u16()),
+        ));
     }
     Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "ok": true, "raw": text })))
 }
@@ -1634,7 +1657,12 @@ async fn group_login_start(
         "anthropic" | "claude" => "/anthropic-auth-url",
         "codex" | "openai" | "chatgpt" => "/codex-auth-url",
         "antigravity" | "gemini" | "google" => "/antigravity-auth-url",
-        other => return Err((StatusCode::BAD_REQUEST, format!("unknown provider '{other}'"))),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unknown provider '{other}'"),
+            ));
+        }
     };
     let v = mgmt_get_json(&app, &name, path).await?;
     Ok(Json(v))
@@ -1710,10 +1738,10 @@ async fn group_login_complete(
     AxPath(name): AxPath<String>,
     Json(req): Json<LoginCompleteReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (base, secret) = app
-        .cliproxy
-        .management(&name)
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "group instance unavailable".into()))?;
+    let (base, secret) = app.cliproxy.management(&name).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "group instance unavailable".into(),
+    ))?;
     let body = if let Some(redirect) = req.redirect_url.as_deref().filter(|s| !s.is_empty()) {
         json!({ "provider": req.provider, "redirect_url": redirect })
     } else if let (Some(code), Some(state)) = (
@@ -1755,10 +1783,10 @@ async fn group_account_delete(
     if file.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "file is required".into()));
     }
-    let (base, secret) = app
-        .cliproxy
-        .management(&name)
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "group instance unavailable".into()))?;
+    let (base, secret) = app.cliproxy.management(&name).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "group instance unavailable".into(),
+    ))?;
     let resp = mgmt_send_retry(
         &app.http,
         reqwest::Method::DELETE,
@@ -1862,13 +1890,19 @@ mod tests {
         let out = normalize_login_status(
             &json!({ "status": "error", "error": "unknown or expired state" }),
         );
-        assert_eq!(out, json!({ "state": "error", "error": "unknown or expired state" }));
+        assert_eq!(
+            out,
+            json!({ "state": "error", "error": "unknown or expired state" })
+        );
     }
 
     #[test]
     fn login_status_error_without_message_falls_back() {
         let out = normalize_login_status(&json!({ "status": "error" }));
-        assert_eq!(out, json!({ "state": "error", "error": "Authentication failed" }));
+        assert_eq!(
+            out,
+            json!({ "state": "error", "error": "Authentication failed" })
+        );
     }
 
     #[test]
@@ -1982,7 +2016,9 @@ mod tests {
             });
         });
         *app.cfg.write().unwrap() = wire::AppConfig {
-            groups: vec![wire::Group { name: "team".into() }],
+            groups: vec![wire::Group {
+                name: "team".into(),
+            }],
             ..app.config()
         };
 
@@ -1990,28 +2026,48 @@ mod tests {
         let resp = host_group(
             State(app.clone()),
             AxPath("w1".into()),
-            Json(HostGroupReq { group: Some("team".into()) }),
+            Json(HostGroupReq {
+                group: Some("team".into()),
+            }),
         )
         .await
         .unwrap()
         .0;
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["group"], "team");
-        let host = app.store.get().hosts.into_iter().find(|h| h.id == "w1").unwrap();
+        let host = app
+            .store
+            .get()
+            .hosts
+            .into_iter()
+            .find(|h| h.id == "w1")
+            .unwrap();
         assert_eq!(host.group.as_deref(), Some("team"));
 
         // Clear the binding with null.
-        let _ = host_group(State(app.clone()), AxPath("w1".into()), Json(HostGroupReq { group: None }))
-            .await
+        let _ = host_group(
+            State(app.clone()),
+            AxPath("w1".into()),
+            Json(HostGroupReq { group: None }),
+        )
+        .await
+        .unwrap();
+        let host = app
+            .store
+            .get()
+            .hosts
+            .into_iter()
+            .find(|h| h.id == "w1")
             .unwrap();
-        let host = app.store.get().hosts.into_iter().find(|h| h.id == "w1").unwrap();
         assert!(host.group.is_none());
 
         // An unknown group name is a 400.
         let err = host_group(
             State(app.clone()),
             AxPath("w1".into()),
-            Json(HostGroupReq { group: Some("nope".into()) }),
+            Json(HostGroupReq {
+                group: Some("nope".into()),
+            }),
         )
         .await
         .unwrap_err();
@@ -2024,8 +2080,7 @@ mod tests {
     #[tokio::test]
     async fn clone_hostname_mode_registers_clone_op() {
         let app = test_app();
-        let body =
-            json!({ "image": "tmpl:latest", "hostname": "w-mod-claude", "group": "team" });
+        let body = json!({ "image": "tmpl:latest", "hostname": "w-mod-claude", "group": "team" });
         let resp = clone(State(app.clone()), Json(body)).await.unwrap().0;
         assert_eq!(resp["ok"], true);
         let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
@@ -2118,7 +2173,10 @@ mod tests {
         let mcp = host_mcp(
             State(app.clone()),
             AxPath("stored".into()),
-            Json(wire::McpCallRequest { tool: "screenshot".into(), args: json!({}) }),
+            Json(wire::McpCallRequest {
+                tool: "screenshot".into(),
+                args: json!({}),
+            }),
         )
         .await
         .unwrap_err();
@@ -2127,7 +2185,9 @@ mod tests {
         let chat = chat_send(
             State(app.clone()),
             AxPath("stored".into()),
-            Json(ChatSendReq { text: "hello".into() }),
+            Json(ChatSendReq {
+                text: "hello".into(),
+            }),
         )
         .await
         .unwrap_err();
@@ -2210,7 +2270,9 @@ mod tests {
     // --- group-proxy router (/cc) token → host → group → port resolution ---
 
     fn cc_request(auth: Option<&str>) -> Request {
-        let mut b = axum::http::Request::builder().method("POST").uri("/cc/v1/messages");
+        let mut b = axum::http::Request::builder()
+            .method("POST")
+            .uri("/cc/v1/messages");
         if let Some(a) = auth {
             b = b.header("authorization", a);
         }
@@ -2221,10 +2283,17 @@ mod tests {
     async fn cc_proxy_missing_or_unknown_bearer_is_401() {
         let app = test_app();
         // No Authorization header.
-        assert_eq!(cc_proxy(State(app.clone()), cc_request(None)).await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            cc_proxy(State(app.clone()), cc_request(None))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
         // A bearer that maps to no host.
         assert_eq!(
-            cc_proxy(State(app), cc_request(Some("Bearer nope"))).await.status(),
+            cc_proxy(State(app), cc_request(Some("Bearer nope")))
+                .await
+                .status(),
             StatusCode::UNAUTHORIZED
         );
     }
@@ -2234,7 +2303,12 @@ mod tests {
         let app = test_app();
         let key = app.cliproxy.mint_router_key("h1");
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host { id: "h1".into(), host: "h1".into(), managed: true, ..Default::default() });
+            s.hosts.push(wire::Host {
+                id: "h1".into(),
+                host: "h1".into(),
+                managed: true,
+                ..Default::default()
+            });
         });
         let resp = cc_proxy(State(app), cc_request(Some(&format!("Bearer {key}")))).await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -2262,7 +2336,11 @@ mod tests {
         let app = test_app();
         let key = app.cliproxy.mint_router_key("h1");
         // Provision the group's instance meta (allocates a stable loopback port).
-        app.cfg.write().unwrap().groups.push(wire::Group { name: "g".into() });
+        app.cfg
+            .write()
+            .unwrap()
+            .groups
+            .push(wire::Group { name: "g".into() });
         crate::cliproxy::apply_now(&app);
         app.store.mutate(|s| {
             s.hosts.push(wire::Host {
@@ -2298,9 +2376,9 @@ mod tests {
         assert_eq!(urlencode("claude-a@b.json"), "claude-a%40b.json");
     }
 
-    /// Spin up `/events` and read the opening bytes. All four multiplexed streams send a
+    /// Spin up `/events` and read the opening bytes. All three multiplexed streams send a
     /// snapshot on connect: the default (unnamed) `ControlState` frame plus the named
-    /// `stats`, `lxcStats`, and `forwards` snapshots. Guards the stream `select` wiring.
+    /// `stats` and `forwards` snapshots. Guards the stream `select` wiring.
     #[tokio::test]
     async fn events_stream_multiplexes_snapshots_on_connect() {
         use futures::stream::StreamExt;
@@ -2323,18 +2401,20 @@ mod tests {
         {
             buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
             let seen = buf.replace(' ', "");
-            if seen.contains("event:stats")
-                && seen.contains("event:lxcStats")
-                && seen.contains("event:forwards")
-            {
+            if seen.contains("event:stats") && seen.contains("event:forwards") {
                 break;
             }
         }
         let seen = buf.replace(' ', "");
         assert!(seen.contains("data:"), "no default state frame in: {buf:?}");
-        assert!(seen.contains("event:stats"), "no stats snapshot in: {buf:?}");
-        assert!(seen.contains("event:lxcStats"), "no LXC stats snapshot in: {buf:?}");
-        assert!(seen.contains("event:forwards"), "no forwards snapshot in: {buf:?}");
+        assert!(
+            seen.contains("event:stats"),
+            "no stats snapshot in: {buf:?}"
+        );
+        assert!(
+            seen.contains("event:forwards"),
+            "no forwards snapshot in: {buf:?}"
+        );
     }
 
     /// The observable heartbeat: a named `ping` event arrives within the first interval.

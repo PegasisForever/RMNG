@@ -16,6 +16,9 @@ pub struct App {
     /// Live config (mutable via `/api/config` in Phase 2; read per use elsewhere).
     pub cfg: Arc<RwLock<AppConfig>>,
     pub http: reqwest::Client,
+    /// Transparent CLIProxyAPI transport. Redirects stay client-visible rather than being
+    /// followed by the control server, preserving the upstream method and response exactly.
+    pub proxy_http: reqwest::Client,
     /// Group-proxy supervisor: per-group CLIProxyAPI instance lifecycle, per-clone router
     /// keys, and management helpers (see [`crate::cliproxy`]).
     pub cliproxy: Arc<CliProxyManager>,
@@ -38,11 +41,16 @@ pub struct App {
     /// reports + data-conn counts); `/events` fans it out as a named `forwards` SSE
     /// event. SSE-only — never persisted (see [`crate::forward::ForwardBus`]).
     pub forwards: Arc<crate::forward::ForwardBus>,
+    /// Per-clone newly processed token totals. Its browser projection is SSE-only while its
+    /// server-private records persist independently from `ControlState`.
+    pub tokens: Arc<crate::tokens::TokenBus>,
 }
 
 impl App {
     pub fn new(store: Arc<StateStore>, cfg: AppConfig) -> Self {
         let cliproxy = Arc::new(CliProxyManager::load(&cfg.data_dir));
+        let tokens = Arc::new(crate::tokens::TokenBus::load(&cfg.data_dir));
+        tokens.sync_hosts(&store.get().hosts);
         // `DockerCtl::connect` is infallible and I/O-free: even a missing socket FILE
         // (bare `docker run` without the sock bind) boots the server — the failure is
         // surfaced per call and by `self_setup`'s env report, so the wizard shows it.
@@ -54,6 +62,11 @@ impl App {
                 .user_agent("rmng-control-server")
                 .build()
                 .expect("reqwest client"),
+            proxy_http: reqwest::Client::builder()
+                .user_agent("rmng-control-server")
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("transparent proxy client"),
             cliproxy,
             chat: Arc::new(ChatState::default()),
             media: Arc::new(crate::mediaplane::MediaHandle::default()),
@@ -61,6 +74,7 @@ impl App {
             stats: Arc::new(crate::monitor::StatsBus::new()),
             lxc_stats: Arc::new(crate::monitor::LxcStatsBus::new()),
             forwards: Arc::new(crate::forward::ForwardBus::new()),
+            tokens,
         }
     }
 
@@ -84,12 +98,15 @@ impl App {
         std::fs::create_dir_all(&dir).unwrap();
         let store =
             std::sync::Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
-        let cfg = wire::AppConfig { data_dir: dir.to_string_lossy().into_owned(), ..Default::default() };
+        let cfg = wire::AppConfig {
+            data_dir: dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
         Self::new(store, cfg)
     }
 
-    /// What to dial a host's in-clone services at (agent-wrapper `/status`+chat, the
-    /// clone-daemon MCP). Managed clones are addressed by container name (== host id):
+    /// What to dial a host's in-clone services at (agent-wrapper chat and the clone-daemon
+    /// MCP). Managed clones are addressed by container name (== host id):
     /// Docker's embedded DNS serves it on the rmng bridge. In dev mode the server runs
     /// on the Docker host, which can't use that resolver — so resolve the clone's bridge
     /// IP via an inspect instead (host processes can route to bridge IPs directly).

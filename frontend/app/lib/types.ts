@@ -60,27 +60,11 @@ export interface Host {
   /** First Linear label on the ticket, if any. */
   linearLabel?: string;
   /**
-   * The agent's last self-reported desktop verdict (via the `set_state` MCP
-   * tool): `working` (our agent or the in-editor Claude Code is actively working)
-   * or `idle` (finished / awaiting the next task / needs a human). Folded into
-   * `monitorState` by the poller.
-   */
-  agentReport?: "working" | "idle";
-  /** Agent-authored note about the current state (what finished, or what the
-   *  human needs to do/decide). Shown on the host card. */
-  stateNote?: string;
-  /**
-   * Effective host state for the UI, derived by the server-side poller:
-   * `offline` (wrapper unreachable) ▸ `working` (our agent has a turn in flight,
-   * or the agent last reported working) ▸ `idle` (running but not working — the
-   * agent finished or is awaiting the next task; absorbs the old "needs
-   * attention"). A running host is just `working` or `idle`.
+   * Server-owned lifecycle state: Docker supplies liveness and passive proxy token activity
+   * distinguishes working from idle. The sidebar uses this only for its compact indicator.
    */
   monitorState?: "working" | "idle" | "offline";
-  /**
-   * True when this clone dropped from `working` to idle/offline since it was
-   * last viewed. Drives the sidebar unread dot; cleared when you switch to it.
-   */
+  /** Set when an unselected clone transitions from working to idle/offline. */
   unread?: boolean;
   /** Local port-forward rules; the native viewer runs the listeners. Live status
    *  arrives separately via the `forwards` SSE event, keyed by host id then rule id. */

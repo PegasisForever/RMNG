@@ -6,11 +6,11 @@ test("baked-in default is the merged instructions file, trimmed and non-empty", 
   expect(BAKED_IN_INSTRUCTIONS).toBe(BAKED_IN_INSTRUCTIONS.trim());
 });
 
-test("baked-in monitoring instructions use the installed clone-daemon path", () => {
-  expect(BAKED_IN_INSTRUCTIONS).toContain("/opt/rmng/bin/rmng-clone-daemon wait-for-stuck");
-  expect(BAKED_IN_INSTRUCTIONS).toContain("/opt/rmng/bin/rmng-clone-daemon report-detection");
-  expect(BAKED_IN_INSTRUCTIONS).not.toContain("`clone-daemon wait-for-stuck`");
-  expect(BAKED_IN_INSTRUCTIONS).not.toContain("`clone-daemon report-detection");
+test("baked-in instructions leave activity detection to the control server", () => {
+  expect(BAKED_IN_INSTRUCTIONS).toContain("proxy token activity");
+  expect(BAKED_IN_INSTRUCTIONS).not.toContain("wait-for-stuck");
+  expect(BAKED_IN_INSTRUCTIONS).not.toContain("report-detection");
+  expect(BAKED_IN_INSTRUCTIONS).not.toContain("set_state");
 });
 
 test("a non-empty injected file wins over the baked-in default", () => {

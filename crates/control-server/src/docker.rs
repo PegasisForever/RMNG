@@ -55,9 +55,9 @@ use wire::{DockerConfig, EnvCheckRow, ExecResult, ImageInfo, SetupEnv, UpdateSta
 /// The user-defined bridge every clone (and the control-server) attaches to. Created
 /// lazily at wizard finish + before each clone; its subnet is one-time config.
 pub const NETWORK: &str = "rmng";
-/// The control-server's DNS alias on the [`NETWORK`] bridge. Clones dial the baked
-/// `RMNG_CONTROL_URL`/`AGENT_CONTROL_MCP_URL` through this name, so the operator's
-/// container name doesn't matter and recreating the container never strands the URLs.
+/// The control-server's DNS alias on the [`NETWORK`] bridge. Clones use this name for
+/// the baked CLIProxyAPI base URL, so the operator's container name doesn't matter and
+/// recreating the container never strands the routing configuration.
 pub const CONTROL_ALIAS: &str = "rmng-control";
 /// The in-clone Linux user the agent + desktop run as (uid 1000).
 pub const CLONE_USER: &str = "rmng";
@@ -535,7 +535,7 @@ impl DockerCtl {
         if let Some(id) = &report.self_container {
             report.control_host = Some(CONTROL_ALIAS.to_string());
             // Best-effort: attach ourselves to the network under the alias so baked
-            // RMNG_CONTROL_URLs resolve. Only meaningful once the network exists.
+            // CLIProxyAPI base URLs resolve. Only meaningful once the network exists.
             if setup_complete {
                 if let Err(e) = self.connect_self_to_network(id).await {
                     tracing::warn!(target: "docker", "connect self to {NETWORK} as {CONTROL_ALIAS} failed: {e}");

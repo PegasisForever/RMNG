@@ -2,10 +2,9 @@
 // (one process per host) on :4096 — the slot opencode used to occupy.
 //
 // It holds ONE long-lived streaming-input session (created lazily on the first
-// prompt and kept alive for the process lifetime). Streaming input is what makes
-// the monitoring loop work: the agent can start a background command (Bash
-// run_in_background), end its turn, and be re-engaged AUTOMATICALLY when that
-// command exits (a `task_notification` arrives in the still-open stream) — no new
+// prompt and kept alive for the process lifetime). Streaming input lets an agent start a
+// background command (Bash run_in_background), end its turn, and be re-engaged automatically
+// when that command exits (a `task_notification` arrives in the still-open stream) — no new
 // user message needed. The desktop operating notes + the per-host "implement a ticket"
 // procedure are injected as the system-prompt append below — the Settings-editable copy
 // the control-server injects at clone creation if present, else the baked-in default
@@ -16,7 +15,7 @@
 // Turns are either:
 //   • solicited   — answering a POST /prompt; the reply rides /events as
 //                   { reply, solicited:true } and the control-server persists it.
-//   • autonomous  — triggered by a background task finishing (monitoring); its
+//   • autonomous  — triggered by a background task finishing; its
 //                   reply rides as { reply, solicited:false }.
 //
 //   POST /prompt { text }   queue a user turn. 202 immediately; 409 if a turn is
@@ -24,12 +23,10 @@
 //   GET  /events            SSE: { busy } snapshot, then { activity } lines, then
 //                           { reply, solicited } / { error } per turn.
 //   POST /abort             interrupt the current turn (session stays alive).
-//   GET  /status            { busy, monitoring, sessionId }.
 //
 // Session id is in memory only: a CoW clone boots a fresh wrapper and starts a
 // brand-new conversation. Auth = the container's logged-in `claude` subscription.
 import { query, type McpServerConfig, type Options, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { hostname } from "node:os";
 
 import { resolveSystemAppend } from "./instructions";
 
@@ -122,14 +119,6 @@ function mcpServers(): Record<string, McpServerConfig> {
     // sharing its live Mutter session. Registered as "desktop" ("computer-use" is a
     // reserved MCP name); alwaysLoad keeps screenshot/click/… in context every turn.
     desktop: { type: "http", url: CONFIG.daemonMcpUrl, alwaysLoad: true },
-    // The per-clone control-server MCP routes by the caller's self-reported clone id
-    // (clone IPs are dynamic Docker IPAM — no source-IP mapping). hostname() == the
-    // clone's container name == its host id.
-    "control-server": {
-      type: "http",
-      url: CONFIG.controlMcpUrl,
-      headers: { "x-rmng-clone": hostname() },
-    },
   };
 
   // The clone's preset Linear identity (LINEAR_API_KEY, injected at clone creation).
@@ -240,7 +229,7 @@ async function consume(q: Query): Promise<void> {
             else emit({ reply: "(no response)", solicited: true });
             emit({ busy: false });
           } else if (text) {
-            emit({ reply: text, solicited: false }); // autonomous (monitoring) message
+            emit({ reply: text, solicited: false }); // autonomous background-task message
           } else if (errs) {
             console.warn(`autonomous turn error: ${errs}`);
           }
@@ -263,21 +252,13 @@ async function consume(q: Query): Promise<void> {
   }
 }
 
-// Clear a wedged autonomous turn flag (defensive; a real turn always resolves).
+// Clear a wedged autonomous turn flag (defensive; a real turn always resolves). This is
+// local session safety only; it does not report or derive clone status.
 setInterval(() => {
   if (turnActive && !userTurnPending && Date.now() - turnStartedAt > STUCK_TURN_MS) {
     turnActive = false;
   }
 }, 30_000);
-
-// ---- monitoring detection (for the dashboard's monitorState) ---------------
-function isMonitoring(): boolean {
-  try {
-    return Bun.spawnSync(["pgrep", "-f", "rmng-clone-daemon wait-for-stuck"]).exitCode === 0;
-  } catch {
-    return false;
-  }
-}
 
 // ---- SSE response ----------------------------------------------------------
 const HEARTBEAT_MS = 20_000;
@@ -335,10 +316,6 @@ const server = Bun.serve({
 
     if (method === "GET" && pathname === "/health") return new Response("ok");
 
-    if (method === "GET" && pathname === "/status") {
-      return Response.json({ busy: userTurnPending, monitoring: isMonitoring(), sessionId });
-    }
-
     if (method === "GET" && pathname === "/events") return sseResponse(req);
 
     if (method === "POST" && pathname === "/abort") {
@@ -377,5 +354,5 @@ const server = Bun.serve({
 
 console.log(
   `agent-wrapper listening on http://0.0.0.0:${server.port} ` +
-    `(model ${CONFIG.model}, executable ${CONFIG.executable}, control-mcp ${CONFIG.controlMcpUrl})`,
+    `(model ${CONFIG.model}, executable ${CONFIG.executable})`,
 );

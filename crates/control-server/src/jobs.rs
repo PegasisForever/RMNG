@@ -368,8 +368,12 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // clone without inference until a group is bound (the router answers 409 until then).
     let group = spec.group.clone();
     match &group {
-        Some(g) => patch_op(&app, &op_id, |op| op.log.push(format!("account: group {g}"))),
-        None => patch_op(&app, &op_id, |op| op.log.push("account: no group bound".into())),
+        Some(g) => patch_op(&app, &op_id, |op| {
+            op.log.push(format!("account: group {g}"))
+        }),
+        None => patch_op(&app, &op_id, |op| {
+            op.log.push("account: no group bound".into())
+        }),
     }
 
     // Register the fully-provisioned host and mark the op done — the clone is now genuinely
@@ -418,6 +422,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             op.finished_at = Some(now_ms());
         }
     });
+    app.tokens.register_host(&spec.new_hostname);
 
     schedule_prune(app.clone(), op_id.clone(), PRUNE_DONE_MS);
 
@@ -754,6 +759,7 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
             op.finished_at = Some(now_ms());
         }
     });
+    app.tokens.forget_host(&host_id);
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
     let dd = app.config().data_dir;
     crate::files::delete_notes(&dd, &host_id);
@@ -817,6 +823,7 @@ async fn run_archive(app: App, op_id: String, host_id: String) {
             op.finished_at = Some(now_ms());
         }
     });
+    app.tokens.set_archived(&host_id, true);
     drop(progress);
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
 }
@@ -878,6 +885,7 @@ async fn run_unarchive(app: App, op_id: String, host_id: String) {
             op.finished_at = Some(now_ms());
         }
     });
+    app.tokens.set_archived(&host_id, false);
     drop(progress);
     crate::shm::ensure_now(&app, &host_id).await;
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
@@ -1035,15 +1043,30 @@ mod tests {
         let archive = start_archive(&app, "clone-a").unwrap();
         assert_eq!(archive.kind, OperationKind::Archive);
         assert_eq!(archive.target, "clone-a");
-        assert!(app.store.get().operations.iter().any(|op| op.id == archive.id));
-        assert!(start_unarchive(&app, "clone-a").unwrap_err().0.contains("not archived"));
+        assert!(
+            app.store
+                .get()
+                .operations
+                .iter()
+                .any(|op| op.id == archive.id)
+        );
+        assert!(
+            start_unarchive(&app, "clone-a")
+                .unwrap_err()
+                .0
+                .contains("not archived")
+        );
     }
 
     #[tokio::test]
     async fn archive_validation_rejects_unmanaged_and_wrong_state() {
         let app = test_app();
         app.store.mutate(|s| {
-            s.hosts.push(Host { id: "plain".into(), host: "plain".into(), ..Default::default() });
+            s.hosts.push(Host {
+                id: "plain".into(),
+                host: "plain".into(),
+                ..Default::default()
+            });
             s.hosts.push(Host {
                 id: "stored".into(),
                 host: "stored".into(),
@@ -1053,10 +1076,25 @@ mod tests {
             });
         });
 
-        assert!(start_archive(&app, "plain").unwrap_err().0.contains("not a managed"));
-        assert!(start_archive(&app, "stored").unwrap_err().0.contains("already archived"));
+        assert!(
+            start_archive(&app, "plain")
+                .unwrap_err()
+                .0
+                .contains("not a managed")
+        );
+        assert!(
+            start_archive(&app, "stored")
+                .unwrap_err()
+                .0
+                .contains("already archived")
+        );
         let unarchive = start_unarchive(&app, "stored").unwrap();
         assert_eq!(unarchive.kind, OperationKind::Unarchive);
-        assert!(start_unarchive(&app, "stored").unwrap_err().0.contains("in flight"));
+        assert!(
+            start_unarchive(&app, "stored")
+                .unwrap_err()
+                .0
+                .contains("in flight")
+        );
     }
 }

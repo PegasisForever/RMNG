@@ -48,28 +48,15 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
             vec![
                 format!("{}{}", h.id, sel),
                 h.local_ip.clone().unwrap_or_default(),
-                h.monitor_state
-                    .map(|m| format!("{m:?}").to_lowercase())
-                    .unwrap_or_default(),
-                h.agent_report
-                    .map(|r| format!("{r:?}").to_lowercase())
-                    .unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
                 h.preset_name.clone().unwrap_or_default(),
                 h.group.clone().unwrap_or_default(),
-                h.state_note
-                    .as_deref()
-                    .map(|n| truncate(n, 48))
-                    .unwrap_or_default(),
             ]
         })
         .collect();
     print!(
         "{}",
-        table(
-            &["ID", "IP", "STATE", "AGENT", "IMAGE", "PRESET", "GROUP", "NOTE"],
-            &rows
-        )
+        table(&["ID", "IP", "IMAGE", "PRESET", "GROUP"], &rows)
     );
     Ok(0)
 }
@@ -191,7 +178,11 @@ pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
 
 pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8> {
     match cmd {
-        AccountCmd::Ls { claude, codex, gemini } => {
+        AccountCmd::Ls {
+            claude,
+            codex,
+            gemini,
+        } => {
             let st = client.state().await?;
             let accounts: Vec<_> = st
                 .usage_groups
@@ -260,7 +251,12 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
             if let Ok(cfg) = client.config().await
                 && !cfg.groups.is_empty()
             {
-                let names = cfg.groups.iter().map(|g| g.name.clone()).collect::<Vec<_>>().join("  ");
+                let names = cfg
+                    .groups
+                    .iter()
+                    .map(|g| g.name.clone())
+                    .collect::<Vec<_>>()
+                    .join("  ");
                 println!("groups: {names}");
             }
             Ok(0)
@@ -297,11 +293,17 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                 }
             }
             if json {
-                emit_json(&serde_json::json!({ "ok": true, "account": account, "removedFrom": removed }))?;
+                emit_json(
+                    &serde_json::json!({ "ok": true, "account": account, "removedFrom": removed }),
+                )?;
             } else if removed.is_empty() {
                 println!("no group currently lists {account}");
             } else {
-                println!("removed {account} from {} group(s): {}", removed.len(), removed.join(", "));
+                println!(
+                    "removed {account} from {} group(s): {}",
+                    removed.len(),
+                    removed.join(", ")
+                );
             }
             Ok(0)
         }
@@ -509,8 +511,7 @@ fn rescale_jpeg(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len() / 4);
     let mut cursor = std::io::Cursor::new(&mut out);
     {
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
         encoder
             .encode(
                 resized.as_bytes(),
@@ -579,11 +580,7 @@ fn rescale_axis(v: i32, src_min: i32, src_max: i32, dst_max: i32) -> i32 {
 /// if they didn't). Used to convert normalized input coords (e.g. M3's
 /// 0–1000) into pixel space. Bails with a useful message when the daemon
 /// reports no monitors (clone not ready, MCP wedged, etc.).
-async fn monitor_size(
-    client: &Client,
-    clone: &str,
-    monitor: Option<u32>,
-) -> Result<(i32, i32)> {
+async fn monitor_size(client: &Client, clone: &str, monitor: Option<u32>) -> Result<(i32, i32)> {
     let content = client
         .desktop(clone, "list_monitors", Value::Object(Default::default()))
         .await?;
@@ -592,24 +589,25 @@ async fn monitor_size(
         .and_then(|c| c.get("text"))
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("list_monitors: no text in response"))?;
-    let mons: Vec<Value> = serde_json::from_str(text)
-        .map_err(|e| anyhow!("list_monitors: not JSON: {e}: {text}"))?;
+    let mons: Vec<Value> =
+        serde_json::from_str(text).map_err(|e| anyhow!("list_monitors: not JSON: {e}: {text}"))?;
     if mons.is_empty() {
         bail!("list_monitors: clone has no monitors");
     }
     let pick = monitor
-        .and_then(|id| mons.iter().find(|m| m.get("id").and_then(Value::as_u64) == Some(id as u64)))
+        .and_then(|id| {
+            mons.iter()
+                .find(|m| m.get("id").and_then(Value::as_u64) == Some(id as u64))
+        })
         .unwrap_or_else(|| &mons[0]);
     let w = pick
         .get("width")
         .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("list_monitors: monitor missing width"))?
-        as i32;
+        .ok_or_else(|| anyhow!("list_monitors: monitor missing width"))? as i32;
     let h = pick
         .get("height")
         .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("list_monitors: monitor missing height"))?
-        as i32;
+        .ok_or_else(|| anyhow!("list_monitors: monitor missing height"))? as i32;
     Ok((w, h))
 }
 
@@ -720,8 +718,16 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_coords(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_coords(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "mouse_move",
                     args_obj(vec![
@@ -741,11 +747,19 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "left_click",
-                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    args_obj(vec![("x", i(x)), ("y", i(y)), ("monitor", n(*monitor))]),
                     Kind::Action,
                     *monitor,
                     out.clone(),
@@ -758,11 +772,19 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "right_click",
-                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    args_obj(vec![("x", i(x)), ("y", i(y)), ("monitor", n(*monitor))]),
                     Kind::Action,
                     *monitor,
                     out.clone(),
@@ -775,11 +797,19 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "middle_click",
-                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    args_obj(vec![("x", i(x)), ("y", i(y)), ("monitor", n(*monitor))]),
                     Kind::Action,
                     *monitor,
                     out.clone(),
@@ -792,11 +822,19 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "left_double_click",
-                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    args_obj(vec![("x", i(x)), ("y", i(y)), ("monitor", n(*monitor))]),
                     Kind::Action,
                     *monitor,
                     out.clone(),
@@ -810,14 +848,22 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "scroll",
                     args_obj(vec![
                         ("amount", (*amount).into()),
-                        ("x", i(x),),
-                        ("y", i(y),),
+                        ("x", i(x)),
+                        ("y", i(y)),
                         ("monitor", n(*monitor)),
                     ]),
                     Kind::Action,
@@ -918,7 +964,11 @@ const STDIN_POLL_GRACE: std::time::Duration = std::time::Duration::from_millis(2
 #[cfg(unix)]
 fn stdin_has_input(grace: std::time::Duration) -> bool {
     use std::os::unix::io::AsRawFd;
-    let mut pfd = libc::pollfd { fd: std::io::stdin().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let mut pfd = libc::pollfd {
+        fd: std::io::stdin().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
     let ms = grace.as_millis().min(i32::MAX as u128) as i32;
     // >0: readable or hung-up (EOF) → drain it. 0: timed out (idle pipe) → forward no stdin.
     // <0: poll error → fall back to attempting the read (the old behavior).
@@ -1183,13 +1233,17 @@ mod tests {
         // dimensions. This exercises the full decode→resize→encode path
         // without needing any external test fixture.
         use image::{ImageBuffer, Rgb};
-        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(4, 2, |_, _| {
-            Rgb([255u8, 0, 0])
-        });
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(4, 2, |_, _| Rgb([255u8, 0, 0]));
         let mut src_jpeg = Vec::new();
         let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut src_jpeg);
         encoder
-            .encode(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgb8)
+            .encode(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                image::ExtendedColorType::Rgb8,
+            )
             .unwrap();
         let src_len = src_jpeg.len();
         assert!(src_len > 0);

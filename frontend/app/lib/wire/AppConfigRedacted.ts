@@ -13,4 +13,4 @@ import type { SshConfig } from "./SshConfig";
  * The shape `GET /api/config` returns: same structure as [`AppConfig`] but with
  * every secret replaced by a boolean "is set". Powers the Settings UI.
  */
-export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataDir: string, staticDir: string, cloneSocket: string, setupComplete: boolean, layoutPresets: Array<LayoutPreset>, activeLayout: string, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, groups: Array<Group>, presets: Array<PresetRedacted>, chroma: ChromaMode, ssh: SshConfig, detectorInferenceUrl: string, agentPlaybook: string, };
+export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataDir: string, staticDir: string, cloneSocket: string, setupComplete: boolean, layoutPresets: Array<LayoutPreset>, activeLayout: string, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, groups: Array<Group>, presets: Array<PresetRedacted>, chroma: ChromaMode, ssh: SshConfig, agentPlaybook: string, };

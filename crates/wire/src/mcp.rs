@@ -2,8 +2,8 @@
 //!
 //! [`McpCallRequest`] is what the `rmng` CLI POSTs to `POST /api/hosts/:id/mcp`; the
 //! control-server proxies it to the target clone's daemon MCP (`:9004`), which owns the
-//! per-tool schema. The remaining DTOs describe those daemon tool inputs (a [`Target`]
-//! selects the clone).
+//! per-tool schema. The remaining DTOs are legacy serialization helpers for daemon tool
+//! inputs; clone selection comes from the web route, not a separate MCP server.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,10 +21,11 @@ pub struct McpCallRequest {
     pub args: serde_json::Value,
 }
 
-/// How a tool call selects its clone. Port 3 omits it (IP-routed); port 4 sets it.
+/// Legacy optional clone selector retained for JSON compatibility with historical tool DTOs.
+/// Clone-local daemon requests do not use it; the web route selects the destination clone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Target {
-    /// Clone id (port 4 only). When absent, the server uses the caller's source IP.
+    /// Historical clone id, ignored by the clone-local daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone: Option<String>,
 }
@@ -95,18 +96,6 @@ pub struct ScrollArgs {
     pub dx: i32,
     #[serde(default)]
     pub dy: i32,
-}
-
-/// The agent's `set_state` report (the old `/mcp` tool).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct SetStateArgs {
-    #[serde(flatten)]
-    pub target: Target,
-    /// "working" | "idle".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
 }
 
 /// A screenshot result: a PNG, base64-encoded for the JSON-RPC payload.

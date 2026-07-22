@@ -41,6 +41,8 @@ import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
+import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
+import { formatTokenCount } from "~/lib/format";
 
 import type { Route } from "./+types/_index";
 
@@ -85,6 +87,7 @@ function useLiveState(initial: ControlState) {
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
   const [lxcStats, setLxcStats] = useState<LxcStats | null>(null);
   const [forwards, setForwards] = useState<Record<string, ForwardRuntime[]>>({});
+  const [tokens, setTokens] = useState<Record<string, CloneTokenUsage>>({});
   useEffect(() => {
     let es: EventSource | null = null;
     let lastActivity = Date.now();
@@ -130,6 +133,14 @@ function useLiveState(initial: ControlState) {
           // ignore malformed frame
         }
       });
+      es.addEventListener("tokens", (e) => {
+        lastActivity = Date.now();
+        try {
+          setTokens(JSON.parse((e as MessageEvent).data));
+        } catch {
+          // ignore malformed frame
+        }
+      });
       // Heartbeat carries no payload — it exists only to keep `lastActivity` fresh so the
       // watchdog can distinguish a wedged socket from an idle-but-healthy one.
       es.addEventListener("ping", () => {
@@ -169,13 +180,13 @@ function useLiveState(initial: ControlState) {
       es?.close();
     };
   }, []);
-  return { state, stats, lxcStats, forwards };
+  return { state, stats, lxcStats, forwards, tokens };
 }
 
 export default function Home({ loaderData }: Route.ComponentProps) {
   // The live SSE state powers both the wizard (template-provision progress) and the
   // dashboard, so it lives here at the gate. `stats` is the volatile per-host usage map.
-  const { state, stats, lxcStats, forwards } = useLiveState(loaderData);
+  const { state, stats, lxcStats, forwards, tokens } = useLiveState(loaderData);
   // First-run gate: hold the config (null while loading). Render a minimal centered
   // "Loading…" until it resolves so the dashboard never flashes before the wizard
   // decision; render the wizard INSTEAD of the dashboard while setup isn't complete.
@@ -206,6 +217,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       stats={stats}
       lxcStats={lxcStats}
       forwards={forwards}
+      tokens={tokens}
       sshPublicHost={cfg.ssh?.publicHost ?? ""}
       bastionPort={cfg.listen.bastion}
       groups={cfg.groups}
@@ -219,6 +231,7 @@ function Dashboard({
   stats,
   lxcStats,
   forwards,
+  tokens,
   sshPublicHost,
   bastionPort,
   groups,
@@ -228,6 +241,7 @@ function Dashboard({
   stats: Record<string, ContainerStats>;
   lxcStats: LxcStats | null;
   forwards: Record<string, ForwardRuntime[]>;
+  tokens: Record<string, CloneTokenUsage>;
   /** `ssh.publicHost` (config) — threaded down to each sidebar row's copied SSH
    *  command; empty ⇒ falls back to `window.location.hostname`. */
   sshPublicHost: string;
@@ -291,6 +305,10 @@ function Dashboard({
     return h ? [h] : [];
   });
   const selectedHost = state.selected ? hostsById.get(state.selected) ?? null : null;
+  const selectedTokens = selectedHost ? tokens[selectedHost.id] : undefined;
+  const selectedTokenTotal = selectedTokens
+    ? Number(selectedTokens.newInputTokens) + Number(selectedTokens.outputTokens)
+    : 0;
 
   // Refetch images when an image-mutating op (pull/commit/delete) leaves the
   // running set — that's when the image list changed. Keyed on the set of running
@@ -477,6 +495,12 @@ function Dashboard({
                 </h2>
                 <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
                   {selectedHost.host}:{selectedHost.port}
+                </span>
+                <span
+                  className="ml-auto shrink-0 font-mono text-xs tabular-nums text-slate-500 dark:text-slate-400"
+                  title="Newly processed model tokens; cache reads are excluded"
+                >
+                  IN {formatTokenCount(selectedTokens?.newInputTokens ?? 0)} · OUT {formatTokenCount(selectedTokens?.outputTokens ?? 0)} · TOTAL {formatTokenCount(selectedTokenTotal)}
                 </span>
               </div>
               <div className="flex min-h-0 flex-1">

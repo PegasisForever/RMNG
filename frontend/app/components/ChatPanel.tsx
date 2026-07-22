@@ -67,13 +67,12 @@ export default function ChatPanel({ hostId, archived = false }: { hostId: string
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, busy]);
 
-  // `override` lets buttons send a fixed message (e.g. "monitor") instead of the
-  // textarea contents. Falls back to the trimmed input otherwise. Fire-and-forget:
-  // the POST only starts the turn; the reply and final busy state arrive via SSE.
-  async function send(override?: string) {
-    const text = (override ?? input).trim();
+  // Fire-and-forget: the POST only starts the turn; the reply and final busy state arrive
+  // through SSE.
+  async function send() {
+    const text = input.trim();
     if (!text || busy || archived) return;
-    if (override === undefined) setInput("");
+    setInput("");
     setError(null);
     setBusy(true); // optimistic; the SSE snapshot confirms (or clears) it
     setActivity(null);
@@ -93,7 +92,7 @@ export default function ChatPanel({ hostId, archived = false }: { hostId: string
       // messages and busy state from here.
     } catch (e) {
       setError((e as Error).message);
-      if (override === undefined) setInput(text); // restore the unsent text
+      setInput(text); // restore the unsent text
       setBusy(false); // the turn never started; SSE will reconcile messages
     }
   }
@@ -183,15 +182,6 @@ export default function ChatPanel({ hostId, archived = false }: { hostId: string
           disabled={busy || archived}
           className="min-w-0 flex-1 resize-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none disabled:opacity-60 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
         />
-        <button
-          type="button"
-          onClick={() => send("monitor")}
-          disabled={busy || archived}
-          title={archived ? "Unarchive this clone before monitoring it" : "Tell the agent to start monitoring this desktop (track working vs idle)"}
-          className="shrink-0 rounded-md border border-amber-400 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-40 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-400 dark:hover:bg-amber-900/40"
-        >
-          Monitor
-        </button>
         {busy && !archived ? (
           <button
             type="button"

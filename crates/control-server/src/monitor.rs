@@ -1,13 +1,14 @@
-//! Per-host agent-state poller — port of `monitor.server.ts`. Probes each host's
-//! agent-wrapper `/status` every 4s and writes a derived `monitorState` onto the host.
+//! Docker-backed clone maintenance and server-owned lifecycle state.
+//!
+//! Docker determines whether a managed container is running; passive proxy token activity
+//! distinguishes `working` from a Docker-running but inactive (`idle`) clone.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
 use tokio::sync::broadcast;
-use wire::{AgentReport, ContainerStats, Host, LxcStats, MonitorState};
+use wire::{ContainerStats, Host, LxcStats, MonitorState};
 
 use crate::app::App;
 
@@ -106,33 +107,6 @@ impl Default for LxcStatsBus {
 struct LxcCpuSample {
     usage_usec: u64,
     sampled_at: Instant,
-}
-
-#[derive(Deserialize)]
-struct StatusResp {
-    #[serde(default)]
-    busy: bool,
-}
-
-/// One probe → the host's derived state.
-async fn probe_host(app: &App, host: &Host, agent_port: u16) -> MonitorState {
-    let url = format!("http://{}:{}/status", app.dial_host(host).await, agent_port);
-    let busy = async {
-        let resp = app.http.get(&url).timeout(FETCH_TIMEOUT).send().await.ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        resp.json::<StatusResp>().await.ok().map(|s| s.busy)
-    }
-    .await;
-    match busy {
-        None => MonitorState::Offline,
-        Some(true) => MonitorState::Working,
-        Some(false) => match host.agent_report {
-            Some(AgentReport::Working) => MonitorState::Working,
-            _ => MonitorState::Idle,
-        },
-    }
 }
 
 fn lxc_cpu_pct(previous: &mut Option<LxcCpuSample>, usage_usec: u64, now: Instant) -> Option<f64> {
@@ -254,7 +228,7 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
         .get()
         .hosts
         .into_iter()
-        .filter(|host| !host.archived)
+        .filter(|host| host.managed && !host.archived)
         .collect();
     if hosts.is_empty() {
         let lxc_stats = sample_lxc(previous_lxc_cpu).await;
@@ -263,29 +237,53 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
         return;
     }
 
-    let agent_port = app.config().agent_port;
     let probes = futures::future::join_all(hosts.iter().map(|host| async move {
-        let (state, sample) = tokio::join!(
-            probe_host(app, host, agent_port),
-            tokio::time::timeout(FETCH_TIMEOUT, sample_host(app, host)),
-        );
-        let (stats, ip) = match sample {
-            Ok(sample) => sample,
+        // An unavailable Docker daemon leaves the lifecycle unchanged; it is not proof that the
+        // container stopped. Only a successful liveness response may write `offline`.
+        let running = match tokio::time::timeout(FETCH_TIMEOUT, app.docker.is_running(&host.id)).await {
+            Ok(Ok(running)) => Some(running),
+            Ok(Err(error)) => {
+                tracing::warn!(host = %host.id, "Docker liveness check failed: {error}");
+                None
+            }
             Err(_) => {
-                tracing::debug!(host = %host.id, "clone resource sample timed out");
-                (None, None)
+                tracing::warn!(host = %host.id, "Docker liveness check timed out");
+                None
             }
         };
-        (host.id.clone(), state, stats, ip)
+        let (stats, ip) = if running == Some(true) {
+            match tokio::time::timeout(FETCH_TIMEOUT, sample_host(app, host)).await {
+                Ok(sample) => sample,
+                Err(_) => {
+                    tracing::debug!(host = %host.id, "clone resource sample timed out");
+                    (None, None)
+                }
+            }
+        } else if running == Some(false) {
+            (None, Some(None))
+        } else {
+            (None, None)
+        };
+        (host.id.clone(), running, stats, ip)
     }));
     let (lxc_stats, probes) = tokio::join!(sample_lxc(previous_lxc_cpu), probes);
     let prev_stats = app.stats.latest_map();
 
+    let now = crate::clone_ops::now_ms();
     let mut next: HashMap<String, MonitorState> = HashMap::with_capacity(probes.len());
     let mut stats_map = HashMap::new();
-    // Only hosts with a definitive runtime inspect this tick; absent means leave IP untouched.
     let mut ip_updates: HashMap<String, Option<String>> = HashMap::new();
-    for (id, state, stats, ip) in probes {
+    for (id, running, stats, ip) in probes {
+        let Some(running) = running else {
+            continue;
+        };
+        let state = if !running {
+            MonitorState::Offline
+        } else if app.tokens.is_token_inactive(&id, now) {
+            MonitorState::Idle
+        } else {
+            MonitorState::Working
+        };
         if let Some(stats) = pick_stat(stats, state, prev_stats.get(&id)) {
             stats_map.insert(id.clone(), stats);
         }
@@ -302,7 +300,7 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
         .get()
         .hosts
         .into_iter()
-        .filter(|host| !host.archived)
+        .filter(|host| host.managed && !host.archived)
         .collect();
     let active_ids: HashSet<String> = active_hosts.iter().map(|host| host.id.clone()).collect();
     next.retain(|id, _| active_ids.contains(id));
@@ -313,13 +311,17 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     app.lxc_stats.publish(&lxc_stats);
 
     for host in &active_hosts {
-        if next.get(&host.id) != Some(&MonitorState::Offline) {
+        if next
+            .get(&host.id)
+            .is_some_and(|state| *state != MonitorState::Offline)
+        {
             crate::chat::ensure_autonomous_listener(app, host);
         }
     }
 
     let changed = app.store.get().hosts.iter().any(|host| {
         !host.archived
+            && host.managed
             && (next.get(&host.id).is_some_and(|state| Some(*state) != host.monitor_state)
                 || ip_updates.get(&host.id).is_some_and(|ip| *ip != host.local_ip))
     });
@@ -329,7 +331,7 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     app.store.mutate(|state| {
         let selected = state.selected.clone();
         for host in &mut state.hosts {
-            if host.archived {
+            if host.archived || !host.managed {
                 continue;
             }
             if let Some(&monitor_state) = next.get(&host.id) {
@@ -338,6 +340,8 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
                     && selected.as_deref() != Some(host.id.as_str())
                 {
                     host.unread = true;
+                } else if monitor_state == MonitorState::Working {
+                    host.unread = false;
                 }
                 host.monitor_state = Some(monitor_state);
             }

@@ -172,7 +172,7 @@ struct TurnFrame {
     activity: Option<String>,
     #[serde(default)]
     reply: Option<String>,
-    /// false ⇒ autonomous (monitoring) message, not the answer to a /prompt.
+    /// false ⇒ autonomous background-task message, not the answer to a /prompt.
     #[serde(default)]
     solicited: Option<bool>,
     #[serde(default)]
@@ -312,7 +312,7 @@ pub struct KickoffOpts {
     pub claude_instructions: Option<String>,
 }
 
-/// After a clone, wait for the wrapper to come up + be idle, then send the kickoff
+/// After a clone, wait for the wrapper to accept its event stream, then send the kickoff
 /// message (ticket URL or plain first message + optional instruction overrides).
 pub async fn kickoff_agent(app: App, host: Host, opts: KickoffOpts) {
     let mut msg = opts.ticket_url.clone().or(opts.message.clone()).unwrap_or_default().trim().to_string();
@@ -321,15 +321,19 @@ pub async fn kickoff_agent(app: App, host: Host, opts: KickoffOpts) {
     }
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
-        // probe /status; break when idle
-        let url = format!("{}/status", base_url(&app, &host).await);
-        let idle = async {
-            let r = app.http.get(&url).timeout(Duration::from_secs(4)).send().await.ok()?;
-            let v: serde_json::Value = r.json().await.ok()?;
-            Some(v.get("busy").and_then(|b| b.as_bool()) == Some(false))
-        }
-        .await;
-        if idle == Some(true) {
+        // Opening the SSE response verifies wrapper readiness without reviving a clone-status
+        // endpoint or creating a duplicate chat turn. Dropping the response immediately closes
+        // this probe subscriber.
+        let url = format!("{}/events", base_url(&app, &host).await);
+        let ready = app
+            .http
+            .get(&url)
+            .header("accept", "text/event-stream")
+            .timeout(Duration::from_secs(4))
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success());
+        if ready {
             break;
         }
         tokio::time::sleep(Duration::from_secs(4)).await;
@@ -349,11 +353,11 @@ pub async fn kickoff_agent(app: App, host: Host, opts: KickoffOpts) {
     }
 }
 
-// --- autonomous (monitoring) message listener ------------------------------
+// --- autonomous background-task message listener ----------------------------
 
 /// Idempotent: keep one persistent `/events` subscription per host that persists
-/// UNSOLICITED assistant messages into the chat (the monitor poller calls this for
-/// reachable hosts; a dropped listener is restarted on the next tick).
+/// UNSOLICITED assistant messages into the chat (the Docker maintenance poller starts this for
+/// running managed clones; a dropped listener is restarted on the next tick).
 pub fn ensure_autonomous_listener(app: &App, host: &Host) {
     {
         let mut l = app.chat.listeners.lock().unwrap();

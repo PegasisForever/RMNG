@@ -97,8 +97,7 @@ export const Busy: Story = {
   args: { host: hostIdle, op: deleteOperation },
 };
 
-/** Overflow stress test: a very long title (wraps — continuation flows back to the
- *  left edge past the ticket badge) and a very long state note (clamped to two lines). */
+/** Overflow stress test: a very long title wraps back to the left edge past its ticket badge. */
 export const LongTitleAndDescription: Story = {
   args: {
     host: {
@@ -106,14 +105,12 @@ export const LongTitleAndDescription: Story = {
       linearTicket: "WE-1042",
       displayName:
         "Investigate and fix the intermittent WebRTC reconnection storm when a clone's headless GNOME session restarts under sustained 4:4:4 encode load",
-      stateNote:
-        "Reproduced on CT 106 — the reconnect loop fires because the daemon re-applies the monitor layout before the encoder releases the previous VA surface; drafting a fix that serializes the two on the shared clone-daemon unit and adds a backoff",
     },
     stats: stats[hostWorking.id],
   },
 };
 
-/** Compact port-forward chips under the state note — one `remote→local` chip per rule
+/** Compact port-forward chips under the host metadata — one `remote→local` chip per rule
  *  with a live status dot, covering every state: listening (with active-conn count),
  *  error, offline (no runtime yet), and a muted rule toggled off. */
 export const WithForwards: Story = {

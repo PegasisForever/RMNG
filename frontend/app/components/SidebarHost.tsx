@@ -12,18 +12,14 @@ import type { ForwardState } from "~/lib/wire/ForwardState";
 import type { PortForward } from "~/lib/wire/PortForward";
 import { workspaceBadge } from "~/lib/workspace";
 
-// Text color + label per host state. `working` is sky, `idle` amber (done / awaiting
-// the next task / needs you), `offline` rose. The state note carries the color; there
-// is no longer a status dot (the unread dot took its place on the title row).
-const AGENT_STATUS: Record<NonNullable<Host["monitorState"]>, { text: string; label: string }> = {
-  working: { text: "text-sky-600 dark:text-sky-400", label: "working" },
-  idle: { text: "text-amber-700 dark:text-amber-400", label: "idle" },
-  offline: { text: "text-rose-500 dark:text-rose-400", label: "offline" },
+// The control server owns this compact lifecycle indicator: blue = recent token activity,
+// gray = Docker-running but inactive, purple = Docker stopped/gone. An unread working→not-working
+// transition replaces the dot with the red `!` badge below.
+const STATUS_DOT: Record<NonNullable<Host["monitorState"]>, { dot: string; label: string }> = {
+  working: { dot: "bg-blue-500", label: "working" },
+  idle: { dot: "bg-slate-400 dark:bg-slate-500", label: "not working" },
+  offline: { dot: "bg-purple-500", label: "offline" },
 };
-
-function effectiveStatus(host: Host): { text: string; label: string } {
-  return AGENT_STATUS[host.monitorState ?? "idle"];
-}
 
 type Metric = { label: string; value: string; title: string };
 
@@ -325,7 +321,7 @@ export function SidebarHost({
   const sshCommand = managed && !host.archived
     ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, host.id)
     : undefined;
-  const status = effectiveStatus(host);
+  const status = host.archived ? undefined : STATUS_DOT[host.monitorState ?? "idle"];
   const group = host.group || undefined;
   const usage = host.archived ? null : formatHostUsage(stats);
   // CPU + MEM share `usage`, so they appear and vanish together — both sit inline on the
@@ -428,11 +424,17 @@ export function SidebarHost({
             {host.unread && !selected ? (
               <span
                 className="mr-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white"
-                title="stopped working since you last viewed it"
-                aria-label="unread: stopped working since last viewed"
+                title="was working and is no longer working"
+                aria-label="unread: working transitioned to not working"
               >
                 !
               </span>
+            ) : status ? (
+              <span
+                className={`mr-1 inline-block size-2 rounded-full align-middle ${status.dot}`}
+                title={status.label}
+                aria-label={status.label}
+              />
             ) : null}
             {host.linearWorkspace && host.linearTicket ? (
               <span
@@ -447,13 +449,9 @@ export function SidebarHost({
           </p>
         ) : null}
 
-        {/* Agent state note (or status label fallback), colored by status. */}
-        {!busy ? (
-          <p
-            className={`mt-1 line-clamp-2 text-xs leading-snug ${status.text}`}
-            title={host.stateNote || status.label}
-          >
-            {[host.linearLabel, host.stateNote || status.label].filter(Boolean).join(" · ")}
+        {!busy && host.linearLabel ? (
+          <p className="mt-1 line-clamp-2 text-xs leading-snug text-slate-500 dark:text-slate-400">
+            {host.linearLabel}
           </p>
         ) : null}
 

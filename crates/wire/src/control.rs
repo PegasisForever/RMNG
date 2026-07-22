@@ -50,16 +50,8 @@ pub enum Provider {
     Antigravity,
 }
 
-/// The agent's last self-reported verdict (via the `set_state` MCP tool).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub enum AgentReport {
-    Working,
-    Idle,
-}
-
-/// Effective host state for the UI, derived by the server-side poller.
+/// Server-owned lifecycle state. Docker supplies container liveness while passive proxy token
+/// activity distinguishes `working` from a running-but-not-working (`idle`) clone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -159,10 +151,8 @@ pub struct Host {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_report: Option<AgentReport>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_note: Option<String>,
+    /// Current server-owned lifecycle state. It is derived from Docker liveness and passive
+    /// proxy token activity, never reported by a clone-local process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor_state: Option<MonitorState>,
     /// The clone container's IPv4 on the rmng bridge network — the address other
@@ -172,9 +162,8 @@ pub struct Host {
     /// A recreated container's new IP self-heals on the next poll.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_ip: Option<String>,
-    /// True when this clone fell out of `working` (→ idle/offline) since the
-    /// operator last viewed it — drives the sidebar "unread" dot. Set by the
-    /// monitor poller on that transition, cleared when the clone is activated.
+    /// Set when a clone transitions from `working` to `idle`/`offline` while it is not selected.
+    /// Clearing the selection state is an explicit operator action, not a clone report.
     #[serde(default)]
     pub unread: bool,
     /// Local port-forward rules for this host (see [`PortForward`]). Persisted; the
@@ -272,6 +261,23 @@ pub struct LxcStats {
     pub mem_limit: u64,
     /// Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
     pub disk_used: Option<u64>,
+}
+
+/// Safe accumulated new-token totals for one clone, delivered in the named `tokens` SSE
+/// event as a `{ hostId: CloneTokenUsage }` map. The server retains the activity timestamp
+/// privately; it is deliberately absent here so clients cannot derive a clone status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct CloneTokenUsage {
+    /// Input tokens newly processed by the model. Cache reads are excluded; native Anthropic
+    /// cache-creation tokens are included because they are newly processed.
+    pub new_input_tokens: u64,
+    /// Newly generated output tokens. Provider-specific reasoning is included exactly once
+    /// when its client-facing total does not already include it.
+    pub output_tokens: u64,
+    /// Number of responses that reported a recognized final usage object.
+    pub request_count: u64,
 }
 
 /// Version + update-available status for the control-server itself, served by
@@ -517,7 +523,10 @@ mod tests {
             ..Default::default()
         };
         let v = serde_json::to_value(&h).unwrap();
-        assert!(v.get("gdm_username").is_some(), "gdm_username stays snake_case");
+        assert!(
+            v.get("gdm_username").is_some(),
+            "gdm_username stays snake_case"
+        );
         assert_eq!(v["group"], "team");
         assert_eq!(v["linearWorkspace"], "we");
         assert_eq!(v["monitorState"], "working");
@@ -532,15 +541,27 @@ mod tests {
         // generated TS so the frontend reads the same keys the server emits.
         let d = <Host as ts_rs::TS>::decl();
         assert!(d.contains("gdm_username"), "binding lost gdm_username: {d}");
-        assert!(!d.contains("gdmUsername"), "binding camelCased gdm_username: {d}");
+        assert!(
+            !d.contains("gdmUsername"),
+            "binding camelCased gdm_username: {d}"
+        );
     }
 
     #[test]
     fn operation_kind_serde_and_bootstrap_alias() {
         // Canonical serialization is the lowercase variant name.
-        assert_eq!(serde_json::to_string(&OperationKind::Pull).unwrap(), "\"pull\"");
-        assert_eq!(serde_json::to_string(&OperationKind::Archive).unwrap(), "\"archive\"");
-        assert_eq!(serde_json::to_string(&OperationKind::Unarchive).unwrap(), "\"unarchive\"");
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Pull).unwrap(),
+            "\"pull\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Archive).unwrap(),
+            "\"archive\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Unarchive).unwrap(),
+            "\"unarchive\""
+        );
         assert_eq!(
             serde_json::from_str::<OperationKind>("\"pull\"").unwrap(),
             OperationKind::Pull
@@ -575,7 +596,13 @@ mod tests {
         let legacy: Host = serde_json::from_str(r#"{ "id": "h", "host": "h" }"#).unwrap();
         assert!(!legacy.archived);
 
-        let archived = Host { id: "h".into(), host: "h".into(), managed: true, archived: true, ..Default::default() };
+        let archived = Host {
+            id: "h".into(),
+            host: "h".into(),
+            managed: true,
+            archived: true,
+            ..Default::default()
+        };
         let value = serde_json::to_value(&archived).unwrap();
         assert_eq!(value["archived"], true);
         assert!(serde_json::from_value::<Host>(value).unwrap().archived);
@@ -594,7 +621,10 @@ mod tests {
         let v = serde_json::to_value(&h).unwrap();
         assert_eq!(v["group"], "team");
         // Omitted when None.
-        let bare = Host { id: "h2".into(), ..Default::default() };
+        let bare = Host {
+            id: "h2".into(),
+            ..Default::default()
+        };
         let bv = serde_json::to_value(&bare).unwrap();
         assert!(bv.get("group").is_none());
         // Round-trips.
@@ -606,7 +636,13 @@ mod tests {
     fn controlstate_roundtrip_camelcase() {
         let st = ControlState {
             selected: Some("h".into()),
-            monitors: vec![MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+            monitors: vec![MonitorSpec {
+                width: 1920,
+                height: 1080,
+                x: 0,
+                y: 0,
+                primary: true,
+            }],
             usage_groups: vec![GroupUsage {
                 name: "team".into(),
                 accounts: vec![ClaudeUsage {
@@ -618,7 +654,10 @@ mod tests {
                     error: None,
                     stale: None,
                     last_updated: 123,
-                    five_hour: Some(ClaudeUsageWindow { pct: 12.5, resets_at: None }),
+                    five_hour: Some(ClaudeUsageWindow {
+                        pct: 12.5,
+                        resets_at: None,
+                    }),
                     seven_day: None,
                     fable: None,
                     spend: None,
@@ -651,7 +690,13 @@ mod tests {
     fn layout_preset_roundtrip_camelcase() {
         let p = LayoutPreset {
             name: "Dual 1440p".into(),
-            monitors: vec![MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: true }],
+            monitors: vec![MonitorSpec {
+                width: 2560,
+                height: 1440,
+                x: 0,
+                y: 0,
+                primary: true,
+            }],
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["name"], "Dual 1440p");

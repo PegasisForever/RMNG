@@ -66,7 +66,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 - `rmng desktop` can target any clone for computer use
 - Computer use MCP inside each clone
 - Per-clone agent chat in the web UI
-- Needs human detector
+- Passive per-clone new-token accounting and server-owned activity lifecycle
 
 **Accounts & integrations**
 
@@ -85,9 +85,9 @@ Needs a Linux host with Docker and a GPU render node (`/dev/dri/renderD128`). Pu
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9002:9000-9002 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
+  -p 9000:9000 -p 9001:9001 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
-Ports: `9000` web UI/API · `9001` video · `9002` per-clone MCP · `9005` port-forward data plane · `445` SMB clone-home share (host `445` must be free) · `2222` SSH bastion (jump into clones).
+Ports: `9000` web UI/API · `9001` video · `9005` port-forward data plane · `445` SMB clone-home share (host `445` must be free) · `2222` SSH bastion (jump into clones). The clone-local desktop MCP remains on internal port `9004`.
 
 Open `http://<host>:9000`. The **first-run setup wizard** walks through the environment checklist, server settings, clone-template download, and setup completion. Full flow, image build, template publishing, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).

@@ -1,20 +1,18 @@
 //! control-server — the fleet hub (see ../README.md).
 //!
-//! One tokio service binding five listen ports — port 1 (video), port 2 (web API + SSE +
-//! static frontend), port 3 (per-clone MCP), port 4 (fleet MCP), and the forward data plane
-//! (9005) — plus an smbd serving `clones` (every clone's home) and `feedback` (detector-feedback
-//! records) shares on 445. All live.
+//! One tokio service binding the video plane, web API + SSE + static frontend, port-forward
+//! data plane (9005), and SSH bastion; `smbd` serves retained clone homes on port 445.
 
+mod antigravity;
 mod app;
 mod assets;
-mod antigravity;
 mod buildinfra;
 mod cgroup;
 mod chat;
 mod claude;
 mod cliproxy;
-mod clone_reconcile;
 mod clone_ops;
+mod clone_reconcile;
 mod codex;
 mod config;
 mod docker;
@@ -23,7 +21,6 @@ mod forward;
 mod homes;
 mod jobs;
 mod linear;
-mod mcp;
 mod mediaplane;
 mod monitor;
 mod provision;
@@ -32,6 +29,7 @@ mod smb;
 mod ssh;
 mod state;
 mod token_migrate;
+mod tokens;
 mod update;
 mod web;
 
@@ -46,7 +44,9 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 // `clip` (the clipboard broker) logs debug by default: copy/paste-driven
                 // only (sparse), and the go-to trail for cross-machine clipboard issues.
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=warn,clip=debug")),
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("info,tower_http=warn,clip=debug")
+                }),
         )
         .init();
 
@@ -56,7 +56,10 @@ async fn main() -> Result<()> {
     // Placed after tracing init (so the helper gets logging) and before config::load().
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("self-upgrade") {
-        let handoff = argv.get(2).cloned().unwrap_or_else(|| update::HANDOFF_PATH.to_string());
+        let handoff = argv
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| update::HANDOFF_PATH.to_string());
         update::self_upgrade_main(&handoff).await; // diverges
     }
 
@@ -118,8 +121,12 @@ async fn main() -> Result<()> {
             .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!("build-infra ensure failed: {e:#} (retries next boot)"),
-                Err(_) => tracing::warn!("build-infra ensure timed out after 120s (retries next boot)"),
+                Ok(Err(e)) => {
+                    tracing::warn!("build-infra ensure failed: {e:#} (retries next boot)")
+                }
+                Err(_) => {
+                    tracing::warn!("build-infra ensure timed out after 120s (retries next boot)")
+                }
             }
         }
     }
@@ -215,15 +222,10 @@ async fn main() -> Result<()> {
     // By-group usage poller: reads each instance's auth-dir tokens and publishes
     // `ControlState.usage_groups` (the old flat claude_accounts pollers stay running).
     tokio::spawn(cliproxy::run_usage_poller(app.clone()));
+    tokio::spawn(app.tokens.clone().run_persister());
 
     // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
     mediaplane::spawn(app.clone());
-
-    // Port 3 (per-clone MCP, header-routed via `x-rmng-clone`).
-    {
-        let cfg = app.config();
-        tokio::spawn(mcp::serve(app.clone(), cfg.listen.clone_mcp));
-    }
 
     web::serve(app).await
 }

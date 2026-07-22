@@ -1,10 +1,10 @@
 //! The per-node **computer-use MCP**, served over HTTP from inside the clone
 //! (`RMNG_DAEMON_MCP_PORT`, default 9004). Replaces the old `computer-use`
 //! stdio binary: the in-clone Claude agent connects here directly, and the
-//! control-server's fleet MCP proxies to it.
+//! control-server's web desktop proxy forwards operator calls to it.
 //!
-//! Stateless JSON-RPC (`initialize`/`ping`/`tools/list`/`tools/call`), the same
-//! curl-testable shape the control-server MCP uses — no rmcp/SSE machinery. It
+//! Stateless JSON-RPC (`initialize`/`ping`/`tools/list`/`tools/call`) with a
+//! curl-testable HTTP shape — no rmcp/SSE machinery. It
 //! shares the daemon's live Mutter `rd` session (input injection) and the latest
 //! captured dmabuf per monitor (on-demand screenshots, GPU-encoded via `media`).
 //!

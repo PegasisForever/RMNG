@@ -7,7 +7,7 @@ process boundary in `RMNG`:
 2. The **clone-daemon ⇄ control-server unix-socket protocol** (dmabuf frame
    descriptors, input events, acks).
 3. The **viewer protocol** (port 1): framed H.264 + cursor/clipboard out, input in.
-4. **MCP DTOs** for the per-clone (port 3) and global (port 4) MCP tool schemas.
+4. **MCP DTOs** for the clone-local desktop-automation tool schemas.
 
 Control-plane types derive `serde::{Serialize, Deserialize}` and `ts-rs::TS` so the
 **frontend's TypeScript types are generated** from this crate (eliminating the
@@ -23,8 +23,8 @@ transport types (socket, viewer) are serde-only.
 - Define the **socket** protocol (`FrameMsg`, `InputMsg`, `Ack`, monitor descriptors).
 - Define the **viewer** protocol (server→viewer video/cursor/clipboard/monitor-list;
   viewer→server input/clipboard/keyframe-request/hello).
-- Define **MCP DTOs** (tool inputs/outputs shared by ports 3 and 4; port-4 variants add a
-  `clone` selector).
+- Define **MCP DTOs** for clone-local desktop automation; the control-server's web API proxies
+  operator requests to that clone-local surface.
 - Emit `.ts` bindings consumed by `frontend`.
 
 ## Key types (to define)
@@ -36,7 +36,7 @@ ControlState { selected: Option<String>, monitors: Vec<MonitorSpec>,
                codex_accounts: Vec<CodexUsage> }
 Host { id, host, port, username, password, domain?, gdm_username?, gdm_password?,
        container?, source?, claude_account_email?, linear_*?, display_name?,
-       agent_report?, state_note?, monitor_state?,
+       monitor_state?, unread?,
        codex_account_email?, codex_group?, codex_selection? }
 Operation { id, kind: Clone|Delete|Bootstrap|Commit, target, source?, status, step, pct,
             message, log: Vec<String>, container?, started_at, finished_at? }
@@ -51,8 +51,8 @@ AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb,
             clone_groups: [{name, accounts: [email]}],
             codex{pollSecs, pinnedEmail, usagePolling},
             codex_groups: [{name, accounts: [email]}],
-            clone_socket, data_dir, static_dir, chroma, setup_complete, detector_inference_url,
-            monitors: [MonitorSpec], listen{video, web, clone_mcp, daemon_mcp}, agent{port} }
+            clone_socket, data_dir, static_dir, chroma, setup_complete,
+            monitors: [MonitorSpec], listen{video, web, daemon_mcp, forward, bastion}, agent{port} }
 # Clone sources are images (identified by their own repo:tag, e.g. pegasis0/rmng-template:latest),
 # not a config template block — pulled from a registry (docker.template_reference, default
 # pegasis0/rmng-template:latest) via POST /api/images/pull; see ImageInfo below + docs/API.md.
@@ -97,10 +97,9 @@ RequestKeyframe { monitor_id }                         # viewer → server (reco
 # clipboard: same Offer/Request/Data triple as the socket, both directions through the broker
 ClipboardOffer/ClipboardRequest/ClipboardData { … }   # viewer ⇄ server
 
-# MCP DTOs (ports 3 + 4) — JSON-RPC tool inputs/outputs
+# Clone-local daemon MCP DTOs — JSON-RPC tool inputs/outputs
 Screenshot{} Click{x,y,button} Type{text} Key{keysym} Move{x,y} Scroll{dx,dy} ...
-# Port-4 tool variants embed `clone: String` (which clone to target); port-3 derives
-# the clone from the caller's source IP.
+# The daemon serves this surface on localhost; the control-server's desktop API proxies to it.
 ```
 
 Field names/casing must match the wire format the existing `/events` consumers expect

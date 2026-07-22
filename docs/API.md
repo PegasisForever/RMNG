@@ -10,7 +10,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
   chat handlers in [chat.rs](../crates/control-server/src/chat.rs); persisted shapes in
   [files.rs](../crates/control-server/src/files.rs); wire types in
   [crates/wire/src/control.rs](../crates/wire/src/control.rs) and [config.rs](../crates/wire/src/config.rs).
-- All request/response bodies are JSON unless noted (uploads/feedback are `multipart/form-data`).
+- All request/response bodies are JSON unless noted (`/api/upload` is `multipart/form-data`).
 - The frontend talks to this port using ts-rs-generated types in `frontend/app/lib/wire/`,
   kept byte-compatible with the Rust `wire` types.
 
@@ -18,7 +18,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 
 | Method | Path | Purpose | Success |
 |---|---|---|---|
-| GET | `/events` | Global state SSE (snapshot + diffs) + named `stats` + `forwards` events | 200 SSE `ControlState` |
+| GET | `/events` | Global state SSE plus named `stats`, `forwards`, and safe accumulated `tokens` events | 200 SSE `ControlState` |
 | GET | `/api/state` | Single-shot `ControlState` snapshot (no SSE) | 200 `ControlState` |
 | POST | `/api/activate` | Select the host shown in the viewer | 200 `ControlState` |
 | POST | `/api/reorder` | Reorder the host list | 200 `ControlState` |
@@ -35,7 +35,6 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/notes/:id` | Save a host's notes | 204 |
 | POST | `/api/upload` | Upload an image (multipart) | 200 `{url}` |
 | GET | `/uploads/:file` | Serve an uploaded image | 200 binary |
-| POST | `/api/detector-feedback` | Clone reports a wrong needs-human verdict (multipart) | 200 `{ok,id,host}` |
 | GET | `/api/config` | Current config, secrets redacted | 200 `AppConfigRedacted` |
 | PUT | `/api/config` | Merge a partial config update (persists 0600) | 200 `{ config, restartRequired, networkWarning? }` |
 | POST | `/api/config/test` | Test a setting (currently `"docker"`) | 200 `{ok,message}` |
@@ -87,11 +86,11 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 
 `Host` carries connection info (`id`, `host`, `port`, `username`, …), the `managed` flag
 (true = a Docker container named after the host id backs it; false = a plain unmanaged
-row), the `source` image reference, the assigned
-`claude_account_email`, Linear metadata (`linear_workspace`, `linear_ticket`, `linear_branch`,
-…), `agent_report` (working/idle), `state_note`, `monitor_state` (working/idle/offline), and
-`forwards` (`PortForward[]` — the host's persisted port-forward rules; live status rides the
-`forwards` SSE event below, never `ControlState`).
+row), the `source` image reference, the assigned `claude_account_email`, Linear metadata
+(`linear_workspace`, `linear_ticket`, `linear_branch`, …), the server-owned `monitor_state`
+(`working`/`idle`/`offline`), `unread` transition marker, and `forwards` (`PortForward[]` —
+the host's persisted port-forward rules; live status rides the `forwards` SSE event below,
+never `ControlState`).
 `Operation` carries `id`, `kind` (clone/delete/pull/commit — a persisted legacy `"bootstrap"`
 op still loads, aliased onto `pull`), `target`, `source`, `status`, `step`, `pct`, a rolling
 `log`, and timestamps.
@@ -104,12 +103,22 @@ unmanaged host contributes no entry). `ContainerStats` ([control.rs](../crates/w
 `memUsed`/`memLimit` in bytes. `memUsed` is RAM with reclaimable file cache excluded, plus
 swap; tmpfs and shared-memory charges remain included. `memLimit` is the clone's RAM plus
 swap limit, or `0` when a cgroup limit is unbounded or unavailable. Disk is intentionally not
-part of this live event. Sampled by the monitor poller alongside its 4 s `/status` probe
-([monitor.rs](../crates/control-server/src/monitor.rs)); a new subscriber gets the latest
-map immediately, then one push per tick — but only when the map actually changed (deduped
-by value, not serialization, so an idle fleet doesn't wake subscribers). Deliberately kept
-out of `ControlState`/`state.json`: these numbers move every tick, and every `ControlState`
-mutation persists the file, so folding stats in would rewrite it every 4 s.
+part of this live event. Sampled by the Docker monitor poller
+([monitor.rs](../crates/control-server/src/monitor.rs)); a new subscriber gets the latest map
+immediately, then one push per tick — but only when the map actually changed (deduped by value,
+not serialization, so an idle fleet doesn't wake subscribers). Deliberately kept out of
+`ControlState`/`state.json`: these numbers move every tick, and every `ControlState` mutation
+persists the file, so folding stats in would rewrite it on every poll.
+
+### `tokens` event
+The same `/events` connection multiplexes a third, named SSE event: `tokens`, a
+`{ <hostId>: CloneTokenUsage }` map. It is the accumulated client-facing CLIProxyAPI usage for
+managed clones: `newInputTokens` excludes cache-read tokens, `outputTokens` includes generated
+output, and `requestCount` is the number of responses with newly observed token use. A new
+subscriber receives the latest map immediately, then a push only when a record changes. The
+control-server persists the aggregate counters privately in `clone-tokens.json`; the map does
+not carry request data, account identity, cache buckets, or last-activity timestamps. The
+frontend uses the selected host's input, output, and total in its desktop header.
 
 ### `lxcStats` event
 The same connection also sends a named `lxcStats` event for the complete CT 105 LXC that hosts
@@ -124,7 +133,7 @@ second CPU sample establishes a rate; `diskUsed` is `null` when the rootfs stat 
 Like `stats`, this event is SSE-only and never writes `state.json`.
 
 ### `forwards` event
-The same `/events` connection multiplexes a third, named SSE event: `forwards`, the volatile
+The same `/events` connection multiplexes a fourth, named SSE event: `forwards`, the volatile
 port-forward **runtime** map — the live status of each host's forward rules as the viewer
 opens/closes its local listeners. A new subscriber gets the current snapshot immediately, then
 one push per status change. It rides its own SSE-only bus (`crate::forward::ForwardBus`), so —
@@ -187,8 +196,8 @@ label, uniqueness enforced (`400` on a taken name) — with no ticket, no derive
 and no kickoff first message. `claudeAccount`/`codexAccount`/`agentInstructions`/
 `claudeInstructions` still apply. Every clone also receives Codex parity files:
 `~/.codex/AGENTS.md` with the same disposable-sandbox guidance as Claude's shared
-`CLAUDE.md`, and `~/.codex/config.toml` with the local desktop MCP, per-clone control-server
-MCP, and Linear MCP.
+`CLAUDE.md`, and `~/.codex/config.toml` with the local desktop MCP, CLIProxyAPI routing, and
+Linear MCP.
 
 > There is no `/api/clone/redeploy` endpoint any more. Clone binaries (`clone-daemon`,
 > `agent-wrapper`, the `rmng` CLI) are installed by the control-server at create time, before
@@ -285,29 +294,13 @@ Serve an uploaded image by its generated `<16-hex>.<ext>` name, with the right C
 
 ---
 
-## Detector feedback
-
-### `POST /api/detector-feedback` (multipart)
-A clone's `rmng-clone-daemon report-detection` posts here when the needs-human detector's verdict
-was wrong. The caller **self-identifies** with a `clone` field (its hostname == host id —
-clone IPs are dynamic Docker IPAM, so there is no source-IP mapping). Fields: `clone`
-(required), `kind` (`false-positive`|`false-negative`, required), `mode`
-(`screen`|`text`, default `screen`), `detectorVerdict`, `detectorReason`, `actualState`,
-repeated `ignoreReason`, `criteria` (text mode: the operator criteria judged against),
-`note`, and the artifact the verdict was made on: an optional `screenshot` file (screen
-mode) or an optional `capture` text field (text mode — the exact pane text). Persists a
-JSON record + artifact (`{id}.jpg` / `{id}.txt`) under `data/detector-feedback/`.
-Returns `{ "ok": true, "id": "...", "host": "..." }`.
-
----
-
 ## Configuration
 
 ### `GET /api/config` → `AppConfigRedacted`
 The full config with the only secret (preset Linear keys) replaced by `linearKeySet: bool`.
 Everything else is returned verbatim — ports, `layoutPresets`/`activeLayout`, the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
-socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`, `detectorInferenceUrl`,
+socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`, and
 `agentPlaybook` (the editable agent playbook seeded with the shipped default and injected into new
 clones — non-secret; a preset's optional `agentPlaybook` append rides along in each `presets` row),
 and claude poll config. See [PROTOCOL.md](PROTOCOL.md#config-schema) for the schema.

@@ -27,7 +27,7 @@
 #   4. runtime     — ubuntu:26.04, runtime libs + samba (smbd serves clone homes over SMB)
 #                    + /usr/local/bin/cliproxy-sidecar + /usr/local/share/rmng payloads
 #                    (2 binaries + static/), a local rmng uid-1000 user for the share,
-#                    WORKDIR /data, EXPOSE 9000-9003 9005 445.
+#                    WORKDIR /data, EXPOSE 9000 9001 9005 445.
 
 # ---------------------------------------------------------------------------------------
 # 1. bun stage: frontend build + agent-wrapper bun --compile
@@ -176,8 +176,8 @@ COPY --from=bun-build   /src/frontend/build/client      /usr/local/share/rmng/st
 
 # CWD-relative config.json + data/ land in the /data volume (config.rs uses relative paths).
 WORKDIR /data
-# 9000 web/API, 9001 video, 9002 per-clone MCP, 9003 global MCP, 9005 forward, 445 SMB (clone homes).
-EXPOSE 9000-9003 9005 445
+# 9000 web/API, 9001 video, 9005 forward, 445 SMB (clone homes).
+EXPOSE 9000 9001 9005 445
 # Logging default only (not a setting — no config lives in env, per the no-env invariant).
 ENV RUST_LOG=info,tower_http=warn,clip=debug
 ENTRYPOINT ["/usr/local/bin/rmng-control-server"]

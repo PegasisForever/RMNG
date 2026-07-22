@@ -549,7 +549,6 @@ export function SettingsPanel({
   const [listen, setListen] = useState({
     web: 9000,
     video: 9001,
-    cloneMcp: 9002,
     daemonMcp: 9004,
     bastion: 2222,
   });
@@ -558,7 +557,6 @@ export function SettingsPanel({
   const [staticDir, setStaticDir] = useState("");
   const [cloneSocket, setCloneSocket] = useState("");
   const [chroma, setChroma] = useState<ChromaMode>("yuv420");
-  const [detectorInferenceUrl, setDetectorInferenceUrl] = useState("");
   const [agentPlaybook, setAgentPlaybook] = useState("");
   // SSH access: pasted authorized_keys (one per line) installed on the bastion + every
   // clone, plus an optional public-host override for the copied `ssh -J …` command.
@@ -595,7 +593,6 @@ export function SettingsPanel({
     setStaticDir(c.staticDir);
     setCloneSocket(c.cloneSocket);
     setChroma(c.chroma);
-    setDetectorInferenceUrl(c.detectorInferenceUrl);
     setAgentPlaybook(c.agentPlaybook);
     setSsh({
       authorizedKeys: c.ssh?.authorizedKeys ?? [],
@@ -698,7 +695,6 @@ export function SettingsPanel({
         cloneSocket,
         chroma,
         ssh,
-        detectorInferenceUrl,
         agentPlaybook,
         presets: presets
           .filter((p) => p.name.trim())
@@ -1198,23 +1194,6 @@ export function SettingsPanel({
               </Field>
             </Section>
 
-            {/* Detector — the window/element detector inference endpoint. */}
-            <Section
-              title="Detector"
-              effect="immediate"
-              hint="Base URL of the detector inference service the fleet queries for on-screen element detection."
-            >
-              <Field label="Inference URL">
-                <input
-                  value={detectorInferenceUrl}
-                  onChange={(e) => setDetectorInferenceUrl(e.target.value)}
-                  placeholder="http://…"
-                  spellCheck={false}
-                  className={input}
-                />
-              </Field>
-            </Section>
-
             {/* SSH Access — public keys installed on the bastion + every clone, so
                 "Copy SSH command" (per-clone) and `rmng ssh <clone>` work with no
                 laptop-side config. Keys apply live (bastion re-render + push to running
@@ -1278,9 +1257,9 @@ export function SettingsPanel({
               </button>
               {advanced ? (
                 <div className="mt-2 grid grid-cols-2 gap-3">
-                  {/* web/video/cloneMcp are wired once at startup → restart-required.
-                      daemonMcp applies live, but must match what clones bake in. */}
-                  {(["web", "video", "cloneMcp"] as const).map((k) => (
+                  {/* web/video are wired once at startup → restart-required; daemonMcp applies
+                      live but must match what clones bake in. */}
+                  {(["web", "video"] as const).map((k) => (
                     <div key={k}>
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Port: {k}</span>

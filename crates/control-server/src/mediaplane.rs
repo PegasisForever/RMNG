@@ -1,5 +1,5 @@
 //! Port 1 — the media plane (the real version of the `media-server` test bin).
-//! Also backs the **desktop MCP tools** (port 3/4): it keeps each clone's daemon
+//! Also backs the **clone-local desktop MCP tools**: it keeps each clone's daemon
 //! connection (input relay) + latest dmabuf frame (screenshots) in a shared
 //! [`MediaHandle`].
 //!

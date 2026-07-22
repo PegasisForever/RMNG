@@ -10,7 +10,6 @@
 mod capture;
 mod capture_pw;
 mod clipboard;
-mod detector;
 mod keysym;
 mod mcp;
 mod mutter;
@@ -23,9 +22,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use wire::socket::{
-    CursorMeta, CursorShape, DaemonMsg, FrameMsg, InputMsg, MonitorPlacement, PlaneLayout, ServerMsg,
+    CursorMeta, CursorShape, DaemonMsg, FrameMsg, InputMsg, MonitorPlacement, PlaneLayout,
+    ServerMsg,
 };
 
 use crate::mutter::Session;
@@ -84,11 +84,23 @@ fn parse_monitors(spec: Option<String>) -> Vec<MonitorCfg> {
                 }
                 None => (0, 0),
             };
-            Some(MonitorCfg { w, h, x, y, primary })
+            Some(MonitorCfg {
+                w,
+                h,
+                x,
+                y,
+                primary,
+            })
         })
         .collect();
     if mons.is_empty() {
-        mons.push(MonitorCfg { w: 1920, h: 1080, x: 0, y: 0, primary: true });
+        mons.push(MonitorCfg {
+            w: 1920,
+            h: 1080,
+            x: 0,
+            y: 0,
+            primary: true,
+        });
     }
     if !mons.iter().any(|m| m.primary) {
         mons[0].primary = true;
@@ -107,19 +119,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Subcommands run as thin clients (no Mutter session / GStreamer): the needs-human
-    // detector, ported from the retired `computer-use` binary. The agent arms
-    // `wait-for-stuck` as a background task and `report-detection`s wrong verdicts.
-    let mut argv = std::env::args().skip(1);
-    if let Some(sub) = argv.next() {
-        let rest: Vec<String> = argv.collect();
-        return match sub.as_str() {
-            "wait-for-stuck" => run_wait_for_stuck(rest).await,
-            "report-detection" => run_report_detection(rest).await,
-            other => anyhow::bail!("unknown subcommand {other:?} (want: wait-for-stuck | report-detection)"),
-        };
-    }
-
     gstreamer::init()?;
     let monitors = parse_monitors(std::env::var("RMNG_MONITORS").ok());
     let sizes: Vec<(u32, u32)> = monitors.iter().map(|m| (m.w, m.h)).collect();
@@ -131,8 +130,11 @@ async fn main() -> Result<()> {
     // GStreamer/embedded-cursor path (cursor composited into the frame). The
     // standalone capture self-test always uses embedded (GStreamer).
     let embedded = std::env::var("RMNG_EMBEDDED_CURSOR").is_ok() || socket.is_none();
-    let cursor_mode =
-        if embedded { mutter::CURSOR_MODE_EMBEDDED } else { mutter::CURSOR_MODE_METADATA };
+    let cursor_mode = if embedded {
+        mutter::CURSOR_MODE_EMBEDDED
+    } else {
+        mutter::CURSOR_MODE_METADATA
+    };
     match socket {
         Some(path) => {
             // Connect to the media socket FIRST (retrying while it's unavailable), THEN
@@ -142,7 +144,10 @@ async fn main() -> Result<()> {
             let transport = connect_retry(&path).await;
             tracing::info!(?sizes, embedded, "clone-daemon: setting up Mutter session");
             let session = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
-            tracing::info!("session ready: {} virtual monitor(s)", session.monitors.len());
+            tracing::info!(
+                "session ready: {} virtual monitor(s)",
+                session.monitors.len()
+            );
             // A fast restart can race the PREVIOUS daemon's session teardown (its
             // monitors die when our old D-Bus connection dropped, but asynchronously).
             wait_monitors_settle(monitors.len()).await;
@@ -152,103 +157,13 @@ async fn main() -> Result<()> {
         None => {
             tracing::info!(?sizes, embedded, "clone-daemon: setting up Mutter session");
             let session = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
-            tracing::info!("session ready: {} virtual monitor(s)", session.monitors.len());
+            tracing::info!(
+                "session ready: {} virtual monitor(s)",
+                session.monitors.len()
+            );
             run_capture_test(session).await
         }
     }
-}
-
-/// `wait-for-stuck [--inference-url <url>] [--ignore-reason <str>]… [--interval <secs>]
-/// [--timeout <secs>] [--text-cmd <shell cmd> [--criteria <str>]]` — screen-mode flags
-/// match the old `computer-use` CLI so the agent's command pattern carries over with
-/// just a binary-name swap. `--text-cmd` switches to text mode: the command's stdout
-/// (e.g. `tmux capture-pane -pt work -S -200`) is judged against `--criteria` instead
-/// of screenshots.
-async fn run_wait_for_stuck(args: Vec<String>) -> Result<()> {
-    let mut inference_url = detector::default_inference_url();
-    let mut ignore_reasons = Vec::new();
-    let mut interval = 60u64;
-    let mut timeout = 1200u64;
-    let mut text_cmd = None;
-    let mut criteria = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--inference-url" => {
-                inference_url = args.get(i + 1).context("--inference-url requires a URL")?.clone();
-                i += 2;
-            }
-            "--ignore-reason" => {
-                ignore_reasons.push(args.get(i + 1).context("--ignore-reason requires a string")?.clone());
-                i += 2;
-            }
-            "--interval" => {
-                interval = args.get(i + 1).context("--interval requires seconds")?.parse().context("--interval integer")?;
-                i += 2;
-            }
-            "--timeout" => {
-                timeout = args.get(i + 1).context("--timeout requires seconds")?.parse().context("--timeout integer")?;
-                i += 2;
-            }
-            "--text-cmd" => {
-                text_cmd = Some(args.get(i + 1).context("--text-cmd requires a shell command")?.clone());
-                i += 2;
-            }
-            "--criteria" => {
-                criteria = Some(args.get(i + 1).context("--criteria requires a string")?.clone());
-                i += 2;
-            }
-            other => anyhow::bail!("unknown wait-for-stuck arg {other:?}"),
-        }
-    }
-    if criteria.is_some() && text_cmd.is_none() {
-        anyhow::bail!("--criteria only applies to text mode; pass --text-cmd too");
-    }
-    let mcp_port =
-        std::env::var("RMNG_DAEMON_MCP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9004);
-    detector::wait_for_stuck(detector::WaitOptions {
-        inference_url,
-        ignore_reasons,
-        interval: Duration::from_secs(interval),
-        timeout: Duration::from_secs(timeout),
-        mcp_port,
-        text_cmd,
-        criteria,
-    })
-    .await
-}
-
-/// `report-detection --kind false-positive|false-negative [--note <str>] [--control <url>]`.
-async fn run_report_detection(args: Vec<String>) -> Result<()> {
-    let mut false_positive = None;
-    let mut note = String::new();
-    let mut control_url = detector::default_control_url();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--kind" => {
-                let v = args.get(i + 1).context("--kind requires false-positive|false-negative")?;
-                false_positive = Some(match v.as_str() {
-                    "false-positive" => true,
-                    "false-negative" => false,
-                    other => anyhow::bail!("--kind must be false-positive|false-negative, got {other:?}"),
-                });
-                i += 2;
-            }
-            "--note" => {
-                note = args.get(i + 1).context("--note requires a string")?.clone();
-                i += 2;
-            }
-            "--control" => {
-                control_url = args.get(i + 1).context("--control requires a base URL")?.clone();
-                i += 2;
-            }
-            other => anyhow::bail!("unknown report-detection arg {other:?}"),
-        }
-    }
-    let false_positive =
-        false_positive.context("report-detection requires --kind false-positive|false-negative")?;
-    detector::report_detection(detector::ReportOptions { false_positive, note, control_url }).await
 }
 
 /// Connect to the media socket, retrying every second until it's reachable (the
@@ -261,7 +176,9 @@ async fn connect_retry(socket_path: &str) -> Arc<transport::Transport> {
             Ok(t) => return Arc::new(t),
             Err(e) => {
                 if !warned {
-                    tracing::warn!("media socket {socket_path} unavailable ({e}); retrying every 1s");
+                    tracing::warn!(
+                        "media socket {socket_path} unavailable ({e}); retrying every 1s"
+                    );
                     warned = true;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -302,7 +219,9 @@ async fn wait_monitors_settle(expected: usize) {
 
 async fn apply_layout(monitors: &[MonitorCfg]) {
     let Some((serial, stdout)) = get_current_state().await else {
-        tracing::warn!("layout: couldn't read DisplayConfig state; leaving Mutter's default layout");
+        tracing::warn!(
+            "layout: couldn't read DisplayConfig state; leaving Mutter's default layout"
+        );
         return;
     };
     let mut available = parse_connectors(&stdout);
@@ -313,8 +232,15 @@ async fn apply_layout(monitors: &[MonitorCfg]) {
         // this monitor's (w, h). `parse_connectors` returns creation order (ascending
         // Meta-N), and slots were RecordVirtual'd in order, so duplicate sizes map 1:1:
         // slot i's connector IS the one whose stream ships as monitor_id i.
-        let Some(idx) = available.iter().position(|(_, w, h)| *w == m.w && *h == m.h) else {
-            tracing::warn!("layout: no Mutter connector currently at {}x{}; skipping that monitor", m.w, m.h);
+        let Some(idx) = available
+            .iter()
+            .position(|(_, w, h)| *w == m.w && *h == m.h)
+        else {
+            tracing::warn!(
+                "layout: no Mutter connector currently at {}x{}; skipping that monitor",
+                m.w,
+                m.h
+            );
             continue;
         };
         let (connector, w, h) = available.remove(idx);
@@ -331,16 +257,29 @@ async fn apply_layout(monitors: &[MonitorCfg]) {
     lm.push(']');
     let out = tokio::process::Command::new("gdbus")
         .args([
-            "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
-            "--object-path", "/org/gnome/Mutter/DisplayConfig",
-            "--method", "org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig",
-            &serial.to_string(), "1", &lm, "@a{sv} {}",
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.DisplayConfig",
+            "--object-path",
+            "/org/gnome/Mutter/DisplayConfig",
+            "--method",
+            "org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig",
+            &serial.to_string(),
+            "1",
+            &lm,
+            "@a{sv} {}",
         ])
         .output()
         .await;
     match out {
-        Ok(o) if o.status.success() => tracing::info!("applied monitor layout ({} monitor(s))", monitors.len()),
-        Ok(o) => tracing::warn!("ApplyMonitorsConfig failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
+        Ok(o) if o.status.success() => {
+            tracing::info!("applied monitor layout ({} monitor(s))", monitors.len())
+        }
+        Ok(o) => tracing::warn!(
+            "ApplyMonitorsConfig failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
         Err(e) => tracing::warn!("ApplyMonitorsConfig spawn failed (gdbus missing?): {e}"),
     }
 }
@@ -350,17 +289,25 @@ async fn apply_layout(monitors: &[MonitorCfg]) {
 async fn get_current_state() -> Option<(u32, String)> {
     let out = tokio::process::Command::new("gdbus")
         .args([
-            "call", "--session", "--dest", "org.gnome.Mutter.DisplayConfig",
-            "--object-path", "/org/gnome/Mutter/DisplayConfig",
-            "--method", "org.gnome.Mutter.DisplayConfig.GetCurrentState",
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Mutter.DisplayConfig",
+            "--object-path",
+            "/org/gnome/Mutter/DisplayConfig",
+            "--method",
+            "org.gnome.Mutter.DisplayConfig.GetCurrentState",
         ])
         .output()
         .await
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
     let idx = s.find("uint32 ")?;
-    let serial =
-        s[idx + 7..].split(|c: char| !c.is_ascii_digit()).find(|t| !t.is_empty())?.parse().ok()?;
+    let serial = s[idx + 7..]
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|t| !t.is_empty())?
+        .parse()
+        .ok()?;
     Some((serial, s))
 }
 
@@ -385,11 +332,15 @@ fn parse_connectors(get_current_state_stdout: &str) -> Vec<(String, u32, u32)> {
     // tuple), which only occurs at monitor-group boundaries in this shape.
     for chunk in get_current_state_stdout.split("((").skip(1) {
         // The connector name is the first single-quoted string in the chunk.
-        let Some(connector) = first_quoted(chunk) else { continue };
+        let Some(connector) = first_quoted(chunk) else {
+            continue;
+        };
         // Find the mode tuple containing `'is-current': <true>`; walk each
         // `'<mode-id>', <w>, <h>` occurrence and keep the one whose nearby props (up to
         // the next mode/group) mention is-current.
-        let Some(current_mode_end) = chunk.find("'is-current': <true>") else { continue };
+        let Some(current_mode_end) = chunk.find("'is-current': <true>") else {
+            continue;
+        };
         // The mode id governing that is-current marker is the *last* mode-id string
         // (`'WxH@rate'`) appearing before it.
         let mut best: Option<(usize, u32, u32)> = None;
@@ -401,7 +352,9 @@ fn parse_connectors(get_current_state_stdout: &str) -> Vec<(String, u32, u32)> {
                 break;
             }
             let after_quote = &rest[rel + 1..];
-            let Some(end_quote) = after_quote.find('\'') else { break };
+            let Some(end_quote) = after_quote.find('\'') else {
+                break;
+            };
             let id = &after_quote[..end_quote];
             // A mode id looks like `WxH@rate`; parse w/h if it matches, else skip (e.g.
             // connector/vendor/product/serial strings).
@@ -429,7 +382,9 @@ fn parse_connectors(get_current_state_stdout: &str) -> Vec<(String, u32, u32)> {
 /// The numeric suffix of a connector name (`"Meta-10"` → 10), recovering creation order
 /// for [`parse_connectors`]. Names without one sort last.
 fn connector_index(name: &str) -> u64 {
-    name.rsplit_once('-').and_then(|(_, n)| n.parse().ok()).unwrap_or(u64::MAX)
+    name.rsplit_once('-')
+        .and_then(|(_, n)| n.parse().ok())
+        .unwrap_or(u64::MAX)
 }
 
 /// The first single-quoted string in `s`, e.g. `"'Meta-0', 'MetaVendor'"` → `"Meta-0"`.
@@ -459,20 +414,39 @@ async fn run_shipping(
     // We rebuild the session on each live layout change, so own it mutably. `cursor_mode`
     // mirrors `main`: embedded composites the cursor, metadata ships it out-of-band.
     let mut session = session;
-    let cursor_mode =
-        if embedded { mutter::CURSOR_MODE_EMBEDDED } else { mutter::CURSOR_MODE_METADATA };
+    let cursor_mode = if embedded {
+        mutter::CURSOR_MODE_EMBEDDED
+    } else {
+        mutter::CURSOR_MODE_METADATA
+    };
 
     let clone_id = std::env::var("RMNG_CLONE_ID")
         .ok()
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string()))
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
         .unwrap_or_else(|| "clone".to_string());
-    transport.send(&DaemonMsg::Hello(wire::socket::Hello { clone_id: clone_id.clone() }), &[])?;
+    transport.send(
+        &DaemonMsg::Hello(wire::socket::Hello {
+            clone_id: clone_id.clone(),
+        }),
+        &[],
+    )?;
     // Report the actual layout (configured positions, applied above) so the viewer routes
     // cross-window drags against it instead of assuming left-to-right.
     let layout: Vec<MonitorPlacement> = monitors
         .iter()
         .enumerate()
-        .map(|(i, m)| MonitorPlacement { id: i as u32, x: m.x, y: m.y, width: m.w, height: m.h, primary: m.primary })
+        .map(|(i, m)| MonitorPlacement {
+            id: i as u32,
+            x: m.x,
+            y: m.y,
+            width: m.w,
+            height: m.h,
+            primary: m.primary,
+        })
         .collect();
     transport.send(&DaemonMsg::Layout { monitors: layout }, &[])?;
     tracing::info!("connected to media socket {socket_path} as clone '{clone_id}'");
@@ -483,7 +457,11 @@ async fn run_shipping(
     let active: ActiveSession = Arc::new(tokio::sync::Mutex::new(SessionRuntime {
         rd: session.rd.clone(),
         conn: session.conn.clone(),
-        streams: session.monitors.iter().map(|m| (m.monitor_id, m.stream_path.clone())).collect(),
+        streams: session
+            .monitors
+            .iter()
+            .map(|m| (m.monitor_id, m.stream_path.clone()))
+            .collect(),
     }));
     // The live monitor set for the MCP task, refreshed by `reconfigure`. `mcp::serve` reads
     // this (plus `active`) per request so screenshots/geometry follow a live layout swap.
@@ -508,7 +486,9 @@ async fn run_shipping(
                 let (rd, stream) = {
                     let rt = active.lock().await;
                     let stream = match &msg {
-                        InputMsg::PointerMove { monitor_id, .. } => rt.streams.get(monitor_id).cloned(),
+                        InputMsg::PointerMove { monitor_id, .. } => {
+                            rt.streams.get(monitor_id).cloned()
+                        }
                         _ => None,
                     };
                     (rt.rd.clone(), stream)
@@ -524,7 +504,9 @@ async fn run_shipping(
                     InputMsg::Button { button, pressed } => {
                         rd.notify_pointer_button(button, pressed).await
                     }
-                    InputMsg::Axis { axis, step } => rd.notify_pointer_axis_discrete(axis, step).await,
+                    InputMsg::Axis { axis, step } => {
+                        rd.notify_pointer_axis_discrete(axis, step).await
+                    }
                     InputMsg::AxisContinuous { dx, dy, flags } => {
                         rd.notify_pointer_axis(dx, dy, flags).await
                     }
@@ -554,7 +536,11 @@ async fn run_shipping(
     // reach the CURRENT session's gates after a swap.
     let in_flight: Arc<std::sync::Mutex<HashMap<u32, Arc<AtomicBool>>>> =
         Arc::new(std::sync::Mutex::new(
-            session.monitors.iter().map(|m| (m.monitor_id, Arc::new(AtomicBool::new(false)))).collect(),
+            session
+                .monitors
+                .iter()
+                .map(|m| (m.monitor_id, Arc::new(AtomicBool::new(false))))
+                .collect(),
         ));
 
     // Reconfigure channel: the reader thread below hands each pushed `SetMonitors` layout to
@@ -593,11 +579,21 @@ async fn run_shipping(
                         let mut mons: Vec<MonitorCfg> = monitors
                             .iter()
                             .map(|m| MonitorCfg {
-                                w: m.width, h: m.height, x: m.x as i32, y: m.y as i32, primary: m.primary,
+                                w: m.width,
+                                h: m.height,
+                                x: m.x as i32,
+                                y: m.y as i32,
+                                primary: m.primary,
                             })
                             .collect();
                         if mons.is_empty() {
-                            mons.push(MonitorCfg { w: 1920, h: 1080, x: 0, y: 0, primary: true });
+                            mons.push(MonitorCfg {
+                                w: 1920,
+                                h: 1080,
+                                x: 0,
+                                y: 0,
+                                primary: true,
+                            });
                         }
                         if !mons.iter().any(|m| m.primary) {
                             mons[0].primary = true;
@@ -645,12 +641,20 @@ async fn run_shipping(
     // monitor set per request, so input/screenshots follow a live layout swap AND the old
     // session's D-Bus conn drops once `active` is repointed (it's the sole long-lived owner).
     {
-        let port: u16 =
-            std::env::var("RMNG_DAEMON_MCP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9004);
-        let (active_mcp, live_mons_mcp, latest_mcp, transport_mcp) =
-            (active.clone(), live_monitors.clone(), latest.clone(), transport.clone());
+        let port: u16 = std::env::var("RMNG_DAEMON_MCP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(9004);
+        let (active_mcp, live_mons_mcp, latest_mcp, transport_mcp) = (
+            active.clone(),
+            live_monitors.clone(),
+            latest.clone(),
+            transport.clone(),
+        );
         tokio::spawn(async move {
-            if let Err(e) = mcp::serve(active_mcp, live_mons_mcp, latest_mcp, transport_mcp, port).await {
+            if let Err(e) =
+                mcp::serve(active_mcp, live_mons_mcp, latest_mcp, transport_mcp, port).await
+            {
                 tracing::error!("clone-daemon MCP exited: {e:#}");
             }
         });
@@ -659,7 +663,11 @@ async fn run_shipping(
     tracing::info!(
         "shipping {} monitor(s) ({}) …",
         session.monitors.len(),
-        if embedded { "embedded cursor" } else { "client cursor / raw-PW" }
+        if embedded {
+            "embedded cursor"
+        } else {
+            "client cursor / raw-PW"
+        }
     );
 
     // Control loop: apply each pushed layout via a make-before-break session swap. The
@@ -673,8 +681,16 @@ async fn run_shipping(
             continue; // idempotent (e.g. a Hello push matching the boot layout)
         }
         if let Err(e) = reconfigure(
-            &mut session, &mut capture, &in_flight, &active, &live_monitors, &transport,
-            &latest, cursor_mode, embedded, &desired,
+            &mut session,
+            &mut capture,
+            &in_flight,
+            &active,
+            &live_monitors,
+            &transport,
+            &latest,
+            cursor_mode,
+            embedded,
+            &desired,
         )
         .await
         {
@@ -724,12 +740,35 @@ fn spawn_capture_for(
                 return;
             }
             let n = seq.fetch_add(1, Ordering::Relaxed);
-            ship_frame(&transport, mid, mw, mh, n, frame.fourcc, frame.modifier, frame.width, frame.height, &frame.planes, &frame.fds);
-            store_latest(&latest, mid, frame.fourcc, frame.modifier, frame.width.min(mw), frame.height.min(mh), &frame.planes, &frame.fds);
+            ship_frame(
+                &transport,
+                mid,
+                mw,
+                mh,
+                n,
+                frame.fourcc,
+                frame.modifier,
+                frame.width,
+                frame.height,
+                &frame.planes,
+                &frame.fds,
+            );
+            store_latest(
+                &latest,
+                mid,
+                frame.fourcc,
+                frame.modifier,
+                frame.width.min(mw),
+                frame.height.min(mh),
+                &frame.planes,
+                &frame.fds,
+            );
         })?;
         Ok(CaptureHandle::Gst(p))
     } else {
-        Ok(CaptureHandle::Pw(spawn_pw_monitor(mon, transport, gate, latest)))
+        Ok(CaptureHandle::Pw(spawn_pw_monitor(
+            mon, transport, gate, latest,
+        )))
     }
 }
 
@@ -805,7 +844,11 @@ async fn reconfigure(
         let mut rt = active.lock().await;
         rt.rd = new.rd.clone();
         rt.conn = new.conn.clone();
-        rt.streams = new.monitors.iter().map(|m| (m.monitor_id, m.stream_path.clone())).collect();
+        rt.streams = new
+            .monitors
+            .iter()
+            .map(|m| (m.monitor_id, m.stream_path.clone()))
+            .collect();
         *live_monitors.lock().unwrap() = new.monitors.clone();
         let mut gates = in_flight.lock().unwrap();
         for (_, f) in gates.drain() {
@@ -853,7 +896,14 @@ async fn reconfigure(
     let layout: Vec<MonitorPlacement> = desired
         .iter()
         .enumerate()
-        .map(|(i, m)| MonitorPlacement { id: i as u32, x: m.x, y: m.y, width: m.w, height: m.h, primary: m.primary })
+        .map(|(i, m)| MonitorPlacement {
+            id: i as u32,
+            x: m.x,
+            y: m.y,
+            width: m.w,
+            height: m.h,
+            primary: m.primary,
+        })
         .collect();
     transport.send(&DaemonMsg::Layout { monitors: layout }, &[])?;
     Ok(())
@@ -880,7 +930,10 @@ fn ship_frame(
         modifier,
         width: width.min(mw),
         height: height.min(mh),
-        planes: planes.iter().map(|&(offset, stride)| PlaneLayout { offset, stride }).collect(),
+        planes: planes
+            .iter()
+            .map(|&(offset, stride)| PlaneLayout { offset, stride })
+            .collect(),
         seq,
     });
     let raw: Vec<i32> = fds.iter().map(|f| f.as_raw_fd()).collect();
@@ -905,10 +958,25 @@ fn store_latest(
     fds: &[OwnedFd],
 ) {
     let Some(fd0) = fds.first() else { return };
-    let Ok(raw) = nix::unistd::dup(fd0.as_raw_fd()) else { return };
+    let Ok(raw) = nix::unistd::dup(fd0.as_raw_fd()) else {
+        return;
+    };
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-    let planes = planes.iter().map(|&(offset, stride)| PlaneLayout { offset, stride }).collect();
-    latest.lock().unwrap().insert(mid, mcp::LatestFrame { fd, fourcc, modifier, width: w, height: h, planes });
+    let planes = planes
+        .iter()
+        .map(|&(offset, stride)| PlaneLayout { offset, stride })
+        .collect();
+    latest.lock().unwrap().insert(
+        mid,
+        mcp::LatestFrame {
+            fd,
+            fourcc,
+            modifier,
+            width: w,
+            height: h,
+            planes,
+        },
+    );
 }
 
 /// Spawn the raw-PipeWire capture for one monitor on its own thread (the pw
@@ -944,22 +1012,61 @@ fn spawn_pw_monitor(
                 }
                 seq += 1;
                 if seq == 1 {
-                    tracing::debug!("pw monitor {mid}: first frame {}x{} fourcc={:#010x} modifier={:#018x}", frame.width, frame.height, frame.fourcc, frame.modifier);
+                    tracing::debug!(
+                        "pw monitor {mid}: first frame {}x{} fourcc={:#010x} modifier={:#018x}",
+                        frame.width,
+                        frame.height,
+                        frame.fourcc,
+                        frame.modifier
+                    );
                 }
-                ship_frame(&ship, mid, mw, mh, seq, frame.fourcc, frame.modifier, frame.width, frame.height, &frame.planes, &frame.fds);
-                store_latest(&latest, mid, frame.fourcc, frame.modifier, frame.width.min(mw), frame.height.min(mh), &frame.planes, &frame.fds);
+                ship_frame(
+                    &ship,
+                    mid,
+                    mw,
+                    mh,
+                    seq,
+                    frame.fourcc,
+                    frame.modifier,
+                    frame.width,
+                    frame.height,
+                    &frame.planes,
+                    &frame.fds,
+                );
+                store_latest(
+                    &latest,
+                    mid,
+                    frame.fourcc,
+                    frame.modifier,
+                    frame.width.min(mw),
+                    frame.height.min(mh),
+                    &frame.planes,
+                    &frame.fds,
+                );
             };
             let on_cursor = move |c: capture_pw::PwCursor| {
-                let shape = c.shape.map(|(width, height, hotspot_x, hotspot_y, rgba)| CursorShape {
-                    width,
-                    height,
-                    hotspot_x,
-                    hotspot_y,
-                    rgba, // BGRA8888 premultiplied (SPA cursor); the viewer uses that memory format
-                });
+                let shape =
+                    c.shape
+                        .map(|(width, height, hotspot_x, hotspot_y, rgba)| CursorShape {
+                            width,
+                            height,
+                            hotspot_x,
+                            hotspot_y,
+                            rgba, // BGRA8888 premultiplied (SPA cursor); the viewer uses that memory format
+                        });
                 // Passive capture echo (the user's own / app cursor); not a warp.
                 let hidden = c.hidden == Some(true);
-                let _ = cursor_tx.send(&DaemonMsg::Cursor(CursorMeta { monitor_id: mid, x: c.x, y: c.y, shape, warp: false, hidden }), &[]);
+                let _ = cursor_tx.send(
+                    &DaemonMsg::Cursor(CursorMeta {
+                        monitor_id: mid,
+                        x: c.x,
+                        y: c.y,
+                        shape,
+                        warp: false,
+                        hidden,
+                    }),
+                    &[],
+                );
             };
             if let Err(e) = capture_pw::run(node_id, on_frame, on_cursor) {
                 tracing::error!("raw-pw capture for monitor {mid} exited: {e:#}");
@@ -982,7 +1089,13 @@ async fn run_capture_test(session: Session) -> Result<()> {
             if f.swap(false, Ordering::Relaxed) {
                 tracing::info!(
                     "monitor {} first frame: fourcc={:#010x} modifier={:#018x} {}x{} planes={:?} fds={}",
-                    mid, frame.fourcc, frame.modifier, frame.width, frame.height, frame.planes, frame.fds.len()
+                    mid,
+                    frame.fourcc,
+                    frame.modifier,
+                    frame.width,
+                    frame.height,
+                    frame.planes,
+                    frame.fds.len()
                 );
             }
         })?;
@@ -1057,7 +1170,11 @@ mod tests {
 (1920, 0, 1.0, 0, false, [('Meta-2', 'x', 'y', '0x3')], {})], {'layout-mode': <uint32 1>})";
         let conns = parse_connectors(blob);
         assert_eq!(conns.len(), 2);
-        assert_eq!(conns[0], ("Meta-2".to_string(), 1920, 1080), "created first (lower N) must come first");
+        assert_eq!(
+            conns[0],
+            ("Meta-2".to_string(), 1920, 1080),
+            "created first (lower N) must come first"
+        );
         assert_eq!(conns[1], ("Meta-10".to_string(), 1920, 1080));
     }
 

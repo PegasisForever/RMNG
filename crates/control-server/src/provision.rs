@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use wire::EnvVar;
 
 use crate::app::App;
-use crate::docker::{CreateSpec, PullEvent, TarEntry, CLONE_USER};
+use crate::docker::{CLONE_USER, CreateSpec, PullEvent, TarEntry};
 
 /// The clone user's uid/gid inside every image (created uid 1000 by `template/setup/30-user.sh`
 /// at template build).
@@ -48,7 +48,8 @@ const WAIT_READY_POLL: Duration = Duration::from_secs(2);
 pub fn is_dns_label(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
-        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && !s.starts_with('-')
         && !s.ends_with('-')
 }
@@ -84,7 +85,9 @@ fn fresh_machine_id() -> Result<Vec<u8>> {
 pub fn resolve_reference(images: &[wire::ImageInfo], input: &str) -> Option<String> {
     images
         .iter()
-        .find(|i| i.reference == input || i.id == input || i.id.strip_prefix("sha256:") == Some(input))
+        .find(|i| {
+            i.reference == input || i.id == input || i.id.strip_prefix("sha256:") == Some(input)
+        })
         .map(|i| i.reference.clone())
 }
 
@@ -99,25 +102,25 @@ pub(crate) fn base_session_env_vars() -> Vec<EnvVar> {
         ("XDG_SESSION_TYPE", "wayland"),
     ]
     .into_iter()
-    .map(|(key, value)| EnvVar { key: key.to_string(), value: value.to_string() })
+    .map(|(key, value)| EnvVar {
+        key: key.to_string(),
+        value: value.to_string(),
+    })
     .collect()
 }
 
-/// The clone→control-server + detector-inference env every clone needs, as
-/// [`EnvVar`]s. Points the detector's feedback + agent
-/// `set_state` MCP at THIS control-server and the detector's vision model at the configured
-/// inference server. The control host is `docker.control_host()` — the `rmng-control`
-/// DNS alias on the rmng bridge (the gateway IP in dev mode; see `docker.rs`). Empty
-/// control URLs (with a warning) if it can't be resolved, so clones fall back to the
-/// compiled detector defaults.
+/// The clone-facing control-server environment every clone needs. The control host is
+/// `docker.control_host()` — the `rmng-control` DNS alias on the rmng bridge (the gateway IP in
+/// dev mode; see `docker.rs`). It provides only the CLIProxyAPI router endpoint.
 pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
     let cfg = app.config();
-    let ev = |key: &str, value: String| EnvVar { key: key.to_string(), value };
+    let ev = |key: &str, value: String| EnvVar {
+        key: key.to_string(),
+        value,
+    };
     let mut vars = Vec::new();
     match app.docker.control_host().await {
         Ok(control) => {
-            vars.push(ev("RMNG_CONTROL_URL", format!("http://{control}:{}", cfg.listen.web)));
-            vars.push(ev("AGENT_CONTROL_MCP_URL", format!("http://{control}:{}", cfg.listen.clone_mcp)));
             // Group-proxy router: every clone's agents reach the control-server's `/cc`
             // reverse proxy at a constant URL; the router maps the clone's per-clone bearer
             // key → its group instance. Claude Code appends `/v1/messages` + `/v1/models`
@@ -125,17 +128,19 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
             // instance's `/v1/models` catalog. The per-clone bearer (ANTHROPIC_AUTH_TOKEN /
             // RMNG_PROXY_KEY) is added separately by `router_env_vars` (it's per-clone, not
             // shared). See `docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`.
-            vars.push(ev("ANTHROPIC_BASE_URL", format!("http://{control}:{}/cc", cfg.listen.web)));
-            vars.push(ev("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1".to_string()));
+            vars.push(ev(
+                "ANTHROPIC_BASE_URL",
+                format!("http://{control}:{}/cc", cfg.listen.web),
+            ));
+            vars.push(ev(
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "1".to_string(),
+            ));
         }
         Err(e) => tracing::warn!(
             "control_env_vars: could not resolve the control-server host ({e}); \
-             clones fall back to the compiled detector defaults"
+             clone inference routing will be unavailable until the next reconcile"
         ),
-    }
-    let infer = cfg.detector_inference_url.trim();
-    if !infer.is_empty() {
-        vars.push(ev("RMNG_INFERENCE_URL", infer.to_string()));
     }
     vars
 }
@@ -150,8 +155,14 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
 pub(crate) fn router_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
     let key = app.cliproxy.mint_router_key(host_id);
     vec![
-        EnvVar { key: "ANTHROPIC_AUTH_TOKEN".into(), value: key.clone() },
-        EnvVar { key: "RMNG_PROXY_KEY".into(), value: key },
+        EnvVar {
+            key: "ANTHROPIC_AUTH_TOKEN".into(),
+            value: key.clone(),
+        },
+        EnvVar {
+            key: "RMNG_PROXY_KEY".into(),
+            value: key,
+        },
     ]
 }
 
@@ -179,7 +190,10 @@ pub(crate) async fn cc_base_url(app: &App) -> Option<String> {
 pub(crate) fn preset_env_vars(p: &wire::Preset) -> Vec<EnvVar> {
     let mut vars = p.vars.clone();
     if !p.linear_key.is_empty() && !vars.iter().any(|v| v.key == "LINEAR_API_KEY") {
-        vars.push(EnvVar { key: "LINEAR_API_KEY".into(), value: p.linear_key.clone() });
+        vars.push(EnvVar {
+            key: "LINEAR_API_KEY".into(),
+            value: p.linear_key.clone(),
+        });
     }
     vars
 }
@@ -192,7 +206,9 @@ pub(crate) fn etc_environment_conf(vars: &[EnvVar]) -> String {
         rows.retain(|(key, _)| *key != v.key);
         rows.push((&v.key, &v.value));
     }
-    rows.into_iter().map(|(key, value)| format!("{key}={value}\n")).collect()
+    rows.into_iter()
+        .map(|(key, value)| format!("{key}={value}\n"))
+        .collect()
 }
 
 pub(crate) fn clone_etc_environment_conf(vars: &[EnvVar]) -> String {
@@ -250,7 +266,11 @@ fn preset_path_rc(env_text: &str) -> Option<PresetPathRc> {
          for d in {dirs}; do\n  case \":$PATH:\" in\n    *\":$d:\"*) : ;;\n    *) PATH=\"$d:$PATH\" ;;\n  esac\ndone\n\
          # <<< rmng-preset-path <<<\n"
     );
-    Some(PresetPathRc { fish, profile, bashrc })
+    Some(PresetPathRc {
+        fish,
+        profile,
+        bashrc,
+    })
 }
 
 /// The three shell-rc payloads a preset `PATH` needs (see [`preset_path_rc`]).
@@ -348,7 +368,11 @@ pub async fn clone_container(
         name: hostname.to_string(),
         image: reference.clone(),
         hostname: hostname.to_string(),
-        env: env.iter().filter(|v| !v.key.is_empty()).map(|v| (v.key.clone(), v.value.clone())).collect(),
+        env: env
+            .iter()
+            .filter(|v| !v.key.is_empty())
+            .map(|v| (v.key.clone(), v.value.clone()))
+            .collect(),
         cpus: cfg.docker.clone_cpus,
         memory_mb: cfg.docker.clone_memory_mb,
         sock_source: sock_source_dir(app).await,
@@ -357,7 +381,16 @@ pub async fn clone_container(
 
     // From here on, a failure must tear the half-built clone down. Run the rest under
     // a guard that removes the container + its dind volumes on any early return.
-    match clone_container_after_create(app, &container, hostname, env, agent_playbook, &mut on_progress).await {
+    match clone_container_after_create(
+        app,
+        &container,
+        hostname,
+        env,
+        agent_playbook,
+        &mut on_progress,
+    )
+    .await
+    {
         Ok(()) => {
             // Shared build infra: optimistically apply the Hub mirror + remote buildx builder
             // now (idempotent, best-effort; the buildinfra reconciler is the backstop if the
@@ -368,8 +401,14 @@ pub async fn clone_container(
         Err(e) => {
             tracing::warn!("clone {hostname} failed after create; cleaning up: {e}");
             docker.remove_container(&container).await.ok();
-            docker.remove_volume(&crate::docker::DockerCtl::dind_volume_name(hostname)).await.ok();
-            docker.remove_volume(&crate::docker::DockerCtl::ctd_volume_name(hostname)).await.ok();
+            docker
+                .remove_volume(&crate::docker::DockerCtl::dind_volume_name(hostname))
+                .await
+                .ok();
+            docker
+                .remove_volume(&crate::docker::DockerCtl::ctd_volume_name(hostname))
+                .await
+                .ok();
             Err(e)
         }
     }
@@ -439,17 +478,31 @@ async fn clone_container_after_create(
     // did not create it.
     on_progress("inject", "preparing Codex guidance + MCP config");
     let code = docker
-        .exec_script(container, crate::clone_reconcile::codex_prepare_script(), &[], &[], |_stream, line| {
-            tracing::debug!(target: "provision", "codex-prepare: {line}");
-        })
+        .exec_script(
+            container,
+            crate::clone_reconcile::codex_prepare_script(),
+            &[],
+            &[],
+            |_stream, line| {
+                tracing::debug!(target: "provision", "codex-prepare: {line}");
+            },
+        )
         .await?;
     if code != 0 {
-        tracing::warn!("clone {hostname}: Codex config directory prepare exited {code} (reconciler will retry)");
+        tracing::warn!(
+            "clone {hostname}: Codex config directory prepare exited {code} (reconciler will retry)"
+        );
     }
     let code = docker
-        .exec_script(container, crate::clone_reconcile::codex_cli_install_script(), &[], &[], |_stream, line| {
-            tracing::debug!(target: "provision", "codex-cli-install: {line}");
-        })
+        .exec_script(
+            container,
+            crate::clone_reconcile::codex_cli_install_script(),
+            &[],
+            &[],
+            |_stream, line| {
+                tracing::debug!(target: "provision", "codex-cli-install: {line}");
+            },
+        )
         .await?;
     if code != 0 {
         tracing::warn!("clone {hostname}: Codex CLI install exited {code} (reconciler will retry)");
@@ -464,7 +517,13 @@ async fn clone_container_after_create(
         // with a transient one; seen live in the E2E — hostnamectl broken, id unstable
         // across restarts). Writing a unique id per clone gives stable, collision-free
         // D-Bus/journald identity; commit truncates it again, so images never carry it.
-        TarEntry { path: "etc/machine-id".into(), data: fresh_machine_id()?, mode: 0o444, uid: 0, gid: 0 },
+        TarEntry {
+            path: "etc/machine-id".into(),
+            data: fresh_machine_id()?,
+            mode: 0o444,
+            uid: 0,
+            gid: 0,
+        },
         // Per-clone env (base desktop session + control URLs + preset vars), read by PAM for
         // SSH sessions and the lingering user manager.
         TarEntry {
@@ -487,10 +546,6 @@ async fn clone_container_after_create(
             gid: CLONE_GID,
         });
     }
-    let control_mcp_url = env
-        .iter()
-        .find(|v| v.key == "AGENT_CONTROL_MCP_URL")
-        .map(|v| v.value.as_str());
     // The group-proxy /cc/v1 base for the generated Codex/OpenCode provider configs, derived
     // from the ANTHROPIC_BASE_URL (`.../cc`) that `control_env_vars` injected into this env.
     let cc_base = env
@@ -500,13 +555,11 @@ async fn clone_container_after_create(
     // One-shot initial config: use the fallback GPT model list here; the clone reconciler
     // refreshes it with the group's live (blacklist-filtered) `/v1/models` set on its next pass.
     let gpt_models = crate::clone_reconcile::fallback_gpt_models();
-    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(
-        hostname,
-        control_mcp_url,
-        cc_base.as_deref(),
-        &gpt_models,
-    );
-    codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(&codex_entries));
+    let mut codex_entries =
+        crate::clone_reconcile::codex_parity_entries(cc_base.as_deref(), &gpt_models);
+    codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(
+        &codex_entries,
+    ));
     entries.append(&mut codex_entries);
     if let Some(rc) = &path_rc {
         entries.push(TarEntry {
@@ -588,7 +641,11 @@ async fn clone_container_after_create(
             }
             // Dead: fold the container's log tail into the op log, then fail.
             let logs = docker.container_logs_tail(container, 30).await;
-            let tail = if logs.trim().is_empty() { String::new() } else { format!("\n{logs}") };
+            let tail = if logs.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n{logs}")
+            };
             bail!("clone {hostname} exited before its daemon registered; last logs:{tail}");
         }
         tokio::time::sleep(WAIT_READY_POLL).await;
@@ -658,7 +715,9 @@ pub async fn pull_template(
     // A `repo@sha256:…` digest ref is mis-split by `split_reference` (it treats the digest's
     // own `:` as the tag separator), so refuse it — pull a `repo:tag` reference instead.
     if remote.contains('@') {
-        bail!("digest references ('{remote}') aren't supported — pull a repo:tag reference instead");
+        bail!(
+            "digest references ('{remote}') aren't supported — pull a repo:tag reference instead"
+        );
     }
 
     let docker = &app.docker;
@@ -674,13 +733,20 @@ pub async fn pull_template(
     // `Bytes` drives the fine pct + message with NO log line (it fires up to ~100 times per
     // pull, which would swamp the log). A daemon error (e.g. a Docker Hub rate limit) is
     // surfaced verbatim by `pull_image` (gotcha #9).
-    on_progress(PullProgress::Step { step: "pull".into(), msg: format!("pulling {remote}") });
+    on_progress(PullProgress::Step {
+        step: "pull".into(),
+        msg: format!("pulling {remote}"),
+    });
     {
         let on_progress = &mut on_progress;
         docker
             .pull_image(remote, |event| match event {
                 PullEvent::Status { layer, status } => {
-                    let msg = if layer.is_empty() { status } else { format!("{layer}: {status}") };
+                    let msg = if layer.is_empty() {
+                        status
+                    } else {
+                        format!("{layer}: {status}")
+                    };
                     on_progress(PullProgress::Log { msg });
                 }
                 PullEvent::Bytes { frac } => {
@@ -719,7 +785,10 @@ pub async fn pull_template(
         ),
     }
 
-    on_progress(PullProgress::Step { step: "done".into(), msg: format!("template {remote} ready") });
+    on_progress(PullProgress::Step {
+        step: "done".into(),
+        msg: format!("template {remote} ready"),
+    });
     Ok(remote.to_string())
 }
 
@@ -769,11 +838,18 @@ pub async fn commit_clone_image(
     // Prepare: flush + clear machine-id in the running clone so committed images don't carry
     // the source clone's identity (a fresh id is regenerated on the next clone's first boot,
     // since clone_container also injects an empty machine-id).
-    on_progress("prepare", "flushing filesystem + clearing machine-id in the clone");
+    on_progress(
+        "prepare",
+        "flushing filesystem + clearing machine-id in the clone",
+    );
     let prep_code = docker
-        .exec_script(container, "sync; truncate -s0 /etc/machine-id\n", &[], &[], |_s, line| {
-            tracing::debug!(target: "provision", "commit-prepare: {line}")
-        })
+        .exec_script(
+            container,
+            "sync; truncate -s0 /etc/machine-id\n",
+            &[],
+            &[],
+            |_s, line| tracing::debug!(target: "provision", "commit-prepare: {line}"),
+        )
         .await?;
     if prep_code != 0 {
         tracing::warn!("commit-prepare exited {prep_code} in {container} (non-fatal; proceeding)");
@@ -791,13 +867,20 @@ pub async fn commit_clone_image(
     );
     let labels = vec![
         (crate::docker::LABEL_IMAGE.to_string(), "1".to_string()),
-        (crate::docker::LABEL_CREATED_FROM.to_string(), source.to_string()),
+        (
+            crate::docker::LABEL_CREATED_FROM.to_string(),
+            source.to_string(),
+        ),
         // `docker commit` INHERITS the parent image's labels, so a clone descended from
         // the wizard base carries `rmng.base=1` — explicitly override it or every user
         // commit wears the base badge and steals the picker preselect (found in E2E).
         (crate::docker::LABEL_BASE.to_string(), "0".to_string()),
     ];
-    docker.commit(container, name, /*set_boot_config=*/ true, /*pause=*/ true, &labels).await?;
+    docker
+        .commit(
+            container, name, /*set_boot_config=*/ true, /*pause=*/ true, &labels,
+        )
+        .await?;
 
     on_progress("done", &format!("image {reference} ready"));
     Ok(reference)
@@ -873,11 +956,22 @@ pub struct CloneBinary {
 
 /// The binaries injected into every clone at create time.
 pub const CLONE_BINARIES: &[CloneBinary] = &[
-    CloneBinary { payload: "clone-daemon", bin: "rmng-clone-daemon", dir: "opt/rmng/bin" },
-    CloneBinary { payload: "agent-wrapper", bin: "agent-wrapper", dir: "opt/rmng/bin" },
-    // The fleet CLI: talks to this control-server via RMNG_CONTROL_URL (preset into every
-    // clone's /etc/environment), so in-clone agents can manage the fleet with plain commands.
-    CloneBinary { payload: "rmng-cli", bin: "rmng", dir: "usr/local/bin" },
+    CloneBinary {
+        payload: "clone-daemon",
+        bin: "rmng-clone-daemon",
+        dir: "opt/rmng/bin",
+    },
+    CloneBinary {
+        payload: "agent-wrapper",
+        bin: "agent-wrapper",
+        dir: "opt/rmng/bin",
+    },
+    // Fleet management CLI, installed on every clone for explicit operator use.
+    CloneBinary {
+        payload: "rmng-cli",
+        bin: "rmng",
+        dir: "usr/local/bin",
+    },
 ];
 
 // --- archive --------------------------------------------------------------------------
@@ -968,7 +1062,10 @@ mod tests {
             created_from: None,
             in_use_by: Vec::new(),
         };
-        let images = vec![img("rmng/template:base", HEX_A), img("rmng/template:dev", HEX_B)];
+        let images = vec![
+            img("rmng/template:base", HEX_A),
+            img("rmng/template:dev", HEX_B),
+        ];
 
         // Repo-tag reference → itself.
         assert_eq!(
@@ -981,7 +1078,10 @@ mod tests {
             Some("rmng/template:dev")
         );
         // Bare 64-hex id (prefix-stripped form) → its reference.
-        assert_eq!(resolve_reference(&images, HEX_A).as_deref(), Some("rmng/template:base"));
+        assert_eq!(
+            resolve_reference(&images, HEX_A).as_deref(),
+            Some("rmng/template:base")
+        );
         // No match (unknown reference, unknown id, empty) → None.
         assert_eq!(resolve_reference(&images, "rmng/template:nope"), None);
         assert_eq!(resolve_reference(&images, "sha256:cccc"), None);
@@ -994,23 +1094,42 @@ mod tests {
     fn provision_uses_ssh_clone_entries_contract() {
         // Guards that provision's SSH injection targets the clone-user .ssh path (the template
         // pre-creates it 700). If this path ever changes, StrictModes will reject the key.
-        if std::process::Command::new("ssh-keygen").arg("-?").output().is_err() {
+        if std::process::Command::new("ssh-keygen")
+            .arg("-?")
+            .output()
+            .is_err()
+        {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rmng-prov-ssh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let e = crate::ssh::clone_ssh_tar_entries(dir.to_str().unwrap(), "c1", &["ssh-ed25519 A a".into()])
-            .unwrap();
-        assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys" && t.mode == 0o600 && t.uid == 1000));
+        let e = crate::ssh::clone_ssh_tar_entries(
+            dir.to_str().unwrap(),
+            "c1",
+            &["ssh-ed25519 A a".into()],
+        )
+        .unwrap();
+        assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys"
+            && t.mode == 0o600
+            && t.uid == 1000));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn etc_environment_conf_skips_empty_keys_and_formats() {
         let vars = vec![
-            EnvVar { key: "FOO".into(), value: "1".into() },
-            EnvVar { key: "".into(), value: "dropped".into() },
-            EnvVar { key: "BAR".into(), value: "a b".into() },
+            EnvVar {
+                key: "FOO".into(),
+                value: "1".into(),
+            },
+            EnvVar {
+                key: "".into(),
+                value: "dropped".into(),
+            },
+            EnvVar {
+                key: "BAR".into(),
+                value: "a b".into(),
+            },
         ];
         assert_eq!(etc_environment_conf(&vars), "FOO=1\nBAR=a b\n");
     }
@@ -1018,12 +1137,18 @@ mod tests {
     #[test]
     fn clone_etc_environment_conf_includes_base_session_and_lets_preset_override() {
         let vars = vec![
-            EnvVar { key: "XDG_CURRENT_DESKTOP".into(), value: "custom".into() },
-            EnvVar { key: "RMNG_CONTROL_URL".into(), value: "http://rmng-control:9000".into() },
+            EnvVar {
+                key: "XDG_CURRENT_DESKTOP".into(),
+                value: "custom".into(),
+            },
+            EnvVar {
+                key: "ANTHROPIC_BASE_URL".into(),
+                value: "http://rmng-control:9000/cc".into(),
+            },
         ];
         let body = clone_etc_environment_conf(&vars);
         assert!(body.contains("XDG_SESSION_DESKTOP=gnome\n"));
-        assert!(body.contains("RMNG_CONTROL_URL=http://rmng-control:9000\n"));
+        assert!(body.contains("ANTHROPIC_BASE_URL=http://rmng-control:9000/cc\n"));
         assert!(body.contains("XDG_CURRENT_DESKTOP=custom\n"));
         assert_eq!(body.matches("XDG_CURRENT_DESKTOP=").count(), 1);
     }
@@ -1041,8 +1166,17 @@ mod tests {
         // Listed order a:b (a first) → reversed so each prepend leaves a in front.
         let rc = preset_path_rc("PATH=/opt/a/bin:/opt/b/bin:$PATH\n").unwrap();
         // Reversed → "/opt/b/bin" then "/opt/a/bin" in the loop dir list.
-        assert!(rc.fish.contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""), "fish: {}", rc.fish);
-        assert!(rc.profile.contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""), "profile: {}", rc.profile);
+        assert!(
+            rc.fish.contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""),
+            "fish: {}",
+            rc.fish
+        );
+        assert!(
+            rc.profile
+                .contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""),
+            "profile: {}",
+            rc.profile
+        );
         // fish prepends with the contains-guard.
         assert!(rc.fish.contains("set -gx PATH \"$d\" $PATH"));
         // sh/bash use the case-guard prepend.
@@ -1090,7 +1224,14 @@ mod tests {
         // The clone table must be monotonic non-decreasing in emission order, so the progress
         // bar never jumps backwards across the create → ready → monitors → accounts → done tail.
         let clone_order = [
-            "queued", "create", "inject", "start", "wait-ready", "ready", "monitors", "accounts",
+            "queued",
+            "create",
+            "inject",
+            "start",
+            "wait-ready",
+            "ready",
+            "monitors",
+            "accounts",
             "done",
         ];
         let mut prev = -1.0_f64;

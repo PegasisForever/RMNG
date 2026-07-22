@@ -14,6 +14,22 @@ export function formatBytes(bytes: bigint | number): string {
 }
 
 /** Coarse "time ago" from an ISO timestamp, e.g. `3d ago`, `just now`. */
+/** Compact integer count, e.g. `12.4k` or `3.1M`. Wire `u64` values are typed as bigint
+ * but JSON events arrive as JavaScript numbers, so accept both representations. */
+export function formatTokenCount(value: bigint | number): string {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1_000) return Math.floor(n).toLocaleString();
+  const units = ["k", "M", "B", "T"];
+  let scaled = n;
+  let index = -1;
+  while (scaled >= 1_000 && index < units.length - 1) {
+    scaled /= 1_000;
+    index++;
+  }
+  return `${scaled >= 100 ? Math.round(scaled) : scaled.toFixed(1)}${units[index]}`;
+}
+
 export function relativeAge(iso: string): string {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return "—";

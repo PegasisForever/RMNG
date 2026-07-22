@@ -6,13 +6,12 @@ run → wizard → upgrade flow, see [DEPLOY.md](DEPLOY.md).
 
 ## The shape
 
-The control-server exposes **four ports** plus an SMB clone-home share; a further automation surface (the daemon MCP) lives inside each clone.
+The control-server exposes video, web/API, forward, SSH, and SMB surfaces; the desktop automation MCP lives inside each clone.
 
 | Port | Default | Transport | Purpose |
 |---|---|---|---|
 | **1 — video** | `9001` | framed H.264 over TCP | the selected clone's monitors to the native GTK viewer, with input + clipboard + cursor back |
 | **2 — web API** | `9000` | HTTP + SSE (+ embedded frontend) | the React management UI: host selection, clone/Linear/Claude/chat orchestration, settings; also the `rmng desktop`/`rmng exec` proxy endpoints |
-| **3 — per-clone MCP** | `9002` | HTTP JSON-RPC, header-routed | the in-clone agent reports its verdict (`set_state`); caller self-identifies via the `x-rmng-clone` header |
 | **4 — forward** | `9005` | framed TCP over TCP | the viewer's port-forwarding data plane: one TCP connection per accepted local socket, spliced to the clone |
 | **SMB** | `445` | SMB (smbd) | the `clones` share — browse every running clone's `/home/rmng` from `smb://<host>/clones` (fixed cred `rmng`/`rmng`) |
 | daemon MCP | `9004` | HTTP JSON-RPC (in each clone) | the full desktop-automation surface; the agent calls it on localhost, the `rmng desktop` CLI proxies to it (operator/fleet desktop control) |
@@ -33,7 +32,7 @@ running server's payloads; there's no manual redeploy step.
 | Doc | Covers |
 |---|---|
 | [API.md](API.md) | Every HTTP endpoint on the web port (9000), incl. the SSE streams |
-| [MCP.md](MCP.md) | Both MCP surfaces (per-clone 9002, daemon 9004): JSON-RPC envelope + every tool + curl examples |
+| [MCP.md](MCP.md) | Clone-local daemon MCP on 9004: JSON-RPC envelope, tools, and curl examples |
 | [CLI.md](CLI.md) | The `rmng` CLI (`/usr/local/bin/rmng` in every clone): every subcommand incl. `desktop`/`exec`, `--json`, exit codes, wait semantics |
 | [PROTOCOL.md](PROTOCOL.md) | The port-1 video/input/clipboard/cursor wire protocol, the clone socket, the config schema, every env var, the clone-daemon CLI, and the per-crate public API |
 | [SCRIPTS.md](SCRIPTS.md) | Every script: what it does, where it runs, its args, and what invokes it |
@@ -45,9 +44,9 @@ running server's payloads; there's no manual redeploy step.
 | Path | Kind | What |
 |---|---|---|
 | [crates/wire](../crates/wire/README.md) | lib | shared types: control state, config, the clone socket + viewer protocols, MCP DTOs; ts-rs export for the frontend |
-| [crates/control-server](../crates/control-server/README.md) | bin | the server: media plane, web API/SSE, per-clone MCP, port-forward + SMB planes, Docker orchestration (bollard), on-disk frontend + clone payloads, clone-template pull + create-time clone-binary injection |
+| [crates/control-server](../crates/control-server/README.md) | bin | the server: media plane, web API/SSE, passive token accounting, Docker lifecycle, port-forward + SMB planes, and clone payloads |
 | [crates/media](../crates/media/README.md) | lib | dmabuf ingest → VA-API H.264 per monitor + dmabuf→JPEG screenshots + the clone-socket transport |
-| [crates/clone-daemon](../crates/clone-daemon/README.md) | bin | the thin in-clone pipe: RecordVirtual capture, RemoteDesktop input inject, clipboard bridge, the desktop MCP (:9004), and the needs-human detector |
+| [crates/clone-daemon](../crates/clone-daemon/README.md) | bin | the thin in-clone pipe: RecordVirtual capture, RemoteDesktop input injection, clipboard bridge, and desktop MCP (:9004) |
 | [crates/viewer](../crates/viewer/README.md) | bin | the native GTK client (GUI + headless test mode): zero-copy VA-API decode, multi-monitor, client-drawn cursor, input + pointer-lock + clipboard |
 | [crates/control-client](../crates/control-client/README.md) | lib | typed reqwest+SSE client for the port-2 web API (`/api/state`, `/events`, clone/delete/image/account wrappers); used by the `rmng` CLI and integration tests |
 | [crates/cli](../crates/cli/README.md) | bin | the `rmng` fleet CLI: hosts/clones/images/accounts/operations over the port-2 web API; injected into every clone as `/usr/local/bin/rmng` |

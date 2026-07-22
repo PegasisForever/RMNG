@@ -20,9 +20,8 @@ server, with no manual redeploy step (see [Upgrades](#upgrades)).
 - A **GPU render node** `/dev/dri/renderD128` on the host (AMD radeonsi/Mesa VA-API). The
   control-server VA-API-**encodes** every clone's frames and each clone **captures** its own
   desktop — both need the render node. Validated on the AMD Radeon Pro **W6800**.
-- Ports **9000–9002**, **9005** (port-forward), **445** (SMB), and **2222** (SSH bastion) free
-  (web/API, video, per-clone MCP, port-forward data plane, clone-home share, jump
-  into clones).
+- Ports **9000**, **9001**, **9005** (port-forward), **445** (SMB), and **2222** (SSH bastion) free
+  (web/API, video, port-forward data plane, clone-home share, and jump into clones).
 
 ## 1. Get the image
 
@@ -59,7 +58,7 @@ and run `docker compose up -d` (no `--build`). The equivalent one-liner off the 
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
-  -p 9000-9002:9000-9002 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
+  -p 9000:9000 -p 9001:9001 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
 What each piece is for:
@@ -72,9 +71,9 @@ What each piece is for:
 | `-v /var/run/docker.sock:…` | the daemon the server drives via bollard |
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
-| `-p 9000-9002:9000-9002` | the web API, video, and per-clone MCP ports |
+| `-p 9000:9000` and `-p 9001:9001` | the web API and video ports |
 | `-p 9005:9005` | the port-forward data plane (viewer↔clone TCP splice) |
-| `-p 445:445` | the SMB shares — `clones` (browse every running clone's `/home/rmng`) and `feedback` (the detector-feedback records) — from `smb://<host>/clones` and `smb://<host>/feedback` (below) |
+| `-p 445:445` | the `clones` SMB share for browsing every running clone's `/home/rmng` from `smb://<host>/clones` |
 | `-p 2222:2222` | the SSH bastion — jump host for `ssh`/`scp`/`rsync`/VSCode Remote-SSH into any clone's own `sshd` (see [SSH into clones](#ssh-into-clones)) |
 
 **There are zero `-e` configuration flags, by design.** `config.json` (edited via the
@@ -249,17 +248,17 @@ control-server copies its own current payloads (`clone-daemon` + `agent-wrapper`
 [`provision.rs`](../crates/control-server/src/provision.rs) `CLONE_BINARIES`) into every
 clone **before it boots**. The template carries none of them. A background reconciler also
 refreshes those payloads on running managed clones after a control-server upgrade, then
-restarts only `rmng-clone-daemon`; `agent-wrapper` is refreshed on disk but not restarted, so
-active agent work is not interrupted.
+restarts `rmng-clone-daemon` and `agent-wrapper` so the reconciled configuration takes effect.
+Active agent work is interrupted only when the payload or generated configuration changed.
 
 **Codex clone context is reconciled too.** New clones get `~/.codex/AGENTS.md` and
 `~/.codex/config.toml` at create time; old running clones get the same files from the
 background reconciler after a control-server update. The reconciler also attempts a missing
 standalone Codex CLI install on old clones and retries on later ticks if the download fails.
-The config gives Codex the local desktop MCP (`http://127.0.0.1:9004`), the per-clone
-control-server MCP with that clone's `x-rmng-clone` header, and Linear MCP using
-`LINEAR_API_KEY`. Existing Codex sessions may need a new Codex run to reload
-instructions/config, but the files are updated automatically.
+The config gives Codex the local desktop MCP (`http://127.0.0.1:9004`) and Linear MCP using
+`LINEAR_API_KEY`; its model requests use the clone-specific CLIProxyAPI route. Existing Codex
+sessions may need a new Codex run to reload instructions/config, but the files are updated
+automatically.
 
 **Dev caveat**: in a `cargo run` dev checkout the payloads come from
 `crates/control-server/embedded-bin/` — with nothing staged there, a clone boots without
@@ -305,11 +304,6 @@ clone restarts (the PID changes) and prunes stopped/deleted clones. Reach it thr
   Fixed credential → user `rmng`, password `rmng`. **Prerequisite: host port 445 must be free**
   (the `-p 445:445` publish fails clearly if something already holds it). Files you create over
   SMB land owned by the clone's own `rmng` user (uid **1000**).
-- **The `feedback` share** — the same `smbd` also serves the control-server's detector-feedback
-  records (`data/detector-feedback`) as `smb://<host>/feedback`, read-write, same `rmng`/`rmng`
-  credential. Browse or prune the JSON records + screenshots while tuning the detector. Scoped to
-  that folder only (not the whole `data_dir`, which holds the `claude-accounts.json` secret store).
-  Unlike `clones`, it does not need `--pid host`.
 - **From the Docker host** (the same symlink path resolves there, since `/proc/<pid>/root` is
   the clone's rootfs): `/var/lib/docker/volumes/rmng-data/_data/data/hosts/<id>`.
 - **`docker exec`** into the control-server container and browse `data/hosts/`.
@@ -507,7 +501,7 @@ the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no 
   lazily at wizard finish and before each clone. Addressing is Docker's embedded DNS, not
   static IPs: every clone resolves by its container name (== host id), and the
   control-server attaches itself under the `rmng-control` alias (so recreating its container
-  never strands the managed `RMNG_CONTROL_URL`s). Clone IPs are plain Docker IPAM — nothing
+  never strands clone-specific CLIProxyAPI routing). Clone IPs are plain Docker IPAM — nothing
   allocates or stores them. If an `rmng` network already exists with a **different** subnet,
   `ensure_network` errors — delete it with `docker network rm rmng` and re-run setup.
 - **Clone media socket**: clone-daemon ships dmabuf frames to the control-server over a

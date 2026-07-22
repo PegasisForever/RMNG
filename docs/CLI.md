@@ -28,16 +28,16 @@ Codex itself is template-installed under the clone user, and the control-server 
 missing standalone Codex CLI install at clone creation and from the clone reconciler for old
 running clones. RMNG gives Codex parity with Claude's shared clone context by managing
 `~/.codex/AGENTS.md` and `~/.codex/config.toml`: Codex gets the same disposable-sandbox
-guidance, plus MCP servers for the local desktop daemon (`desktop`), the per-clone
-control-server MCP (`control-server`), and Linear (`linear`, using `LINEAR_API_KEY`). The
-clone reconciler refreshes those files on old running clones.
+guidance, the local desktop daemon MCP (`desktop`), and Linear (`linear`, using
+`LINEAR_API_KEY`). Its model requests route through the control-server's clone-specific
+CLIProxyAPI endpoint. The clone reconciler refreshes those files on old running clones.
 
 ## Server resolution
 
-`--server <URL>` > `$RMNG_CONTROL_URL` > `http://localhost:9000`. Every clone gets
-`RMNG_CONTROL_URL` preset through `/etc/environment` (pointing at this control-server's web port),
-so inside a clone `rmng ps` just works. Blank values fall through; a trailing `/` is
-stripped. A connection failure prints the resolved base with a `set --server or
+`--server <URL>` > `$RMNG_CONTROL_URL` > `http://localhost:9000`. The environment variable is
+an optional operator convenience; clones no longer receive it automatically, so invoke the CLI
+with `--server` when the control-server is not local. Blank values fall through; a trailing `/`
+is stripped. A connection failure prints the resolved base with a `set --server or
 $RMNG_CONTROL_URL` hint.
 
 ## Global flags & output
@@ -72,10 +72,9 @@ $RMNG_CONTROL_URL` hint.
 ## Commands
 
 ### `rmng ps`
-Hosts table: `ID` (a `*` suffix marks the selected host), `STATE` (monitor verdict:
-working/idle/offline), `AGENT` (the agent's self-report), `IMAGE` (source reference),
-`CLAUDE` / `CODEX` (assigned account email, else the stored selection), `NOTE` (the agent's
-state note, truncated).
+Hosts table: `ID` (a `*` suffix marks the selected host), `IP` (the current Docker bridge
+address when available), `IMAGE` (source reference), `PRESET` (the clone's creation preset),
+and `GROUP` (its CLIProxyAPI account pool).
 
 ### `rmng select <host|none>`
 Point the operator's viewer at a host (`POST /api/activate`); `none` clears the selection.

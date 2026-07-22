@@ -34,10 +34,6 @@ export const CONFIG = {
    * (screenshot/click/key/type/window-mgmt) locally, sharing its Mutter session. */
   daemonMcpUrl: process.env.DAEMON_MCP_URL ?? "http://127.0.0.1:9004",
 
-  /** control-server per-clone MCP (HTTP) — exposes set_state; resolves THIS host by
-   * source IP. The rmng control-server serves it on the clone_mcp port (9002). */
-  controlMcpUrl: process.env.AGENT_CONTROL_MCP_URL ?? "http://10.60.0.1:9002",
-
   /** Graphical-session env (kept for reference; the clone-daemon has its own). */
   runtimeDir,
   dbusAddress: process.env.DBUS_SESSION_BUS_ADDRESS ?? `unix:path=${runtimeDir}/bus`,

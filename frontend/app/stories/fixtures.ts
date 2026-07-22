@@ -29,8 +29,6 @@ export const hostWorking: Host = {
   linearLabel: "frontend",
   displayName: "Normalize sidebar CPU to % of allowance",
   monitorState: "working",
-  agentReport: "working",
-  stateNote: "Refactoring usageLine to divide by the clone's cpu allowance",
 };
 
 /** Idle, bound to the "pooled" group, with an unread dot (dropped from working). */
@@ -47,7 +45,6 @@ export const hostIdle: Host = {
   linearTicket: "DEV-88",
   displayName: "Wire up the pull-template wizard",
   monitorState: "idle",
-  stateNote: "Done — awaiting review",
   unread: true,
 };
 
@@ -62,7 +59,6 @@ export const hostOffline: Host = {
   group: "team",
   displayName: "Database migration spike",
   monitorState: "idle",
-  stateNote: "Container stopped",
 };
 
 /** A managed scratch box with no account group bound (no inference). */
@@ -74,7 +70,6 @@ export const hostNoToken: Host = {
   password: "",
   managed: true,
   monitorState: "idle",
-  stateNote: "Manual scratch container",
 };
 
 /** A plain unmanaged row (no container) — only deletable, no commit/account actions. */
@@ -102,8 +97,6 @@ export const hostDualProvider: Host = {
   linearTicket: "WE-207",
   displayName: "Port the encoder path to the new VA surface pool",
   monitorState: "working",
-  agentReport: "working",
-  stateNote: "Wiring the group picker into the clone modal",
 };
 
 export const hosts: Host[] = [
@@ -266,7 +259,7 @@ export const deleteOperation: Operation = {
 // --- redacted app config (for the Settings story) --------------------------
 
 export const appConfig: AppConfigRedacted = {
-  listen: { web: 9000, video: 9001, cloneMcp: 9002, daemonMcp: 9004, forward: 9005, bastion: 2222 },
+  listen: { web: 9000, video: 9001, daemonMcp: 9004, forward: 9005, bastion: 2222 },
   agentPort: 4096,
   dataDir: "/data",
   staticDir: "",
@@ -315,7 +308,6 @@ export const appConfig: AppConfigRedacted = {
     authorizedKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop"],
     publicHost: "rmng.example.com",
   },
-  detectorInferenceUrl: "http://detector.internal:8080",
   agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
 };
 

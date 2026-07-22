@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use wire::AppConfig;
 
 pub fn config_path() -> PathBuf {
@@ -15,8 +15,8 @@ pub fn load() -> Result<AppConfig> {
     let path = config_path();
     let cfg = match std::fs::read_to_string(&path) {
         Ok(s) => {
-            let mut cfg: AppConfig = serde_json::from_str(&s)
-                .with_context(|| format!("parsing {}", path.display()))?;
+            let mut cfg: AppConfig =
+                serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
             // Legacy fields (serde ignores them at parse): fold what's still useful
             // into the current shape and rewrite the file once, so dead secrets
             // (long-lived clone tokens, per-workspace Linear keys) don't linger on disk.
@@ -59,7 +59,9 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
     if cfg.presets.is_empty() {
         if let Some(rows) = raw.get("envPresets").and_then(|v| v.as_array()) {
             for r in rows {
-                let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
+                let Some(name) = r.get("name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
                 let vars = r
                     .get("vars")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -75,7 +77,9 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
         }
     }
     if non_empty("linear") {
-        tracing::info!("dropping legacy per-workspace Linear keys (now per-preset — re-enter in Settings)");
+        tracing::info!(
+            "dropping legacy per-workspace Linear keys (now per-preset — re-enter in Settings)"
+        );
     }
     // Retired: the whole Proxmox backend is gone. Scrub any `proxmox` block from disk;
     // carry its `hostnamePrefix` into `docker.hostnamePrefix` when the file predates the
@@ -96,10 +100,17 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
             }
         }
     }
+    let retired_clone_mcp = raw
+        .get("listen")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|listen| listen.contains_key("cloneMcp"));
+    let retired_detector_url = raw.get("detectorInferenceUrl").is_some();
     let mut changed = non_empty("envPresets")
         || non_empty("linear")
         || non_empty("cloneAccounts")
-        || has_proxmox;
+        || has_proxmox
+        || retired_clone_mcp
+        || retired_detector_url;
     // Legacy single `monitors` array → a "Default" layout preset (one-shot). Only when
     // the new `layout_presets` is still empty (don't clobber an already-migrated config).
     if cfg.layout_presets.is_empty() {
@@ -108,7 +119,10 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                 if let Ok(parsed) = serde_json::from_value::<Vec<wire::MonitorSpec>>(
                     serde_json::Value::Array(mons.clone()),
                 ) {
-                    cfg.layout_presets = vec![wire::LayoutPreset { name: "Default".into(), monitors: parsed }];
+                    cfg.layout_presets = vec![wire::LayoutPreset {
+                        name: "Default".into(),
+                        monitors: parsed,
+                    }];
                     if cfg.active_layout.is_empty() {
                         cfg.active_layout = "Default".into();
                     }
@@ -126,20 +140,20 @@ mod tests {
     use wire::Group;
 
     #[test]
-    fn merge_preserves_blank_secrets_and_applies_changes() {
+    fn merge_preserves_blank_scalars_and_applies_changes() {
         let mut base = AppConfig::default();
-        base.detector_inference_url = "http://infer:8080".into();
-        // The UI sends back a blank for an unchanged scalar, plus real changes.
+        base.static_dir = "existing-static".into();
+        // The UI sends back a blank unchanged scalar, plus real changes.
         let incoming = serde_json::json!({
             "listen": { "web": 9100 },
-            "detectorInferenceUrl": "",
+            "staticDir": "",
             "docker": { "hostnamePrefix": "clone-" },
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.listen.web, 9100); // changed
-        assert_eq!(merged.listen.video, 9001); // untouched (merge kept it)
-        assert_eq!(merged.detector_inference_url, "http://infer:8080"); // blank = unchanged
-        assert_eq!(merged.docker.hostname_prefix, "clone-"); // non-secret changed
+        assert_eq!(merged.listen.web, 9100);
+        assert_eq!(merged.listen.video, 9001);
+        assert_eq!(merged.static_dir, "existing-static");
+        assert_eq!(merged.docker.hostname_prefix, "clone-");
     }
 
     #[test]
@@ -147,8 +161,16 @@ mod tests {
         use wire::{EnvVar, Preset};
         let mut base = AppConfig::default();
         base.presets = vec![
-            Preset { name: "med".into(), linear_key: "OLD-MED".into(), ..Default::default() },
-            Preset { name: "gone".into(), linear_key: "OLD-GONE".into(), ..Default::default() },
+            Preset {
+                name: "med".into(),
+                linear_key: "OLD-MED".into(),
+                ..Default::default()
+            },
+            Preset {
+                name: "gone".into(),
+                linear_key: "OLD-GONE".into(),
+                ..Default::default()
+            },
         ];
         // UI sends the full list: blank linearKey = keep stored, new row = added,
         // omitted row ("gone") = deleted (with its key). Labels/vars replace.
@@ -163,7 +185,13 @@ mod tests {
         assert_eq!(merged.presets.len(), 2);
         assert_eq!(merged.presets[0].linear_key, "OLD-MED"); // blank kept stored
         assert_eq!(merged.presets[0].labels, vec!["Backend"]); // trimmed, blanks dropped
-        assert_eq!(merged.presets[0].vars, vec![EnvVar { key: "A".into(), value: "1".into() }]);
+        assert_eq!(
+            merged.presets[0].vars,
+            vec![EnvVar {
+                key: "A".into(),
+                value: "1".into()
+            }]
+        );
         assert_eq!(merged.presets[1].name, "new");
         assert_eq!(merged.presets[1].linear_key, "NEW-KEY");
         assert!(!merged.presets.iter().any(|p| p.name == "gone")); // omitted → deleted
@@ -208,7 +236,10 @@ mod tests {
         // Legacy object-shaped `linear` also counts; existing presets are never clobbered.
         let raw = serde_json::json!({ "linear": { "we": "K1" }, "envPresets": [{ "name": "x" }] });
         let mut cfg = AppConfig::default();
-        cfg.presets = vec![wire::Preset { name: "kept".into(), ..Default::default() }];
+        cfg.presets = vec![wire::Preset {
+            name: "kept".into(),
+            ..Default::default()
+        }];
         assert!(migrate_legacy(&raw, &mut cfg));
         assert_eq!(cfg.presets.len(), 1);
         assert_eq!(cfg.presets[0].name, "kept");
@@ -241,7 +272,11 @@ mod tests {
         use wire::CodexConfig;
         let mut base = AppConfig::default();
         base.groups = vec![Group { name: "old".into() }];
-        base.codex = CodexConfig { poll_secs: 600, usage_polling: true, ..Default::default() };
+        base.codex = CodexConfig {
+            poll_secs: 600,
+            usage_polling: true,
+            ..Default::default()
+        };
         // Editor sends the full group list + a codex config patch.
         let incoming = serde_json::json!({
             "groups": [{ "name": "team" }],
@@ -253,7 +288,8 @@ mod tests {
         assert_eq!(merged.codex.poll_secs, 300);
         assert!(!merged.codex.usage_polling);
         // A codex-only patch leaves the groups untouched.
-        let m2 = merge_update(&merged, serde_json::json!({ "codex": { "pollSecs": 120 } })).unwrap();
+        let m2 =
+            merge_update(&merged, serde_json::json!({ "codex": { "pollSecs": 120 } })).unwrap();
         assert_eq!(m2.groups.len(), 1, "codex patch must not disturb groups");
         assert_eq!(m2.groups[0].name, "team");
     }
@@ -276,13 +312,19 @@ mod tests {
         assert!(e.to_string().contains("dataDir"), "err: {e}");
         assert!(e.to_string().contains("first-run"), "err: {e}");
         // cloneSocket
-        let e = merge_update(&base, serde_json::json!({ "cloneSocket": "/tmp/other.sock" }))
-            .unwrap_err();
+        let e = merge_update(
+            &base,
+            serde_json::json!({ "cloneSocket": "/tmp/other.sock" }),
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("cloneSocket"), "err: {e}");
         assert!(e.to_string().contains("first-run"), "err: {e}");
         // docker.subnet
-        let e = merge_update(&base, serde_json::json!({ "docker": { "subnet": "10.42.0.0/24" } }))
-            .unwrap_err();
+        let e = merge_update(
+            &base,
+            serde_json::json!({ "docker": { "subnet": "10.42.0.0/24" } }),
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("subnet"), "err: {e}");
         assert!(e.to_string().contains("first-run"), "err: {e}");
         // A no-op resend of the same values is fine (final value == base value).
@@ -331,16 +373,19 @@ mod tests {
         }
         // Bad format / bad prefix / non-IP are all rejected, naming the field.
         for bad in [
-            "10.99.0.0",      // no prefix
-            "10.99.0.0/",     // empty prefix
-            "10.99.0.0/8",    // prefix too wide (<16)
-            "10.99.0.0/25",   // prefix too narrow (>24)
-            "10.99.0/24",     // not a full IPv4 address
-            "banana/24",      // non-IP
-            "fd00::/24",      // IPv6 not supported
+            "10.99.0.0",    // no prefix
+            "10.99.0.0/",   // empty prefix
+            "10.99.0.0/8",  // prefix too wide (<16)
+            "10.99.0.0/25", // prefix too narrow (>24)
+            "10.99.0/24",   // not a full IPv4 address
+            "banana/24",    // non-IP
+            "fd00::/24",    // IPv6 not supported
         ] {
             let e = merge_update(&base, set(bad)).unwrap_err();
-            assert!(e.to_string().contains("docker.subnet"), "subnet {bad:?} err: {e}");
+            assert!(
+                e.to_string().contains("docker.subnet"),
+                "subnet {bad:?} err: {e}"
+            );
         }
         // Blank = unchanged (deep-merge collapses it before validation) — never an error.
         let ok = merge_update(&base, set("")).unwrap();
@@ -393,14 +438,23 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.layout_presets = vec![wire::LayoutPreset {
             name: "X".into(),
-            monitors: vec![wire::MonitorSpec { width: 800, height: 600, x: 0, y: 0, primary: true }],
+            monitors: vec![wire::MonitorSpec {
+                width: 800,
+                height: 600,
+                x: 0,
+                y: 0,
+                primary: true,
+            }],
         }];
         cfg.active_layout = "X".into();
         // Migration must not clobber an already-migrated config.
         let _ = migrate_legacy(&raw, &mut cfg);
         assert_eq!(cfg.layout_presets.len(), 1);
         assert_eq!(cfg.layout_presets[0].name, "X");
-        assert_eq!(cfg.layout_presets[0].monitors[0].width, 800, "existing preset width must not be clobbered");
+        assert_eq!(
+            cfg.layout_presets[0].monitors[0].width, 800,
+            "existing preset width must not be clobbered"
+        );
     }
 
     #[test]
@@ -460,9 +514,6 @@ mod tests {
         n.listen.video = 8081;
         assert!(restart_required(&base, &n));
         let mut n = base.clone();
-        n.listen.clone_mcp = 8082;
-        assert!(restart_required(&base, &n));
-        let mut n = base.clone();
         n.clone_socket = "/tmp/other.sock".into();
         assert!(restart_required(&base, &n));
         let mut n = base.clone();
@@ -482,15 +533,27 @@ mod tests {
     }
 
     fn ms(w: u32, h: u32) -> wire::MonitorSpec {
-        wire::MonitorSpec { width: w, height: h, x: 0, y: 0, primary: true }
+        wire::MonitorSpec {
+            width: w,
+            height: h,
+            x: 0,
+            y: 0,
+            primary: true,
+        }
     }
 
     #[test]
     fn merge_reconciles_active_layout_when_active_preset_removed() {
         let mut base = AppConfig::default();
         base.layout_presets = vec![
-            wire::LayoutPreset { name: "A".into(), monitors: vec![ms(1920, 1080)] },
-            wire::LayoutPreset { name: "B".into(), monitors: vec![ms(3840, 2160)] },
+            wire::LayoutPreset {
+                name: "A".into(),
+                monitors: vec![ms(1920, 1080)],
+            },
+            wire::LayoutPreset {
+                name: "B".into(),
+                monitors: vec![ms(3840, 2160)],
+            },
         ];
         base.active_layout = "B".into();
         // The UI removes preset "B", sending only "A".
@@ -506,9 +569,7 @@ mod tests {
     #[test]
     fn merge_rejects_invalid_layout_presets() {
         let base = AppConfig::default();
-        let one = |primary: bool| {
-            serde_json::json!({ "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": primary })
-        };
+        let one = |primary: bool| serde_json::json!({ "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": primary });
 
         // Two presets sharing a (case-sensitive) name → Err.
         let dup = serde_json::json!({ "layoutPresets": [
@@ -536,8 +597,15 @@ mod tests {
         ] });
         let merged = merge_update(&base, two_primaries).unwrap();
         let mons = &merged.layout_presets[0].monitors;
-        assert_eq!(mons.iter().filter(|m| m.primary).count(), 1, "exactly one primary");
-        assert!(mons[0].primary && !mons[1].primary, "first primary kept, rest cleared");
+        assert_eq!(
+            mons.iter().filter(|m| m.primary).count(),
+            1,
+            "exactly one primary"
+        );
+        assert!(
+            mons[0].primary && !mons[1].primary,
+            "first primary kept, rest cleared"
+        );
 
         // Zero primaries → Ok, normalized so the first monitor becomes primary.
         let no_primary = serde_json::json!({ "layoutPresets": [
@@ -545,7 +613,11 @@ mod tests {
         ] });
         let merged = merge_update(&base, no_primary).unwrap();
         let mons = &merged.layout_presets[0].monitors;
-        assert_eq!(mons.iter().filter(|m| m.primary).count(), 1, "exactly one primary");
+        assert_eq!(
+            mons.iter().filter(|m| m.primary).count(),
+            1,
+            "exactly one primary"
+        );
         assert!(mons[0].primary, "first monitor promoted to primary");
 
         // An empty layout_presets array is allowed (fresh install has none).
@@ -563,7 +635,10 @@ mod tests {
         let merged = merge_update(&base, incoming).unwrap();
         assert_eq!(
             merged.ssh.authorized_keys,
-            vec!["ssh-ed25519 NEW b".to_string(), "ssh-ed25519 NEW c".to_string()]
+            vec![
+                "ssh-ed25519 NEW b".to_string(),
+                "ssh-ed25519 NEW c".to_string()
+            ]
         );
     }
 
@@ -571,7 +646,11 @@ mod tests {
     fn merge_can_clear_ssh_authorized_keys() {
         let mut base = AppConfig::default();
         base.ssh.authorized_keys = vec!["ssh-ed25519 OLD a".into()];
-        let merged = merge_update(&base, serde_json::json!({ "ssh": { "authorizedKeys": [] } })).unwrap();
+        let merged = merge_update(
+            &base,
+            serde_json::json!({ "ssh": { "authorizedKeys": [] } }),
+        )
+        .unwrap();
         assert!(merged.ssh.authorized_keys.is_empty());
     }
 
@@ -597,7 +676,10 @@ mod tests {
             serde_json::json!({ "ssh": { "authorizedKeys": ["ssh-ed25519 AAAA x"] } }),
         )
         .unwrap();
-        assert_eq!(merged.ssh.authorized_keys, vec!["ssh-ed25519 AAAA x".to_string()]);
+        assert_eq!(
+            merged.ssh.authorized_keys,
+            vec!["ssh-ed25519 AAAA x".to_string()]
+        );
     }
 }
 
@@ -640,9 +722,16 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
     }
     // Keep active_layout valid after preset edits: if it no longer names a preset,
     // point it at the first (or clear it when there are none).
-    if !merged.layout_presets.iter().any(|p| p.name == merged.active_layout) {
-        merged.active_layout =
-            merged.layout_presets.first().map(|p| p.name.clone()).unwrap_or_default();
+    if !merged
+        .layout_presets
+        .iter()
+        .any(|p| p.name == merged.active_layout)
+    {
+        merged.active_layout = merged
+            .layout_presets
+            .first()
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
     }
     enforce_categories(base, &merged)?;
     validate_docker_subnet(&merged.docker.subnet)?;
@@ -700,7 +789,9 @@ fn validate_docker_subnet(subnet: &str) -> Result<()> {
             && prefix.parse::<u8>().is_ok_and(|p| (16..=24).contains(&p))
     });
     if !ok {
-        bail!("docker.subnet must be an IPv4 CIDR with a /16–/24 prefix (e.g. 10.99.0.0/24), got {subnet:?}");
+        bail!(
+            "docker.subnet must be an IPv4 CIDR with a /16–/24 prefix (e.g. 10.99.0.0/24), got {subnet:?}"
+        );
     }
     Ok(())
 }
@@ -712,17 +803,25 @@ fn validate_docker_subnet(subnet: &str) -> Result<()> {
 /// values — a client re-sending the current value is a no-op, not an error.
 fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
     if base.setup_complete && !merged.setup_complete {
-        bail!("setupComplete cannot be turned off — it is a one-way latch set during first-run setup");
+        bail!(
+            "setupComplete cannot be turned off — it is a one-way latch set during first-run setup"
+        );
     }
     if base.setup_complete {
         if merged.data_dir != base.data_dir {
-            bail!("dataDir is a one-time setting (set during first-run setup) and cannot be changed after setup");
+            bail!(
+                "dataDir is a one-time setting (set during first-run setup) and cannot be changed after setup"
+            );
         }
         if merged.clone_socket != base.clone_socket {
-            bail!("cloneSocket is a one-time setting (set during first-run setup) and cannot be changed after setup");
+            bail!(
+                "cloneSocket is a one-time setting (set during first-run setup) and cannot be changed after setup"
+            );
         }
         if merged.docker.subnet != base.docker.subnet {
-            bail!("docker.subnet is a one-time setting (baked into the rmng network at first-run setup) and cannot be changed after setup");
+            bail!(
+                "docker.subnet is a one-time setting (baked into the rmng network at first-run setup) and cannot be changed after setup"
+            );
         }
     }
     Ok(())
@@ -737,7 +836,6 @@ fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
 pub fn restart_required(old: &AppConfig, new: &AppConfig) -> bool {
     old.listen.web != new.listen.web
         || old.listen.video != new.listen.video
-        || old.listen.clone_mcp != new.listen.clone_mcp
         || old.listen.bastion != new.listen.bastion
         || old.clone_socket != new.clone_socket
         || old.docker.socket != new.docker.socket
@@ -751,7 +849,9 @@ pub fn restart_required(old: &AppConfig, new: &AppConfig) -> bool {
 fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire::Preset> {
     let mut out: Vec<wire::Preset> = Vec::new();
     for r in rows {
-        let Some(name) = r.get("name").and_then(|v| v.as_str()) else { continue };
+        let Some(name) = r.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
         let name = name.trim().to_string();
         if name.is_empty() || out.iter().any(|p| p.name == name) {
             continue;
@@ -774,13 +874,25 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
             .unwrap_or_default();
         let sent = r.get("linearKey").and_then(|v| v.as_str()).unwrap_or("");
         let linear_key = if sent.is_empty() {
-            base.iter().find(|p| p.name == name).map(|p| p.linear_key.clone()).unwrap_or_default()
+            base.iter()
+                .find(|p| p.name == name)
+                .map(|p| p.linear_key.clone())
+                .unwrap_or_default()
         } else {
             sent.to_string()
         };
-        let agent_playbook =
-            r.get("agentPlaybook").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        out.push(wire::Preset { name, labels, linear_key, vars, agent_playbook });
+        let agent_playbook = r
+            .get("agentPlaybook")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        out.push(wire::Preset {
+            name,
+            labels,
+            linear_key,
+            vars,
+            agent_playbook,
+        });
     }
     out
 }
@@ -802,4 +914,3 @@ fn deep_merge(dst: &mut serde_json::Value, src: &serde_json::Value) {
         (d, s) => *d = s.clone(),
     }
 }
-
