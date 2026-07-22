@@ -100,14 +100,28 @@ op still loads, aliased onto `pull`), `target`, `source`, `status`, `step`, `pct
 The same `/events` connection multiplexes a second, named SSE event: `stats`, a live
 `{ <hostId>: ContainerStats }` map for running **managed** clones only (a stopped or
 unmanaged host contributes no entry). `ContainerStats` ([control.rs](../crates/wire/src/control.rs)):
-`cpuPct` (percentage of ONE core — 100 == a single fully-used core, so a container busy
-across several cores reads > 100; docker-CLI convention), `memUsed`/`memLimit` (bytes,
-docker-CLI semantics). Sampled by the monitor poller alongside its 4 s `/status` probe
+`cpuPct` (percentage of total host CPU capacity — 100 == every available core busy), plus
+`memUsed`/`memLimit` in bytes. `memUsed` is RAM with reclaimable file cache excluded, plus
+swap; tmpfs and shared-memory charges remain included. `memLimit` is the clone's RAM plus
+swap limit, or `0` when a cgroup limit is unbounded or unavailable. Disk is intentionally not
+part of this live event. Sampled by the monitor poller alongside its 4 s `/status` probe
 ([monitor.rs](../crates/control-server/src/monitor.rs)); a new subscriber gets the latest
 map immediately, then one push per tick — but only when the map actually changed (deduped
 by value, not serialization, so an idle fleet doesn't wake subscribers). Deliberately kept
 out of `ControlState`/`state.json`: these numbers move every tick, and every `ControlState`
 mutation persists the file, so folding stats in would rewrite it every 4 s.
+
+### `lxcStats` event
+The same connection also sends a named `lxcStats` event for the complete CT 105 LXC that hosts
+RMNG, independent of the clone-only `stats` map. Its `LxcStats` payload has `cpuPct`, `memUsed`,
+`memLimit`, and `diskUsed`. CPU is measured from the CT-root cgroup’s `cpu.stat` over the monitor
+interval: `100` means CT 105's enforced 16-CPU capacity was busy. `memUsed` uses the
+same RAM-plus-swap policy as clone stats but includes the control-server, Docker daemon, registry,
+caches, and every other CT process. `diskUsed` is physical rootfs usage from CT-root `statvfs`; on
+this CT’s ZFS rootfs it is compression-aware. There is intentionally no logical/pre-compression
+disk value because it is not observable from the unprivileged LXC. `cpuPct` is `null` until a
+second CPU sample establishes a rate; `diskUsed` is `null` when the rootfs stat is unavailable.
+Like `stats`, this event is SSE-only and never writes `state.json`.
 
 ### `forwards` event
 The same `/events` connection multiplexes a third, named SSE event: `forwards`, the volatile

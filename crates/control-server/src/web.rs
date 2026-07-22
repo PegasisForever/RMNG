@@ -137,16 +137,18 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `GET /events` — three multiplexed streams on one connection:
+/// `GET /events` — four multiplexed streams on one connection:
 ///   - the persisted `ControlState` as the default (unnamed) event → the client's
 ///     `onmessage`: full snapshot on connect, then one frame per change;
 ///   - the volatile per-host CPU/RAM map as a named `stats` event → the client's
 ///     `addEventListener("stats")`: latest snapshot on connect, then one per poll tick;
+///   - CT 105-wide CPU/RAM/disk as a named `lxcStats` event → the client's
+///     `addEventListener("lxcStats")`: latest snapshot on connect, then one per poll tick;
 ///   - the volatile port-forward runtime map as a named `forwards` event → the client's
 ///     `addEventListener("forwards")`: snapshot on connect, then one per status change.
 ///
-/// Stats and forwards ride separate SSE-only buses ([`crate::monitor::StatsBus`],
-/// [`crate::forward::ForwardBus`]) so they never enter `ControlState` / `state.json`
+/// Stats, LXC stats, and forwards ride separate SSE-only buses ([`crate::monitor::StatsBus`],
+/// [`crate::monitor::LxcStatsBus`], [`crate::forward::ForwardBus`]) so they never enter `ControlState` / `state.json`
 /// (which persists on every mutation). Plus a named `ping` event every 15s (an
 /// observable heartbeat the client's reconnect watchdog measures) and a 20s low-level
 /// keep-alive comment.
@@ -173,6 +175,18 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
         }
     });
     let stats_stream = stats_initial.chain(stats_updates);
+
+    let (lxc_stats_snapshot, lxc_stats_rx) = app.lxc_stats.subscribe();
+    let lxc_stats_initial = futures::stream::once(async move {
+        Ok(Event::default().event("lxcStats").data(lxc_stats_snapshot))
+    });
+    let lxc_stats_updates = BroadcastStream::new(lxc_stats_rx).filter_map(|r| async move {
+        match r {
+            Ok(json) => Some(Ok(Event::default().event("lxcStats").data(json))),
+            Err(_) => None, // lagged: next tick resyncs
+        }
+    });
+    let lxc_stats_stream = lxc_stats_initial.chain(lxc_stats_updates);
 
     let (fwd_snapshot, fwd_rx) = app.forwards.subscribe();
     let fwd_initial =
@@ -203,7 +217,10 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     Sse::new(futures::stream::select(
         state_stream,
         futures::stream::select(
-            futures::stream::select(stats_stream, fwd_stream),
+            futures::stream::select(
+                futures::stream::select(stats_stream, lxc_stats_stream),
+                fwd_stream,
+            ),
             heartbeat,
         ),
     ))
@@ -2281,9 +2298,9 @@ mod tests {
         assert_eq!(urlencode("claude-a@b.json"), "claude-a%40b.json");
     }
 
-    /// Spin up `/events` and read the opening bytes. All three multiplexed streams send a
+    /// Spin up `/events` and read the opening bytes. All four multiplexed streams send a
     /// snapshot on connect: the default (unnamed) `ControlState` frame plus the named
-    /// `stats` and `forwards` snapshots. Guards the stream `select` wiring.
+    /// `stats`, `lxcStats`, and `forwards` snapshots. Guards the stream `select` wiring.
     #[tokio::test]
     async fn events_stream_multiplexes_snapshots_on_connect() {
         use futures::stream::StreamExt;
@@ -2306,13 +2323,17 @@ mod tests {
         {
             buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
             let seen = buf.replace(' ', "");
-            if seen.contains("event:stats") && seen.contains("event:forwards") {
+            if seen.contains("event:stats")
+                && seen.contains("event:lxcStats")
+                && seen.contains("event:forwards")
+            {
                 break;
             }
         }
         let seen = buf.replace(' ', "");
         assert!(seen.contains("data:"), "no default state frame in: {buf:?}");
         assert!(seen.contains("event:stats"), "no stats snapshot in: {buf:?}");
+        assert!(seen.contains("event:lxcStats"), "no LXC stats snapshot in: {buf:?}");
         assert!(seen.contains("event:forwards"), "no forwards snapshot in: {buf:?}");
     }
 

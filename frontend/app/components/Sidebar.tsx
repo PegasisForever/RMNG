@@ -18,46 +18,23 @@ import { Settings } from "lucide-react";
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
 import { SidebarHost } from "~/components/SidebarHost";
-import { formatBytes } from "~/lib/format";
 import type { GroupUsage, Host, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
+import type { LxcStats } from "~/lib/wire/LxcStats";
 
-export function formatHostsUsageSummary(
-  hostIds: string[],
-  stats: Record<string, ContainerStats>,
-  cloneCpus: number,
-): { cpu: string; mem: string; disk?: string } | null {
-  let cpuPctTotal = 0;
-  let memUsedTotal = 0;
-  let dockerDiskUsed = 0;
-  let sampleCount = 0;
-
-  for (const id of hostIds) {
-    const sample = stats[id];
-    if (!sample || Number(sample.memLimit) <= 0) continue;
-    cpuPctTotal += sample.cpuPct;
-    memUsedTotal += Number(sample.memUsed);
-    dockerDiskUsed = Math.max(dockerDiskUsed, Number(sample.dockerDiskUsed ?? 0));
-    sampleCount += 1;
-  }
-
-  if (sampleCount === 0) return null;
+export function formatLxcUsage(
+  stats: LxcStats | null,
+): { cpu: string; mem: string; disk: string } | null {
+  if (!stats) return null;
 
   const GiB = 1024 ** 3;
-  const mem = `${(memUsedTotal / GiB).toFixed(1)}GB`;
-  const cpu =
-    cloneCpus > 0
-      ? (() => {
-          const pct = cpuPctTotal / cloneCpus;
-          return `${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%`;
-        })()
-      : `${(cpuPctTotal / 100).toFixed(1)}c`;
-  return {
-    cpu,
-    mem,
-    ...(dockerDiskUsed > 0 ? { disk: formatBytes(dockerDiskUsed).replace(" ", "") } : {}),
-  };
+  const cpu = stats.cpuPct === null
+    ? "—"
+    : `${stats.cpuPct < 1 ? stats.cpuPct.toFixed(1) : Math.round(stats.cpuPct)}%`;
+  const mem = `${(Number(stats.memUsed) / GiB).toFixed(1)}GB`;
+  const disk = stats.diskUsed === null ? "—" : `${(Number(stats.diskUsed) / GiB).toFixed(1)}GB`;
+  return { cpu, mem, disk };
 }
 
 export function partitionHosts(hosts: Host[]): { activeHosts: Host[]; archivedHosts: Host[] } {
@@ -83,6 +60,8 @@ export interface SidebarProps {
   hosts: Host[];
   /** Live per-host CPU/RAM map (the volatile `stats` SSE event). */
   stats: Record<string, ContainerStats>;
+  /** Live CT 105-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
+  lxcStats: LxcStats | null;
   /** Live per-host forward-runtime map (the `forwards` SSE event), fanned out to each
    *  host row's compact forwards chips. */
   forwards?: Record<string, ForwardRuntime[]>;
@@ -90,8 +69,6 @@ export interface SidebarProps {
    *  and the Activity list from these. */
   operations: Operation[];
   selectedId: string | null;
-  /** `docker.cloneCpus` — normalizes each host row's CPU usage figure. */
-  cloneCpus: number;
   /** `ssh.publicHost` (config) — the `-J` jump target for each row's copied SSH
    *  command. Empty ⇒ each row falls back to `window.location.hostname`. */
   sshPublicHost: string;
@@ -140,10 +117,10 @@ export function Sidebar({
   usageGroups,
   hosts,
   stats,
+  lxcStats,
   forwards = {},
   operations,
   selectedId,
-  cloneCpus,
   sshPublicHost,
   bastionPort,
   presetNames,
@@ -170,11 +147,7 @@ export function Sidebar({
   const opForHost = (id: string) =>
     operations.find((o) => o.target === id && o.status === "running");
   const { activeHosts, archivedHosts } = partitionHosts(hosts);
-  const hostsUsage = formatHostsUsageSummary(
-    activeHosts.map((h) => h.id),
-    stats,
-    cloneCpus,
-  );
+  const lxcUsage = formatLxcUsage(lxcStats);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -184,7 +157,7 @@ export function Sidebar({
   function onDragEnd(event: DragEndEvent) {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const ids = activeHosts.map((h) => h.id);
+    const ids = activeHosts.map((host) => host.id);
     const oldIndex = ids.indexOf(String(active.id));
     const newIndex = ids.indexOf(String(over.id));
     if (oldIndex < 0 || newIndex < 0) return;
@@ -254,13 +227,12 @@ export function Sidebar({
             <h2 className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
               Hosts ({activeHosts.length})
             </h2>
-            {hostsUsage ? (
+            {lxcUsage ? (
               <span
                 className="truncate text-[11px] font-semibold tabular-nums text-slate-500 dark:text-slate-400"
-                title="Total live container CPU and memory usage; Docker daemon disk usage"
+                title="CT 105 LXC totals: CPU and memory include all LXC processes; memory is RAM + swap excluding reclaimable file cache; disk is physical, compression-aware ZFS rootfs use"
               >
-                CPU {hostsUsage.cpu} · MEM {hostsUsage.mem}
-                {hostsUsage.disk ? <> · DISK {hostsUsage.disk}</> : null}
+                LXC CPU {lxcUsage.cpu} · MEM {lxcUsage.mem} · DISK {lxcUsage.disk}
               </span>
             ) : null}
           </div>
@@ -285,7 +257,7 @@ export function Sidebar({
             onDragEnd={onDragEnd}
           >
             <SortableContext
-              items={activeHosts.map((h) => h.id)}
+              items={activeHosts.map((host) => host.id)}
               strategy={verticalListSortingStrategy}
             >
               <div>
@@ -295,7 +267,6 @@ export function Sidebar({
                     host={host}
                     stats={stats[host.id]}
                     forwardRuntime={forwards[host.id]}
-                    cloneCpus={cloneCpus}
                     sshPublicHost={sshPublicHost}
                     bastionPort={bastionPort}
                     selected={selectedId === host.id}
@@ -320,30 +291,25 @@ export function Sidebar({
           <h2 className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
             Archived hosts ({archivedHosts.length})
           </h2>
-          <DndContext>
-            <SortableContext items={[]} strategy={verticalListSortingStrategy}>
-              <div>
-                {archivedHosts.map((host) => (
-                  <SidebarHost
-                    key={host.id}
-                    host={host}
-                    cloneCpus={cloneCpus}
-                    sshPublicHost={sshPublicHost}
-                    bastionPort={bastionPort}
-                    selected={selectedId === host.id}
-                    op={opForHost(host.id)}
-                    onSelect={() => onSelectHost(host)}
-                    onCommit={() => onCommitHost(host)}
-                    onDelete={() => onDeleteHost(host)}
-                    onChangeAccount={() => onChangeAccountHost(host)}
-                    onPortForward={() => onPortForwardHost(host)}
-                    onArchive={() => onArchiveHost(host)}
-                    onUnarchive={() => onUnarchiveHost(host)}
-                  />
-                ))}
-              </div>
-            </SortableContext>
-          </DndContext>
+          <div>
+            {archivedHosts.map((host) => (
+              <SidebarHost
+                key={host.id}
+                host={host}
+                selected={selectedId === host.id}
+                op={opForHost(host.id)}
+                onSelect={() => onSelectHost(host)}
+                onCommit={() => onCommitHost(host)}
+                onDelete={() => onDeleteHost(host)}
+                onChangeAccount={() => onChangeAccountHost(host)}
+                onPortForward={() => onPortForwardHost(host)}
+                onArchive={() => onArchiveHost(host)}
+                onUnarchive={() => onUnarchiveHost(host)}
+                sshPublicHost={sshPublicHost}
+                bastionPort={bastionPort}
+              />
+            ))}
+          </div>
         </div>
       ) : null}
 

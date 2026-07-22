@@ -9,6 +9,7 @@ mod app;
 mod assets;
 mod antigravity;
 mod buildinfra;
+mod cgroup;
 mod chat;
 mod claude;
 mod cliproxy;

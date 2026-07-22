@@ -38,6 +38,7 @@ import { type ClaudeUsage, type ControlState, type GroupUsage, type Host, emptyS
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
+import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
@@ -70,8 +71,8 @@ export function clientLoader() {
 const SSE_STALE_MS = 45_000;
 
 /** Initial state from the SSR loader, kept live by the SSE stream. The same connection
- *  carries the persisted `ControlState` (default event) and a volatile per-host CPU/RAM
- *  map (named `stats` event) — the latter never touches `state.json`.
+ *  carries persisted `ControlState` plus volatile clone (`stats`) and CT-wide (`lxcStats`)
+ *  resource events; neither metric stream touches `state.json`.
  *
  *  A plain `EventSource` auto-reconnects when the browser *notices* the socket died — but
  *  after a Wi-Fi drop the TCP connection often goes half-open: it stays `OPEN`, delivers
@@ -82,6 +83,7 @@ const SSE_STALE_MS = 45_000;
 function useLiveState(initial: ControlState) {
   const [state, setState] = useState(initial);
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
+  const [lxcStats, setLxcStats] = useState<LxcStats | null>(null);
   const [forwards, setForwards] = useState<Record<string, ForwardRuntime[]>>({});
   useEffect(() => {
     let es: EventSource | null = null;
@@ -108,6 +110,14 @@ function useLiveState(initial: ControlState) {
         lastActivity = Date.now();
         try {
           setStats(JSON.parse((e as MessageEvent).data));
+        } catch {
+          // ignore malformed frame
+        }
+      });
+      es.addEventListener("lxcStats", (e) => {
+        lastActivity = Date.now();
+        try {
+          setLxcStats(JSON.parse((e as MessageEvent).data));
         } catch {
           // ignore malformed frame
         }
@@ -159,13 +169,13 @@ function useLiveState(initial: ControlState) {
       es?.close();
     };
   }, []);
-  return { state, stats, forwards };
+  return { state, stats, lxcStats, forwards };
 }
 
 export default function Home({ loaderData }: Route.ComponentProps) {
   // The live SSE state powers both the wizard (template-provision progress) and the
   // dashboard, so it lives here at the gate. `stats` is the volatile per-host usage map.
-  const { state, stats, forwards } = useLiveState(loaderData);
+  const { state, stats, lxcStats, forwards } = useLiveState(loaderData);
   // First-run gate: hold the config (null while loading). Render a minimal centered
   // "Loading…" until it resolves so the dashboard never flashes before the wizard
   // decision; render the wizard INSTEAD of the dashboard while setup isn't complete.
@@ -194,8 +204,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     <Dashboard
       state={state}
       stats={stats}
+      lxcStats={lxcStats}
       forwards={forwards}
-      cloneCpus={cfg.docker.cloneCpus}
       sshPublicHost={cfg.ssh?.publicHost ?? ""}
       bastionPort={cfg.listen.bastion}
       groups={cfg.groups}
@@ -207,8 +217,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 function Dashboard({
   state,
   stats,
+  lxcStats,
   forwards,
-  cloneCpus,
   sshPublicHost,
   bastionPort,
   groups,
@@ -216,8 +226,8 @@ function Dashboard({
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
+  lxcStats: LxcStats | null;
   forwards: Record<string, ForwardRuntime[]>;
-  cloneCpus: number;
   /** `ssh.publicHost` (config) — threaded down to each sidebar row's copied SSH
    *  command; empty ⇒ falls back to `window.location.hostname`. */
   sshPublicHost: string;
@@ -420,10 +430,10 @@ function Dashboard({
           usageGroups={displayGroups}
           hosts={orderedHosts}
           stats={stats}
+          lxcStats={lxcStats}
           forwards={forwards}
           operations={state.operations}
           selectedId={state.selected}
-          cloneCpus={cloneCpus}
           sshPublicHost={sshPublicHost}
           bastionPort={bastionPort}
           presetNames={state.layoutPresetNames ?? []}

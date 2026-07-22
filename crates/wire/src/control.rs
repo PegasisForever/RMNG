@@ -246,20 +246,32 @@ pub struct Operation {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ContainerStats {
-    /// CPU use as a percentage of ONE core (100 == a single fully-used core; a container
-    /// busy across several cores reads > 100). The frontend divides by 100 to display
-    /// "cores".
+    /// CPU use as a percentage of total host capacity (100 == every available core busy).
     pub cpu_pct: f64,
-    /// Resident memory in bytes, docker-CLI semantics (`usage` minus reclaimable
-    /// `inactive_file` page cache).
+    /// RAM usage excluding reclaimable page cache, plus swap usage, in bytes. Tmpfs and
+    /// shared-memory charges remain included.
     pub mem_used: u64,
-    /// Memory limit in bytes; 0 when the daemon reports none.
+    /// RAM plus swap limit in bytes; 0 when either cgroup limit is unbounded or unavailable.
     pub mem_limit: u64,
-    /// Total Docker daemon disk usage in bytes. This is daemon-wide, not per-container;
-    /// the monitor repeats it on each live stats sample so the frontend can show one
-    /// sidebar total without routing volatile data through `ControlState`.
-    #[serde(default)]
-    pub docker_disk_used: u64,
+}
+
+/// Live resource usage for the entire CT 105 LXC that hosts RMNG. Published as the volatile
+/// `lxcStats` SSE event, separately from per-clone [`ContainerStats`] rows, so control-server,
+/// Docker, registry, cache, and unmanaged CT work are included without entering `state.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct LxcStats {
+    /// CT-wide CPU use; 100 means CT 105's enforced 16-CPU capacity was busy. `None` is
+    /// emitted until two cgroup samples establish a rate.
+    pub cpu_pct: Option<f64>,
+    /// RAM usage excluding reclaimable page cache, plus swap usage, in bytes. Tmpfs and
+    /// shared-memory charges remain included.
+    pub mem_used: u64,
+    /// RAM plus swap limit in bytes; 0 when either cgroup limit is unbounded or unavailable.
+    pub mem_limit: u64,
+    /// Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
+    pub disk_used: Option<u64>,
 }
 
 /// Version + update-available status for the control-server itself, served by

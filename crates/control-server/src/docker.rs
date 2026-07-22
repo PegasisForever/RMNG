@@ -40,7 +40,7 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
-    DataUsageOptions, ListImagesOptionsBuilder, RemoveContainerOptionsBuilder,
+    ListImagesOptionsBuilder, RemoveContainerOptionsBuilder,
     RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder, StatsOptionsBuilder,
     StopContainerOptionsBuilder,
 };
@@ -48,7 +48,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
-use wire::{ContainerStats, DockerConfig, EnvCheckRow, ExecResult, ImageInfo, SetupEnv, UpdateStatus};
+use wire::{DockerConfig, EnvCheckRow, ExecResult, ImageInfo, SetupEnv, UpdateStatus};
 
 // --- Constants ------------------------------------------------------------------------
 
@@ -248,6 +248,14 @@ pub struct DockerCtl {
     /// would reject the mismatched network).
     subnet: std::sync::RwLock<String>,
     env: RwLock<EnvReport>,
+}
+
+/// Runtime facts from one Docker container inspect. `pid` is absent for a stopped/gone
+/// container; `ip` is absent when it is stopped or detached from the rmng bridge.
+#[derive(Debug, Clone)]
+pub struct ContainerRuntime {
+    pub pid: Option<i64>,
+    pub ip: Option<String>,
 }
 
 /// The set of things needed to create a clone container. `provision.rs` fills this from
@@ -1605,21 +1613,35 @@ impl DockerCtl {
         format!("rmng-ctd-{name}")
     }
 
+    /// One Docker inspect for the runtime facts the monitor needs. A 404 is the same as a
+    /// stopped container: no PID and no bridge IP. Keeping these facts together avoids a
+    /// clone-recreate race between separate PID and IP inspections.
+    pub async fn inspect_runtime(&self, id: &str) -> Result<ContainerRuntime> {
+        match self
+            .daemon()?
+            .inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>)
+            .await
+        {
+            Ok(info) => Ok(ContainerRuntime {
+                pid: info.state.and_then(|s| s.pid).filter(|&pid| pid > 0),
+                ip: info
+                    .network_settings
+                    .and_then(|ns| ns.networks)
+                    .and_then(|nets| nets.get(NETWORK).and_then(|e| e.ip_address.clone()))
+                    .filter(|ip| !ip.is_empty()),
+            }),
+            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {
+                Ok(ContainerRuntime { pid: None, ip: None })
+            }
+            Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
+        }
+    }
+
     /// The container's IPv4 on the rmng network, or `None` if not attached / not running.
     /// Dev mode's dial path: a host process can't use Docker's embedded DNS, so
     /// `App::dial_host` resolves a clone's bridge IP through this instead.
     pub async fn inspect_ip(&self, id: &str) -> Result<Option<String>> {
-        let info = self
-            .daemon()?
-            .inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>)
-            .await
-            .with_context(|| format!("inspecting container {id}"))?;
-        let ip = info
-            .network_settings
-            .and_then(|ns| ns.networks)
-            .and_then(|nets| nets.get(NETWORK).and_then(|e| e.ip_address.clone()))
-            .filter(|s| !s.is_empty());
-        Ok(ip)
+        Ok(self.inspect_runtime(id).await?.ip)
     }
 
     /// Whether a container is currently running. `false` (not an error) if it doesn't
@@ -1632,69 +1654,25 @@ impl DockerCtl {
         }
     }
 
-    /// Total Docker daemon disk usage in bytes, matching the assumption that RMNG owns
-    /// this daemon. Uses Docker's `system df` accounting: image layer bytes once,
-    /// container writable layers, volumes, and build cache.
-    pub async fn docker_disk_used(&self) -> Option<u64> {
-        let df = self.daemon().ok()?.df(None::<DataUsageOptions>).await.ok()?;
-        Some(docker_disk_used_from_df(df))
-    }
-
-    /// One-shot live resource sample for a container (`stream=false` so the daemon
-    /// returns a single frame then disconnects; `one_shot=false` so it collects TWO CPU
-    /// cycles and fills `precpu_stats`, which the CPU-delta math needs). Returns `None` —
-    /// never an error — for a stopped/missing container (the daemon yields no usable
-    /// memory sample), so the monitor poller can just skip it. CPU is a percent-of-one-
-    /// core figure ([`cpu_percent`]); memory follows docker-CLI semantics (`usage` minus
-    /// reclaimable `inactive_file` cache). Best-effort: a dead daemon yields `None` too.
-    pub async fn container_stats(&self, name: &str) -> Option<ContainerStats> {
+    /// One-shot CPU sample for a running container (`stream=false` so the daemon returns a
+    /// single frame then disconnects; `one_shot=false` so it collects TWO CPU cycles and
+    /// fills `precpu_stats`, which the delta math needs). The result is a percentage of total
+    /// host capacity. Memory is sampled separately from the same runtime inspect's PID, so
+    /// Docker's presentation-oriented memory field never enters the stats payload.
+    pub async fn container_cpu_pct(&self, name: &str) -> Option<f64> {
         let opts = StatsOptionsBuilder::new().stream(false).one_shot(false).build();
         let docker = self.daemon().ok()?;
         let mut stream = docker.stats(name, Some(opts));
         // `stream=false` yields exactly one frame (after the two cycles) then closes; a
         // stopped or missing container errors / yields nothing → None.
         let s = stream.next().await?.ok()?;
-
-        // Memory: a running container reports a non-empty `memory_stats` with `usage`; a
-        // stopped one reports an empty object (no `usage`) — the running gate.
-        let mem = s.memory_stats?;
-        let usage = mem.usage?;
-        let mem_limit = mem.limit.unwrap_or(0);
-        // Subtract reclaimable page cache so the number matches `docker stats` (cgroup v2
-        // exports `inactive_file`; v1 `total_inactive_file`).
-        let inactive = mem
-            .stats
-            .as_ref()
-            .and_then(|m| m.get("inactive_file").or_else(|| m.get("total_inactive_file")))
-            .copied()
-            .unwrap_or(0);
-        let mem_used = usage.saturating_sub(inactive);
-
-        // CPU: delta of the container's total vs the system's total across the two samples
-        // the daemon just collected, scaled by the online-CPU count.
         let cpu = s.cpu_stats.unwrap_or_default();
         let precpu = s.precpu_stats.unwrap_or_default();
         let cpu_total = cpu.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0);
         let precpu_total = precpu.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0);
         let system = cpu.system_cpu_usage.unwrap_or(0);
         let presystem = precpu.system_cpu_usage.unwrap_or(0);
-        // `online_cpus` can be absent on older daemons — fall back to the per-CPU vector
-        // length, then to 1, so a valid sample never collapses to 0% for lack of a count.
-        let online = cpu
-            .online_cpus
-            .map(u64::from)
-            .filter(|&n| n > 0)
-            .or_else(|| {
-                cpu.cpu_usage
-                    .as_ref()
-                    .and_then(|u| u.percpu_usage.as_ref())
-                    .map(|v| v.len() as u64)
-                    .filter(|&n| n > 0)
-            })
-            .unwrap_or(1);
-        let cpu_pct = cpu_percent(cpu_total, precpu_total, system, presystem, online);
-
-        Some(ContainerStats { cpu_pct, mem_used, mem_limit, docker_disk_used: 0 })
+        Some(cpu_percent(cpu_total, precpu_total, system, presystem))
     }
 
     /// The container's host PID (`State.Pid`), or `None` when it isn't running (the daemon
@@ -1703,11 +1681,7 @@ impl DockerCtl {
     /// under `data/hosts/`; that only resolves when the control-server shares the host PID
     /// namespace (`pid: "host"` in compose.yaml). A dead daemon is a real error (retried).
     pub async fn container_pid(&self, name_or_id: &str) -> Result<Option<i64>> {
-        match self.daemon()?.inspect_container(name_or_id, None::<bollard::query_parameters::InspectContainerOptions>).await {
-            Ok(info) => Ok(info.state.and_then(|s| s.pid).filter(|&p| p > 0)),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(None),
-            Err(e) => Err(anyhow!("inspecting container {name_or_id}: {e}")),
-        }
+        Ok(self.inspect_runtime(name_or_id).await?.pid)
     }
 
     /// `(host PID, HostConfig.Memory bytes)` for a running container, from a single inspect.
@@ -2154,49 +2128,17 @@ impl PullAggregator {
     }
 }
 
-/// Docker's CPU-percent formula, in *percent-of-one-core* units (100 == one fully-used
-/// core; a container busy across four cores reads ~400). Pure over the raw counters
+/// Docker's CPU-percent formula relative to total host capacity. Pure over the raw counters
 /// bollard's stats hand back, so it's unit-testable without a daemon. Yields 0 — never
 /// NaN/∞ — when either delta is non-positive (the first sample carries no `precpu`, and an
-/// idle window has a zero system delta) or the online-CPU count is unknown.
-fn cpu_percent(cpu_total: u64, precpu_total: u64, system: u64, presystem: u64, online_cpus: u64) -> f64 {
+/// idle window has a zero system delta).
+fn cpu_percent(cpu_total: u64, precpu_total: u64, system: u64, presystem: u64) -> f64 {
     let cpu_delta = cpu_total.saturating_sub(precpu_total) as f64;
     let system_delta = system.saturating_sub(presystem) as f64;
-    if cpu_delta <= 0.0 || system_delta <= 0.0 || online_cpus == 0 {
+    if cpu_delta <= 0.0 || system_delta <= 0.0 {
         return 0.0;
     }
-    (cpu_delta / system_delta) * online_cpus as f64 * 100.0
-}
-
-fn docker_disk_used_from_df(df: bollard::models::SystemDataUsageResponse) -> u64 {
-    let mut total = nonnegative_i64(df.layers_size).unwrap_or(0);
-    total = total.saturating_add(
-        df.containers
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|c| nonnegative_i64(c.size_rw))
-            .sum::<u64>(),
-    );
-    total = total.saturating_add(
-        df.volumes
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|v| v.usage_data)
-            .filter_map(|u| nonnegative_i64(Some(u.size)))
-            .sum::<u64>(),
-    );
-    total = total.saturating_add(
-        df.build_cache
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|c| nonnegative_i64(c.size))
-            .sum::<u64>(),
-    );
-    total
-}
-
-fn nonnegative_i64(value: Option<i64>) -> Option<u64> {
-    value.and_then(|v| u64::try_from(v).ok())
+    (cpu_delta / system_delta) * 100.0
 }
 
 /// A short (12-hex) form of a full container/image id for log lines. `sha256:` prefixes
@@ -2431,85 +2373,37 @@ mod tests {
         assert_eq!(ctl.control_host().await.unwrap(), "10.98.0.1");
     }
 
-    #[test]
-    fn docker_disk_used_sums_daemon_usage_categories_once() {
-        let df: bollard::models::SystemDataUsageResponse = serde_json::from_value(serde_json::json!({
-            "LayersSize": 10,
-            "Containers": [{ "SizeRw": 2 }, { "SizeRw": -1 }],
-            "Volumes": [
-                {
-                    "Name": "rmng-data",
-                    "Driver": "local",
-                    "Mountpoint": "/var/lib/docker/volumes/rmng-data/_data",
-                    "Labels": {},
-                    "Options": {},
-                    "Scope": "local",
-                    "UsageData": { "Size": 3, "RefCount": 1 }
-                },
-                {
-                    "Name": "unknown",
-                    "Driver": "local",
-                    "Mountpoint": "/var/lib/docker/volumes/unknown/_data",
-                    "Labels": {},
-                    "Options": {},
-                    "Scope": "local",
-                    "UsageData": { "Size": -1, "RefCount": -1 }
-                }
-            ],
-            "BuildCache": [{ "Size": 5 }]
-        }))
-        .unwrap();
-
-        assert_eq!(docker_disk_used_from_df(df), 20);
-    }
-
     // --- cpu percent ------------------------------------------------------------------
 
     #[test]
-    fn cpu_percent_scales_by_online_cpus() {
-        // The container burned 50% of the wall-clock CPU delta; on an 8-core host that's
-        // 50% × 8 = 400% of one core (i.e. four cores' worth).
-        assert_eq!(cpu_percent(500, 0, 1000, 0, 8), 400.0);
-        // A single fully-used core on a 1-CPU host reads 100%.
-        assert_eq!(cpu_percent(1000, 0, 1000, 0, 1), 100.0);
-        // Half of one core on a 4-core host: 50% of the delta on one core = 200%? No — the
-        // container used 250/1000 = 25% of the delta, × 4 = 100%.
-        assert_eq!(cpu_percent(250, 0, 1000, 0, 4), 100.0);
+    fn cpu_percent_is_relative_to_total_host_capacity() {
+        assert_eq!(cpu_percent(500, 0, 1000, 0), 50.0);
+        assert_eq!(cpu_percent(1000, 0, 1000, 0), 100.0);
+        assert_eq!(cpu_percent(250, 0, 1000, 0), 25.0);
     }
 
     #[test]
     fn cpu_percent_uses_deltas_not_absolutes() {
-        // Only the movement between the two samples counts: container advanced 200,
-        // system advanced 800, on 4 cores → 200/800 × 4 × 100 = 100%.
-        assert_eq!(cpu_percent(1200, 1000, 5800, 5000, 4), 100.0);
+        // Only the movement between the two samples counts: 200 / 800 = 25% of the host.
+        assert_eq!(cpu_percent(1200, 1000, 5800, 5000), 25.0);
     }
 
     #[test]
     fn cpu_percent_zero_system_delta_is_zero_not_nan() {
         // A zero (or backwards) system delta must not divide-by-zero into NaN/∞.
-        let v = cpu_percent(500, 0, 1000, 1000, 8);
+        let v = cpu_percent(500, 0, 1000, 1000);
         assert_eq!(v, 0.0);
         assert!(v.is_finite());
         // System counter went backwards (daemon restart / rollover): still 0, not negative.
-        assert_eq!(cpu_percent(500, 0, 900, 1000, 8), 0.0);
+        assert_eq!(cpu_percent(500, 0, 900, 1000), 0.0);
     }
 
     #[test]
     fn cpu_percent_missing_precpu_first_sample_is_zero() {
         // The very first sample has no precpu, so cpu_total == precpu_total (both 0) → a
         // zero container delta → 0%, never a spurious spike.
-        assert_eq!(cpu_percent(0, 0, 0, 0, 4), 0.0);
-        // Container counter present but system counter absent (both precpu fields 0):
-        // system_delta == system, cpu_delta == cpu_total; guard only trips on non-positive
-        // deltas, so a real system counter still computes — this checks the degenerate
-        // all-zero-precpu case where the system side is also 0.
-        assert_eq!(cpu_percent(500, 0, 0, 0, 4), 0.0);
-    }
-
-    #[test]
-    fn cpu_percent_zero_online_cpus_is_zero() {
-        // An unknown CPU count (0) is guarded rather than multiplying to 0 implicitly.
-        assert_eq!(cpu_percent(500, 0, 1000, 0, 0), 0.0);
+        assert_eq!(cpu_percent(0, 0, 0, 0), 0.0);
+        assert_eq!(cpu_percent(500, 0, 0, 0), 0.0);
     }
 
     // --- subnet plan ------------------------------------------------------------------

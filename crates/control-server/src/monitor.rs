@@ -1,80 +1,48 @@
 //! Per-host agent-state poller — port of `monitor.server.ts`. Probes each host's
-//! agent-wrapper `/status` every 4s and writes a derived `monitorState` onto the
-//! host (riding the existing `mutate()` → SSE frame):
-//!   unreachable / non-OK → offline ▸ busy → working ▸ else the agent's last
-//!   reported verdict (`agentReport`), default idle. Re-derived each tick so a
-//!   dropped read self-heals.
+//! agent-wrapper `/status` every 4s and writes a derived `monitorState` onto the host.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock as StdRwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tokio::sync::broadcast;
-use wire::{AgentReport, ContainerStats, Host, MonitorState};
+use wire::{AgentReport, ContainerStats, Host, LxcStats, MonitorState};
 
 use crate::app::App;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(4);
 const FETCH_TIMEOUT: Duration = Duration::from_millis(2500);
-const DISK_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
-const DISK_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const CGROUP_FETCH_TIMEOUT: Duration = Duration::from_millis(500);
+/// CT 105's parent cgroup enforces `cpu.max=1600000 100000`; no other deployment is supported.
+const CT105_CPU_CAPACITY: f64 = 16.0;
 
-/// Volatile per-host resource-usage bus. The monitor poller samples each running managed
-/// clone's CPU/RAM every tick and publishes the whole `{ hostId: ContainerStats }` map
-/// here; the `/events` handler fans it out to the frontend as a named `stats` SSE event.
-///
-/// Deliberately OUT of `ControlState` / `state.json`: these numbers move every tick, and
-/// every `ControlState` mutation persists the file atomically (see `state.rs::mutate`), so
-/// carrying stats there would rewrite `state.json` every 4 seconds. The bus is SSE-only —
-/// it never touches disk. A new subscriber gets the `latest` snapshot immediately, then
-/// live deltas; `publish` dedups logically-equal maps so a drained/idle fleet stops waking
-/// subscribers.
+/// Volatile per-host resource-usage bus. The monitor samples each running managed clone's
+/// CPU/RAM every tick and publishes the whole `{ hostId: ContainerStats }` map as a named SSE
+/// event. It stays out of `ControlState` / `state.json`: these numbers move every tick.
 pub struct StatsBus {
     tx: broadcast::Sender<String>,
-    docker_disk_used: AtomicU64,
-    /// The latest published map + its serialization (the snapshot new subscribers get;
-    /// `"{}"` until the first tick). The dedupe compares the MAP (`HashMap: PartialEq`),
-    /// never the JSON bytes: `poll_once` builds a fresh `HashMap` each tick and
-    /// `RandomState` seeds iteration order per instance, so two logically-equal maps
-    /// routinely serialize with different key orders.
+    /// The latest map plus its serialization. Equality is on the map rather than JSON bytes:
+    /// fresh `HashMap`s can serialize equal content in a different key order.
     latest: StdRwLock<(HashMap<String, ContainerStats>, String)>,
 }
 
 impl StatsBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(16);
-        Self {
-            tx,
-            docker_disk_used: AtomicU64::new(0),
-            latest: StdRwLock::new((HashMap::new(), "{}".to_string())),
-        }
+        Self { tx, latest: StdRwLock::new((HashMap::new(), "{}".to_string())) }
     }
 
-    /// The latest published map (JSON) + a live receiver, for a new `/events` subscriber.
+    /// The latest published map (JSON) plus a live receiver for a new `/events` subscriber.
     pub fn subscribe(&self) -> (String, broadcast::Receiver<String>) {
         (self.latest.read().unwrap().1.clone(), self.tx.subscribe())
     }
 
-    /// A clone of the last published stats map. `poll_once` reads it to carry a still-
-    /// reachable host's previous reading forward across a transient sampling gap, so a
-    /// one-off `docker stats` timeout doesn't blank that clone's CPU/RAM in the UI.
     fn latest_map(&self) -> HashMap<String, ContainerStats> {
         self.latest.read().unwrap().0.clone()
     }
 
-    fn docker_disk_used(&self) -> u64 {
-        self.docker_disk_used.load(Ordering::Relaxed)
-    }
-
-    fn set_docker_disk_used(&self, bytes: u64) {
-        self.docker_disk_used.store(bytes, Ordering::Relaxed);
-    }
-
-    /// Publish a stats map, but only broadcast when it differs from the last one — an
-    /// empty/unchanged map (no running managed hosts) doesn't wake anyone. Equality is
-    /// on the map itself (order-independent), not its serialization.
+    /// Broadcast only a logically changed map, so an idle fleet does not wake SSE clients.
     fn publish(&self, map: &HashMap<String, ContainerStats>) {
         let json = {
             let mut latest = self.latest.write().unwrap();
@@ -93,6 +61,51 @@ impl Default for StatsBus {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Volatile resource usage for the whole CT 105 LXC. It is intentionally a separate event from
+/// the clone-keyed stats map: the control-server and Docker infrastructure have no clone id.
+pub struct LxcStatsBus {
+    tx: broadcast::Sender<String>,
+    latest: StdRwLock<(Option<LxcStats>, String)>,
+}
+
+impl LxcStatsBus {
+    pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(16);
+        Self { tx, latest: StdRwLock::new((None, "null".to_string())) }
+    }
+
+    /// The latest CT sample (JSON) plus a live receiver for a new `/events` subscriber.
+    pub fn subscribe(&self) -> (String, broadcast::Receiver<String>) {
+        (self.latest.read().unwrap().1.clone(), self.tx.subscribe())
+    }
+
+    /// Broadcast only a changed CT sample; `None` explicitly clears unavailable readings.
+    fn publish(&self, stats: &Option<LxcStats>) {
+        let json = {
+            let mut latest = self.latest.write().unwrap();
+            if latest.0 == *stats {
+                return;
+            }
+            let json = serde_json::to_string(stats).unwrap_or_else(|_| "null".to_string());
+            *latest = (stats.clone(), json.clone());
+            json
+        };
+        let _ = self.tx.send(json);
+    }
+}
+
+impl Default for LxcStatsBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LxcCpuSample {
+    usage_usec: u64,
+    sampled_at: Instant,
 }
 
 #[derive(Deserialize)]
@@ -122,11 +135,107 @@ async fn probe_host(app: &App, host: &Host, agent_port: u16) -> MonitorState {
     }
 }
 
-/// Which CPU/RAM reading to publish for one host this tick. A fresh sample always wins.
-/// With no fresh sample, a still-reachable clone keeps its `prev` reading — a transient
-/// `docker stats` timeout under daemon load shouldn't blank a running clone's metrics —
-/// while an offline clone (stopped/gone container) drops to `None` so its numbers clear.
-/// Returns `None` too when a reachable host has no prior reading yet (nothing to show).
+fn lxc_cpu_pct(previous: &mut Option<LxcCpuSample>, usage_usec: u64, now: Instant) -> Option<f64> {
+    let previous = previous.replace(LxcCpuSample { usage_usec, sampled_at: now })?;
+    let usage_delta = usage_usec.checked_sub(previous.usage_usec)? as f64;
+    let elapsed_usec = now.checked_duration_since(previous.sampled_at)?.as_secs_f64() * 1_000_000.0;
+    (elapsed_usec > 0.0).then_some((usage_delta / elapsed_usec) * 100.0 / CT105_CPU_CAPACITY)
+}
+
+/// One CT 105-wide CPU/RAM/disk sample. Every cgroup input is read through PID 1's root so the
+/// result includes the Docker daemon and other LXC processes, not merely managed clones.
+async fn sample_lxc(previous_cpu: &mut Option<LxcCpuSample>) -> Option<LxcStats> {
+    let (cpu, memory, disk) = tokio::join!(
+        tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::lxc_cpu_usage_usec()),
+        tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::lxc_memory_usage()),
+        async { crate::cgroup::lxc_disk_used() },
+    );
+
+    let cpu = match cpu {
+        Ok(Ok(cpu)) => cpu,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "CT 105 cgroup-v2 CPU sample unavailable");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!("CT 105 cgroup-v2 CPU sample timed out");
+            return None;
+        }
+    };
+    let memory = match memory {
+        Ok(Ok(memory)) => memory,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "CT 105 cgroup-v2 memory sample unavailable");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!("CT 105 cgroup-v2 memory sample timed out");
+            return None;
+        }
+    };
+    let disk_used = match disk {
+        Ok(disk_used) => Some(disk_used),
+        Err(e) => {
+            tracing::debug!(error = %e, "CT 105 rootfs disk sample unavailable");
+            None
+        }
+    };
+
+    Some(LxcStats {
+        cpu_pct: lxc_cpu_pct(previous_cpu, cpu, Instant::now()),
+        mem_used: memory.used,
+        mem_limit: memory.limit,
+        disk_used,
+    })
+}
+
+/// One bounded CPU/RAM sample plus the bridge IP from one Docker runtime inspect. The CPU
+/// stream and inspect run concurrently; the inspect's PID is the sole source for both cgroup
+/// memory and the persisted IP, avoiding a clone-recreate race between separate inspections.
+async fn sample_host(app: &App, host: &Host) -> (Option<ContainerStats>, Option<Option<String>>) {
+    if !host.managed {
+        return (None, None);
+    }
+
+    let (cpu, runtime) = tokio::join!(
+        app.docker.container_cpu_pct(&host.id),
+        app.docker.inspect_runtime(&host.id),
+    );
+    let runtime = match runtime {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            tracing::debug!(host = %host.id, error = %e, "clone runtime inspect unavailable");
+            return (None, None);
+        }
+    };
+    let ip = Some(runtime.ip);
+    let Some(pid) = runtime.pid else {
+        return (None, ip);
+    };
+    let memory = match tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::memory_usage(pid)).await {
+        Ok(Ok(memory)) => memory,
+        Ok(Err(e)) => {
+            tracing::debug!(host = %host.id, pid, error = %e, "clone cgroup-v2 memory sample unavailable");
+            return (None, ip);
+        }
+        Err(_) => {
+            tracing::debug!(host = %host.id, pid, "clone cgroup-v2 memory sample timed out");
+            return (None, ip);
+        }
+    };
+    let Some(cpu_pct) = cpu else {
+        return (None, ip);
+    };
+
+    (
+        Some(ContainerStats { cpu_pct, mem_used: memory.used, mem_limit: memory.limit }),
+        ip,
+    )
+}
+
+/// Which CPU/RAM reading to publish for one host this tick. A fresh sample always wins. With no
+/// fresh sample, a still-reachable clone keeps its prior reading across a transient sampling gap;
+/// an offline clone drops it so its numbers clear.
 fn pick_stat(
     fresh: Option<ContainerStats>,
     state: MonitorState,
@@ -139,79 +248,46 @@ fn pick_stat(
     }
 }
 
-async fn poll_once(app: &App) {
-    // Archived clones are intentionally stopped. They are not failures to probe, and must not
-    // contribute stale stats or unread transitions while they are retained.
+async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     let hosts: Vec<Host> = app
         .store
         .get()
         .hosts
         .into_iter()
-        .filter(|h| !h.archived)
+        .filter(|host| !host.archived)
         .collect();
     if hosts.is_empty() {
-        // Clear any stale stats so a drained fleet stops showing numbers (deduped: a no-op
-        // once already empty).
+        let lxc_stats = sample_lxc(previous_lxc_cpu).await;
         app.stats.publish(&HashMap::new());
+        app.lxc_stats.publish(&lxc_stats);
         return;
     }
+
     let agent_port = app.config().agent_port;
-    // Per host, probe the agent-wrapper `/status` AND sample container stats, all
-    // concurrently. Stats are sampled only for managed clones (a container named after the
-    // host id backs them); a stopped/missing container yields `None`. A `None` for a still-
-    // reachable clone is treated as a transient gap and its last reading is carried forward
-    // (see the loop below); only an offline/unmanaged host contributes no entry. Cost: one
-    // `docker stats` call per managed host per tick — cheap, one-shot, and concurrent.
-    //
-    // Two bounds keep stats from ever holding the monitor state hostage:
-    // - the stats call gets the same FETCH_TIMEOUT as the /status probe — the shared
-    //   bollard client's own timeout is 1 h (sized for base-image commits), so an
-    //   unbounded call against a wedged container/daemon would freeze this `join_all`
-    //   (and with it ALL monitor-state updates) for up to an hour;
-    // - probe and stats run concurrently (`join!`), not sequentially, so even a healthy
-    //   tick's state application never waits on the daemon's ~1 s two-cycle sampling
-    //   (`one_shot=false` collects two CPU cycles before answering).
-    let probes_fut = futures::future::join_all(hosts.iter().map(|h| async move {
-        let stats_fut = async {
-            if !h.managed {
-                return None;
-            }
-            tokio::time::timeout(FETCH_TIMEOUT, app.docker.container_stats(&h.id))
-                .await
-                .ok() // timed out → no sample this tick
-                .flatten()
-        };
-        // The clone's bridge IP, refreshed each tick alongside stats. `Some(_)` is a
-        // definitive inspect result (`Some(ip)` running & attached, `None` gone/detached);
-        // the outer `None` means "no reading this tick" (unmanaged, timed out, or a daemon
-        // hiccup) and leaves the persisted value untouched so a transient failure can't
-        // churn `state.json` by flapping the IP to empty and back.
-        let ip_fut = async {
-            if !h.managed {
-                return None;
-            }
-            match tokio::time::timeout(FETCH_TIMEOUT, app.docker.inspect_ip(&h.id)).await {
-                Ok(Ok(ip)) => Some(ip),
-                _ => None,
+    let probes = futures::future::join_all(hosts.iter().map(|host| async move {
+        let (state, sample) = tokio::join!(
+            probe_host(app, host, agent_port),
+            tokio::time::timeout(FETCH_TIMEOUT, sample_host(app, host)),
+        );
+        let (stats, ip) = match sample {
+            Ok(sample) => sample,
+            Err(_) => {
+                tracing::debug!(host = %host.id, "clone resource sample timed out");
+                (None, None)
             }
         };
-        let (state, stats, ip) =
-            tokio::join!(probe_host(app, h, agent_port), stats_fut, ip_fut);
-        (h.id.clone(), state, stats, ip)
+        (host.id.clone(), state, stats, ip)
     }));
-    let probes = probes_fut.await;
-    let docker_disk_used = app.stats.docker_disk_used();
-    // Last tick's published readings, to bridge a transient gap (see below).
+    let (lxc_stats, probes) = tokio::join!(sample_lxc(previous_lxc_cpu), probes);
     let prev_stats = app.stats.latest_map();
 
     let mut next: HashMap<String, MonitorState> = HashMap::with_capacity(probes.len());
-    let mut stats_map: HashMap<String, ContainerStats> = HashMap::new();
-    // Only hosts with a definitive IP reading this tick; absent = "leave as-is".
+    let mut stats_map = HashMap::new();
+    // Only hosts with a definitive runtime inspect this tick; absent means leave IP untouched.
     let mut ip_updates: HashMap<String, Option<String>> = HashMap::new();
     for (id, state, stats, ip) in probes {
-        if let Some(mut s) = pick_stat(stats, state, prev_stats.get(&id)) {
-            s.docker_disk_used = docker_disk_used;
-            stats_map.insert(id.clone(), s);
+        if let Some(stats) = pick_stat(stats, state, prev_stats.get(&id)) {
+            stats_map.insert(id.clone(), stats);
         }
         if let Some(ip) = ip {
             ip_updates.insert(id.clone(), ip);
@@ -219,93 +295,65 @@ async fn poll_once(app: &App) {
         next.insert(id, state);
     }
 
-    // An archive operation may have completed while this batch was in flight. Filter against
-    // the latest state before publishing/applying so its intentional stop cannot race into an
-    // offline state, a stale stats sample, or a new autonomous listener.
+    // An archive operation may complete while Docker and cgroup calls are in flight. Filter a
+    // second time so its intentional stop cannot race into lifecycle, stats, or chat updates.
     let active_hosts: Vec<Host> = app
         .store
         .get()
         .hosts
         .into_iter()
-        .filter(|h| !h.archived)
+        .filter(|host| !host.archived)
         .collect();
-    let active_ids: HashSet<String> = active_hosts.iter().map(|h| h.id.clone()).collect();
+    let active_ids: HashSet<String> = active_hosts.iter().map(|host| host.id.clone()).collect();
     next.retain(|id, _| active_ids.contains(id));
     stats_map.retain(|id, _| active_ids.contains(id));
     ip_updates.retain(|id, _| active_ids.contains(id));
 
-    // Volatile stats ride the SSE-only bus — never `state.json`.
     app.stats.publish(&stats_map);
+    app.lxc_stats.publish(&lxc_stats);
 
-    // Keep a persistent autonomous-message listener on every reachable active host.
-    for h in &active_hosts {
-        if next.get(&h.id) != Some(&MonitorState::Offline) {
-            crate::chat::ensure_autonomous_listener(app, h);
+    for host in &active_hosts {
+        if next.get(&host.id) != Some(&MonitorState::Offline) {
+            crate::chat::ensure_autonomous_listener(app, host);
         }
     }
 
-    // Only persist when the monitor state or a clone's IP actually changed.
-    let changed = app.store.get().hosts.iter().any(|h| {
-        !h.archived
-            && (next.get(&h.id).is_some_and(|s| Some(*s) != h.monitor_state)
-                || ip_updates.get(&h.id).is_some_and(|ip| *ip != h.local_ip))
+    let changed = app.store.get().hosts.iter().any(|host| {
+        !host.archived
+            && (next.get(&host.id).is_some_and(|state| Some(*state) != host.monitor_state)
+                || ip_updates.get(&host.id).is_some_and(|ip| *ip != host.local_ip))
     });
     if !changed {
         return;
     }
-    app.store.mutate(|s| {
-        let sel = s.selected.clone();
-        for h in &mut s.hosts {
-            if h.archived {
+    app.store.mutate(|state| {
+        let selected = state.selected.clone();
+        for host in &mut state.hosts {
+            if host.archived {
                 continue;
             }
-            if let Some(&state) = next.get(&h.id) {
-                // Light the unread dot when a clone drops out of `working`
-                // (→ idle/offline), unless the operator is already viewing it.
-                if h.monitor_state == Some(MonitorState::Working)
-                    && state != MonitorState::Working
-                    && sel.as_deref() != Some(h.id.as_str())
+            if let Some(&monitor_state) = next.get(&host.id) {
+                if host.monitor_state == Some(MonitorState::Working)
+                    && monitor_state != MonitorState::Working
+                    && selected.as_deref() != Some(host.id.as_str())
                 {
-                    h.unread = true;
+                    host.unread = true;
                 }
-                h.monitor_state = Some(state);
+                host.monitor_state = Some(monitor_state);
             }
-            if let Some(ip) = ip_updates.get(&h.id) {
-                h.local_ip = ip.clone();
+            if let Some(ip) = ip_updates.get(&host.id) {
+                host.local_ip = ip.clone();
             }
         }
     });
-}
-
-async fn poll_docker_disk_once(app: &App) {
-    match tokio::time::timeout(DISK_FETCH_TIMEOUT, app.docker.docker_disk_used()).await {
-        Ok(Some(bytes)) => app.stats.set_docker_disk_used(bytes),
-        Ok(None) => tracing::debug!("docker disk usage unavailable this tick"),
-        Err(_) => tracing::warn!(
-            "docker disk usage sample timed out after {}s",
-            DISK_FETCH_TIMEOUT.as_secs()
-        ),
-    }
-}
-
-async fn run_docker_disk_poller(app: App) {
-    tracing::info!(
-        "docker disk usage poller started (every {}s, timeout {}s)",
-        DISK_POLL_INTERVAL.as_secs(),
-        DISK_FETCH_TIMEOUT.as_secs()
-    );
-    loop {
-        poll_docker_disk_once(&app).await;
-        tokio::time::sleep(DISK_POLL_INTERVAL).await;
-    }
 }
 
 /// Background loop; spawned once at startup.
 pub async fn run(app: App) {
     tracing::info!("monitor poller started (every {}s)", POLL_INTERVAL.as_secs());
-    tokio::spawn(run_docker_disk_poller(app.clone()));
+    let mut previous_lxc_cpu = None;
     loop {
-        poll_once(&app).await;
+        poll_once(&app, &mut previous_lxc_cpu).await;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -315,17 +363,32 @@ mod tests {
     use super::*;
 
     fn stat(cpu: f64) -> ContainerStats {
-        ContainerStats {
+        ContainerStats { cpu_pct: cpu, mem_used: 1 << 30, mem_limit: 8u64 << 30 }
+    }
+
+    fn lxc_stat(cpu: Option<f64>) -> LxcStats {
+        LxcStats {
             cpu_pct: cpu,
-            mem_used: 1 << 30,
-            mem_limit: 8u64 << 30,
-            docker_disk_used: 0,
+            mem_used: 16u64 << 30,
+            mem_limit: 264u64 << 30,
+            disk_used: Some(320u64 << 30),
         }
     }
 
     #[test]
+    fn lxc_cpu_uses_elapsed_time_and_ct105_capacity() {
+        let start = Instant::now();
+        let mut previous = None;
+        assert_eq!(lxc_cpu_pct(&mut previous, 1_000, start), None);
+
+        let pct = lxc_cpu_pct(&mut previous, 32_001_000, start + Duration::from_secs(4)).unwrap();
+        assert!((pct - 50.0).abs() < f64::EPSILON);
+
+        assert_eq!(lxc_cpu_pct(&mut previous, 10, start + Duration::from_secs(8)), None);
+    }
+
+    #[test]
     fn pick_stat_prefers_a_fresh_sample() {
-        // A fresh reading always wins, whatever the state or the prior value.
         let prev = stat(10.0);
         let got = pick_stat(Some(stat(55.0)), MonitorState::Working, Some(&prev));
         assert_eq!(got, Some(stat(55.0)));
@@ -333,8 +396,6 @@ mod tests {
 
     #[test]
     fn pick_stat_carries_prev_forward_for_a_reachable_host() {
-        // No sample this tick (transient docker-stats gap) but the clone is still
-        // reachable → keep its last reading so the UI doesn't flicker to blank.
         let prev = stat(33.0);
         for state in [MonitorState::Working, MonitorState::Idle] {
             assert_eq!(pick_stat(None, state, Some(&prev)), Some(stat(33.0)));
@@ -343,15 +404,7 @@ mod tests {
 
     #[test]
     fn pick_stat_drops_an_offline_host() {
-        // Offline (stopped/gone container) → clear its numbers even if we had a prior.
-        let prev = stat(33.0);
-        assert_eq!(pick_stat(None, MonitorState::Offline, Some(&prev)), None);
-    }
-
-    #[test]
-    fn pick_stat_reachable_host_with_no_prior_stays_empty() {
-        // A just-started clone whose first sample missed has nothing to carry forward.
-        assert_eq!(pick_stat(None, MonitorState::Working, None), None);
+        assert_eq!(pick_stat(None, MonitorState::Offline, Some(&stat(33.0))), None);
     }
 
     #[test]
@@ -362,37 +415,21 @@ mod tests {
     }
 
     #[test]
-    fn stats_bus_tracks_cached_docker_disk_usage() {
-        let bus = StatsBus::new();
-        assert_eq!(bus.docker_disk_used(), 0);
-        bus.set_docker_disk_used(42);
-        assert_eq!(bus.docker_disk_used(), 42);
-    }
-
-    #[test]
-    fn stats_bus_publish_broadcasts_and_seeds_latest() {
+    fn stats_bus_serializes_only_cpu_and_memory_fields() {
         let bus = StatsBus::new();
         let (_snap, mut rx) = bus.subscribe();
-        let map = HashMap::from([("h1".to_string(), stat(120.0))]);
-        bus.publish(&map);
-        // Existing subscriber receives the frame...
-        let got = rx.try_recv().expect("a frame was broadcast");
-        assert!(got.contains("\"h1\""), "frame: {got}");
-        assert!(got.contains("\"cpuPct\":120"), "frame: {got}");
-        // ...and a fresh subscriber now snapshots the same published map.
-        let (snap2, _rx2) = bus.subscribe();
-        assert_eq!(snap2, got);
+        bus.publish(&HashMap::from([("h1".to_string(), stat(120.0))]));
+        let frame: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        let host = frame["h1"].as_object().unwrap();
+        assert_eq!(host.len(), 3);
+        assert_eq!(host["cpuPct"], serde_json::json!(120.0));
+        assert_eq!(host["memUsed"], serde_json::json!(1 << 30));
+        assert_eq!(host["memLimit"], serde_json::json!(8u64 << 30));
+        assert!(host.get("dockerDiskUsed").is_none());
     }
 
     #[test]
     fn stats_bus_dedups_equal_maps_regardless_of_key_order() {
-        // This dedup is what stops an idle fleet from waking SSE subscribers every tick.
-        // Crucially it must be ORDER-INDEPENDENT: `poll_once` builds a fresh `HashMap`
-        // each tick, and `RandomState` seeds iteration order per instance, so two
-        // logically-equal multi-key maps routinely serialize with different key orders —
-        // a byte-level JSON compare would never dedupe them. Hence: two separately
-        // constructed maps (opposite insertion orders) with equal content, and the second
-        // publish must not wake anyone.
         let bus = StatsBus::new();
         let (_snap, mut rx) = bus.subscribe();
         let a: HashMap<String, ContainerStats> =
@@ -401,20 +438,33 @@ mod tests {
             (0..8).rev().map(|i| (format!("h{i}"), stat(i as f64))).collect();
         assert_eq!(a, b);
         bus.publish(&a);
-        assert!(rx.try_recv().is_ok(), "first publish must broadcast");
-        bus.publish(&b); // equal content, freshly built → must NOT broadcast
-        assert!(rx.try_recv().is_err(), "logically-equal map must not re-broadcast");
+        assert!(rx.try_recv().is_ok());
+        bus.publish(&b);
+        assert!(rx.try_recv().is_err());
 
-        // A changed map still gets through after the dedupe.
-        let mut c = a.clone();
-        c.insert("h0".to_string(), stat(99.0));
-        bus.publish(&c);
-        assert!(rx.try_recv().is_ok(), "a genuinely changed map must broadcast");
+        let mut changed = a.clone();
+        changed.insert("h0".to_string(), stat(99.0));
+        bus.publish(&changed);
+        assert!(rx.try_recv().is_ok());
+    }
 
-        // An empty map over the never-populated empty latest is also a no-op.
-        let bus2 = StatsBus::new();
-        let (_s, mut rx2) = bus2.subscribe();
-        bus2.publish(&HashMap::new());
-        assert!(rx2.try_recv().is_err(), "empty republish over empty latest must not broadcast");
+    #[test]
+    fn lxc_stats_bus_snapshots_dedups_and_clears() {
+        let bus = LxcStatsBus::new();
+        let (snap, mut rx) = bus.subscribe();
+        assert_eq!(snap, "null");
+
+        let sample = Some(lxc_stat(Some(50.0)));
+        bus.publish(&sample);
+        let frame: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(frame["cpuPct"], serde_json::json!(50.0));
+        assert_eq!(frame["memUsed"], serde_json::json!(16u64 << 30));
+        assert_eq!(frame["memLimit"], serde_json::json!(264u64 << 30));
+        assert_eq!(frame["diskUsed"], serde_json::json!(320u64 << 30));
+
+        bus.publish(&sample);
+        assert!(rx.try_recv().is_err());
+        bus.publish(&None);
+        assert_eq!(rx.try_recv().unwrap(), "null");
     }
 }

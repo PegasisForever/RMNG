@@ -15,45 +15,33 @@ import { workspaceBadge } from "~/lib/workspace";
 // Text color + label per host state. `working` is sky, `idle` amber (done / awaiting
 // the next task / needs you), `offline` rose. The state note carries the color; there
 // is no longer a status dot (the unread dot took its place on the title row).
-const AGENT_STATUS: Record<NonNullable<Host["monitorState"]> | "archived", { text: string; label: string }> = {
+const AGENT_STATUS: Record<NonNullable<Host["monitorState"]>, { text: string; label: string }> = {
   working: { text: "text-sky-600 dark:text-sky-400", label: "working" },
   idle: { text: "text-amber-700 dark:text-amber-400", label: "idle" },
   offline: { text: "text-rose-500 dark:text-rose-400", label: "offline" },
-  archived: { text: "text-slate-500 dark:text-slate-400", label: "archived" },
 };
 
 function effectiveStatus(host: Host): { text: string; label: string } {
-  return AGENT_STATUS[host.archived ? "archived" : (host.monitorState ?? "idle")];
+  return AGENT_STATUS[host.monitorState ?? "idle"];
 }
 
 type Metric = { label: string; value: string; title: string };
 
-/** CPU (percent of the clone's cpu allowance) + memory-used strings, e.g.
+/** CPU (percentage of total host capacity) + memory-used strings, e.g.
  *  `{ cpu: "20%", mem: "3.2GB" }`. CPU rides the Claude line and MEM the Codex line;
  *  each renders in a fixed-width, right-aligned tabular slot so the two figures stack
- *  and line up across every row. CPU normalizes `stats.cpuPct` (docker convention:
- *  100 == one core) by `cloneCpus`; below 1% one decimal is kept so a near-idle clone
- *  doesn't read as dead-zero. When `cloneCpus <= 0` (unlimited clone) it falls back to a
- *  cores figure (`2.4c`). MEM is memory used in GiB, one decimal. Returns null when
- *  there's no usable sample — no stats yet, or a stopped/unmanaged host with no memory
- *  limit. `mem*` are typed bigint by ts-rs but arrive as JSON numbers, hence the
- *  `Number()` coercion. */
-function usageParts(
+ *  and line up across every row. Below 1% one decimal is kept so a near-idle clone does
+ *  not read as dead-zero. Memory includes swap and tmpfs/shared memory while excluding
+ *  reclaimable page cache. Returns null when there is no usable sample. `mem*` are typed
+ *  bigint by ts-rs but arrive as JSON numbers, hence the `Number()` coercion. */
+export function formatHostUsage(
   stats: ContainerStats | undefined,
-  cloneCpus: number,
 ): { cpu: string; mem: string } | null {
   if (!stats) return null;
-  const memLimit = Number(stats.memLimit);
-  if (memLimit <= 0) return null;
   const GiB = 1024 ** 3;
   const mem = `${(Number(stats.memUsed) / GiB).toFixed(1)}GB`;
-  const cpu =
-    cloneCpus > 0
-      ? (() => {
-          const pct = stats.cpuPct / cloneCpus;
-          return `${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%`;
-        })()
-      : `${(stats.cpuPct / 100).toFixed(1)}c`;
+  const pct = stats.cpuPct;
+  const cpu = `${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%`;
   return { cpu, mem };
 }
 
@@ -70,17 +58,23 @@ function MetricSlot({ metric }: { metric: Metric }) {
   );
 }
 
-/** The clone's account-group binding (or a muted "no group"), taking the remaining width
- *  and truncating so the usage figures + ⋯ menu stay on the same row. Provider-agnostic — a
- *  group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns intra-group selection. */
+/** The clone's account-group binding: a "group" badge + the group name (or a muted "no
+ *  group"), taking the remaining width and truncating so the usage figures + ⋯ menu stay
+ *  on the same row. Provider-agnostic — a group is one pool of Claude and/or GPT accounts;
+ *  CLIProxyAPI owns intra-group selection. */
 function GroupTag({ group }: { group?: string }) {
   return (
     <span
-      className="flex min-w-0 flex-1 items-center text-slate-400 dark:text-slate-500"
+      className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
       title={group ? `account group: ${group}` : "no account group — no inference"}
     >
       {group ? (
-        <span className="truncate">{group}</span>
+        <>
+          <span className="shrink-0 rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+            group
+          </span>
+          <span className="truncate">{group}</span>
+        </>
       ) : (
         <span className="italic text-slate-300 dark:text-slate-600">no group</span>
       )}
@@ -133,10 +127,6 @@ export interface SidebarHostProps {
   /** Live CPU/RAM usage for this host's container, pushed over the `stats` SSE event.
    *  Absent for a stopped/unmanaged host or before the first sample — renders nothing. */
   stats?: ContainerStats;
-  /** The fleet's `docker.cloneCpus` CPU allowance (cores per clone), used to normalize
-   *  the usage line's CPU figure to a percent of that allowance. `<= 0` means unlimited,
-   *  which falls `usageParts` back to a cores figure. */
-  cloneCpus: number;
   selected: boolean;
   /** A running operation targeting this host (delete, or a clone finishing its
    *  post-add `wait-swap` step), if any. */
@@ -149,9 +139,9 @@ export interface SidebarHostProps {
   onChangeAccount: () => void;
   /** Open the port-forward editor for this host. */
   onPortForward: () => void;
-  /** Gracefully stop this managed clone while retaining it. */
+  /** Gracefully stop a managed clone while retaining it. */
   onArchive: () => void;
-  /** Start this retained managed clone again. */
+  /** Restart a retained managed clone. */
   onUnarchive: () => void;
   /** Live runtime status for this host's forwards (from the `forwards` SSE event),
    *  merged into the compact forwards chips by rule id. */
@@ -313,7 +303,6 @@ function OverflowMenu({
 export function SidebarHost({
   host,
   stats,
-  cloneCpus,
   selected,
   op,
   onSelect,
@@ -331,21 +320,25 @@ export function SidebarHost({
   // Managed clones (backed by a container named after the host id) get the commit /
   // account actions; plain unmanaged rows only get remove.
   const managed = host.managed === true;
-  // Only active managed clones run a usable sshd to jump into. Archived clones retain
-  // their container but deliberately hide runtime actions until they are restored.
+  // Archived clones retain their container but deliberately hide runtime actions until they
+  // are restored; unmanaged rows have no container-backed SSH endpoint either.
   const sshCommand = managed && !host.archived
     ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, host.id)
     : undefined;
   const status = effectiveStatus(host);
   const group = host.group || undefined;
-  const usage = host.archived ? null : usageParts(stats, cloneCpus);
+  const usage = host.archived ? null : formatHostUsage(stats);
   // CPU + MEM share `usage`, so they appear and vanish together — both sit inline on the
   // group row (group on the left, CPU then MEM right-aligned, then the ⋯ menu).
   const cpuMetric = usage
-    ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of clone allowance)" }
+    ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of total host capacity)" }
     : undefined;
   const memMetric = usage
-    ? { label: "MEM", value: usage.mem, title: "container memory used" }
+    ? {
+        label: "MEM",
+        value: usage.mem,
+        title: "RAM + swap; includes tmpfs/shared memory and excludes reclaimable file cache",
+      }
     : undefined;
   // Show the group/usage row when there's a group or a usage sample; a group-less, stat-less
   // clone shows neither (just the ⋯ menu).
@@ -376,7 +369,7 @@ export function SidebarHost({
       aria-pressed={selected}
       onClick={onSelect}
       title={`${host.id} · ${host.host}:${host.port}`}
-      className={`group flex touch-none ${host.archived ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"} items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent px-1.5 py-1.5 last:border-b-0 dark:border-b-slate-700 ${
+      className={`group flex touch-none cursor-grab items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent px-1.5 py-1.5 last:border-b-0 active:cursor-grabbing dark:border-b-slate-700 ${
         // Per-side borders (explicit colors so they never collide): a slate-200 bottom
         // divider between rows + a left accent for the selected row. Exactly one
         // background wins (dragging ▸ selected ▸ default); the default is a solid
@@ -400,13 +393,7 @@ export function SidebarHost({
                 {host.displayName ?? host.id}
               </span>
               <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400">
-                {op?.kind === "delete"
-                  ? "deleting…"
-                  : op?.kind === "archive"
-                    ? "archiving…"
-                    : op?.kind === "unarchive"
-                      ? "restoring…"
-                      : op?.step}
+                {op?.kind === "delete" ? "deleting…" : op?.step}
               </span>
             </div>
           ) : showBindingLine ? (
@@ -421,7 +408,7 @@ export function SidebarHost({
           <OverflowMenu
             hostId={host.id}
             managed={managed}
-            archived={host.archived === true}
+            archived={host.archived}
             busy={busy}
             onCommit={onCommit}
             onChangeAccount={onChangeAccount}
@@ -438,7 +425,7 @@ export function SidebarHost({
             Hidden while busy — the op step shows in the top block instead. */}
         {!busy ? (
           <p className="break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
-            {host.unread && !host.archived && !selected ? (
+            {host.unread && !selected ? (
               <span
                 className="mr-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white"
                 title="stopped working since you last viewed it"
@@ -471,7 +458,7 @@ export function SidebarHost({
         ) : null}
 
         {/* Compact list of this host's port forwards (remote→local, live status dot). */}
-        {!busy && !host.archived && host.forwards && host.forwards.length > 0 ? (
+        {!busy && host.forwards && host.forwards.length > 0 ? (
           <ForwardChips forwards={host.forwards} runtime={forwardRuntime ?? []} />
         ) : null}
       </div>
