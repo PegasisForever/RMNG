@@ -67,7 +67,7 @@ function GroupTag({ group }: { group?: string }) {
       title={group ? `account group: ${group}` : "no account group — no inference"}
     >
       {group ? (
-        <span className="max-w-full truncate rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+        <span className="-ml-0.5 max-w-full truncate rounded bg-slate-200 px-1 text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">
           {group}
         </span>
       ) : (
