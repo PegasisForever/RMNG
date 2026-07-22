@@ -2,10 +2,15 @@
 //! `rmng` fleet CLI and integration tests. Response shapes are the [`wire`] types
 //! verbatim — this crate adds transport + error surfacing, never its own schema.
 
+use std::collections::HashMap;
+
 use anyhow::{Result, anyhow, bail};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
-use wire::{AppConfigRedacted, ControlState, ExecRequest, ExecResult, ImageInfo, Operation};
+use wire::{
+    AppConfigRedacted, CloneTokenUsage, ContainerStats, ControlState, ExecRequest, ExecResult,
+    ImageInfo, Operation,
+};
 
 /// A connected control-server client.
 #[derive(Clone)]
@@ -91,6 +96,16 @@ impl Client {
         Ok(Self::check(resp).await?.json().await?)
     }
 
+    /// Current volatile per-clone resource-usage map, matching the named `stats` SSE snapshot.
+    pub async fn stats(&self) -> Result<HashMap<String, ContainerStats>> {
+        self.get_json("/api/stats").await
+    }
+
+    /// Current safe per-clone cumulative-token map, matching the named `tokens` SSE snapshot.
+    pub async fn tokens(&self) -> Result<HashMap<String, CloneTokenUsage>> {
+        self.get_json("/api/tokens").await
+    }
+
     /// The `/events` SSE stream, filtered to the default (unnamed) frames = full
     /// [`ControlState`] snapshots: one on connect, then one per change. Named events
     /// (`stats`, `forwards`) and keep-alive comments are skipped.
@@ -139,23 +154,22 @@ impl Client {
         self.post_json("/api/activate", &json!({ "id": id })).await
     }
 
-    /// Raw hostname clone (`POST /api/clone` hostname mode). Optional Claude/Codex
-    /// account selections (`email` / `"auto"` / `"group:<name>"` / `"none"`) and preset.
+    /// Raw hostname clone (`POST /api/clone` hostname mode) with an optional account-group
+    /// binding and env preset. `none`/blank group input intentionally clears the binding.
     pub async fn clone_host(
         &self,
         image: &str,
         hostname: &str,
-        claude: Option<&str>,
-        codex: Option<&str>,
+        group: Option<&str>,
         preset: Option<&str>,
     ) -> Result<Operation> {
         let mut body = json!({ "image": image, "hostname": hostname });
         let obj = body.as_object_mut().unwrap();
-        if let Some(a) = claude {
-            obj.insert("claudeAccount".into(), json!(a));
-        }
-        if let Some(a) = codex {
-            obj.insert("codexAccount".into(), json!(a));
+        if let Some(group) = group
+            .map(str::trim)
+            .filter(|group| !group.is_empty() && *group != "none")
+        {
+            obj.insert("group".into(), json!(group));
         }
         if let Some(p) = preset {
             obj.insert("preset".into(), json!(p));
@@ -171,6 +185,18 @@ impl Client {
     /// Destroy a managed clone (or unregister a plain host).
     pub async fn delete(&self, id: &str) -> Result<Operation> {
         self.post_json("/api/delete", &json!({ "id": id })).await
+    }
+
+    /// Stop a managed clone while retaining its container, volumes, notes, and chat history.
+    pub async fn archive(&self, id: &str) -> Result<Operation> {
+        self.post_json(&format!("/api/hosts/{id}/archive"), &json!({}))
+            .await
+    }
+
+    /// Restart a retained archived clone.
+    pub async fn unarchive(&self, id: &str) -> Result<Operation> {
+        self.post_json(&format!("/api/hosts/{id}/unarchive"), &json!({}))
+            .await
     }
 
     /// The clone-source images.
@@ -201,15 +227,21 @@ impl Client {
     /// Bind a clone to an account group (or clear it with `None`). The group-proxy
     /// replacement for the old per-provider account swap. `POST /api/hosts/:id/group`.
     pub async fn set_host_group(&self, host: &str, group: Option<&str>) -> Result<Value> {
-        self.post_json(&format!("/api/hosts/{host}/group"), &json!({ "group": group }))
-            .await
+        self.post_json(
+            &format!("/api/hosts/{host}/group"),
+            &json!({ "group": group }),
+        )
+        .await
     }
 
     /// Remove one authenticated account (a credential file) from a group's CLIProxyAPI
     /// instance. `POST /api/groups/:name/accounts/delete`.
     pub async fn delete_group_account(&self, group: &str, file: &str) -> Result<Value> {
-        self.post_json(&format!("/api/groups/{group}/accounts/delete"), &json!({ "file": file }))
-            .await
+        self.post_json(
+            &format!("/api/groups/{group}/accounts/delete"),
+            &json!({ "file": file }),
+        )
+        .await
     }
 
     /// The redacted server config (presets, account groups, docker settings — no secrets).
@@ -232,8 +264,11 @@ impl Client {
     /// Run a single non-interactive command inside a clone (`POST /api/hosts/:id/exec`).
     /// Returns the command's exit code plus its captured stdout/stderr.
     pub async fn exec(&self, host: &str, req: &ExecRequest) -> Result<ExecResult> {
-        self.post_json(&format!("/api/hosts/{host}/exec"), &serde_json::to_value(req)?)
-            .await
+        self.post_json(
+            &format!("/api/hosts/{host}/exec"),
+            &serde_json::to_value(req)?,
+        )
+        .await
     }
 }
 

@@ -1,7 +1,7 @@
 # `rmng` CLI reference — fleet management over the web port
 
 The `rmng` binary ([crates/cli](../crates/cli/README.md), package `rmng-cli`) is the fleet
-management surface: hosts, clones, images, Claude/Codex accounts, and operations, all over
+management surface: hosts, clones, images, account groups and imported accounts, and operations, all over
 the control-server's **port-2 web API** (via [control-client](../crates/control-client/README.md)).
 It also carries the **operator/fleet desktop control** (`rmng desktop`, folded in from the
 retired global MCP) and a docker-exec-style **`rmng exec`** — both reach clones through the
@@ -51,12 +51,12 @@ $RMNG_CONTROL_URL` hint.
 | Command (with `--json`) | Emits |
 |---|---|
 | `ps`, `select` | `ControlState` |
-| `clone`, `rm`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
+| `clone`, `rm`, `archive`, `restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
 | `wait` | the terminal `Operation` |
 | `ops` | `Operation[]` |
 | `image ls` | `ImageInfo[]` |
 | `account ls` | `ClaudeUsage[]` |
-| `account swap` | the API reply `{ok, account, group, selection}` |
+| `account bind` | the API reply `{ok, group}` |
 | `image rm` | `{ok: true}` |
 
 ## Exit codes
@@ -74,26 +74,50 @@ $RMNG_CONTROL_URL` hint.
 ### `rmng ps`
 Hosts table: `ID` (a `*` suffix marks the selected host), `IP` (the current Docker bridge
 address when available), `IMAGE` (source reference), `PRESET` (the clone's creation preset),
-and `GROUP` (its CLIProxyAPI account pool).
+`GROUP` (its CLIProxyAPI account pool), live `CPU` and `RAM`, cache-excluded cumulative `TOK-IN`,
+generated cumulative `TOK-OUT`, and lifecycle `STATUS`.
+
+CPU/RAM are one-shot volatile snapshots for sampled active managed clones; missing readings render
+as `-`. RAM is used/limit, or used only when the cgroup limit is unavailable. Token totals can
+remain visible after archive/restore. Status is server-owned `working`, `idle`, `offline`, or
+`archived`; `-` means the clone has not yet been sampled or is unmanaged. `rmng ps --json` remains
+the raw `ControlState` document and intentionally excludes volatile metrics.
 
 ### `rmng select <host|none>`
 Point the operator's viewer at a host (`POST /api/activate`); `none` clears the selection.
 An unknown host id errors (exit 1) with a pointer to `rmng ps`.
 
-### `rmng clone --image <REF> --hostname <H> [--claude <SEL>] [--codex <SEL>] [--preset <P>] [--wait] [--timeout <N>]`
+### `rmng clone --image <REF> --hostname <H> [--group <GROUP>] [--preset <P>] [--wait] [--timeout <N>]`
 Create a clone under an **exact hostname** (a DNS label; `400` if taken) — the `POST
-/api/clone` hostname mode: no ticket, no kickoff message. `--claude` / `--codex` take an
-email, `auto`, `group:<name>`, or `none`; `--preset` names an env preset (optional — fleet
-workers usually need none). Prints the started op id (follow with `rmng wait <op-id>`), or
-blocks until done with `--wait`.
+/api/clone` hostname mode: no ticket, no kickoff message. `--group` binds the clone to one
+provider-agnostic CLIProxyAPI account pool; omit it (or use `none`) for no inference binding.
+The server rejects an unknown group. `--preset` names an env preset (optional — fleet workers
+usually need none). Prints the started op id (follow with `rmng wait <op-id>`), or blocks until
+done with `--wait`.
 
 ```sh
-rmng clone --image pegasis0/rmng-template:latest --hostname w-cp-claude --claude auto --wait
+rmng clone --image pegasis0/rmng-template:latest --hostname w-cp --group pooled --wait
 ```
 
 ### `rmng rm <host> [-y|--yes] [--wait] [--timeout <N>]`
 Destroy a clone (container + volumes). Asks `[y/N]` on stderr unless `--yes`; declining
 exits 1. **Refuses to run non-interactively without `--yes`** (stdin not a terminal).
+
+### `rmng archive <host> [--wait] [--timeout <N>]`
+Gracefully stop a managed clone while retaining its container, volumes, notes, and chat history.
+This is reversible and needs no confirmation. The resulting `archive` operation can be followed
+with `rmng wait` or awaited inline with `--wait`.
+
+### `rmng restore <host> [--wait] [--timeout <N>]`
+Restart a retained archived clone. `unarchive` is an alias. The server refuses unknown,
+unmanaged, already-active, or concurrently operated clones.
+
+### `rmng ssh <host>`
+Print the ready-to-paste bastion-jump command only for a managed clone whose endpoint is usable:
+working, idle, and not-yet-sampled clones are accepted. Unmanaged, archived, and explicitly
+offline clones are refused instead of printing a command known not to work. Restore an archived
+clone first. When `ssh.publicHost` is unset, the CLI warns on stderr and makes a best-effort
+address guess from its control-server URL.
 
 ### `rmng image ls|pull|commit|rm`
 - `image ls` — clone-source images: `REFERENCE ID SIZE CREATED BASE FROM IN-USE-BY`.
@@ -104,18 +128,19 @@ exits 1. **Refuses to run non-interactively without `--yes`** (stdin not a termi
 - `image rm <reference>` — remove a clone-source image (`409` while clones use it).
 
 ### `rmng account ls [--claude|--codex|--gemini]`
-Imported accounts with usage windows: `EMAIL PROVIDER ASSIGNABLE 5H 5H-RESETS 7D ERROR`.
-All providers by default; the flags conflict. Gemini (Antigravity) accounts show as a
-display-only presence row with no usage windows — Antigravity exposes no pollable quota.
-Human output appends the configured account groups (from `GET /api/config`).
+Read-only listing of imported accounts and usage windows: `GROUP EMAIL PROVIDER ASSIGNABLE 5H
+5H-RESETS 7D FABLE ERROR`. All providers are shown by default; provider filters conflict. Gemini
+(Antigravity) can be a presence-only row because its upstream does not expose pollable quota.
 
-### `rmng account swap <host> <account> [--codex]`
-Hot-swap a running clone's account (`POST /api/{claude,codex}/swap`). `<account>` is an
-email, `auto`, `group:<name>`, or `none`; Claude by default, `--codex` for Codex.
+### `rmng account bind <host> <group|none>`
+Bind a managed clone to one provider-agnostic account group (`POST /api/hosts/:id/group`), or
+clear its inference binding with `none`. This is a pure routing change; account creation,
+deletion, OAuth onboarding, usage refresh, and provider selection remain frontend/API
+responsibilities. `account swap` remains an alias for compatibility.
 
 ### `rmng ops`
-The current `operations[]`: in-flight + recently-finished clone/delete/pull/commit/update
-jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are pruned quickly — see below.
+The current `operations[]`: in-flight + recently-finished clone/delete/archive/unarchive/pull/
+commit/update jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are pruned quickly — see below.
 
 ### `rmng wait <op-id> [--timeout <N>]`
 Block until an operation reaches a terminal state (default timeout 600 s). Same semantics

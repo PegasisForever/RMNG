@@ -50,6 +50,8 @@ pub fn router(app: App) -> Router {
     let routes = Router::new()
         .route("/events", get(events))
         .route("/api/state", get(state_get))
+        .route("/api/stats", get(stats_get))
+        .route("/api/tokens", get(tokens_get))
         .route("/api/activate", post(activate))
         .route("/api/reorder", post(reorder))
         .route("/api/clone", post(clone))
@@ -189,9 +191,10 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     let stats_stream = stats_initial.chain(stats_updates);
 
     let (lxc_snapshot, lxc_rx) = app.lxc_stats.subscribe();
-    let lxc_initial = futures::stream::once(async move {
-        Ok(Event::default().event("lxcStats").data(lxc_snapshot))
-    });
+    let lxc_initial =
+        futures::stream::once(
+            async move { Ok(Event::default().event("lxcStats").data(lxc_snapshot)) },
+        );
     let lxc_updates = BroadcastStream::new(lxc_rx).filter_map(|r| async move {
         match r {
             Ok(json) => Some(Ok(Event::default().event("lxcStats").data(json))),
@@ -264,6 +267,20 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
 /// scripts — that shouldn't have to open an SSE stream to see the fleet.
 async fn state_get(State(app): State<App>) -> Json<ControlState> {
     Json(app.store.get())
+}
+
+/// `GET /api/stats` — the current per-clone resource-usage snapshot, matching the first named
+/// `stats` `/events` frame. Volatile by design: it is never persisted in [`ControlState`].
+async fn stats_get(State(app): State<App>) -> Response {
+    let (snapshot, _rx) = app.stats.subscribe();
+    ([(header::CONTENT_TYPE, "application/json")], snapshot).into_response()
+}
+
+/// `GET /api/tokens` — the current safe per-clone cumulative-token snapshot, matching the first
+/// named `tokens` `/events` frame. It intentionally contains no activity timestamps or account data.
+async fn tokens_get(State(app): State<App>) -> Response {
+    let (snapshot, _rx) = app.tokens.subscribe();
+    ([(header::CONTENT_TYPE, "application/json")], snapshot).into_response()
 }
 
 #[derive(Deserialize)]
@@ -506,7 +523,8 @@ async fn clone(
     let image = str_field("image")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| bad("body must include { image }".into()))?;
-    let group = str_field("group");
+    let requested_group = str_field("group");
+    let group = resolve_group(&app, requested_group.as_deref())?;
     let agent_instructions = str_field("agentInstructions");
     let claude_instructions = str_field("claudeInstructions");
     let cfg = app.config();
@@ -1225,6 +1243,16 @@ struct HostGroupReq {
     group: Option<String>,
 }
 
+fn resolve_group(app: &App, group: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
+    match group.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) if app.config().groups.iter().any(|group| group.name == name) => {
+            Ok(Some(name.to_string()))
+        }
+        Some(name) => Err((StatusCode::BAD_REQUEST, format!("unknown group '{name}'"))),
+        None => Ok(None),
+    }
+}
+
 /// `POST /api/hosts/:id/group` — bind a clone to an account group (or clear the binding
 /// with `{ "group": null }`). This is the sole account selection under the group-proxy
 /// model: the `/cc` router maps the clone → its group → that group's CLIProxyAPI instance,
@@ -1244,20 +1272,7 @@ async fn host_group(
             format!("'{id}' is not a managed clone"),
         ));
     }
-    let group = match req
-        .group
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(name) => {
-            if !app.config().groups.iter().any(|g| g.name == name) {
-                return Err((StatusCode::BAD_REQUEST, format!("unknown group '{name}'")));
-            }
-            Some(name.to_string())
-        }
-        None => None,
-    };
+    let group = resolve_group(&app, req.group.as_deref())?;
     let group_set = group.clone();
     app.store.mutate(|s| {
         if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
@@ -1361,7 +1376,11 @@ fn hop_by_hop_headers(headers: &axum::http::HeaderMap) -> HashSet<HeaderName> {
         let Ok(value) = value.to_str() else {
             continue;
         };
-        for name in value.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        for name in value
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
             if let Ok(name) = HeaderName::from_bytes(name.as_bytes()) {
                 names.insert(name);
             }

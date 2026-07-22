@@ -9,10 +9,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use control_client::Client;
 use serde_json::Value;
-use wire::{ControlState, Operation, Provider};
+use wire::{ContainerStats, ControlState, MonitorState, Operation, Provider};
 
 use crate::args::{AccountCmd, DesktopCmd, ImageCmd, RescaleArgs, WaitArgs};
-use crate::output::{human_size, pct, short_id, table};
+use crate::output::{human_size, pct, short_id, table, token_count};
 use crate::wait::{WaitOutcome, wait_for_op};
 
 fn emit_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -30,12 +30,45 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+fn cpu_pct(cpu_pct: f64) -> String {
+    if cpu_pct < 1.0 {
+        format!("{cpu_pct:.1}%")
+    } else {
+        format!("{cpu_pct:.0}%")
+    }
+}
+
+fn ram(stats: &ContainerStats) -> String {
+    if stats.mem_limit == 0 {
+        human_size(stats.mem_used)
+    } else {
+        format!(
+            "{}/{}",
+            human_size(stats.mem_used),
+            human_size(stats.mem_limit)
+        )
+    }
+}
+
+fn host_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
+    if archived {
+        return "archived".to_string();
+    }
+    match monitor_state {
+        Some(MonitorState::Working) => "working".to_string(),
+        Some(MonitorState::Idle) => "idle".to_string(),
+        Some(MonitorState::Offline) => "offline".to_string(),
+        None => String::new(),
+    }
+}
+
 pub async fn ps(client: &Client, json: bool) -> Result<u8> {
-    let st = client.state().await?;
     if json {
-        emit_json(&st)?;
+        emit_json(&client.state().await?)?;
         return Ok(0);
     }
+
+    let (st, stats, tokens) = tokio::try_join!(client.state(), client.stats(), client.tokens())?;
     let rows: Vec<Vec<String>> = st
         .hosts
         .iter()
@@ -45,18 +78,37 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
             } else {
                 ""
             };
+            let stats = stats.get(&h.id);
+            let usage = tokens.get(&h.id);
             vec![
                 format!("{}{}", h.id, sel),
                 h.local_ip.clone().unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
                 h.preset_name.clone().unwrap_or_default(),
                 h.group.clone().unwrap_or_default(),
+                stats
+                    .map(|stats| cpu_pct(stats.cpu_pct))
+                    .unwrap_or_default(),
+                stats.map(ram).unwrap_or_default(),
+                usage
+                    .map(|usage| token_count(usage.new_input_tokens))
+                    .unwrap_or_default(),
+                usage
+                    .map(|usage| token_count(usage.output_tokens))
+                    .unwrap_or_default(),
+                host_status(h.archived, h.monitor_state),
             ]
         })
         .collect();
     print!(
         "{}",
-        table(&["ID", "IP", "IMAGE", "PRESET", "GROUP"], &rows)
+        table(
+            &[
+                "ID", "IP", "IMAGE", "PRESET", "GROUP", "CPU", "RAM", "TOK-IN", "TOK-OUT",
+                "STATUS",
+            ],
+            &rows,
+        )
     );
     Ok(0)
 }
@@ -81,20 +133,16 @@ pub async fn select(client: &Client, host: &str, json: bool) -> Result<u8> {
     Ok(0)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn clone(
     client: &Client,
     image: &str,
     hostname: &str,
-    claude: Option<&str>,
-    codex: Option<&str>,
+    group: Option<&str>,
     preset: Option<&str>,
     wait: &WaitArgs,
     json: bool,
 ) -> Result<u8> {
-    let op = client
-        .clone_host(image, hostname, claude, codex, preset)
-        .await?;
+    let op = client.clone_host(image, hostname, group, preset).await?;
     started(client, op, wait, json, "clone").await
 }
 
@@ -115,6 +163,16 @@ pub async fn rm(client: &Client, host: &str, yes: bool, wait: &WaitArgs, json: b
     }
     let op = client.delete(host).await?;
     started(client, op, wait, json, "delete").await
+}
+
+pub async fn archive(client: &Client, host: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
+    let op = client.archive(host).await?;
+    started(client, op, wait, json, "archive").await
+}
+
+pub async fn restore(client: &Client, host: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
+    let op = client.unarchive(host).await?;
+    started(client, op, wait, json, "restore").await
 }
 
 pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
@@ -187,46 +245,57 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
             let accounts: Vec<_> = st
                 .usage_groups
                 .iter()
-                .flat_map(|g| g.accounts.iter())
-                .filter(|a| {
-                    if *claude {
-                        // A missing provider defaults to Claude (legacy rows).
-                        matches!(a.provider, Some(Provider::Claude) | None)
-                    } else if *codex {
-                        matches!(a.provider, Some(Provider::Codex))
-                    } else if *gemini {
-                        matches!(a.provider, Some(Provider::Antigravity))
-                    } else {
-                        true
-                    }
+                .flat_map(|group| {
+                    group
+                        .accounts
+                        .iter()
+                        .filter(move |account| {
+                            if *claude {
+                                matches!(account.provider, Some(Provider::Claude) | None)
+                            } else if *codex {
+                                matches!(account.provider, Some(Provider::Codex))
+                            } else if *gemini {
+                                matches!(account.provider, Some(Provider::Antigravity))
+                            } else {
+                                true
+                            }
+                        })
+                        .map(move |account| (group.name.as_str(), account))
                 })
-                .cloned()
-                .collect();
+                .collect::<Vec<_>>();
             if json {
-                emit_json(&accounts)?;
+                emit_json(
+                    &accounts
+                        .iter()
+                        .map(|(_, account)| *account)
+                        .collect::<Vec<_>>(),
+                )?;
                 return Ok(0);
             }
             let rows: Vec<Vec<String>> = accounts
                 .iter()
-                .map(|a| {
+                .map(|(group, account)| {
                     vec![
-                        a.email.clone(),
-                        match a.provider {
+                        group.to_string(),
+                        account.email.clone(),
+                        match account.provider {
                             Some(Provider::Codex) => "codex".into(),
                             Some(Provider::Antigravity) => "gemini".into(),
                             _ => "claude".into(),
                         },
-                        a.assignable
-                            .map(|b| if b { "yes" } else { "no" }.to_string())
+                        account
+                            .assignable
+                            .map(|assignable| if assignable { "yes" } else { "no" }.to_string())
                             .unwrap_or_default(),
-                        pct(&a.five_hour),
-                        a.five_hour
+                        pct(&account.five_hour),
+                        account
+                            .five_hour
                             .as_ref()
-                            .and_then(|w| w.resets_at.clone())
+                            .and_then(|window| window.resets_at.clone())
                             .unwrap_or_default(),
-                        pct(&a.seven_day),
-                        pct(&a.fable),
-                        a.error.clone().unwrap_or_default(),
+                        pct(&account.seven_day),
+                        pct(&account.fable),
+                        account.error.clone().unwrap_or_default(),
                     ]
                 })
                 .collect();
@@ -234,6 +303,7 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                 "{}",
                 table(
                     &[
+                        "GROUP",
                         "EMAIL",
                         "PROVIDER",
                         "ASSIGNABLE",
@@ -241,69 +311,23 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                         "5H-RESETS",
                         "7D",
                         "FABLE",
-                        "ERROR"
+                        "ERROR",
                     ],
-                    &rows
+                    &rows,
                 )
             );
-            // Account groups come from config (redacted view), not state. Membership lives in
-            // each group's CLIProxyAPI instance auth-dir and is surfaced above via usage_groups.
-            if let Ok(cfg) = client.config().await
-                && !cfg.groups.is_empty()
-            {
-                let names = cfg
-                    .groups
-                    .iter()
-                    .map(|g| g.name.clone())
-                    .collect::<Vec<_>>()
-                    .join("  ");
-                println!("groups: {names}");
-            }
             Ok(0)
         }
-        // `account` is now the GROUP name to bind this clone to ("" / "none" clears it).
-        // Groups are provider-agnostic under the group-proxy model, so `--codex` is ignored.
-        AccountCmd::Swap {
-            host,
-            account,
-            codex: _,
-        } => {
-            let group = match account.as_str() {
+        AccountCmd::Bind { host, group } => {
+            let group = match group.trim() {
                 "" | "none" => None,
-                g => Some(g),
+                group => Some(group),
             };
             let reply = client.set_host_group(host, group).await?;
             if json {
                 emit_json(&reply)?;
             } else {
                 println!("set {host} group → {}", group.unwrap_or("none"));
-            }
-            Ok(0)
-        }
-        // Account membership is per-group now: remove this email's credential from every group
-        // it appears in (the auth file name follows the `<provider>-<email>.json` convention).
-        AccountCmd::Rm { account, codex } => {
-            let file = format!("{}-{account}.json", if *codex { "codex" } else { "claude" });
-            let st = client.state().await?;
-            let mut removed: Vec<String> = Vec::new();
-            for g in &st.usage_groups {
-                if g.accounts.iter().any(|a| &a.email == account) {
-                    client.delete_group_account(&g.name, &file).await?;
-                    removed.push(g.name.clone());
-                }
-            }
-            if json {
-                emit_json(
-                    &serde_json::json!({ "ok": true, "account": account, "removedFrom": removed }),
-                )?;
-            } else if removed.is_empty() {
-                println!("no group currently lists {account}");
-            } else {
-                println!(
-                    "removed {account} from {} group(s): {}",
-                    removed.len(),
-                    removed.join(", ")
-                );
             }
             Ok(0)
         }
@@ -430,11 +454,21 @@ fn host_from_base(base: &str) -> &str {
 }
 
 fn validate_ssh_host(st: &ControlState, host: &str) -> Result<()> {
-    if st.hosts.iter().any(|h| h.id == host) {
-        Ok(())
-    } else {
-        bail!("unknown host '{host}' (see `rmng ps`)")
+    let target = st
+        .hosts
+        .iter()
+        .find(|candidate| candidate.id == host)
+        .ok_or_else(|| anyhow!("unknown host '{host}' (see `rmng ps`)"))?;
+    if !target.managed {
+        bail!("'{host}' is not a managed clone; RMNG has no SSH endpoint for it")
     }
+    if target.archived {
+        bail!("host '{host}' is archived; restore it first")
+    }
+    if matches!(target.monitor_state, Some(MonitorState::Offline)) {
+        bail!("host '{host}' is offline; its SSH endpoint is unavailable")
+    }
+    Ok(())
 }
 
 /// `rmng ssh <host>`: print the ready-to-paste `ssh` one-liner that jumps through the
@@ -1075,6 +1109,82 @@ mod tests {
         let err = validate_ssh_host(&st, "herms").expect_err("host suffix must not match");
         assert_eq!(err.to_string(), "unknown host 'herms' (see `rmng ps`)");
         validate_ssh_host(&st, "pega-herms").expect("exact host id should match");
+    }
+
+    #[test]
+    fn validate_ssh_host_rejects_unreachable_targets() {
+        let st = ControlState {
+            hosts: vec![
+                wire::Host {
+                    id: "legacy".into(),
+                    ..Default::default()
+                },
+                wire::Host {
+                    id: "archived".into(),
+                    managed: true,
+                    archived: true,
+                    ..Default::default()
+                },
+                wire::Host {
+                    id: "offline".into(),
+                    managed: true,
+                    monitor_state: Some(MonitorState::Offline),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            validate_ssh_host(&st, "legacy").unwrap_err().to_string(),
+            "'legacy' is not a managed clone; RMNG has no SSH endpoint for it"
+        );
+        assert_eq!(
+            validate_ssh_host(&st, "archived").unwrap_err().to_string(),
+            "host 'archived' is archived; restore it first"
+        );
+        assert_eq!(
+            validate_ssh_host(&st, "offline").unwrap_err().to_string(),
+            "host 'offline' is offline; its SSH endpoint is unavailable"
+        );
+    }
+
+    #[test]
+    fn validate_ssh_host_allows_active_or_unsampled_clones() {
+        let st = ControlState {
+            hosts: [None, Some(MonitorState::Working), Some(MonitorState::Idle)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, monitor_state)| wire::Host {
+                    id: format!("clone-{index}"),
+                    managed: true,
+                    monitor_state,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        for host in ["clone-0", "clone-1", "clone-2"] {
+            validate_ssh_host(&st, host).expect("managed clone should have an SSH command");
+        }
+    }
+
+    #[test]
+    fn ps_formatters_handle_metrics_and_status() {
+        assert_eq!(cpu_pct(0.4), "0.4%");
+        assert_eq!(cpu_pct(18.4), "18%");
+        assert_eq!(
+            ram(&ContainerStats {
+                cpu_pct: 0.0,
+                mem_used: 2 * 1024 * 1024 * 1024,
+                mem_limit: 4 * 1024 * 1024 * 1024,
+            }),
+            "2.0 GiB/4.0 GiB"
+        );
+        assert_eq!(host_status(true, Some(MonitorState::Working)), "archived");
+        assert_eq!(host_status(false, Some(MonitorState::Idle)), "idle");
+        assert_eq!(host_status(false, None), "");
     }
 
     #[test]

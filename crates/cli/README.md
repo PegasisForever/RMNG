@@ -1,8 +1,9 @@
 # rmng-cli
 
 `rmng` — the fleet-management CLI for the RMNG control-server: hosts (`ps`, `select`),
-clones (`clone`, `rm`), images (`image ls|pull|commit|rm`), Claude/Codex accounts
-(`account ls|swap`), and operations (`ops`, `wait`), all over the **port-2 web API** via
+clones (`clone`, `rm`, `archive`, `restore`), images (`image ls|pull|commit|rm`), read-only
+account listing plus group binding (`account ls|bind`), and operations (`ops`, `wait`), all over
+the **port-2 web API** via
 [control-client](../control-client/README.md). Fleet management only — desktop automation
 is the MCP's job ([docs/MCP.md](../../docs/MCP.md)).
 

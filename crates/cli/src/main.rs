@@ -41,8 +41,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
         Cmd::Clone {
             image,
             hostname,
-            claude,
-            codex,
+            group,
             preset,
             wait,
         } => {
@@ -50,8 +49,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 client,
                 image,
                 hostname,
-                claude.as_deref(),
-                codex.as_deref(),
+                group.as_deref(),
                 preset.as_deref(),
                 wait,
                 cli.json,
@@ -59,6 +57,8 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             .await
         }
         Cmd::Rm { host, yes, wait } => commands::rm(client, host, *yes, wait, cli.json).await,
+        Cmd::Archive { host, wait } => commands::archive(client, host, wait, cli.json).await,
+        Cmd::Restore { host, wait } => commands::restore(client, host, wait, cli.json).await,
         Cmd::Image(cmd) => commands::image(client, cmd, cli.json).await,
         Cmd::Account(cmd) => commands::account(client, cmd, cli.json).await,
         Cmd::Ops => commands::ops(client, cli.json).await,

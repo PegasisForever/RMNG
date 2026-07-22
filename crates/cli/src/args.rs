@@ -27,7 +27,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// List hosts with their image, preset, and account-group assignment
+    /// List hosts with live CPU, RAM, token totals, activity, and account-group assignment
     Ps,
     /// Point the operator's viewer at a host (`none` clears the selection)
     Select {
@@ -42,12 +42,9 @@ pub enum Cmd {
         /// Exact hostname for the new clone (DNS label)
         #[arg(long)]
         hostname: String,
-        /// Claude account selection: email, `auto`, `group:<name>`, or `none`
+        /// Account group to route this clone's agents through (`none` clears the binding)
         #[arg(long)]
-        claude: Option<String>,
-        /// Codex account selection: email, `auto`, `group:<name>`, or `none`
-        #[arg(long)]
-        codex: Option<String>,
+        group: Option<String>,
         /// Env preset name (optional; fleet workers usually need none)
         #[arg(long)]
         preset: Option<String>,
@@ -64,13 +61,28 @@ pub enum Cmd {
         #[command(flatten)]
         wait: WaitArgs,
     },
+    /// Stop a managed clone but retain its container, volumes, notes, and chat
+    Archive {
+        /// Host id of the managed clone
+        host: String,
+        #[command(flatten)]
+        wait: WaitArgs,
+    },
+    /// Restart a retained archived clone
+    #[command(alias = "unarchive")]
+    Restore {
+        /// Host id of the archived clone
+        host: String,
+        #[command(flatten)]
+        wait: WaitArgs,
+    },
     /// Clone-source image operations
     #[command(subcommand)]
     Image(ImageCmd),
-    /// Claude / Codex account operations
+    /// Account-group and imported-account operations
     #[command(subcommand)]
     Account(AccountCmd),
-    /// List operations (clone / delete / pull / commit / update)
+    /// List operations (clone / delete / archive / unarchive / pull / commit / update)
     Ops,
     /// Wait for an operation to reach a terminal state
     Wait {
@@ -154,14 +166,20 @@ impl RescaleArgs {
             return Ok(None);
         };
         if let Some((lo, hi)) = s.split_once('-') {
-            let lo: i32 = lo.parse().map_err(|e| format!("--rescale-cursor: bad min: {e}"))?;
-            let hi: i32 = hi.parse().map_err(|e| format!("--rescale-cursor: bad max: {e}"))?;
+            let lo: i32 = lo
+                .parse()
+                .map_err(|e| format!("--rescale-cursor: bad min: {e}"))?;
+            let hi: i32 = hi
+                .parse()
+                .map_err(|e| format!("--rescale-cursor: bad max: {e}"))?;
             if hi <= lo {
                 return Err("--rescale-cursor: max must be > min".into());
             }
             Ok(Some((lo, hi)))
         } else {
-            let hi: i32 = s.parse().map_err(|e| format!("--rescale-cursor: bad max: {e}"))?;
+            let hi: i32 = s
+                .parse()
+                .map_err(|e| format!("--rescale-cursor: bad max: {e}"))?;
             if hi <= 0 {
                 return Err("--rescale-cursor: max must be > 0".into());
             }
@@ -181,8 +199,12 @@ impl RescaleArgs {
             .split_once('x')
             .or_else(|| s.split_once('X'))
             .ok_or_else(|| format!("--rescale-screen: expected WxH, got '{s}'"))?;
-        let w: i32 = w.parse().map_err(|e| format!("--rescale-screen: bad W: {e}"))?;
-        let h: i32 = h.parse().map_err(|e| format!("--rescale-screen: bad H: {e}"))?;
+        let w: i32 = w
+            .parse()
+            .map_err(|e| format!("--rescale-screen: bad W: {e}"))?;
+        let h: i32 = h
+            .parse()
+            .map_err(|e| format!("--rescale-screen: bad H: {e}"))?;
         if w <= 0 || h <= 0 {
             return Err("--rescale-screen: W and H must be > 0".into());
         }
@@ -347,7 +369,7 @@ pub enum ImageCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum AccountCmd {
-    /// List imported accounts with usage windows (both providers by default)
+    /// List imported accounts with usage windows (all providers by default)
     Ls {
         /// Only Claude accounts
         #[arg(long, conflicts_with_all = ["codex", "gemini"])]
@@ -359,24 +381,13 @@ pub enum AccountCmd {
         #[arg(long)]
         gemini: bool,
     },
-    /// Hot-swap a clone's account (Claude by default; --codex for Codex)
-    Swap {
+    /// Bind a clone to an account group (`none` clears the binding)
+    #[command(alias = "swap")]
+    Bind {
         /// Host id
         host: String,
-        /// email, `auto`, `group:<name>`, or `none`
-        account: String,
-        /// Swap the Codex account instead of Claude
-        #[arg(long)]
-        codex: bool,
-    },
-    /// Delete an imported account by email (Claude by default; --codex for Codex).
-    /// Fails if a clone is pinned to it; auto/group clones are moved off first.
-    Rm {
-        /// Account email to delete
-        account: String,
-        /// Delete the Codex account instead of Claude
-        #[arg(long)]
-        codex: bool,
+        /// Account group name, or `none`
+        group: String,
     },
 }
 
@@ -402,18 +413,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_clone_with_accounts_and_wait() {
+    fn parses_clone_with_group_and_wait() {
         let cli = Cli::parse_from([
             "rmng",
             "clone",
             "--image",
             "hyperhost-worker:latest",
             "--hostname",
-            "w-cp-claude",
-            "--claude",
-            "auto",
-            "--codex",
-            "none",
+            "w-cp",
+            "--group",
+            "pooled",
             "--wait",
             "--timeout",
             "120",
@@ -422,21 +431,32 @@ mod tests {
             Cmd::Clone {
                 image,
                 hostname,
-                claude,
-                codex,
+                group,
                 preset,
                 wait,
             } => {
                 assert_eq!(image, "hyperhost-worker:latest");
-                assert_eq!(hostname, "w-cp-claude");
-                assert_eq!(claude.as_deref(), Some("auto"));
-                assert_eq!(codex.as_deref(), Some("none"));
+                assert_eq!(hostname, "w-cp");
+                assert_eq!(group.as_deref(), Some("pooled"));
                 assert_eq!(preset, None);
                 assert!(wait.wait);
                 assert_eq!(wait.timeout, 120);
             }
             other => panic!("wrong cmd: {other:?}"),
         }
+        assert!(
+            Cli::try_parse_from([
+                "rmng",
+                "clone",
+                "--image",
+                "hyperhost-worker:latest",
+                "--hostname",
+                "w-cp",
+                "--claude",
+                "auto",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -452,6 +472,29 @@ mod tests {
     }
 
     #[test]
+    fn account_bind_and_swap_alias_parse() {
+        for cmd in ["bind", "swap"] {
+            let cli = Cli::parse_from(["rmng", "account", cmd, "w-cp", "pooled"]);
+            assert!(matches!(
+                cli.cmd,
+                Cmd::Account(AccountCmd::Bind { ref host, ref group })
+                    if host == "w-cp" && group == "pooled"
+            ));
+        }
+    }
+
+    #[test]
+    fn archive_and_restore_parse_with_wait() {
+        let archive = Cli::parse_from(["rmng", "archive", "w-cp", "--wait"]);
+        assert!(matches!(
+            archive.cmd,
+            Cmd::Archive { ref host, ref wait } if host == "w-cp" && wait.wait
+        ));
+        let restore = Cli::parse_from(["rmng", "unarchive", "w-cp"]);
+        assert!(matches!(restore.cmd, Cmd::Restore { ref host, .. } if host == "w-cp"));
+    }
+
+    #[test]
     fn rm_requires_host() {
         assert!(Cli::try_parse_from(["rmng", "rm"]).is_err());
     }
@@ -463,7 +506,9 @@ mod tests {
             Cmd::Desktop { clone, cmd } => {
                 assert_eq!(clone, "w-cp");
                 match cmd {
-                    DesktopCmd::Click { x, y, monitor, out, .. } => {
+                    DesktopCmd::Click {
+                        x, y, monitor, out, ..
+                    } => {
                         assert_eq!(x, Some(10));
                         assert_eq!(y, Some(20));
                         assert_eq!(monitor, None);
@@ -478,7 +523,9 @@ mod tests {
 
     #[test]
     fn desktop_type_and_key_accept_out_flag() {
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "type", "hello", "--out", "/x.jpg"]);
+        let cli = Cli::parse_from([
+            "rmng", "desktop", "w-cp", "type", "hello", "--out", "/x.jpg",
+        ]);
         match cli.cmd {
             Cmd::Desktop {
                 cmd: DesktopCmd::Type { text, out },
@@ -489,7 +536,9 @@ mod tests {
             }
             other => panic!("wrong cmd: {other:?}"),
         }
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "key", "ctrl+c", "--out", "/k.jpg"]);
+        let cli = Cli::parse_from([
+            "rmng", "desktop", "w-cp", "key", "ctrl+c", "--out", "/k.jpg",
+        ]);
         assert!(matches!(
             cli.cmd,
             Cmd::Desktop {
@@ -517,7 +566,14 @@ mod tests {
     #[test]
     fn desktop_dt_alias_and_flags() {
         let cli = Cli::parse_from([
-            "rmng", "dt", "w-cp", "screenshot", "--monitor", "1", "--out", "/tmp/s.jpg",
+            "rmng",
+            "dt",
+            "w-cp",
+            "screenshot",
+            "--monitor",
+            "1",
+            "--out",
+            "/tmp/s.jpg",
         ]);
         match cli.cmd {
             Cmd::Desktop {
@@ -535,17 +591,18 @@ mod tests {
     #[test]
     fn desktop_click_accepts_rescale_cursor() {
         let cli = Cli::parse_from([
-            "rmng", "desktop", "w-cp", "click", "500", "500", "--rescale-cursor", "0-1000",
+            "rmng",
+            "desktop",
+            "w-cp",
+            "click",
+            "500",
+            "500",
+            "--rescale-cursor",
+            "0-1000",
         ]);
         match cli.cmd {
             Cmd::Desktop {
-                cmd:
-                    DesktopCmd::Click {
-                        x,
-                        y,
-                        rescale,
-                        ..
-                    },
+                cmd: DesktopCmd::Click { x, y, rescale, .. },
                 ..
             } => {
                 assert_eq!(x, Some(500));
@@ -559,7 +616,15 @@ mod tests {
     #[test]
     fn desktop_scroll_accepts_rescale_cursor() {
         let cli = Cli::parse_from([
-            "rmng", "desktop", "w-cp", "scroll", "3", "500", "500", "--rescale-cursor", "0-1000",
+            "rmng",
+            "desktop",
+            "w-cp",
+            "scroll",
+            "3",
+            "500",
+            "500",
+            "--rescale-cursor",
+            "0-1000",
         ]);
         match cli.cmd {
             Cmd::Desktop {
@@ -646,8 +711,7 @@ mod tests {
     #[test]
     fn exec_repeated_env_accumulates_with_user_and_workdir() {
         let cli = Cli::parse_from([
-            "rmng", "exec", "c", "-u", "root", "-w", "/srv", "-e", "A=1", "-e", "B=2", "--",
-            "env",
+            "rmng", "exec", "c", "-u", "root", "-w", "/srv", "-e", "A=1", "-e", "B=2", "--", "env",
         ]);
         match cli.cmd {
             Cmd::Exec {
