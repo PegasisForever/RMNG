@@ -146,7 +146,7 @@ port: <allocated>
 auth-dir: <data>/cliproxy/<group>/auth
 api-keys: ["<inbound key>"]  # shared secret: router → instance
 routing:
-  strategy: fill-first
+  strategy: round-robin
   session-affinity: true
   session-affinity-ttl: "6h"
 quota-exceeded:

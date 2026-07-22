@@ -268,7 +268,7 @@ fn render_config_yaml(meta: &InstanceMeta, auth_dir: &str) -> String {
          auth-dir: \"{auth_dir}\"\n\
          api-keys:\n  - \"{inbound}\"\n\
          remote-management:\n  allow-remote: false\n  secret-key: \"{secret}\"\n  disable-control-panel: true\n\
-         routing:\n  strategy: \"fill-first\"\n  session-affinity: true\n  session-affinity-ttl: \"6h\"\n\
+         routing:\n  strategy: \"round-robin\"\n  session-affinity: true\n  session-affinity-ttl: \"6h\"\n\
          quota-exceeded:\n  switch-project: true\n\
          max-retry-credentials: 0\n",
         port = meta.port,
