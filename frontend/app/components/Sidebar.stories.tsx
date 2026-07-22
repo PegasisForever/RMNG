@@ -41,6 +41,8 @@ const meta = {
     onCommitHost: fn(),
     onChangeAccountHost: fn(),
     onPortForwardHost: fn(),
+    onArchiveHost: fn(),
+    onUnarchiveHost: fn(),
     onReorder: fn(),
   },
 } satisfies Meta<typeof Sidebar>;
@@ -79,4 +81,14 @@ export const Empty: Story = {
 /** A clone in flight — the Activity section renders and + Clone is disabled. */
 export const WithActivity: Story = {
   args: { operations: [cloneOperation] },
+};
+
+/** Retained clones are separated from active, drag-reorderable hosts. */
+export const WithArchivedHosts: Story = {
+  args: {
+    hosts: [
+      ...hosts,
+      { ...hosts[0], id: "archived-host", displayName: "Archived host", archived: true },
+    ],
+  },
 };

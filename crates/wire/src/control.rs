@@ -129,6 +129,10 @@ pub struct Host {
     /// unmanaged — serde drops the stale keys.
     #[serde(default)]
     pub managed: bool,
+    /// True when this managed clone is intentionally stopped but retained. Its container,
+    /// named volumes, notes, and chat history remain available for a later unarchive.
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
@@ -186,6 +190,8 @@ pub struct Host {
 pub enum OperationKind {
     Clone,
     Delete,
+    Archive,
+    Unarchive,
     /// Pull the clone template from a registry (replaced the retired in-product
     /// `Bootstrap` build). The `bootstrap` alias keeps a persisted legacy op loadable:
     /// `state.rs::read_from_disk` falls back to an EMPTY state on any parse error, so a
@@ -212,7 +218,7 @@ pub enum OperationStatus {
 pub struct Operation {
     pub id: String,
     pub kind: OperationKind,
-    /// Host id being created (clone) or removed (delete).
+    /// Host id being created, archived, restored, or removed; image reference for template jobs.
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -503,6 +509,7 @@ mod tests {
         assert_eq!(v["group"], "team");
         assert_eq!(v["linearWorkspace"], "we");
         assert_eq!(v["monitorState"], "working");
+        assert_eq!(v["archived"], false);
         // omitted optionals are not serialized
         assert!(v.get("source").is_none());
     }
@@ -520,9 +527,19 @@ mod tests {
     fn operation_kind_serde_and_bootstrap_alias() {
         // Canonical serialization is the lowercase variant name.
         assert_eq!(serde_json::to_string(&OperationKind::Pull).unwrap(), "\"pull\"");
+        assert_eq!(serde_json::to_string(&OperationKind::Archive).unwrap(), "\"archive\"");
+        assert_eq!(serde_json::to_string(&OperationKind::Unarchive).unwrap(), "\"unarchive\"");
         assert_eq!(
             serde_json::from_str::<OperationKind>("\"pull\"").unwrap(),
             OperationKind::Pull
+        );
+        assert_eq!(
+            serde_json::from_str::<OperationKind>("\"archive\"").unwrap(),
+            OperationKind::Archive
+        );
+        assert_eq!(
+            serde_json::from_str::<OperationKind>("\"unarchive\"").unwrap(),
+            OperationKind::Unarchive
         );
         // Legacy persisted ops used `"bootstrap"`; the alias keeps them loadable so a
         // stored op never trips `read_from_disk`'s parse-error → empty-state fallback.
@@ -539,6 +556,17 @@ mod tests {
         let op: Operation = serde_json::from_str(legacy).unwrap();
         assert_eq!(op.kind, OperationKind::Pull);
         assert_eq!(op.target, "my-base");
+    }
+
+    #[test]
+    fn legacy_host_defaults_to_active_and_archive_state_roundtrips() {
+        let legacy: Host = serde_json::from_str(r#"{ "id": "h", "host": "h" }"#).unwrap();
+        assert!(!legacy.archived);
+
+        let archived = Host { id: "h".into(), host: "h".into(), managed: true, archived: true, ..Default::default() };
+        let value = serde_json::to_value(&archived).unwrap();
+        assert_eq!(value["archived"], true);
+        assert!(serde_json::from_value::<Host>(value).unwrap().archived);
     }
 
     #[test]

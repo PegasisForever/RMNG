@@ -5,7 +5,7 @@
 //!   reported verdict (`agentReport`), default idle. Re-derived each tick so a
 //!   dropped read self-heals.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
@@ -140,7 +140,15 @@ fn pick_stat(
 }
 
 async fn poll_once(app: &App) {
-    let hosts = app.store.get().hosts;
+    // Archived clones are intentionally stopped. They are not failures to probe, and must not
+    // contribute stale stats or unread transitions while they are retained.
+    let hosts: Vec<Host> = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| !h.archived)
+        .collect();
     if hosts.is_empty() {
         // Clear any stale stats so a drained fleet stops showing numbers (deduped: a no-op
         // once already empty).
@@ -211,11 +219,26 @@ async fn poll_once(app: &App) {
         next.insert(id, state);
     }
 
+    // An archive operation may have completed while this batch was in flight. Filter against
+    // the latest state before publishing/applying so its intentional stop cannot race into an
+    // offline state, a stale stats sample, or a new autonomous listener.
+    let active_hosts: Vec<Host> = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| !h.archived)
+        .collect();
+    let active_ids: HashSet<String> = active_hosts.iter().map(|h| h.id.clone()).collect();
+    next.retain(|id, _| active_ids.contains(id));
+    stats_map.retain(|id, _| active_ids.contains(id));
+    ip_updates.retain(|id, _| active_ids.contains(id));
+
     // Volatile stats ride the SSE-only bus — never `state.json`.
     app.stats.publish(&stats_map);
 
-    // Keep a persistent autonomous-message listener on every reachable host.
-    for h in &hosts {
+    // Keep a persistent autonomous-message listener on every reachable active host.
+    for h in &active_hosts {
         if next.get(&h.id) != Some(&MonitorState::Offline) {
             crate::chat::ensure_autonomous_listener(app, h);
         }
@@ -223,8 +246,9 @@ async fn poll_once(app: &App) {
 
     // Only persist when the monitor state or a clone's IP actually changed.
     let changed = app.store.get().hosts.iter().any(|h| {
-        next.get(&h.id).is_some_and(|s| Some(*s) != h.monitor_state)
-            || ip_updates.get(&h.id).is_some_and(|ip| *ip != h.local_ip)
+        !h.archived
+            && (next.get(&h.id).is_some_and(|s| Some(*s) != h.monitor_state)
+                || ip_updates.get(&h.id).is_some_and(|ip| *ip != h.local_ip))
     });
     if !changed {
         return;
@@ -232,6 +256,9 @@ async fn poll_once(app: &App) {
     app.store.mutate(|s| {
         let sel = s.selected.clone();
         for h in &mut s.hosts {
+            if h.archived {
+                continue;
+            }
             if let Some(&state) = next.get(&h.id) {
                 // Light the unread dot when a clone drops out of `working`
                 // (→ idle/offline), unless the operator is already viewing it.

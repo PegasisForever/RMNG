@@ -60,6 +60,20 @@ export function formatHostsUsageSummary(
   };
 }
 
+export function partitionHosts(hosts: Host[]): { activeHosts: Host[]; archivedHosts: Host[] } {
+  return {
+    activeHosts: hosts.filter((host) => !host.archived),
+    archivedHosts: hosts.filter((host) => host.archived),
+  };
+}
+
+/** Merge a reordered active-host projection back into the complete persisted order without
+ * moving archived rows. This keeps an archived clone's place when it is restored. */
+export function mergeActiveHostOrder(hosts: Host[], activeOrder: string[]): string[] {
+  const nextActive = [...activeOrder];
+  return hosts.map((host) => (host.archived ? host.id : (nextActive.shift() ?? host.id)));
+}
+
 export interface SidebarProps {
   /** Off-canvas drawer state (< lg); the panel is static + always visible ≥ lg. */
   open?: boolean;
@@ -109,6 +123,10 @@ export interface SidebarProps {
   onChangeAccountHost: (host: Host) => void;
   /** Open the port-forward editor for a host. */
   onPortForwardHost: (host: Host) => void;
+  /** Gracefully stop a managed clone while retaining it. */
+  onArchiveHost: (host: Host) => void;
+  /** Restart a retained managed clone. */
+  onUnarchiveHost: (host: Host) => void;
   /** New host id order after a drag-reorder. */
   onReorder: (nextIds: string[]) => void;
 }
@@ -142,6 +160,8 @@ export function Sidebar({
   onCommitHost,
   onChangeAccountHost,
   onPortForwardHost,
+  onArchiveHost,
+  onUnarchiveHost,
   onReorder,
 }: SidebarProps) {
   const runningClone = operations.some(
@@ -149,8 +169,9 @@ export function Sidebar({
   );
   const opForHost = (id: string) =>
     operations.find((o) => o.target === id && o.status === "running");
+  const { activeHosts, archivedHosts } = partitionHosts(hosts);
   const hostsUsage = formatHostsUsageSummary(
-    hosts.map((h) => h.id),
+    activeHosts.map((h) => h.id),
     stats,
     cloneCpus,
   );
@@ -163,11 +184,11 @@ export function Sidebar({
   function onDragEnd(event: DragEndEvent) {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const ids = hosts.map((h) => h.id);
+    const ids = activeHosts.map((h) => h.id);
     const oldIndex = ids.indexOf(String(active.id));
     const newIndex = ids.indexOf(String(over.id));
     if (oldIndex < 0 || newIndex < 0) return;
-    onReorder(arrayMove(ids, oldIndex, newIndex));
+    onReorder(mergeActiveHostOrder(hosts, arrayMove(ids, oldIndex, newIndex)));
   }
 
   return (
@@ -231,7 +252,7 @@ export function Sidebar({
         <div className="mb-1 flex items-center justify-between px-1">
           <div className="flex min-w-0 items-baseline gap-2">
             <h2 className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-              Hosts ({hosts.length})
+              Hosts ({activeHosts.length})
             </h2>
             {hostsUsage ? (
               <span
@@ -253,9 +274,9 @@ export function Sidebar({
             + Clone
           </button>
         </div>
-        {hosts.length === 0 ? (
+        {activeHosts.length === 0 ? (
           <p className="rounded-lg border border-dashed border-slate-300 bg-white p-4 text-center text-xs text-slate-400 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-500">
-            No hosts yet.
+            {archivedHosts.length === 0 ? "No hosts yet." : "No active hosts."}
           </p>
         ) : (
           <DndContext
@@ -264,11 +285,11 @@ export function Sidebar({
             onDragEnd={onDragEnd}
           >
             <SortableContext
-              items={hosts.map((h) => h.id)}
+              items={activeHosts.map((h) => h.id)}
               strategy={verticalListSortingStrategy}
             >
               <div>
-                {hosts.map((host) => (
+                {activeHosts.map((host) => (
                   <SidebarHost
                     key={host.id}
                     host={host}
@@ -284,6 +305,8 @@ export function Sidebar({
                     onDelete={() => onDeleteHost(host)}
                     onChangeAccount={() => onChangeAccountHost(host)}
                     onPortForward={() => onPortForwardHost(host)}
+                    onArchive={() => onArchiveHost(host)}
+                    onUnarchive={() => onUnarchiveHost(host)}
                   />
                 ))}
               </div>
@@ -291,6 +314,38 @@ export function Sidebar({
           </DndContext>
         )}
       </div>
+
+      {archivedHosts.length > 0 ? (
+        <div>
+          <h2 className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            Archived hosts ({archivedHosts.length})
+          </h2>
+          <DndContext>
+            <SortableContext items={[]} strategy={verticalListSortingStrategy}>
+              <div>
+                {archivedHosts.map((host) => (
+                  <SidebarHost
+                    key={host.id}
+                    host={host}
+                    cloneCpus={cloneCpus}
+                    sshPublicHost={sshPublicHost}
+                    bastionPort={bastionPort}
+                    selected={selectedId === host.id}
+                    op={opForHost(host.id)}
+                    onSelect={() => onSelectHost(host)}
+                    onCommit={() => onCommitHost(host)}
+                    onDelete={() => onDeleteHost(host)}
+                    onChangeAccount={() => onChangeAccountHost(host)}
+                    onPortForward={() => onPortForwardHost(host)}
+                    onArchive={() => onArchiveHost(host)}
+                    onUnarchive={() => onUnarchiveHost(host)}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
+        </div>
+      ) : null}
 
       {operations.length > 0 ? (
         <div className="space-y-2">

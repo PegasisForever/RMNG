@@ -4,7 +4,7 @@ import type { OperationStatus } from "./OperationStatus";
 
 export type Operation = { id: string, kind: OperationKind, 
 /**
- * Host id being created (clone) or removed (delete).
+ * Host id being created, archived, restored, or removed; image reference for template jobs.
  */
 target: string, source: string | null, status: OperationStatus, 
 /**

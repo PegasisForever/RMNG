@@ -44,6 +44,8 @@ const meta = {
     onCommit: fn(),
     onChangeAccount: fn(),
     onPortForward: fn(),
+    onArchive: fn(),
+    onUnarchive: fn(),
   },
 } satisfies Meta<typeof SidebarHost>;
 
@@ -79,6 +81,11 @@ export const NoToken: Story = {
 /** Plain unmanaged row — delete only (no commit / account actions). */
 export const Unmanaged: Story = {
   args: { host: hostUnmanaged },
+};
+
+/** Retained clone: no live runtime actions or usage, but it remains selectable. */
+export const Archived: Story = {
+  args: { host: { ...hostIdle, archived: true } },
 };
 
 /** The selected (active) row. */

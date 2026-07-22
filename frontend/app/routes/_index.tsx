@@ -12,6 +12,7 @@ import { Sidebar } from "~/components/Sidebar";
 import {
   activate,
   activateLayout,
+  archiveHost,
   cloneHost,
   commitImage,
   createGroup,
@@ -30,6 +31,7 @@ import {
   restartServer,
   setHostGroup,
   testConfig,
+  unarchiveHost,
   updateServer,
 } from "~/lib/api";
 import { type ClaudeUsage, type ControlState, type GroupUsage, type Host, emptyState } from "~/lib/types";
@@ -449,6 +451,8 @@ function Dashboard({
             setForwardError(null);
             setForwardHost(host);
           }}
+          onArchiveHost={(host) => run(archiveHost(host.id))}
+          onUnarchiveHost={(host) => run(unarchiveHost(host.id))}
           onReorder={onReorder}
         />
 
@@ -495,7 +499,11 @@ function Dashboard({
                         <div className="p-4 text-sm text-slate-400 dark:text-slate-500">Loading chat…</div>
                       }
                     >
-                      <ChatPanel key={selectedHost.id} hostId={selectedHost.id} />
+                      <ChatPanel
+                        key={selectedHost.id}
+                        hostId={selectedHost.id}
+                        archived={selectedHost.archived === true}
+                      />
                     </Suspense>
                   </ClientOnly>
                 </div>

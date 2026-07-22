@@ -57,6 +57,12 @@ export const reorder = (order: string[]) => postJson("/api/reorder", { order });
 export const cloneHost = (image: string, payload: ClonePayload) =>
   postJson("/api/clone", { image, ...payload });
 export const deleteHost = (id: string) => postJson("/api/delete", { id });
+/** Gracefully stop a managed clone while retaining its container and per-host data. */
+export const archiveHost = (id: string) =>
+  postJson(`/api/hosts/${encodeURIComponent(id)}/archive`, {});
+/** Restart a retained archived clone. */
+export const unarchiveHost = (id: string) =>
+  postJson(`/api/hosts/${encodeURIComponent(id)}/unarchive`, {});
 /** Replace a host's port-forward rules. New rules omit `id` (server derives it as
  *  `f<localPort>`). 400 on a local-port conflict (validated server-side); the UI
  *  refreshes from the next `/events` frame. */

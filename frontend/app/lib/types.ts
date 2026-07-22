@@ -35,6 +35,9 @@ export interface Host {
    * retired `ctid`/`container` keys load unmanaged — serde drops the stale keys.
    */
   managed?: boolean;
+  /** True for a retained managed clone that is intentionally stopped. Unlike `offline`,
+   *  this is an operator-controlled state and the clone can be started again. */
+  archived?: boolean;
   /** The clone-source image reference this host was cloned from (`pegasis0/rmng-template:latest`). */
   source?: string;
   /**
@@ -84,7 +87,14 @@ export interface Host {
   forwards?: PortForward[];
 }
 
-export type OperationKind = "clone" | "delete" | "pull" | "commit" | "update";
+export type OperationKind =
+  | "clone"
+  | "delete"
+  | "archive"
+  | "unarchive"
+  | "pull"
+  | "commit"
+  | "update";
 export type OperationStatus = "running" | "done" | "error";
 
 export interface Operation {

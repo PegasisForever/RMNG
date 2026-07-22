@@ -93,6 +93,8 @@ fn make_op(kind: OperationKind, target: &str, source: Option<&str>) -> Operation
         OperationKind::Pull => format!("queued template pull → {target}"),
         OperationKind::Commit => format!("queued commit of {}", source.unwrap_or("?")),
         OperationKind::Delete => format!("queued delete of {target}"),
+        OperationKind::Archive => format!("queued archive of {target}"),
+        OperationKind::Unarchive => format!("queued unarchive of {target}"),
         OperationKind::Update => "queued control-server update".to_string(),
     };
     Operation {
@@ -758,6 +760,129 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
     crate::chat::delete_chat(&dd, &host_id);
 }
 
+/// Stop a managed clone without removing its container, volumes, or per-host files.
+pub fn start_archive(app: &App, host_id: &str) -> Result<Operation, JobError> {
+    let st = app.store.get();
+    let host = st
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .ok_or_else(|| JobError(format!("unknown host '{host_id}'")))?;
+    if !host.managed {
+        return Err(JobError(format!("'{host_id}' is not a managed clone")));
+    }
+    if host.archived {
+        return Err(JobError(format!("'{host_id}' is already archived")));
+    }
+    if st
+        .operations
+        .iter()
+        .any(|o| o.status == OperationStatus::Running && o.target == host_id)
+    {
+        return Err(JobError(format!(
+            "'{host_id}' already has an operation in flight"
+        )));
+    }
+
+    let op = make_op(OperationKind::Archive, host_id, None);
+    let op_for_return = op.clone();
+    let op_id = op.id.clone();
+    app.store.mutate(|s| s.operations.push(op));
+
+    let app2 = app.clone();
+    let host_id = host_id.to_string();
+    tokio::spawn(async move { run_archive(app2, op_id, host_id).await });
+    Ok(op_for_return)
+}
+
+async fn run_archive(app: App, op_id: String, host_id: String) {
+    let mut progress = op_progress(&app, &op_id, OperationKind::Archive);
+    progress("stop", "stopping the clone (SIGRTMIN+3, up to 20s)");
+    if let Err(e) = app.docker.stop_container(&host_id).await {
+        return fail_op(&app, &op_id, e.to_string());
+    }
+
+    app.store.mutate(|s| {
+        if let Some(host) = s.hosts.iter_mut().find(|h| h.id == host_id) {
+            host.archived = true;
+            host.monitor_state = None;
+            host.local_ip = None;
+            host.unread = false;
+        }
+        if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
+            op.status = OperationStatus::Done;
+            op.step = "done".into();
+            op.pct = 100.0;
+            op.message = format!("clone {host_id} archived");
+            op.finished_at = Some(now_ms());
+        }
+    });
+    drop(progress);
+    schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+}
+
+/// Start an archived managed clone without recreating it.
+pub fn start_unarchive(app: &App, host_id: &str) -> Result<Operation, JobError> {
+    let st = app.store.get();
+    let host = st
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .ok_or_else(|| JobError(format!("unknown host '{host_id}'")))?;
+    if !host.managed {
+        return Err(JobError(format!("'{host_id}' is not a managed clone")));
+    }
+    if !host.archived {
+        return Err(JobError(format!("'{host_id}' is not archived")));
+    }
+    if st
+        .operations
+        .iter()
+        .any(|o| o.status == OperationStatus::Running && o.target == host_id)
+    {
+        return Err(JobError(format!(
+            "'{host_id}' already has an operation in flight"
+        )));
+    }
+
+    let op = make_op(OperationKind::Unarchive, host_id, None);
+    let op_for_return = op.clone();
+    let op_id = op.id.clone();
+    app.store.mutate(|s| s.operations.push(op));
+
+    let app2 = app.clone();
+    let host_id = host_id.to_string();
+    tokio::spawn(async move { run_unarchive(app2, op_id, host_id).await });
+    Ok(op_for_return)
+}
+
+async fn run_unarchive(app: App, op_id: String, host_id: String) {
+    let mut progress = op_progress(&app, &op_id, OperationKind::Unarchive);
+    progress("start", "starting the archived clone");
+    if let Err(e) = app.docker.start_container(&host_id).await {
+        return fail_op(&app, &op_id, e.to_string());
+    }
+
+    app.store.mutate(|s| {
+        if let Some(host) = s.hosts.iter_mut().find(|h| h.id == host_id) {
+            host.archived = false;
+            host.monitor_state = None;
+            host.local_ip = None;
+            host.unread = false;
+        }
+        if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
+            op.status = OperationStatus::Done;
+            op.step = "done".into();
+            op.pct = 100.0;
+            op.message = format!("clone {host_id} restored");
+            op.finished_at = Some(now_ms());
+        }
+    });
+    drop(progress);
+    crate::shm::ensure_now(&app, &host_id).await;
+    schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,5 +1018,45 @@ mod tests {
             "got: {}",
             err.0
         );
+    }
+
+    #[tokio::test]
+    async fn archive_and_unarchive_register_lifecycle_ops() {
+        let app = test_app();
+        app.store.mutate(|s| {
+            s.hosts.push(Host {
+                id: "clone-a".into(),
+                host: "clone-a".into(),
+                managed: true,
+                ..Default::default()
+            });
+        });
+
+        let archive = start_archive(&app, "clone-a").unwrap();
+        assert_eq!(archive.kind, OperationKind::Archive);
+        assert_eq!(archive.target, "clone-a");
+        assert!(app.store.get().operations.iter().any(|op| op.id == archive.id));
+        assert!(start_unarchive(&app, "clone-a").unwrap_err().0.contains("not archived"));
+    }
+
+    #[tokio::test]
+    async fn archive_validation_rejects_unmanaged_and_wrong_state() {
+        let app = test_app();
+        app.store.mutate(|s| {
+            s.hosts.push(Host { id: "plain".into(), host: "plain".into(), ..Default::default() });
+            s.hosts.push(Host {
+                id: "stored".into(),
+                host: "stored".into(),
+                managed: true,
+                archived: true,
+                ..Default::default()
+            });
+        });
+
+        assert!(start_archive(&app, "plain").unwrap_err().0.contains("not a managed"));
+        assert!(start_archive(&app, "stored").unwrap_err().0.contains("already archived"));
+        let unarchive = start_unarchive(&app, "stored").unwrap();
+        assert_eq!(unarchive.kind, OperationKind::Unarchive);
+        assert!(start_unarchive(&app, "stored").unwrap_err().0.contains("in flight"));
     }
 }

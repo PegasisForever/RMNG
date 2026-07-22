@@ -880,9 +880,29 @@ pub const CLONE_BINARIES: &[CloneBinary] = &[
     CloneBinary { payload: "rmng-cli", bin: "rmng", dir: "usr/local/bin" },
 ];
 
+// --- archive --------------------------------------------------------------------------
+
+fn archive_pct(step: &str) -> Option<f64> {
+    Some(match step {
+        "queued" => 0.0,
+        "stop" => 75.0,
+        "done" => 100.0,
+        _ => return None,
+    })
+}
+
+fn unarchive_pct(step: &str) -> Option<f64> {
+    Some(match step {
+        "queued" => 0.0,
+        "start" => 75.0,
+        "done" => 100.0,
+        _ => return None,
+    })
+}
+
 // --- op-log pct helpers (exposed for jobs.rs step tables) -----------------------------
 
-/// The clone/pull/commit/delete step→pct tables, exposed so `jobs.rs` maps a streamed step
+/// The clone/pull/commit/delete/archive step→pct tables, exposed so `jobs.rs` maps a streamed step
 /// key to the operation's coarse percentage without re-deriving it. (Monitors-apply is
 /// intentionally NOT an Operation — web.rs streams its `[ct]` lines directly — so there is
 /// no monitors table here.)
@@ -892,6 +912,8 @@ pub fn step_pct(kind: wire::OperationKind, step: &str) -> Option<f64> {
         wire::OperationKind::Pull => pull_pct(step),
         wire::OperationKind::Commit => commit_pct(step),
         wire::OperationKind::Delete => delete_pct(step),
+        wire::OperationKind::Archive => archive_pct(step),
+        wire::OperationKind::Unarchive => unarchive_pct(step),
         // Self-update has no provision step table — `jobs::run_update` drives its pct directly.
         wire::OperationKind::Update => None,
     }

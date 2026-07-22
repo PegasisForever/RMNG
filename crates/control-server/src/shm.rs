@@ -180,7 +180,7 @@ async fn reconcile(app: &App, warned: &mut HashSet<String>) {
         .get()
         .hosts
         .into_iter()
-        .filter(|h| h.managed && is_safe_id(&h.id))
+        .filter(|h| h.managed && !h.archived && is_safe_id(&h.id))
         .collect();
 
     for h in &hosts {

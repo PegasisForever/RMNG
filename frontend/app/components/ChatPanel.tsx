@@ -30,7 +30,7 @@ function Bubble({ m }: { m: ChatMessage }) {
   );
 }
 
-export default function ChatPanel({ hostId }: { hostId: string }) {
+export default function ChatPanel({ hostId, archived = false }: { hostId: string; archived?: boolean }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState("");
@@ -72,7 +72,7 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
   // the POST only starts the turn; the reply and final busy state arrive via SSE.
   async function send(override?: string) {
     const text = (override ?? input).trim();
-    if (!text || busy) return;
+    if (!text || busy || archived) return;
     if (override === undefined) setInput("");
     setError(null);
     setBusy(true); // optimistic; the SSE snapshot confirms (or clears) it
@@ -101,7 +101,7 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
   // Interrupt the in-flight turn. The wrapper interrupts the agent and emits the
   // aborted result over SSE, which clears `busy` (and `stopping`).
   async function stop() {
-    if (!busy || stopping) return;
+    if (!busy || stopping || archived) return;
     setStopping(true);
     setError(null);
     try {
@@ -127,7 +127,9 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
           <p className="text-sm text-slate-400 dark:text-slate-500">Loading…</p>
         ) : messages.length === 0 ? (
           <p className="text-sm text-slate-400 dark:text-slate-500">
-            Ask the agent anything — it can control this host's desktop.
+            {archived
+              ? "This clone is archived. Its chat history is retained."
+              : "Ask the agent anything — it can control this host's desktop."}
           </p>
         ) : (
           messages.map((m) => <Bubble key={m.id} m={m} />)
@@ -154,6 +156,11 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
           {error}
         </div>
       ) : null}
+      {archived ? (
+        <div className="border-t border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400">
+          Unarchive this clone to message the agent.
+        </div>
+      ) : null}
 
       <form
         className="flex items-end gap-2 border-t border-slate-200 p-2 dark:border-slate-700"
@@ -172,20 +179,20 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
             }
           }}
           rows={2}
-          placeholder="Message the agent…  (Enter to send)"
-          disabled={busy}
+          placeholder={archived ? "Unarchive to message the agent" : "Message the agent…  (Enter to send)"}
+          disabled={busy || archived}
           className="min-w-0 flex-1 resize-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none disabled:opacity-60 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
         />
         <button
           type="button"
           onClick={() => send("monitor")}
-          disabled={busy}
-          title="Tell the agent to start monitoring this desktop (track working vs idle)"
+          disabled={busy || archived}
+          title={archived ? "Unarchive this clone before monitoring it" : "Tell the agent to start monitoring this desktop (track working vs idle)"}
           className="shrink-0 rounded-md border border-amber-400 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-40 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-400 dark:hover:bg-amber-900/40"
         >
           Monitor
         </button>
-        {busy ? (
+        {busy && !archived ? (
           <button
             type="button"
             onClick={stop}
@@ -198,7 +205,7 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
         ) : (
           <button
             type="submit"
-            disabled={!input.trim()}
+            disabled={archived || !input.trim()}
             className="shrink-0 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
             Send

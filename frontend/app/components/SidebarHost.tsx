@@ -15,14 +15,15 @@ import { workspaceBadge } from "~/lib/workspace";
 // Text color + label per host state. `working` is sky, `idle` amber (done / awaiting
 // the next task / needs you), `offline` rose. The state note carries the color; there
 // is no longer a status dot (the unread dot took its place on the title row).
-const AGENT_STATUS: Record<NonNullable<Host["monitorState"]>, { text: string; label: string }> = {
+const AGENT_STATUS: Record<NonNullable<Host["monitorState"]> | "archived", { text: string; label: string }> = {
   working: { text: "text-sky-600 dark:text-sky-400", label: "working" },
   idle: { text: "text-amber-700 dark:text-amber-400", label: "idle" },
   offline: { text: "text-rose-500 dark:text-rose-400", label: "offline" },
+  archived: { text: "text-slate-500 dark:text-slate-400", label: "archived" },
 };
 
 function effectiveStatus(host: Host): { text: string; label: string } {
-  return AGENT_STATUS[host.monitorState ?? "idle"];
+  return AGENT_STATUS[host.archived ? "archived" : (host.monitorState ?? "idle")];
 }
 
 type Metric = { label: string; value: string; title: string };
@@ -69,23 +70,17 @@ function MetricSlot({ metric }: { metric: Metric }) {
   );
 }
 
-/** The clone's account-group binding: a "group" badge + the group name (or a muted "no
- *  group"), taking the remaining width and truncating so the usage figures + ⋯ menu stay
- *  on the same row. Provider-agnostic — a group is one pool of Claude and/or GPT accounts;
- *  CLIProxyAPI owns intra-group selection. */
+/** The clone's account-group binding (or a muted "no group"), taking the remaining width
+ *  and truncating so the usage figures + ⋯ menu stay on the same row. Provider-agnostic — a
+ *  group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns intra-group selection. */
 function GroupTag({ group }: { group?: string }) {
   return (
     <span
-      className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
+      className="flex min-w-0 flex-1 items-center text-slate-400 dark:text-slate-500"
       title={group ? `account group: ${group}` : "no account group — no inference"}
     >
       {group ? (
-        <>
-          <span className="shrink-0 rounded bg-slate-100 px-1 text-[9px] font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-            group
-          </span>
-          <span className="truncate">{group}</span>
-        </>
+        <span className="truncate">{group}</span>
       ) : (
         <span className="italic text-slate-300 dark:text-slate-600">no group</span>
       )}
@@ -154,6 +149,10 @@ export interface SidebarHostProps {
   onChangeAccount: () => void;
   /** Open the port-forward editor for this host. */
   onPortForward: () => void;
+  /** Gracefully stop this managed clone while retaining it. */
+  onArchive: () => void;
+  /** Start this retained managed clone again. */
+  onUnarchive: () => void;
   /** Live runtime status for this host's forwards (from the `forwards` SSE event),
    *  merged into the compact forwards chips by rule id. */
   forwardRuntime?: ForwardRuntime[];
@@ -201,19 +200,25 @@ function CopySshMenuItem({ command, onDone }: { command: string; onDone: () => v
 function OverflowMenu({
   hostId,
   managed,
+  archived,
   busy,
   onCommit,
   onChangeAccount,
   onPortForward,
+  onArchive,
+  onUnarchive,
   onDelete,
   sshCommand,
 }: {
   hostId: string;
   managed: boolean;
+  archived: boolean;
   busy: boolean;
   onCommit: () => void;
   onChangeAccount: () => void;
   onPortForward: () => void;
+  onArchive: () => void;
+  onUnarchive: () => void;
   onDelete: () => void;
   /** The ready-to-paste `ssh -J …` one-liner for this clone. Undefined for unmanaged
    *  rows (no real container/sshd to jump to), which hides the menu item. */
@@ -282,12 +287,19 @@ function OverflowMenu({
           role="menu"
           className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800"
         >
-          {managed ? (
+          {managed && !archived ? (
             <>
               {item("Commit to image…", onCommit)}
               {item("Change account…", onChangeAccount)}
               {item("Port forward…", onPortForward)}
               {sshCommand ? <CopySshMenuItem command={sshCommand} onDone={() => setOpen(false)} /> : null}
+              {item("Archive", onArchive)}
+              <div className="my-1 h-px bg-slate-100 dark:bg-slate-700" />
+            </>
+          ) : null}
+          {managed && archived ? (
+            <>
+              {item("Unarchive", onUnarchive)}
               <div className="my-1 h-px bg-slate-100 dark:bg-slate-700" />
             </>
           ) : null}
@@ -309,6 +321,8 @@ export function SidebarHost({
   onCommit,
   onChangeAccount,
   onPortForward,
+  onArchive,
+  onUnarchive,
   forwardRuntime,
   sshPublicHost,
   bastionPort,
@@ -317,14 +331,14 @@ export function SidebarHost({
   // Managed clones (backed by a container named after the host id) get the commit /
   // account actions; plain unmanaged rows only get remove.
   const managed = host.managed === true;
-  // Only managed clones run a real sshd to jump into (Task 7/8 provisioning) — an
-  // unmanaged row has no container, so no command is offered for it.
-  const sshCommand = managed
+  // Only active managed clones run a usable sshd to jump into. Archived clones retain
+  // their container but deliberately hide runtime actions until they are restored.
+  const sshCommand = managed && !host.archived
     ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, host.id)
     : undefined;
   const status = effectiveStatus(host);
   const group = host.group || undefined;
-  const usage = usageParts(stats, cloneCpus);
+  const usage = host.archived ? null : usageParts(stats, cloneCpus);
   // CPU + MEM share `usage`, so they appear and vanish together — both sit inline on the
   // group row (group on the left, CPU then MEM right-aligned, then the ⋯ menu).
   const cpuMetric = usage
@@ -335,9 +349,9 @@ export function SidebarHost({
     : undefined;
   // Show the group/usage row when there's a group or a usage sample; a group-less, stat-less
   // clone shows neither (just the ⋯ menu).
-  const showBindingLine = !!group || !!cpuMetric;
+  const showBindingLine = !host.archived && (!!group || !!cpuMetric);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: host.id, disabled: busy });
+    useSortable({ id: host.id, disabled: busy || host.archived });
 
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -362,7 +376,7 @@ export function SidebarHost({
       aria-pressed={selected}
       onClick={onSelect}
       title={`${host.id} · ${host.host}:${host.port}`}
-      className={`group flex touch-none cursor-grab items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent px-1.5 py-1.5 last:border-b-0 active:cursor-grabbing dark:border-b-slate-700 ${
+      className={`group flex touch-none ${host.archived ? "cursor-pointer" : "cursor-grab active:cursor-grabbing"} items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent px-1.5 py-1.5 last:border-b-0 dark:border-b-slate-700 ${
         // Per-side borders (explicit colors so they never collide): a slate-200 bottom
         // divider between rows + a left accent for the selected row. Exactly one
         // background wins (dragging ▸ selected ▸ default); the default is a solid
@@ -386,7 +400,13 @@ export function SidebarHost({
                 {host.displayName ?? host.id}
               </span>
               <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400">
-                {op?.kind === "delete" ? "deleting…" : op?.step}
+                {op?.kind === "delete"
+                  ? "deleting…"
+                  : op?.kind === "archive"
+                    ? "archiving…"
+                    : op?.kind === "unarchive"
+                      ? "restoring…"
+                      : op?.step}
               </span>
             </div>
           ) : showBindingLine ? (
@@ -401,10 +421,13 @@ export function SidebarHost({
           <OverflowMenu
             hostId={host.id}
             managed={managed}
+            archived={host.archived === true}
             busy={busy}
             onCommit={onCommit}
             onChangeAccount={onChangeAccount}
             onPortForward={onPortForward}
+            onArchive={onArchive}
+            onUnarchive={onUnarchive}
             onDelete={onDelete}
             sshCommand={sshCommand}
           />
@@ -415,7 +438,7 @@ export function SidebarHost({
             Hidden while busy — the op step shows in the top block instead. */}
         {!busy ? (
           <p className="break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
-            {host.unread && !selected ? (
+            {host.unread && !host.archived && !selected ? (
               <span
                 className="mr-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white"
                 title="stopped working since you last viewed it"
@@ -448,7 +471,7 @@ export function SidebarHost({
         ) : null}
 
         {/* Compact list of this host's port forwards (remote→local, live status dot). */}
-        {!busy && host.forwards && host.forwards.length > 0 ? (
+        {!busy && !host.archived && host.forwards && host.forwards.length > 0 ? (
           <ForwardChips forwards={host.forwards} runtime={forwardRuntime ?? []} />
         ) : null}
       </div>

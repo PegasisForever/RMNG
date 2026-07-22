@@ -192,11 +192,13 @@ pub fn backoff(failures: u32) -> Duration {
     BASE_BACKOFF.saturating_mul(2u32.saturating_pow(failures)).min(MAX_BACKOFF)
 }
 
-/// Sorted, deduped ids of managed clones — the `PermitOpen` allowlist source. A stopped
-/// clone stays listed (harmless: the dial just fails); membership tracks the fleet roster.
+/// Sorted, deduped ids of active managed clones — the `PermitOpen` allowlist source.
 pub fn managed_clone_ids(hosts: &[wire::Host]) -> Vec<String> {
-    let mut ids: Vec<String> =
-        hosts.iter().filter(|h| h.managed).map(|h| h.id.clone()).collect();
+    let mut ids: Vec<String> = hosts
+        .iter()
+        .filter(|h| h.managed && !h.archived)
+        .map(|h| h.id.clone())
+        .collect();
     ids.sort_unstable();
     ids.dedup();
     ids
@@ -236,7 +238,13 @@ fn render_bastion_files(app: &App, data_dir: &str) -> bool {
 async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<String, u64>) {
     let cfg = app.config();
     let hash = keys_hash(&cfg.ssh.authorized_keys);
-    for host in app.store.get().hosts.into_iter().filter(|h| h.managed) {
+    for host in app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| h.managed && !h.archived)
+    {
         if pushed.get(&host.id) == Some(&hash) {
             continue;
         }
@@ -534,7 +542,11 @@ mod tests {
         let mut unmanaged = wire::Host::default();
         unmanaged.id = "legacy".into();
         unmanaged.managed = false;
-        let ids = managed_clone_ids(&[h1, unmanaged, h2]);
+        let mut archived = wire::Host::default();
+        archived.id = "retained".into();
+        archived.managed = true;
+        archived.archived = true;
+        let ids = managed_clone_ids(&[h1, unmanaged, h2, archived]);
         assert_eq!(ids, vec!["a-clone".to_string(), "b-clone".to_string()]);
     }
 }

@@ -390,6 +390,7 @@ fn build_forwards_msg(state: &wire::ControlState, forward_port: u16) -> wire::fo
     let rules = state
         .hosts
         .iter()
+        .filter(|h| !h.archived)
         .flat_map(|h| {
             h.forwards.iter().filter(|f| f.enabled).map(move |f| wire::forward::ForwardRule {
                 host_id: h.id.clone(),
@@ -905,6 +906,10 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
         let _ = stream.write_all(&[1u8]);
         return;
     };
+    if host.archived {
+        let _ = stream.write_all(&[1u8]);
+        return;
+    }
     // Confine the data plane to *configured, enabled* forwards for this host — otherwise
     // the 0.0.0.0 listener is an open TCP proxy into the Docker network. The header must
     // name a forward that exists, is enabled, and targets the same remote port.
@@ -1008,13 +1013,18 @@ mod tests {
         b.forwards = vec![
             PortForward { id: "f7000".into(), remote_port: 5000, local_port: 7000, enabled: true, label: None },
         ];
-        let st = ControlState { hosts: vec![a, b], ..Default::default() };
+        let mut archived = Host { id: "archived".into(), host: "archived".into(), archived: true, ..Default::default() };
+        archived.forwards = vec![
+            PortForward { id: "f9000".into(), remote_port: 9000, local_port: 9000, enabled: true, label: None },
+        ];
+        let st = ControlState { hosts: vec![a, b, archived], ..Default::default() };
         let msg = build_forwards_msg(&st, 9005);
         assert_eq!(msg.forward_port, 9005);
         // Only the two enabled rules, tagged with host id.
         assert_eq!(msg.rules.len(), 2);
         assert!(msg.rules.iter().any(|r| r.host_id == "a" && r.local_port == 8080 && r.remote_port == 3000));
         assert!(msg.rules.iter().any(|r| r.host_id == "b" && r.local_port == 7000));
+        assert!(!msg.rules.iter().any(|r| r.host_id == "archived"));
         assert!(!msg.rules.iter().any(|r| r.local_port == 9)); // disabled excluded
     }
 

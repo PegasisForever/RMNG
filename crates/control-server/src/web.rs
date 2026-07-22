@@ -73,6 +73,8 @@ pub fn router(app: App) -> Router {
         .route("/api/chat/:id/abort", post(chat_abort))
         .route("/api/hosts/:id/forwards", put(forwards_put))
         .route("/api/hosts/:id/group", post(host_group))
+        .route("/api/hosts/:id/archive", post(archive))
+        .route("/api/hosts/:id/unarchive", post(unarchive))
         .route("/api/hosts/:id/mcp", post(host_mcp))
         .route("/api/hosts/:id/exec", post(host_exec))
         // Group-proxy onboarding + CRUD (thin proxies to each group instance's management API).
@@ -350,6 +352,9 @@ async fn host_mcp(
     Json(req): Json<wire::McpCallRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
+    if host.archived {
+        return Err((StatusCode::CONFLICT, format!("host '{id}' is archived; unarchive it first")));
+    }
     let content = proxy_to_daemon(&app, &host, &req.tool, &req.args)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
@@ -402,6 +407,9 @@ async fn host_exec(
         return Err((StatusCode::BAD_REQUEST, "cmd must not be empty".into()));
     }
     let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
+    if host.archived {
+        return Err((StatusCode::CONFLICT, format!("host '{id}' is archived; unarchive it first")));
+    }
     let stdin = match &req.stdin_b64 {
         Some(b64) => Some(
             B64.decode(b64)
@@ -824,6 +832,26 @@ async fn images_delete(
 #[derive(Deserialize)]
 struct DeleteReq {
     id: String,
+}
+
+/// `POST /api/hosts/:id/archive` — gracefully stop a managed clone but retain its data.
+async fn archive(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+) -> Result<Json<Operation>, (StatusCode, String)> {
+    jobs::start_archive(&app, &id)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+/// `POST /api/hosts/:id/unarchive` — restart a retained archived clone.
+async fn unarchive(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+) -> Result<Json<Operation>, (StatusCode, String)> {
+    jobs::start_unarchive(&app, &id)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
 /// `POST /api/delete` — destroy a managed CT (or unregister a plain host).
@@ -1294,6 +1322,9 @@ async fn chat_send(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let host = host_by_id(&app, &id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown host '{id}'")))?;
+    if host.archived {
+        return Err((StatusCode::CONFLICT, format!("host '{id}' is archived; unarchive it first")));
+    }
     crate::chat::send_chat(&app, &host, &req.text).map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -1315,11 +1346,20 @@ async fn chat_events(
 }
 
 /// `POST /api/chat/:id/abort` — interrupt the in-flight turn.
-async fn chat_abort(State(app): State<App>, AxPath(id): AxPath<String>) -> StatusCode {
+async fn chat_abort(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
     if let Some(host) = host_by_id(&app, &id) {
+        if host.archived {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("host '{id}' is archived; unarchive it first"),
+            ));
+        }
         crate::chat::abort_chat(&app, &host).await;
     }
-    StatusCode::NO_CONTENT
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- group-proxy request router (/cc) --------------------------------------
@@ -1363,15 +1403,20 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
         return deny(StatusCode::UNAUTHORIZED, "unknown or missing router bearer key");
     };
 
-    // 2. Clone → group binding.
-    let group = app
+    // 2. Clone → active group binding.
+    let host = app
         .store
         .get()
         .hosts
         .into_iter()
-        .find(|h| h.id == host_id)
-        .and_then(|h| h.group);
-    let Some(group) = group else {
+        .find(|h| h.id == host_id);
+    let Some(host) = host else {
+        return deny(StatusCode::UNAUTHORIZED, "unknown clone");
+    };
+    if host.archived {
+        return deny(StatusCode::CONFLICT, "clone is archived; unarchive it before using inference");
+    }
+    let Some(group) = host.group else {
         return deny(
             StatusCode::CONFLICT,
             "clone has no group (bind one in Settings before running an agent)",
@@ -2038,6 +2083,43 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("cmd"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn archived_host_runtime_calls_return_conflict() {
+        let app = test_app();
+        app.store.mutate(|s| {
+            s.hosts.push(wire::Host {
+                id: "stored".into(),
+                host: "stored".into(),
+                managed: true,
+                archived: true,
+                ..Default::default()
+            });
+        });
+
+        let mcp = host_mcp(
+            State(app.clone()),
+            AxPath("stored".into()),
+            Json(wire::McpCallRequest { tool: "screenshot".into(), args: json!({}) }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(mcp.0, StatusCode::CONFLICT);
+
+        let chat = chat_send(
+            State(app.clone()),
+            AxPath("stored".into()),
+            Json(ChatSendReq { text: "hello".into() }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(chat.0, StatusCode::CONFLICT);
+
+        let abort = chat_abort(State(app), AxPath("stored".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(abort.0, StatusCode::CONFLICT);
     }
 
     #[test]

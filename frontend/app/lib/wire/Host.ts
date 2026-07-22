@@ -24,7 +24,12 @@ port: number, username: string, password: string, domain: string | null, gdm_use
  * `state.json` rows carrying the retired `ctid`/`container` keys load as
  * unmanaged — serde drops the stale keys.
  */
-managed: boolean, source: string | null, 
+managed: boolean,
+/**
+ * True when this managed clone is intentionally stopped but retained. Its container,
+ * named volumes, notes, and chat history remain available for a later unarchive.
+ */
+archived: boolean, source: string | null,
 /**
  * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
  * route through, via the control-server's `/cc` router. `None` = no inference. This is
