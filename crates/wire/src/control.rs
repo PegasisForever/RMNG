@@ -249,6 +249,25 @@ pub struct ContainerStats {
     pub mem_limit: u64,
 }
 
+/// Live resource usage for the entire CT 105 LXC that hosts RMNG. Published as the volatile
+/// `lxcStats` SSE event, separately from per-clone [`ContainerStats`] rows, so control-server,
+/// Docker, registry, cache, and unmanaged CT work are included without entering `state.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct LxcStats {
+    /// CT-wide CPU use; 100 means CT 105's enforced 16-CPU capacity was busy. `None` is
+    /// emitted until two cgroup samples establish a rate.
+    pub cpu_pct: Option<f64>,
+    /// RAM usage excluding reclaimable page cache, plus swap usage, in bytes. Tmpfs and
+    /// shared-memory charges remain included.
+    pub mem_used: u64,
+    /// RAM plus swap limit in bytes; 0 when either cgroup limit is unbounded or unavailable.
+    pub mem_limit: u64,
+    /// Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
+    pub disk_used: Option<u64>,
+}
+
 /// Version + update-available status for the control-server itself, served by
 /// `GET /api/server/version`. `current_*` come from the running image's OCI labels /
 /// RepoDigest; `remote_digest` from a registry manifest query (no pull). `available` is

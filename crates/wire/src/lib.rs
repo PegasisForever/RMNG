@@ -34,6 +34,6 @@ pub use exec::{ExecRequest, ExecResult};
 pub use mcp::McpCallRequest;
 pub use control::{
     AgentReport, Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
-    CodexResetMark, ContainerStats, ControlState, GroupUsage, Host, LayoutPreset, MonitorSpec,
+    CodexResetMark, ContainerStats, ControlState, GroupUsage, Host, LayoutPreset, LxcStats, MonitorSpec,
     MonitorState, Operation, OperationKind, OperationStatus, PortForward, Provider, UpdateStatus,
 };

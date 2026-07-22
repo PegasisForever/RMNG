@@ -31,6 +31,9 @@ pub struct App {
     /// tick; `/events` fans it out as a named `stats` SSE event. SSE-only — never persisted
     /// to `state.json` (see [`crate::monitor::StatsBus`]).
     pub stats: Arc<crate::monitor::StatsBus>,
+    /// Volatile CT 105-wide resource usage, published as the named `lxcStats` SSE event.
+    /// This includes the control-server and Docker infrastructure, unlike the clone map.
+    pub lxc_stats: Arc<crate::monitor::LxcStatsBus>,
     /// Volatile port-forward runtime status. Published by the media plane (viewer
     /// reports + data-conn counts); `/events` fans it out as a named `forwards` SSE
     /// event. SSE-only — never persisted (see [`crate::forward::ForwardBus`]).
@@ -56,6 +59,7 @@ impl App {
             media: Arc::new(crate::mediaplane::MediaHandle::default()),
             docker,
             stats: Arc::new(crate::monitor::StatsBus::new()),
+            lxc_stats: Arc::new(crate::monitor::LxcStatsBus::new()),
             forwards: Arc::new(crate::forward::ForwardBus::new()),
         }
     }

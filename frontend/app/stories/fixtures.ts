@@ -7,6 +7,7 @@ import type { ClaudeUsage, GroupUsage, Host, Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { Group } from "~/lib/wire/Group";
+import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
 const GiB = 1024 ** 3;
@@ -116,6 +117,13 @@ export const hosts: Host[] = [
 export const hostIds: string[] = hosts.map((h) => h.id);
 
 // --- live container usage (the volatile `stats` SSE map) --------------------
+
+export const lxcStats: LxcStats = {
+  cpuPct: 23,
+  memUsed: BigInt(Math.round(18.7 * GiB)),
+  memLimit: BigInt(264 * GiB),
+  diskUsed: BigInt(Math.round(312.1 * GiB)),
+};
 
 export const stats: Record<string, ContainerStats> = {
   [hostWorking.id]: {

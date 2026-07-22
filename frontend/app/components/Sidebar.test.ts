@@ -1,51 +1,37 @@
 import { expect, test } from "bun:test";
 
-import { formatHostsUsageSummary } from "./Sidebar";
-import type { ContainerStats } from "~/lib/wire/ContainerStats";
+import { formatLxcUsage } from "./Sidebar";
+import type { LxcStats } from "~/lib/wire/LxcStats";
 
 const GiB = 1024 ** 3;
 
-test("formats aggregate host-capacity CPU and memory usage", () => {
-  const stats: Record<string, ContainerStats> = {
-    alpha: {
-      cpuPct: 16,
-      memUsed: BigInt(Math.round(1.2 * GiB)),
-      memLimit: BigInt(16 * GiB),
-    },
-    beta: {
-      cpuPct: 8,
-      memUsed: BigInt(Math.round(2.4 * GiB)),
-      memLimit: BigInt(16 * GiB),
-    },
-    unbounded: {
-      cpuPct: 20,
-      memUsed: BigInt(Math.round(9.9 * GiB)),
-      memLimit: BigInt(0),
-    },
+test("formats whole-LXC CPU, memory, and physical disk usage", () => {
+  const stats: LxcStats = {
+    cpuPct: 16,
+    memUsed: BigInt(Math.round(13.5 * GiB)),
+    memLimit: BigInt(264 * GiB),
+    diskUsed: BigInt(Math.round(312.4 * GiB)),
   };
 
-  expect(formatHostsUsageSummary(["alpha", "beta", "unbounded", "missing"], stats)).toEqual({
-    cpu: "44%",
+  expect(formatLxcUsage(stats)).toEqual({
+    cpu: "16%",
     mem: "13.5GB",
+    disk: "312.4GB",
   });
 });
 
-test("retains precision for an aggregate below one percent", () => {
-  const stats: Record<string, ContainerStats> = {
-    alpha: {
-      cpuPct: 0.4,
-      memUsed: BigInt(Math.round(0.5 * GiB)),
-      memLimit: BigInt(16 * GiB),
-    },
-    beta: {
-      cpuPct: 0.2,
-      memUsed: BigInt(Math.round(0.7 * GiB)),
-      memLimit: BigInt(16 * GiB),
-    },
+test("keeps unavailable LXC rate and disk visibly unavailable", () => {
+  const stats: LxcStats = {
+    cpuPct: null,
+    memUsed: BigInt(Math.round(0.5 * GiB)),
+    memLimit: BigInt(0),
+    diskUsed: null,
   };
 
-  expect(formatHostsUsageSummary(["alpha", "beta"], stats)).toEqual({
-    cpu: "0.6%",
-    mem: "1.2GB",
+  expect(formatLxcUsage(stats)).toEqual({
+    cpu: "—",
+    mem: "0.5GB",
+    disk: "—",
   });
+  expect(formatLxcUsage(null)).toBeNull();
 });

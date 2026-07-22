@@ -3,17 +3,19 @@
 
 use std::collections::HashMap;
 use std::sync::RwLock as StdRwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tokio::sync::broadcast;
-use wire::{AgentReport, ContainerStats, Host, MonitorState};
+use wire::{AgentReport, ContainerStats, Host, LxcStats, MonitorState};
 
 use crate::app::App;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(4);
 const FETCH_TIMEOUT: Duration = Duration::from_millis(2500);
 const CGROUP_FETCH_TIMEOUT: Duration = Duration::from_millis(500);
+/// CT 105's parent cgroup enforces `cpu.max=1600000 100000`; no other deployment is supported.
+const CT105_CPU_CAPACITY: f64 = 16.0;
 
 /// Volatile per-host resource-usage bus. The monitor samples each running managed clone's
 /// CPU/RAM every tick and publishes the whole `{ hostId: ContainerStats }` map as a named SSE
@@ -61,6 +63,51 @@ impl Default for StatsBus {
     }
 }
 
+/// Volatile resource usage for the whole CT 105 LXC. It is intentionally a separate event from
+/// the clone-keyed stats map: the control-server and Docker infrastructure have no clone id.
+pub struct LxcStatsBus {
+    tx: broadcast::Sender<String>,
+    latest: StdRwLock<(Option<LxcStats>, String)>,
+}
+
+impl LxcStatsBus {
+    pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(16);
+        Self { tx, latest: StdRwLock::new((None, "null".to_string())) }
+    }
+
+    /// The latest CT sample (JSON) plus a live receiver for a new `/events` subscriber.
+    pub fn subscribe(&self) -> (String, broadcast::Receiver<String>) {
+        (self.latest.read().unwrap().1.clone(), self.tx.subscribe())
+    }
+
+    /// Broadcast only a changed CT sample; `None` explicitly clears unavailable readings.
+    fn publish(&self, stats: &Option<LxcStats>) {
+        let json = {
+            let mut latest = self.latest.write().unwrap();
+            if latest.0 == *stats {
+                return;
+            }
+            let json = serde_json::to_string(stats).unwrap_or_else(|_| "null".to_string());
+            *latest = (stats.clone(), json.clone());
+            json
+        };
+        let _ = self.tx.send(json);
+    }
+}
+
+impl Default for LxcStatsBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LxcCpuSample {
+    usage_usec: u64,
+    sampled_at: Instant,
+}
+
 #[derive(Deserialize)]
 struct StatusResp {
     #[serde(default)]
@@ -86,6 +133,60 @@ async fn probe_host(app: &App, host: &Host, agent_port: u16) -> MonitorState {
             _ => MonitorState::Idle,
         },
     }
+}
+
+fn lxc_cpu_pct(previous: &mut Option<LxcCpuSample>, usage_usec: u64, now: Instant) -> Option<f64> {
+    let previous = previous.replace(LxcCpuSample { usage_usec, sampled_at: now })?;
+    let usage_delta = usage_usec.checked_sub(previous.usage_usec)? as f64;
+    let elapsed_usec = now.checked_duration_since(previous.sampled_at)?.as_secs_f64() * 1_000_000.0;
+    (elapsed_usec > 0.0).then_some((usage_delta / elapsed_usec) * 100.0 / CT105_CPU_CAPACITY)
+}
+
+/// One CT 105-wide CPU/RAM/disk sample. Every cgroup input is read through PID 1's root so the
+/// result includes the Docker daemon and other LXC processes, not merely managed clones.
+async fn sample_lxc(previous_cpu: &mut Option<LxcCpuSample>) -> Option<LxcStats> {
+    let (cpu, memory, disk) = tokio::join!(
+        tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::lxc_cpu_usage_usec()),
+        tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::lxc_memory_usage()),
+        async { crate::cgroup::lxc_disk_used() },
+    );
+
+    let cpu = match cpu {
+        Ok(Ok(cpu)) => cpu,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "CT 105 cgroup-v2 CPU sample unavailable");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!("CT 105 cgroup-v2 CPU sample timed out");
+            return None;
+        }
+    };
+    let memory = match memory {
+        Ok(Ok(memory)) => memory,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "CT 105 cgroup-v2 memory sample unavailable");
+            return None;
+        }
+        Err(_) => {
+            tracing::debug!("CT 105 cgroup-v2 memory sample timed out");
+            return None;
+        }
+    };
+    let disk_used = match disk {
+        Ok(disk_used) => Some(disk_used),
+        Err(e) => {
+            tracing::debug!(error = %e, "CT 105 rootfs disk sample unavailable");
+            None
+        }
+    };
+
+    Some(LxcStats {
+        cpu_pct: lxc_cpu_pct(previous_cpu, cpu, Instant::now()),
+        mem_used: memory.used,
+        mem_limit: memory.limit,
+        disk_used,
+    })
 }
 
 /// One bounded CPU/RAM sample plus the bridge IP from one Docker runtime inspect. The CPU
@@ -147,10 +248,12 @@ fn pick_stat(
     }
 }
 
-async fn poll_once(app: &App) {
+async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     let hosts = app.store.get().hosts;
     if hosts.is_empty() {
+        let lxc_stats = sample_lxc(previous_lxc_cpu).await;
         app.stats.publish(&HashMap::new());
+        app.lxc_stats.publish(&lxc_stats);
         return;
     }
 
@@ -168,8 +271,8 @@ async fn poll_once(app: &App) {
             }
         };
         (host.id.clone(), state, stats, ip)
-    }))
-    .await;
+    }));
+    let (lxc_stats, probes) = tokio::join!(sample_lxc(previous_lxc_cpu), probes);
     let prev_stats = app.stats.latest_map();
 
     let mut next: HashMap<String, MonitorState> = HashMap::with_capacity(probes.len());
@@ -187,6 +290,7 @@ async fn poll_once(app: &App) {
     }
 
     app.stats.publish(&stats_map);
+    app.lxc_stats.publish(&lxc_stats);
 
     for host in &hosts {
         if next.get(&host.id) != Some(&MonitorState::Offline) {
@@ -223,8 +327,9 @@ async fn poll_once(app: &App) {
 /// Background loop; spawned once at startup.
 pub async fn run(app: App) {
     tracing::info!("monitor poller started (every {}s)", POLL_INTERVAL.as_secs());
+    let mut previous_lxc_cpu = None;
     loop {
-        poll_once(&app).await;
+        poll_once(&app, &mut previous_lxc_cpu).await;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -235,6 +340,27 @@ mod tests {
 
     fn stat(cpu: f64) -> ContainerStats {
         ContainerStats { cpu_pct: cpu, mem_used: 1 << 30, mem_limit: 8u64 << 30 }
+    }
+
+    fn lxc_stat(cpu: Option<f64>) -> LxcStats {
+        LxcStats {
+            cpu_pct: cpu,
+            mem_used: 16u64 << 30,
+            mem_limit: 264u64 << 30,
+            disk_used: Some(320u64 << 30),
+        }
+    }
+
+    #[test]
+    fn lxc_cpu_uses_elapsed_time_and_ct105_capacity() {
+        let start = Instant::now();
+        let mut previous = None;
+        assert_eq!(lxc_cpu_pct(&mut previous, 1_000, start), None);
+
+        let pct = lxc_cpu_pct(&mut previous, 32_001_000, start + Duration::from_secs(4)).unwrap();
+        assert!((pct - 50.0).abs() < f64::EPSILON);
+
+        assert_eq!(lxc_cpu_pct(&mut previous, 10, start + Duration::from_secs(8)), None);
     }
 
     #[test]
@@ -296,5 +422,25 @@ mod tests {
         changed.insert("h0".to_string(), stat(99.0));
         bus.publish(&changed);
         assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn lxc_stats_bus_snapshots_dedups_and_clears() {
+        let bus = LxcStatsBus::new();
+        let (snap, mut rx) = bus.subscribe();
+        assert_eq!(snap, "null");
+
+        let sample = Some(lxc_stat(Some(50.0)));
+        bus.publish(&sample);
+        let frame: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(frame["cpuPct"], serde_json::json!(50.0));
+        assert_eq!(frame["memUsed"], serde_json::json!(16u64 << 30));
+        assert_eq!(frame["memLimit"], serde_json::json!(264u64 << 30));
+        assert_eq!(frame["diskUsed"], serde_json::json!(320u64 << 30));
+
+        bus.publish(&sample);
+        assert!(rx.try_recv().is_err());
+        bus.publish(&None);
+        assert_eq!(rx.try_recv().unwrap(), "null");
     }
 }

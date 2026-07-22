@@ -3,7 +3,7 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { Sidebar } from "./Sidebar";
-import { cloneOperation, hosts, stats, usageGroups } from "~/stories/fixtures";
+import { cloneOperation, hosts, lxcStats, stats, usageGroups } from "~/stories/fixtures";
 
 const meta = {
   title: "Sidebar/Sidebar",
@@ -22,6 +22,7 @@ const meta = {
     usageGroups,
     hosts,
     stats,
+    lxcStats,
     operations: [],
     selectedId: hosts[0].id,
     sshPublicHost: "rmng.example.com",
@@ -72,7 +73,7 @@ export const Default: Story = {
 
 /** Fresh install — no hosts or groups yet. */
 export const Empty: Story = {
-  args: { hosts: [], usageGroups: [], selectedId: null },
+  args: { hosts: [], usageGroups: [], lxcStats: null, selectedId: null },
 };
 
 /** A clone in flight — the Activity section renders and + Clone is disabled. */

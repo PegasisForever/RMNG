@@ -7,6 +7,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use nix::sys::statvfs::statvfs;
+
+const LXC_CGROUP_ROOT: &str = "/proc/1/root/sys/fs/cgroup";
+const LXC_ROOT: &str = "/proc/1/root";
 
 /// RAM plus swap usage and limit for one clone, in bytes. A zero limit means one or both
 /// cgroup limits are unbounded or unavailable.
@@ -21,6 +25,26 @@ pub struct MemoryUsage {
 /// the control-server may lack `pid: "host"`, or a counter may be incomplete or malformed.
 pub async fn memory_usage(pid: i64) -> Result<MemoryUsage> {
     memory_usage_from_root(&PathBuf::from(format!("/proc/{pid}/root/sys/fs/cgroup"))).await
+}
+
+/// CT 105's whole-LXC memory usage through the control-server's shared PID namespace.
+pub async fn lxc_memory_usage() -> Result<MemoryUsage> {
+    memory_usage_from_root(Path::new(LXC_CGROUP_ROOT)).await
+}
+
+/// CT 105's cumulative CPU time, in microseconds, including every descendant cgroup.
+pub async fn lxc_cpu_usage_usec() -> Result<u64> {
+    let path = Path::new(LXC_CGROUP_ROOT).join("cpu.stat");
+    let stat = tokio::fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("reading {}", path.display()))?;
+    parse_cpu_usage(&stat)
+}
+
+/// Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
+pub fn lxc_disk_used() -> Result<u64> {
+    let stat = statvfs(LXC_ROOT).with_context(|| format!("reading filesystem stats for {LXC_ROOT}"))?;
+    disk_used(stat.blocks(), stat.blocks_free(), stat.fragment_size())
 }
 
 /// Kept separate from the `/proc` path so synthetic CT 105 cgroup-v2 fixtures can exercise the
@@ -98,6 +122,35 @@ fn parse_memory_stat(input: &str) -> Result<(u64, u64)> {
     ))
 }
 
+fn parse_cpu_usage(input: &str) -> Result<u64> {
+    let mut usage = None;
+    for line in input.lines().filter(|line| !line.trim().is_empty()) {
+        let mut parts = line.split_whitespace();
+        let key = parts
+            .next()
+            .ok_or_else(|| anyhow!("cpu.stat line has no key: {line:?}"))?;
+        let value: u64 = parts
+            .next()
+            .ok_or_else(|| anyhow!("cpu.stat line has no value: {line:?}"))?
+            .parse()
+            .with_context(|| format!("parsing cpu.stat line {line:?}"))?;
+        if parts.next().is_some() {
+            bail!("cpu.stat line has extra fields: {line:?}");
+        }
+        if key == "usage_usec" {
+            usage = Some(value);
+        }
+    }
+    usage.ok_or_else(|| anyhow!("cpu.stat is missing usage_usec"))
+}
+
+fn disk_used(blocks: u64, blocks_free: u64, fragment_size: u64) -> Result<u64> {
+    blocks
+        .checked_sub(blocks_free)
+        .and_then(|used_blocks| used_blocks.checked_mul(fragment_size))
+        .ok_or_else(|| anyhow!("filesystem usage overflow or invalid free-block count"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -130,6 +183,18 @@ mod tests {
         );
         assert!(parse_memory_stat("inactive_file nope\nshmem 0\n").is_err());
         assert!(parse_memory_stat("inactive_file 1\n").is_err());
+    }
+
+    #[test]
+    fn parses_ct_cpu_usage_and_physical_disk_blocks() {
+        assert_eq!(parse_cpu_usage("usage_usec 120\nuser_usec 80\n").unwrap(), 120);
+        assert!(parse_cpu_usage("user_usec 80\n").is_err());
+        assert!(parse_cpu_usage("usage_usec nope\n").is_err());
+        assert!(parse_cpu_usage("usage_usec 1 extra\n").is_err());
+
+        assert_eq!(disk_used(10, 3, 4096).unwrap(), 28_672);
+        assert!(disk_used(3, 10, 4096).is_err());
+        assert!(disk_used(u64::MAX, 0, 2).is_err());
     }
 
     #[tokio::test]

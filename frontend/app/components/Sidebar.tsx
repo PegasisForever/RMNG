@@ -21,29 +21,20 @@ import { SidebarHost } from "~/components/SidebarHost";
 import type { GroupUsage, Host, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
+import type { LxcStats } from "~/lib/wire/LxcStats";
 
-export function formatHostsUsageSummary(
-  hostIds: string[],
-  stats: Record<string, ContainerStats>,
-): { cpu: string; mem: string } | null {
-  let cpuPctTotal = 0;
-  let memUsedTotal = 0;
-  let sampleCount = 0;
-
-  for (const id of hostIds) {
-    const sample = stats[id];
-    if (!sample) continue;
-    cpuPctTotal += sample.cpuPct;
-    memUsedTotal += Number(sample.memUsed);
-    sampleCount += 1;
-  }
-
-  if (sampleCount === 0) return null;
+export function formatLxcUsage(
+  stats: LxcStats | null,
+): { cpu: string; mem: string; disk: string } | null {
+  if (!stats) return null;
 
   const GiB = 1024 ** 3;
-  const mem = `${(memUsedTotal / GiB).toFixed(1)}GB`;
-  const cpu = `${cpuPctTotal < 1 ? cpuPctTotal.toFixed(1) : Math.round(cpuPctTotal)}%`;
-  return { cpu, mem };
+  const cpu = stats.cpuPct === null
+    ? "—"
+    : `${stats.cpuPct < 1 ? stats.cpuPct.toFixed(1) : Math.round(stats.cpuPct)}%`;
+  const mem = `${(Number(stats.memUsed) / GiB).toFixed(1)}GB`;
+  const disk = stats.diskUsed === null ? "—" : `${(Number(stats.diskUsed) / GiB).toFixed(1)}GB`;
+  return { cpu, mem, disk };
 }
 
 export interface SidebarProps {
@@ -55,6 +46,8 @@ export interface SidebarProps {
   hosts: Host[];
   /** Live per-host CPU/RAM map (the volatile `stats` SSE event). */
   stats: Record<string, ContainerStats>;
+  /** Live CT 105-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
+  lxcStats: LxcStats | null;
   /** Live per-host forward-runtime map (the `forwards` SSE event), fanned out to each
    *  host row's compact forwards chips. */
   forwards?: Record<string, ForwardRuntime[]>;
@@ -106,6 +99,7 @@ export function Sidebar({
   usageGroups,
   hosts,
   stats,
+  lxcStats,
   forwards = {},
   operations,
   selectedId,
@@ -132,7 +126,7 @@ export function Sidebar({
   );
   const opForHost = (id: string) =>
     operations.find((o) => o.target === id && o.status === "running");
-  const hostsUsage = formatHostsUsageSummary(hosts.map((h) => h.id), stats);
+  const lxcUsage = formatLxcUsage(lxcStats);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -212,12 +206,12 @@ export function Sidebar({
             <h2 className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
               Hosts ({hosts.length})
             </h2>
-            {hostsUsage ? (
+            {lxcUsage ? (
               <span
                 className="truncate text-[11px] font-semibold tabular-nums text-slate-500 dark:text-slate-400"
-                title="Total live clone CPU and memory: RAM + swap, excluding reclaimable file cache"
+                title="CT 105 LXC totals: CPU and memory include all LXC processes; memory is RAM + swap excluding reclaimable file cache; disk is physical, compression-aware ZFS rootfs use"
               >
-                CPU {hostsUsage.cpu} · MEM {hostsUsage.mem}
+                LXC CPU {lxcUsage.cpu} · MEM {lxcUsage.mem} · DISK {lxcUsage.disk}
               </span>
             ) : null}
           </div>
