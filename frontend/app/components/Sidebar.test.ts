@@ -5,53 +5,47 @@ import type { ContainerStats } from "~/lib/wire/ContainerStats";
 
 const GiB = 1024 ** 3;
 
-test("formats aggregate host CPU and memory usage", () => {
+test("formats aggregate host-capacity CPU and memory usage", () => {
   const stats: Record<string, ContainerStats> = {
     alpha: {
-      cpuPct: 160,
+      cpuPct: 16,
       memUsed: BigInt(Math.round(1.2 * GiB)),
-      memLimit: BigInt(8 * GiB),
-      dockerDiskUsed: BigInt(42 * GiB),
+      memLimit: BigInt(16 * GiB),
     },
     beta: {
-      cpuPct: 80,
+      cpuPct: 8,
       memUsed: BigInt(Math.round(2.4 * GiB)),
-      memLimit: BigInt(8 * GiB),
-      dockerDiskUsed: BigInt(42 * GiB),
+      memLimit: BigInt(16 * GiB),
     },
-    ignoredWithoutLimit: {
+    unbounded: {
       cpuPct: 20,
       memUsed: BigInt(Math.round(9.9 * GiB)),
       memLimit: BigInt(0),
-      dockerDiskUsed: BigInt(99 * GiB),
     },
   };
 
-  expect(formatHostsUsageSummary(["alpha", "beta", "missing"], stats, 4)).toEqual({
-    cpu: "60%",
-    mem: "3.6GB",
-    disk: "42.0GB",
+  expect(formatHostsUsageSummary(["alpha", "beta", "unbounded", "missing"], stats)).toEqual({
+    cpu: "44%",
+    mem: "13.5GB",
   });
 });
 
-test("formats aggregate host CPU as cores when clone CPU allowance is unlimited", () => {
+test("retains precision for an aggregate below one percent", () => {
   const stats: Record<string, ContainerStats> = {
     alpha: {
-      cpuPct: 150,
+      cpuPct: 0.4,
       memUsed: BigInt(Math.round(0.5 * GiB)),
-      memLimit: BigInt(8 * GiB),
-      dockerDiskUsed: BigInt(0),
+      memLimit: BigInt(16 * GiB),
     },
     beta: {
-      cpuPct: 50,
+      cpuPct: 0.2,
       memUsed: BigInt(Math.round(0.7 * GiB)),
-      memLimit: BigInt(8 * GiB),
-      dockerDiskUsed: BigInt(0),
+      memLimit: BigInt(16 * GiB),
     },
   };
 
-  expect(formatHostsUsageSummary(["alpha", "beta"], stats, 0)).toEqual({
-    cpu: "2.0c",
+  expect(formatHostsUsageSummary(["alpha", "beta"], stats)).toEqual({
+    cpu: "0.6%",
     mem: "1.2GB",
   });
 });

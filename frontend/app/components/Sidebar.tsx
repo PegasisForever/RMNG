@@ -18,7 +18,6 @@ import { Settings } from "lucide-react";
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
 import { SidebarHost } from "~/components/SidebarHost";
-import { formatBytes } from "~/lib/format";
 import type { GroupUsage, Host, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
@@ -26,19 +25,16 @@ import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 export function formatHostsUsageSummary(
   hostIds: string[],
   stats: Record<string, ContainerStats>,
-  cloneCpus: number,
-): { cpu: string; mem: string; disk?: string } | null {
+): { cpu: string; mem: string } | null {
   let cpuPctTotal = 0;
   let memUsedTotal = 0;
-  let dockerDiskUsed = 0;
   let sampleCount = 0;
 
   for (const id of hostIds) {
     const sample = stats[id];
-    if (!sample || Number(sample.memLimit) <= 0) continue;
+    if (!sample) continue;
     cpuPctTotal += sample.cpuPct;
     memUsedTotal += Number(sample.memUsed);
-    dockerDiskUsed = Math.max(dockerDiskUsed, Number(sample.dockerDiskUsed ?? 0));
     sampleCount += 1;
   }
 
@@ -46,18 +42,8 @@ export function formatHostsUsageSummary(
 
   const GiB = 1024 ** 3;
   const mem = `${(memUsedTotal / GiB).toFixed(1)}GB`;
-  const cpu =
-    cloneCpus > 0
-      ? (() => {
-          const pct = cpuPctTotal / cloneCpus;
-          return `${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%`;
-        })()
-      : `${(cpuPctTotal / 100).toFixed(1)}c`;
-  return {
-    cpu,
-    mem,
-    ...(dockerDiskUsed > 0 ? { disk: formatBytes(dockerDiskUsed).replace(" ", "") } : {}),
-  };
+  const cpu = `${cpuPctTotal < 1 ? cpuPctTotal.toFixed(1) : Math.round(cpuPctTotal)}%`;
+  return { cpu, mem };
 }
 
 export interface SidebarProps {
@@ -76,8 +62,6 @@ export interface SidebarProps {
    *  and the Activity list from these. */
   operations: Operation[];
   selectedId: string | null;
-  /** `docker.cloneCpus` — normalizes each host row's CPU usage figure. */
-  cloneCpus: number;
   /** `ssh.publicHost` (config) — the `-J` jump target for each row's copied SSH
    *  command. Empty ⇒ each row falls back to `window.location.hostname`. */
   sshPublicHost: string;
@@ -125,7 +109,6 @@ export function Sidebar({
   forwards = {},
   operations,
   selectedId,
-  cloneCpus,
   sshPublicHost,
   bastionPort,
   presetNames,
@@ -149,11 +132,7 @@ export function Sidebar({
   );
   const opForHost = (id: string) =>
     operations.find((o) => o.target === id && o.status === "running");
-  const hostsUsage = formatHostsUsageSummary(
-    hosts.map((h) => h.id),
-    stats,
-    cloneCpus,
-  );
+  const hostsUsage = formatHostsUsageSummary(hosts.map((h) => h.id), stats);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -236,10 +215,9 @@ export function Sidebar({
             {hostsUsage ? (
               <span
                 className="truncate text-[11px] font-semibold tabular-nums text-slate-500 dark:text-slate-400"
-                title="Total live container CPU and memory usage; Docker daemon disk usage"
+                title="Total live clone CPU and memory: RAM + swap, excluding reclaimable file cache"
               >
                 CPU {hostsUsage.cpu} · MEM {hostsUsage.mem}
-                {hostsUsage.disk ? <> · DISK {hostsUsage.disk}</> : null}
               </span>
             ) : null}
           </div>
@@ -274,7 +252,6 @@ export function Sidebar({
                     host={host}
                     stats={stats[host.id]}
                     forwardRuntime={forwards[host.id]}
-                    cloneCpus={cloneCpus}
                     sshPublicHost={sshPublicHost}
                     bastionPort={bastionPort}
                     selected={selectedId === host.id}

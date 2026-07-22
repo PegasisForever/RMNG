@@ -119,28 +119,24 @@ export const hostIds: string[] = hosts.map((h) => h.id);
 
 export const stats: Record<string, ContainerStats> = {
   [hostWorking.id]: {
-    cpuPct: 640, // ÷ cloneCpus(16) → 40% of the clone's allowance
+    cpuPct: 40,
     memUsed: BigInt(Math.round(5.1 * GiB)),
-    memLimit: BigInt(32 * GiB),
-    dockerDiskUsed: BigInt(Math.round(91.3 * GiB)),
+    memLimit: BigInt(40 * GiB),
   },
   [hostIdle.id]: {
-    cpuPct: 12,
+    cpuPct: 1.2,
     memUsed: BigInt(Math.round(1.4 * GiB)),
-    memLimit: BigInt(32 * GiB),
-    dockerDiskUsed: BigInt(Math.round(91.3 * GiB)),
+    memLimit: BigInt(40 * GiB),
   },
   [hostNoToken.id]: {
-    cpuPct: 3,
+    cpuPct: 0.3,
     memUsed: BigInt(Math.round(0.6 * GiB)),
-    memLimit: BigInt(32 * GiB),
-    dockerDiskUsed: BigInt(Math.round(91.3 * GiB)),
+    memLimit: BigInt(40 * GiB),
   },
   [hostDualProvider.id]: {
-    cpuPct: 288, // ÷ cloneCpus(16) → 18% of the clone's allowance
+    cpuPct: 18,
     memUsed: BigInt(Math.round(3.2 * GiB)),
-    memLimit: BigInt(32 * GiB),
-    dockerDiskUsed: BigInt(Math.round(91.3 * GiB)),
+    memLimit: BigInt(40 * GiB),
   },
 };
 

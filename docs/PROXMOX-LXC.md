@@ -42,6 +42,10 @@ Set them via `pct set <id> --features nesting=1,keyctl=1,fuse=1` and edit the co
 fleet you intend to run (clones default to 16 cores / 32 GiB each — tune
 `docker.cloneCpus` / `docker.cloneMemoryMb` in the wizard).
 
+RMNG's live memory accounting reads cgroup-v2 counters through the control-server's shared PID
+namespace, so retain the deployment's `privileged: true` and `pid: "host"` settings. Without
+those settings, swap-aware clone memory samples are unavailable.
+
 ## 1b. Raise the kernel keyring quotas on the Proxmox host
 
 In an unprivileged CT, **every** container's root maps to the same host uid, so all their

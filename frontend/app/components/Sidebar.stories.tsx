@@ -24,7 +24,6 @@ const meta = {
     stats,
     operations: [],
     selectedId: hosts[0].id,
-    cloneCpus: 16,
     sshPublicHost: "rmng.example.com",
     bastionPort: 2222,
     presetNames: ["Default", "Focus"],

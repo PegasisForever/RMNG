@@ -399,6 +399,10 @@ RAM and cores. Install **lxcfs** on the Docker host and RMNG binds its cgroup-aw
 files (`meminfo`, `cpuinfo`, `stat`, `uptime`, `loadavg`, `swaps`) over each *new* clone's,
 so those tools reflect the clone's own 16-cpu / 32-GiB limits.
 
+The control-server's sidebar reads cgroup-v2 counters directly for RAM-plus-swap usage. Its
+compose deployment therefore requires the existing `privileged: true` and `pid: "host"` settings;
+without them, RMNG cannot resolve a clone's cgroup files through `/proc/<pid>/root`.
+
 - **Optional, auto-detected.** RMNG probes for lxcfs at boot / on Settings → Test / at wizard
   finish and shows the result as an advisory row in the setup checklist ("LXCFS"). Without
   lxcfs, clones just keep host-wide `/proc` — everything else works.

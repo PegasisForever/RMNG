@@ -27,32 +27,21 @@ function effectiveStatus(host: Host): { text: string; label: string } {
 
 type Metric = { label: string; value: string; title: string };
 
-/** CPU (percent of the clone's cpu allowance) + memory-used strings, e.g.
+/** CPU (percentage of total host capacity) + memory-used strings, e.g.
  *  `{ cpu: "20%", mem: "3.2GB" }`. CPU rides the Claude line and MEM the Codex line;
  *  each renders in a fixed-width, right-aligned tabular slot so the two figures stack
- *  and line up across every row. CPU normalizes `stats.cpuPct` (docker convention:
- *  100 == one core) by `cloneCpus`; below 1% one decimal is kept so a near-idle clone
- *  doesn't read as dead-zero. When `cloneCpus <= 0` (unlimited clone) it falls back to a
- *  cores figure (`2.4c`). MEM is memory used in GiB, one decimal. Returns null when
- *  there's no usable sample — no stats yet, or a stopped/unmanaged host with no memory
- *  limit. `mem*` are typed bigint by ts-rs but arrive as JSON numbers, hence the
- *  `Number()` coercion. */
-function usageParts(
+ *  and line up across every row. Below 1% one decimal is kept so a near-idle clone does
+ *  not read as dead-zero. Memory includes swap and tmpfs/shared memory while excluding
+ *  reclaimable page cache. Returns null when there is no usable sample. `mem*` are typed
+ *  bigint by ts-rs but arrive as JSON numbers, hence the `Number()` coercion. */
+export function formatHostUsage(
   stats: ContainerStats | undefined,
-  cloneCpus: number,
 ): { cpu: string; mem: string } | null {
   if (!stats) return null;
-  const memLimit = Number(stats.memLimit);
-  if (memLimit <= 0) return null;
   const GiB = 1024 ** 3;
   const mem = `${(Number(stats.memUsed) / GiB).toFixed(1)}GB`;
-  const cpu =
-    cloneCpus > 0
-      ? (() => {
-          const pct = stats.cpuPct / cloneCpus;
-          return `${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%`;
-        })()
-      : `${(stats.cpuPct / 100).toFixed(1)}c`;
+  const pct = stats.cpuPct;
+  const cpu = `${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%`;
   return { cpu, mem };
 }
 
@@ -138,10 +127,6 @@ export interface SidebarHostProps {
   /** Live CPU/RAM usage for this host's container, pushed over the `stats` SSE event.
    *  Absent for a stopped/unmanaged host or before the first sample — renders nothing. */
   stats?: ContainerStats;
-  /** The fleet's `docker.cloneCpus` CPU allowance (cores per clone), used to normalize
-   *  the usage line's CPU figure to a percent of that allowance. `<= 0` means unlimited,
-   *  which falls `usageParts` back to a cores figure. */
-  cloneCpus: number;
   selected: boolean;
   /** A running operation targeting this host (delete, or a clone finishing its
    *  post-add `wait-swap` step), if any. */
@@ -301,7 +286,6 @@ function OverflowMenu({
 export function SidebarHost({
   host,
   stats,
-  cloneCpus,
   selected,
   op,
   onSelect,
@@ -324,14 +308,18 @@ export function SidebarHost({
     : undefined;
   const status = effectiveStatus(host);
   const group = host.group || undefined;
-  const usage = usageParts(stats, cloneCpus);
+  const usage = formatHostUsage(stats);
   // CPU + MEM share `usage`, so they appear and vanish together — both sit inline on the
   // group row (group on the left, CPU then MEM right-aligned, then the ⋯ menu).
   const cpuMetric = usage
-    ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of clone allowance)" }
+    ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of total host capacity)" }
     : undefined;
   const memMetric = usage
-    ? { label: "MEM", value: usage.mem, title: "container memory used" }
+    ? {
+        label: "MEM",
+        value: usage.mem,
+        title: "RAM + swap; includes tmpfs/shared memory and excludes reclaimable file cache",
+      }
     : undefined;
   // Show the group/usage row when there's a group or a usage sample; a group-less, stat-less
   // clone shows neither (just the ⋯ menu).

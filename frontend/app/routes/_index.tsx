@@ -193,7 +193,6 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       state={state}
       stats={stats}
       forwards={forwards}
-      cloneCpus={cfg.docker.cloneCpus}
       sshPublicHost={cfg.ssh?.publicHost ?? ""}
       bastionPort={cfg.listen.bastion}
       groups={cfg.groups}
@@ -206,7 +205,6 @@ function Dashboard({
   state,
   stats,
   forwards,
-  cloneCpus,
   sshPublicHost,
   bastionPort,
   groups,
@@ -215,7 +213,6 @@ function Dashboard({
   state: ControlState;
   stats: Record<string, ContainerStats>;
   forwards: Record<string, ForwardRuntime[]>;
-  cloneCpus: number;
   /** `ssh.publicHost` (config) — threaded down to each sidebar row's copied SSH
    *  command; empty ⇒ falls back to `window.location.hostname`. */
   sshPublicHost: string;
@@ -421,7 +418,6 @@ function Dashboard({
           forwards={forwards}
           operations={state.operations}
           selectedId={state.selected}
-          cloneCpus={cloneCpus}
           sshPublicHost={sshPublicHost}
           bastionPort={bastionPort}
           presetNames={state.layoutPresetNames ?? []}

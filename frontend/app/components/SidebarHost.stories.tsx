@@ -35,7 +35,6 @@ const meta = {
     ),
   ],
   args: {
-    cloneCpus: 16,
     sshPublicHost: "rmng.example.com",
     bastionPort: 2222,
     selected: false,
