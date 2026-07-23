@@ -480,7 +480,7 @@ fn host_from_base(base: &str) -> &str {
         .unwrap_or(base)
 }
 
-fn validate_ssh_host(st: &ControlState, host: &str) -> Result<()> {
+fn validate_ssh_host<'a>(st: &'a ControlState, host: &str) -> Result<&'a wire::Host> {
     let target = st
         .hosts
         .iter()
@@ -495,7 +495,28 @@ fn validate_ssh_host(st: &ControlState, host: &str) -> Result<()> {
     if matches!(target.monitor_state, Some(MonitorState::Offline)) {
         bail!("host '{host}' is offline; its SSH endpoint is unavailable")
     }
-    Ok(())
+    Ok(target)
+}
+
+/// True when this `rmng` is running INSIDE a clone. Every clone carries its per-clone router
+/// bearer in `RMNG_PROXY_KEY` (`provision::router_env_vars`); an operator laptop does not. We
+/// reuse that same identity signal the group-proxy already trusts — no server round-trip or
+/// peer-IP needed — to decide clone→clone (direct) vs operator→clone (bastion) SSH.
+fn running_inside_clone() -> bool {
+    std::env::var("RMNG_PROXY_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false)
+}
+
+/// The direct one-liner used clone→clone: no bastion jump — clones share the `rmng` Docker
+/// bridge and reach each other by internal IP / Docker-DNS id. `accept-new` trusts the
+/// target's stable host key on first contact (the clone's `~/.ssh/config` sets the same).
+pub fn build_direct_ssh_command(target: &str) -> String {
+    format!("ssh -o StrictHostKeyChecking=accept-new rmng@{target}")
+}
+
+/// The address a sibling clone dials: its internal bridge IP when known, else its id (Docker
+/// DNS resolves the id to the same host, so this is safe when a fresh clone isn't IP-sampled).
+fn direct_ssh_target(host: &wire::Host) -> String {
+    host.local_ip.clone().unwrap_or_else(|| host.id.clone())
 }
 
 /// `rmng ssh <host>`: print the ready-to-paste `ssh` one-liner that jumps through the
@@ -504,7 +525,16 @@ fn validate_ssh_host(st: &ControlState, host: &str) -> Result<()> {
 /// `publicHost` isn't set, so the command on stdout stays copy-pasteable either way.
 pub async fn ssh_cmd(client: &Client, host: &str) -> Result<u8> {
     let st = client.state().await?;
-    validate_ssh_host(&st, host)?;
+    let target = validate_ssh_host(&st, host)?;
+
+    // From inside a clone: skip the bastion entirely and dial the sibling directly over the
+    // shared Docker bridge. Prefer its internal IP; fall back to the clone id (Docker DNS
+    // resolves it) when a just-started clone hasn't been IP-sampled yet.
+    if running_inside_clone() {
+        println!("{}", build_direct_ssh_command(&direct_ssh_target(target)));
+        return Ok(0);
+    }
+
     let cfg = client.config().await?;
     let public_host = if !cfg.ssh.public_host.trim().is_empty() {
         cfg.ssh.public_host.clone()
@@ -1120,6 +1150,31 @@ mod tests {
             build_ssh_command("rmng.example.com", 2222, "w-cp-claude"),
             "ssh -J rmng@rmng.example.com:2222 -o StrictHostKeyChecking=accept-new rmng@w-cp-claude"
         );
+    }
+
+    #[test]
+    fn direct_ssh_command_skips_the_bastion() {
+        assert_eq!(
+            build_direct_ssh_command("172.20.0.5"),
+            "ssh -o StrictHostKeyChecking=accept-new rmng@172.20.0.5"
+        );
+    }
+
+    #[test]
+    fn direct_ssh_target_prefers_local_ip_then_falls_back_to_id() {
+        let with_ip = wire::Host {
+            id: "clone-b".into(),
+            local_ip: Some("172.20.0.9".into()),
+            ..Default::default()
+        };
+        assert_eq!(direct_ssh_target(&with_ip), "172.20.0.9");
+
+        let no_ip = wire::Host {
+            id: "clone-b".into(),
+            local_ip: None,
+            ..Default::default()
+        };
+        assert_eq!(direct_ssh_target(&no_ip), "clone-b");
     }
 
     #[test]
