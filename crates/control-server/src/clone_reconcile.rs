@@ -172,7 +172,7 @@ fn default_claude_model(catalog: &[String], gpt_fallback: Option<&str>) -> Optio
 
 fn codex_config_toml(cc_base_url: Option<&str>, gpt_models: &[String]) -> String {
     let mut body =
-        String::from("# Managed by RMNG. Re-created by the control-server clone reconciler.\n\n");
+        String::from("# Managed by RMNG. Re-created by the RMNG clone reconciler.\n\n");
 
     // Group-proxy provider (bare top-level keys MUST precede any [table] in TOML). When the
     // control host resolves, route Codex through the control-server's /cc/v1 OpenAI-compatible

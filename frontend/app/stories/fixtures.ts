@@ -100,8 +100,25 @@ export const hostDualProvider: Host = {
   monitorState: "working",
 };
 
+/** A sub host: a managed clone spawned by `hostWorking`, shown indented under it in the
+ *  sidebar (collapsed by default). Cosmetic one-level nesting via `parent`. */
+export const hostSubHost: Host = {
+  id: "pega-we-142-helper",
+  host: "10.99.0.31",
+  port: 3389,
+  username: "pega",
+  password: "",
+  managed: true,
+  source: "pegasis0/rmng-template:latest",
+  group: "pooled",
+  parent: hostWorking.id,
+  displayName: "helper: run the e2e suite",
+  monitorState: "working",
+};
+
 export const hosts: Host[] = [
   hostWorking,
+  hostSubHost,
   hostIdle,
   hostOffline,
   hostNoToken,

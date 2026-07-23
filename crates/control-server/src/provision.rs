@@ -169,6 +169,13 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
                 "1".to_string(),
             ));
+            // The fleet `rmng` CLI's control-server base URL, so a clone can run `rmng …`
+            // (e.g. `rmng clone …` to spawn a sub host) without `--server`. Resolves the same
+            // control host as the router URL above; the CLI falls back to localhost otherwise.
+            vars.push(ev(
+                "RMNG_CONTROL_URL",
+                format!("http://{control}:{}", cfg.listen.web),
+            ));
         }
         Err(e) => tracing::warn!(
             "control_env_vars: could not resolve the control-server host ({e}); \
