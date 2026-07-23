@@ -596,6 +596,12 @@ fn build_ui(
         window.video-window { background: black; }
         /* The video grabs keyboard focus on hover/click; don't draw a focus ring on it. */
         picture:focus, picture:focus-visible { outline: none; }
+        /* Terminal tab view: no content padding/border so the terminal fills edge to edge with
+           no rim of the window background showing around it. */
+        notebook.rmng-term,
+        notebook.rmng-term > stack,
+        notebook.rmng-term > header { border: none; }
+        notebook.rmng-term > stack { padding: 0; }
         /* FPS readout in the title bar: tabular figures so the width does not
            jitter as the number changes, and dimmed so it stays unobtrusive. */
         .fps-readout {
@@ -954,6 +960,9 @@ fn teardown_content(mw: &mut MonitorWindow, srcs: &VideoSrcs) {
         let _ = vc.pipeline.set_state(gst::State::Null);
         srcs.lock().unwrap().remove(&mw.id);
     }
+    // Drop the black letterbox background so the next content (terminal/placeholder) shows the
+    // normal themed background, not a black rim. make_video_content re-adds it for video.
+    mw.window.remove_css_class("video-window");
     mw.content = Content::Placeholder;
 }
 
@@ -1010,9 +1019,9 @@ fn make_window_shell(
         // can't be closed individually (their layout mirrors the remote desktop).
         .deletable(is_main)
         .build();
-    // Tag this as a monitor window so the `window.video-window { background: black }` rule paints
-    // letterbox bars black, without affecting dialogs (Settings).
-    window.add_css_class("video-window");
+    // The `video-window` class (black letterbox background) is applied per-content: only while the
+    // window shows video, so a terminal/placeholder window keeps the normal themed background
+    // instead of a black rim around its content.
 
     // FPS counter: bumped by the current video paintable (see make_video_content) and read by a 1s
     // header timer. Lives on the shell so it survives content swaps.
@@ -1125,6 +1134,9 @@ fn make_video_content(
     overlay.set_child(Some(&video));
     overlay.add_overlay(&cursor);
     window.set_child(Some(&overlay));
+    // Paint this window's letterbox bars black (via the `window.video-window` CSS rule). Applied
+    // to the window only while it shows video; removed in teardown_content when it leaves.
+    window.add_css_class("video-window");
 
     // FPS: bump the shared counter on each presented frame (the header timer reads it).
     #[cfg(not(target_os = "macos"))]

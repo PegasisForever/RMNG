@@ -41,6 +41,10 @@ const FALLBACK_FONT: &str = "Monospace 11";
 /// Cell-height multiplier over the font's natural ascent+descent (glyphs are vertically centered
 /// in the taller cell). 1.0 = tight/VTE-default; >1.0 adds line spacing.
 const LINE_HEIGHT: f64 = 1.1;
+/// Inset on the top and left edges before the first cell, in character-cell widths — a little
+/// breathing room so text doesn't hug the window frame. The grid is measured against the reduced
+/// area, and hit-testing subtracts it, so rendering / sizing / mouse all stay aligned.
+const PAD_CELLS: f64 = 0.5;
 /// Default grid until the widget is allocated and reports its real character dimensions.
 const INIT_COLS: usize = 80;
 const INIT_ROWS: usize = 24;
@@ -286,8 +290,10 @@ mod imp {
             if cw <= 0.0 || ch <= 0.0 {
                 return;
             }
-            let cols = ((w as f64 / cw).floor() as i64).clamp(1, u16::MAX as i64) as usize;
-            let lines = ((h as f64 / ch).floor() as i64).clamp(1, u16::MAX as i64) as usize;
+            // Reserve the top/left inset before dividing into cells, so the grid + padding fit.
+            let pad = cw * PAD_CELLS;
+            let cols = (((w as f64 - pad) / cw).floor() as i64).clamp(1, u16::MAX as i64) as usize;
+            let lines = (((h as f64 - pad) / ch).floor() as i64).clamp(1, u16::MAX as i64) as usize;
             if let Some(grid) = self.grid.borrow().as_ref() {
                 if grid.get() == (cols, lines) {
                     return;
@@ -325,9 +331,12 @@ mod imp {
             };
             let lines = self.grid.borrow().as_ref().map(|g| g.get().1).unwrap_or(INIT_ROWS);
             // Cell edges snapped to the integer pixel grid, so adjacent backgrounds abut exactly
-            // (no fractional-coordinate AA seams between cells/rows).
-            let cell_x = |c: usize| (c as f64 * cw).round() as f32;
-            let row_y = |r: usize| (r as f64 * ch).round() as f32;
+            // (no fractional-coordinate AA seams between cells/rows), offset by the top/left inset.
+            // The full-widget background fill below still covers the inset, so it's the terminal
+            // background colour, not a gap.
+            let pad = (cw * PAD_CELLS).round() as f32;
+            let cell_x = |c: usize| pad + (c as f64 * cw).round() as f32;
+            let row_y = |r: usize| pad + (r as f64 * ch).round() as f32;
             // Extra line-spacing is split above/below the glyph so text stays vertically centered
             // in the cell (backgrounds/cursor still fill the full cell height).
             let text_pad = ((ch - ch / LINE_HEIGHT) / 2.0) as f32;
@@ -427,7 +436,8 @@ mod imp {
                 layout.set_text(&rb.text);
                 layout.set_attributes(Some(&rb.attrs));
                 snapshot.save();
-                snapshot.translate(&graphene::Point::new(0.0, row_y(rowi) + text_pad));
+                // `pad` (left inset) so glyphs line up with their cell backgrounds/cursor.
+                snapshot.translate(&graphene::Point::new(pad, row_y(rowi) + text_pad));
                 snapshot.append_layout(&layout, &rgba(theme.fg));
                 snapshot.restore();
             }
@@ -505,6 +515,10 @@ impl TerminalView {
         notebook.set_scrollable(true);
         notebook.set_hexpand(true);
         notebook.set_vexpand(true);
+        // No frame around the page: the terminal paints its own background edge-to-edge, so a
+        // notebook border would just expose the window behind it as a dark rim.
+        notebook.set_show_border(false);
+        notebook.add_css_class("rmng-term");
 
         let plus = gtk4::Button::from_icon_name("list-add-symbolic");
         plus.set_tooltip_text(Some("New tmux session"));
@@ -538,6 +552,7 @@ impl TerminalView {
     /// ones and their scrollback), and remove tabs whose session vanished.
     pub fn set_sessions(&self, sessions: &[String]) {
         let mut tabs = self.tabs.borrow_mut();
+        let had_tabs = !tabs.is_empty();
         let gone: Vec<String> = tabs.keys().filter(|k| !sessions.contains(k)).cloned().collect();
         for name in gone {
             if let Some(tab) = tabs.remove(&name) {
@@ -546,6 +561,10 @@ impl TerminalView {
                 }
             }
         }
+        // The last freshly-added tab, so we can focus it — but only when tabs already existed (a
+        // session just appeared: the "+" button, or one created inside the clone). On a fresh build
+        // (initial load / clone switch) there's no "new" session to jump to; land on the first tab.
+        let mut newly_added: Option<TermArea> = None;
         for name in sessions {
             if tabs.contains_key(name) {
                 continue;
@@ -554,9 +573,22 @@ impl TerminalView {
             let label = gtk4::Label::new(Some(name));
             self.notebook.append_page(&tab.area, Some(&label));
             self.notebook.set_tab_reorderable(&tab.area, true);
+            if had_tabs {
+                newly_added = Some(tab.area.clone());
+            }
             tabs.insert(name.clone(), tab);
         }
-        if self.notebook.current_page().is_none() && self.notebook.n_pages() > 0 {
+        if let Some(area) = newly_added {
+            // A new session appeared — switch to it and move keyboard focus onto its terminal.
+            // Without this the focus stays on the "+" button (which triggered the new session), so
+            // the user can't type. Deferred to an idle so it runs after the page becomes current.
+            if let Some(page) = self.notebook.page_num(&area) {
+                self.notebook.set_current_page(Some(page));
+            }
+            glib::idle_add_local_once(move || {
+                area.grab_focus();
+            });
+        } else if self.notebook.current_page().is_none() && self.notebook.n_pages() > 0 {
             self.notebook.set_current_page(Some(0));
         }
     }
@@ -1057,9 +1089,11 @@ fn locate(
 ) -> (Point, Side, usize, usize) {
     let (cw, ch) = cell;
     let (cols, lines) = grid;
-    let colf = (x / cw).max(0.0);
+    // Undo the top/left inset applied when rendering, so clicks land on the right cell.
+    let pad = cw * PAD_CELLS;
+    let colf = ((x - pad) / cw).max(0.0);
     let col = (colf.floor() as usize).min(cols.saturating_sub(1));
-    let row = ((y / ch).floor() as i64).clamp(0, lines.saturating_sub(1) as i64) as usize;
+    let row = (((y - pad) / ch).floor() as i64).clamp(0, lines.saturating_sub(1) as i64) as usize;
     let side = if colf.fract() < 0.5 { Side::Left } else { Side::Right };
     let display_offset = term.borrow().grid().display_offset() as i32;
     let point = Point::new(Line(row as i32 - display_offset), Column(col));
