@@ -1,12 +1,16 @@
 //! Cross-platform terminal tab view for headless clones, powered by the `alacritty_terminal`
-//! engine.
+//! engine and rendered on the GPU through GTK's scene graph.
 //!
 //! A [`TerminalView`] is a `gtk4::Notebook` with one [`TerminalTab`] per tmux session (plus a
 //! tab-bar "+" that requests a new session). Each tab drives an `alacritty_terminal::Term` — a
 //! full terminal state machine (grid, scrollback, selection, mouse/app modes) — fed the control-
-//! server's raw PTY bytes via [`TerminalView::feed`]. We render its grid into a GTK `DrawingArea`
-//! with cairo (no system terminal library, so it builds and runs identically on Linux and macOS),
-//! and wire up the interactions of a normal terminal: text **selection** (click-drag, word/line on
+//! server's raw PTY bytes via [`TerminalView::feed`]. Rendering is a custom `gtk4::Widget`
+//! ([`TermArea`]) whose `snapshot()` emits **GSK render nodes**: glyphs via `append_layout` (GTK's
+//! GPU glyph atlas) and backgrounds/cursor/selection via `append_color` — so text is drawn by the
+//! GL/Vulkan renderer rather than rasterized on the CPU each frame. No system terminal library, so
+//! it builds and runs identically on Linux and macOS.
+//!
+//! Interactions match a normal terminal: text **selection** (click-drag, word/line on
 //! double/triple click) with **copy** (Ctrl+Shift+C and the primary selection), **paste**
 //! (Ctrl+Shift+V and middle-click, bracketed when requested), **mouse reporting** to the remote app
 //! when it enables mouse mode, and **scrollback** (wheel / Shift+PageUp). Keystrokes and any bytes
@@ -23,14 +27,16 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb};
-use gtk4::cairo;
 use gtk4::gdk;
 use gtk4::gio;
 use gtk4::glib;
+use gtk4::graphene;
+use gtk4::pango;
 use gtk4::prelude::*;
+use gtk4::subclass::prelude::ObjectSubclassIsExt;
 
-/// Monospace point size for the cell grid.
-const FONT_SIZE: f64 = 13.0;
+/// Monospace pixel size for the cell grid.
+const FONT_PX: f64 = 13.0;
 /// Default grid until the widget is allocated and reports its real character dimensions.
 const INIT_COLS: usize = 80;
 const INIT_ROWS: usize = 24;
@@ -97,6 +103,282 @@ enum Drag {
     Selecting,
     /// Reporting mouse events to the remote app; the held button code (0/1/2).
     Reporting(u8),
+}
+
+/// Shared terminal handle used by both the render widget and the input controllers.
+type SharedTerm = Rc<RefCell<Term<EventProxy>>>;
+/// Shared cell metrics (px) and grid dimensions, written by the widget, read by controllers.
+type SharedMetrics = Rc<Cell<(f64, f64)>>;
+type SharedGrid = Rc<Cell<(usize, usize)>>;
+
+// --- GPU render widget ------------------------------------------------------------------
+
+mod imp {
+    use super::*;
+    use gtk4::subclass::prelude::*;
+
+    /// Per-row text buffer built each frame: the row string plus a pango attribute list mapping
+    /// byte ranges to foreground color + bold/italic/underline.
+    struct RowBuf {
+        text: String,
+        attrs: pango::AttrList,
+        cols: usize,
+    }
+    impl RowBuf {
+        fn new() -> Self {
+            Self { text: String::new(), attrs: pango::AttrList::new(), cols: 0 }
+        }
+        fn push_cell(&mut self, col: usize, ch: char, fg: (f64, f64, f64), flags: Flags, wide: bool) {
+            while self.cols < col {
+                self.text.push(' ');
+                self.cols += 1;
+            }
+            let start = self.text.len() as u32;
+            self.text.push(ch);
+            let end = self.text.len() as u32;
+            let (r, g, b) = pango16(fg);
+            let mut a = pango::AttrColor::new_foreground(r, g, b);
+            a.set_start_index(start);
+            a.set_end_index(end);
+            self.attrs.insert(a);
+            let add = |mut attr: pango::Attribute| {
+                attr.set_start_index(start);
+                attr.set_end_index(end);
+                self.attrs.insert(attr);
+            };
+            if flags.contains(Flags::BOLD) {
+                add(pango::AttrInt::new_weight(pango::Weight::Bold).upcast());
+            }
+            if flags.contains(Flags::ITALIC) {
+                add(pango::AttrInt::new_style(pango::Style::Italic).upcast());
+            }
+            if flags.intersects(Flags::UNDERLINE | Flags::DOUBLE_UNDERLINE | Flags::UNDERCURL) {
+                add(pango::AttrInt::new_underline(pango::Underline::Single).upcast());
+            }
+            if flags.contains(Flags::STRIKEOUT) {
+                add(pango::AttrInt::new_strikethrough(true).upcast());
+            }
+            self.cols += if wide { 2 } else { 1 };
+        }
+    }
+
+    #[derive(Default)]
+    pub struct TermArea {
+        pub(super) term: RefCell<Option<SharedTerm>>,
+        pub(super) on_resize: RefCell<Option<ResizeCb>>,
+        pub(super) metrics: RefCell<Option<SharedMetrics>>,
+        pub(super) grid: RefCell<Option<SharedGrid>>,
+        pub(super) font: RefCell<Option<pango::FontDescription>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for TermArea {
+        const NAME: &'static str = "RmngTermArea";
+        type Type = super::TermArea;
+        type ParentType = gtk4::Widget;
+    }
+
+    impl ObjectImpl for TermArea {}
+
+    impl WidgetImpl for TermArea {
+        fn snapshot(&self, snapshot: &gtk4::Snapshot) {
+            self.render(snapshot);
+        }
+
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            self.parent_size_allocate(width, height, baseline);
+            self.handle_size(width, height);
+        }
+
+        fn measure(&self, orientation: gtk4::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
+            let (cw, ch) = self.ensure_metrics();
+            let nat = match orientation {
+                gtk4::Orientation::Horizontal => (cw * INIT_COLS as f64) as i32,
+                _ => (ch * INIT_ROWS as f64) as i32,
+            };
+            (1, nat.max(1), -1, -1)
+        }
+    }
+
+    impl TermArea {
+        /// Lazily build the monospace font + measure the cell size; publish it to the shared cell.
+        fn ensure_metrics(&self) -> (f64, f64) {
+            if self.font.borrow().is_none() {
+                let mut fd = pango::FontDescription::new();
+                fd.set_family("monospace");
+                fd.set_absolute_size(FONT_PX * pango::SCALE as f64);
+                let ctx = self.obj().pango_context();
+                let m = ctx.metrics(Some(&fd), None);
+                let cw = (m.approximate_char_width() as f64 / pango::SCALE as f64).max(1.0);
+                let ch = ((m.ascent() + m.descent()) as f64 / pango::SCALE as f64).max(1.0);
+                *self.font.borrow_mut() = Some(fd);
+                if let Some(shared) = self.metrics.borrow().as_ref() {
+                    shared.set((cw, ch));
+                }
+            }
+            self.metrics.borrow().as_ref().map(|m| m.get()).unwrap_or((8.0, 16.0))
+        }
+
+        /// Recompute the grid from the allocation; resize the terminal + notify the server.
+        fn handle_size(&self, w: i32, h: i32) {
+            let (cw, ch) = self.ensure_metrics();
+            if cw <= 0.0 || ch <= 0.0 {
+                return;
+            }
+            let cols = ((w as f64 / cw).floor() as i64).clamp(1, u16::MAX as i64) as usize;
+            let lines = ((h as f64 / ch).floor() as i64).clamp(1, u16::MAX as i64) as usize;
+            if let Some(grid) = self.grid.borrow().as_ref() {
+                if grid.get() == (cols, lines) {
+                    return;
+                }
+                grid.set((cols, lines));
+            }
+            if let Some(term) = self.term.borrow().as_ref() {
+                term.borrow_mut().resize(Dims { cols, lines });
+            }
+            if let Some(cb) = self.on_resize.borrow().as_ref() {
+                cb(cols as u16, lines as u16);
+            }
+        }
+
+        /// Paint the terminal: one `append_color` per non-default cell background, one
+        /// `append_layout` (GPU text) per row, then the cursor.
+        fn render(&self, snapshot: &gtk4::Snapshot) {
+            let (cw, ch) = self.ensure_metrics();
+            let term_rc = match self.term.borrow().as_ref() {
+                Some(t) => t.clone(),
+                None => return,
+            };
+            let term = term_rc.borrow();
+            let obj = self.obj();
+            let wpx = obj.width() as f32;
+            let hpx = obj.height() as f32;
+            let ctx = obj.pango_context();
+            let font_b = self.font.borrow();
+            let font = match font_b.as_ref() {
+                Some(f) => f,
+                None => return,
+            };
+            let (cwf, chf) = (cw as f32, ch as f32);
+            let lines = self.grid.borrow().as_ref().map(|g| g.get().1).unwrap_or(INIT_ROWS);
+
+            // Background fill.
+            snapshot.append_color(&rgba(DEFAULT_BG), &graphene::Rect::new(0.0, 0.0, wpx, hpx));
+
+            let content = term.renderable_content();
+            let colors = content.colors;
+            let offset = content.display_offset as i32;
+            let selection = content.selection;
+            let cursor = content.cursor;
+            let cursor_on = cursor.shape != CursorShape::Hidden;
+
+            let mut rows: Vec<RowBuf> = Vec::with_capacity(lines);
+            rows.resize_with(lines, RowBuf::new);
+
+            for indexed in content.display_iter {
+                let point = indexed.point;
+                let c = indexed.cell;
+                let flags = c.flags;
+                if flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let row = point.line.0 + offset;
+                if row < 0 || row as usize >= lines {
+                    continue;
+                }
+                let rowi = row as usize;
+                let col = point.column.0;
+
+                let mut fg = resolve(c.fg, colors, DEFAULT_FG);
+                let mut bg = resolve(c.bg, colors, DEFAULT_BG);
+                if flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if flags.contains(Flags::DIM) {
+                    fg = (fg.0 * 0.66, fg.1 * 0.66, fg.2 * 0.66);
+                }
+                if selection.is_some_and(|r| r.contains(point)) {
+                    bg = SELECTION_BG;
+                }
+                // Block cursor: invert this cell (fg glyph on the cursor color).
+                if cursor_on
+                    && point == cursor.point
+                    && matches!(cursor.shape, CursorShape::Block | CursorShape::HollowBlock)
+                {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let wide = flags.contains(Flags::WIDE_CHAR);
+                if bg != DEFAULT_BG {
+                    let w = cwf * if wide { 2.0 } else { 1.0 };
+                    snapshot.append_color(
+                        &rgba(bg),
+                        &graphene::Rect::new(col as f32 * cwf, rowi as f32 * chf, w, chf),
+                    );
+                }
+                let glyph = if flags.contains(Flags::HIDDEN) { ' ' } else { c.c };
+                rows[rowi].push_cell(col, glyph, fg, flags, wide);
+            }
+
+            for (rowi, rb) in rows.iter().enumerate() {
+                if rb.text.trim_end().is_empty() {
+                    continue;
+                }
+                let layout = pango::Layout::new(&ctx);
+                layout.set_font_description(Some(font));
+                layout.set_text(&rb.text);
+                layout.set_attributes(Some(&rb.attrs));
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(0.0, rowi as f32 * chf));
+                snapshot.append_layout(&layout, &rgba(DEFAULT_FG));
+                snapshot.restore();
+            }
+
+            // Beam / underline cursor (block is drawn via the inversion above).
+            if cursor_on {
+                let row = cursor.point.line.0 + offset;
+                if row >= 0 && (row as usize) < lines {
+                    let x = cursor.point.column.0 as f32 * cwf;
+                    let y = row as f32 * chf;
+                    match cursor.shape {
+                        CursorShape::Beam => snapshot
+                            .append_color(&rgba(DEFAULT_FG), &graphene::Rect::new(x, y, 2.0, chf)),
+                        CursorShape::Underline => snapshot.append_color(
+                            &rgba(DEFAULT_FG),
+                            &graphene::Rect::new(x, y + chf - 2.0, cwf, 2.0),
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    /// GPU-rendered terminal surface for one session.
+    pub struct TermArea(ObjectSubclass<imp::TermArea>) @extends gtk4::Widget;
+}
+
+impl TermArea {
+    fn new() -> Self {
+        glib::Object::new()
+    }
+
+    /// Wire the widget to its terminal, resize callback, and the shared metrics/grid cells the
+    /// input controllers read.
+    fn set_context(
+        &self,
+        term: SharedTerm,
+        on_resize: ResizeCb,
+        metrics: SharedMetrics,
+        grid: SharedGrid,
+    ) {
+        let imp = self.imp();
+        *imp.term.borrow_mut() = Some(term);
+        *imp.on_resize.borrow_mut() = Some(on_resize);
+        *imp.metrics.borrow_mut() = Some(metrics);
+        *imp.grid.borrow_mut() = Some(grid);
+    }
 }
 
 // --- view -------------------------------------------------------------------------------
@@ -174,26 +456,23 @@ impl TerminalView {
 // --- one session's tab ------------------------------------------------------------------
 
 struct TerminalTab {
-    area: gtk4::DrawingArea,
-    term: Rc<RefCell<Term<EventProxy>>>,
+    area: TermArea,
+    term: SharedTerm,
     parser: Rc<RefCell<Processor>>,
 }
 
 impl TerminalTab {
     fn new(session: String, cb: TermCallbacks) -> Self {
-        let area = gtk4::DrawingArea::new();
+        let area = TermArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
         area.set_focusable(true);
         area.set_can_focus(true);
 
-        // Clipboards from the default display (works before the widget is realized).
         let display = gdk::Display::default();
         let clipboard = display.as_ref().map(|d| d.clipboard());
         let primary = display.as_ref().map(|d| d.primary_clipboard());
 
-        // Terminal engine. The event proxy forwards emulator-generated PTY writes to the server
-        // and OSC-52 clipboard stores to the system clipboard.
         let proxy = EventProxy {
             session: session.clone(),
             on_input: cb.on_input.clone(),
@@ -207,46 +486,15 @@ impl TerminalTab {
             },
         };
         let init = Dims { cols: INIT_COLS, lines: INIT_ROWS };
-        let term = Rc::new(RefCell::new(Term::new(TermConfig::default(), &init, proxy)));
+        let term: SharedTerm =
+            Rc::new(RefCell::new(Term::new(TermConfig::default(), &init, proxy)));
         let parser = Rc::new(RefCell::new(Processor::new()));
-        let dims = Rc::new(Cell::new(init));
-        let cell = Rc::new(Cell::new(measure_cell()));
+        let metrics: SharedMetrics = Rc::new(Cell::new((8.0, 16.0)));
+        let grid: SharedGrid = Rc::new(Cell::new((INIT_COLS, INIT_ROWS)));
         let drag = Rc::new(Cell::new(Drag::None));
-        // Last pointer cell (col,row), used to position mouse-wheel reports.
         let last_pos = Rc::new(Cell::new((0usize, 0usize)));
 
-        // Paint.
-        {
-            let term = term.clone();
-            let cell = cell.clone();
-            area.set_draw_func(move |_a, cr, w, h| {
-                let m = refine_cell(cr, &cell);
-                draw_content(cr, &term.borrow(), m, w, h);
-            });
-        }
-
-        // Resize: recompute the grid from the allocation and tell the server (all PTYs share a size).
-        {
-            let term = term.clone();
-            let dims = dims.clone();
-            let cell = cell.clone();
-            let on_resize = cb.on_resize.clone();
-            area.connect_resize(move |_a, w, h| {
-                let (cw, ch) = cell.get();
-                if cw <= 0.0 || ch <= 0.0 {
-                    return;
-                }
-                let cols = ((w as f64 / cw).floor() as i64).clamp(1, u16::MAX as i64) as usize;
-                let lines = ((h as f64 / ch).floor() as i64).clamp(1, u16::MAX as i64) as usize;
-                let cur = dims.get();
-                if (cols, lines) != (cur.cols, cur.lines) {
-                    let nd = Dims { cols, lines };
-                    dims.set(nd);
-                    term.borrow_mut().resize(nd);
-                    (on_resize)(cols as u16, lines as u16);
-                }
-            });
-        }
+        area.set_context(term.clone(), cb.on_resize.clone(), metrics.clone(), grid.clone());
 
         // Keyboard.
         {
@@ -260,7 +508,6 @@ impl TerminalTab {
                 use gdk::ModifierType as M;
                 let ctrl = state.contains(M::CONTROL_MASK);
                 let shift = state.contains(M::SHIFT_MASK);
-                // Copy: Ctrl+Shift+C.
                 if ctrl && shift && matches!(keyval, gdk::Key::c | gdk::Key::C) {
                     if let (Some(clip), Some(text)) =
                         (&clipboard, term.borrow().selection_to_string())
@@ -271,14 +518,12 @@ impl TerminalTab {
                     }
                     return glib::Propagation::Stop;
                 }
-                // Paste: Ctrl+Shift+V.
                 if ctrl && shift && matches!(keyval, gdk::Key::v | gdk::Key::V) {
                     if let Some(clip) = &clipboard {
                         paste_from(clip, &term, &session, &on_input);
                     }
                     return glib::Propagation::Stop;
                 }
-                // Scrollback: Shift+PageUp/PageDown/Home/End.
                 if shift {
                     let scroll = match keyval {
                         gdk::Key::Page_Up => Some(Scroll::PageUp),
@@ -297,7 +542,6 @@ impl TerminalTab {
                 }
                 let app_cursor = term.borrow().mode().contains(TermMode::APP_CURSOR);
                 if let Some(bytes) = encode_key(keyval, state, app_cursor) {
-                    // Any keypress snaps the view back to the prompt (like a normal terminal).
                     term.borrow_mut().scroll_display(Scroll::Bottom);
                     (on_input)(&session, bytes);
                     glib::Propagation::Stop
@@ -308,13 +552,13 @@ impl TerminalTab {
             area.add_controller(keys);
         }
 
-        // Mouse buttons (press/release) — selection, copy-to-primary, paste, mouse reporting.
+        // Mouse buttons.
         {
             let click = gtk4::GestureClick::new();
-            click.set_button(0); // all buttons
+            click.set_button(0);
             let p_term = term.clone();
-            let p_dims = dims.clone();
-            let p_cell = cell.clone();
+            let p_metrics = metrics.clone();
+            let p_grid = grid.clone();
             let p_drag = drag.clone();
             let p_last = last_pos.clone();
             let p_input = cb.on_input.clone();
@@ -326,14 +570,13 @@ impl TerminalTab {
                     a.grab_focus();
                 }
                 let button = g.current_button();
-                let state = g.current_event_state();
-                let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                let shift = g.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
                 let mode = *p_term.borrow().mode();
                 let mouse_on = mode.intersects(TermMode::MOUSE_MODE) && !shift;
-                let (pt, side, col, row) = locate(x, y, p_cell.get(), p_dims.get(), &p_term);
+                let (pt, side, col, row) =
+                    locate(x, y, p_metrics.get(), p_grid.get(), &p_term);
                 p_last.set((col, row));
 
-                // Middle-click paste (primary selection) when the app isn't grabbing the mouse.
                 if button == 2 && !mouse_on {
                     if let Some(p) = &p_primary {
                         paste_from(p, &p_term, &p_session, &p_input);
@@ -346,7 +589,6 @@ impl TerminalTab {
                     p_drag.set(Drag::Reporting(code));
                     return;
                 }
-                // Text selection (left button). Double/triple click = word/line.
                 if button == 1 {
                     let ty = match n_press {
                         2 => SelectionType::Semantic,
@@ -366,17 +608,17 @@ impl TerminalTab {
             let rel_primary = primary.clone();
             let rel_input = cb.on_input.clone();
             let rel_session = session.clone();
-            let rel_cell = cell.clone();
-            let rel_dims = dims.clone();
+            let rel_metrics = metrics.clone();
+            let rel_grid = grid.clone();
             click.connect_released(move |_g, _n, x, y| {
-                let (_pt, _side, col, row) = locate(x, y, rel_cell.get(), rel_dims.get(), &rel_term);
+                let (_pt, _side, col, row) =
+                    locate(x, y, rel_metrics.get(), rel_grid.get(), &rel_term);
                 match rel_drag.get() {
                     Drag::Reporting(code) => {
                         let mode = *rel_term.borrow().mode();
                         (rel_input)(&rel_session, mouse_report(code, col, row, false, mode));
                     }
                     Drag::Selecting => {
-                        // Auto-copy the selection to the primary selection (middle-click paste).
                         if let (Some(p), Some(text)) =
                             (&rel_primary, rel_term.borrow().selection_to_string())
                         {
@@ -392,19 +634,19 @@ impl TerminalTab {
             area.add_controller(click);
         }
 
-        // Pointer motion — extend a selection, or report motion to the app.
+        // Pointer motion.
         {
             let motion = gtk4::EventControllerMotion::new();
             let term = term.clone();
-            let dims = dims.clone();
-            let cell = cell.clone();
+            let metrics = metrics.clone();
+            let grid = grid.clone();
             let drag = drag.clone();
             let last_pos = last_pos.clone();
             let on_input = cb.on_input.clone();
             let session = session.clone();
             let area_w = area.downgrade();
             motion.connect_motion(move |_m, x, y| {
-                let (pt, side, col, row) = locate(x, y, cell.get(), dims.get(), &term);
+                let (pt, side, col, row) = locate(x, y, metrics.get(), grid.get(), &term);
                 last_pos.set((col, row));
                 match drag.get() {
                     Drag::Selecting => {
@@ -418,7 +660,6 @@ impl TerminalTab {
                     Drag::Reporting(code) => {
                         let mode = *term.borrow().mode();
                         if mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
-                            // Motion report: base button + 32 (motion bit).
                             (on_input)(&session, mouse_report(code + 32, col, row, true, mode));
                         }
                     }
@@ -428,7 +669,7 @@ impl TerminalTab {
             area.add_controller(motion);
         }
 
-        // Scroll wheel — scrollback, or wheel reports / alt-screen arrow keys.
+        // Scroll wheel.
         {
             let scroll =
                 gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::BOTH_AXES);
@@ -446,22 +687,20 @@ impl TerminalTab {
                 let mode = *term.borrow().mode();
                 let shift = c.current_event_state().contains(gdk::ModifierType::SHIFT_MASK);
                 if mode.intersects(TermMode::MOUSE_MODE) && !shift {
-                    // Wheel report: SGR/normal button 64 (up) / 65 (down).
                     let (col, row) = last_pos.get();
                     let code = if up { 64 } else { 65 };
                     for _ in 0..(steps / 3).max(1) {
                         (on_input)(&session, mouse_report(code, col, row, true, mode));
                     }
                 } else if mode.contains(TermMode::ALT_SCREEN) && !shift {
-                    // Alt-screen app (less/vim) with no mouse mode: translate to arrow keys.
                     let app = mode.contains(TermMode::APP_CURSOR);
                     let key = if up { arrow(b'A', app) } else { arrow(b'B', app) };
                     for _ in 0..steps {
                         (on_input)(&session, key.clone());
                     }
                 } else {
-                    // Scrollback.
-                    term.borrow_mut().scroll_display(Scroll::Delta(if up { steps } else { -steps }));
+                    term.borrow_mut()
+                        .scroll_display(Scroll::Delta(if up { steps } else { -steps }));
                     if let Some(a) = area_w.upgrade() {
                         a.queue_draw();
                     }
@@ -478,7 +717,7 @@ impl TerminalTab {
 /// Read the system clipboard and send it to the session as input (bracketed when the app asked).
 fn paste_from(
     clipboard: &gdk::Clipboard,
-    term: &Rc<RefCell<Term<EventProxy>>>,
+    term: &SharedTerm,
     session: &str,
     on_input: &InputCb,
 ) {
@@ -487,7 +726,6 @@ fn paste_from(
     let on_input = on_input.clone();
     clipboard.read_text_async(gio::Cancellable::NONE, move |res| {
         if let Ok(Some(text)) = res {
-            // Terminals expect CR for line breaks on paste.
             let text = text.replace('\n', "\r");
             let payload = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text };
             (on_input)(&session, payload.into_bytes());
@@ -495,7 +733,7 @@ fn paste_from(
     });
 }
 
-// --- rendering --------------------------------------------------------------------------
+// --- colors -----------------------------------------------------------------------------
 
 /// Default foreground/background (a soft light-on-dark terminal theme).
 const DEFAULT_FG: (f64, f64, f64) = (0.85, 0.85, 0.86);
@@ -503,150 +741,17 @@ const DEFAULT_BG: (f64, f64, f64) = (0.11, 0.12, 0.13);
 /// Selection highlight background.
 const SELECTION_BG: (f64, f64, f64) = (0.22, 0.35, 0.55);
 
-fn measure_cell() -> (f64, f64) {
-    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, 8, 8).unwrap();
-    let cr = cairo::Context::new(&surface).unwrap();
-    cell_metrics(&cr)
+fn rgba(c: (f64, f64, f64)) -> gdk::RGBA {
+    gdk::RGBA::new(c.0 as f32, c.1 as f32, c.2 as f32, 1.0)
 }
 
-fn cell_metrics(cr: &cairo::Context) -> (f64, f64) {
-    cr.select_font_face("monospace", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-    cr.set_font_size(FONT_SIZE);
-    let fe = cr.font_extents().map(|f| f.height()).unwrap_or(FONT_SIZE * 1.3);
-    let te = cr.text_extents("M").map(|t| t.x_advance()).unwrap_or(FONT_SIZE * 0.6);
-    let w = if te > 0.0 { te } else { FONT_SIZE * 0.6 };
-    let h = if fe > 0.0 { fe } else { FONT_SIZE * 1.3 };
-    (w.ceil(), h.ceil())
+fn pango16(c: (f64, f64, f64)) -> (u16, u16, u16) {
+    (
+        (c.0.clamp(0.0, 1.0) * 65535.0) as u16,
+        (c.1.clamp(0.0, 1.0) * 65535.0) as u16,
+        (c.2.clamp(0.0, 1.0) * 65535.0) as u16,
+    )
 }
-
-fn refine_cell(cr: &cairo::Context, cell: &Rc<Cell<(f64, f64)>>) -> (f64, f64) {
-    let m = cell_metrics(cr);
-    cell.set(m);
-    m
-}
-
-/// Paint the terminal grid: backgrounds (incl. selection), glyphs, then the cursor.
-fn draw_content(cr: &cairo::Context, term: &Term<EventProxy>, cell: (f64, f64), _w: i32, _h: i32) {
-    let (cw, ch) = cell;
-    let content = term.renderable_content();
-    let colors = content.colors;
-    let display_offset = content.display_offset as i32;
-    let selection = content.selection;
-
-    // Clear to the default background.
-    cr.set_source_rgb(DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2);
-    let _ = cr.paint();
-
-    cr.select_font_face("monospace", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-    cr.set_font_size(FONT_SIZE);
-    let ascent = cr.font_extents().map(|f| f.ascent()).unwrap_or(FONT_SIZE);
-
-    for indexed in content.display_iter {
-        let point = indexed.point;
-        let c = indexed.cell;
-        let flags = c.flags;
-        if flags.contains(Flags::WIDE_CHAR_SPACER) {
-            continue;
-        }
-        let row = point.line.0 + display_offset;
-        if row < 0 {
-            continue;
-        }
-        let x = point.column.0 as f64 * cw;
-        let y = row as f64 * ch;
-        let width_cells = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
-
-        let mut fg = resolve(c.fg, colors, DEFAULT_FG);
-        let mut bg = resolve(c.bg, colors, DEFAULT_BG);
-        if flags.contains(Flags::INVERSE) {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-        if flags.contains(Flags::DIM) {
-            fg = (fg.0 * 0.66, fg.1 * 0.66, fg.2 * 0.66);
-        }
-        if selection.is_some_and(|r| r.contains(point)) {
-            bg = SELECTION_BG;
-        }
-
-        if bg != DEFAULT_BG {
-            cr.set_source_rgb(bg.0, bg.1, bg.2);
-            cr.rectangle(x, y, cw * width_cells, ch);
-            let _ = cr.fill();
-        }
-
-        if c.c != ' ' && !flags.contains(Flags::HIDDEN) {
-            cr.select_font_face(
-                "monospace",
-                if flags.contains(Flags::ITALIC) {
-                    cairo::FontSlant::Italic
-                } else {
-                    cairo::FontSlant::Normal
-                },
-                if flags.contains(Flags::BOLD) {
-                    cairo::FontWeight::Bold
-                } else {
-                    cairo::FontWeight::Normal
-                },
-            );
-            cr.set_font_size(FONT_SIZE);
-            cr.set_source_rgb(fg.0, fg.1, fg.2);
-            cr.move_to(x, y + ascent);
-            let mut buf = [0u8; 4];
-            let _ = cr.show_text(c.c.encode_utf8(&mut buf));
-        }
-        if flags.intersects(Flags::UNDERLINE | Flags::DOUBLE_UNDERLINE | Flags::UNDERCURL) {
-            cr.set_source_rgb(fg.0, fg.1, fg.2);
-            cr.rectangle(x, y + ch - 1.5, cw * width_cells, 1.0);
-            let _ = cr.fill();
-        }
-        if flags.contains(Flags::STRIKEOUT) {
-            cr.set_source_rgb(fg.0, fg.1, fg.2);
-            cr.rectangle(x, y + ch / 2.0, cw * width_cells, 1.0);
-            let _ = cr.fill();
-        }
-    }
-
-    // Cursor (skip when scrolled away or hidden).
-    let cur = content.cursor;
-    if cur.shape != CursorShape::Hidden {
-        let row = cur.point.line.0 + display_offset;
-        if row >= 0 {
-            let x = cur.point.column.0 as f64 * cw;
-            let y = row as f64 * ch;
-            cr.set_source_rgba(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2, 0.8);
-            match cur.shape {
-                CursorShape::Beam => {
-                    cr.rectangle(x, y, 2.0, ch);
-                    let _ = cr.fill();
-                }
-                CursorShape::Underline => {
-                    cr.rectangle(x, y + ch - 2.0, cw, 2.0);
-                    let _ = cr.fill();
-                }
-                CursorShape::HollowBlock => {
-                    cr.set_line_width(1.0);
-                    cr.rectangle(x + 0.5, y + 0.5, cw - 1.0, ch - 1.0);
-                    let _ = cr.stroke();
-                }
-                _ => {
-                    // Block: fill + redraw the glyph under it in the background color.
-                    cr.rectangle(x, y, cw, ch);
-                    let _ = cr.fill();
-                    if let Some(g) = term.grid().display_iter().find(|i| i.point == cur.point) {
-                        if g.cell.c != ' ' {
-                            cr.set_source_rgb(DEFAULT_BG.0, DEFAULT_BG.1, DEFAULT_BG.2);
-                            cr.move_to(x, y + ascent);
-                            let mut buf = [0u8; 4];
-                            let _ = cr.show_text(g.cell.c.encode_utf8(&mut buf));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// --- colors -----------------------------------------------------------------------------
 
 fn rgb_f(rgb: Rgb) -> (f64, f64, f64) {
     (rgb.r as f64 / 255.0, rgb.g as f64 / 255.0, rgb.b as f64 / 255.0)
@@ -743,13 +848,14 @@ fn locate(
     x: f64,
     y: f64,
     cell: (f64, f64),
-    dims: Dims,
-    term: &Rc<RefCell<Term<EventProxy>>>,
+    grid: (usize, usize),
+    term: &SharedTerm,
 ) -> (Point, Side, usize, usize) {
     let (cw, ch) = cell;
+    let (cols, lines) = grid;
     let colf = (x / cw).max(0.0);
-    let col = (colf.floor() as usize).min(dims.cols.saturating_sub(1));
-    let row = ((y / ch).floor() as i64).clamp(0, dims.lines.saturating_sub(1) as i64) as usize;
+    let col = (colf.floor() as usize).min(cols.saturating_sub(1));
+    let row = ((y / ch).floor() as i64).clamp(0, lines.saturating_sub(1) as i64) as usize;
     let side = if colf.fract() < 0.5 { Side::Left } else { Side::Right };
     let display_offset = term.borrow().grid().display_offset() as i32;
     let point = Point::new(Line(row as i32 - display_offset), Column(col));
@@ -781,7 +887,6 @@ fn mouse_report(code: u8, col: usize, row: usize, pressed: bool, mode: TermMode)
         let m = if pressed { 'M' } else { 'm' };
         format!("\x1b[<{};{};{}{}", code, col + 1, row + 1, m).into_bytes()
     } else {
-        // Normal encoding: release is button 3; values are offset by 32 and clamped to 223.
         let cb = if pressed { code } else { 3 };
         let cx = (col as u16 + 1).min(223) as u8 + 32;
         let cy = (row as u16 + 1).min(223) as u8 + 32;
