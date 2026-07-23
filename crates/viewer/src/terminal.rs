@@ -170,7 +170,6 @@ mod imp {
         pub(super) on_resize: RefCell<Option<ResizeCb>>,
         pub(super) metrics: RefCell<Option<SharedMetrics>>,
         pub(super) grid: RefCell<Option<SharedGrid>>,
-        pub(super) theme: RefCell<Option<SharedTheme>>,
         pub(super) font: RefCell<Option<pango::FontDescription>>,
     }
 
@@ -181,7 +180,22 @@ mod imp {
         type ParentType = gtk4::Widget;
     }
 
-    impl ObjectImpl for TermArea {}
+    impl ObjectImpl for TermArea {
+        fn constructed(&self) {
+            self.parent_constructed();
+            // Repaint (re-sampling light/dark) whenever the system GTK theme changes.
+            if let Some(settings) = gtk4::Settings::default() {
+                let weak = self.obj().downgrade();
+                let redraw = move |_: &gtk4::Settings, _: &glib::ParamSpec| {
+                    if let Some(o) = weak.upgrade() {
+                        o.queue_draw();
+                    }
+                };
+                settings.connect_notify_local(Some("gtk-theme-name"), redraw.clone());
+                settings.connect_notify_local(Some("gtk-application-prefer-dark-theme"), redraw);
+            }
+        }
+    }
 
     impl WidgetImpl for TermArea {
         fn snapshot(&self, snapshot: &gtk4::Snapshot) {
@@ -253,7 +267,9 @@ mod imp {
                 None => return,
             };
             let term = term_rc.borrow();
-            let theme = self.theme.borrow().as_ref().map(|t| t.get()).unwrap_or_else(dark_theme);
+            // Match whatever theme GTK resolved from the system: a light default foreground means
+            // a dark theme, and vice-versa. Re-sampled each frame, so it follows live switches.
+            let theme = if is_dark(self.obj().color()) { dark_theme() } else { light_theme() };
             let obj = self.obj();
             let wpx = obj.width() as f32;
             let hpx = obj.height() as f32;
@@ -409,14 +425,12 @@ impl TermArea {
         on_resize: ResizeCb,
         metrics: SharedMetrics,
         grid: SharedGrid,
-        theme: SharedTheme,
     ) {
         let imp = self.imp();
         *imp.term.borrow_mut() = Some(term);
         *imp.on_resize.borrow_mut() = Some(on_resize);
         *imp.metrics.borrow_mut() = Some(metrics);
         *imp.grid.borrow_mut() = Some(grid);
-        *imp.theme.borrow_mut() = Some(theme);
     }
 }
 
@@ -427,9 +441,6 @@ pub struct TerminalView {
     notebook: gtk4::Notebook,
     cb: TermCallbacks,
     tabs: Rc<RefCell<HashMap<String, TerminalTab>>>,
-    theme: SharedTheme,
-    /// The settings-portal proxy kept alive so its live `color-scheme` signal keeps firing.
-    _portal: Option<gio::DBusProxy>,
 }
 
 impl TerminalView {
@@ -449,22 +460,7 @@ impl TerminalView {
         notebook.set_action_widget(&plus, gtk4::PackType::End);
         plus.set_visible(true);
 
-        let tabs: Rc<RefCell<HashMap<String, TerminalTab>>> = Rc::new(RefCell::new(HashMap::new()));
-        // Follow the system light/dark preference (defaults to dark if no desktop portal).
-        let theme: SharedTheme = Rc::new(Cell::new(theme_for(portal_color_scheme())));
-        let portal = settings_portal();
-        if let Some(p) = &portal {
-            let theme = theme.clone();
-            let tabs = tabs.clone();
-            watch_color_scheme(p, move |scheme| {
-                theme.set(theme_for(scheme));
-                for tab in tabs.borrow().values() {
-                    tab.area.queue_draw();
-                }
-            });
-        }
-
-        Self { notebook, cb, tabs, theme, _portal: portal }
+        Self { notebook, cb, tabs: Rc::new(RefCell::new(HashMap::new())) }
     }
 
     /// The widget to embed as the primary window's child.
@@ -488,7 +484,7 @@ impl TerminalView {
             if tabs.contains_key(name) {
                 continue;
             }
-            let tab = TerminalTab::new(name.clone(), self.cb.clone(), self.theme.clone());
+            let tab = TerminalTab::new(name.clone(), self.cb.clone());
             let label = gtk4::Label::new(Some(name));
             self.notebook.append_page(&tab.area, Some(&label));
             self.notebook.set_tab_reorderable(&tab.area, true);
@@ -519,7 +515,7 @@ struct TerminalTab {
 }
 
 impl TerminalTab {
-    fn new(session: String, cb: TermCallbacks, theme: SharedTheme) -> Self {
+    fn new(session: String, cb: TermCallbacks) -> Self {
         let area = TermArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
@@ -551,7 +547,7 @@ impl TerminalTab {
         let drag = Rc::new(Cell::new(Drag::None));
         let last_pos = Rc::new(Cell::new((0usize, 0usize)));
 
-        area.set_context(term.clone(), cb.on_resize.clone(), metrics.clone(), grid.clone(), theme);
+        area.set_context(term.clone(), cb.on_resize.clone(), metrics.clone(), grid.clone());
 
         // Keyboard.
         {
@@ -793,8 +789,6 @@ fn paste_from(
 // --- theme + colors ---------------------------------------------------------------------
 
 type Rgb3 = (f64, f64, f64);
-/// Shared current theme; swapped live when the system light/dark preference changes.
-type SharedTheme = Rc<Cell<Theme>>;
 
 /// A terminal color scheme: default fg/bg, selection highlight, and the 16 ANSI colors.
 #[derive(Clone, Copy)]
@@ -841,10 +835,11 @@ fn light_theme() -> Theme {
     Theme { fg: (0.13, 0.13, 0.15), bg: (0.99, 0.99, 0.98), sel: (0.70, 0.82, 0.98), ansi: ansi16() }
 }
 
-/// Map an XDG `color-scheme` value (1 = prefer dark, 2 = prefer light, 0 = no preference) to a
-/// theme. Default to dark (the usual terminal default) unless light is explicitly preferred.
-fn theme_for(scheme: Option<u32>) -> Theme {
-    if scheme == Some(2) { light_theme() } else { dark_theme() }
+/// Whether the resolved GTK theme is dark, judged by the luminance of its default foreground
+/// color (light text ⇒ dark theme). This reflects the theme GTK actually applied from the
+/// system — correct on any desktop and macOS, unlike the portal's often-"no preference" hint.
+fn is_dark(fg: gdk::RGBA) -> bool {
+    0.2126 * fg.red() as f64 + 0.7152 * fg.green() as f64 + 0.0722 * fg.blue() as f64 > 0.5
 }
 
 fn rgba(c: Rgb3) -> gdk::RGBA {
@@ -921,70 +916,6 @@ fn indexed_default(idx: u8, theme: &Theme) -> Rgb3 {
             (v, v, v)
         }
     }
-}
-
-// --- system light/dark preference (XDG desktop portal) ----------------------------------
-
-/// Read the system's `color-scheme` (1 dark / 2 light / 0 none) from the desktop settings
-/// portal, or `None` if the portal is unavailable (no portal → caller defaults to dark).
-fn portal_color_scheme() -> Option<u32> {
-    read_color_scheme(&settings_portal()?)
-}
-
-fn settings_portal() -> Option<gio::DBusProxy> {
-    gio::DBusProxy::for_bus_sync(
-        gio::BusType::Session,
-        gio::DBusProxyFlags::NONE,
-        None,
-        "org.freedesktop.portal.Desktop",
-        "/org/freedesktop/portal/desktop",
-        "org.freedesktop.portal.Settings",
-        gio::Cancellable::NONE,
-    )
-    .ok()
-}
-
-fn read_color_scheme(proxy: &gio::DBusProxy) -> Option<u32> {
-    let params = ("org.freedesktop.appearance", "color-scheme").to_variant();
-    let reply = proxy
-        .call_sync("ReadOne", Some(&params), gio::DBusCallFlags::NONE, 1000, gio::Cancellable::NONE)
-        .or_else(|_| {
-            proxy.call_sync("Read", Some(&params), gio::DBusCallFlags::NONE, 1000, gio::Cancellable::NONE)
-        })
-        .ok()?;
-    variant_to_u32(&reply.child_value(0))
-}
-
-/// The portal double-wraps the value in `v` variants; peel them until a `u32` surfaces.
-fn variant_to_u32(v: &glib::Variant) -> Option<u32> {
-    let mut cur = v.clone();
-    for _ in 0..4 {
-        if let Some(u) = cur.get::<u32>() {
-            return Some(u);
-        }
-        match cur.as_variant() {
-            Some(inner) => cur = inner,
-            None => break,
-        }
-    }
-    None
-}
-
-/// Subscribe to live `color-scheme` changes on the settings portal.
-fn watch_color_scheme(proxy: &gio::DBusProxy, on_change: impl Fn(Option<u32>) + 'static) {
-    proxy.connect_local("g-signal", false, move |vals| {
-        if let (Ok(signal), Ok(params)) =
-            (vals[2].get::<String>(), vals[3].get::<glib::Variant>())
-        {
-            if signal == "SettingChanged"
-                && params.child_value(0).str() == Some("org.freedesktop.appearance")
-                && params.child_value(1).str() == Some("color-scheme")
-            {
-                on_change(variant_to_u32(&params.child_value(2)));
-            }
-        }
-        None
-    });
 }
 
 // --- input encoding ---------------------------------------------------------------------
