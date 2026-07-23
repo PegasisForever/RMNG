@@ -48,6 +48,9 @@ pub enum Cmd {
         /// Env preset name (optional; fleet workers usually need none)
         #[arg(long)]
         preset: Option<String>,
+        /// Headless clone: no desktop; the viewer shows a tmux tab view instead of a stream
+        #[arg(long)]
+        headless: bool,
         #[command(flatten)]
         wait: WaitArgs,
     },
@@ -433,12 +436,14 @@ mod tests {
                 hostname,
                 group,
                 preset,
+                headless,
                 wait,
             } => {
                 assert_eq!(image, "hyperhost-worker:latest");
                 assert_eq!(hostname, "w-cp");
                 assert_eq!(group.as_deref(), Some("pooled"));
                 assert_eq!(preset, None);
+                assert!(!headless);
                 assert!(wait.wait);
                 assert_eq!(wait.timeout, 120);
             }

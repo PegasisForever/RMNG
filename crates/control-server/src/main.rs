@@ -28,6 +28,7 @@ mod shm;
 mod smb;
 mod ssh;
 mod state;
+mod termplane;
 mod token_migrate;
 mod tokens;
 mod update;

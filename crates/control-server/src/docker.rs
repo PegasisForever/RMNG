@@ -31,7 +31,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::errors::Error as BollardError;
-use bollard::exec::{CreateExecOptions, StartExecResults};
+use bollard::exec::{
+    CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults,
+};
 use bollard::models::{
     ContainerConfig, ContainerCreateBody, ContainerInspectResponse, EndpointSettings, HostConfig,
     Ipam, IpamConfig, Mount, MountBindOptions, MountBindOptionsPropagationEnum, MountPointTypeEnum,
@@ -1971,6 +1973,67 @@ impl DockerCtl {
         let exit_code = self.daemon()?.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
         Ok(ExecResult { exit_code, stdout, stderr })
     }
+
+    /// Start an **interactive TTY exec** (`tty: true`) and hand back its attached streams so a
+    /// caller can proxy a live terminal (the headless-clone `termplane` runs `tmux attach`).
+    /// Unlike [`Self::exec_script`]/[`Self::exec_capture`], nothing is buffered or line-split —
+    /// the caller pumps `output` (raw terminal bytes; with a TTY there is no stdout/stderr
+    /// split) and writes keystrokes to `input`. The initial window size is applied before
+    /// returning; later changes go through [`Self::resize_exec`] with the returned `id`.
+    pub async fn exec_tty(
+        &self,
+        container: &str,
+        cmd: &[String],
+        user: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TtyExec> {
+        let daemon = self.daemon()?;
+        let exec = daemon
+            .create_exec(
+                container,
+                CreateExecOptions {
+                    cmd: Some(cmd.to_vec()),
+                    user: Some(user.to_string()),
+                    attach_stdin: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    tty: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("creating tty exec in {container}"))?;
+        let StartExecResults::Attached { output, input } = daemon
+            .start_exec(&exec.id, Some(StartExecOptions { tty: true, ..Default::default() }))
+            .await?
+        else {
+            bail!("tty exec started detached unexpectedly");
+        };
+        // Best-effort initial sizing so the very first render matches the viewer tab.
+        daemon
+            .resize_exec(&exec.id, ResizeExecOptions { height: rows, width: cols })
+            .await
+            .ok();
+        Ok(TtyExec { id: exec.id, output, input })
+    }
+
+    /// Resize a running TTY exec's pseudo-terminal (rows/cols), by the id from [`Self::exec_tty`].
+    pub async fn resize_exec(&self, exec_id: &str, cols: u16, rows: u16) -> Result<()> {
+        self.daemon()?
+            .resize_exec(exec_id, ResizeExecOptions { height: rows, width: cols })
+            .await?;
+        Ok(())
+    }
+}
+
+/// A live interactive TTY exec (see [`DockerCtl::exec_tty`]): the multiplexed-away raw output
+/// stream, the stdin writer, and the exec id used for [`DockerCtl::resize_exec`]. The streams
+/// are dropped to detach (which makes `tmux attach` see EOF and detach its client).
+pub struct TtyExec {
+    pub id: String,
+    pub output: std::pin::Pin<Box<dyn futures::Stream<Item = Result<LogOutput, BollardError>> + Send>>,
+    pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
 }
 
 /// Per-request timeout for plain (non-hijacked) daemon calls. `docker commit` of a

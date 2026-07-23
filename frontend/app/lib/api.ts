@@ -47,7 +47,7 @@ export type ClonePayload = (
       | { create: { team: string; title: string; description: string } }
     ) & { agentInstructions?: string; claudeInstructions?: string })
   | { plain: { title: string; message: string } }
-) & { group?: string | null; preset?: string };
+) & { group?: string | null; preset?: string; headless?: boolean };
 
 export const activate = (id: string | null) =>
   postJson("/api/activate", { id });

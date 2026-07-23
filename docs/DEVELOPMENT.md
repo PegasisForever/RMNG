@@ -72,8 +72,10 @@ frontend works unchanged.
 
 Rust (edition 2024), `bun`, `clang`/`libclang`; `libpipewire-0.3-dev`, `libva-dev` + AMD VA-API
 (radeonsi/Mesa), `libdrm-dev`, GStreamer + **`gstreamer1.0-plugins-bad`** (the `va` elements —
-*not* `gstreamer1.0-va`), GTK4; a GPU render node (`/dev/dri/renderD128`) on the control-server
-host *and* every clone. With those dev libs the **whole workspace compiles on a plain laptop**
+*not* `gstreamer1.0-va`) + **`gstreamer1.0-gtk4`** (the `gtk4paintablesink` the viewer renders
+into — without it the viewer aborts with `no element "gtk4paintablesink"` on the first video
+frame), GTK4; a GPU render node (`/dev/dri/renderD128`) on the control-server host *and* every
+clone. With those dev libs the **whole workspace compiles on a plain laptop**
 (a bare box without them builds only `wire`); the GPU box is only needed to *run* the
 capture/encode/server side — the **`viewer` builds *and* runs locally** (client-side decode).
 See the [dev loop](DEPLOY.md#the-dev-loop). **The clone template is built on the

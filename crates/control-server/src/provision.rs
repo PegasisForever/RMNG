@@ -42,6 +42,24 @@ const WAIT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// Poll interval while waiting for readiness.
 const WAIT_READY_POLL: Duration = Duration::from_secs(2);
 
+/// Headless clone: drop the desktop + capture user units so they never start. Removing the
+/// `default.target.wants` symlinks is the race-free part (a plain filesystem op that beats the
+/// lingering user manager on first boot); the `systemctl --user disable --now` is best-effort
+/// mop-up if the user bus is already up. `agent-wrapper.service` is deliberately left enabled.
+const HEADLESS_DISABLE_SCRIPT: &str = r#"set -e
+wants=/home/rmng/.config/systemd/user/default.target.wants
+rm -f "$wants/gnome-headless.service" "$wants/rmng-clone-daemon.service"
+runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 \
+  systemctl --user disable --now gnome-headless.service rmng-clone-daemon.service 2>/dev/null || true
+"#;
+
+/// Headless clone: ensure a default `main` tmux session exists (idempotent). Runs as the clone
+/// user via a login shell so PATH/SHELL match an interactive session. `termplane` re-creates a
+/// missing session on select, so this is a convenience default, not load-bearing.
+const HEADLESS_TMUX_DEFAULT_SCRIPT: &str = r#"set -e
+runuser -u rmng -- bash -lc 'tmux has-session -t main 2>/dev/null || tmux new-session -d -s main'
+"#;
+
 // --- pure ports -----------------------------------------------------------------------
 
 /// A DNS label (host-id / hostname validity + path-traversal guard). Ported verbatim.
@@ -332,6 +350,7 @@ pub async fn clone_container(
     hostname: &str,
     env: &[EnvVar],
     agent_playbook: &str,
+    headless: bool,
     mut on_progress: impl FnMut(&str, &str),
 ) -> Result<String> {
     if !is_dns_label(hostname) {
@@ -387,6 +406,7 @@ pub async fn clone_container(
         hostname,
         env,
         agent_playbook,
+        headless,
         &mut on_progress,
     )
     .await
@@ -422,6 +442,7 @@ async fn clone_container_after_create(
     hostname: &str,
     env: &[EnvVar],
     agent_playbook: &str,
+    headless: bool,
     on_progress: &mut impl FnMut(&str, &str),
 ) -> Result<()> {
     let docker = &app.docker;
@@ -465,6 +486,25 @@ async fn clone_container_after_create(
     // settle, so their PAM-created environment sees `/etc/environment`.
     on_progress("inject", "starting container to inject identity + preset");
     docker.start_container(container).await?;
+
+    // Headless clone: kill the desktop the instant the container is up — remove the
+    // `gnome-headless.service` + `rmng-clone-daemon.service` wants-symlinks so the lingering
+    // user manager never pulls them in on this (still-booting) first boot, and best-effort
+    // `disable --now` in case it already reached them. The `rm` (a filesystem op) is the
+    // race-free part; the `systemctl` is mop-up if the user bus is already up. `agent-wrapper`
+    // is left enabled. Runs before the ~seconds of Codex/env injects below, so it wins the race.
+    if headless {
+        on_progress("inject", "headless: disabling desktop (gnome-headless + clone-daemon)");
+        let code = docker
+            .exec_script(container, HEADLESS_DISABLE_SCRIPT, &[], &[], |_stream, line| {
+                tracing::debug!(target: "provision", "headless-disable: {line}");
+            })
+            .await
+            .unwrap_or(0);
+        if code != 0 {
+            tracing::warn!("clone {hostname}: headless desktop-disable exited {code} (non-fatal)");
+        }
+    }
 
     // Belt-and-suspenders: reconcile /dev/shm the moment the clone is up, so its desktop never
     // touches the 64 MB default even for the first reconcile tick. This clone was just created
@@ -614,6 +654,24 @@ async fn clone_container_after_create(
             // interactive bash misses it. Warn rather than tear the clone down.
             tracing::warn!("clone {hostname}: bashrc preset-PATH append exited {code} (non-fatal)");
         }
+    }
+
+    // Headless clone: there is no clone-daemon, so a media `Hello` never arrives — don't wait
+    // for one. Start the default `main` tmux session (idempotent; the viewer shows it as the
+    // first tab and `termplane` self-heals a missing session on select) and report ready.
+    if headless {
+        on_progress("wait-ready", "headless clone — starting default tmux session");
+        let code = docker
+            .exec_script(container, HEADLESS_TMUX_DEFAULT_SCRIPT, &[], &[], |_stream, line| {
+                tracing::debug!(target: "provision", "headless-tmux: {line}");
+            })
+            .await
+            .unwrap_or(0);
+        if code != 0 {
+            tracing::warn!("clone {hostname}: default tmux session start exited {code} (non-fatal)");
+        }
+        on_progress("ready", &format!("headless clone {hostname} up"));
+        return Ok(());
     }
 
     // wait-ready: poll the mediaplane for the daemon's Hello (keyed by clone_id == hostname).

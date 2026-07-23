@@ -460,6 +460,12 @@ export function SidebarHost({
                 {host.linearTicket}
               </span>
             ) : null}
+            {host.headless ? (
+              <Terminal
+                className="mr-1 inline-block size-3.5 align-middle text-slate-500 dark:text-slate-400"
+                aria-label="headless clone (tmux view)"
+              />
+            ) : null}
             {host.displayName ?? host.id}
           </p>
         ) : null}

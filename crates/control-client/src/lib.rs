@@ -162,6 +162,7 @@ impl Client {
         hostname: &str,
         group: Option<&str>,
         preset: Option<&str>,
+        headless: bool,
     ) -> Result<Operation> {
         let mut body = json!({ "image": image, "hostname": hostname });
         let obj = body.as_object_mut().unwrap();
@@ -173,6 +174,9 @@ impl Client {
         }
         if let Some(p) = preset {
             obj.insert("preset".into(), json!(p));
+        }
+        if headless {
+            obj.insert("headless".into(), json!(true));
         }
         let v: Value = self.post_json("/api/clone", &body).await?;
         Ok(serde_json::from_value(

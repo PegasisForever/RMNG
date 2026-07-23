@@ -166,6 +166,12 @@ pub struct Host {
     /// Clearing the selection state is an explicit operator action, not a clone report.
     #[serde(default)]
     pub unread: bool,
+    /// A headless clone has **no desktop**: its display (`gnome-headless.service`) and capture
+    /// daemon (`rmng-clone-daemon.service`) are disabled at create time, so it streams no video.
+    /// Selecting it drives the viewer's tmux tab view instead of an H.264 desktop stream (see
+    /// the control-server `termplane`). Created from the same template as a regular clone.
+    #[serde(default)]
+    pub headless: bool,
     /// Local port-forward rules for this host (see [`PortForward`]). Persisted; the
     /// viewer runs the listeners and reports status out-of-band (volatile `forwards`
     /// SSE event, never stored here).

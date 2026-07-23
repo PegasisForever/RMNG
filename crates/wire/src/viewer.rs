@@ -78,6 +78,47 @@ pub struct RequestKeyframe {
     pub monitor_id: u32,
 }
 
+// --- headless-clone terminal (tmux) view ------------------------------------------------
+// When the selected clone is headless (`Host.headless`), the control-server's `termplane`
+// proxies each tmux session as a PTY over these port-1 messages instead of streaming video.
+// The viewer renders one terminal tab per session on its primary window only.
+
+/// Server → viewer (port-1 tag 6): the selected clone is a headless/terminal clone; here are
+/// its tmux session names (one tab each, in order). Sent when the terminal view activates and
+/// whenever the session set changes. An empty list means the clone has no sessions yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermInit {
+    pub sessions: Vec<String>,
+}
+
+/// Server → viewer (port-1 tag 7): a chunk of raw terminal output for `session` (the bytes a
+/// tmux client would write to its terminal — already VT/ANSI-encoded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermData {
+    pub session: String,
+    #[serde(with = "crate::socket::serde_bytes_b64")]
+    pub data: Vec<u8>,
+}
+
+/// Viewer → server: keystrokes / pasted bytes for `session` (fed to the tmux client's stdin).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermInput {
+    pub session: String,
+    #[serde(with = "crate::socket::serde_bytes_b64")]
+    pub data: Vec<u8>,
+}
+
+/// Viewer → server: the terminal tab for `session` was resized (characters).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TermResize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Viewer → server: the tab-bar "+" — create a new tmux session in the selected headless clone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TermNewSession {}
+
 /// Server → viewer messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]

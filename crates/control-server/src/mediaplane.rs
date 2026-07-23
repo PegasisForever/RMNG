@@ -34,14 +34,14 @@ use crate::app::App;
 /// One connected viewer: its id + the sender into its per-viewer writer thread.
 /// The writer thread owns the socket; producers only ever `try_send` here, so a slow
 /// viewer's socket never blocks the encode or metadata threads.
-struct ViewerConn {
+pub(crate) struct ViewerConn {
     id: u64,
     tx: SyncSender<Arc<[u8]>>,
 }
 
 /// The live set of viewers, keyed by id. Held under a short-lived lock only to
 /// snapshot/insert/remove; all sends are non-blocking `try_send`.
-type Viewers = Arc<Mutex<HashMap<u64, ViewerConn>>>;
+pub(crate) type Viewers = Arc<Mutex<HashMap<u64, ViewerConn>>>;
 
 /// Bounded per-viewer queue depth. `try_send` overflow disconnects the viewer (it
 /// reconnects + re-primes). Bounds worst-case queued memory at CAP × max-AU per slow
@@ -226,12 +226,17 @@ pub fn spawn(app: App) {
     let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
     let encoders: Encoders = Arc::new(Mutex::new(HashMap::new()));
     let last_sel: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // Headless-clone terminal plane: proxies tmux sessions to viewers when the selected clone
+    // is headless. Threaded into the connect path, the selection watcher, and each viewer's
+    // input reader below.
+    let termplane =
+        Arc::new(crate::termplane::TermPlane::new(app.clone(), viewers.clone(), rt_handle.clone()));
 
     // Port 1 TCP: viewers + their input. Each viewer gets a bounded channel + a writer
     // thread; producers only `try_send`, so a slow viewer never blocks the encoders.
     {
-        let (viewers, handle, app, encoders) =
-            (viewers.clone(), handle.clone(), app.clone(), encoders.clone());
+        let (viewers, handle, app, encoders, termplane) =
+            (viewers.clone(), handle.clone(), app.clone(), encoders.clone(), termplane.clone());
         std::thread::spawn(move || match TcpListener::bind(("0.0.0.0", video_port)) {
             Ok(l) => {
                 tracing::info!("port 1 (video) listening on 0.0.0.0:{video_port}");
@@ -277,10 +282,16 @@ pub fn spawn(app: App) {
                     // (independent of encode latency); mode already leads its channel.
                     viewers.lock().unwrap().insert(id, ViewerConn { id, tx });
                     prime_viewer_video(&handle, &encoders, &viewers, selected, chroma);
+                    // If the selected clone is headless, activate its tmux view and prime this
+                    // viewer with the current session list.
+                    termplane.on_viewers_changed();
 
                     // Reader thread owns teardown.
-                    let (handle, app, viewers) = (handle.clone(), app.clone(), viewers.clone());
-                    std::thread::spawn(move || read_viewer_input(read_half, handle, app, viewers, id));
+                    let (handle, app, viewers, termplane) =
+                        (handle.clone(), app.clone(), viewers.clone(), termplane.clone());
+                    std::thread::spawn(move || {
+                        read_viewer_input(read_half, handle, app, viewers, termplane, id)
+                    });
                 }
             }
             Err(e) => tracing::error!("port 1 bind {video_port} failed: {e}"),
@@ -312,8 +323,14 @@ pub fn spawn(app: App) {
     // cursor / layout. Shares `last_sel` with the frame loop (same mutex, same lock order
     // last_sel → encoders/viewer), so the two paths serialize and never double-prime.
     {
-        let (app, encoders, viewers, last_sel, handle) =
-            (app.clone(), encoders.clone(), viewers.clone(), last_sel.clone(), handle.clone());
+        let (app, encoders, viewers, last_sel, handle, termplane) = (
+            app.clone(),
+            encoders.clone(),
+            viewers.clone(),
+            last_sel.clone(),
+            handle.clone(),
+            termplane.clone(),
+        );
         std::thread::spawn(move || {
             let (_seed, mut rx) = app.store.subscribe();
             loop {
@@ -332,6 +349,9 @@ pub fn spawn(app: App) {
                             continue;
                         }
                         *ls = sel.clone();
+                        // Selection changed: (de)activate the headless terminal view accordingly
+                        // (handles headless→headed, headed→headless, and headless→headless).
+                        termplane.on_viewers_changed();
                         // No viewers attached → nothing to repaint; the connect path primes on connect.
                         if viewers.lock().unwrap().is_empty() {
                             continue;
@@ -381,8 +401,20 @@ const T_LAYOUT: u8 = 3;
 const T_MODE: u8 = 4;
 /// Server→viewer tag 5: the desired forward set (`[5][u32be len][JSON ForwardsMsg]`).
 const T_FORWARDS: u8 = 5;
+/// Server→viewer tag 6: the selected clone is headless — its tmux session list
+/// (`[6][u32be len][JSON TermInit]`). Drives the viewer's tmux tab view.
+pub(crate) const T_TERM_INIT: u8 = 6;
+/// Server→viewer tag 7: raw terminal output bytes for one session
+/// (`[7][u32be len][JSON TermData]`).
+pub(crate) const T_TERM_DATA: u8 = 7;
 /// Viewer→server tag 2: a forward rule's status changed (`[2][u32be len][JSON ForwardStatusMsg]`).
 const T_FORWARD_STATUS: u8 = 2;
+/// Viewer→server tag 3: keystrokes/paste for a headless clone's tmux session (`TermInput`).
+const T_TERM_INPUT: u8 = 3;
+/// Viewer→server tag 4: resize a session's PTY (`TermResize`).
+const T_TERM_RESIZE: u8 = 4;
+/// Viewer→server tag 5: create a new tmux session — the tab-bar "+" (`TermNewSession`).
+const T_TERM_NEW_SESSION: u8 = 5;
 
 /// Build the viewer's desired forward set: the union of every host's *enabled* rules,
 /// each tagged with its host id, plus the data port.
@@ -436,7 +468,7 @@ fn broadcast_video(viewers: &Viewers, monitor_id: u32, au: &[u8]) {
 }
 
 /// Fan one tagged JSON message out to every viewer.
-fn broadcast_json<T: serde::Serialize>(viewers: &Viewers, tag: u8, msg: &T) {
+pub(crate) fn broadcast_json<T: serde::Serialize>(viewers: &Viewers, tag: u8, msg: &T) {
     if let Some(buf) = frame_json(tag, msg) {
         broadcast_bytes(viewers, &buf);
     }
@@ -809,7 +841,14 @@ fn teardown_if_current(
 /// Viewer → server: `[u8 type][u32be len][JSON]`. type 0 = InputMsg (to the selected
 /// clone), type 1 = ClipboardData (broker fans it out), type 2 = ForwardStatusMsg.
 /// This thread is the SOLE owner of the viewer's teardown.
-fn read_viewer_input(mut sock: TcpStream, handle: Arc<MediaHandle>, app: App, viewers: Viewers, id: u64) {
+fn read_viewer_input(
+    mut sock: TcpStream,
+    handle: Arc<MediaHandle>,
+    app: App,
+    viewers: Viewers,
+    termplane: Arc<crate::termplane::TermPlane>,
+    id: u64,
+) {
     let src = viewer_src(id);
     let mut tag = [0u8; 1];
     let mut hdr = [0u8; 4];
@@ -845,6 +884,19 @@ fn read_viewer_input(mut sock: TcpStream, handle: Arc<MediaHandle>, app: App, vi
                     app.forwards.report(msg);
                 }
             }
+            T_TERM_INPUT => {
+                if let Ok(msg) = serde_json::from_slice::<wire::viewer::TermInput>(&body) {
+                    termplane.input(msg.session, msg.data);
+                }
+            }
+            T_TERM_RESIZE => {
+                if let Ok(msg) = serde_json::from_slice::<wire::viewer::TermResize>(&body) {
+                    termplane.resize(msg.cols, msg.rows);
+                }
+            }
+            T_TERM_NEW_SESSION => {
+                termplane.new_session();
+            }
             _ => break,
         }
     }
@@ -853,6 +905,8 @@ fn read_viewer_input(mut sock: TcpStream, handle: Arc<MediaHandle>, app: App, vi
     remove_viewer(&viewers, id);
     clip_forget_source(&handle.clip, &src);
     app.forwards.viewer_left();
+    // A departing viewer may leave the headless terminal view with no audience → deactivate.
+    termplane.on_viewers_changed();
 }
 
 /// Read the data-plane header: `[u32be len][JSON ForwardHeader]` (len capped at 64 KiB).

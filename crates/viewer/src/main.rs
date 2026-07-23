@@ -31,6 +31,7 @@ mod auto_lock;
 mod forward;
 mod glunpack;
 mod headless;
+mod terminal;
 // The Wayland pointer-lock implementation only compiles (and links) on Linux.
 // The macOS twin lives in pointer_lock_macos.rs (§4.5).
 // Other platforms get a no-op stub.
@@ -96,7 +97,7 @@ use wire::socket::{
     ClipboardData, ClipboardMsg, ClipboardOffer, ClipboardRequest, CursorMeta, CursorShape, MonitorPlacement,
 };
 use wire::forward::{ForwardStatusMsg, ForwardsMsg};
-use wire::viewer::ModeMsg;
+use wire::viewer::{ModeMsg, TermData, TermInit};
 
 fn main() -> Result<()> {
     // GTK's default GL renderer (`ngl`) and `vulkan` cache GdkTextures by identity and keep serving
@@ -213,6 +214,20 @@ type SharedLayout = Rc<RefCell<Vec<Screen>>>;
 /// The server's reported layout, shared net-thread → GTK main thread.
 type ReportedLayout = Arc<Mutex<Vec<MonitorPlacement>>>;
 
+/// Headless-clone terminal state, shared net-thread → GTK main thread. `active` (an atomic so
+/// the video hot path can flip it cheaply) is true while the selected clone is headless: the net
+/// thread sets it on a `TermInit`, and any incoming video AU clears it (a headed clone streaming).
+/// The inbox carries the tmux session list (with an `epoch` bumped on change, so the tick only
+/// rebuilds tabs when it actually changes) and a queue of per-session output chunks to render.
+type TermActive = Arc<std::sync::atomic::AtomicBool>;
+#[derive(Default)]
+struct TermInbox {
+    sessions: Vec<String>,
+    epoch: u64,
+    queue: VecDeque<(String, Vec<u8>)>,
+}
+type TermShared = Arc<Mutex<TermInbox>>;
+
 fn run_gui() -> Result<()> {
     // Server address: persisted config is the source of truth (the Settings dialog
     // edits it live); `RMNG_VIDEO` only seeds the default on first run.
@@ -237,11 +252,15 @@ fn run_gui() -> Result<()> {
     // Auto pointer-lock policy: net thread latches remote cursor visibility,
     // the GTK tick polls it and reconciles the actual lock.
     let auto: AutoLockShared = Arc::new(Mutex::new(auto_lock::AutoLock::new(Instant::now())));
+    // Headless-clone terminal view: net thread latches the mode + session list + output; the GTK
+    // tick swaps the primary window into the tmux tab view and renders it.
+    let term_active: TermActive = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let term_inbox: TermShared = Arc::new(Mutex::new(TermInbox::default()));
 
     // Net thread: reconnect loop; read [u8 tag][…] → video queue / clipboard / cursor / layout.
     {
-        let (aus, srcs, writer, inbox, cursors, reported, warp, addr, fwd_mgr, auto) =
-            (aus.clone(), srcs.clone(), writer.clone(), inbox.clone(), cursors.clone(), reported.clone(), warp.clone(), addr.clone(), fwd_mgr.clone(), auto.clone());
+        let (aus, srcs, writer, inbox, cursors, reported, warp, addr, fwd_mgr, auto, term_active, term_inbox) =
+            (aus.clone(), srcs.clone(), writer.clone(), inbox.clone(), cursors.clone(), reported.clone(), warp.clone(), addr.clone(), fwd_mgr.clone(), auto.clone(), term_active.clone(), term_inbox.clone());
         std::thread::spawn(move || {
             loop {
                 // Re-read the (possibly just-changed) address each reconnect, so the
@@ -267,8 +286,9 @@ fn run_gui() -> Result<()> {
                         let mut rd = std::io::BufReader::new(rd);
                         let mut tag = [0u8; 1];
                         while rd.read_exact(&mut tag).is_ok() {
-                            // tags 1 (clipboard), 2 (cursor), 3 (layout), 4 (mode), 5 (forwards) are all [u32 len][json].
-                            if matches!(tag[0], 1 | 2 | 3 | 4 | 5) {
+                            // tags 1 (clipboard), 2 (cursor), 3 (layout), 4 (mode), 5 (forwards),
+                            // 6 (term init), 7 (term data) are all [u32 len][json].
+                            if matches!(tag[0], 1..=7) {
                                 let mut lb = [0u8; 4];
                                 if rd.read_exact(&mut lb).is_err() {
                                     break;
@@ -304,6 +324,23 @@ fn run_gui() -> Result<()> {
                                             .unwrap_or(server);
                                         let forward_addr = format!("{host}:{}", m.forward_port);
                                         fwd_mgr.reconcile(m.rules, forward_addr);
+                                    }
+                                } else if tag[0] == 6 {
+                                    // Headless clone selected: enter terminal mode and record its
+                                    // tmux session list (epoch bumped on change so the tick only
+                                    // rebuilds tabs when the set actually changes).
+                                    if let Ok(m) = serde_json::from_slice::<TermInit>(&body) {
+                                        term_active.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        let mut inbox = term_inbox.lock().unwrap();
+                                        if inbox.sessions != m.sessions {
+                                            inbox.sessions = m.sessions;
+                                            inbox.epoch = inbox.epoch.wrapping_add(1);
+                                        }
+                                    }
+                                } else if tag[0] == 7 {
+                                    // Terminal output for one session → queue for the tick to render.
+                                    if let Ok(m) = serde_json::from_slice::<TermData>(&body) {
+                                        term_inbox.lock().unwrap().queue.push_back((m.session, m.data));
                                     }
                                 } else if let Ok(c) = serde_json::from_slice::<CursorMeta>(&body) {
                                     let now = Instant::now();
@@ -349,6 +386,9 @@ fn run_gui() -> Result<()> {
                                 }
                                 continue;
                             }
+                            // A video AU (tag 0): a headed clone is streaming, so leave terminal
+                            // mode. Cheap unconditional store; the GTK tick tears the view down.
+                            term_active.store(false, std::sync::atomic::Ordering::Relaxed);
                             let mut hdr = [0u8; 8];
                             if rd.read_exact(&mut hdr).is_err() {
                                 break;
@@ -388,7 +428,7 @@ fn run_gui() -> Result<()> {
     }
 
     let app = gtk4::Application::builder().application_id("dev.rmng.viewer").build();
-    app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &reported, &warp, &addr, &auto));
+    app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &reported, &warp, &addr, &auto, &term_active, &term_inbox));
     let empty: [&str; 0] = [];
     app.run_with_args(&empty);
     Ok(())
@@ -438,6 +478,8 @@ fn build_ui(
     warp: &WarpSuppress,
     addr: &ServerAddr,
     auto: &AutoLockShared,
+    term_active: &TermActive,
+    term_inbox: &TermShared,
 ) {
     // Black background behind every letterboxed video (applies to all windows).
     // Pointer-lock (games): one instance per display, shared across monitor windows;
@@ -501,9 +543,11 @@ fn build_ui(
 
     let windows: Windows = Rc::new(RefCell::new(HashMap::new()));
     let layout: SharedLayout = Rc::new(RefCell::new(Vec::new()));
+    // Terminal (headless) UI state: Some while the primary window is in tmux-tab mode.
+    let term_ui: Rc<RefCell<Option<TermUi>>> = Rc::new(RefCell::new(None));
 
     {
-        let (aus, srcs, writer, cursors, windows, layout, app, reported, warp, pointer_lock, startup, addr, auto) = (
+        let (aus, srcs, writer, cursors, windows, layout, app, reported, warp, pointer_lock, startup, addr, auto, term_active, term_inbox, term_ui) = (
             aus.clone(),
             srcs.clone(),
             writer.clone(),
@@ -517,6 +561,9 @@ fn build_ui(
             startup.clone(),
             addr.clone(),
             auto.clone(),
+            term_active.clone(),
+            term_inbox.clone(),
+            term_ui.clone(),
         );
         // ~8 ms tick: drain AUs → window per monitor (created lazily here, on the main
         // thread); refresh the layout; update client cursors.
@@ -697,9 +744,167 @@ fn build_ui(
                 win.cursor.set_margin_top((off_y + (e.y - hy) as f64 * scale).round().max(0.0) as i32);
                 win.cursor.set_visible(win.cursor.paintable().is_some());
             }
+            // Headless terminal view: swap the primary window into tmux-tab mode (or restore
+            // video). Runs last so any video AU this tick already (re)built window 0.
+            reconcile_terminal(&term_active, &term_inbox, &term_ui, &windows, &startup, &app, &writer);
             glib::ControlFlow::Continue
         });
     }
+}
+
+/// Primary-window headless terminal state: the tmux tab view plus the widgets to restore when
+/// leaving terminal mode (see [`enter_terminal`]/[`exit_terminal`]).
+struct TermUi {
+    view: terminal::TerminalView,
+    /// Last session-list epoch applied to the notebook (so tabs rebuild only on change).
+    epoch: u64,
+    /// Windows whose child we swapped out, to restore on exit: (monitor_id, original child).
+    saved: Vec<(u32, gtk4::Widget)>,
+    /// A primary window we had to create because no video window existed; destroyed on exit.
+    created_primary: Option<gtk4::ApplicationWindow>,
+}
+
+/// A blank placeholder for a secondary monitor window while a headless clone is selected (kept
+/// open per the "only the primary window shows tmux" rule, but with no live content).
+fn placeholder_widget() -> gtk4::Widget {
+    let label = gtk4::Label::new(Some("Headless clone selected — no desktop"));
+    label.set_halign(gtk4::Align::Center);
+    label.set_valign(gtk4::Align::Center);
+    label.set_hexpand(true);
+    label.set_vexpand(true);
+    label.add_css_class("dim-label");
+    label.upcast()
+}
+
+/// Each tick: enter/maintain/exit the headless terminal view based on `term_active`.
+fn reconcile_terminal(
+    term_active: &TermActive,
+    term_inbox: &TermShared,
+    term_ui: &Rc<RefCell<Option<TermUi>>>,
+    windows: &Windows,
+    startup: &Rc<RefCell<Option<gtk4::ApplicationWindow>>>,
+    app: &gtk4::Application,
+    writer: &Writer,
+) {
+    let active = term_active.load(std::sync::atomic::Ordering::Relaxed);
+    let mut slot = term_ui.borrow_mut();
+    if active {
+        if slot.is_none() {
+            *slot = Some(enter_terminal(windows, startup, app, writer));
+        }
+        if let Some(ui) = slot.as_mut() {
+            // Reconcile tabs on session-list change, then drain queued output to the tabs.
+            let (sessions, epoch, chunks) = {
+                let mut inbox = term_inbox.lock().unwrap();
+                let chunks: Vec<(String, Vec<u8>)> = inbox.queue.drain(..).collect();
+                (inbox.sessions.clone(), inbox.epoch, chunks)
+            };
+            if epoch != ui.epoch {
+                ui.view.set_sessions(&sessions);
+                ui.epoch = epoch;
+            }
+            for (session, data) in chunks {
+                ui.view.feed(&session, &data);
+            }
+        }
+    } else if let Some(ui) = slot.take() {
+        exit_terminal(ui, windows);
+    }
+}
+
+/// Switch the primary window into the tmux tab view (reusing window 0 if present, else creating
+/// one), and blank every secondary window to a placeholder. Returns the state to restore later.
+fn enter_terminal(
+    windows: &Windows,
+    startup: &Rc<RefCell<Option<gtk4::ApplicationWindow>>>,
+    app: &gtk4::Application,
+    writer: &Writer,
+) -> TermUi {
+    let cb = terminal::TermCallbacks {
+        on_input: {
+            let writer = writer.clone();
+            Rc::new(move |session: &str, data: Vec<u8>| {
+                let msg = wire::viewer::TermInput { session: session.to_string(), data };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    send_tagged(&writer, 3, json);
+                }
+            })
+        },
+        on_resize: {
+            let writer = writer.clone();
+            Rc::new(move |cols: u16, rows: u16| {
+                if let Ok(json) = serde_json::to_string(&wire::viewer::TermResize { cols, rows }) {
+                    send_tagged(&writer, 4, json);
+                }
+            })
+        },
+        on_new_session: {
+            let writer = writer.clone();
+            Rc::new(move || {
+                if let Ok(json) = serde_json::to_string(&wire::viewer::TermNewSession {}) {
+                    send_tagged(&writer, 5, json);
+                }
+            })
+        },
+    };
+    let view = terminal::TerminalView::new(cb);
+    let mut saved: Vec<(u32, gtk4::Widget)> = Vec::new();
+    let mut created_primary = None;
+
+    let w = windows.borrow();
+    if let Some(win0) = w.get(&0) {
+        if let Some(child) = win0.window.child() {
+            saved.push((0, child));
+        }
+        win0.window.set_child(Some(view.widget()));
+    } else {
+        // No video window yet (headless selected before any headed clone): make a primary window.
+        let win = gtk4::ApplicationWindow::builder()
+            .application(app)
+            .title("RMNG — headless")
+            .default_width(1100)
+            .default_height(700)
+            .build();
+        win.set_child(Some(view.widget()));
+        {
+            let app = app.clone();
+            win.connect_close_request(move |_| {
+                app.quit();
+                glib::Propagation::Stop
+            });
+        }
+        win.present();
+        created_primary = Some(win);
+        if let Some(s) = startup.borrow_mut().take() {
+            s.destroy();
+        }
+    }
+    // Secondary windows stay open but blanked.
+    for (mid, win) in w.iter() {
+        if *mid == 0 {
+            continue;
+        }
+        if let Some(child) = win.window.child() {
+            saved.push((*mid, child));
+        }
+        win.window.set_child(Some(&placeholder_widget()));
+    }
+
+    TermUi { view, epoch: 0, saved, created_primary }
+}
+
+/// Leave terminal mode: restore every swapped window child and destroy a primary we created.
+fn exit_terminal(ui: TermUi, windows: &Windows) {
+    let w = windows.borrow();
+    for (mid, child) in &ui.saved {
+        if let Some(win) = w.get(mid) {
+            win.window.set_child(Some(child));
+        }
+    }
+    if let Some(win) = ui.created_primary {
+        win.destroy();
+    }
+    // Dropping `ui` drops the TerminalView; its notebook was unparented by the restores above.
 }
 
 /// Build one monitor's window: decode pipeline + video/cursor overlay + input controllers.

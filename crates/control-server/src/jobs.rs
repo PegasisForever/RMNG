@@ -65,6 +65,10 @@ pub struct CloneSpec {
     /// Composed agent playbook (global + preset append) injected into the clone at creation
     /// as ~/.config/rmng/agent-instructions.md. Empty ⇒ no file injected.
     pub agent_playbook: String,
+    /// Create a **headless clone**: same template, but the desktop (`gnome-headless`) and
+    /// capture daemon (`rmng-clone-daemon`) user units are disabled at provision and a default
+    /// tmux session is started. Persisted on `Host.headless`; drives the viewer tmux view.
+    pub headless: bool,
 }
 
 fn now_ms() -> i64 {
@@ -336,6 +340,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         &spec.new_hostname,
         &env,
         &spec.agent_playbook,
+        spec.headless,
         progress,
     )
     .await
@@ -395,6 +400,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             source: Some(image_ref.clone()),
             group: group.clone(),
             preset_name: spec.preset_name.clone(),
+            headless: spec.headless,
             ..Default::default()
         };
         if let Some(m) = &spec.linear {
@@ -410,7 +416,10 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             op.status = OperationStatus::Done;
             op.step = "done".into();
             op.pct = 100.0;
-            op.message = if daemon_up {
+            op.message = if spec.headless {
+                // Headless clones run no clone-daemon by design — never expect a media Hello.
+                format!("headless clone {} ready", spec.new_hostname)
+            } else if daemon_up {
                 format!("clone {} ready", spec.new_hostname)
             } else {
                 format!(

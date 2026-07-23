@@ -139,10 +139,13 @@ pub async fn clone(
     hostname: &str,
     group: Option<&str>,
     preset: Option<&str>,
+    headless: bool,
     wait: &WaitArgs,
     json: bool,
 ) -> Result<u8> {
-    let op = client.clone_host(image, hostname, group, preset).await?;
+    let op = client
+        .clone_host(image, hostname, group, preset, headless)
+        .await?;
     started(client, op, wait, json, "clone").await
 }
 

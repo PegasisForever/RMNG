@@ -527,6 +527,8 @@ async fn clone(
     let group = resolve_group(&app, requested_group.as_deref())?;
     let agent_instructions = str_field("agentInstructions");
     let claude_instructions = str_field("claudeInstructions");
+    // Cross-cutting like `group`/`preset`: a headless clone (no desktop) in any create mode.
+    let headless = body.get("headless").and_then(|v| v.as_bool()).unwrap_or(false);
     let cfg = app.config();
     let prefix = cfg.docker.hostname_prefix.clone();
 
@@ -578,6 +580,7 @@ async fn clone(
                 .map(crate::provision::preset_env_vars)
                 .unwrap_or_default(),
             agent_playbook: compose_playbook(&cfg, explicit),
+            headless,
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
         return Ok(Json(json!({ "ok": true, "op": op })));
@@ -626,6 +629,7 @@ async fn clone(
             preset_name: explicit.map(|p| p.name.clone()),
             env,
             agent_playbook: compose_playbook(&cfg, explicit),
+            headless,
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
         return Ok(Json(json!({ "ok": true, "op": op })));
@@ -660,6 +664,7 @@ async fn clone(
         preset_name: Some(preset.name.clone()),
         env: crate::provision::preset_env_vars(&preset),
         agent_playbook: compose_playbook(&cfg, Some(&preset)),
+        headless,
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))

@@ -66,6 +66,9 @@ export interface Host {
   monitorState?: "working" | "idle" | "offline";
   /** Set when an unselected clone transitions from working to idle/offline. */
   unread?: boolean;
+  /** Headless clone: no desktop (display + capture units disabled at create). Selecting it
+   *  shows the viewer's tmux tab view instead of a video stream. Same template as a regular clone. */
+  headless?: boolean;
   /** Local port-forward rules; the native viewer runs the listeners. Live status
    *  arrives separately via the `forwards` SSE event, keyed by host id then rule id. */
   forwards?: PortForward[];

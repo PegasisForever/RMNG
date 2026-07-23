@@ -51,6 +51,8 @@ export function CloneModal({
   // require an explicit pick, defaulted to the first preset below).
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
   const [preset, setPreset] = useState("");
+  // Headless clone: no desktop; the viewer shows a tmux tab view instead of a video stream.
+  const [headless, setHeadless] = useState(false);
 
   useEffect(() => {
     getConfig()
@@ -95,6 +97,7 @@ export function CloneModal({
         plain: { title: title.trim(), message: message.trim() },
         group: groupValue,
         preset: preset || undefined,
+        headless: headless || undefined,
       });
       return;
     }
@@ -110,6 +113,7 @@ export function CloneModal({
         ...extra,
         group: groupValue,
         preset: preset || undefined, // "" ⇒ auto-select by ticket-id prefix
+        headless: headless || undefined,
       });
     else
       onClone(image, {
@@ -117,6 +121,7 @@ export function CloneModal({
         ...extra,
         group: groupValue,
         preset: preset || undefined,
+        headless: headless || undefined,
       });
   }
 
@@ -345,6 +350,22 @@ export function CloneModal({
             </div>
           </details>
         ) : null}
+
+        <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <input
+            type="checkbox"
+            checked={headless}
+            onChange={(e) => setHeadless(e.target.checked)}
+            className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+          />
+          <span>
+            Headless (no desktop)
+            <span className="mt-0.5 block text-[11px] font-normal text-slate-400 dark:text-slate-500">
+              Skips the GNOME desktop. The viewer shows a tabbed tmux terminal instead of a
+              video stream. The agent chat still works.
+            </span>
+          </span>
+        </label>
 
         <div className="mt-4 flex justify-end gap-2">
           <button
