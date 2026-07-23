@@ -6,14 +6,19 @@
 //! interactive `tmux attach` PTY per session via `docker exec` (bollard TTY exec), and pumps
 //! bytes both ways. The viewer renders one terminal tab per session on its primary window.
 //!
-//! Wire (port 1): server→viewer [`wire::viewer::TermInit`] (tag 6, session list) and
-//! [`wire::viewer::TermData`] (tag 7, output bytes); viewer→server [`wire::viewer::TermInput`],
-//! [`wire::viewer::TermResize`], [`wire::viewer::TermNewSession`] (parsed in `mediaplane`'s
-//! `read_viewer_input`, dispatched here).
+//! Wire (port 1): the session list rides in the tag-3 [`wire::viewer::ViewSpec`]
+//! (`ViewContent::Terminal`); per-session output is [`wire::viewer::TermData`] (tag 7). Viewer→
+//! server [`wire::viewer::TermInput`], [`wire::viewer::TermResize`],
+//! [`wire::viewer::TermNewSession`] (parsed in `mediaplane`'s `read_viewer_input`, dispatched here).
 //!
 //! Lifecycle: exactly one clone is "active" at a time (the selected headless clone). Activation
 //! spawns a manager task; deactivation drops it, which aborts the manager and every per-session
 //! PTY pump (dropping the exec streams makes `tmux attach` see EOF and detach cleanly).
+//!
+//! Sizing: PTY attach is **deferred** until the viewer reports its real tab dimensions (a
+//! `TermResize`), so every session's tmux is born at the true grid instead of a default that
+//! visibly corrects a moment later. The session list (the `ViewSpec`) is announced immediately so
+//! the viewer can build + measure its terminal.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,13 +30,18 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::app::App;
-use crate::mediaplane::{Viewers, broadcast_json, T_TERM_DATA, T_TERM_INIT};
+use crate::mediaplane::{Viewers, broadcast_json, configured_monitors, T_TERM_DATA, T_VIEWSPEC};
 
 /// The clone user every session PTY runs as (uid 1000).
 const CLONE_USER: &str = "rmng";
-/// Initial PTY size before the viewer reports its real tab dimensions.
+/// Fallback PTY size if the viewer never reports its real dimensions within [`ATTACH_WAIT`].
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
+/// How long to wait for the viewer's first `TermResize` before attaching PTYs at [`DEFAULT_COLS`]
+/// × [`DEFAULT_ROWS`]. The viewer normally reports within one frame of receiving the session list,
+/// so PTYs are almost always born at the true grid; this bound just prevents a stuck viewer from
+/// leaving the terminal permanently blank.
+const ATTACH_WAIT: Duration = Duration::from_millis(750);
 /// How often the manager re-enumerates tmux sessions to pick up ones the agent/operator
 /// created (or destroyed) inside the clone.
 const POLL: Duration = Duration::from_millis(1500);
@@ -75,11 +85,18 @@ pub struct TermPlane {
     viewers: Viewers,
     rt: tokio::runtime::Handle,
     active: Mutex<Option<Active>>,
+    /// The viewer's last-reported terminal grid, remembered across (de)activations. The terminal
+    /// window is a stable viewer window whose size carries over between headless clones and across
+    /// reconnects, but the viewer only emits a `TermResize` when that widget is (re)allocated — not
+    /// on a headless→headless switch. So on activation we attach PTYs immediately at this size
+    /// instead of waiting for a resize that won't come; `None` (first-ever select) falls back to
+    /// the deferred path.
+    last_size: Mutex<Option<(u16, u16)>>,
 }
 
 impl TermPlane {
     pub fn new(app: App, viewers: Viewers, rt: tokio::runtime::Handle) -> Self {
-        Self { app, viewers, rt, active: Mutex::new(None) }
+        Self { app, viewers, rt, active: Mutex::new(None), last_size: Mutex::new(None) }
     }
 
     /// Re-evaluate whether the terminal view should be running: it is active iff the selected
@@ -92,10 +109,10 @@ impl TermPlane {
         match (selected, has_viewers) {
             (Some(clone_id), true) => match active.as_ref() {
                 // Already running for this clone: re-prime any freshly-connected viewer with the
-                // current session list (a redundant TermInit for existing viewers is harmless).
+                // current session list (a redundant ViewSpec for existing viewers is harmless).
                 Some(a) if a.clone_id == clone_id => {
                     let sessions = a.sessions.lock().unwrap().clone();
-                    broadcast_json(&self.viewers, T_TERM_INIT, &wire::viewer::TermInit { sessions });
+                    broadcast_view_spec(&self.app, &self.viewers, &clone_id, sessions);
                 }
                 _ => {
                     *active = Some(self.activate(clone_id));
@@ -118,11 +135,13 @@ impl TermPlane {
         }
     }
 
-    /// Resize every session's PTY (the viewer's tabs share one window size).
+    /// Resize every session's PTY (the viewer's tabs share one window size). Also records the size
+    /// so a later (re)activation can attach at it without waiting for a fresh report.
     pub fn resize(&self, cols: u16, rows: u16) {
         if cols == 0 || rows == 0 {
             return;
         }
+        *self.last_size.lock().unwrap() = Some((cols, rows));
         if let Some(a) = self.active.lock().unwrap().as_ref() {
             let _ = a.cmd_tx.send(Cmd::Resize { cols, rows });
         }
@@ -150,12 +169,14 @@ impl TermPlane {
     fn activate(&self, clone_id: String) -> Active {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(Mutex::new(Vec::new()));
+        let init_size = *self.last_size.lock().unwrap();
         let manager = self.rt.spawn(run_manager(
             self.app.clone(),
             self.viewers.clone(),
             clone_id.clone(),
             cmd_rx,
             sessions.clone(),
+            init_size,
         ));
         tracing::info!(target: "termplane", "terminal view activated for {clone_id}");
         Active { clone_id, cmd_tx, sessions, _manager: AbortOnDrop(manager) }
@@ -164,25 +185,51 @@ impl TermPlane {
 
 /// One active clone's manager: enumerate sessions, keep a PTY pump per session, and dispatch
 /// viewer commands. Ends (and cancels its session pumps) when its `Active` is dropped.
+///
+/// PTY attach is deferred until `size` is known — the viewer's first `TermResize`, or the
+/// [`ATTACH_WAIT`] fallback — so every session's tmux is born at the true grid. Until then the
+/// session list is still announced (via [`announce_sessions`]) so the viewer builds + measures
+/// its terminal and reports that size.
 async fn run_manager(
     app: App,
     viewers: Viewers,
     clone_id: String,
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     sessions: Arc<Mutex<Vec<String>>>,
+    init_size: Option<(u16, u16)>,
 ) {
     let mut txs: HashMap<String, mpsc::UnboundedSender<SessionMsg>> = HashMap::new();
     let mut tasks: HashMap<String, AbortOnDrop> = HashMap::new();
-    let mut size = (DEFAULT_COLS, DEFAULT_ROWS);
+    let mut size: Option<(u16, u16)> = init_size;
 
-    reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, size).await;
+    // Announce the session list immediately (no pumps yet) so the viewer can build + measure.
+    announce_sessions(&app, &viewers, &clone_id, &sessions).await;
+    // If the viewer's terminal size is already known (a reconnect, or a switch between headless
+    // clones — the terminal window is stable, so its size carries over and the viewer sends no
+    // fresh TermResize), attach PTYs now at that size. Otherwise defer until the viewer reports it.
+    if let Some(sz) = size {
+        reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await;
+    }
+    let attach_at = tokio::time::Instant::now() + ATTACH_WAIT;
 
     let mut poll = tokio::time::interval(POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            // Fallback: the viewer never reported a size — attach at the default so the terminal
+            // isn't left permanently blank. Disabled once we have a size.
+            _ = tokio::time::sleep_until(attach_at), if size.is_none() => {
+                let sz = (DEFAULT_COLS, DEFAULT_ROWS);
+                size = Some(sz);
+                reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await;
+            }
             _ = poll.tick() => {
-                reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, size).await;
+                match size {
+                    // Pumps running: reconcile them against live tmux sessions.
+                    Some(sz) => reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await,
+                    // Still waiting for a size: keep the announced session list fresh (no pumps).
+                    None => announce_sessions(&app, &viewers, &clone_id, &sessions).await,
+                }
             }
             cmd = cmd_rx.recv() => match cmd {
                 None => break,
@@ -192,9 +239,15 @@ async fn run_manager(
                     }
                 }
                 Some(Cmd::Resize { cols, rows }) => {
-                    size = (cols, rows);
-                    for tx in txs.values() {
-                        let _ = tx.send(SessionMsg::Resize { cols, rows });
+                    let first = size.is_none();
+                    size = Some((cols, rows));
+                    if first {
+                        // First real size: attach every PTY now, born at the true grid.
+                        reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, (cols, rows)).await;
+                    } else {
+                        for tx in txs.values() {
+                            let _ = tx.send(SessionMsg::Resize { cols, rows });
+                        }
                     }
                 }
                 Some(Cmd::NewSession) => {
@@ -202,15 +255,61 @@ async fn run_manager(
                     if let Err(e) = new_tmux_session(&app, &clone_id, &name).await {
                         tracing::warn!(target: "termplane", "new tmux session in {clone_id} failed: {e:#}");
                     }
-                    reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, size).await;
+                    match size {
+                        Some(sz) => reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await,
+                        None => announce_sessions(&app, &viewers, &clone_id, &sessions).await,
+                    }
                 }
             }
         }
     }
 }
 
+/// Broadcast the current tmux session list to all viewers as a `Terminal` [`wire::viewer::ViewSpec`]
+/// (tag 3): the stable window set (configured monitors) + the owning clone id + the session names
+/// for the tab bar. The clone id lets the viewer rebuild the terminal when the selection moves to a
+/// different headless clone (session names alone can't distinguish two clones' `main` sessions).
+fn broadcast_view_spec(app: &App, viewers: &Viewers, clone_id: &str, sessions: Vec<String>) {
+    let spec = wire::viewer::ViewSpec {
+        monitors: configured_monitors(&app.config()),
+        content: wire::viewer::ViewContent::Terminal { clone: clone_id.to_string(), sessions },
+    };
+    broadcast_json(viewers, T_VIEWSPEC, &spec);
+}
+
+/// Enumerate the clone's tmux sessions (creating a default `main` if none exist) and broadcast the
+/// `Terminal` `ViewSpec` when the set changed — **without** attaching any PTYs. Used before the
+/// viewer reports its size so it can build + measure its terminal; pumps are spawned later, at the
+/// true grid, by [`reconcile`].
+async fn announce_sessions(
+    app: &App,
+    viewers: &Viewers,
+    clone_id: &str,
+    sessions: &Arc<Mutex<Vec<String>>>,
+) {
+    let mut current = list_sessions(app, clone_id).await;
+    if current.is_empty() {
+        if let Err(e) = new_tmux_session(app, clone_id, "main").await {
+            tracing::warn!(target: "termplane", "default tmux session in {clone_id} failed: {e:#}");
+        }
+        current = list_sessions(app, clone_id).await;
+    }
+    let changed = {
+        let mut g = sessions.lock().unwrap();
+        if *g != current {
+            *g = current.clone();
+            true
+        } else {
+            false
+        }
+    };
+    if changed {
+        broadcast_view_spec(app, viewers, clone_id, current);
+    }
+}
+
 /// Bring the running PTY-pump set in line with the clone's live tmux sessions: spawn pumps for
-/// new sessions, drop (abort) pumps for vanished ones, and broadcast a fresh `TermInit` when the
+/// new sessions, drop (abort) pumps for vanished ones, and broadcast a fresh `ViewSpec` when the
 /// list changed. Ensures a default `main` session exists so there is always at least one tab.
 async fn reconcile(
     app: &App,
@@ -258,7 +357,7 @@ async fn reconcile(
         }
     };
     if changed {
-        broadcast_json(viewers, T_TERM_INIT, &wire::viewer::TermInit { sessions: current });
+        broadcast_view_spec(app, viewers, clone_id, current);
     }
 }
 

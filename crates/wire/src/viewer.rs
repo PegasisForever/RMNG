@@ -78,18 +78,56 @@ pub struct RequestKeyframe {
     pub monitor_id: u32,
 }
 
+// --- authoritative view spec ------------------------------------------------------------
+// The single message that describes the viewer's *entire* window set and each window's
+// content, sent on every selection change / layout change / viewer connect (port-1 tag 3).
+// The viewer keeps a stable set of N windows (N = configured monitor count) and only swaps
+// their content per this spec — video AUs and `TermData` are pure content fills, they never
+// create or destroy windows. Replaces the old daemon-reported layout + `TermInit` split.
+
+/// One window in the viewer's stable set. `id` is the layout slot index (`0..n-1`); window 0
+/// is always the "main" window (close button + Settings). Geometry is unified-desktop px,
+/// taken from the server's **configured** layout (fleet-wide, always known — not the daemon's
+/// live report), so the window set is identical across every clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewMonitor {
+    pub id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+/// What the windows in a [`ViewSpec`] show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ViewContent {
+    /// Headed clone: every window shows its monitor's H.264 desktop stream. (The video surface is
+    /// clone-agnostic — switching between headed clones reuses the same decode windows — so no
+    /// clone id is needed here.)
+    Desktop,
+    /// Headless clone: window 0 shows the tmux tabs (one per `sessions` entry); every other window
+    /// shows a blank placeholder. `clone` is the selected host id: it identifies *which* clone the
+    /// sessions belong to so the viewer rebuilds the terminal (fresh scrollback/grids) when the
+    /// selection moves to a different headless clone — two clones can share a session name (`main`),
+    /// so the name alone can't distinguish them.
+    Terminal { clone: String, sessions: Vec<String> },
+}
+
+/// Server → viewer (port-1 tag 3): the complete view for the selected clone. `monitors` is
+/// empty when nothing is selected — the viewer then shows only its keep-alive window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewSpec {
+    pub monitors: Vec<ViewMonitor>,
+    pub content: ViewContent,
+}
+
 // --- headless-clone terminal (tmux) view ------------------------------------------------
 // When the selected clone is headless (`Host.headless`), the control-server's `termplane`
 // proxies each tmux session as a PTY over these port-1 messages instead of streaming video.
-// The viewer renders one terminal tab per session on its primary window only.
-
-/// Server → viewer (port-1 tag 6): the selected clone is a headless/terminal clone; here are
-/// its tmux session names (one tab each, in order). Sent when the terminal view activates and
-/// whenever the session set changes. An empty list means the clone has no sessions yet.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TermInit {
-    pub sessions: Vec<String>,
-}
+// The session list itself rides in [`ViewSpec`] (`ViewContent::Terminal`); the messages below
+// carry the per-session byte streams and viewer→server input.
 
 /// Server → viewer (port-1 tag 7): a chunk of raw terminal output for `session` (the bytes a
 /// tmux client would write to its terminal — already VT/ANSI-encoded).

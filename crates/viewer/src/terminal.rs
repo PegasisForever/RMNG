@@ -491,6 +491,12 @@ pub struct TerminalView {
     notebook: gtk4::Notebook,
     cb: TermCallbacks,
     tabs: Rc<RefCell<HashMap<String, TerminalTab>>>,
+    /// The authoritative grid (cols, rows) for **every** tab. Updated when the visible tab is
+    /// allocated (via `on_grid`); applied to background tabs lazily in [`Self::feed`].
+    size: SharedGrid,
+    /// Handed to every tab as its resize callback: records the authoritative `size` and sends a
+    /// single `TermResize` to the server (which resizes all sessions' PTYs together).
+    on_grid: ResizeCb,
 }
 
 impl TerminalView {
@@ -510,7 +516,17 @@ impl TerminalView {
         notebook.set_action_widget(&plus, gtk4::PackType::End);
         plus.set_visible(true);
 
-        Self { notebook, cb, tabs: Rc::new(RefCell::new(HashMap::new())) }
+        let size: SharedGrid = Rc::new(Cell::new((INIT_COLS, INIT_ROWS)));
+        let on_grid: ResizeCb = {
+            let size = size.clone();
+            let real = cb.on_resize.clone();
+            Rc::new(move |cols: u16, rows: u16| {
+                size.set((cols as usize, rows as usize));
+                (real)(cols, rows);
+            })
+        };
+
+        Self { notebook, cb, tabs: Rc::new(RefCell::new(HashMap::new())), size, on_grid }
     }
 
     /// The widget to embed as the primary window's child.
@@ -534,7 +550,7 @@ impl TerminalView {
             if tabs.contains_key(name) {
                 continue;
             }
-            let tab = TerminalTab::new(name.clone(), self.cb.clone());
+            let tab = TerminalTab::new(name.clone(), self.cb.clone(), self.on_grid.clone(), self.size.get());
             let label = gtk4::Label::new(Some(name));
             self.notebook.append_page(&tab.area, Some(&label));
             self.notebook.set_tab_reorderable(&tab.area, true);
@@ -548,6 +564,16 @@ impl TerminalView {
     /// Feed raw PTY output bytes to the named session's terminal and repaint it.
     pub fn feed(&self, session: &str, data: &[u8]) {
         if let Some(tab) = self.tabs.borrow().get(session) {
+            // Grow this (possibly hidden) tab to the authoritative grid BEFORE advancing. The
+            // server resizes every session's PTY together, so a background tab's tmux emits output
+            // for the new size even though GTK never allocated its widget; sizing the alacritty
+            // grid up first captures that wide output instead of dropping it — the fix for the
+            // "blank band after switching tabs" bug.
+            let (cols, rows) = self.size.get();
+            if tab.grid.get() != (cols, rows) {
+                tab.term.borrow_mut().resize(Dims { cols, lines: rows });
+                tab.grid.set((cols, rows));
+            }
             let mut term = tab.term.borrow_mut();
             tab.parser.borrow_mut().advance(&mut *term, data);
             drop(term);
@@ -562,10 +588,16 @@ struct TerminalTab {
     area: TermArea,
     term: SharedTerm,
     parser: Rc<RefCell<Processor>>,
+    /// This tab's current alacritty grid (cols, rows). Compared against the view's authoritative
+    /// size in `feed` so a hidden tab is grown before its wide tmux output is advanced.
+    grid: SharedGrid,
 }
 
 impl TerminalTab {
-    fn new(session: String, cb: TermCallbacks) -> Self {
+    /// `resize_cb` reports grid changes to the owning [`TerminalView`] (updates the authoritative
+    /// size + sends one `TermResize`); `init` is the grid to start at (the view's current
+    /// authoritative size), so a tab created off-screen is already correctly sized.
+    fn new(session: String, cb: TermCallbacks, resize_cb: ResizeCb, init_grid: (usize, usize)) -> Self {
         let area = TermArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
@@ -588,16 +620,16 @@ impl TerminalTab {
                 })
             },
         };
-        let init = Dims { cols: INIT_COLS, lines: INIT_ROWS };
+        let init = Dims { cols: init_grid.0, lines: init_grid.1 };
         let term: SharedTerm =
             Rc::new(RefCell::new(Term::new(TermConfig::default(), &init, proxy)));
         let parser = Rc::new(RefCell::new(Processor::new()));
         let metrics: SharedMetrics = Rc::new(Cell::new((8.0, 16.0)));
-        let grid: SharedGrid = Rc::new(Cell::new((INIT_COLS, INIT_ROWS)));
+        let grid: SharedGrid = Rc::new(Cell::new(init_grid));
         let drag = Rc::new(Cell::new(Drag::None));
         let last_pos = Rc::new(Cell::new((0usize, 0usize)));
 
-        area.set_context(term.clone(), cb.on_resize.clone(), metrics.clone(), grid.clone());
+        area.set_context(term.clone(), resize_cb, metrics.clone(), grid.clone());
 
         // Keyboard.
         {
@@ -813,7 +845,7 @@ impl TerminalTab {
             area.add_controller(scroll);
         }
 
-        Self { area, term, parser }
+        Self { area, term, parser, grid }
     }
 }
 

@@ -53,11 +53,26 @@ runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 \
   systemctl --user disable --now gnome-headless.service rmng-clone-daemon.service 2>/dev/null || true
 "#;
 
-/// Headless clone: ensure a default `main` tmux session exists (idempotent). Runs as the clone
-/// user via a login shell so PATH/SHELL match an interactive session. `termplane` re-creates a
-/// missing session on select, so this is a convenience default, not load-bearing.
+/// Headless clone: pin tmux's multi-client sizing policy, then ensure a default `main` tmux
+/// session exists (idempotent). Runs as the clone user via a login shell so PATH/SHELL match an
+/// interactive session. `termplane` re-creates a missing session on select, so the default session
+/// is a convenience, not load-bearing.
+///
+/// `window-size latest` makes tmux size a session to its **most-recent** client rather than the
+/// smallest: the viewer's proxy attaches as a second client, so without this a co-attached human
+/// shell (or the proxy's own transient default) would clamp the grid to the smaller size — the
+/// "terminal is the wrong size" bug. Written to `~/.tmux.conf` (read when the server starts) and
+/// also applied live via `set-option -g` for the session created just below / any running server.
 const HEADLESS_TMUX_DEFAULT_SCRIPT: &str = r#"set -e
-runuser -u rmng -- bash -lc 'tmux has-session -t main 2>/dev/null || tmux new-session -d -s main -c /home/rmng'
+runuser -u rmng -- bash -lc '
+cat > ~/.tmux.conf <<EOF
+# RMNG: the viewer proxy attaches as a second client — size to the latest (viewer) client, not the
+# smallest, so a co-attached human shell never clamps the terminal grid.
+set -g window-size latest
+EOF
+tmux has-session -t main 2>/dev/null || tmux new-session -d -s main -c /home/rmng
+tmux set-option -g window-size latest 2>/dev/null || true
+'
 "#;
 
 // --- pure ports -----------------------------------------------------------------------
