@@ -174,10 +174,10 @@ impl Client {
     ) -> Result<Operation> {
         let mut body = json!({ "image": image, "hostname": hostname });
         let obj = body.as_object_mut().unwrap();
-        if let Some(group) = group
-            .map(str::trim)
-            .filter(|group| !group.is_empty() && *group != "none")
-        {
+        // Send the group verbatim, INCLUDING "none": the server distinguishes an omitted
+        // `group` (a sub host inherits its parent's group) from an explicit `--group none`
+        // (bind no group, opting out of inheritance).
+        if let Some(group) = group.map(str::trim).filter(|group| !group.is_empty()) {
             obj.insert("group".into(), json!(group));
         }
         if let Some(p) = preset {

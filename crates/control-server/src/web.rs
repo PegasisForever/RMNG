@@ -566,6 +566,34 @@ fn resolve_parent(
     Ok(caller.filter(|id| top_level_managed(id)))
 }
 
+/// The effective account group + preset for a fleet-CLI clone, applying sub-host inheritance:
+/// a sub host inherits its `parent`'s group / preset unless the request specified one (an
+/// explicit `--group`/`--preset`, including `none`, counts as specified and overrides). No
+/// parent, or a parent with no group/preset, yields `None` (same as a plain top-level clone).
+/// Pure — unit-tested. The returned preset borrows `presets` (the live config preset list).
+fn effective_group_preset<'a>(
+    parent: Option<&wire::Host>,
+    group_specified: bool,
+    resolved_group: Option<String>,
+    preset_specified: bool,
+    explicit: Option<&'a wire::Preset>,
+    presets: &'a [wire::Preset],
+) -> (Option<String>, Option<&'a wire::Preset>) {
+    let group = if group_specified {
+        resolved_group
+    } else {
+        parent.and_then(|h| h.group.clone())
+    };
+    let preset = if preset_specified {
+        explicit
+    } else {
+        parent
+            .and_then(|h| h.preset_name.as_deref())
+            .and_then(|name| presets.iter().find(|p| p.name == name))
+    };
+    (group, preset)
+}
+
 /// `POST /api/clone` — start a clone from a source image. Body is one of:
 ///   `{ image, ticket }`                               — existing ticket (preset auto-selected
 ///                                                        by the ticket's labels)
@@ -598,11 +626,14 @@ async fn clone(
     let cfg = app.config();
     let prefix = cfg.docker.hostname_prefix.clone();
 
-    // An explicitly chosen preset (by name); absent/"auto" means auto-select in
+    // Whether the request carried a `preset` field at all (present ⇒ don't inherit the parent's
+    // preset on a sub host). `auto`/`none`/empty resolve to "no explicit preset".
+    let preset_field = str_field("preset").map(|s| s.trim().to_string());
+    let preset_specified = preset_field.as_ref().is_some_and(|s| !s.is_empty());
+    // An explicitly chosen preset (by name); absent/"auto"/"none" means auto-select in
     // ticket mode and "required, so error" in plain/create mode (checked per mode).
-    let explicit = match str_field("preset")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "auto")
+    let explicit = match preset_field
+        .filter(|s| !s.is_empty() && s != "auto" && !s.eq_ignore_ascii_case("none"))
     {
         Some(name) => Some(
             cfg.presets
@@ -638,20 +669,34 @@ async fn clone(
         // the caller clone from its per-clone router key header and nest under it when the caller
         // is itself top-level. See `resolve_parent`.
         let parent = resolve_parent(&app, &body, &headers)?;
+        // A sub host inherits its parent clone's group + preset BY DEFAULT — a clone created
+        // from inside a clone (the common case) should join the same account pool and env as its
+        // parent unless the caller overrides it (`--group <name|none>` / `--preset <name|none>`).
+        let parent_host = parent
+            .as_deref()
+            .and_then(|pid| app.store.get().hosts.into_iter().find(|h| h.id == pid));
+        let (eff_group, eff_preset) = effective_group_preset(
+            parent_host.as_ref(),
+            requested_group.is_some(),
+            group.clone(),
+            preset_specified,
+            explicit,
+            &cfg.presets,
+        );
         let spec = CloneSpec {
             source_image: image,
             new_hostname: hostname,
             linear: None,
-            group: group.clone(),
+            group: eff_group,
             first_message: None,
             agent_instructions,
             claude_instructions,
-            preset_name: explicit.map(|p| p.name.clone()),
-            env: explicit
+            preset_name: eff_preset.map(|p| p.name.clone()),
+            env: eff_preset
                 .map(crate::provision::preset_env_vars)
                 .unwrap_or_default(),
-            agent_playbook: compose_playbook(&cfg, explicit),
-            global_prompt: compose_global_prompt(&cfg, explicit),
+            agent_playbook: compose_playbook(&cfg, eff_preset),
+            global_prompt: compose_global_prompt(&cfg, eff_preset),
             headless,
             parent,
         };
@@ -1362,6 +1407,9 @@ struct HostGroupReq {
 
 fn resolve_group(app: &App, group: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
     match group.map(str::trim).filter(|name| !name.is_empty()) {
+        // Explicit clear: `--group none` binds no group (and, for a sub host, opts out of
+        // inheriting the parent's group). Reserved word — a group can't be named "none".
+        Some(name) if name.eq_ignore_ascii_case("none") => Ok(None),
         Some(name) if app.config().groups.iter().any(|group| group.name == name) => {
             Ok(Some(name.to_string()))
         }
@@ -2287,6 +2335,63 @@ mod tests {
         }
         // `parent` + `topLevel` together is an error.
         assert!(resolve_parent(&app, &json!({ "parent": "p", "topLevel": true }), &empty).is_err());
+    }
+
+    #[test]
+    fn sub_host_inherits_group_and_preset_unless_overridden() {
+        let presets = vec![
+            wire::Preset { name: "parent-preset".into(), ..Default::default() },
+            wire::Preset { name: "override-preset".into(), ..Default::default() },
+        ];
+        let parent = wire::Host {
+            id: "p".into(),
+            managed: true,
+            group: Some("parent-group".into()),
+            preset_name: Some("parent-preset".into()),
+            ..Default::default()
+        };
+        let name = |p: Option<&wire::Preset>| p.map(|p| p.name.clone());
+
+        // Nothing specified → inherit both from the parent.
+        let (g, pr) = effective_group_preset(Some(&parent), false, None, false, None, &presets);
+        assert_eq!(g, Some("parent-group".into()));
+        assert_eq!(name(pr), Some("parent-preset".into()));
+
+        // Explicit group/preset override inheritance.
+        let (g, pr) = effective_group_preset(
+            Some(&parent), true, Some("other-group".into()), true, Some(&presets[1]), &presets,
+        );
+        assert_eq!(g, Some("other-group".into()));
+        assert_eq!(name(pr), Some("override-preset".into()));
+
+        // Explicit `none` (specified, but resolves to None) opts out of inheritance.
+        let (g, pr) = effective_group_preset(Some(&parent), true, None, true, None, &presets);
+        assert_eq!(g, None);
+        assert_eq!(pr, None);
+
+        // No parent → no inheritance.
+        let (g, pr) = effective_group_preset(None, false, None, false, None, &presets);
+        assert_eq!(g, None);
+        assert!(pr.is_none());
+
+        // Parent names a preset that no longer exists → gracefully no preset.
+        let orphan = wire::Host { preset_name: Some("gone".into()), ..parent.clone() };
+        let (_g, pr) = effective_group_preset(Some(&orphan), false, None, false, None, &presets);
+        assert!(pr.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_group_treats_none_as_clear() {
+        let app = test_app();
+        *app.cfg.write().unwrap() = wire::AppConfig {
+            groups: vec![wire::Group { name: "team".into() }],
+            ..app.config()
+        };
+        assert_eq!(resolve_group(&app, Some("team")).unwrap(), Some("team".into()));
+        assert_eq!(resolve_group(&app, Some("none")).unwrap(), None);
+        assert_eq!(resolve_group(&app, Some("NONE")).unwrap(), None); // case-insensitive
+        assert_eq!(resolve_group(&app, None).unwrap(), None);
+        assert!(resolve_group(&app, Some("ghost")).is_err());
     }
 
     #[tokio::test]
