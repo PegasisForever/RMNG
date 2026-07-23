@@ -38,6 +38,9 @@ use gtk4::subclass::prelude::ObjectSubclassIsExt;
 /// Font used when the GNOME `monospace-font-name` setting isn't available (non-GNOME / macOS).
 /// A point size (not `px`), so it scales with DPI + text-scaling like the rest of the desktop.
 const FALLBACK_FONT: &str = "Monospace 11";
+/// Cell-height multiplier over the font's natural ascent+descent (glyphs are vertically centered
+/// in the taller cell). 1.0 = tight/VTE-default; >1.0 adds line spacing.
+const LINE_HEIGHT: f64 = 1.1;
 /// Default grid until the widget is allocated and reports its real character dimensions.
 const INIT_COLS: usize = 80;
 const INIT_ROWS: usize = 24;
@@ -267,7 +270,8 @@ mod imp {
                 let ctx = self.obj().pango_context();
                 let m = ctx.metrics(Some(&fd), None);
                 let cw = (m.approximate_char_width() as f64 / pango::SCALE as f64).max(1.0);
-                let ch = ((m.ascent() + m.descent()) as f64 / pango::SCALE as f64).max(1.0);
+                let natural = (m.ascent() + m.descent()) as f64 / pango::SCALE as f64;
+                let ch = (natural * LINE_HEIGHT).max(1.0);
                 *self.font.borrow_mut() = Some(fd);
                 if let Some(shared) = self.metrics.borrow().as_ref() {
                     shared.set((cw, ch));
@@ -324,6 +328,9 @@ mod imp {
             // (no fractional-coordinate AA seams between cells/rows).
             let cell_x = |c: usize| (c as f64 * cw).round() as f32;
             let row_y = |r: usize| (r as f64 * ch).round() as f32;
+            // Extra line-spacing is split above/below the glyph so text stays vertically centered
+            // in the cell (backgrounds/cursor still fill the full cell height).
+            let text_pad = ((ch - ch / LINE_HEIGHT) / 2.0) as f32;
 
             // Background fill.
             snapshot.append_color(&rgba(theme.bg), &graphene::Rect::new(0.0, 0.0, wpx, hpx));
@@ -420,7 +427,7 @@ mod imp {
                 layout.set_text(&rb.text);
                 layout.set_attributes(Some(&rb.attrs));
                 snapshot.save();
-                snapshot.translate(&graphene::Point::new(0.0, row_y(rowi)));
+                snapshot.translate(&graphene::Point::new(0.0, row_y(rowi) + text_pad));
                 snapshot.append_layout(&layout, &rgba(theme.fg));
                 snapshot.restore();
             }
