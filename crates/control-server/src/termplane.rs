@@ -34,6 +34,11 @@ use crate::mediaplane::{Viewers, broadcast_json, configured_monitors, T_TERM_DAT
 
 /// The clone user every session PTY runs as (uid 1000).
 const CLONE_USER: &str = "rmng";
+/// argv[0] our `tmux attach` clients run under, so we can reap *our* orphans without touching a
+/// human's `tmux attach`. Docker exec processes are NOT killed when their stream is dropped (and a
+/// dead-PTY client ignores `detach-client`), so each attach lingers as a stale tmux client; a pile
+/// of them collapses `window-size latest` to a tiny size. We reap these at activation.
+const PROXY_MARKER: &str = "rmng-tmux-proxy";
 /// Fallback PTY size if the viewer never reports its real dimensions within [`ATTACH_WAIT`].
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
@@ -200,35 +205,42 @@ async fn run_manager(
 ) {
     let mut txs: HashMap<String, mpsc::UnboundedSender<SessionMsg>> = HashMap::new();
     let mut tasks: HashMap<String, AbortOnDrop> = HashMap::new();
+    // The size the PTYs are (to be) attached at, and whether we've attached yet. We do NOT attach
+    // at activation even when `size` is already known (from a remembered `init_size`): attaching
+    // immediately races the docker exec's TTY setup and can strand the PTY at the 80x24 default.
+    // Instead we always wait for the viewer's first `TermResize` (it rebuilds + re-measures its
+    // terminal on any clone change, so one arrives within ~a frame) or the `ATTACH_WAIT` fallback,
+    // which is the timing that reliably wins the resize race. `init_size` only seeds the fallback.
     let mut size: Option<(u16, u16)> = init_size;
+    let mut attached = false;
+
+    // Reap orphaned attach clients from prior viewer sessions BEFORE attaching fresh, so
+    // `window-size latest` is driven only by our current clients (else a pile of stale clients
+    // clamps the window to a tiny size — the "tmux not resized to the window" bug).
+    reap_orphan_clients(&app, &clone_id).await;
 
     // Announce the session list immediately (no pumps yet) so the viewer can build + measure.
     announce_sessions(&app, &viewers, &clone_id, &sessions).await;
-    // If the viewer's terminal size is already known (a reconnect, or a switch between headless
-    // clones — the terminal window is stable, so its size carries over and the viewer sends no
-    // fresh TermResize), attach PTYs now at that size. Otherwise defer until the viewer reports it.
-    if let Some(sz) = size {
-        reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await;
-    }
     let attach_at = tokio::time::Instant::now() + ATTACH_WAIT;
 
     let mut poll = tokio::time::interval(POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            // Fallback: the viewer never reported a size — attach at the default so the terminal
-            // isn't left permanently blank. Disabled once we have a size.
-            _ = tokio::time::sleep_until(attach_at), if size.is_none() => {
-                let sz = (DEFAULT_COLS, DEFAULT_ROWS);
+            // Fallback: the viewer never reported a size — attach at the remembered size (or the
+            // default) so the terminal isn't left blank. Disabled once attached.
+            _ = tokio::time::sleep_until(attach_at), if !attached => {
+                let sz = size.unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
                 size = Some(sz);
+                attached = true;
                 reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await;
             }
             _ = poll.tick() => {
-                match size {
+                match (attached, size) {
                     // Pumps running: reconcile them against live tmux sessions.
-                    Some(sz) => reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await,
-                    // Still waiting for a size: keep the announced session list fresh (no pumps).
-                    None => announce_sessions(&app, &viewers, &clone_id, &sessions).await,
+                    (true, Some(sz)) => reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await,
+                    // Still waiting to attach: keep the announced session list fresh (no pumps).
+                    _ => announce_sessions(&app, &viewers, &clone_id, &sessions).await,
                 }
             }
             cmd = cmd_rx.recv() => match cmd {
@@ -239,10 +251,10 @@ async fn run_manager(
                     }
                 }
                 Some(Cmd::Resize { cols, rows }) => {
-                    let first = size.is_none();
                     size = Some((cols, rows));
-                    if first {
+                    if !attached {
                         // First real size: attach every PTY now, born at the true grid.
+                        attached = true;
                         reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, (cols, rows)).await;
                     } else {
                         for tx in txs.values() {
@@ -255,9 +267,9 @@ async fn run_manager(
                     if let Err(e) = new_tmux_session(&app, &clone_id, &name).await {
                         tracing::warn!(target: "termplane", "new tmux session in {clone_id} failed: {e:#}");
                     }
-                    match size {
-                        Some(sz) => reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await,
-                        None => announce_sessions(&app, &viewers, &clone_id, &sessions).await,
+                    match (attached, size) {
+                        (true, Some(sz)) => reconcile(&app, &viewers, &clone_id, &mut txs, &mut tasks, &sessions, sz).await,
+                        _ => announce_sessions(&app, &viewers, &clone_id, &sessions).await,
                     }
                 }
             }
@@ -372,12 +384,13 @@ async fn pump_session(
     mut rx: mpsc::UnboundedReceiver<SessionMsg>,
     size: (u16, u16),
 ) {
-    // `attach-session` (not `new-session`): the session already exists. `-t` selects it.
+    // `attach-session` (not `new-session`): the session already exists. `-t` selects it. Run it
+    // under a marker argv[0] (via bash `exec -a`) so `reap_orphan_clients` can later kill our own
+    // orphaned attaches without disturbing a human's `tmux attach`.
     let cmd = [
-        "tmux".to_string(),
-        "attach-session".to_string(),
-        "-t".to_string(),
-        session.clone(),
+        "bash".to_string(),
+        "-c".to_string(),
+        format!("exec -a {PROXY_MARKER} tmux attach-session -t {session}"),
     ];
     let tty = match app.docker.exec_tty(&clone_id, &cmd, CLONE_USER, size.0, size.1).await {
         Ok(t) => t,
@@ -421,6 +434,16 @@ async fn pump_session(
         }
     }
     tracing::debug!(target: "termplane", "session pump ended {clone_id}/{session}");
+}
+
+/// Kill our own orphaned `tmux attach` clients (argv[0] == [`PROXY_MARKER`]) left by prior viewer
+/// sessions. `docker exec` processes aren't terminated when their stream is dropped, and a
+/// dead-PTY client ignores `detach-client`, so `kill` is the only reliable reaper. Matched by the
+/// marker so a human's plain `tmux attach` is left alone. Best-effort; `pkill` exits non-zero when
+/// nothing matches, which is fine.
+async fn reap_orphan_clients(app: &App, clone_id: &str) {
+    let cmd = ["pkill".to_string(), "-9".to_string(), "-f".to_string(), PROXY_MARKER.to_string()];
+    let _ = app.docker.exec_capture(clone_id, &cmd, CLONE_USER, None, &[], None).await;
 }
 
 /// `tmux list-sessions -F '#{session_name}'` → the session names (empty on no server / error).
