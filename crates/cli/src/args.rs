@@ -1,9 +1,16 @@
 //! The clap command tree. Fleet management only — driving the agents *inside*
 //! clones is the desktop MCP's job (computer use), and code moves via git.
+//!
+//! Structure is uniform **noun → verb**: `rmng <noun> <verb> [<clone>] [flags]`. The nouns are
+//! `clone` (the fleet unit), `image`, `account`, `op`, and `desktop`. One list verb (`ls`), one
+//! destroy verb (`rm`); the target is always a positional `<clone>`.
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+/// Default seconds to wait on an operation before giving up (shared by every `--wait`/`op wait`).
+const DEFAULT_TIMEOUT: u64 = 600;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -11,14 +18,15 @@ use clap::{Args, Parser, Subcommand};
     version,
     about = "Fleet management for the RMNG control-server",
     long_about = "Fleet management for the RMNG control-server.\n\n\
-                  Server resolution: --server, else optional $RMNG_CONTROL_URL, else \
+                  Inside a clone the server is auto-resolved from $RMNG_CONTROL_URL, so bare \
+                  `rmng …` just works. Otherwise: --server > $RMNG_CONTROL_URL > \
                   http://localhost:9000."
 )]
 pub struct Cli {
     /// Control-server web-API origin (e.g. http://rmng-control:9000)
     #[arg(long, global = true, value_name = "URL")]
     pub server: Option<String>,
-    /// Emit the raw wire JSON instead of a table
+    /// Emit machine-readable JSON instead of a table (honored by every command)
     #[arg(long, global = true)]
     pub json: bool,
     #[command(subcommand)]
@@ -27,97 +35,98 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// List hosts with live CPU, RAM, token totals, activity, and account-group assignment
-    Ps,
-    /// Point the operator's viewer at a host (`none` clears the selection)
-    Select {
-        /// Host id, or `none`
-        host: String,
+    /// Manage clones (the fleet unit): ls / create / rm / archive / restore / ssh / exec / …
+    #[command(subcommand)]
+    Clone(CloneCmd),
+    /// Clone-source image operations
+    #[command(subcommand)]
+    Image(ImageCmd),
+    /// Imported-account operations
+    #[command(subcommand)]
+    Account(AccountCmd),
+    /// Operation (clone / delete / archive / pull / commit / update) inspection
+    #[command(subcommand)]
+    Op(OpCmd),
+    /// Drive a clone's desktop via its daemon MCP (screenshot-on-every-action)
+    Desktop {
+        /// Clone id
+        clone: String,
+        #[command(subcommand)]
+        cmd: DesktopCmd,
     },
+}
+
+/// `rmng clone <verb>` — everything that acts on the fleet unit.
+#[derive(Subcommand, Debug)]
+pub enum CloneCmd {
+    /// List clones with live CPU, RAM, token totals, activity, and account-group assignment
+    Ls,
     /// Create a clone under an exact hostname
-    Clone {
-        /// Clone-source image reference (see `rmng image ls`)
-        #[arg(long)]
-        image: String,
+    Create {
         /// Exact hostname for the new clone (DNS label)
-        #[arg(long)]
         hostname: String,
-        /// Account group to route this clone's agents through (`none` clears the binding)
+        /// Clone-source image reference to create from (see `rmng image ls`)
+        #[arg(long)]
+        from: String,
+        /// Account group to route this clone's agents through. Omitted inside a clone ⇒ inherit
+        /// the parent's group; use --no-group to bind none.
         #[arg(long)]
         group: Option<String>,
-        /// Env preset name (optional; fleet workers usually need none)
+        /// Bind no account group (opt out of inheriting the parent's)
+        #[arg(long, conflicts_with = "group")]
+        no_group: bool,
+        /// Env preset name. Omitted inside a clone ⇒ inherit the parent's preset; use
+        /// --no-preset for none.
         #[arg(long)]
         preset: Option<String>,
+        /// Use no env preset (opt out of inheriting the parent's)
+        #[arg(long, conflicts_with = "preset")]
+        no_preset: bool,
         /// Headless clone: no desktop; the viewer shows a tmux tab view instead of a stream
         #[arg(long)]
         headless: bool,
-        /// Create as a sub host under this parent host id (must be a top-level clone).
-        /// Overrides the default caller auto-detection. Conflicts with --top-level.
+        /// Create as a sub host under this parent clone id (must be top-level). Overrides the
+        /// default caller auto-detection. Conflicts with --top-level.
         #[arg(long, conflicts_with = "top_level")]
         parent: Option<String>,
-        /// Force a top-level host even when run from inside a clone (skip auto-detection).
+        /// Force a top-level clone even when run from inside a clone (skip auto-nesting)
         #[arg(long)]
         top_level: bool,
         #[command(flatten)]
         wait: WaitArgs,
     },
-    /// Destroy a clone (asks for confirmation unless --yes)
+    /// Destroy a clone (container + volumes). Non-interactive callers must pass -y.
     Rm {
-        /// Host id
-        host: String,
-        /// Skip the confirmation prompt
+        /// Clone id
+        clone: String,
+        /// Skip the confirmation prompt (required when not attached to a terminal)
         #[arg(short = 'y', long)]
         yes: bool,
         #[command(flatten)]
         wait: WaitArgs,
     },
-    /// Stop a managed clone but retain its container, volumes, notes, and chat
+    /// Stop a clone but retain its container, volumes, notes, and chat
     Archive {
-        /// Host id of the managed clone
-        host: String,
+        /// Clone id
+        clone: String,
         #[command(flatten)]
         wait: WaitArgs,
     },
     /// Restart a retained archived clone
-    #[command(alias = "unarchive")]
     Restore {
-        /// Host id of the archived clone
-        host: String,
+        /// Clone id
+        clone: String,
         #[command(flatten)]
         wait: WaitArgs,
     },
-    /// Clone-source image operations
-    #[command(subcommand)]
-    Image(ImageCmd),
-    /// Account-group and imported-account operations
-    #[command(subcommand)]
-    Account(AccountCmd),
-    /// List operations (clone / delete / archive / unarchive / pull / commit / update)
-    Ops,
-    /// Wait for an operation to reach a terminal state
-    Wait {
-        /// Operation id (as printed by clone/rm/image commands)
-        op_id: String,
-        /// Give up after this many seconds
-        #[arg(long, default_value_t = 600)]
-        timeout: u64,
-    },
-    /// Print the ready-to-paste `ssh` command for a clone (jump via the control-server bastion)
+    /// Print the ready-to-paste `ssh` command for a clone
     Ssh {
-        /// Host id of the clone
-        host: String,
-    },
-    /// Drive a clone's desktop via its daemon MCP (screenshot-on-every-action)
-    #[command(alias = "dt")]
-    Desktop {
-        /// Host id of the clone
+        /// Clone id
         clone: String,
-        #[command(subcommand)]
-        cmd: DesktopCmd,
     },
     /// Run a single non-interactive command inside a clone (docker-exec-style)
     Exec {
-        /// Host id of the clone
+        /// Clone id
         clone: String,
         /// Run-as user (uid or name); defaults to the clone's agent user server-side
         #[arg(short = 'u', long)]
@@ -128,10 +137,100 @@ pub enum Cmd {
         /// Extra environment `KEY=VAL` (repeatable)
         #[arg(short = 'e', long)]
         env: Vec<String>,
-        /// The command argv, after `--` (e.g. `rmng exec c -- ls -la`)
+        /// The command argv, after `--` (e.g. `rmng clone exec c -- ls -la`)
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Bind a clone to an account group
+    Bind {
+        /// Clone id
+        clone: String,
+        /// Account group name to bind (omit and pass --none to clear)
+        group: Option<String>,
+        /// Clear the clone's account-group binding
+        #[arg(long, conflicts_with = "group")]
+        none: bool,
+    },
+    /// Point the operator's viewer at a clone (operator-only; no effect on command targeting)
+    Select {
+        /// Clone id (omit and pass --none to clear the selection)
+        clone: Option<String>,
+        /// Clear the viewer selection
+        #[arg(long, conflicts_with = "clone")]
+        none: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ImageCmd {
+    /// List clone-source images
+    Ls,
+    /// Pull the clone template from a registry (default: the configured reference)
+    Pull {
+        /// Registry reference (e.g. pegasis0/rmng-template:latest)
+        reference: Option<String>,
+        #[command(flatten)]
+        wait: WaitArgs,
+    },
+    /// Commit a running clone to a new clone-source image `<name>:latest`
+    Commit {
+        /// Clone id to commit
+        clone: String,
+        /// Image name (DNS label; becomes the repo of `<name>:latest`)
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: String,
+        #[command(flatten)]
+        wait: WaitArgs,
+    },
+    /// Remove a clone-source image (fails while clones use it)
+    Rm {
+        /// Image reference or id
+        reference: String,
+    },
+}
+
+/// Account provider filter for `rmng account ls --provider <p>`.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum Provider {
+    Claude,
+    Codex,
+    Gemini,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AccountCmd {
+    /// List imported accounts with usage windows (all providers by default)
+    Ls {
+        /// Only show accounts for this provider
+        #[arg(long)]
+        provider: Option<Provider>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OpCmd {
+    /// List operations (clone / delete / archive / restore / pull / commit / update)
+    Ls,
+    /// Wait for an operation to reach a terminal state
+    Wait {
+        /// Operation id (as printed by clone/image commands)
+        op_id: String,
+        /// Give up after this many seconds
+        #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
+        timeout: u64,
+    },
+}
+
+/// `--wait [--timeout N]` shared by the operation-starting commands.
+#[derive(Args, Debug)]
+pub struct WaitArgs {
+    /// Block until the operation finishes (rides the /events SSE stream)
+    #[arg(long)]
+    pub wait: bool,
+    /// Seconds to wait before giving up (with --wait)
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
+    pub timeout: u64,
 }
 
 /// Optional `--rescale-cursor <range>` (and optional `--rescale-screen <W>x<H>`)
@@ -264,7 +363,7 @@ pub enum DesktopCmd {
         rescale: RescaleArgs,
     },
     /// Right click, optionally at X Y (→ `right_click`)
-    Rclick {
+    RightClick {
         x: Option<i32>,
         y: Option<i32>,
         #[arg(long)]
@@ -275,7 +374,7 @@ pub enum DesktopCmd {
         rescale: RescaleArgs,
     },
     /// Middle click, optionally at X Y (→ `middle_click`)
-    Mclick {
+    MiddleClick {
         x: Option<i32>,
         y: Option<i32>,
         #[arg(long)]
@@ -286,7 +385,7 @@ pub enum DesktopCmd {
         rescale: RescaleArgs,
     },
     /// Left double click, optionally at X Y (→ `left_double_click`)
-    Dclick {
+    DoubleClick {
         x: Option<i32>,
         y: Option<i32>,
         #[arg(long)]
@@ -328,7 +427,7 @@ pub enum DesktopCmd {
         id: String,
     },
     /// Move/arrange a window by id (→ `move_window`)
-    Movewin {
+    MoveWindow {
         /// Window id
         id: String,
         #[arg(long)]
@@ -336,68 +435,6 @@ pub enum DesktopCmd {
         /// Placement mode, e.g. `maximize` / `center-half`
         #[arg(long)]
         mode: Option<String>,
-    },
-}
-
-/// `--wait [--timeout N]` shared by the operation-starting commands.
-#[derive(Args, Debug)]
-pub struct WaitArgs {
-    /// Block until the operation finishes (rides the /events SSE stream)
-    #[arg(long)]
-    pub wait: bool,
-    /// Seconds to wait before giving up (with --wait)
-    #[arg(long, default_value_t = 600)]
-    pub timeout: u64,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum ImageCmd {
-    /// List clone-source images
-    Ls,
-    /// Pull the clone template from a registry (default: the configured reference)
-    Pull {
-        /// Registry reference (e.g. pegasis0/rmng-template:latest)
-        reference: Option<String>,
-        #[command(flatten)]
-        wait: WaitArgs,
-    },
-    /// Commit a running clone to a new clone-source image `<name>:latest`
-    Commit {
-        /// Host id of the clone to commit
-        host: String,
-        /// Image name (DNS label; becomes the repo of `<name>:latest`)
-        name: String,
-        #[command(flatten)]
-        wait: WaitArgs,
-    },
-    /// Remove a clone-source image (fails while clones use it)
-    Rm {
-        /// Image reference or id
-        reference: String,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub enum AccountCmd {
-    /// List imported accounts with usage windows (all providers by default)
-    Ls {
-        /// Only Claude accounts
-        #[arg(long, conflicts_with_all = ["codex", "gemini"])]
-        claude: bool,
-        /// Only Codex accounts
-        #[arg(long, conflicts_with = "gemini")]
-        codex: bool,
-        /// Only Gemini (Antigravity) accounts
-        #[arg(long)]
-        gemini: bool,
-    },
-    /// Bind a clone to an account group (`none` clears the binding)
-    #[command(alias = "swap")]
-    Bind {
-        /// Host id
-        host: String,
-        /// Account group name, or `none`
-        group: String,
     },
 }
 
@@ -416,280 +453,212 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn parses_ps() {
-        let cli = Cli::parse_from(["rmng", "ps"]);
-        assert!(matches!(cli.cmd, Cmd::Ps));
+    fn parses_clone_ls() {
+        let cli = Cli::parse_from(["rmng", "clone", "ls"]);
+        assert!(matches!(cli.cmd, Cmd::Clone(CloneCmd::Ls)));
         assert!(!cli.json);
     }
 
     #[test]
-    fn parses_clone_with_group_and_wait() {
-        let cli = Cli::parse_from([
-            "rmng",
-            "clone",
-            "--image",
-            "hyperhost-worker:latest",
-            "--hostname",
-            "w-cp",
-            "--group",
-            "pooled",
-            "--wait",
-            "--timeout",
-            "120",
-        ]);
-        match cli.cmd {
-            Cmd::Clone {
-                image,
-                hostname,
-                group,
-                preset,
-                headless,
-                parent,
-                top_level,
-                wait,
-            } => {
-                assert_eq!(image, "hyperhost-worker:latest");
-                assert_eq!(hostname, "w-cp");
-                assert_eq!(group.as_deref(), Some("pooled"));
-                assert_eq!(preset, None);
-                assert!(!headless);
-                assert_eq!(parent, None);
-                assert!(!top_level);
-                assert!(wait.wait);
-                assert_eq!(wait.timeout, 120);
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-        // --parent and --top-level are mutually exclusive.
-        assert!(
-            Cli::try_parse_from([
-                "rmng", "clone", "--image", "i:latest", "--hostname", "w-x", "--parent", "w-p",
-                "--top-level",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "rmng",
-                "clone",
-                "--image",
-                "hyperhost-worker:latest",
-                "--hostname",
-                "w-cp",
-                "--claude",
-                "auto",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
     fn global_flags_work_after_subcommand() {
-        let cli = Cli::parse_from(["rmng", "ps", "--json", "--server", "http://x:9000"]);
+        let cli = Cli::parse_from(["rmng", "clone", "ls", "--json", "--server", "http://x:9000"]);
         assert!(cli.json);
         assert_eq!(cli.server.as_deref(), Some("http://x:9000"));
     }
 
     #[test]
-    fn account_ls_provider_flags_conflict() {
-        assert!(Cli::try_parse_from(["rmng", "account", "ls", "--claude", "--codex"]).is_err());
-    }
-
-    #[test]
-    fn account_bind_and_swap_alias_parse() {
-        for cmd in ["bind", "swap"] {
-            let cli = Cli::parse_from(["rmng", "account", cmd, "w-cp", "pooled"]);
-            assert!(matches!(
-                cli.cmd,
-                Cmd::Account(AccountCmd::Bind { ref host, ref group })
-                    if host == "w-cp" && group == "pooled"
-            ));
+    fn clone_create_positional_hostname_and_from() {
+        let cli = Cli::parse_from([
+            "rmng", "clone", "create", "w-cp", "--from", "tmpl:latest", "--group", "pooled",
+            "--wait", "--timeout", "120",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Create {
+                hostname, from, group, no_group, preset, no_preset, headless, parent, top_level,
+                wait,
+            }) => {
+                assert_eq!(hostname, "w-cp");
+                assert_eq!(from, "tmpl:latest");
+                assert_eq!(group.as_deref(), Some("pooled"));
+                assert!(!no_group && !no_preset && !headless && !top_level);
+                assert_eq!(preset, None);
+                assert_eq!(parent, None);
+                assert!(wait.wait);
+                assert_eq!(wait.timeout, 120);
+            }
+            other => panic!("wrong cmd: {other:?}"),
         }
     }
 
     #[test]
-    fn archive_and_restore_parse_with_wait() {
-        let archive = Cli::parse_from(["rmng", "archive", "w-cp", "--wait"]);
-        assert!(matches!(
-            archive.cmd,
-            Cmd::Archive { ref host, ref wait } if host == "w-cp" && wait.wait
-        ));
-        let restore = Cli::parse_from(["rmng", "unarchive", "w-cp"]);
-        assert!(matches!(restore.cmd, Cmd::Restore { ref host, .. } if host == "w-cp"));
+    fn clone_create_mutually_exclusive_flags() {
+        // --parent ⊕ --top-level, --group ⊕ --no-group, --preset ⊕ --no-preset.
+        assert!(Cli::try_parse_from([
+            "rmng", "clone", "create", "w-x", "--from", "i", "--parent", "p", "--top-level",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "rmng", "clone", "create", "w-x", "--from", "i", "--group", "g", "--no-group",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "rmng", "clone", "create", "w-x", "--from", "i", "--preset", "p", "--no-preset",
+        ])
+        .is_err());
+        // --from is required.
+        assert!(Cli::try_parse_from(["rmng", "clone", "create", "w-x"]).is_err());
     }
 
     #[test]
-    fn rm_requires_host() {
-        assert!(Cli::try_parse_from(["rmng", "rm"]).is_err());
+    fn clone_rm_requires_clone() {
+        assert!(Cli::try_parse_from(["rmng", "clone", "rm"]).is_err());
+        let cli = Cli::parse_from(["rmng", "clone", "rm", "w-cp", "-y"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Clone(CloneCmd::Rm { ref clone, yes: true, .. }) if clone == "w-cp"
+        ));
+    }
+
+    #[test]
+    fn clone_archive_and_restore_parse_with_wait() {
+        let archive = Cli::parse_from(["rmng", "clone", "archive", "w-cp", "--wait"]);
+        assert!(matches!(
+            archive.cmd,
+            Cmd::Clone(CloneCmd::Archive { ref clone, ref wait }) if clone == "w-cp" && wait.wait
+        ));
+        let restore = Cli::parse_from(["rmng", "clone", "restore", "w-cp"]);
+        assert!(matches!(
+            restore.cmd,
+            Cmd::Clone(CloneCmd::Restore { ref clone, .. }) if clone == "w-cp"
+        ));
+    }
+
+    #[test]
+    fn clone_bind_and_select_none_flags() {
+        let bind = Cli::parse_from(["rmng", "clone", "bind", "w-cp", "pooled"]);
+        assert!(matches!(
+            bind.cmd,
+            Cmd::Clone(CloneCmd::Bind { ref clone, group: Some(ref g), none: false })
+                if clone == "w-cp" && g == "pooled"
+        ));
+        let unbind = Cli::parse_from(["rmng", "clone", "bind", "w-cp", "--none"]);
+        assert!(matches!(
+            unbind.cmd,
+            Cmd::Clone(CloneCmd::Bind { none: true, group: None, .. })
+        ));
+        // group + --none conflict.
+        assert!(Cli::try_parse_from(["rmng", "clone", "bind", "w-cp", "pooled", "--none"]).is_err());
+        let sel = Cli::parse_from(["rmng", "clone", "select", "--none"]);
+        assert!(matches!(sel.cmd, Cmd::Clone(CloneCmd::Select { none: true, clone: None })));
+    }
+
+    #[test]
+    fn op_ls_and_wait() {
+        assert!(matches!(
+            Cli::parse_from(["rmng", "op", "ls"]).cmd,
+            Cmd::Op(OpCmd::Ls)
+        ));
+        let w = Cli::parse_from(["rmng", "op", "wait", "op_123", "--timeout", "30"]);
+        assert!(matches!(
+            w.cmd,
+            Cmd::Op(OpCmd::Wait { ref op_id, timeout: 30 }) if op_id == "op_123"
+        ));
+    }
+
+    #[test]
+    fn image_commit_takes_name_as_flag() {
+        let cli = Cli::parse_from(["rmng", "image", "commit", "w-cp", "--as", "myimg"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Image(ImageCmd::Commit { ref clone, ref as_name, .. })
+                if clone == "w-cp" && as_name == "myimg"
+        ));
+        // --as is required.
+        assert!(Cli::try_parse_from(["rmng", "image", "commit", "w-cp"]).is_err());
+    }
+
+    #[test]
+    fn account_ls_provider_enum() {
+        let cli = Cli::parse_from(["rmng", "account", "ls", "--provider", "codex"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Account(AccountCmd::Ls { provider: Some(Provider::Codex) })
+        ));
+        // Bad provider rejected.
+        assert!(Cli::try_parse_from(["rmng", "account", "ls", "--provider", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn clone_exec_separates_command_after_dashes() {
+        let cli = Cli::parse_from([
+            "rmng", "clone", "exec", "c", "-u", "root", "-w", "/srv", "-e", "A=1", "-e", "B=2",
+            "--", "env",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Exec { clone, user, workdir, env, cmd }) => {
+                assert_eq!(clone, "c");
+                assert_eq!(user.as_deref(), Some("root"));
+                assert_eq!(workdir.as_deref(), Some("/srv"));
+                assert_eq!(env, vec!["A=1".to_string(), "B=2".to_string()]);
+                assert_eq!(cmd, vec!["env".to_string()]);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["rmng", "clone", "exec", "c"]).is_err());
     }
 
     #[test]
     fn desktop_click_parses_verb_and_coords() {
         let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "click", "10", "20"]);
         match cli.cmd {
-            Cmd::Desktop { clone, cmd } => {
+            Cmd::Desktop { clone, cmd: DesktopCmd::Click { x, y, monitor, out, .. } } => {
                 assert_eq!(clone, "w-cp");
-                match cmd {
-                    DesktopCmd::Click {
-                        x, y, monitor, out, ..
-                    } => {
-                        assert_eq!(x, Some(10));
-                        assert_eq!(y, Some(20));
-                        assert_eq!(monitor, None);
-                        assert_eq!(out, None);
-                    }
-                    other => panic!("wrong desktop cmd: {other:?}"),
-                }
+                assert_eq!((x, y), (Some(10), Some(20)));
+                assert_eq!(monitor, None);
+                assert_eq!(out, None);
             }
             other => panic!("wrong cmd: {other:?}"),
         }
     }
 
     #[test]
-    fn desktop_type_and_key_accept_out_flag() {
-        let cli = Cli::parse_from([
-            "rmng", "desktop", "w-cp", "type", "hello", "--out", "/x.jpg",
-        ]);
-        match cli.cmd {
-            Cmd::Desktop {
-                cmd: DesktopCmd::Type { text, out },
-                ..
-            } => {
-                assert_eq!(text, "hello");
-                assert_eq!(out.as_deref(), Some(std::path::Path::new("/x.jpg")));
-            }
-            other => panic!("wrong cmd: {other:?}"),
+    fn desktop_renamed_verbs_use_kebab_case() {
+        // Old cryptic names no longer parse.
+        for old in ["rclick", "mclick", "dclick", "movewin"] {
+            assert!(
+                Cli::try_parse_from(["rmng", "desktop", "w-cp", old]).is_err(),
+                "old verb `{old}` should no longer parse"
+            );
         }
-        let cli = Cli::parse_from([
-            "rmng", "desktop", "w-cp", "key", "ctrl+c", "--out", "/k.jpg",
-        ]);
+        // New spelled-out names resolve to their variants.
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "right-click", "5", "6"]);
         assert!(matches!(
             cli.cmd,
-            Cmd::Desktop {
-                cmd: DesktopCmd::Key { out: Some(_), .. },
-                ..
-            }
+            Cmd::Desktop { cmd: DesktopCmd::RightClick { x: Some(5), y: Some(6), .. }, .. }
         ));
-    }
-
-    #[test]
-    fn desktop_click_coords_are_optional() {
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "click"]);
-        match cli.cmd {
-            Cmd::Desktop {
-                cmd: DesktopCmd::Click { x, y, .. },
-                ..
-            } => {
-                assert_eq!(x, None);
-                assert_eq!(y, None);
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn desktop_dt_alias_and_flags() {
-        let cli = Cli::parse_from([
-            "rmng",
-            "dt",
-            "w-cp",
-            "screenshot",
-            "--monitor",
-            "1",
-            "--out",
-            "/tmp/s.jpg",
-        ]);
-        match cli.cmd {
-            Cmd::Desktop {
-                clone,
-                cmd: DesktopCmd::Screenshot { monitor, out, .. },
-            } => {
-                assert_eq!(clone, "w-cp");
-                assert_eq!(monitor, Some(1));
-                assert_eq!(out.as_deref(), Some(std::path::Path::new("/tmp/s.jpg")));
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn desktop_click_accepts_rescale_cursor() {
-        let cli = Cli::parse_from([
-            "rmng",
-            "desktop",
-            "w-cp",
-            "click",
-            "500",
-            "500",
-            "--rescale-cursor",
-            "0-1000",
-        ]);
-        match cli.cmd {
-            Cmd::Desktop {
-                cmd: DesktopCmd::Click { x, y, rescale, .. },
-                ..
-            } => {
-                assert_eq!(x, Some(500));
-                assert_eq!(y, Some(500));
-                assert_eq!(rescale.rescale_cursor.as_deref(), Some("0-1000"));
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn desktop_scroll_accepts_rescale_cursor() {
-        let cli = Cli::parse_from([
-            "rmng",
-            "desktop",
-            "w-cp",
-            "scroll",
-            "3",
-            "500",
-            "500",
-            "--rescale-cursor",
-            "0-1000",
-        ]);
-        match cli.cmd {
-            Cmd::Desktop {
-                cmd:
-                    DesktopCmd::Scroll {
-                        amount,
-                        x,
-                        y,
-                        rescale,
-                        ..
-                    },
-                ..
-            } => {
-                assert_eq!(amount, 3);
-                assert_eq!(x, Some(500));
-                assert_eq!(y, Some(500));
-                assert_eq!(rescale.rescale_cursor.as_deref(), Some("0-1000"));
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
+        assert!(matches!(
+            Cli::parse_from(["rmng", "desktop", "w-cp", "middle-click"]).cmd,
+            Cmd::Desktop { cmd: DesktopCmd::MiddleClick { .. }, .. }
+        ));
+        assert!(matches!(
+            Cli::parse_from(["rmng", "desktop", "w-cp", "double-click"]).cmd,
+            Cmd::Desktop { cmd: DesktopCmd::DoubleClick { .. }, .. }
+        ));
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "move-window", "win1", "--mode", "maximize"]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Desktop { cmd: DesktopCmd::MoveWindow { ref id, .. }, .. } if id == "win1"
+        ));
     }
 
     #[test]
     fn desktop_click_accepts_both_rescale_flags() {
         let cli = Cli::parse_from([
-            "rmng",
-            "desktop",
-            "w-cp",
-            "click",
-            "500",
-            "500",
-            "--rescale-cursor",
-            "0-1000",
-            "--rescale-screen",
-            "1920x1080",
+            "rmng", "desktop", "w-cp", "click", "500", "500", "--rescale-cursor", "0-1000",
+            "--rescale-screen", "1920x1080",
         ]);
         match cli.cmd {
-            Cmd::Desktop {
-                cmd: DesktopCmd::Click { rescale, .. },
-                ..
-            } => {
+            Cmd::Desktop { cmd: DesktopCmd::Click { rescale, .. }, .. } => {
                 assert_eq!(rescale.rescale_cursor.as_deref(), Some("0-1000"));
                 assert_eq!(rescale.rescale_screen.as_deref(), Some("1920x1080"));
             }
@@ -699,20 +668,11 @@ mod tests {
 
     #[test]
     fn desktop_screenshot_accepts_rescale_screen_alone() {
-        // --rescale-screen is independent of --rescale-cursor; valid on its own.
         let cli = Cli::parse_from([
-            "rmng",
-            "desktop",
-            "w-cp",
-            "screenshot",
-            "--rescale-screen",
-            "1280x720",
+            "rmng", "desktop", "w-cp", "screenshot", "--rescale-screen", "1280x720",
         ]);
         match cli.cmd {
-            Cmd::Desktop {
-                cmd: DesktopCmd::Screenshot { rescale, .. },
-                ..
-            } => {
+            Cmd::Desktop { cmd: DesktopCmd::Screenshot { rescale, .. }, .. } => {
                 assert_eq!(rescale.rescale_screen.as_deref(), Some("1280x720"));
                 assert_eq!(rescale.rescale_cursor, None);
             }
@@ -721,60 +681,13 @@ mod tests {
     }
 
     #[test]
-    fn exec_separates_command_after_dashes() {
-        let cli = Cli::parse_from(["rmng", "exec", "c", "--", "ls", "-la"]);
-        match cli.cmd {
-            Cmd::Exec { clone, cmd, .. } => {
-                assert_eq!(clone, "c");
-                assert_eq!(cmd, vec!["ls".to_string(), "-la".to_string()]);
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn exec_repeated_env_accumulates_with_user_and_workdir() {
-        let cli = Cli::parse_from([
-            "rmng", "exec", "c", "-u", "root", "-w", "/srv", "-e", "A=1", "-e", "B=2", "--", "env",
-        ]);
-        match cli.cmd {
-            Cmd::Exec {
-                clone,
-                user,
-                workdir,
-                env,
-                cmd,
-            } => {
-                assert_eq!(clone, "c");
-                assert_eq!(user.as_deref(), Some("root"));
-                assert_eq!(workdir.as_deref(), Some("/srv"));
-                assert_eq!(env, vec!["A=1".to_string(), "B=2".to_string()]);
-                assert_eq!(cmd, vec!["env".to_string()]);
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn exec_requires_a_command() {
-        assert!(Cli::try_parse_from(["rmng", "exec", "c"]).is_err());
-    }
-
-    #[test]
     fn server_resolution_precedence() {
         assert_eq!(
             resolve_server(Some("http://flag:1/".into()), Some("http://env:2".into())),
             "http://flag:1"
         );
-        assert_eq!(
-            resolve_server(None, Some("http://env:2".into())),
-            "http://env:2"
-        );
+        assert_eq!(resolve_server(None, Some("http://env:2".into())), "http://env:2");
         assert_eq!(resolve_server(None, None), "http://localhost:9000");
-        // Blank values fall through rather than producing an empty base URL.
-        assert_eq!(
-            resolve_server(Some("  ".into()), None),
-            "http://localhost:9000"
-        );
+        assert_eq!(resolve_server(Some("  ".into()), None), "http://localhost:9000");
     }
 }

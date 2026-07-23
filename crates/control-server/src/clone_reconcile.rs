@@ -401,54 +401,63 @@ description: Use when you need to manage the RMNG clone fleet from inside a clon
 clone it auto-resolves the control-server (via `$RMNG_CONTROL_URL`), so commands work with no
 setup. It talks to the control-server's web API — it does NOT need Docker or root.
 
-Add `--json` to any command to get raw JSON (wire types) for scripting; human tables go to
-stdout, progress/prompts to stderr.
+The surface is **noun → verb**: `rmng <noun> <verb> [<clone>] [flags]`. Every command takes
+`--json` for machine-readable output (tables/prose go to stdout, progress/prompts to stderr;
+under `--json` even errors are JSON). The target is always the **clone id** — the first column
+of `rmng clone ls`.
 
 ## Inspect the fleet
 
-- `rmng ps` — list all hosts with live CPU, RAM, token totals, activity, and account group.
-  Sub hosts are shown indented under their parent.
-- `rmng ops` — list recent operations (clone / delete / archive / pull / commit / update).
-- `rmng wait <op-id> [--timeout <secs>]` — block until an operation reaches a terminal state.
+- `rmng clone ls` — list clones with live CPU, RAM, token totals, status, and account group.
+  Sub hosts are indented under their parent. `--json` gives one object per clone with `stats`
+  and `tokens` nested.
+- `rmng op ls` — list recent operations (clone / delete / archive / pull / commit / update).
+- `rmng op wait <op-id> [--timeout <secs>]` — block until an operation reaches a terminal state.
 
 ## Reach another clone
 
-- `rmng ssh <host>` — print a ready-to-paste `ssh` command for a clone.
-- `rmng exec <host> -- <argv…>` — run one non-interactive command inside another clone
-  (docker-exec style). Flags: `--user <uid|name>`, `--cwd <dir>`, `--env KEY=VAL` (repeatable).
-  Example: `rmng exec pega-we-142 -- ls -la /home/rmng`.
-- `rmng desktop <host> <verb>` — drive another clone's desktop for computer use (each action
-  returns a fresh screenshot). Verbs include `screenshot`, `monitors`, `windows`, `apps`,
-  `move X Y`, `click [X Y]`, `rclick`/`mclick`/`dclick`, plus type/key/scroll actions.
+- `rmng clone ssh <clone>` — print a ready-to-paste `ssh` command for a clone.
+- `rmng clone exec <clone> -- <argv…>` — run one non-interactive command inside another clone
+  (docker-exec style). Flags: `-u <user>`, `-w <dir>`, `-e KEY=VAL` (repeatable). Passes through
+  the command's exit code. Example: `rmng clone exec pega-we-142 -- ls -la /home/rmng`.
+- `rmng desktop <clone> <verb>` — drive another clone's desktop for computer use (each action
+  returns a fresh screenshot; add `--json` for `{screenshot, text}`). Verbs: `screenshot`,
+  `monitors`, `windows`, `apps`, `move X Y`, `click [X Y]`, `right-click`, `middle-click`,
+  `double-click`, `scroll`, `key <chord>`, `type <text>`, `launch <id>`, `move-window <id>`.
   Example: `rmng desktop pega-we-142 screenshot`.
 
 ## Create / retire clones
 
-- `rmng clone --image <ref> --hostname <name>` — create a clone under an exact hostname
-  (a DNS label). **Run from inside a clone, the new clone auto-nests as a sub host under you
-  AND inherits your account group and env preset by default** — so a helper you spin up joins
-  the same pool/preset with no flags. Override with:
-  - `--preset <name|none>` — use a different env preset, or `none` for no preset.
-  - `--group <name|none>` — bind a different account group, or `none` for no group.
-  - `--top-level` — create a top-level host instead of a sub host (also skips inheritance).
-  - `--parent <host-id>` — nest under a specific top-level clone (inherits that parent's
-    group/preset).
+- `rmng clone create <hostname> --from <image>` — create a clone under an exact hostname
+  (a DNS label), from an image (`rmng image ls` lists valid references). **Run from inside a
+  clone, the new clone auto-nests as a sub host under you AND inherits your account group and
+  env preset by default** — a helper you spin up joins the same pool/preset with no flags.
+  Override with:
+  - `--preset <name>` / `--no-preset` — a different preset, or none.
+  - `--group <name>` / `--no-group` — a different account group, or none.
+  - `--top-level` — a top-level clone instead of a sub host (also skips inheritance).
+  - `--parent <clone>` — nest under a specific top-level clone (inherits that parent's group/preset).
   - `--headless` — no desktop (tmux view instead of a video stream).
-  Add `--wait` to block until it's ready. `rmng image ls` lists valid `--image` references.
-- `rmng rm <host> [--yes]` — destroy a clone (prompts unless `--yes`; also removes its sub hosts).
-- `rmng archive <host>` / `rmng restore <host>` — stop-and-retain, then bring back.
+  Add `--wait` to block until it's ready.
+- `rmng clone rm <clone> [-y]` — destroy a clone (prompts unless `-y`; also removes its sub hosts).
+  Non-interactive callers MUST pass `-y`.
+- `rmng clone archive <clone>` / `rmng clone restore <clone>` — stop-and-retain, then bring back.
+- `rmng clone bind <clone> <group>` / `rmng clone bind <clone> --none` — (re)bind or clear a
+  clone's account group.
 
 ## Images & accounts
 
-- `rmng image ls` — list clone-source images. `rmng image pull <ref>` / `rmng image commit …`.
-- `rmng account …` — list imported accounts / bind an account group.
+- `rmng image ls` — list clone-source images. `rmng image pull [ref]`,
+  `rmng image commit <clone> --as <name>`, `rmng image rm <ref>`.
+- `rmng account ls [--provider claude|codex|gemini]` — list imported accounts + usage windows.
 
 ## Tips
 
-- Prefer `rmng exec <host> -- …` over hand-rolled SSH when you just need to run one command
-  elsewhere.
-- Everything is addressed by **host id** (the value in the first column of `rmng ps`).
-- On any connection error, `rmng` prints the resolved server URL and a `--server` hint.
+- Prefer `rmng clone exec <clone> -- …` over hand-rolled SSH when you just need to run one
+  command elsewhere.
+- Everything is addressed by **clone id** (the first column of `rmng clone ls`).
+- `rmng clone select <clone>` points the operator's *viewer* at a clone — it does NOT change
+  which clone your other commands target.
 "#;
 
 /// The `rmng-cli` skill TarEntries: the same SKILL.md at both skill locations.
@@ -1506,7 +1515,7 @@ mod tests {
             assert_eq!((e.uid, e.gid), (1000, 1000));
             let body = String::from_utf8(e.data.clone()).unwrap();
             assert!(body.starts_with("---\nname: rmng-cli\n"), "SKILL.md needs skill frontmatter");
-            assert!(body.contains("rmng ps") && body.contains("rmng exec"));
+            assert!(body.contains("rmng clone ls") && body.contains("rmng clone exec"));
         }
         // The prepare script creates both skill directories.
         let prep = codex_prepare_script();

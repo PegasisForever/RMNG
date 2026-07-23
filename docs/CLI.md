@@ -4,7 +4,7 @@ The `rmng` binary ([crates/cli](../crates/cli/README.md), package `rmng-cli`) is
 management surface: hosts, clones, images, account groups and imported accounts, and operations, all over
 the control-server's **port-2 web API** (via [control-client](../crates/control-client/README.md)).
 It also carries the **operator/fleet desktop control** (`rmng desktop`, folded in from the
-retired global MCP) and a docker-exec-style **`rmng exec`** — both reach clones through the
+retired global MCP) and a docker-exec-style **`rmng clone exec`** — both reach clones through the
 same web API, which proxies to the clone's daemon MCP / Docker exec. What stays elsewhere:
 the **in-clone** agent's own desktop automation is the daemon MCP's job ([MCP.md](MCP.md)),
 host-agent chat is the web API's (`/api/chat/:id`, [API.md](API.md#per-host-agent-chat)), and
@@ -34,30 +34,32 @@ CLIProxyAPI endpoint. The clone reconciler refreshes those files on old running 
 
 ## Server resolution
 
-`--server <URL>` > `$RMNG_CONTROL_URL` > `http://localhost:9000`. The environment variable is
-an optional operator convenience; clones no longer receive it automatically, so invoke the CLI
-with `--server` when the control-server is not local. Blank values fall through; a trailing `/`
-is stripped. A connection failure prints the resolved base with a `set --server or
+`--server <URL>` > `$RMNG_CONTROL_URL` > `http://localhost:9000`. The control-server sets
+`RMNG_CONTROL_URL` in every clone's `/etc/environment`, so a bare `rmng …` inside a clone
+auto-resolves the server with no `--server`. Blank values fall through; a trailing `/` is
+stripped. A connection failure prints the resolved base with a `set --server or
 $RMNG_CONTROL_URL` hint.
 
 ## Global flags & output
 
 - `--server <URL>` — control-server web-API origin (e.g. `http://rmng-control:9000`).
-- `--json` — emit the raw **wire JSON verbatim** (pretty-printed) instead of a table. The
-  shapes are the [`wire`](../crates/wire/src/control.rs) types exactly — no CLI-specific
-  schema. Progress lines, prompts, and warnings go to **stderr**, so stdout stays clean for
-  piping.
+- `--json` — machine-readable JSON, honored by **every** command (progress/prompts/warnings go
+  to stderr, so stdout stays clean). Most commands emit the [`wire`](../crates/wire/src/control.rs)
+  types verbatim; the exceptions carry a small CLI-owned shape (below). Under `--json`, **errors
+  are JSON too** — `{"error": {"message", "hint"}}` on stderr, with the same exit codes.
 
 | Command (with `--json`) | Emits |
 |---|---|
-| `ps`, `select` | `ControlState` |
-| `clone`, `rm`, `archive`, `restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
-| `wait` | the terminal `Operation` |
-| `ops` | `Operation[]` |
+| `clone ls` | `{ selected, clones: [Host + {stats, tokens}], operations }` (CLI shape — includes the metrics the table shows) |
+| `clone select`, `clone bind` | small status object (`{selected}` / the `{ok, group}` reply) |
+| `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
+| `clone create`, `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
+| `op wait` | the terminal `Operation` |
+| `op ls` | `Operation[]` |
 | `image ls` | `ImageInfo[]` |
 | `account ls` | `ClaudeUsage[]` |
-| `account bind` | the API reply `{ok, group}` |
 | `image rm` | `{ok: true}` |
+| `desktop` (screenshot/action) | `{ screenshot: <path>, text? }`; query verbs → the tool's JSON |
 
 ## Exit codes
 
@@ -67,86 +69,79 @@ $RMNG_CONTROL_URL` hint.
 | `1` | API / transport error (also: `rm` confirmation declined) |
 | `2` | usage error (clap) |
 | `3` | the waited-on operation ended in **Error** |
-| `4` | `--wait` / `wait` timed out |
+| `4` | `--wait` / `op wait` timed out |
 
 ## Commands
 
-### `rmng ps`
-Hosts table: `ID` (a `*` suffix marks the selected host), `IP` (the current Docker bridge
-address when available), `IMAGE` (source reference), `PRESET` (the clone's creation preset),
-`GROUP` (its CLIProxyAPI account pool), live `CPU` and `RAM`, cache-excluded cumulative `TOK-IN`,
-generated cumulative `TOK-OUT`, and lifecycle `STATUS`.
+The surface is **noun → verb**. Nouns: `clone`, `image`, `account`, `op`, `desktop`. The target
+is always a positional **clone id** (the first column of `rmng clone ls`).
 
-CPU/RAM are one-shot volatile snapshots for sampled active managed clones; missing readings render
-as `-`. RAM is used/limit, or used only when the cgroup limit is unavailable. Token totals can
-remain visible after archive/restore. Status is server-owned `working`, `idle`, `offline`, or
-`archived`; `-` means the clone has not yet been sampled or is unmanaged. `rmng ps --json` remains
-the raw `ControlState` document and intentionally excludes volatile metrics.
+### `rmng clone ls`
+Clones table: `ID` (a `*` suffix marks the selected clone), `IP` (the current Docker bridge
+address when available), `IMAGE` (source reference), `PRESET`, `GROUP` (its CLIProxyAPI account
+pool), live `CPU` and `RAM`, cumulative `TOK-IN` / `TOK-OUT`, and lifecycle `STATUS`. Sub hosts
+are indented under their parent. CPU/RAM are volatile snapshots for sampled active managed clones.
+`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Host + {stats, tokens}],
+operations }` — so the metrics the table shows are available to a machine reader too.
 
-### `rmng select <host|none>`
-Point the operator's viewer at a host (`POST /api/activate`); `none` clears the selection.
-An unknown host id errors (exit 1) with a pointer to `rmng ps`.
-
-### `rmng clone --image <REF> --hostname <H> [--group <GROUP>] [--preset <P>] [--wait] [--timeout <N>]`
-Create a clone under an **exact hostname** (a DNS label; `400` if taken) — the `POST
-/api/clone` hostname mode: no ticket, no kickoff message. `--group` binds the clone to one
-provider-agnostic CLIProxyAPI account pool; omit it (or use `none`) for no inference binding.
-The server rejects an unknown group. `--preset` names an env preset (optional — fleet workers
-usually need none). Prints the started op id (follow with `rmng wait <op-id>`), or blocks until
-done with `--wait`.
+### `rmng clone create <HOSTNAME> --from <IMAGE> [--group <G>|--no-group] [--preset <P>|--no-preset] [--headless] [--parent <C>|--top-level] [--wait] [--timeout <N>]`
+Create a clone under an **exact hostname** (a DNS label; `400` if taken). **Run from inside a
+clone, the new clone auto-nests as a sub host under the caller AND inherits the caller's account
+group + env preset by default.** Overrides: `--group <name>`/`--no-group`, `--preset
+<name>`/`--no-preset`, `--parent <clone>` (nest under a specific top-level clone), `--top-level`
+(force top-level, skipping inheritance). `--from` names the clone-source image (`rmng image ls`).
+Prints the started op id (follow with `rmng op wait <op-id>`), or blocks with `--wait`.
 
 ```sh
-rmng clone --image pegasis0/rmng-template:latest --hostname w-cp --group pooled --wait
+rmng clone create w-cp --from pegasis0/rmng-template:latest --wait
 ```
 
-### `rmng rm <host> [-y|--yes] [--wait] [--timeout <N>]`
-Destroy a clone (container + volumes). Asks `[y/N]` on stderr unless `--yes`; declining
-exits 1. **Refuses to run non-interactively without `--yes`** (stdin not a terminal).
+### `rmng clone rm <CLONE> [-y|--yes] [--wait] [--timeout <N>]`
+Destroy a clone (container + volumes; cascades to its sub hosts). Asks `[y/N]` on stderr unless
+`-y`; declining exits 1. **Refuses to run non-interactively without `-y`** (stdin not a terminal).
 
-### `rmng archive <host> [--wait] [--timeout <N>]`
-Gracefully stop a managed clone while retaining its container, volumes, notes, and chat history.
-This is reversible and needs no confirmation. The resulting `archive` operation can be followed
-with `rmng wait` or awaited inline with `--wait`.
+### `rmng clone archive <CLONE>` / `rmng clone restore <CLONE>` `[--wait] [--timeout <N>]`
+Stop a managed clone while retaining its container/volumes/notes/chat, then restart it later.
+Reversible, no confirmation. The server refuses unknown / unmanaged / already-in-state clones.
 
-### `rmng restore <host> [--wait] [--timeout <N>]`
-Restart a retained archived clone. `unarchive` is an alias. The server refuses unknown,
-unmanaged, already-active, or concurrently operated clones.
+### `rmng clone ssh <CLONE>`
+Print the ready-to-paste `ssh` command for a usable managed clone (working/idle/not-yet-sampled).
+From inside a clone it prints a direct command; otherwise a bastion jump. Unmanaged/archived/
+offline clones are refused. `--json` → `{ command, mode }`.
 
-### `rmng ssh <host>`
-Print the ready-to-paste bastion-jump command only for a managed clone whose endpoint is usable:
-working, idle, and not-yet-sampled clones are accepted. Unmanaged, archived, and explicitly
-offline clones are refused instead of printing a command known not to work. Restore an archived
-clone first. When `ssh.publicHost` is unset, the CLI warns on stderr and makes a best-effort
-address guess from its control-server URL.
+### `rmng clone exec <CLONE> [-u <user>] [-w <dir>] [-e KEY=VAL]… -- <cmd…>`
+Run one non-interactive command inside a clone (docker-exec style); forwards piped stdin and
+passes through the command's exit code. `--json` emits one object with the captured streams.
+
+### `rmng clone bind <CLONE> <GROUP>` / `rmng clone bind <CLONE> --none`
+(Re)bind a clone to one provider-agnostic account group (`POST /api/hosts/:id/group`), or clear
+it with `--none`. Pure routing change; account onboarding/refresh stays frontend/API.
+
+### `rmng clone select <CLONE>` / `rmng clone select --none`
+Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears it. **Operator-only
+— it does not change which clone your other commands target.** Unknown id errors (exit 1).
 
 ### `rmng image ls|pull|commit|rm`
 - `image ls` — clone-source images: `REFERENCE ID SIZE CREATED BASE FROM IN-USE-BY`.
-- `image pull [reference] [--wait]` — pull the clone template from a registry; no reference
-  = the configured `docker.templateReference`.
-- `image commit <host> <name> [--wait]` — commit a running clone to a new clone-source
-  image `<name>:latest`.
+- `image pull [reference] [--wait]` — pull the clone template; no reference = the configured
+  `docker.templateReference`.
+- `image commit <CLONE> --as <NAME> [--wait]` — commit a running clone to `<name>:latest`.
 - `image rm <reference>` — remove a clone-source image (`409` while clones use it).
 
-### `rmng account ls [--claude|--codex|--gemini]`
+### `rmng account ls [--provider claude|codex|gemini]`
 Read-only listing of imported accounts and usage windows: `GROUP EMAIL PROVIDER ASSIGNABLE 5H
-5H-RESETS 7D FABLE ERROR`. All providers are shown by default; provider filters conflict. Gemini
-(Antigravity) can be a presence-only row because its upstream does not expose pollable quota.
+5H-RESETS 7D FABLE ERROR`. All providers by default; `--provider` filters to one. Gemini
+(Antigravity) can be a presence-only row (its upstream exposes no pollable quota).
 
-### `rmng account bind <host> <group|none>`
-Bind a managed clone to one provider-agnostic account group (`POST /api/hosts/:id/group`), or
-clear its inference binding with `none`. This is a pure routing change; account creation,
-deletion, OAuth onboarding, usage refresh, and provider selection remain frontend/API
-responsibilities. `account swap` remains an alias for compatibility.
+### `rmng op ls`
+The current `operations[]`: in-flight + recently-finished clone/delete/archive/restore/pull/
+commit/update jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are pruned quickly.
 
-### `rmng ops`
-The current `operations[]`: in-flight + recently-finished clone/delete/archive/unarchive/pull/
-commit/update jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are pruned quickly — see below.
+### `rmng op wait <op-id> [--timeout <N>]`
+Block until an operation reaches a terminal state (default timeout 600 s). Same semantics as
+`--wait` on the starting command.
 
-### `rmng wait <op-id> [--timeout <N>]`
-Block until an operation reaches a terminal state (default timeout 600 s). Same semantics
-as `--wait` on the starting command.
-
-### `rmng desktop <clone> <verb>` (alias `dt`)
+### `rmng desktop <clone> <verb>`
 Drive any clone's desktop from an operator machine. The clone id is the first positional;
 each verb maps 1:1 to a daemon-MCP tool, forwarded by the control-server to that clone's
 daemon MCP (`http://{clone}:9004`). This is the operator-facing replacement for the retired
@@ -160,23 +155,23 @@ global MCP — see [MCP.md](MCP.md).
 | `apps` | — | `list_apps` | installed launcher apps |
 | `move` | `X Y [--monitor N] [--out PATH]` | `mouse_move` | eased glide to `x,y` |
 | `click` | `[X Y] [--monitor N] [--out PATH]` | `left_click` | optional glide, then left click |
-| `rclick` | `[X Y] [--monitor N] [--out PATH]` | `right_click` | right click |
-| `mclick` | `[X Y] [--monitor N] [--out PATH]` | `middle_click` | middle click |
-| `dclick` | `[X Y] [--monitor N] [--out PATH]` | `left_double_click` | left double-click |
+| `right-click` | `[X Y] [--monitor N] [--out PATH]` | `right_click` | right click |
+| `middle-click` | `[X Y] [--monitor N] [--out PATH]` | `middle_click` | middle click |
+| `double-click` | `[X Y] [--monitor N] [--out PATH]` | `left_double_click` | left double-click |
 | `scroll` | `AMOUNT [X Y] [--monitor N] [--out PATH]` | `scroll` | `amount` vertical notches |
 | `key` | `"ctrl+c" [--out PATH]` | `key` | press a key combo |
 | `type` | `"some text" [--out PATH]` | `type` | type a Unicode string |
-| `launch` | `firefox.desktop [--out PATH]` | `launch_app` | launch an app by `.desktop` id |
-| `movewin` | `<win-id> [--monitor N] [--mode maximize\|center-half] [--out PATH]` | `move_window` | move/place a window |
+| `launch` | `firefox.desktop` | `launch_app` | launch an app by `.desktop` id |
+| `move-window` | `<win-id> [--monitor N] [--mode maximize\|center-half]` | `move_window` | move/place a window |
 
-**Screenshot on every action.** Every **action verb** (`move`, `click`, `rclick`, `mclick`,
-`dclick`, `scroll`, `key`, `type`, `launch`, `movewin`) — plus `screenshot` itself — always
-produces a post-action JPEG: the CLI writes it to a file and prints the file's **absolute
-path** on stdout, so the calling agent can `Read` it. Most action tools return the daemon's
-settle-screenshot inline; for tools whose result carries no image (`type`, `launch`,
-`movewin`) the CLI issues a follow-up `screenshot` (monitor `0` or `--monitor N`) so the
-guarantee holds uniformly, printing any text/JSON result before the path. **Query verbs**
-(`monitors`, `windows`, `apps`) print their JSON result and take no screenshot.
+**Screenshot on every action.** Every **action verb** (`move`, `click`, `right-click`,
+`middle-click`, `double-click`, `scroll`, `key`, `type`, `launch`, `move-window`) — plus
+`screenshot` itself — always produces a post-action JPEG: the CLI writes it to a file and prints
+the file's **absolute path** on stdout (or `{screenshot, text}` under `--json`), so the calling
+agent can `Read` it. Most action tools return the daemon's settle-screenshot inline; for tools
+whose result carries no image (`type`, `launch`, `move-window`) the CLI issues a follow-up
+`screenshot`. **Query verbs** (`monitors`, `windows`, `apps`) print their JSON result and take no
+screenshot.
 
 - `--monitor N` — which monitor to act on / screenshot (default `0`).
 - `--out PATH` — where to write the JPEG. Default `$TMPDIR/rmng-<clone>-mon<N>.jpg`
@@ -184,14 +179,14 @@ guarantee holds uniformly, printing any text/JSON result before the path. **Quer
 
 ```sh
 rmng desktop w-cp-claude screenshot          # → prints /tmp/rmng-w-cp-claude-mon0.jpg
-rmng dt w-cp-claude click 640 480            # click, then prints the settle screenshot path
-rmng dt w-cp-claude type "hello"             # types, follow-up screenshot, prints path
-rmng dt w-cp-claude windows                  # prints JSON, no screenshot
+rmng desktop w-cp-claude click 640 480       # click, then prints the settle screenshot path
+rmng desktop w-cp-claude type "hello"        # types, follow-up screenshot, prints path
+rmng desktop w-cp-claude windows             # prints JSON, no screenshot
 ```
 
-### `rmng exec <clone> [-u|--user USER] [-w|--workdir DIR] [-e|--env KEY=VAL ...] -- <cmd> [args...]`
+### `rmng clone exec <clone> [-u|--user USER] [-w|--workdir DIR] [-e|--env KEY=VAL ...] -- <cmd> [args...]`
 Run a **single non-interactive** command inside a clone, docker-exec style (no TTY). The
-control-server runs it via the Docker exec primitive; `rmng ssh` covers interactive sessions.
+control-server runs it via the Docker exec primitive; `rmng clone ssh` covers interactive sessions.
 
 - `--` separates rmng's own flags from the command argv; everything after it is the command.
 - `-u|--user USER` — user to run as. Default **uid `1000`** (the clone's agent user — the
@@ -199,20 +194,20 @@ control-server runs it via the Docker exec primitive; `rmng ssh` covers interact
 - `-w|--workdir DIR` — working directory for the command.
 - `-e|--env KEY=VAL` — set an env var; **repeatable** (accumulates).
 - **stdin passthrough:** a non-terminal stdin is read and forwarded, so
-  `echo hi | rmng exec c -- cat` works.
+  `echo hi | rmng clone exec c -- cat` works.
 - Command **stdout → CLI stdout**, **stderr → CLI stderr** (kept separate), and the CLI
   **exits with the command's own exit code**.
 - Global `--json` — emit one `{exit_code, stdout, stderr}` object instead of splitting the
   streams onto stdout/stderr.
 
 ```sh
-rmng exec w-cp-claude -- echo hi                      # stdout "hi", exit 0
-rmng exec w-cp-claude -w /home/rmng -e FOO=bar -- env # runs `env` with FOO=bar in /home/rmng
-echo hi | rmng exec w-cp-claude -- cat                # stdin passthrough
-rmng exec w-cp-claude --json -- false                 # {"exit_code":1,"stdout":"","stderr":""}
+rmng clone exec w-cp-claude -- echo hi                      # stdout "hi", exit 0
+rmng clone exec w-cp-claude -w /home/rmng -e FOO=bar -- env # runs `env` with FOO=bar in /home/rmng
+echo hi | rmng clone exec w-cp-claude -- cat                # stdin passthrough
+rmng clone exec w-cp-claude --json -- false                 # {"exit_code":1,"stdout":"","stderr":""}
 ```
 
-## Wait semantics (`--wait` / `wait`)
+## Wait semantics (`--wait` / `op wait`)
 
 Waiting rides the **`/events` SSE stream**, not polling: the server **prunes** finished ops
 from state shortly after they settle (**8 s** after `Done`, **60 s** after `Error` —
@@ -226,4 +221,4 @@ printed to stderr whenever the step or whole-percent changes.
 - **Vanished** — the op disappeared without a terminal frame (broadcast-channel lag, an op
   already pruned before the first frame, or the SSE stream ending under a server restart):
   reported as a **warning + exit 0** — overwhelmingly the Done-prune corner.
-- **Timeout** → exit 4 (the op may still be running — check `rmng ops`).
+- **Timeout** → exit 4 (the op may still be running — check `rmng op ls`).

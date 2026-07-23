@@ -184,8 +184,8 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
                 "1".to_string(),
             ));
             // The fleet `rmng` CLI's control-server base URL, so a clone can run `rmng …`
-            // without `--server` — a bare `rmng ps`/`rmng ssh`/`rmng clone …` (the latter
-            // spawning a sub host) just works. The CLI resolves `--server` >
+            // without `--server` — a bare `rmng clone ls`/`rmng clone ssh`/`rmng clone create …`
+            // (the latter spawning a sub host) just works. The CLI resolves `--server` >
             // `$RMNG_CONTROL_URL` > `http://localhost:9000`; inside a clone `localhost:9000`
             // is unreachable, so this points it at the same `rmng-control` route the agents
             // already use (the router URL above).

@@ -74,7 +74,7 @@ headless: boolean,
 /**
  * The id of this host's parent, when it is a sub host. One level deep only — a host
  * that has a parent is never itself a parent. `None` = top-level. Purely cosmetic
- * grouping in the sidebar and `rmng ps`; a sub host is otherwise an ordinary managed
+ * grouping in the sidebar and `rmng clone ls`; a sub host is otherwise an ordinary managed
  * clone (its own group binding, router key, tokens, and video). Cascade-deleted with
  * its parent.
  */

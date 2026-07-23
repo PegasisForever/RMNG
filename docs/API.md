@@ -102,7 +102,7 @@ legacy `"bootstrap"` op still loads, aliased onto `pull`), `target`, `source`, `
 The same `/events` connection multiplexes a second, named SSE event: `stats`, a live
 `{ <hostId>: ContainerStats }` map for running **managed** clones only (a stopped or
 unmanaged host contributes no entry). `GET /api/stats` returns the exact latest snapshot for
-one-off clients such as `rmng ps`; it does not wait for a monitor tick. `ContainerStats`
+one-off clients such as `rmng clone ls`; it does not wait for a monitor tick. `ContainerStats`
 ([control.rs](../crates/wire/src/control.rs)):
 `cpuPct` (percentage of total host CPU capacity — 100 == every available core busy), plus
 `memUsed`/`memLimit` in bytes. `memUsed` is RAM with reclaimable file cache excluded, plus
@@ -123,7 +123,7 @@ clones: `newInputTokens` excludes cache-read tokens, `outputTokens` includes gen
 and `requestCount` is the number of responses with newly observed token use. A new subscriber
 receives the latest map immediately, then a push only when a record changes. The control-server
 persists the aggregate counters privately in `clone-tokens.json`; the map does not carry request
-data, account identity, cache buckets, or last-activity timestamps. The dashboard and `rmng ps`
+data, account identity, cache buckets, or last-activity timestamps. The dashboard and `rmng clone ls`
 show cache-excluded input and generated-output totals.
 
 ### `lxcStats` event

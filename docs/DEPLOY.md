@@ -331,7 +331,7 @@ one public key list, installed on both the bastion and every clone.
 
 - **From a clone's row in the UI**: click **Copy SSH command**, then paste into a terminal and
   hit enter.
-- **From the CLI**: `rmng ssh <clone-id>` prints the same ready-to-paste command (see
+- **From the CLI**: `rmng clone ssh <clone-id>` prints the same ready-to-paste command (see
   [CLI.md](CLI.md)).
 - Either way the command is:
 
