@@ -51,6 +51,13 @@ pub enum Cmd {
         /// Headless clone: no desktop; the viewer shows a tmux tab view instead of a stream
         #[arg(long)]
         headless: bool,
+        /// Create as a sub host under this parent host id (must be a top-level clone).
+        /// Overrides the default caller auto-detection. Conflicts with --top-level.
+        #[arg(long, conflicts_with = "top_level")]
+        parent: Option<String>,
+        /// Force a top-level host even when run from inside a clone (skip auto-detection).
+        #[arg(long)]
+        top_level: bool,
         #[command(flatten)]
         wait: WaitArgs,
     },
@@ -437,6 +444,8 @@ mod tests {
                 group,
                 preset,
                 headless,
+                parent,
+                top_level,
                 wait,
             } => {
                 assert_eq!(image, "hyperhost-worker:latest");
@@ -444,11 +453,21 @@ mod tests {
                 assert_eq!(group.as_deref(), Some("pooled"));
                 assert_eq!(preset, None);
                 assert!(!headless);
+                assert_eq!(parent, None);
+                assert!(!top_level);
                 assert!(wait.wait);
                 assert_eq!(wait.timeout, 120);
             }
             other => panic!("wrong cmd: {other:?}"),
         }
+        // --parent and --top-level are mutually exclusive.
+        assert!(
+            Cli::try_parse_from([
+                "rmng", "clone", "--image", "i:latest", "--hostname", "w-x", "--parent", "w-p",
+                "--top-level",
+            ])
+            .is_err()
+        );
         assert!(
             Cli::try_parse_from([
                 "rmng",

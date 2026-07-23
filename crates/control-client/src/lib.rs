@@ -156,6 +156,12 @@ impl Client {
 
     /// Raw hostname clone (`POST /api/clone` hostname mode) with an optional account-group
     /// binding and env preset. `none`/blank group input intentionally clears the binding.
+    ///
+    /// Sub hosts: `top_level` forces a top-level host; an explicit `parent` id nests under that
+    /// clone; otherwise the server auto-detects the caller from the `X-RMNG-Proxy-Key` header,
+    /// which we populate from this process's own `RMNG_PROXY_KEY` env var (present when `rmng`
+    /// runs inside a clone) so a clone spawning a clone gets a sub host with no flags.
+    #[allow(clippy::too_many_arguments)]
     pub async fn clone_host(
         &self,
         image: &str,
@@ -163,6 +169,8 @@ impl Client {
         group: Option<&str>,
         preset: Option<&str>,
         headless: bool,
+        parent: Option<&str>,
+        top_level: bool,
     ) -> Result<Operation> {
         let mut body = json!({ "image": image, "hostname": hostname });
         let obj = body.as_object_mut().unwrap();
@@ -178,7 +186,20 @@ impl Client {
         if headless {
             obj.insert("headless".into(), json!(true));
         }
-        let v: Value = self.post_json("/api/clone", &body).await?;
+        if let Some(parent) = parent.map(str::trim).filter(|p| !p.is_empty()) {
+            obj.insert("parent".into(), json!(parent));
+        }
+        if top_level {
+            obj.insert("topLevel".into(), json!(true));
+        }
+        let mut req = self.http.post(format!("{}/api/clone", self.base)).json(&body);
+        if let Some(key) = std::env::var("RMNG_PROXY_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+        {
+            req = req.header("X-RMNG-Proxy-Key", key);
+        }
+        let v: Value = Self::check(req.send().await?).await?.json().await?;
         Ok(serde_json::from_value(
             v.get("op")
                 .cloned()

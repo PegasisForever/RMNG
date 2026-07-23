@@ -1,6 +1,8 @@
 import {
   closestCenter,
   DndContext,
+  type DraggableAttributes,
+  type DraggableSyntheticListeners,
   type DragEndEvent,
   KeyboardSensor,
   PointerSensor,
@@ -11,9 +13,12 @@ import {
   arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
+  useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { Settings } from "lucide-react";
+import { type CSSProperties, type ReactNode, useState } from "react";
 
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
@@ -50,6 +55,74 @@ export function partitionHosts(hosts: Host[]): { activeHosts: Host[]; archivedHo
 export function mergeActiveHostOrder(hosts: Host[], activeOrder: string[]): string[] {
   const nextActive = [...activeOrder];
   return hosts.map((host) => (host.archived ? host.id : (nextActive.shift() ?? host.id)));
+}
+
+/** Split active hosts into a one-level tree: top-level rows (parentless, or whose parent is
+ *  not itself an active host — so a child of an archived/deleted parent still shows) and a
+ *  parent-id → sub-hosts map, both preserving the incoming order. */
+export function groupSubHosts(activeHosts: Host[]): {
+  topLevel: Host[];
+  childrenByParent: Map<string, Host[]>;
+} {
+  const activeIds = new Set(activeHosts.map((h) => h.id));
+  const isChild = (h: Host) => !!h.parent && activeIds.has(h.parent);
+  const topLevel = activeHosts.filter((h) => !isChild(h));
+  const childrenByParent = new Map<string, Host[]>();
+  for (const h of activeHosts) {
+    if (isChild(h)) {
+      const arr = childrenByParent.get(h.parent as string) ?? [];
+      arr.push(h);
+      childrenByParent.set(h.parent as string, arr);
+    }
+  }
+  return { topLevel, childrenByParent };
+}
+
+/** Flatten a reordered top-level id list back into a full active-host order, keeping each
+ *  parent's sub hosts directly under it (sub hosts are never independently reordered). */
+export function flattenTreeOrder(
+  topLevelOrder: string[],
+  childrenByParent: Map<string, Host[]>,
+): string[] {
+  return topLevelOrder.flatMap((id) => [
+    id,
+    ...(childrenByParent.get(id)?.map((c) => c.id) ?? []),
+  ]);
+}
+
+/** The sortable unit is the whole group — a top-level host plus its (expanded) sub hosts —
+ *  so `setNodeRef`/`transform` wrap all of them and a drag moves them together. The parent
+ *  card receives the drag activator props (via the render prop) so grabbing it drags the group;
+ *  sub hosts render inside and are not independently draggable. */
+function SortableHostGroup({
+  id,
+  disabled,
+  children,
+}: {
+  id: string;
+  disabled: boolean;
+  children: (drag: {
+    dragAttributes: DraggableAttributes;
+    dragListeners: DraggableSyntheticListeners;
+    dragging: boolean;
+  }) => ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id,
+    disabled,
+  });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    // `position: relative` so the raised z-index lifts the dragged group above sibling rows.
+    position: "relative",
+    zIndex: isDragging ? 50 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style}>
+      {children({ dragAttributes: attributes, dragListeners: listeners, dragging: isDragging })}
+    </div>
+  );
 }
 
 export interface SidebarProps {
@@ -151,22 +224,73 @@ export function Sidebar({
   const opForHost = (id: string) =>
     operations.find((o) => o.target === id && o.status === "running");
   const { activeHosts, archivedHosts } = partitionHosts(hosts);
+  const { topLevel, childrenByParent } = groupSubHosts(activeHosts);
   const lxcUsage = formatLxcUsage(lxcStats);
+
+  // Sub hosts are collapsed by default; this holds the parent ids whose children are expanded.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const toggleExpand = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
+  // Only top-level hosts are drag-reorderable; a reorder keeps each parent's sub hosts under it.
   function onDragEnd(event: DragEndEvent) {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const ids = activeHosts.map((host) => host.id);
+    const ids = topLevel.map((host) => host.id);
     const oldIndex = ids.indexOf(String(active.id));
     const newIndex = ids.indexOf(String(over.id));
     if (oldIndex < 0 || newIndex < 0) return;
-    onReorder(mergeActiveHostOrder(hosts, arrayMove(ids, oldIndex, newIndex)));
+    const nextTop = arrayMove(ids, oldIndex, newIndex);
+    onReorder(mergeActiveHostOrder(hosts, flattenTreeOrder(nextTop, childrenByParent)));
   }
+
+  // One SidebarHost row. `isChild` indents it. `drag` (only for a draggable top-level row) carries
+  // the enclosing group's activator props so grabbing the card drags the whole group.
+  const hostRow = (
+    host: Host,
+    isChild: boolean,
+    drag?: {
+      dragAttributes: DraggableAttributes;
+      dragListeners: DraggableSyntheticListeners;
+      dragging: boolean;
+    },
+  ) => (
+    <SidebarHost
+      key={host.id}
+      host={host}
+      stats={stats[host.id]}
+      tokenUsage={tokens[host.id]}
+      forwardRuntime={forwards[host.id]}
+      sshPublicHost={sshPublicHost}
+      bastionPort={bastionPort}
+      selected={selectedId === host.id}
+      op={opForHost(host.id)}
+      isChild={isChild}
+      childCount={isChild ? 0 : (childrenByParent.get(host.id)?.length ?? 0)}
+      expanded={expanded.has(host.id)}
+      onToggleExpand={() => toggleExpand(host.id)}
+      dragAttributes={drag?.dragAttributes}
+      dragListeners={drag?.dragListeners}
+      dragging={drag?.dragging}
+      onSelect={() => onSelectHost(host)}
+      onCommit={() => onCommitHost(host)}
+      onDelete={() => onDeleteHost(host)}
+      onChangeAccount={() => onChangeAccountHost(host)}
+      onPortForward={() => onPortForwardHost(host)}
+      onArchive={() => onArchiveHost(host)}
+      onUnarchive={() => onUnarchiveHost(host)}
+    />
+  );
 
   return (
     <aside
@@ -261,30 +385,29 @@ export function Sidebar({
             onDragEnd={onDragEnd}
           >
             <SortableContext
-              items={activeHosts.map((host) => host.id)}
+              items={topLevel.map((host) => host.id)}
               strategy={verticalListSortingStrategy}
             >
               <div>
-                {activeHosts.map((host) => (
-                  <SidebarHost
-                    key={host.id}
-                    host={host}
-                    stats={stats[host.id]}
-                    tokenUsage={tokens[host.id]}
-                    forwardRuntime={forwards[host.id]}
-                    sshPublicHost={sshPublicHost}
-                    bastionPort={bastionPort}
-                    selected={selectedId === host.id}
-                    op={opForHost(host.id)}
-                    onSelect={() => onSelectHost(host)}
-                    onCommit={() => onCommitHost(host)}
-                    onDelete={() => onDeleteHost(host)}
-                    onChangeAccount={() => onChangeAccountHost(host)}
-                    onPortForward={() => onPortForwardHost(host)}
-                    onArchive={() => onArchiveHost(host)}
-                    onUnarchive={() => onUnarchiveHost(host)}
-                  />
-                ))}
+                {topLevel.map((host) => {
+                  const kids = childrenByParent.get(host.id) ?? [];
+                  return (
+                    <SortableHostGroup
+                      key={host.id}
+                      id={host.id}
+                      disabled={opForHost(host.id)?.status === "running"}
+                    >
+                      {(drag) => (
+                        <>
+                          {hostRow(host, false, drag)}
+                          {expanded.has(host.id)
+                            ? kids.map((child) => hostRow(child, true))
+                            : null}
+                        </>
+                      )}
+                    </SortableHostGroup>
+                  );
+                })}
               </div>
             </SortableContext>
           </DndContext>

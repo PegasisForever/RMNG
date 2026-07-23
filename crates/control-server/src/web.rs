@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Multipart, Path as AxPath, Request, State},
-    http::{HeaderName, StatusCode, header},
+    http::{HeaderMap, HeaderName, StatusCode, header},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
     routing::{any, get, post, put},
@@ -515,6 +515,57 @@ async fn host_exec(
     Ok(Json(result))
 }
 
+/// Resolve the parent host for a fleet-CLI clone create (the sub-host relationship).
+/// Precedence: a `topLevel` body flag → `None`; an explicit `parent` body id → validated as a
+/// top-level managed clone; otherwise auto-detect the calling clone from its per-clone router
+/// key header (`X-RMNG-Proxy-Key`, the same bearer the `/cc` proxy trusts, mapped by
+/// [`crate::cliproxy::InstanceManager::host_for_token`]) and nest under it only when the caller
+/// is itself top-level — nesting is one level deep, so a request from a sub host (or from
+/// outside the fleet with no key) yields a top-level host. `topLevel` + `parent` is an error.
+fn resolve_parent(
+    app: &App,
+    body: &serde_json::Value,
+    headers: &HeaderMap,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let bad = |m: String| (StatusCode::BAD_REQUEST, m);
+    let top_level = body
+        .get("topLevel")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let explicit = body
+        .get("parent")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if top_level && explicit.is_some() {
+        return Err(bad("`topLevel` and `parent` are mutually exclusive".into()));
+    }
+    if top_level {
+        return Ok(None);
+    }
+    let st = app.store.get();
+    let top_level_managed =
+        |id: &str| st.hosts.iter().any(|h| h.id == id && h.managed && h.parent.is_none());
+    if let Some(pid) = explicit {
+        return match st.hosts.iter().find(|h| h.id == pid) {
+            None => Err(bad(format!("parent host '{pid}' not found"))),
+            Some(h) if !h.managed => {
+                Err(bad(format!("parent host '{pid}' is not a managed clone")))
+            }
+            Some(h) if h.parent.is_some() => Err(bad(format!(
+                "parent host '{pid}' is itself a sub host; sub hosts are one level deep"
+            ))),
+            Some(_) => Ok(Some(pid.to_string())),
+        };
+    }
+    // Auto-detect: the calling clone proves its identity with its own per-clone router key.
+    let caller = headers
+        .get("x-rmng-proxy-key")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|key| app.cliproxy.host_for_token(key));
+    Ok(caller.filter(|id| top_level_managed(id)))
+}
+
 /// `POST /api/clone` — start a clone from a source image. Body is one of:
 ///   `{ image, ticket }`                               — existing ticket (preset auto-selected
 ///                                                        by the ticket's labels)
@@ -529,6 +580,7 @@ async fn host_exec(
 /// `pegasis0/rmng-template:latest`) from `GET /api/images`.
 async fn clone(
     State(app): State<App>,
+    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let bad = |m: String| (StatusCode::BAD_REQUEST, m);
@@ -581,6 +633,11 @@ async fn clone(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
+        // Sub-host resolution (only the fleet-CLI path nests): `topLevel` forces a top-level
+        // host; an explicit `parent` must name a top-level managed clone; otherwise auto-detect
+        // the caller clone from its per-clone router key header and nest under it when the caller
+        // is itself top-level. See `resolve_parent`.
+        let parent = resolve_parent(&app, &body, &headers)?;
         let spec = CloneSpec {
             source_image: image,
             new_hostname: hostname,
@@ -595,6 +652,7 @@ async fn clone(
                 .unwrap_or_default(),
             agent_playbook: compose_playbook(&cfg, explicit),
             headless,
+            parent,
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
         return Ok(Json(json!({ "ok": true, "op": op })));
@@ -644,6 +702,8 @@ async fn clone(
             env,
             agent_playbook: compose_playbook(&cfg, explicit),
             headless,
+            // UI create modes always produce top-level hosts.
+            parent: None,
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
         return Ok(Json(json!({ "ok": true, "op": op })));
@@ -679,6 +739,8 @@ async fn clone(
         env: crate::provision::preset_env_vars(&preset),
         agent_playbook: compose_playbook(&cfg, Some(&preset)),
         headless,
+        // UI create modes always produce top-level hosts.
+        parent: None,
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
@@ -947,6 +1009,24 @@ async fn delete(
     State(app): State<App>,
     Json(req): Json<DeleteReq>,
 ) -> Result<Json<Operation>, (StatusCode, String)> {
+    // Cascade: a sub host is torn down with its parent. Delete each child first — as its own
+    // full delete op (container + volumes + token/router-key/notes teardown) — best-effort, so
+    // a child that is momentarily busy doesn't block the parent's removal (the frontend renders
+    // a child whose parent has vanished as top-level). One level deep ⇒ no recursion.
+    let children: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .filter(|h| h.parent.as_deref() == Some(req.id.as_str()))
+        .map(|h| h.id.clone())
+        .collect();
+    for child in &children {
+        app.cliproxy.forget_host(child);
+        if let Err(e) = jobs::start_delete(&app, child) {
+            tracing::warn!(target: "clone", "cascade delete of sub host '{child}' skipped: {e}");
+        }
+    }
     // Drop the clone's group-proxy router key so a stale bearer can never route again.
     app.cliproxy.forget_host(&req.id);
     jobs::start_delete(&app, &req.id)
@@ -2118,8 +2198,15 @@ mod tests {
     #[tokio::test]
     async fn clone_hostname_mode_registers_clone_op() {
         let app = test_app();
+        // Hostname mode still resolves the account-group binding, so the group must exist.
+        *app.cfg.write().unwrap() = wire::AppConfig {
+            groups: vec![wire::Group {
+                name: "team".into(),
+            }],
+            ..app.config()
+        };
         let body = json!({ "image": "tmpl:latest", "hostname": "w-mod-claude", "group": "team" });
-        let resp = clone(State(app.clone()), Json(body)).await.unwrap().0;
+        let resp = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap().0;
         assert_eq!(resp["ok"], true);
         let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
         assert_eq!(op.kind, wire::OperationKind::Clone);
@@ -2132,7 +2219,7 @@ mod tests {
     async fn clone_hostname_mode_rejects_bad_label() {
         let app = test_app();
         let body = json!({ "image": "tmpl:latest", "hostname": "Not A Label!" });
-        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
+        let err = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("DNS label"), "msg: {}", err.1);
     }
@@ -2141,9 +2228,100 @@ mod tests {
     async fn clone_hostname_mode_rejects_unknown_preset() {
         let app = test_app();
         let body = json!({ "image": "tmpl:latest", "hostname": "w1", "preset": "nope" });
-        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
+        let err = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
+    }
+
+    // --- sub hosts: parent resolution + cascade delete ---
+
+    fn push_host(app: &App, id: &str, managed: bool, parent: Option<&str>) {
+        app.store.mutate(|s| {
+            s.hosts.push(wire::Host {
+                id: id.into(),
+                host: id.into(),
+                managed,
+                parent: parent.map(str::to_string),
+                ..Default::default()
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn resolve_parent_explicit_flags_and_validation() {
+        let app = test_app();
+        push_host(&app, "p", true, None); // top-level managed clone
+        push_host(&app, "c", true, Some("p")); // its sub host
+        push_host(&app, "u", false, None); // unmanaged row
+        let empty = HeaderMap::new();
+
+        // `topLevel` forces a top-level host; no hints also → top-level.
+        assert_eq!(resolve_parent(&app, &json!({ "topLevel": true }), &empty).unwrap(), None);
+        assert_eq!(resolve_parent(&app, &json!({}), &empty).unwrap(), None);
+        // A valid explicit top-level parent is accepted.
+        assert_eq!(
+            resolve_parent(&app, &json!({ "parent": "p" }), &empty).unwrap(),
+            Some("p".into())
+        );
+        // A sub host, an unmanaged row, and an unknown id are all rejected as parents.
+        for pid in ["c", "u", "ghost"] {
+            assert!(resolve_parent(&app, &json!({ "parent": pid }), &empty).is_err());
+        }
+        // `parent` + `topLevel` together is an error.
+        assert!(resolve_parent(&app, &json!({ "parent": "p", "topLevel": true }), &empty).is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_parent_auto_detects_caller_router_key() {
+        let app = test_app();
+        push_host(&app, "p", true, None);
+        push_host(&app, "c", true, Some("p"));
+        let header = |key: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(HeaderName::from_static("x-rmng-proxy-key"), key.parse().unwrap());
+            h
+        };
+
+        // A top-level caller's own router key nests the new host under it.
+        let key_p = app.cliproxy.mint_router_key("p");
+        assert_eq!(
+            resolve_parent(&app, &json!({}), &header(&key_p)).unwrap(),
+            Some("p".into())
+        );
+        // A sub-host caller can't nest deeper (one level) → top-level.
+        let key_c = app.cliproxy.mint_router_key("c");
+        assert_eq!(resolve_parent(&app, &json!({}), &header(&key_c)).unwrap(), None);
+        // An unrecognized key → top-level.
+        assert_eq!(resolve_parent(&app, &json!({}), &header("bogus")).unwrap(), None);
+        // An explicit `topLevel` overrides the caller key.
+        assert_eq!(
+            resolve_parent(&app, &json!({ "topLevel": true }), &header(&key_p)).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_cascades_to_sub_hosts() {
+        let app = test_app();
+        // Unmanaged rows so teardown needs no Docker; the cascade wiring is what we assert.
+        push_host(&app, "p", false, None);
+        push_host(&app, "c1", false, Some("p"));
+        push_host(&app, "c2", false, Some("p"));
+        push_host(&app, "other", false, None);
+
+        delete(State(app.clone()), Json(DeleteReq { id: "p".into() }))
+            .await
+            .unwrap();
+
+        // A delete op was enqueued for the parent and each of its sub hosts, but not for the
+        // unrelated top-level host.
+        let ops = app.store.get().operations;
+        let deleting = |id: &str| {
+            ops.iter()
+                .any(|o| o.target == id && o.kind == wire::OperationKind::Delete)
+        };
+        assert!(deleting("p") && deleting("c1") && deleting("c2"));
+        assert!(!deleting("other"));
     }
 
     // --- POST /api/hosts/:id/mcp + /exec (the rmng desktop / exec backends) ---

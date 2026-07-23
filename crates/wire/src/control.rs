@@ -172,6 +172,13 @@ pub struct Host {
     /// the control-server `termplane`). Created from the same template as a regular clone.
     #[serde(default)]
     pub headless: bool,
+    /// The id of this host's parent, when it is a sub host. One level deep only — a host
+    /// that has a parent is never itself a parent. `None` = top-level. Purely cosmetic
+    /// grouping in the sidebar and `rmng ps`; a sub host is otherwise an ordinary managed
+    /// clone (its own group binding, router key, tokens, and video). Cascade-deleted with
+    /// its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     /// Local port-forward rules for this host (see [`PortForward`]). Persisted; the
     /// viewer runs the listeners and reports status out-of-band (volatile `forwards`
     /// SSE event, never stored here).

@@ -69,6 +69,10 @@ pub struct CloneSpec {
     /// capture daemon (`rmng-clone-daemon`) user units are disabled at provision and a default
     /// tmux session is started. Persisted on `Host.headless`; drives the viewer tmux view.
     pub headless: bool,
+    /// Parent host id when this clone should be created as a sub host (one level deep). Already
+    /// validated by the caller (`web::clone`): the parent exists, is managed, and is itself
+    /// top-level. `None` = top-level clone. Persisted on `Host.parent`; purely cosmetic.
+    pub parent: Option<String>,
 }
 
 fn now_ms() -> i64 {
@@ -303,6 +307,24 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
             spec.new_hostname
         )));
     }
+    // Sub-host invariant (defense in depth; `web::resolve_parent` already validated): the parent
+    // must exist, be a managed clone, and be top-level — nesting is one level deep.
+    if let Some(parent) = &spec.parent {
+        match st.hosts.iter().find(|h| &h.id == parent) {
+            None => return Err(JobError(format!("parent host '{parent}' not found"))),
+            Some(h) if !h.managed => {
+                return Err(JobError(format!(
+                    "parent host '{parent}' is not a managed clone"
+                )));
+            }
+            Some(h) if h.parent.is_some() => {
+                return Err(JobError(format!(
+                    "parent host '{parent}' is itself a sub host; sub hosts are one level deep"
+                )));
+            }
+            Some(_) => {}
+        }
+    }
 
     let op = make_op(
         OperationKind::Clone,
@@ -401,6 +423,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             group: group.clone(),
             preset_name: spec.preset_name.clone(),
             headless: spec.headless,
+            parent: spec.parent.clone(),
             ..Default::default()
         };
         if let Some(m) = &spec.linear {
