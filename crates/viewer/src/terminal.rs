@@ -110,6 +110,8 @@ type SharedTerm = Rc<RefCell<Term<EventProxy>>>;
 /// Shared cell metrics (px) and grid dimensions, written by the widget, read by controllers.
 type SharedMetrics = Rc<Cell<(f64, f64)>>;
 type SharedGrid = Rc<Cell<(usize, usize)>>;
+/// A coalesced background run while rendering: (row, start col, end col exclusive, RGB).
+type BgRun = (usize, usize, usize, (f64, f64, f64));
 
 // --- GPU render widget ------------------------------------------------------------------
 
@@ -259,8 +261,11 @@ mod imp {
                 Some(f) => f,
                 None => return,
             };
-            let (cwf, chf) = (cw as f32, ch as f32);
             let lines = self.grid.borrow().as_ref().map(|g| g.get().1).unwrap_or(INIT_ROWS);
+            // Cell edges snapped to the integer pixel grid, so adjacent backgrounds abut exactly
+            // (no fractional-coordinate AA seams between cells/rows).
+            let cell_x = |c: usize| (c as f64 * cw).round() as f32;
+            let row_y = |r: usize| (r as f64 * ch).round() as f32;
 
             // Background fill.
             snapshot.append_color(&rgba(DEFAULT_BG), &graphene::Rect::new(0.0, 0.0, wpx, hpx));
@@ -274,6 +279,10 @@ mod imp {
 
             let mut rows: Vec<RowBuf> = Vec::with_capacity(lines);
             rows.resize_with(lines, RowBuf::new);
+            // Coalesce horizontal runs of identical background into one rect per run: (row, start
+            // col, end col exclusive, color). A solid-color line becomes a single node.
+            let mut runs: Vec<BgRun> = Vec::new();
+            let mut cur: Option<BgRun> = None;
 
             for indexed in content.display_iter {
                 let point = indexed.point;
@@ -308,15 +317,37 @@ mod imp {
                     std::mem::swap(&mut fg, &mut bg);
                 }
                 let wide = flags.contains(Flags::WIDE_CHAR);
-                if bg != DEFAULT_BG {
-                    let w = cwf * if wide { 2.0 } else { 1.0 };
-                    snapshot.append_color(
-                        &rgba(bg),
-                        &graphene::Rect::new(col as f32 * cwf, rowi as f32 * chf, w, chf),
-                    );
+                let span = if wide { 2 } else { 1 };
+                // Extend or flush the current background run.
+                if bg == DEFAULT_BG {
+                    if let Some(run) = cur.take() {
+                        runs.push(run);
+                    }
+                } else {
+                    match cur {
+                        Some((r, c0, c1, cbg)) if r == rowi && c1 == col && cbg == bg => {
+                            cur = Some((r, c0, col + span, cbg));
+                        }
+                        Some(run) => {
+                            runs.push(run);
+                            cur = Some((rowi, col, col + span, bg));
+                        }
+                        None => cur = Some((rowi, col, col + span, bg)),
+                    }
                 }
                 let glyph = if flags.contains(Flags::HIDDEN) { ' ' } else { c.c };
                 rows[rowi].push_cell(col, glyph, fg, flags, wide);
+            }
+            if let Some(run) = cur.take() {
+                runs.push(run);
+            }
+            for (r, c0, c1, bg) in &runs {
+                let x = cell_x(*c0);
+                let y = row_y(*r);
+                snapshot.append_color(
+                    &rgba(*bg),
+                    &graphene::Rect::new(x, y, cell_x(*c1) - x, row_y(*r + 1) - y),
+                );
             }
 
             for (rowi, rb) in rows.iter().enumerate() {
@@ -328,7 +359,7 @@ mod imp {
                 layout.set_text(&rb.text);
                 layout.set_attributes(Some(&rb.attrs));
                 snapshot.save();
-                snapshot.translate(&graphene::Point::new(0.0, rowi as f32 * chf));
+                snapshot.translate(&graphene::Point::new(0.0, row_y(rowi)));
                 snapshot.append_layout(&layout, &rgba(DEFAULT_FG));
                 snapshot.restore();
             }
@@ -337,14 +368,18 @@ mod imp {
             if cursor_on {
                 let row = cursor.point.line.0 + offset;
                 if row >= 0 && (row as usize) < lines {
-                    let x = cursor.point.column.0 as f32 * cwf;
-                    let y = row as f32 * chf;
+                    let rowi = row as usize;
+                    let col = cursor.point.column.0;
+                    let x = cell_x(col);
+                    let (y, y1) = (row_y(rowi), row_y(rowi + 1));
                     match cursor.shape {
-                        CursorShape::Beam => snapshot
-                            .append_color(&rgba(DEFAULT_FG), &graphene::Rect::new(x, y, 2.0, chf)),
+                        CursorShape::Beam => snapshot.append_color(
+                            &rgba(DEFAULT_FG),
+                            &graphene::Rect::new(x, y, 2.0, y1 - y),
+                        ),
                         CursorShape::Underline => snapshot.append_color(
                             &rgba(DEFAULT_FG),
-                            &graphene::Rect::new(x, y + chf - 2.0, cwf, 2.0),
+                            &graphene::Rect::new(x, y1 - 2.0, cell_x(col + 1) - x, 2.0),
                         ),
                         _ => {}
                     }
