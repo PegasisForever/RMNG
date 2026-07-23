@@ -170,6 +170,7 @@ mod imp {
         pub(super) on_resize: RefCell<Option<ResizeCb>>,
         pub(super) metrics: RefCell<Option<SharedMetrics>>,
         pub(super) grid: RefCell<Option<SharedGrid>>,
+        pub(super) theme: RefCell<Option<SharedTheme>>,
         pub(super) font: RefCell<Option<pango::FontDescription>>,
     }
 
@@ -252,6 +253,7 @@ mod imp {
                 None => return,
             };
             let term = term_rc.borrow();
+            let theme = self.theme.borrow().as_ref().map(|t| t.get()).unwrap_or_else(dark_theme);
             let obj = self.obj();
             let wpx = obj.width() as f32;
             let hpx = obj.height() as f32;
@@ -268,7 +270,7 @@ mod imp {
             let row_y = |r: usize| (r as f64 * ch).round() as f32;
 
             // Background fill.
-            snapshot.append_color(&rgba(DEFAULT_BG), &graphene::Rect::new(0.0, 0.0, wpx, hpx));
+            snapshot.append_color(&rgba(theme.bg), &graphene::Rect::new(0.0, 0.0, wpx, hpx));
 
             let content = term.renderable_content();
             let colors = content.colors;
@@ -298,8 +300,8 @@ mod imp {
                 let rowi = row as usize;
                 let col = point.column.0;
 
-                let mut fg = resolve(c.fg, colors, DEFAULT_FG);
-                let mut bg = resolve(c.bg, colors, DEFAULT_BG);
+                let mut fg = resolve(c.fg, colors, &theme);
+                let mut bg = resolve(c.bg, colors, &theme);
                 if flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -307,7 +309,7 @@ mod imp {
                     fg = (fg.0 * 0.66, fg.1 * 0.66, fg.2 * 0.66);
                 }
                 if selection.is_some_and(|r| r.contains(point)) {
-                    bg = SELECTION_BG;
+                    bg = theme.sel;
                 }
                 // Block cursor: invert this cell (fg glyph on the cursor color).
                 if cursor_on
@@ -319,7 +321,7 @@ mod imp {
                 let wide = flags.contains(Flags::WIDE_CHAR);
                 let span = if wide { 2 } else { 1 };
                 // Extend or flush the current background run.
-                if bg == DEFAULT_BG {
+                if bg == theme.bg {
                     if let Some(run) = cur.take() {
                         runs.push(run);
                     }
@@ -360,7 +362,7 @@ mod imp {
                 layout.set_attributes(Some(&rb.attrs));
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(0.0, row_y(rowi)));
-                snapshot.append_layout(&layout, &rgba(DEFAULT_FG));
+                snapshot.append_layout(&layout, &rgba(theme.fg));
                 snapshot.restore();
             }
 
@@ -374,11 +376,11 @@ mod imp {
                     let (y, y1) = (row_y(rowi), row_y(rowi + 1));
                     match cursor.shape {
                         CursorShape::Beam => snapshot.append_color(
-                            &rgba(DEFAULT_FG),
+                            &rgba(theme.fg),
                             &graphene::Rect::new(x, y, 2.0, y1 - y),
                         ),
                         CursorShape::Underline => snapshot.append_color(
-                            &rgba(DEFAULT_FG),
+                            &rgba(theme.fg),
                             &graphene::Rect::new(x, y1 - 2.0, cell_x(col + 1) - x, 2.0),
                         ),
                         _ => {}
@@ -407,12 +409,14 @@ impl TermArea {
         on_resize: ResizeCb,
         metrics: SharedMetrics,
         grid: SharedGrid,
+        theme: SharedTheme,
     ) {
         let imp = self.imp();
         *imp.term.borrow_mut() = Some(term);
         *imp.on_resize.borrow_mut() = Some(on_resize);
         *imp.metrics.borrow_mut() = Some(metrics);
         *imp.grid.borrow_mut() = Some(grid);
+        *imp.theme.borrow_mut() = Some(theme);
     }
 }
 
@@ -423,6 +427,9 @@ pub struct TerminalView {
     notebook: gtk4::Notebook,
     cb: TermCallbacks,
     tabs: Rc<RefCell<HashMap<String, TerminalTab>>>,
+    theme: SharedTheme,
+    /// The settings-portal proxy kept alive so its live `color-scheme` signal keeps firing.
+    _portal: Option<gio::DBusProxy>,
 }
 
 impl TerminalView {
@@ -442,7 +449,22 @@ impl TerminalView {
         notebook.set_action_widget(&plus, gtk4::PackType::End);
         plus.set_visible(true);
 
-        Self { notebook, cb, tabs: Rc::new(RefCell::new(HashMap::new())) }
+        let tabs: Rc<RefCell<HashMap<String, TerminalTab>>> = Rc::new(RefCell::new(HashMap::new()));
+        // Follow the system light/dark preference (defaults to dark if no desktop portal).
+        let theme: SharedTheme = Rc::new(Cell::new(theme_for(portal_color_scheme())));
+        let portal = settings_portal();
+        if let Some(p) = &portal {
+            let theme = theme.clone();
+            let tabs = tabs.clone();
+            watch_color_scheme(p, move |scheme| {
+                theme.set(theme_for(scheme));
+                for tab in tabs.borrow().values() {
+                    tab.area.queue_draw();
+                }
+            });
+        }
+
+        Self { notebook, cb, tabs, theme, _portal: portal }
     }
 
     /// The widget to embed as the primary window's child.
@@ -466,7 +488,7 @@ impl TerminalView {
             if tabs.contains_key(name) {
                 continue;
             }
-            let tab = TerminalTab::new(name.clone(), self.cb.clone());
+            let tab = TerminalTab::new(name.clone(), self.cb.clone(), self.theme.clone());
             let label = gtk4::Label::new(Some(name));
             self.notebook.append_page(&tab.area, Some(&label));
             self.notebook.set_tab_reorderable(&tab.area, true);
@@ -497,7 +519,7 @@ struct TerminalTab {
 }
 
 impl TerminalTab {
-    fn new(session: String, cb: TermCallbacks) -> Self {
+    fn new(session: String, cb: TermCallbacks, theme: SharedTheme) -> Self {
         let area = TermArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
@@ -529,7 +551,7 @@ impl TerminalTab {
         let drag = Rc::new(Cell::new(Drag::None));
         let last_pos = Rc::new(Cell::new((0usize, 0usize)));
 
-        area.set_context(term.clone(), cb.on_resize.clone(), metrics.clone(), grid.clone());
+        area.set_context(term.clone(), cb.on_resize.clone(), metrics.clone(), grid.clone(), theme);
 
         // Keyboard.
         {
@@ -768,19 +790,68 @@ fn paste_from(
     });
 }
 
-// --- colors -----------------------------------------------------------------------------
+// --- theme + colors ---------------------------------------------------------------------
 
-/// Default foreground/background (a soft light-on-dark terminal theme).
-const DEFAULT_FG: (f64, f64, f64) = (0.85, 0.85, 0.86);
-const DEFAULT_BG: (f64, f64, f64) = (0.11, 0.12, 0.13);
-/// Selection highlight background.
-const SELECTION_BG: (f64, f64, f64) = (0.22, 0.35, 0.55);
+type Rgb3 = (f64, f64, f64);
+/// Shared current theme; swapped live when the system light/dark preference changes.
+type SharedTheme = Rc<Cell<Theme>>;
 
-fn rgba(c: (f64, f64, f64)) -> gdk::RGBA {
+/// A terminal color scheme: default fg/bg, selection highlight, and the 16 ANSI colors.
+#[derive(Clone, Copy)]
+struct Theme {
+    fg: Rgb3,
+    bg: Rgb3,
+    sel: Rgb3,
+    ansi: [Rgb3; 16],
+}
+
+/// The 16 ANSI colors, shared by both schemes (saturated colors read on light and dark); only
+/// the default fg/bg and the selection tint differ between light and dark.
+const ANSI16: [(u8, u8, u8); 16] = [
+    (0x00, 0x00, 0x00),
+    (0xcd, 0x00, 0x00),
+    (0x00, 0xcd, 0x00),
+    (0xcd, 0xcd, 0x00),
+    (0x00, 0x00, 0xee),
+    (0xcd, 0x00, 0xcd),
+    (0x00, 0xcd, 0xcd),
+    (0xe5, 0xe5, 0xe5),
+    (0x7f, 0x7f, 0x7f),
+    (0xff, 0x00, 0x00),
+    (0x00, 0xff, 0x00),
+    (0xff, 0xff, 0x00),
+    (0x5c, 0x5c, 0xff),
+    (0xff, 0x00, 0xff),
+    (0x00, 0xff, 0xff),
+    (0xff, 0xff, 0xff),
+];
+
+fn ansi16() -> [Rgb3; 16] {
+    std::array::from_fn(|i| {
+        let (r, g, b) = ANSI16[i];
+        (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
+    })
+}
+
+fn dark_theme() -> Theme {
+    Theme { fg: (0.85, 0.85, 0.86), bg: (0.11, 0.12, 0.13), sel: (0.22, 0.35, 0.55), ansi: ansi16() }
+}
+
+fn light_theme() -> Theme {
+    Theme { fg: (0.13, 0.13, 0.15), bg: (0.99, 0.99, 0.98), sel: (0.70, 0.82, 0.98), ansi: ansi16() }
+}
+
+/// Map an XDG `color-scheme` value (1 = prefer dark, 2 = prefer light, 0 = no preference) to a
+/// theme. Default to dark (the usual terminal default) unless light is explicitly preferred.
+fn theme_for(scheme: Option<u32>) -> Theme {
+    if scheme == Some(2) { light_theme() } else { dark_theme() }
+}
+
+fn rgba(c: Rgb3) -> gdk::RGBA {
     gdk::RGBA::new(c.0 as f32, c.1 as f32, c.2 as f32, 1.0)
 }
 
-fn pango16(c: (f64, f64, f64)) -> (u16, u16, u16) {
+fn pango16(c: Rgb3) -> (u16, u16, u16) {
     (
         (c.0.clamp(0.0, 1.0) * 65535.0) as u16,
         (c.1.clamp(0.0, 1.0) * 65535.0) as u16,
@@ -788,29 +859,27 @@ fn pango16(c: (f64, f64, f64)) -> (u16, u16, u16) {
     )
 }
 
-fn rgb_f(rgb: Rgb) -> (f64, f64, f64) {
+fn rgb_f(rgb: Rgb) -> Rgb3 {
     (rgb.r as f64 / 255.0, rgb.g as f64 / 255.0, rgb.b as f64 / 255.0)
 }
 
-/// Resolve an alacritty cell color to normalized RGB, honoring the theme palette when set and
-/// falling back to a built-in xterm palette / the given default otherwise.
-fn resolve(
-    color: AnsiColor,
-    palette: &alacritty_terminal::term::color::Colors,
-    default: (f64, f64, f64),
-) -> (f64, f64, f64) {
+/// Resolve an alacritty cell color to normalized RGB, honoring the app's palette when it set one
+/// and falling back to the current theme / the built-in xterm palette otherwise.
+fn resolve(color: AnsiColor, palette: &alacritty_terminal::term::color::Colors, theme: &Theme) -> Rgb3 {
     match color {
         AnsiColor::Spec(rgb) => rgb_f(rgb),
         AnsiColor::Named(named) => {
-            palette[named].map(rgb_f).unwrap_or_else(|| named_default(named, default))
+            palette[named].map(rgb_f).unwrap_or_else(|| named_default(named, theme))
         }
-        AnsiColor::Indexed(i) => palette[i as usize].map(rgb_f).unwrap_or_else(|| indexed_default(i)),
+        AnsiColor::Indexed(i) => {
+            palette[i as usize].map(rgb_f).unwrap_or_else(|| indexed_default(i, theme))
+        }
     }
 }
 
-fn named_default(n: NamedColor, fallback: (f64, f64, f64)) -> (f64, f64, f64) {
+fn named_default(n: NamedColor, theme: &Theme) -> Rgb3 {
     use NamedColor::*;
-    let idx: u8 = match n {
+    let idx: usize = match n {
         Black => 0,
         Red => 1,
         Green => 2,
@@ -827,53 +896,95 @@ fn named_default(n: NamedColor, fallback: (f64, f64, f64)) -> (f64, f64, f64) {
         BrightMagenta => 13,
         BrightCyan => 14,
         BrightWhite => 15,
-        Foreground | BrightForeground => return DEFAULT_FG,
-        Background => return DEFAULT_BG,
-        DimForeground => return (DEFAULT_FG.0 * 0.66, DEFAULT_FG.1 * 0.66, DEFAULT_FG.2 * 0.66),
-        _ => return fallback,
+        Foreground | BrightForeground => return theme.fg,
+        Background => return theme.bg,
+        DimForeground => return (theme.fg.0 * 0.66, theme.fg.1 * 0.66, theme.fg.2 * 0.66),
+        _ => return theme.fg,
     };
-    indexed_default(idx)
+    theme.ansi[idx]
 }
 
-/// The standard xterm 256-color palette → normalized RGB.
-fn indexed_default(idx: u8) -> (f64, f64, f64) {
-    const BASE: [(u8, u8, u8); 16] = [
-        (0x00, 0x00, 0x00),
-        (0xcd, 0x00, 0x00),
-        (0x00, 0xcd, 0x00),
-        (0xcd, 0xcd, 0x00),
-        (0x00, 0x00, 0xee),
-        (0xcd, 0x00, 0xcd),
-        (0x00, 0xcd, 0xcd),
-        (0xe5, 0xe5, 0xe5),
-        (0x7f, 0x7f, 0x7f),
-        (0xff, 0x00, 0x00),
-        (0x00, 0xff, 0x00),
-        (0xff, 0xff, 0x00),
-        (0x5c, 0x5c, 0xff),
-        (0xff, 0x00, 0xff),
-        (0x00, 0xff, 0xff),
-        (0xff, 0xff, 0xff),
-    ];
-    let (r, g, b) = match idx {
-        0..=15 => BASE[idx as usize],
+/// The xterm 256-color palette → normalized RGB. 0-15 come from the theme's ANSI colors; the
+/// 6×6×6 cube and grayscale ramp are absolute (scheme-independent).
+fn indexed_default(idx: u8, theme: &Theme) -> Rgb3 {
+    match idx {
+        0..=15 => theme.ansi[idx as usize],
         16..=231 => {
             let i = idx - 16;
-            let conv = |v: u8| -> u8 {
-                if v == 0 {
-                    0
-                } else {
-                    55 + v * 40
-                }
+            let conv = |v: u8| -> f64 {
+                if v == 0 { 0.0 } else { (55 + v * 40) as f64 / 255.0 }
             };
             (conv(i / 36), conv((i % 36) / 6), conv(i % 6))
         }
         232..=255 => {
-            let v = 8 + (idx - 232) * 10;
+            let v = (8 + (idx - 232) * 10) as f64 / 255.0;
             (v, v, v)
         }
-    };
-    (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
+    }
+}
+
+// --- system light/dark preference (XDG desktop portal) ----------------------------------
+
+/// Read the system's `color-scheme` (1 dark / 2 light / 0 none) from the desktop settings
+/// portal, or `None` if the portal is unavailable (no portal → caller defaults to dark).
+fn portal_color_scheme() -> Option<u32> {
+    read_color_scheme(&settings_portal()?)
+}
+
+fn settings_portal() -> Option<gio::DBusProxy> {
+    gio::DBusProxy::for_bus_sync(
+        gio::BusType::Session,
+        gio::DBusProxyFlags::NONE,
+        None,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Settings",
+        gio::Cancellable::NONE,
+    )
+    .ok()
+}
+
+fn read_color_scheme(proxy: &gio::DBusProxy) -> Option<u32> {
+    let params = ("org.freedesktop.appearance", "color-scheme").to_variant();
+    let reply = proxy
+        .call_sync("ReadOne", Some(&params), gio::DBusCallFlags::NONE, 1000, gio::Cancellable::NONE)
+        .or_else(|_| {
+            proxy.call_sync("Read", Some(&params), gio::DBusCallFlags::NONE, 1000, gio::Cancellable::NONE)
+        })
+        .ok()?;
+    variant_to_u32(&reply.child_value(0))
+}
+
+/// The portal double-wraps the value in `v` variants; peel them until a `u32` surfaces.
+fn variant_to_u32(v: &glib::Variant) -> Option<u32> {
+    let mut cur = v.clone();
+    for _ in 0..4 {
+        if let Some(u) = cur.get::<u32>() {
+            return Some(u);
+        }
+        match cur.as_variant() {
+            Some(inner) => cur = inner,
+            None => break,
+        }
+    }
+    None
+}
+
+/// Subscribe to live `color-scheme` changes on the settings portal.
+fn watch_color_scheme(proxy: &gio::DBusProxy, on_change: impl Fn(Option<u32>) + 'static) {
+    proxy.connect_local("g-signal", false, move |vals| {
+        if let (Ok(signal), Ok(params)) =
+            (vals[2].get::<String>(), vals[3].get::<glib::Variant>())
+        {
+            if signal == "SettingChanged"
+                && params.child_value(0).str() == Some("org.freedesktop.appearance")
+                && params.child_value(1).str() == Some("color-scheme")
+            {
+                on_change(variant_to_u32(&params.child_value(2)));
+            }
+        }
+        None
+    });
 }
 
 // --- input encoding ---------------------------------------------------------------------
