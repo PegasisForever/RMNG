@@ -414,6 +414,20 @@ async fn host_mcp(
     Json(req): Json<wire::McpCallRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
+    // Headless clones have no desktop: `gnome-headless.service` and the capture daemon are
+    // disabled at create time, so there is no MCP on :9004 to dial. Short-circuit with a clear
+    // reason rather than letting `proxy_to_daemon` surface a bare "connection refused" 502 that
+    // reads like a transient outage. Checked before `archived`: unarchiving would not give it a
+    // desktop, so headlessness is the more actionable message.
+    if host.headless {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "host '{id}' is headless (no desktop) — `rmng desktop` does not apply; \
+                 use `rmng exec`/`rmng ssh` or the viewer's terminal instead"
+            ),
+        ));
+    }
     if host.archived {
         return Err((
             StatusCode::CONFLICT,
@@ -2179,6 +2193,33 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("cmd"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn headless_host_mcp_returns_conflict_with_reason() {
+        let app = test_app();
+        app.store.mutate(|s| {
+            s.hosts.push(wire::Host {
+                id: "term-only".into(),
+                host: "term-only".into(),
+                managed: true,
+                headless: true,
+                ..Default::default()
+            });
+        });
+
+        let err = host_mcp(
+            State(app.clone()),
+            AxPath("term-only".into()),
+            Json(wire::McpCallRequest {
+                tool: "screenshot".into(),
+                args: json!({}),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(err.1.contains("headless"), "msg: {}", err.1);
     }
 
     #[tokio::test]
