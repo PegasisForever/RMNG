@@ -170,9 +170,9 @@ fn default_claude_model(catalog: &[String], gpt_fallback: Option<&str>) -> Optio
         .or_else(|| gpt_fallback.map(str::to_string))
 }
 
-fn codex_config_toml(cc_base_url: Option<&str>, gpt_models: &[String]) -> String {
+fn codex_config_toml(cc_base_url: Option<&str>, gpt_models: &[String], headless: bool) -> String {
     let mut body =
-        String::from("# Managed by RMNG. Re-created by the control-server clone reconciler.\n\n");
+        String::from("# Managed by RMNG. Re-created by the RMNG clone reconciler.\n\n");
 
     // Group-proxy provider (bare top-level keys MUST precede any [table] in TOML). When the
     // control host resolves, route Codex through the control-server's /cc/v1 OpenAI-compatible
@@ -189,11 +189,19 @@ fn codex_config_toml(cc_base_url: Option<&str>, gpt_models: &[String]) -> String
         body.push_str("model_reasoning_effort = \"high\"\n\n");
     }
 
-    body.push_str(
-        r#"[mcp_servers.desktop]
+    // The `desktop` computer-use MCP is served by the clone-daemon on :9004 — which is deleted on
+    // headless clones (they have no desktop), so omit it there rather than point Codex at a dead
+    // port. `linear` is always present (its key is resolved from the env at runtime).
+    if !headless {
+        body.push_str(
+            r#"[mcp_servers.desktop]
 url = "http://127.0.0.1:9004"
 
-[mcp_servers.linear]
+"#,
+        );
+    }
+    body.push_str(
+        r#"[mcp_servers.linear]
 url = "https://mcp.linear.app/mcp"
 bearer_token_env_var = "LINEAR_API_KEY"
 "#,
@@ -229,13 +237,20 @@ supports_websockets = false
     body
 }
 
-/// The managed OpenCode config: a single OpenAI-compatible provider named `rmng` pointing at
-/// the group-proxy router's /cc/v1 surface, keyed by RMNG_PROXY_KEY, listing the resolved GPT
-/// models only (no Anthropic provider), so OpenCode's picker never shows a Claude model. `None`
-/// when the control host can't be resolved OR the model list is empty (nothing to write / would
-/// be a broken provider this pass).
+/// The managed OpenCode config: the shared two-MCP set (`desktop` + `linear`) every agent gets,
+/// plus — when the control host resolves and the model list is non-empty — a single
+/// OpenAI-compatible provider named `rmng` pointing at the group-proxy router's /cc/v1 surface,
+/// keyed by RMNG_PROXY_KEY, listing the resolved GPT models only (no Anthropic provider), so
+/// OpenCode's picker never shows a Claude model. Always returns a config (the MCP section is
+/// unconditional); the provider block is simply omitted when it can't be resolved this pass (an
+/// empty model list would be a broken provider), leaving OpenCode with its own default model.
 ///
-/// Schema per the OpenCode provider docs (https://opencode.ai/docs/providers):
+/// MCP schema per https://opencode.ai/docs/mcp-servers: top-level `mcp`, each server
+/// `{type:"remote", url, enabled, headers?}`; `headers` support `{env:VAR}` interpolation. The
+/// `desktop` computer-use server (clone-daemon on :9004) is omitted on headless clones — that
+/// port is deleted with the desktop, so listing it would only add a dead endpoint.
+///
+/// Provider schema per https://opencode.ai/docs/providers:
 ///   - `npm = "@ai-sdk/openai-compatible"` is the custom OpenAI-compatible provider; it POSTs
 ///     `{baseURL}/chat/completions`, so `options.baseURL` ends in /v1 (the /cc router forwards
 ///     the suffix to the instance).
@@ -244,36 +259,59 @@ supports_websockets = false
 ///   - the top-level `model` sets the default as `"<provider>/<id>"`.
 /// The global managed path is ~/.config/opencode/opencode.json. `gpt_models` is the group's live
 /// (blacklist-filtered) `/v1/models` GPT set, or [`FALLBACK_GPT_MODELS`] when that can't be read.
-fn opencode_config_json(cc_base_url: Option<&str>, gpt_models: &[String]) -> Option<String> {
-    let base = cc_base_url.map(str::trim).filter(|s| !s.is_empty())?;
-    let default_model = default_gpt_model(gpt_models)?;
-    let models: serde_json::Map<String, serde_json::Value> = gpt_models
-        .iter()
-        .map(|m| (m.clone(), serde_json::json!({ "name": m })))
-        .collect();
-    let cfg = serde_json::json!({
+fn opencode_config_json(cc_base_url: Option<&str>, gpt_models: &[String], headless: bool) -> String {
+    let mut mcp = serde_json::Map::new();
+    if !headless {
+        mcp.insert(
+            "desktop".into(),
+            serde_json::json!({ "type": "remote", "url": "http://127.0.0.1:9004", "enabled": true }),
+        );
+    }
+    mcp.insert(
+        "linear".into(),
+        serde_json::json!({
+            "type": "remote",
+            "url": "https://mcp.linear.app/mcp",
+            "enabled": true,
+            "headers": { "Authorization": "Bearer {env:LINEAR_API_KEY}" },
+        }),
+    );
+
+    let mut cfg = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
-        "model": format!("rmng/{default_model}"),
-        "provider": {
+        "mcp": mcp,
+    });
+
+    // The rmng provider only when the control host resolves AND a default model exists — an empty
+    // model list would yield a provider with no default (broken). Additive to the MCP section.
+    if let (Some(base), Some(default_model)) = (
+        cc_base_url.map(str::trim).filter(|s| !s.is_empty()),
+        default_gpt_model(gpt_models),
+    ) {
+        let models: serde_json::Map<String, serde_json::Value> = gpt_models
+            .iter()
+            .map(|m| (m.clone(), serde_json::json!({ "name": m })))
+            .collect();
+        cfg["model"] = serde_json::json!(format!("rmng/{default_model}"));
+        cfg["provider"] = serde_json::json!({
             "rmng": {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "RMNG",
-                "options": {
-                    "baseURL": base,
-                    "apiKey": "{env:RMNG_PROXY_KEY}"
-                },
-                "models": models
+                "options": { "baseURL": base, "apiKey": "{env:RMNG_PROXY_KEY}" },
+                "models": models,
             }
-        }
-    });
-    Some(serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into()))
+        });
+    }
+
+    serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into())
 }
 
 pub(crate) fn codex_parity_entries(
     cc_base_url: Option<&str>,
     gpt_models: &[String],
+    headless: bool,
 ) -> Vec<TarEntry> {
-    let mut entries = vec![
+    let entries = vec![
         TarEntry {
             path: "home/rmng/.codex/AGENTS.md".to_string(),
             data: SHARED_AGENTS_MD.as_bytes().to_vec(),
@@ -294,21 +332,21 @@ pub(crate) fn codex_parity_entries(
         },
         TarEntry {
             path: "home/rmng/.codex/config.toml".to_string(),
-            data: codex_config_toml(cc_base_url, gpt_models).into_bytes(),
+            data: codex_config_toml(cc_base_url, gpt_models, headless).into_bytes(),
+            mode: 0o600,
+            uid: CLONE_UID,
+            gid: CLONE_GID,
+        },
+        // OpenCode's global config: the shared MCP set (always) plus the rmng provider (when it
+        // resolves). Unlike before, this file is always written — the MCP section is unconditional.
+        TarEntry {
+            path: "home/rmng/.config/opencode/opencode.json".to_string(),
+            data: opencode_config_json(cc_base_url, gpt_models, headless).into_bytes(),
             mode: 0o600,
             uid: CLONE_UID,
             gid: CLONE_GID,
         },
     ];
-    if let Some(json) = opencode_config_json(cc_base_url, gpt_models) {
-        entries.push(TarEntry {
-            path: "home/rmng/.config/opencode/opencode.json".to_string(),
-            data: json.into_bytes(),
-            mode: 0o600,
-            uid: CLONE_UID,
-            gid: CLONE_GID,
-        });
-    }
     entries
 }
 
@@ -324,6 +362,60 @@ fn codex_parity_stamp_entry(hash: &str) -> TarEntry {
 
 pub(crate) fn codex_parity_stamp_entry_for(entries: &[TarEntry]) -> TarEntry {
     codex_parity_stamp_entry(&desired_payload_hash(entries))
+}
+
+/// Interactive Claude Code (and the inner Cursor agent / any human `claude`) reads its MCP servers
+/// from `~/.claude.json`'s top-level `mcpServers` key. That file is state-bearing (Claude Code
+/// accumulates project history in it), so we **jq-merge** the two managed servers rather than
+/// overwrite it — matching how the template seeds `linear` (`template/setup/30-user.sh`). `linear`
+/// is always set; `desktop` (the clone-daemon computer-use MCP on :9004) is set on headed clones
+/// and deleted on headless ones (there is no daemon there). `${LINEAR_API_KEY}` is stored literally
+/// — Claude Code expands it from the session env at runtime, so the single quotes below are
+/// load-bearing (bash must not expand it). Runs as root via docker exec; re-chowns to rmng.
+pub(crate) fn claude_mcp_script(headless: bool) -> String {
+    // Set `linear` first so `.mcpServers` exists before the headless `del(.mcpServers.desktop)`.
+    let desktop_step = if headless {
+        "| del(.mcpServers.desktop)"
+    } else {
+        r#"| .mcpServers.desktop = {"type":$dtype,"url":$durl}"#
+    };
+    format!(
+        r#"set -e
+f=/home/rmng/.claude.json
+[ -s "$f" ] || printf '{{}}' > "$f"
+tmp="$(mktemp)"
+jq \
+  --arg ltype http --arg lurl "https://mcp.linear.app/mcp" --arg lauth 'Bearer ${{LINEAR_API_KEY}}' \
+  --arg dtype http --arg durl "http://127.0.0.1:9004" \
+  '.mcpServers.linear = {{"type":$ltype,"url":$lurl,"headers":{{"Authorization":$lauth}}}} {desktop_step}' \
+  "$f" > "$tmp"
+cat "$tmp" > "$f"
+rm -f "$tmp"
+chown rmng:rmng "$f"
+chmod 600 "$f"
+"#
+    )
+}
+
+fn claude_mcp_stamp_path() -> &'static str {
+    "etc/rmng/claude-mcp"
+}
+
+/// Desired stamp value — changes with the headless bit (and the `v1` shape tag, bumped if the
+/// managed server set changes), so the reconciler re-applies `claude_mcp_script` exactly when the
+/// desired `~/.claude.json` MCP set would differ.
+fn claude_mcp_desired(headless: bool) -> String {
+    format!("v1 headless={headless}")
+}
+
+pub(crate) fn claude_mcp_stamp_entry_for(headless: bool) -> TarEntry {
+    TarEntry {
+        path: claude_mcp_stamp_path().to_string(),
+        data: format!("{}\n", claude_mcp_desired(headless)).into_bytes(),
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+    }
 }
 
 pub(crate) fn codex_prepare_script() -> &'static str {
@@ -389,9 +481,19 @@ systemctl restart ssh
 "#
 }
 
+/// Restart the clone-daemon after a binary refresh — but only if its unit is present. Headless
+/// clones DELETE `rmng-clone-daemon.service` (control-server `provision.rs` HEADLESS_DISABLE_SCRIPT),
+/// so an unconditional `systemctl --user restart` exits 5 ("unit not loaded") and would abort the
+/// whole payload reconcile before the agent-wrapper restart + payload stamp ever run — permanently
+/// wedging binary refreshes on headless clones. Guard on `systemctl cat`: present ⇒ restart (a real
+/// restart failure still surfaces under `set -e` on headed clones); absent ⇒ skip cleanly.
 fn restart_clone_daemon_script() -> &'static str {
     r#"set -e
-runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart rmng-clone-daemon.service
+if runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user cat rmng-clone-daemon.service >/dev/null 2>&1; then
+  runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart rmng-clone-daemon.service
+else
+  echo "rmng-clone-daemon.service absent (headless clone) — skipping restart"
+fi
 "#
 }
 
@@ -575,9 +677,14 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_codex_parity(app: &App, clone_id: &str, gpt_models: &[String]) -> Result<bool> {
+async fn ensure_codex_parity(
+    app: &App,
+    clone_id: &str,
+    gpt_models: &[String],
+    headless: bool,
+) -> Result<bool> {
     let cc_base = crate::provision::cc_base_url(app).await;
-    let entries = codex_parity_entries(cc_base.as_deref(), gpt_models);
+    let entries = codex_parity_entries(cc_base.as_deref(), gpt_models, headless);
     let desired = desired_payload_hash(&entries);
     if read_stamp(app, clone_id, codex_parity_stamp_path(), "codex parity")
         .await?
@@ -596,6 +703,33 @@ async fn ensure_codex_parity(app: &App, clone_id: &str, gpt_models: &[String]) -
         .upload_tar(clone_id, vec![codex_parity_stamp_entry(&desired)])
         .await
         .with_context(|| format!("{clone_id}: writing Codex parity stamp"))?;
+    Ok(true)
+}
+
+/// Keep interactive Claude Code's `~/.claude.json` MCP set in sync (desktop headed-only, linear
+/// always). jq-merge via [`claude_mcp_script`], stamped on the headless bit so it only execs when
+/// the desired set changes — retrofitting `desktop` onto existing headed clones and removing it
+/// from existing headless ones on the reconciler's next pass.
+async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<bool> {
+    let desired = claude_mcp_desired(headless);
+    if read_stamp(app, clone_id, claude_mcp_stamp_path(), "claude mcp")
+        .await?
+        .as_deref()
+        == Some(desired.as_str())
+    {
+        return Ok(false);
+    }
+    exec_ok(
+        app,
+        clone_id,
+        &claude_mcp_script(headless),
+        "sync ~/.claude.json MCP",
+    )
+    .await?;
+    app.docker
+        .upload_tar(clone_id, vec![claude_mcp_stamp_entry_for(headless)])
+        .await
+        .with_context(|| format!("{clone_id}: writing claude mcp stamp"))?;
     Ok(true)
 }
 
@@ -848,7 +982,7 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
 
         // `gpt_models` (this clone's group GPT list, or the FALLBACK_GPT_MODELS safety net) was
         // resolved once per pass above, alongside the Claude Code default, from the group catalog.
-        match ensure_codex_parity(app, id, &gpt_models).await {
+        match ensure_codex_parity(app, id, &gpt_models, h.headless).await {
             Ok(true) => {
                 warned.remove(&format!("{id}:codex"));
                 tracing::info!(
@@ -866,6 +1000,29 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                     tracing::debug!(target: "clone_reconcile", "clone {id}: Codex parity reconcile still failing: {e:#}");
                 }
                 continue;
+            }
+        }
+
+        // Interactive Claude Code's `~/.claude.json` MCP set (desktop headed-only + linear). jq
+        // merge, stamped on the headless bit. Best-effort — a failure is logged and retried.
+        match ensure_claude_mcp(app, id, h.headless).await {
+            Ok(true) => {
+                warned.remove(&format!("{id}:claude-mcp"));
+                tracing::info!(
+                    target: "clone_reconcile",
+                    "clone {id}: synced ~/.claude.json MCP servers (headless={})",
+                    h.headless
+                );
+            }
+            Ok(false) => {
+                warned.remove(&format!("{id}:claude-mcp"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:claude-mcp")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile still failing: {e:#}");
+                }
             }
         }
 
@@ -989,12 +1146,17 @@ mod tests {
 
     #[test]
     fn empty_gpt_models_never_emit_a_broken_provider() {
-        // With a cc base but no models, Codex omits the provider and OpenCode writes nothing —
-        // an empty list must never yield a provider with no default model.
-        let toml = codex_config_toml(Some("http://rmng-control:9000/cc/v1"), &[]);
+        // With a cc base but no models, Codex omits the provider and OpenCode omits its provider
+        // block — an empty list must never yield a provider with no default model. OpenCode still
+        // writes the MCP section (that's unconditional).
+        let toml = codex_config_toml(Some("http://rmng-control:9000/cc/v1"), &[], false);
         assert!(!toml.contains("model_provider"));
         assert!(!toml.contains("model_providers.rmng"));
-        assert!(opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &[]).is_none());
+        let oc = opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &[], false);
+        assert!(!oc.contains("\"provider\""));
+        assert!(!oc.contains("@ai-sdk/openai-compatible"));
+        assert!(oc.contains("\"mcp\""));
+        assert!(oc.contains("mcp.linear.app"));
     }
 
     #[test]
@@ -1018,7 +1180,7 @@ mod tests {
 
     #[test]
     fn codex_parity_entries_install_global_guidance_and_linear_mcp() {
-        let entries = codex_parity_entries(None, &fallback_gpt_models());
+        let entries = codex_parity_entries(None, &fallback_gpt_models(), false);
         let agents = entries
             .iter()
             .find(|e| e.path == "home/rmng/.codex/AGENTS.md")
@@ -1041,13 +1203,15 @@ mod tests {
         assert!(config_body.contains("[mcp_servers.linear]"));
         assert!(config_body.contains("url = \"https://mcp.linear.app/mcp\""));
         assert!(config_body.contains("bearer_token_env_var = \"LINEAR_API_KEY\""));
-        assert!(!config_body.contains("control-server"));
+        // With no cc base, no rmng provider is emitted — so no `base_url` leaks into the config.
+        // (The managed-file header prose does mention "control-server", so don't assert on that.)
+        assert!(!config_body.contains("base_url"));
     }
 
     #[test]
     fn codex_config_adds_active_rmng_provider_when_cc_base_present() {
         let models = fallback_gpt_models();
-        let toml = codex_config_toml(Some("http://rmng-control:9000/cc/v1"), &models);
+        let toml = codex_config_toml(Some("http://rmng-control:9000/cc/v1"), &models, false);
         assert!(toml.contains("model_provider = \"rmng\""));
         assert!(toml.contains("[model_providers.rmng]"));
         assert!(toml.contains("base_url = \"http://rmng-control:9000/cc/v1\""));
@@ -1070,47 +1234,117 @@ mod tests {
             "top-level keys must come before tables:\n{toml}"
         );
         // No cc base → the old behavior (no rmng provider at all).
-        let plain = codex_config_toml(None, &models);
+        let plain = codex_config_toml(None, &models, false);
         assert!(!plain.contains("model_providers.rmng"));
         assert!(!plain.contains("model_provider"));
     }
 
     #[test]
+    fn claude_mcp_script_sets_desktop_headed_and_deletes_it_headless() {
+        let headed = claude_mcp_script(false);
+        assert!(headed.contains(".mcpServers.linear ="));
+        assert!(headed.contains(".mcpServers.desktop ="));
+        assert!(headed.contains("http://127.0.0.1:9004"));
+        assert!(!headed.contains("del(.mcpServers.desktop)"));
+
+        let headless = claude_mcp_script(true);
+        assert!(headless.contains(".mcpServers.linear ="));
+        assert!(headless.contains("del(.mcpServers.desktop)"));
+        assert!(!headless.contains(".mcpServers.desktop ="));
+
+        // ${LINEAR_API_KEY} must be stored literally (single-quoted → not shell-expanded), so
+        // Claude Code expands it from the session env at runtime.
+        assert!(headed.contains("'Bearer ${LINEAR_API_KEY}'"));
+        assert!(headless.contains("'Bearer ${LINEAR_API_KEY}'"));
+
+        // The stamp value tracks the headless bit so the reconciler re-applies on a state change.
+        assert_ne!(claude_mcp_desired(false), claude_mcp_desired(true));
+    }
+
+    #[test]
+    fn agent_configs_omit_desktop_mcp_when_headless() {
+        // Headless clones have no desktop (the clone-daemon on :9004 is deleted), so the shared
+        // `desktop` MCP must disappear from every generated agent config while `linear` stays.
+        let hl = codex_parity_entries(None, &fallback_gpt_models(), true);
+        let codex = String::from_utf8(
+            hl.iter()
+                .find(|e| e.path == "home/rmng/.codex/config.toml")
+                .unwrap()
+                .data
+                .clone(),
+        )
+        .unwrap();
+        assert!(!codex.contains("[mcp_servers.desktop]"));
+        assert!(!codex.contains("127.0.0.1:9004"));
+        assert!(codex.contains("[mcp_servers.linear]"));
+
+        let oc = String::from_utf8(
+            hl.iter()
+                .find(|e| e.path == "home/rmng/.config/opencode/opencode.json")
+                .unwrap()
+                .data
+                .clone(),
+        )
+        .unwrap();
+        assert!(!oc.contains("127.0.0.1:9004"));
+        assert!(oc.contains("mcp.linear.app"));
+
+        // Headed keeps desktop in both.
+        let headed = codex_parity_entries(None, &fallback_gpt_models(), false);
+        let oc_headed = String::from_utf8(
+            headed
+                .iter()
+                .find(|e| e.path == "home/rmng/.config/opencode/opencode.json")
+                .unwrap()
+                .data
+                .clone(),
+        )
+        .unwrap();
+        assert!(oc_headed.contains("127.0.0.1:9004"));
+    }
+
+    #[test]
     fn opencode_config_is_gpt_only_openai_compatible_provider() {
         let models = fallback_gpt_models();
-        assert!(opencode_config_json(None, &models).is_none());
-        let json = opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &models).unwrap();
+        // No cc base → MCP-only config (no provider), but the file is still produced.
+        let none_base = opencode_config_json(None, &models, false);
+        assert!(!none_base.contains("\"provider\""));
+        assert!(!none_base.contains("@ai-sdk/openai-compatible"));
+        assert!(none_base.contains("\"mcp\""));
+
+        let json = opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &models, false);
         assert!(json.contains("\"npm\": \"@ai-sdk/openai-compatible\""));
         assert!(json.contains("\"baseURL\": \"http://rmng-control:9000/cc/v1\""));
         assert!(json.contains("{env:RMNG_PROXY_KEY}"));
         assert!(json.contains("gpt-5.6-terra"));
         // Default model is set as "<provider>/<id>" pointing at the GPT default.
         assert!(json.contains("\"model\": \"rmng/gpt-5.6-terra\""));
-        // No Anthropic/Claude provider is generated for OpenCode.
+        // The two shared MCP servers ride alongside the provider.
+        assert!(json.contains("\"mcp\""));
+        assert!(json.contains("127.0.0.1:9004"));
+        assert!(json.contains("mcp.linear.app"));
+        // No Anthropic/Claude *provider* is generated for OpenCode (the substring "claude" must not
+        // appear — the MCP urls don't contain it either).
         let lower = json.to_lowercase();
         assert!(!lower.contains("anthropic"));
         assert!(!lower.contains("claude"));
-        // The parity entries carry the opencode file when a cc base is present.
-        let entries = codex_parity_entries(Some("http://rmng-control:9000/cc/v1"), &models);
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.path == "home/rmng/.config/opencode/opencode.json")
-        );
-        // ...and omit it when there's no cc base.
-        let bare = codex_parity_entries(None, &models);
-        assert!(
-            !bare
-                .iter()
-                .any(|e| e.path == "home/rmng/.config/opencode/opencode.json")
-        );
+        // The parity entries always carry the opencode file now (MCP section is unconditional),
+        // with or without a cc base.
+        for cc in [Some("http://rmng-control:9000/cc/v1"), None] {
+            let entries = codex_parity_entries(cc, &models, false);
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path == "home/rmng/.config/opencode/opencode.json")
+            );
+        }
     }
 
     #[test]
     fn codex_parity_stamp_hash_changes_when_config_changes() {
         let original =
-            codex_parity_stamp_entry_for(&codex_parity_entries(None, &fallback_gpt_models()));
-        let mut changed = codex_parity_entries(None, &fallback_gpt_models());
+            codex_parity_stamp_entry_for(&codex_parity_entries(None, &fallback_gpt_models(), false));
+        let mut changed = codex_parity_entries(None, &fallback_gpt_models(), false);
         changed
             .iter_mut()
             .find(|e| e.path == "home/rmng/.codex/config.toml")

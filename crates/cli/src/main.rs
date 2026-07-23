@@ -44,6 +44,8 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             group,
             preset,
             headless,
+            parent,
+            top_level,
             wait,
         } => {
             commands::clone(
@@ -53,6 +55,8 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 group.as_deref(),
                 preset.as_deref(),
                 *headless,
+                parent.as_deref(),
+                *top_level,
                 wait,
                 cli.json,
             )

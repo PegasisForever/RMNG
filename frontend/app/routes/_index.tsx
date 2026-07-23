@@ -464,8 +464,12 @@ function Dashboard({
             setSidebarOpen(false);
           }}
           onDeleteHost={(host) => {
+            // Deleting a parent cascades to its sub hosts (server-side), so say so up front.
+            const subCount = state.hosts.filter((h) => h.parent === host.id).length;
+            const subs =
+              subCount > 0 ? ` and its ${subCount} sub host${subCount === 1 ? "" : "s"}` : "";
             const msg = host.managed
-              ? `Delete ${host.id}? This destroys its container.`
+              ? `Delete ${host.id}${subs}? This destroys its container${subCount > 0 ? "s" : ""}.`
               : `Remove ${host.id}? This unregisters the host.`;
             if (confirm(msg)) run(deleteHost(host.id));
           }}

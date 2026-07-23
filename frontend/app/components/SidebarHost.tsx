@@ -1,6 +1,5 @@
-import { useSortable } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import { ArrowRight, Ellipsis, Terminal } from "lucide-react";
+import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
+import { ArrowRight, ChevronDown, ChevronRight, Ellipsis, Terminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { copyText } from "~/lib/clipboard";
@@ -159,6 +158,24 @@ export interface SidebarHostProps {
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied command jumps through. */
   bastionPort: number;
+  /** True when this row is a sub host: it renders indented under its parent and is not
+   *  drag-reorderable (nesting is a cosmetic one-level grouping). */
+  isChild?: boolean;
+  /** Number of sub hosts under this (top-level) host. `> 0` shows the expand/collapse control
+   *  at the bottom of the card. */
+  childCount?: number;
+  /** Whether this host's sub hosts are currently expanded. */
+  expanded?: boolean;
+  /** Toggle this host's sub-host expansion. */
+  onToggleExpand?: () => void;
+  /** dnd-kit drag activator props from the enclosing sortable group (see `SortableHostGroup`).
+   *  Present only on a draggable top-level row; spread onto the card so grabbing it drags the
+   *  whole group (parent + its expanded sub hosts). Absent ⇒ the row is static (children,
+   *  archived rows, Storybook). */
+  dragAttributes?: DraggableAttributes;
+  dragListeners?: DraggableSyntheticListeners;
+  /** True while this row's group is being dragged (drives the lifted-card styling). */
+  dragging?: boolean;
 }
 
 /** A single overflow-menu item that copies `command` to the clipboard and shows a
@@ -324,6 +341,13 @@ export function SidebarHost({
   forwardRuntime,
   sshPublicHost,
   bastionPort,
+  isChild = false,
+  childCount = 0,
+  expanded = false,
+  onToggleExpand,
+  dragAttributes,
+  dragListeners,
+  dragging = false,
 }: SidebarHostProps) {
   const busy = op?.status === "running";
   // Managed clones (backed by a container named after the host id) get the commit /
@@ -363,39 +387,30 @@ export function SidebarHost({
     : undefined;
   // All managed clones retain their token slots even before their first observed request.
   const showBindingLine = !!group || !!cpuMetric || !!inputTokenMetric;
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: host.id, disabled: busy || host.archived });
-
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    // `position: relative` so the z-index actually takes effect — z-index is ignored
-    // on a statically-positioned element, which is why a dragged card otherwise paints
-    // *under* the sibling rows that come after it in the DOM. With it positioned, the
-    // raised z-index lifts the dragged card above every other row.
-    position: "relative",
-    zIndex: isDragging ? 50 : undefined,
-  };
+  // Drag is owned by the enclosing SortableHostGroup; a row is draggable only when it received
+  // drag listeners (top-level active rows). Children/archived rows get none and stay static.
+  const draggable = !!dragListeners;
 
   return (
     // The whole card is both the drag source (no handle) and the select target — a
     // plain click selects (the sensor's 5px activation distance keeps clicks and drags
-    // apart); a drag reorders. The ⋯ menu stops propagation.
+    // apart); a drag reorders. The ⋯ menu and the expand control stop propagation.
     <div
-      ref={setNodeRef}
-      style={style}
-      {...attributes}
-      {...listeners}
+      {...dragAttributes}
+      {...dragListeners}
       aria-pressed={selected}
       onClick={onSelect}
       title={`${host.id} · ${host.host}:${host.port}`}
-      className={`group flex touch-none cursor-grab items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent px-1.5 pb-2.5 pt-1.5 last:border-b-0 active:cursor-grabbing dark:border-b-slate-700 ${
+      className={`group flex touch-none items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 dark:border-b-slate-700 ${
+        // Sub host rows are indented under their parent; top-level rows keep the normal gutter.
+        isChild ? "pl-6" : "pl-1.5"
+      } ${draggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"} ${
         // Per-side borders (explicit colors so they never collide): a slate-200 bottom
         // divider between rows + a left accent for the selected row. Exactly one
         // background wins (dragging ▸ selected ▸ default); the default is a solid
         // slate-50 (not transparent) so a dragged card fully hides the rows under it.
         // While dragging the card lifts out as a rounded, divider-less floating card.
-        isDragging
+        dragging
           ? "rounded-md border-b-transparent bg-white shadow-lg ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600"
           : selected
             ? "border-l-emerald-400 bg-emerald-50 dark:bg-emerald-950"
@@ -430,7 +445,7 @@ export function SidebarHost({
           <OverflowMenu
             hostId={host.id}
             managed={managed}
-            archived={host.archived}
+            archived={host.archived ?? false}
             busy={busy}
             onCommit={onCommit}
             onChangeAccount={onChangeAccount}
@@ -484,6 +499,25 @@ export function SidebarHost({
         {/* Compact list of this host's port forwards (remote→local, live status dot). */}
         {!busy && host.forwards && host.forwards.length > 0 ? (
           <ForwardChips forwards={host.forwards} runtime={forwardRuntime ?? []} />
+        ) : null}
+
+        {/* Expand/collapse this host's sub hosts — pinned to the bottom of the card. Stops
+            propagation so it neither selects the row nor starts a drag. */}
+        {!busy && childCount > 0 ? (
+          <button
+            type="button"
+            aria-expanded={expanded}
+            title={`${expanded ? "hide" : "show"} ${childCount} sub host${childCount === 1 ? "" : "s"}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleExpand?.();
+            }}
+            className="mt-1.5 flex items-center gap-1 rounded text-[10px] font-medium text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+          >
+            {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            {expanded ? "Hide" : "Show"} {childCount} sub host{childCount === 1 ? "" : "s"}
+          </button>
         ) : null}
       </div>
     </div>

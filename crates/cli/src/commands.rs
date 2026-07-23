@@ -69,19 +69,40 @@ pub async fn ps(client: &Client, json: bool) -> Result<u8> {
     }
 
     let (st, stats, tokens) = tokio::try_join!(client.state(), client.stats(), client.tokens())?;
-    let rows: Vec<Vec<String>> = st
-        .hosts
+    // Order rows as a one-level tree: each top-level host followed by its sub hosts, which are
+    // indented under it. A child whose parent isn't present renders at top level so nothing is
+    // hidden. Order within each level is the server's host Vec order.
+    let present: std::collections::HashSet<&str> = st.hosts.iter().map(|h| h.id.as_str()).collect();
+    let mut ordered: Vec<(&_, bool)> = Vec::with_capacity(st.hosts.len());
+    for h in &st.hosts {
+        let is_top = h.parent.as_deref().is_none_or(|p| !present.contains(p));
+        if !is_top {
+            continue;
+        }
+        ordered.push((h, false));
+        for c in &st.hosts {
+            if c.parent.as_deref() == Some(h.id.as_str()) {
+                ordered.push((c, true));
+            }
+        }
+    }
+    let rows: Vec<Vec<String>> = ordered
         .iter()
-        .map(|h| {
+        .map(|(h, is_child)| {
             let sel = if st.selected.as_deref() == Some(&h.id) {
                 "*"
             } else {
                 ""
             };
+            let id_cell = if *is_child {
+                format!("└─ {}{}", h.id, sel)
+            } else {
+                format!("{}{}", h.id, sel)
+            };
             let stats = stats.get(&h.id);
             let usage = tokens.get(&h.id);
             vec![
-                format!("{}{}", h.id, sel),
+                id_cell,
                 h.local_ip.clone().unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
                 h.preset_name.clone().unwrap_or_default(),
@@ -133,6 +154,7 @@ pub async fn select(client: &Client, host: &str, json: bool) -> Result<u8> {
     Ok(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn clone(
     client: &Client,
     image: &str,
@@ -140,11 +162,13 @@ pub async fn clone(
     group: Option<&str>,
     preset: Option<&str>,
     headless: bool,
+    parent: Option<&str>,
+    top_level: bool,
     wait: &WaitArgs,
     json: bool,
 ) -> Result<u8> {
     let op = client
-        .clone_host(image, hostname, group, preset, headless)
+        .clone_host(image, hostname, group, preset, headless, parent, top_level)
         .await?;
     started(client, op, wait, json, "clone").await
 }
