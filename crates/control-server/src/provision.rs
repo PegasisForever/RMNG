@@ -169,6 +169,14 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
                 "1".to_string(),
             ));
+            // The `rmng` CLI's server resolution is `--server` > `$RMNG_CONTROL_URL` >
+            // `http://localhost:9000`. Inside a clone `localhost:9000` is unreachable, so
+            // point the CLI at the control-server's web API over the same `rmng-control`
+            // route its agents already use — so a bare `rmng ps`/`rmng ssh` just works.
+            vars.push(ev(
+                "RMNG_CONTROL_URL",
+                format!("http://{control}:{}", cfg.listen.web),
+            ));
         }
         Err(e) => tracing::warn!(
             "control_env_vars: could not resolve the control-server host ({e}); \

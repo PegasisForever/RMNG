@@ -98,6 +98,43 @@ pub fn clone_hostkey_path(data_dir: &str, clone_id: &str) -> PathBuf {
     Path::new(data_dir).join("ssh/clones").join(clone_id).join("ssh_host_ed25519_key")
 }
 
+/// The persisted SHARED fleet keypair path. One identity, provisioned into every clone's
+/// `~/.ssh`, so any clone can SSH into any sibling with no manual setup — the public half is
+/// folded into each clone's `authorized_keys` ([`clone_authorized_keys`]). Stable across
+/// control-server restarts (generated once, then reused).
+pub fn fleet_key_path(data_dir: &str) -> PathBuf {
+    Path::new(data_dir).join("ssh/fleet/id_ed25519")
+}
+
+/// The shared fleet public-key line, generating the keypair on first call (idempotent).
+/// Trimmed to a single line. Used both to append to clones' `authorized_keys` and to seed the
+/// push-gate hash so a first-time key generation propagates.
+fn fleet_public_key(data_dir: &str) -> Result<String> {
+    let key_path = fleet_key_path(data_dir);
+    ensure_hostkey(&key_path)?;
+    let pub_bytes = std::fs::read(key_path.with_extension("pub"))
+        .with_context(|| format!("reading fleet pubkey at {}", key_path.display()))?;
+    Ok(String::from_utf8_lossy(&pub_bytes).trim().to_string())
+}
+
+/// Operator authorized keys plus the shared fleet public key — the full set every CLONE
+/// accepts. The bastion stays operator-only (it never sees the fleet key), so clone↔clone
+/// SSH is enabled without widening the operator's door. Order: operator keys first, fleet key
+/// last; [`render_authorized_keys`] trims + dedups at render.
+pub fn clone_authorized_keys(operator_keys: &[String], fleet_pub: &str) -> Vec<String> {
+    let mut keys = operator_keys.to_vec();
+    let fleet_pub = fleet_pub.trim();
+    if !fleet_pub.is_empty() {
+        keys.push(fleet_pub.to_string());
+    }
+    keys
+}
+
+/// Dropped at `~rmng/.ssh/config` in every clone so a bare `ssh <clone-id>` from inside a
+/// clone is prompt-free: the fleet key is the default identity, and `accept-new` trusts a
+/// sibling's stable host key on first contact (host keys are persisted per clone id).
+const CLONE_SSH_CONFIG: &str = "Host *\n    StrictHostKeyChecking accept-new\n    User rmng\n";
+
 /// Generate an ed25519 host key at `key_path` (+ `.pub`) if it doesn't already exist.
 /// Idempotent: an existing key is left byte-for-byte untouched (so identity is stable).
 /// Parent dirs are created 0700.
@@ -124,10 +161,13 @@ pub fn ensure_hostkey(key_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The tar entries that provision SSH into one clone: its `authorized_keys` (clone-user
-/// owned, 0600) and its stable host key + public half (root, 0600 / 0644). Generates and
-/// persists the host key on first call for this clone id. The `~rmng/.ssh` dir is
-/// pre-created 700 by the template, so only the file is dropped here.
+/// The tar entries that provision SSH into one clone:
+/// - `~rmng/.ssh/authorized_keys` (operator keys + the shared fleet pubkey; clone-user, 0600),
+/// - the shared fleet keypair `~rmng/.ssh/id_ed25519`(.pub) so this clone can dial siblings,
+/// - `~rmng/.ssh/config` (`accept-new`, default user) for a prompt-free `ssh <clone-id>`,
+/// - the clone's own stable sshd host key + public half (root, 0600 / 0644).
+/// Generates+persists the per-clone host key and the shared fleet key on first call. The
+/// `~rmng/.ssh` dir is pre-created 700 by the template, so only files are dropped here.
 pub fn clone_ssh_tar_entries(
     data_dir: &str,
     clone_id: &str,
@@ -140,10 +180,43 @@ pub fn clone_ssh_tar_entries(
     let pub_bytes = std::fs::read(key_path.with_extension("pub"))
         .with_context(|| format!("reading clone host pubkey for {clone_id}"))?;
 
+    // Shared fleet identity (generated once, persisted): its private half + a small ssh
+    // client config go into this clone's ~/.ssh; its public half is folded into the clone's
+    // authorized_keys so every clone accepts every other.
+    let fleet_path = fleet_key_path(data_dir);
+    ensure_hostkey(&fleet_path)?;
+    let fleet_priv = std::fs::read(&fleet_path)
+        .with_context(|| format!("reading fleet key {}", fleet_path.display()))?;
+    let fleet_pub_bytes = std::fs::read(fleet_path.with_extension("pub"))
+        .with_context(|| "reading fleet pubkey".to_string())?;
+    let fleet_pub = String::from_utf8_lossy(&fleet_pub_bytes).trim().to_string();
+    let authorized = clone_authorized_keys(keys, &fleet_pub);
+
     Ok(vec![
         TarEntry {
             path: "home/rmng/.ssh/authorized_keys".into(),
-            data: render_authorized_keys(keys).into_bytes(),
+            data: render_authorized_keys(&authorized).into_bytes(),
+            mode: 0o600,
+            uid: 1000,
+            gid: 1000,
+        },
+        TarEntry {
+            path: "home/rmng/.ssh/id_ed25519".into(),
+            data: fleet_priv,
+            mode: 0o600,
+            uid: 1000,
+            gid: 1000,
+        },
+        TarEntry {
+            path: "home/rmng/.ssh/id_ed25519.pub".into(),
+            data: fleet_pub_bytes,
+            mode: 0o644,
+            uid: 1000,
+            gid: 1000,
+        },
+        TarEntry {
+            path: "home/rmng/.ssh/config".into(),
+            data: CLONE_SSH_CONFIG.as_bytes().to_vec(),
             mode: 0o600,
             uid: 1000,
             gid: 1000,
@@ -237,7 +310,10 @@ fn render_bastion_files(app: &App, data_dir: &str) -> bool {
 /// real change or a newly-seen clone. Best-effort per clone.
 async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<String, u64>) {
     let cfg = app.config();
-    let hash = keys_hash(&cfg.ssh.authorized_keys);
+    // Gate on the EFFECTIVE clone key set (operator keys + fleet pubkey) so a first-time
+    // fleet-key generation triggers a push even when the operator keys are unchanged.
+    let fleet_pub = fleet_public_key(data_dir).unwrap_or_default();
+    let hash = keys_hash(&clone_authorized_keys(&cfg.ssh.authorized_keys, &fleet_pub));
     for host in app
         .store
         .get()
@@ -252,8 +328,9 @@ async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<Str
             continue; // stopped clones get keys at next provision/boot
         }
         match clone_ssh_tar_entries(data_dir, &host.id, &cfg.ssh.authorized_keys) {
-            // Only push authorized_keys live; the host key is provision-time only (changing
-            // it under a running sshd would need a restart), so filter to the .ssh file.
+            // Push the ~/.ssh material live (authorized_keys + shared fleet key + config);
+            // the clone's own host key is provision-time only (changing it under a running
+            // sshd would need a restart), so filter to the home/ files.
             Ok(entries) => {
                 let ak: Vec<_> =
                     entries.into_iter().filter(|e| e.path.starts_with("home/")).collect();
@@ -493,17 +570,51 @@ mod tests {
         let entries =
             clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()]).unwrap();
 
+        // authorized_keys = operator key + the generated fleet pubkey.
         let ak = entries.iter().find(|e| e.path == "home/rmng/.ssh/authorized_keys").expect("authorized_keys entry");
         assert_eq!(ak.mode, 0o600);
         assert_eq!((ak.uid, ak.gid), (1000, 1000));
-        assert_eq!(ak.data, b"ssh-ed25519 AAAA a\n");
+        let fleet_pub =
+            std::fs::read_to_string(fleet_key_path(dir.to_str().unwrap()).with_extension("pub")).unwrap();
+        let fleet_pub = fleet_pub.trim();
+        let ak_text = String::from_utf8(ak.data.clone()).unwrap();
+        assert!(ak_text.contains("ssh-ed25519 AAAA a"), "operator key present:\n{ak_text}");
+        assert!(ak_text.contains(fleet_pub), "fleet pubkey folded in:\n{ak_text}");
 
+        // Shared fleet keypair + client config, clone-user owned.
+        let id = entries.iter().find(|e| e.path == "home/rmng/.ssh/id_ed25519").expect("fleet private key entry");
+        assert_eq!(id.mode, 0o600);
+        assert_eq!((id.uid, id.gid), (1000, 1000));
+        assert!(!id.data.is_empty(), "fleet private key material present");
+        assert!(entries.iter().any(
+            |e| e.path == "home/rmng/.ssh/id_ed25519.pub" && e.mode == 0o644 && (e.uid, e.gid) == (1000, 1000)
+        ));
+        let cfg = entries.iter().find(|e| e.path == "home/rmng/.ssh/config").expect("ssh config entry");
+        assert_eq!(cfg.mode, 0o600);
+        assert_eq!((cfg.uid, cfg.gid), (1000, 1000));
+        assert!(String::from_utf8(cfg.data.clone()).unwrap().contains("StrictHostKeyChecking accept-new"));
+
+        // The clone's own sshd host key is still root-owned.
         let hk = entries.iter().find(|e| e.path == "etc/ssh/ssh_host_ed25519_key").expect("host key entry");
         assert_eq!(hk.mode, 0o600);
         assert_eq!((hk.uid, hk.gid), (0, 0));
         assert!(entries.iter().any(|e| e.path == "etc/ssh/ssh_host_ed25519_key.pub" && e.mode == 0o644));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clone_authorized_keys_appends_fleet_pubkey() {
+        let out = clone_authorized_keys(&["ssh-ed25519 OP op".into()], "  ssh-ed25519 FLEET fleet  ");
+        assert_eq!(out, vec!["ssh-ed25519 OP op".to_string(), "ssh-ed25519 FLEET fleet".to_string()]);
+        // No operator keys ⇒ just the fleet key; empty fleet ⇒ operator keys only.
+        assert_eq!(clone_authorized_keys(&[], "ssh-ed25519 FLEET fleet"), vec!["ssh-ed25519 FLEET fleet".to_string()]);
+        assert_eq!(clone_authorized_keys(&["ssh-ed25519 OP op".into()], "  "), vec!["ssh-ed25519 OP op".to_string()]);
+    }
+
+    #[test]
+    fn fleet_key_path_is_under_data_dir() {
+        assert_eq!(fleet_key_path("/data").to_str().unwrap(), "/data/ssh/fleet/id_ed25519");
     }
 
     #[test]
