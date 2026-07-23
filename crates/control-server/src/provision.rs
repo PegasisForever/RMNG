@@ -624,7 +624,7 @@ async fn clone_container_after_create(
     // refreshes it with the group's live (blacklist-filtered) `/v1/models` set on its next pass.
     let gpt_models = crate::clone_reconcile::fallback_gpt_models();
     let mut codex_entries =
-        crate::clone_reconcile::codex_parity_entries(cc_base.as_deref(), &gpt_models);
+        crate::clone_reconcile::codex_parity_entries(cc_base.as_deref(), &gpt_models, headless);
     codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(
         &codex_entries,
     ));
@@ -660,6 +660,39 @@ async fn clone_container_after_create(
 
     on_progress("inject", "injecting machine-id + preset env + PATH rc");
     docker.upload_tar(container, entries).await?;
+
+    // Interactive Claude Code reads MCP servers from ~/.claude.json (state-bearing → jq merge, not
+    // a tar entry). Give it the same desktop+linear set as Codex/OpenCode/the agent-wrapper; the
+    // desktop server is removed on headless clones. Stamp it so the reconciler skips re-running
+    // this within its first 30s pass. Best-effort — the reconciler retries on failure.
+    on_progress("inject", "configuring ~/.claude.json MCP servers");
+    let code = docker
+        .exec_script(
+            container,
+            &crate::clone_reconcile::claude_mcp_script(headless),
+            &[],
+            &[],
+            |_stream, line| {
+                tracing::debug!(target: "provision", "claude-mcp: {line}");
+            },
+        )
+        .await
+        .unwrap_or(1);
+    if code == 0 {
+        if let Err(e) = docker
+            .upload_tar(
+                container,
+                vec![crate::clone_reconcile::claude_mcp_stamp_entry_for(headless)],
+            )
+            .await
+        {
+            tracing::warn!("clone {hostname}: writing claude mcp stamp failed: {e:#} (non-fatal)");
+        }
+    } else {
+        tracing::warn!(
+            "clone {hostname}: ~/.claude.json MCP configure exited {code} (reconciler will retry)"
+        );
+    }
 
     // The bashrc block can't go in the tar (it's an APPEND, not a whole file — /etc/bash.bashrc
     // already exists in the image). Delete any prior rmng-preset-path block then re-append,

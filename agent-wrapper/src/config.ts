@@ -2,6 +2,8 @@
 // clones inheriting it) is the single source of truth. Everything has a sane
 // default so `bun run src/server.ts` works on a fresh container with no env.
 
+import { existsSync } from "node:fs";
+
 function uid(): number {
   try {
     return process.getuid?.() ?? 1000;
@@ -33,6 +35,16 @@ export const CONFIG = {
   /** Per-node desktop MCP (HTTP) — the clone-daemon serves the computer-use tools
    * (screenshot/click/key/type/window-mgmt) locally, sharing its Mutter session. */
   daemonMcpUrl: process.env.DAEMON_MCP_URL ?? "http://127.0.0.1:9004",
+
+  /** A headless clone has no desktop: the control-server DELETES both gnome-headless.service and
+   * rmng-clone-daemon.service at create time (control-server `provision.rs` HEADLESS_DISABLE_SCRIPT),
+   * so nothing serves the desktop MCP on :9004. Detect that by the absence of the clone-daemon user
+   * unit — a create-time-stable signal (unlike a TCP probe, it can't misfire during the boot race
+   * before the daemon has bound its port). When headless, `mcpServers()` skips the `desktop` server
+   * so the SDK doesn't register (and, with alwaysLoad, keep retrying) a dead endpoint. */
+  headless: !existsSync(
+    `${process.env.HOME ?? "/home/rmng"}/.config/systemd/user/rmng-clone-daemon.service`,
+  ),
 
   /** Graphical-session env (kept for reference; the clone-daemon has its own). */
   runtimeDir,
