@@ -386,6 +386,88 @@ fn opencode_config_json(cc_base_url: Option<&str>, gpt_models: &[String], headle
     serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into())
 }
 
+/// The `rmng-cli` agent skill — single source of truth (hardcoded here). Written into every
+/// clone at `~/.claude/skills/rmng-cli/SKILL.md` (Claude Code + the inner Cursor Claude Code)
+/// and `~/.agents/skills/rmng-cli/SKILL.md` (Codex / OpenCode), so any agent can load it on
+/// demand to learn the `rmng` fleet CLI. Same delivery model as the global prompt / MCP config.
+const RMNG_CLI_SKILL_MD: &str = r#"---
+name: rmng-cli
+description: Use when you need to manage the RMNG clone fleet from inside a clone — list hosts, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, or manage clone-source images and account groups. Covers the `rmng` command-line tool.
+---
+
+# Managing the fleet with `rmng`
+
+`rmng` is the RMNG fleet CLI, pre-installed at `/usr/local/bin/rmng` in every clone. Inside a
+clone it auto-resolves the control-server (via `$RMNG_CONTROL_URL`), so commands work with no
+setup. It talks to the control-server's web API — it does NOT need Docker or root.
+
+Add `--json` to any command to get raw JSON (wire types) for scripting; human tables go to
+stdout, progress/prompts to stderr.
+
+## Inspect the fleet
+
+- `rmng ps` — list all hosts with live CPU, RAM, token totals, activity, and account group.
+  Sub hosts are shown indented under their parent.
+- `rmng ops` — list recent operations (clone / delete / archive / pull / commit / update).
+- `rmng wait <op-id> [--timeout <secs>]` — block until an operation reaches a terminal state.
+
+## Reach another clone
+
+- `rmng ssh <host>` — print a ready-to-paste `ssh` command for a clone.
+- `rmng exec <host> -- <argv…>` — run one non-interactive command inside another clone
+  (docker-exec style). Flags: `--user <uid|name>`, `--cwd <dir>`, `--env KEY=VAL` (repeatable).
+  Example: `rmng exec pega-we-142 -- ls -la /home/rmng`.
+- `rmng desktop <host> <verb>` — drive another clone's desktop for computer use (each action
+  returns a fresh screenshot). Verbs include `screenshot`, `monitors`, `windows`, `apps`,
+  `move X Y`, `click [X Y]`, `rclick`/`mclick`/`dclick`, plus type/key/scroll actions.
+  Example: `rmng desktop pega-we-142 screenshot`.
+
+## Create / retire clones
+
+- `rmng clone --image <ref> --hostname <name>` — create a clone under an exact hostname
+  (a DNS label). **Run from inside a clone, the new clone auto-nests as a sub host under you
+  AND inherits your account group and env preset by default** — so a helper you spin up joins
+  the same pool/preset with no flags. Override with:
+  - `--preset <name|none>` — use a different env preset, or `none` for no preset.
+  - `--group <name|none>` — bind a different account group, or `none` for no group.
+  - `--top-level` — create a top-level host instead of a sub host (also skips inheritance).
+  - `--parent <host-id>` — nest under a specific top-level clone (inherits that parent's
+    group/preset).
+  - `--headless` — no desktop (tmux view instead of a video stream).
+  Add `--wait` to block until it's ready. `rmng image ls` lists valid `--image` references.
+- `rmng rm <host> [--yes]` — destroy a clone (prompts unless `--yes`; also removes its sub hosts).
+- `rmng archive <host>` / `rmng restore <host>` — stop-and-retain, then bring back.
+
+## Images & accounts
+
+- `rmng image ls` — list clone-source images. `rmng image pull <ref>` / `rmng image commit …`.
+- `rmng account …` — list imported accounts / bind an account group.
+
+## Tips
+
+- Prefer `rmng exec <host> -- …` over hand-rolled SSH when you just need to run one command
+  elsewhere.
+- Everything is addressed by **host id** (the value in the first column of `rmng ps`).
+- On any connection error, `rmng` prints the resolved server URL and a `--server` hint.
+"#;
+
+/// The `rmng-cli` skill TarEntries: the same SKILL.md at both skill locations.
+fn rmng_cli_skill_entries() -> Vec<TarEntry> {
+    [
+        "home/rmng/.claude/skills/rmng-cli/SKILL.md",
+        "home/rmng/.agents/skills/rmng-cli/SKILL.md",
+    ]
+    .into_iter()
+    .map(|path| TarEntry {
+        path: path.to_string(),
+        data: RMNG_CLI_SKILL_MD.as_bytes().to_vec(),
+        mode: 0o644,
+        uid: CLONE_UID,
+        gid: CLONE_GID,
+    })
+    .collect()
+}
+
 /// The per-clone agent config bundle: the shared **global agent prompt** (layers a+c, passed in
 /// as `global_prompt`) written to every agent's native rules file — Claude Code's
 /// `~/.claude/CLAUDE.md`, Codex's `~/.codex/AGENTS.md`, OpenCode's `~/.config/opencode/AGENTS.md`
@@ -437,6 +519,9 @@ pub(crate) fn codex_parity_entries(
             gid: CLONE_GID,
         },
     ];
+    // The `rmng-cli` skill, at both skill locations (Claude/Cursor + Codex/OpenCode).
+    let mut entries = entries;
+    entries.extend(rmng_cli_skill_entries());
     entries
 }
 
@@ -506,6 +591,7 @@ pub(crate) fn codex_prepare_script() -> &'static str {
     r#"set -e
 install -d -o rmng -g rmng -m700 /home/rmng/.codex
 install -d -o rmng -g rmng -m755 /home/rmng/.config /home/rmng/.config/opencode /home/rmng/.config/rmng /home/rmng/.claude
+install -d -o rmng -g rmng -m755 /home/rmng/.claude/skills/rmng-cli /home/rmng/.agents/skills/rmng-cli
 mkdir -p /etc/rmng
 "#
 }
@@ -1406,6 +1492,26 @@ mod tests {
         )
         .unwrap();
         assert!(oc_headed.contains("127.0.0.1:9004"));
+    }
+
+    #[test]
+    fn rmng_cli_skill_written_to_both_skill_locations() {
+        let entries = codex_parity_entries(None, &fallback_gpt_models(), false, "guide");
+        for path in [
+            "home/rmng/.claude/skills/rmng-cli/SKILL.md",
+            "home/rmng/.agents/skills/rmng-cli/SKILL.md",
+        ] {
+            let e = entries.iter().find(|e| e.path == path).unwrap_or_else(|| panic!("missing {path}"));
+            assert_eq!(e.mode, 0o644);
+            assert_eq!((e.uid, e.gid), (1000, 1000));
+            let body = String::from_utf8(e.data.clone()).unwrap();
+            assert!(body.starts_with("---\nname: rmng-cli\n"), "SKILL.md needs skill frontmatter");
+            assert!(body.contains("rmng ps") && body.contains("rmng exec"));
+        }
+        // The prepare script creates both skill directories.
+        let prep = codex_prepare_script();
+        assert!(prep.contains("/home/rmng/.claude/skills/rmng-cli"));
+        assert!(prep.contains("/home/rmng/.agents/skills/rmng-cli"));
     }
 
     #[test]
