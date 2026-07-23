@@ -48,6 +48,10 @@ const PAD_CELLS: f64 = 0.5;
 /// Default grid until the widget is allocated and reports its real character dimensions.
 const INIT_COLS: usize = 80;
 const INIT_ROWS: usize = 24;
+/// Debounce for applying a new grid size to the server. A window drag crosses many cell
+/// boundaries; sending each one floods the server, which repaints *every* tmux session per
+/// resize. We coalesce to the final size this long after the last change.
+const RESIZE_DEBOUNCE_MS: u64 = 90;
 
 /// Keystrokes/paste for a session (session name, bytes) → sent to the server.
 pub type InputCb = Rc<dyn Fn(&str, Vec<u8>)>;
@@ -505,8 +509,18 @@ pub struct TerminalView {
     /// allocated (via `on_grid`); applied to background tabs lazily in [`Self::feed`].
     size: SharedGrid,
     /// Handed to every tab as its resize callback: records the authoritative `size` and sends a
-    /// single `TermResize` to the server (which resizes all sessions' PTYs together).
+    /// single `TermResize` to the server (which resizes all sessions' PTYs together). Debounced.
     on_grid: ResizeCb,
+    /// The pending debounced resize timer, cancelled on the next resize or on drop.
+    resize_pending: Rc<RefCell<Option<glib::SourceId>>>,
+}
+
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        if let Some(id) = self.resize_pending.borrow_mut().take() {
+            id.remove();
+        }
+    }
 }
 
 impl TerminalView {
@@ -531,16 +545,37 @@ impl TerminalView {
         plus.set_visible(true);
 
         let size: SharedGrid = Rc::new(Cell::new((INIT_COLS, INIT_ROWS)));
+        let resize_pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
         let on_grid: ResizeCb = {
             let size = size.clone();
             let real = cb.on_resize.clone();
+            let pending = resize_pending.clone();
             Rc::new(move |cols: u16, rows: u16| {
-                size.set((cols as usize, rows as usize));
-                (real)(cols, rows);
+                // Debounce: reset the timer on each change so only the settled size is applied.
+                if let Some(id) = pending.borrow_mut().take() {
+                    id.remove();
+                }
+                let (size, real, pending2) = (size.clone(), real.clone(), pending.clone());
+                let id = glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                    move || {
+                        pending2.borrow_mut().take(); // we're firing; clear the (now-spent) handle
+                        size.set((cols as usize, rows as usize));
+                        (real)(cols, rows);
+                    },
+                );
+                *pending.borrow_mut() = Some(id);
             })
         };
 
-        Self { notebook, cb, tabs: Rc::new(RefCell::new(HashMap::new())), size, on_grid }
+        Self {
+            notebook,
+            cb,
+            tabs: Rc::new(RefCell::new(HashMap::new())),
+            size,
+            on_grid,
+            resize_pending,
+        }
     }
 
     /// The widget to embed as the primary window's child.
