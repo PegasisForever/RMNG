@@ -29,11 +29,11 @@ gstreamer-gl = { version = "0.23", features = ["v1_24"] }
 gtk4 = { version = "0.9", package = "gtk4", features = ["v4_14"] }
 serde.workspace = true
 serde_json.workspace = true
-# Cross-platform (pure-Rust) terminal-screen emulator for the headless-clone tmux tab view
-# (src/terminal.rs). Feeds the server's raw PTY bytes and exposes the rendered grid, which we
-# paint into a GTK DrawingArea with pangocairo — no system terminal lib, so it builds and runs
-# identically on Linux and macOS (unlike the GTK VTE widget).
-vt100 = "0.16"
+# Full terminal engine (grid, scrollback, selection, mouse/app modes) for the headless-clone
+# tmux tab view (src/terminal.rs). We feed the server's raw PTY bytes and render its grid into a
+# GTK DrawingArea with cairo — no system terminal lib, so it builds and runs identically on Linux
+# and macOS (unlike the GTK VTE widget). Its unused PTY-spawn deps are harmless compile weight.
+alacritty_terminal = "0.26"
 
 # Pointer-lock / relative mouse (Wayland only; gdk4-wayland links a C lib that
 # does not exist on macOS).  The pointer_lock module is gated by the same cfg.
