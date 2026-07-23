@@ -2382,15 +2382,16 @@ mod tests {
     }
 
     #[test]
-    fn is_hop_by_hop_matches_framing_headers_only() {
-        assert!(is_hop_by_hop(&HeaderName::from_static("host")));
-        assert!(is_hop_by_hop(&HeaderName::from_static("connection")));
-        assert!(is_hop_by_hop(&HeaderName::from_static("content-length")));
-        assert!(is_hop_by_hop(&HeaderName::from_static("transfer-encoding")));
+    fn hop_by_hop_matches_framing_headers_only() {
+        let hop = hop_by_hop_headers(&axum::http::HeaderMap::new());
+        assert!(hop.contains(&header::HOST));
+        assert!(hop.contains(&header::CONNECTION));
+        assert!(hop.contains(&header::CONTENT_LENGTH));
+        assert!(hop.contains(&header::TRANSFER_ENCODING));
         // Content-type + authorization are NOT framing headers (authorization is handled
         // separately by the router; content-type must survive for text/event-stream).
-        assert!(!is_hop_by_hop(&HeaderName::from_static("content-type")));
-        assert!(!is_hop_by_hop(&HeaderName::from_static("authorization")));
+        assert!(!hop.contains(&header::CONTENT_TYPE));
+        assert!(!hop.contains(&header::AUTHORIZATION));
     }
 
     #[test]

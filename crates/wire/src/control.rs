@@ -284,6 +284,10 @@ pub struct CloneTokenUsage {
     pub output_tokens: u64,
     /// Number of responses that reported a recognized final usage object.
     pub request_count: u64,
+    /// True when this clone was served by the Fable model within the last 5 minutes. Derived
+    /// server-side from a private timestamp (never sent) and re-projected on a timer so it
+    /// decays back to false; drives the sidebar's "fable" badge next to the group binding.
+    pub fable_active: bool,
 }
 
 /// Version + update-available status for the control-server itself, served by

@@ -224,6 +224,7 @@ async fn main() -> Result<()> {
     // `ControlState.usage_groups` (the old flat claude_accounts pollers stay running).
     tokio::spawn(cliproxy::run_usage_poller(app.clone()));
     tokio::spawn(app.tokens.clone().run_persister());
+    tokio::spawn(app.tokens.clone().run_fable_ticker());
 
     // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
     mediaplane::spawn(app.clone());

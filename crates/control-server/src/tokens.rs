@@ -17,6 +17,12 @@ use wire::{CloneTokenUsage, Host};
 
 const TOKEN_FILE: &str = "clone-tokens.json";
 const TOKEN_INACTIVE_MS: i64 = 5 * 60 * 1000;
+/// How long after a clone's last observed use of the Fable model it still counts as
+/// "recently used Fable" for the sidebar badge. Matches the token-inactivity window.
+const FABLE_ACTIVE_MS: i64 = 5 * 60 * 1000;
+/// Cadence for re-projecting `fable_active`: without token traffic the flag would otherwise
+/// never flip back to false, so a lightweight ticker recomputes the browser view on this beat.
+const FABLE_TICK: Duration = Duration::from_secs(30);
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 const FLUSH_DELAY: Duration = Duration::from_millis(750);
 
@@ -28,6 +34,10 @@ struct StoredUsage {
     request_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_token_at: Option<i64>,
+    /// Wall-clock ms of this clone's most recent response served by the Fable model. Private
+    /// like `last_token_at`; only its derived `fable_active` recency reaches the browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_fable_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -82,7 +92,7 @@ impl TokenBus {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        let latest = public_map(&file.records);
+        let latest = public_map(&file.records, crate::clone_ops::now_ms());
         let latest_json = json_for(&latest);
         let (tx, _) = broadcast::channel(32);
         Self {
@@ -159,7 +169,7 @@ impl TokenBus {
                 }
             }
             if changed {
-                frame = mark_dirty_and_refresh(&mut inner);
+                frame = mark_dirty_and_refresh(&mut inner, crate::clone_ops::now_ms());
             }
         }
         if changed {
@@ -188,7 +198,7 @@ impl TokenBus {
                 .file
                 .lifecycle
                 .insert(host_id.to_string(), Lifecycle::active(next_epoch, false));
-            mark_dirty_and_refresh(&mut inner)
+            mark_dirty_and_refresh(&mut inner, crate::clone_ops::now_ms())
         };
         self.persist_poke.notify_one();
         if let Some(frame) = frame {
@@ -243,7 +253,7 @@ impl TokenBus {
                 changed = true;
             }
             if changed {
-                frame = mark_dirty_and_refresh(&mut inner);
+                frame = mark_dirty_and_refresh(&mut inner, crate::clone_ops::now_ms());
             }
         }
         if changed {
@@ -330,7 +340,7 @@ impl TokenBus {
                 }
             }
             if changed {
-                frame = mark_dirty_and_refresh(&mut inner);
+                frame = mark_dirty_and_refresh(&mut inner, now);
             }
         }
         if changed {
@@ -340,6 +350,36 @@ impl TokenBus {
             let _ = self.tx.send(frame);
         }
         activity
+    }
+
+    /// Record that this clone's most recent response was served by the Fable model, stamping
+    /// the private `last_fable_at` so `fable_active` reads true for the next window. A stale or
+    /// archived epoch is ignored, exactly like [`Self::record`].
+    fn record_fable(&self, host_id: &str, epoch: u64) {
+        let now = crate::clone_ops::now_ms();
+        let frame = {
+            let mut inner = self.inner.lock().unwrap();
+            let valid_epoch = inner
+                .file
+                .lifecycle
+                .get(host_id)
+                .is_some_and(|lifecycle| lifecycle.active && lifecycle.epoch == epoch);
+            if !valid_epoch {
+                return;
+            }
+            let Some(record) = inner.file.records.get_mut(host_id) else {
+                return;
+            };
+            if record.last_fable_at == Some(now) {
+                return;
+            }
+            record.last_fable_at = Some(now);
+            mark_dirty_and_refresh(&mut inner, now)
+        };
+        self.persist_poke.notify_one();
+        if let Some(frame) = frame {
+            let _ = self.tx.send(frame);
+        }
     }
 
     pub fn observer(
@@ -365,6 +405,7 @@ impl TokenBus {
             high_water: UsageTotals::default(),
             counted_request: false,
             working_marked: false,
+            fable_marked: false,
         })
     }
 
@@ -463,9 +504,30 @@ impl TokenBus {
             }
         }
     }
+
+    /// Periodically re-project the browser view so `fable_active` decays back to false a bounded
+    /// time after the last Fable response, even when no further token traffic arrives to trigger
+    /// a refresh. Touches no persistence state; emits an SSE frame only when the view changed.
+    pub async fn run_fable_ticker(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(FABLE_TICK);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let frame = {
+                let mut inner = self.inner.lock().unwrap();
+                refresh_public(&mut inner, crate::clone_ops::now_ms())
+            };
+            if let Some(frame) = frame {
+                let _ = self.tx.send(frame);
+            }
+        }
+    }
 }
 
-fn public_map(records: &HashMap<String, StoredUsage>) -> HashMap<String, CloneTokenUsage> {
+fn public_map(
+    records: &HashMap<String, StoredUsage>,
+    now: i64,
+) -> HashMap<String, CloneTokenUsage> {
     records
         .iter()
         .map(|(id, record)| {
@@ -475,10 +537,17 @@ fn public_map(records: &HashMap<String, StoredUsage>) -> HashMap<String, CloneTo
                     new_input_tokens: record.new_input_tokens,
                     output_tokens: record.output_tokens,
                     request_count: record.request_count,
+                    fable_active: fable_active(record.last_fable_at, now),
                 },
             )
         })
         .collect()
+}
+
+/// Whether a clone's last Fable response falls inside the active window ending at `now`.
+/// A future timestamp (clock skew) is treated as not active, mirroring `is_token_inactive`.
+fn fable_active(last_fable_at: Option<i64>, now: i64) -> bool {
+    last_fable_at.is_some_and(|last| last <= now && now.saturating_sub(last) < FABLE_ACTIVE_MS)
 }
 
 fn json_for(map: &HashMap<String, CloneTokenUsage>) -> String {
@@ -487,10 +556,17 @@ fn json_for(map: &HashMap<String, CloneTokenUsage>) -> String {
 
 /// Marks the file dirty and returns a fresh SSE frame only if the safe browser projection
 /// changed. Timestamp-only activity is persisted but intentionally not leaked to the client.
-fn mark_dirty_and_refresh(inner: &mut Inner) -> Option<String> {
+fn mark_dirty_and_refresh(inner: &mut Inner, now: i64) -> Option<String> {
     inner.revision = inner.revision.saturating_add(1);
     inner.dirty = true;
-    let next = public_map(&inner.file.records);
+    refresh_public(inner, now)
+}
+
+/// Re-project the safe browser view at `now` and return a fresh SSE frame only if it changed.
+/// Unlike `mark_dirty_and_refresh` this touches no persistence state, so the periodic
+/// `fable_active` recompute never rewrites `clone-tokens.json`.
+fn refresh_public(inner: &mut Inner, now: i64) -> Option<String> {
+    let next = public_map(&inner.file.records, now);
     if next == inner.latest {
         return None;
     }
@@ -576,6 +652,9 @@ pub struct ResponseObserver {
     high_water: UsageTotals,
     counted_request: bool,
     working_marked: bool,
+    /// Set once this response has been attributed to Fable, so a long stream stamps the clock
+    /// a single time rather than on every event carrying the model id.
+    fable_marked: bool,
 }
 
 impl ResponseObserver {
@@ -598,6 +677,7 @@ impl ResponseObserver {
         }
         self.buffer.extend_from_slice(chunk);
         if let Ok(value) = serde_json::from_slice::<Value>(&self.buffer) {
+            self.note_model(&value);
             self.account_usage(&value);
             self.disabled = true;
             self.buffer.clear();
@@ -674,6 +754,7 @@ impl ResponseObserver {
             self.disabled = true;
             return;
         };
+        self.note_model(&value);
         self.account_usage(&value);
         if !self.disabled
             && recognized_output_delta(&value)
@@ -707,6 +788,17 @@ impl ResponseObserver {
         ) {
             self.mark_working_once();
         }
+    }
+
+    /// Stamp Fable activity the first time this response reveals the Fable model. The model id
+    /// appears in an early event (Anthropic `message_start`) or the non-streaming body, so this
+    /// runs on every parsed value independent of whether that value also carries a usage object.
+    fn note_model(&mut self, value: &Value) {
+        if self.fable_marked || !mentions_fable(value) {
+            return;
+        }
+        self.fable_marked = true;
+        self.bus.record_fable(&self.host_id, self.epoch);
     }
 
     fn mark_working_once(&mut self) {
@@ -870,6 +962,26 @@ fn gemini_interactions_usage(value: &Value) -> Option<UsageTotals> {
     })
 }
 
+/// Whether a response value names the Fable model. The model id is echoed by every provider
+/// shape in one of these locations (Anthropic `message.model` / top-level `model`, OpenAI
+/// `model`, Gemini `modelVersion`); a substring match on "fable" catches `claude-fable-5` and
+/// any dated variant without hard-coding an exact id.
+fn mentions_fable(value: &Value) -> bool {
+    const MODEL_PATHS: &[&[&str]] = &[
+        &["model"],
+        &["message", "model"],
+        &["response", "model"],
+        &["modelVersion"],
+        &["response", "modelVersion"],
+    ];
+    MODEL_PATHS.iter().any(|path| {
+        path.iter()
+            .try_fold(value, |current, key| current.get(*key))
+            .and_then(Value::as_str)
+            .is_some_and(|model| model.to_ascii_lowercase().contains("fable"))
+    })
+}
+
 /// Recognize model-output deltas that prove a stream remains alive before a final `usage`
 /// snapshot arrives. This deliberately accepts only text, reasoning, and tool-argument payloads.
 fn recognized_output_delta(value: &Value) -> bool {
@@ -1020,6 +1132,7 @@ mod tests {
             high_water: UsageTotals::default(),
             counted_request: false,
             working_marked: false,
+            fable_marked: false,
         };
         observer.account_usage(&parse(r#"{"usage":{"input_tokens":9,"output_tokens":2}}"#));
         observer.account_usage(&parse(r#"{"usage":{"input_tokens":9,"output_tokens":5}}"#));
@@ -1050,5 +1163,28 @@ mod tests {
         assert!(!bus.is_token_inactive("h", 300_999));
         assert!(bus.is_token_inactive("h", 301_000));
         assert!(bus.is_token_inactive("h", 999));
+    }
+
+    #[test]
+    fn detects_fable_across_provider_shapes() {
+        assert!(mentions_fable(&parse(
+            r#"{"type":"message_start","message":{"model":"claude-fable-5"}}"#
+        )));
+        assert!(mentions_fable(&parse(r#"{"model":"claude-fable-5-20251001"}"#)));
+        assert!(mentions_fable(&parse(r#"{"response":{"model":"CLAUDE-FABLE-5"}}"#)));
+        assert!(!mentions_fable(&parse(
+            r#"{"message":{"model":"claude-opus-4-8"}}"#
+        )));
+        assert!(!mentions_fable(&parse(r#"{"model":"gpt-5.5"}"#)));
+        assert!(!mentions_fable(&parse(r#"{"usage":{"output_tokens":3}}"#)));
+    }
+
+    #[test]
+    fn fable_active_window_is_exclusive_and_rejects_future() {
+        assert!(fable_active(Some(1_000), 1_000));
+        assert!(fable_active(Some(1_000), 1_000 + FABLE_ACTIVE_MS - 1));
+        assert!(!fable_active(Some(1_000), 1_000 + FABLE_ACTIVE_MS));
+        assert!(!fable_active(Some(2_000), 1_000));
+        assert!(!fable_active(None, 5_000));
     }
 }

@@ -59,20 +59,31 @@ function MetricSlot({ metric }: { metric: Metric }) {
 /** The clone's account-group binding: a badge carrying the group name (or a muted "no group"),
  *  taking the remaining width and truncating so the usage figures + ⋯ menu stay on the same row.
  *  Provider-agnostic — a group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns
- *  intra-group selection. */
-function GroupTag({ group }: { group?: string }) {
+ *  intra-group selection. When `fable` is set, a small "fable" label sits next to the group
+ *  name to flag that this clone was served by the Fable model in the last 5 minutes. */
+function GroupTag({ group, fable }: { group?: string; fable?: boolean }) {
   return (
     <span
       className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
       title={group ? `account group: ${group}` : "no account group — no inference"}
     >
       {group ? (
-        <span className="-ml-0.5 max-w-full truncate rounded bg-slate-200 px-1 text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+        // `min-w-0` (not `max-w-full`) so the name truncates before the fable label, keeping
+        // the label visible right beside it rather than being pushed off the row.
+        <span className="-ml-0.5 min-w-0 truncate rounded bg-slate-200 px-1 text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">
           {group}
         </span>
       ) : (
         <span className="italic text-slate-300 dark:text-slate-600">no group</span>
       )}
+      {fable ? (
+        <span
+          className="shrink-0 text-[11px] text-violet-600 dark:text-violet-400"
+          title="served by the Fable model in the last 5 minutes"
+        >
+          fable
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -407,7 +418,7 @@ export function SidebarHost({
             </div>
           ) : showBindingLine ? (
             <div className="flex min-w-0 flex-1 items-center gap-2 text-[10px]">
-              <GroupTag group={group} />
+              <GroupTag group={group} fable={managed ? tokenUsage?.fableActive : undefined} />
               {inputTokenMetric ? <MetricSlot metric={inputTokenMetric} /> : null}
               {outputTokenMetric ? <MetricSlot metric={outputTokenMetric} /> : null}
               {cpuMetric ? <MetricSlot metric={cpuMetric} /> : null}

@@ -19,4 +19,10 @@ outputTokens: bigint,
 /**
  * Number of responses that reported a recognized final usage object.
  */
-requestCount: bigint, };
+requestCount: bigint,
+/**
+ * True when this clone was served by the Fable model within the last 5 minutes. Derived
+ * server-side from a private timestamp (never sent) and re-projected on a timer so it
+ * decays back to false; drives the sidebar's "fable" badge next to the group binding.
+ */
+fableActive: boolean, };
