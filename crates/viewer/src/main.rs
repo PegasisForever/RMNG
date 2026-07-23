@@ -466,6 +466,78 @@ struct MonitorWindow {
 
 type Windows = Rc<RefCell<HashMap<u32, MonitorWindow>>>;
 
+/// Make the app follow the system light/dark preference, the way libadwaita does: read the XDG
+/// desktop settings portal's `color-scheme` and drive `GtkSettings:gtk-application-prefer-dark-theme`,
+/// then keep it in sync. Without this a plain GTK4 app always boots in the light theme regardless
+/// of the desktop setting (fixed only by a manual theme toggle). No-op when there is no portal.
+fn follow_system_color_scheme() {
+    let Some(settings) = gtk4::Settings::default() else { return };
+    let Some(proxy) = color_scheme_portal() else { return };
+    apply_prefer_dark(&settings, read_color_scheme(&proxy));
+    let settings = settings.clone();
+    proxy.connect_local("g-signal", false, move |vals| {
+        let sig = vals.get(2).and_then(|v| v.get::<String>().ok());
+        let params = vals.get(3).and_then(|v| v.get::<glib::Variant>().ok());
+        if let (Some(sig), Some(params)) = (sig, params) {
+            if sig == "SettingChanged"
+                && params.child_value(0).str() == Some("org.freedesktop.appearance")
+                && params.child_value(1).str() == Some("color-scheme")
+            {
+                apply_prefer_dark(&settings, variant_to_u32(&params.child_value(2)));
+            }
+        }
+        None
+    });
+    // The proxy owns the signal subscription; keep it alive for the whole process.
+    std::mem::forget(proxy);
+}
+
+/// `color-scheme` 1 = prefer dark, 2 = prefer light, 0/None = no preference (GTK default = light).
+fn apply_prefer_dark(settings: &gtk4::Settings, scheme: Option<u32>) {
+    let dark = scheme == Some(1);
+    tracing::info!("system color-scheme = {scheme:?} → prefer-dark = {dark}");
+    settings.set_gtk_application_prefer_dark_theme(dark);
+}
+
+fn color_scheme_portal() -> Option<gtk4::gio::DBusProxy> {
+    gtk4::gio::DBusProxy::for_bus_sync(
+        gtk4::gio::BusType::Session,
+        gtk4::gio::DBusProxyFlags::NONE,
+        None,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Settings",
+        gtk4::gio::Cancellable::NONE,
+    )
+    .ok()
+}
+
+fn read_color_scheme(proxy: &gtk4::gio::DBusProxy) -> Option<u32> {
+    let params = ("org.freedesktop.appearance", "color-scheme").to_variant();
+    let reply = proxy
+        .call_sync("ReadOne", Some(&params), gtk4::gio::DBusCallFlags::NONE, 1000, gtk4::gio::Cancellable::NONE)
+        .or_else(|_| {
+            proxy.call_sync("Read", Some(&params), gtk4::gio::DBusCallFlags::NONE, 1000, gtk4::gio::Cancellable::NONE)
+        })
+        .ok()?;
+    variant_to_u32(&reply.child_value(0))
+}
+
+/// The portal wraps the value in one or more `v` variants; peel them until a `u32` surfaces.
+fn variant_to_u32(v: &glib::Variant) -> Option<u32> {
+    let mut cur = v.clone();
+    for _ in 0..4 {
+        if let Some(u) = cur.get::<u32>() {
+            return Some(u);
+        }
+        match cur.as_variant() {
+            Some(inner) => cur = inner,
+            None => break,
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_ui(
     app: &gtk4::Application,
@@ -481,6 +553,9 @@ fn build_ui(
     term_active: &TermActive,
     term_inbox: &TermShared,
 ) {
+    // Follow the system light/dark preference (a plain GTK4 app otherwise boots light).
+    follow_system_color_scheme();
+
     // Black background behind every letterboxed video (applies to all windows).
     // Pointer-lock (games): one instance per display, shared across monitor windows;
     // None on X11 / when the compositor lacks the protocols / RMNG_NO_POINTER_LOCK.
