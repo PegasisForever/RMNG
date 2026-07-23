@@ -126,9 +126,15 @@ pub struct Preset {
     #[serde(default)]
     pub vars: Vec<EnvVar>,
     /// Optional per-preset text appended (after `"\n\n"`) to the global agent playbook for
-    /// clones of this preset. Empty ⇒ no append. Non-secret.
+    /// clones of this preset. Empty ⇒ no append. Non-secret. (Layer **d**: node-agent extra,
+    /// this preset only.)
     #[serde(default)]
     pub agent_playbook: String,
+    /// Optional per-preset text appended (after `"\n\n"`) to the global agent prompt for clones
+    /// of this preset — written to EVERY agent's global rules file (CLAUDE.md / AGENTS.md).
+    /// Empty ⇒ no append. Non-secret. (Layer **c**: global prompt, all agents, this preset only.)
+    #[serde(default)]
+    pub global_prompt: String,
 }
 
 impl Preset {
@@ -139,6 +145,7 @@ impl Preset {
             linear_key_set: !self.linear_key.is_empty(),
             vars: self.vars.clone(),
             agent_playbook: self.agent_playbook.clone(),
+            global_prompt: self.global_prompt.clone(),
         }
     }
 }
@@ -154,6 +161,7 @@ pub struct PresetRedacted {
     pub linear_key_set: bool,
     pub vars: Vec<EnvVar>,
     pub agent_playbook: String,
+    pub global_prompt: String,
 }
 
 /// A named account pool backed by one CLIProxyAPI instance (see the group-proxy
@@ -406,8 +414,17 @@ pub struct AppConfig {
     /// The desktop agent's base playbook (operating notes + ticket procedure), injected into
     /// each new clone at creation as its system-prompt append. Seeded with the shipped default
     /// (the wrapper's `agent-instructions.md`); edited in Settings. Applies to the next clone.
+    /// (Layer **b**: node-agent extra, all presets.)
     #[serde(default = "default_agent_playbook")]
     pub agent_playbook: String,
+    /// The global agent prompt every coding agent reads as its native operating memory
+    /// (written to CLAUDE.md / `~/.codex/AGENTS.md` / `~/.config/opencode/AGENTS.md`, and read
+    /// by the node-agent via `settingSources:["user"]`). Seeded with the shipped default; edited
+    /// in Settings. Kept in sync into existing clones by the reconciler. (Layer **a**: global
+    /// prompt, all agents, all presets.) Keep desktop/Cursor procedure OUT of this — that belongs
+    /// in [`agent_playbook`] (the inner Cursor Claude Code reads CLAUDE.md and would recurse).
+    #[serde(default = "default_global_prompt")]
+    pub global_prompt: String,
 }
 
 impl Default for AppConfig {
@@ -429,6 +446,7 @@ impl Default for AppConfig {
             chroma: ChromaMode::default(),
             ssh: SshConfig::default(),
             agent_playbook: default_agent_playbook(),
+            global_prompt: default_global_prompt(),
         }
     }
 }
@@ -441,6 +459,13 @@ fn default_agent_port() -> u16 {
 /// Same file the agent-wrapper bakes in as its fallback (single source of truth).
 fn default_agent_playbook() -> String {
     include_str!("../../../agent-wrapper/agent-instructions.md").to_string()
+}
+/// The shipped global agent prompt (layer **a** default): the shared "operating memory" every
+/// coding agent reads as its native global rules. General engineering guidance only — the
+/// desktop/Cursor ticket procedure lives in the node-agent playbook, never here. This is the
+/// single source of truth for the body the control-server writes to CLAUDE.md / AGENTS.md.
+pub fn default_global_prompt() -> String {
+    "# Working in this clone\n\nThis machine is a **disposable, single-purpose dev sandbox** that belongs to you,\nwith **passwordless `sudo`**. Install packages, toolchains, and global CLIs freely\nand reconfigure the system as needed — the machine itself is throwaway and there is\nno other user to disturb. Optimize for getting the task done.\n\n## When you're blocked\n\nIf you're genuinely stuck — missing access or credentials, an ambiguous\nrequirement, or a call that's the human's to make — **stop and ask** rather than\nguessing or thrashing. A precise question beats a confident wrong turn.\n".to_string()
 }
 fn default_data_dir() -> String {
     "data".into()
@@ -503,6 +528,7 @@ impl AppConfig {
             chroma: self.chroma,
             ssh: self.ssh.clone(),
             agent_playbook: self.agent_playbook.clone(),
+            global_prompt: self.global_prompt.clone(),
         }
     }
 }
@@ -529,6 +555,7 @@ pub struct AppConfigRedacted {
     pub chroma: ChromaMode,
     pub ssh: SshConfig,
     pub agent_playbook: String,
+    pub global_prompt: String,
 }
 
 /// Response body for `PUT /api/config`: the redacted config after the merge, plus
@@ -763,6 +790,7 @@ mod tests {
                         value: "1".into(),
                     }],
                     agent_playbook: String::new(),
+                    global_prompt: String::new(),
                 },
                 Preset {
                     name: "bare".into(),
@@ -801,19 +829,35 @@ mod tests {
     }
 
     #[test]
+    fn global_prompt_defaults_to_shipped_body() {
+        // Missing key ⇒ the shipped shared operating-memory body (non-empty).
+        let c: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(!c.global_prompt.is_empty());
+        assert_eq!(c.global_prompt, default_global_prompt());
+        assert!(c.global_prompt.contains("disposable"));
+        // A preset's global prompt defaults to empty (optional append, layer c).
+        let p: Preset = serde_json::from_str(r#"{ "name": "x" }"#).unwrap();
+        assert!(p.global_prompt.is_empty());
+    }
+
+    #[test]
     fn agent_playbook_passes_through_redaction() {
         let c = AppConfig {
             agent_playbook: "GLOBAL NOTES".into(),
+            global_prompt: "GLOBAL PROMPT".into(),
             presets: vec![Preset {
                 name: "p".into(),
                 agent_playbook: "PRESET APPEND".into(),
+                global_prompt: "PRESET PROMPT".into(),
                 ..Default::default()
             }],
             ..Default::default()
         };
         let r = c.redacted();
         assert_eq!(r.agent_playbook, "GLOBAL NOTES");
+        assert_eq!(r.global_prompt, "GLOBAL PROMPT");
         assert_eq!(r.presets[0].agent_playbook, "PRESET APPEND");
+        assert_eq!(r.presets[0].global_prompt, "PRESET PROMPT");
     }
 
     #[test]

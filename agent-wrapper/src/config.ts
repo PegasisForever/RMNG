@@ -59,4 +59,11 @@ export const CONFIG = {
   instructionsPath:
     process.env.AGENT_INSTRUCTIONS_PATH ??
     `${process.env.HOME ?? "/home/rmng"}/.config/rmng/agent-instructions.md`,
+
+  /** The control-server-written MCP descriptor — the single source of truth for the managed
+   * server set (`desktop`+`linear`), already headless-filtered. The wrapper reads this at
+   * startup and maps it to the SDK's `mcpServers`; absent ⇒ the built-in fallback in server.ts. */
+  mcpConfigPath:
+    process.env.RMNG_MCP_CONFIG_PATH ??
+    `${process.env.HOME ?? "/home/rmng"}/.config/rmng/mcp.json`,
 } as const;

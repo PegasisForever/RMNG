@@ -349,6 +349,7 @@ export const appConfig: AppConfigRedacted = {
       linearKeySet: true,
       vars: [{ key: "NODE_ENV", value: "development" }],
       agentPlaybook: "",
+      globalPrompt: "",
     },
   ],
   chroma: "yuv420",
@@ -357,5 +358,6 @@ export const appConfig: AppConfigRedacted = {
     publicHost: "rmng.example.com",
   },
   agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
+  globalPrompt: "# Working in this clone\n\n(sample shared operating memory)\n",
 };
 

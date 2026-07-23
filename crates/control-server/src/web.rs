@@ -651,6 +651,7 @@ async fn clone(
                 .map(crate::provision::preset_env_vars)
                 .unwrap_or_default(),
             agent_playbook: compose_playbook(&cfg, explicit),
+            global_prompt: compose_global_prompt(&cfg, explicit),
             headless,
             parent,
         };
@@ -701,6 +702,7 @@ async fn clone(
             preset_name: explicit.map(|p| p.name.clone()),
             env,
             agent_playbook: compose_playbook(&cfg, explicit),
+            global_prompt: compose_global_prompt(&cfg, explicit),
             headless,
             // UI create modes always produce top-level hosts.
             parent: None,
@@ -738,6 +740,7 @@ async fn clone(
         preset_name: Some(preset.name.clone()),
         env: crate::provision::preset_env_vars(&preset),
         agent_playbook: compose_playbook(&cfg, Some(&preset)),
+        global_prompt: compose_global_prompt(&cfg, Some(&preset)),
         headless,
         // UI create modes always produce top-level hosts.
         parent: None,
@@ -761,6 +764,21 @@ pub(crate) fn compose_playbook(cfg: &wire::AppConfig, preset: Option<&wire::Pres
     let base = cfg.agent_playbook.trim();
     match preset
         .map(|p| p.agent_playbook.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(extra) => format!("{base}\n\n{extra}"),
+        None => base.to_string(),
+    }
+}
+
+/// The effective GLOBAL AGENT PROMPT for a clone (layers **a + c**): the global `globalPrompt`
+/// plus the preset's optional `globalPrompt` append (after a blank line). This is the shared
+/// operating-memory body written to EVERY agent's native rules file (CLAUDE.md / AGENTS.md).
+/// Same shape as [`compose_playbook`] (which yields the node-agent-only b+d append).
+pub(crate) fn compose_global_prompt(cfg: &wire::AppConfig, preset: Option<&wire::Preset>) -> String {
+    let base = cfg.global_prompt.trim();
+    match preset
+        .map(|p| p.global_prompt.trim())
         .filter(|s| !s.is_empty())
     {
         Some(extra) => format!("{base}\n\n{extra}"),
@@ -2802,6 +2820,36 @@ mod playbook_tests {
         assert_eq!(
             compose_playbook(&cfg_with("BASE"), Some(&preset_with("EXTRA"))),
             "BASE\n\nEXTRA"
+        );
+    }
+
+    // ---- compose_global_prompt (layers a + c) ----
+
+    fn cfg_global(a: &str) -> wire::AppConfig {
+        wire::AppConfig {
+            global_prompt: a.into(),
+            ..Default::default()
+        }
+    }
+    fn preset_global(c: &str) -> wire::Preset {
+        wire::Preset {
+            name: "p".into(),
+            global_prompt: c.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn global_prompt_is_a_then_c() {
+        // a only (no preset / empty c) → just a; a+c → joined with a blank line.
+        assert_eq!(compose_global_prompt(&cfg_global("A"), None), "A");
+        assert_eq!(
+            compose_global_prompt(&cfg_global("A"), Some(&preset_global("   "))),
+            "A"
+        );
+        assert_eq!(
+            compose_global_prompt(&cfg_global("A"), Some(&preset_global("C"))),
+            "A\n\nC"
         );
     }
 }

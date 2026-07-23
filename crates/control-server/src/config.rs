@@ -72,6 +72,7 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                     linear_key: String::new(),
                     vars,
                     agent_playbook: String::new(),
+                    global_prompt: String::new(),
                 });
             }
         }
@@ -886,12 +887,18 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let global_prompt = r
+            .get("globalPrompt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         out.push(wire::Preset {
             name,
             labels,
             linear_key,
             vars,
             agent_playbook,
+            global_prompt,
         });
     }
     out

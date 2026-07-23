@@ -529,6 +529,7 @@ export function SettingsPanel({
       keySet: boolean;
       vars: { key: string; value: string }[];
       agentPlaybook: string;
+      globalPrompt: string;
     }[]
   >([]);
   const [hostnamePrefix, setHostnamePrefix] = useState("");
@@ -558,6 +559,7 @@ export function SettingsPanel({
   const [cloneSocket, setCloneSocket] = useState("");
   const [chroma, setChroma] = useState<ChromaMode>("yuv420");
   const [agentPlaybook, setAgentPlaybook] = useState("");
+  const [globalPrompt, setGlobalPrompt] = useState("");
   // SSH access: pasted authorized_keys (one per line) installed on the bastion + every
   // clone, plus an optional public-host override for the copied `ssh -J …` command.
   const [ssh, setSsh] = useState<{ authorizedKeys: string[]; publicHost: string }>({
@@ -594,6 +596,7 @@ export function SettingsPanel({
     setCloneSocket(c.cloneSocket);
     setChroma(c.chroma);
     setAgentPlaybook(c.agentPlaybook);
+    setGlobalPrompt(c.globalPrompt);
     setSsh({
       authorizedKeys: c.ssh?.authorizedKeys ?? [],
       publicHost: c.ssh?.publicHost ?? "",
@@ -606,6 +609,7 @@ export function SettingsPanel({
         keySet: p.linearKeySet,
         vars: p.vars.map((v) => ({ ...v })),
         agentPlaybook: p.agentPlaybook,
+        globalPrompt: p.globalPrompt,
       })),
     );
   }
@@ -631,10 +635,14 @@ export function SettingsPanel({
   const addPreset = () =>
     setPresets((ps) => [
       ...ps,
-      { name: "", labels: "", linearKey: "", keySet: false, vars: [{ key: "", value: "" }], agentPlaybook: "" },
+      { name: "", labels: "", linearKey: "", keySet: false, vars: [{ key: "", value: "" }], agentPlaybook: "", globalPrompt: "" },
     ]);
   const rmPreset = (i: number) => setPresets((ps) => ps.filter((_, j) => j !== i));
-  const setPresetField = (i: number, field: "name" | "labels" | "linearKey" | "agentPlaybook", v: string) =>
+  const setPresetField = (
+    i: number,
+    field: "name" | "labels" | "linearKey" | "agentPlaybook" | "globalPrompt",
+    v: string,
+  ) =>
     setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, [field]: v } : p)));
   const addVar = (i: number) =>
     setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, vars: [...p.vars, { key: "", value: "" }] } : p)));
@@ -696,6 +704,7 @@ export function SettingsPanel({
         chroma,
         ssh,
         agentPlaybook,
+        globalPrompt,
         presets: presets
           .filter((p) => p.name.trim())
           .map((p) => ({
@@ -704,6 +713,7 @@ export function SettingsPanel({
             linearKey: p.linearKey, // "" = keep the stored key
             vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
             agentPlaybook: p.agentPlaybook,
+            globalPrompt: p.globalPrompt,
           })),
       };
       const res = await putConfig(patch);
@@ -819,12 +829,29 @@ export function SettingsPanel({
               </div>
             </Section>
 
-            {/* Agent instructions — the desktop agent's operating notes / ticket
-                procedure, injected as its system prompt at clone time. */}
+            {/* Global agent prompt (layer a) — the shared operating memory EVERY agent reads
+                as its native global rules (CLAUDE.md / AGENTS.md). Kept in sync into existing
+                clones by the reconciler. */}
             <Section
-              title="Agent instructions"
+              title="Global agent prompt (all presets)"
               effect="immediate"
-              hint="The desktop agent's operating notes + ticket procedure, injected as its system prompt. Applies to newly created clones (existing clones keep the instructions they were created with)."
+              hint="General engineering guidance written to every agent's native rules file (Claude CLAUDE.md, Codex/OpenCode AGENTS.md, and read by the node-agent). Applies to all presets; edits sync into existing clones. Keep desktop/Cursor ticket procedure OUT of this — that belongs in the node-agent prompt below (the inner Cursor Claude Code reads this file and would recurse)."
+            >
+              <textarea
+                value={globalPrompt}
+                onChange={(e) => setGlobalPrompt(e.target.value)}
+                spellCheck={false}
+                rows={12}
+                className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
+              />
+            </Section>
+
+            {/* Node-agent additional prompt (layer b) — the desktop agent's operating notes /
+                ticket procedure, appended to its system prompt at clone time. Node-agent only. */}
+            <Section
+              title="Node-agent additional prompt (all presets)"
+              effect="immediate"
+              hint="Extra system-prompt append for the node-agent ONLY (the desktop agent's operating notes + ticket procedure). Not given to Claude/Codex/OpenCode. Applies to newly created clones (existing clones keep what they were created with)."
             >
               <textarea
                 value={agentPlaybook}
@@ -915,7 +942,19 @@ export function SettingsPanel({
                       + Add variable
                     </button>
                     <div className="mt-2">
-                      <Field label="Extra agent instructions (appended after the global instructions for this preset)">
+                      <Field label="Extra global prompt for this preset (appended to the global agent prompt, for every agent)">
+                        <textarea
+                          value={p.globalPrompt}
+                          onChange={(e) => setPresetField(i, "globalPrompt", e.target.value)}
+                          spellCheck={false}
+                          rows={4}
+                          placeholder="(optional)"
+                          className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+                        />
+                      </Field>
+                    </div>
+                    <div className="mt-2">
+                      <Field label="Extra node-agent prompt for this preset (appended to the node-agent prompt only)">
                         <textarea
                           value={p.agentPlaybook}
                           onChange={(e) => setPresetField(i, "agentPlaybook", e.target.value)}

@@ -389,6 +389,7 @@ pub async fn clone_container(
     hostname: &str,
     env: &[EnvVar],
     agent_playbook: &str,
+    global_prompt: &str,
     headless: bool,
     mut on_progress: impl FnMut(&str, &str),
 ) -> Result<String> {
@@ -445,6 +446,7 @@ pub async fn clone_container(
         hostname,
         env,
         agent_playbook,
+        global_prompt,
         headless,
         &mut on_progress,
     )
@@ -481,6 +483,7 @@ async fn clone_container_after_create(
     hostname: &str,
     env: &[EnvVar],
     agent_playbook: &str,
+    global_prompt: &str,
     headless: bool,
     on_progress: &mut impl FnMut(&str, &str),
 ) -> Result<()> {
@@ -633,8 +636,12 @@ async fn clone_container_after_create(
     // One-shot initial config: use the fallback GPT model list here; the clone reconciler
     // refreshes it with the group's live (blacklist-filtered) `/v1/models` set on its next pass.
     let gpt_models = crate::clone_reconcile::fallback_gpt_models();
-    let mut codex_entries =
-        crate::clone_reconcile::codex_parity_entries(cc_base.as_deref(), &gpt_models, headless);
+    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(
+        cc_base.as_deref(),
+        &gpt_models,
+        headless,
+        global_prompt,
+    );
     codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(
         &codex_entries,
     ));

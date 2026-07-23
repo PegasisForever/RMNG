@@ -26,8 +26,11 @@
 //
 // Session id is in memory only: a CoW clone boots a fresh wrapper and starts a
 // brand-new conversation. Auth = the container's logged-in `claude` subscription.
+import { readFileSync } from "node:fs";
+
 import { query, type McpServerConfig, type Options, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
+import { mcpServersFromDescriptor } from "./mcp";
 import { resolveSystemAppend } from "./instructions";
 
 import { CONFIG } from "./config";
@@ -113,19 +116,29 @@ function toolLabel(name: string): string {
 }
 
 // ---- MCP + query options ---------------------------------------------------
+// Prefer the control-server's MCP descriptor (single source of truth, ~/.config/rmng/mcp.json,
+// already headless-filtered). Fall back to the built-in `desktop`+`linear` set when the file is
+// missing/unreadable (e.g. a clone created before this control-server, or a bare dev run).
 function mcpServers(): Record<string, McpServerConfig> {
-  const servers: Record<string, McpServerConfig> = {};
+  try {
+    const parsed = JSON.parse(readFileSync(CONFIG.mcpConfigPath, "utf8"));
+    if (Array.isArray(parsed)) return mcpServersFromDescriptor(parsed);
+  } catch {
+    // fall through to the built-in set
+  }
+  return mcpServersBuiltin();
+}
 
+// The historical hardcoded set, kept as a fallback when no descriptor is present.
+function mcpServersBuiltin(): Record<string, McpServerConfig> {
+  const servers: Record<string, McpServerConfig> = {};
   // The desktop-control MCP is served by the clone-daemon over HTTP (localhost), sharing its live
-  // Mutter session. Registered as "desktop" ("computer-use" is a reserved MCP name); alwaysLoad
-  // keeps screenshot/click/… in context every turn. Skipped on headless clones — there is no
-  // daemon / :9004 there, so registering it would only add a dead server that alwaysLoad retries.
+  // Mutter session. alwaysLoad keeps screenshot/click/… in context every turn. Skipped on headless
+  // clones — there is no daemon / :9004 there, so it would only add a dead server.
   if (!CONFIG.headless) {
     servers.desktop = { type: "http", url: CONFIG.daemonMcpUrl, alwaysLoad: true };
   }
-
   // The clone's preset Linear identity (LINEAR_API_KEY, injected at clone creation).
-  // Interactive `claude` gets the same server from ~/.claude.json (user scope).
   if (CONFIG.linearApiKey) {
     servers.linear = {
       type: "http",

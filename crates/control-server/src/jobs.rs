@@ -63,8 +63,11 @@ pub struct CloneSpec {
     /// Resolved env-preset vars to write into the clone's `/etc/environment` at creation.
     pub env: Vec<wire::EnvVar>,
     /// Composed agent playbook (global + preset append) injected into the clone at creation
-    /// as ~/.config/rmng/agent-instructions.md. Empty ⇒ no file injected.
+    /// as ~/.config/rmng/agent-instructions.md. Empty ⇒ no file injected. (Layers b + d.)
     pub agent_playbook: String,
+    /// Composed global agent prompt (global + preset append) written to every agent's native
+    /// rules file (CLAUDE.md / AGENTS.md) at creation. (Layers a + c.)
+    pub global_prompt: String,
     /// Create a **headless clone**: same template, but the desktop (`gnome-headless`) and
     /// capture daemon (`rmng-clone-daemon`) user units are disabled at provision and a default
     /// tmux session is started. Persisted on `Host.headless`; drives the viewer tmux view.
@@ -362,6 +365,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         &spec.new_hostname,
         &env,
         &spec.agent_playbook,
+        &spec.global_prompt,
         spec.headless,
         progress,
     )
