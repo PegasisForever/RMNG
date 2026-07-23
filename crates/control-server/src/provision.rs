@@ -57,7 +57,7 @@ runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 \
 /// user via a login shell so PATH/SHELL match an interactive session. `termplane` re-creates a
 /// missing session on select, so this is a convenience default, not load-bearing.
 const HEADLESS_TMUX_DEFAULT_SCRIPT: &str = r#"set -e
-runuser -u rmng -- bash -lc 'tmux has-session -t main 2>/dev/null || tmux new-session -d -s main'
+runuser -u rmng -- bash -lc 'tmux has-session -t main 2>/dev/null || tmux new-session -d -s main -c /home/rmng'
 "#;
 
 // --- pure ports -----------------------------------------------------------------------

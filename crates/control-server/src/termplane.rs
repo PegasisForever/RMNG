@@ -346,7 +346,7 @@ async fn list_sessions(app: &App, clone_id: &str) -> Vec<String> {
     }
 }
 
-/// `tmux new-session -d -s <name>` (detached).
+/// `tmux new-session -d -s <name> -c <home>` (detached, starting in the clone user's home).
 async fn new_tmux_session(app: &App, clone_id: &str, name: &str) -> anyhow::Result<()> {
     let cmd = [
         "tmux".to_string(),
@@ -354,6 +354,8 @@ async fn new_tmux_session(app: &App, clone_id: &str, name: &str) -> anyhow::Resu
         "-d".to_string(),
         "-s".to_string(),
         name.to_string(),
+        "-c".to_string(),
+        format!("/home/{CLONE_USER}"),
     ];
     let r = app.docker.exec_capture(clone_id, &cmd, CLONE_USER, None, &[], None).await?;
     if r.exit_code != 0 {
