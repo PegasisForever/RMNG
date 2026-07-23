@@ -316,7 +316,10 @@ mod imp {
                 let rowi = row as usize;
                 let col = point.column.0;
 
-                let mut fg = resolve(c.fg, colors, &theme);
+                // Bold promotes the 8 base ANSI colors to their bright variants (the classic
+                // "bold is bright" behavior TUIs like htop rely on, e.g. bold-black → gray).
+                let fg_src = if flags.contains(Flags::BOLD) { bold_bright(c.fg) } else { c.fg };
+                let mut fg = resolve(fg_src, colors, &theme);
                 let mut bg = resolve(c.bg, colors, &theme);
                 if flags.contains(Flags::INVERSE) {
                     std::mem::swap(&mut fg, &mut bg);
@@ -894,6 +897,26 @@ fn resolve(color: AnsiColor, palette: &alacritty_terminal::term::color::Colors, 
         AnsiColor::Indexed(i) => {
             palette[i as usize].map(rgb_f).unwrap_or_else(|| indexed_default(i, theme))
         }
+    }
+}
+
+/// Promote a base ANSI color (0-7, or the named equivalents) to its bright variant (8-15), for
+/// the traditional bold-is-bright rendering. Truecolor, already-bright, and 256-cube colors pass
+/// through unchanged.
+fn bold_bright(c: AnsiColor) -> AnsiColor {
+    use NamedColor as N;
+    match c {
+        AnsiColor::Named(N::Black) => AnsiColor::Named(N::BrightBlack),
+        AnsiColor::Named(N::Red) => AnsiColor::Named(N::BrightRed),
+        AnsiColor::Named(N::Green) => AnsiColor::Named(N::BrightGreen),
+        AnsiColor::Named(N::Yellow) => AnsiColor::Named(N::BrightYellow),
+        AnsiColor::Named(N::Blue) => AnsiColor::Named(N::BrightBlue),
+        AnsiColor::Named(N::Magenta) => AnsiColor::Named(N::BrightMagenta),
+        AnsiColor::Named(N::Cyan) => AnsiColor::Named(N::BrightCyan),
+        AnsiColor::Named(N::White) => AnsiColor::Named(N::BrightWhite),
+        AnsiColor::Named(N::Foreground) => AnsiColor::Named(N::BrightForeground),
+        AnsiColor::Indexed(i) if i < 8 => AnsiColor::Indexed(i + 8),
+        other => other,
     }
 }
 
