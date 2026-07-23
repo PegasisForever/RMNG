@@ -149,21 +149,26 @@ export const tokens: Record<string, CloneTokenUsage> = {
     newInputTokens: 128_400n,
     outputTokens: 22_800n,
     requestCount: 4n,
+    // Recently served by Fable → the sidebar shows the "fable" chip next to its group badge.
+    fableActive: true,
   },
   [hostIdle.id]: {
     newInputTokens: 54_600n,
     outputTokens: 7_500n,
     requestCount: 2n,
+    fableActive: false,
   },
   [hostOffline.id]: {
     newInputTokens: 20_000n,
     outputTokens: 3_100n,
     requestCount: 1n,
+    fableActive: false,
   },
   [hostDualProvider.id]: {
     newInputTokens: 948_000n,
     outputTokens: 41_000n,
     requestCount: 7n,
+    fableActive: false,
   },
 };
 
