@@ -35,8 +35,9 @@ use gtk4::pango;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::ObjectSubclassIsExt;
 
-/// Monospace pixel size for the cell grid.
-const FONT_PX: f64 = 13.0;
+/// Font used when the GNOME `monospace-font-name` setting isn't available (non-GNOME / macOS).
+/// A point size (not `px`), so it scales with DPI + text-scaling like the rest of the desktop.
+const FALLBACK_FONT: &str = "Monospace 11";
 /// Default grid until the widget is allocated and reports its real character dimensions.
 const INIT_COLS: usize = 80;
 const INIT_ROWS: usize = 24;
@@ -47,6 +48,31 @@ pub type InputCb = Rc<dyn Fn(&str, Vec<u8>)>;
 pub type ResizeCb = Rc<dyn Fn(u16, u16)>;
 /// The tab-bar "+" → create a new tmux session.
 pub type NewSessionCb = Rc<dyn Fn()>;
+
+/// The GNOME interface settings, or `None` when the schema isn't installed (non-GNOME / macOS),
+/// in which case we fall back to a generic monospace font. Checked via the schema source so a
+/// missing schema never aborts the process.
+fn interface_settings() -> Option<gio::Settings> {
+    let source = gio::SettingsSchemaSource::default()?;
+    source.lookup("org.gnome.desktop.interface", true)?;
+    Some(gio::Settings::new("org.gnome.desktop.interface"))
+}
+
+/// The terminal font: the GNOME `monospace-font-name` (e.g. `"Monaspace Neon Frozen 11"` — a
+/// family plus a point size), or [`FALLBACK_FONT`]. DPI and text-scaling are applied later by the
+/// widget's pango context, so this matches how the rest of the desktop sizes the same font.
+fn load_font(settings: Option<&gio::Settings>) -> pango::FontDescription {
+    if let Some(s) = settings {
+        let name = s.string("monospace-font-name");
+        if !name.is_empty() {
+            let fd = pango::FontDescription::from_string(&name);
+            if fd.family().is_some() {
+                return fd;
+            }
+        }
+    }
+    pango::FontDescription::from_string(FALLBACK_FONT)
+}
 
 /// Callbacks a [`TerminalView`] uses to talk back to the control-server (via the port-1 writer).
 #[derive(Clone)]
@@ -171,6 +197,7 @@ mod imp {
         pub(super) metrics: RefCell<Option<SharedMetrics>>,
         pub(super) grid: RefCell<Option<SharedGrid>>,
         pub(super) font: RefCell<Option<pango::FontDescription>>,
+        pub(super) settings: RefCell<Option<gio::Settings>>,
     }
 
     #[glib::object_subclass]
@@ -193,6 +220,20 @@ mod imp {
                 };
                 settings.connect_notify_local(Some("gtk-theme-name"), redraw.clone());
                 settings.connect_notify_local(Some("gtk-application-prefer-dark-theme"), redraw);
+            }
+            // Font: follow the GNOME monospace-font-name + text-scaling; rebuild on change.
+            if let Some(gs) = interface_settings() {
+                let weak = self.obj().downgrade();
+                let refresh = move |_: &gio::Settings, _: &str| {
+                    if let Some(o) = weak.upgrade() {
+                        *o.imp().font.borrow_mut() = None; // drop the cached font → recompute
+                        o.queue_resize(); // cell size may have changed → re-grid
+                        o.queue_draw();
+                    }
+                };
+                gs.connect_changed(Some("monospace-font-name"), refresh.clone());
+                gs.connect_changed(Some("text-scaling-factor"), refresh);
+                *self.settings.borrow_mut() = Some(gs);
             }
         }
     }
@@ -221,9 +262,8 @@ mod imp {
         /// Lazily build the monospace font + measure the cell size; publish it to the shared cell.
         fn ensure_metrics(&self) -> (f64, f64) {
             if self.font.borrow().is_none() {
-                let mut fd = pango::FontDescription::new();
-                fd.set_family("monospace");
-                fd.set_absolute_size(FONT_PX * pango::SCALE as f64);
+                let fd = load_font(self.settings.borrow().as_ref());
+                gtk4::glib::g_debug!("rmng-term", "terminal font: {}", fd.to_str());
                 let ctx = self.obj().pango_context();
                 let m = ctx.metrics(Some(&fd), None);
                 let cw = (m.approximate_char_width() as f64 / pango::SCALE as f64).max(1.0);
