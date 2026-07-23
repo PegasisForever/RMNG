@@ -42,15 +42,29 @@ const WAIT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// Poll interval while waiting for readiness.
 const WAIT_READY_POLL: Duration = Duration::from_secs(2);
 
-/// Headless clone: drop the desktop + capture user units so they never start. Removing the
-/// `default.target.wants` symlinks is the race-free part (a plain filesystem op that beats the
-/// lingering user manager on first boot); the `systemctl --user disable --now` is best-effort
-/// mop-up if the user bus is already up. `agent-wrapper.service` is deliberately left enabled.
+/// Headless clone: guarantee neither the desktop (`gnome-headless.service`) nor the capture
+/// daemon (`rmng-clone-daemon.service`) ever runs. Just removing the `default.target.wants`
+/// symlinks is not enough: `rmng-clone-daemon` carries `Wants=gnome-headless.service`, so the
+/// daemon pulls the desktop up as a runtime dependency independent of `[Install]`, and the
+/// lingering user manager starts both at first boot before this script can win the race — which
+/// is exactly why headless clones were observed still running gnome-shell + the daemon on :9004.
+///
+/// A headless clone has no desktop, so the clean fix is to simply **delete both unit files** (real
+/// files the template ships in `~/.config/systemd/user`). With no fragment on disk systemd has
+/// nothing to start by any path — the `[Install]` want, the `Wants=` pull, or a manual start — and
+/// there is no leftover mask symlink to reason about. `daemon-reload` then makes the (possibly
+/// already-running) user manager forget the units so nothing restarts them, and `pkill` reaps
+/// whatever it started in the pre-delete boot window. If the user bus is up gnome is running and
+/// the reload+pkill take effect; if it's down gnome isn't up yet and the missing files keep it from
+/// ever starting — either way it ends up dead. `agent-wrapper.service` is deliberately left enabled.
 const HEADLESS_DISABLE_SCRIPT: &str = r#"set -e
-wants=/home/rmng/.config/systemd/user/default.target.wants
-rm -f "$wants/gnome-headless.service" "$wants/rmng-clone-daemon.service"
-runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 \
-  systemctl --user disable --now gnome-headless.service rmng-clone-daemon.service 2>/dev/null || true
+u=/home/rmng/.config/systemd/user
+rm -f "$u/gnome-headless.service" "$u/rmng-clone-daemon.service" \
+      "$u/default.target.wants/gnome-headless.service" "$u/default.target.wants/rmng-clone-daemon.service"
+runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload 2>/dev/null || true
+pkill -u 1000 -f '/opt/rmng/bin/rmng-clone-daemon' 2>/dev/null || true
+pkill -u 1000 -f 'gnome-shell --headless' 2>/dev/null || true
+exit 0
 "#;
 
 /// Headless clone: pin tmux's multi-client sizing policy, then ensure a default `main` tmux
@@ -502,14 +516,13 @@ async fn clone_container_after_create(
     on_progress("inject", "starting container to inject identity + preset");
     docker.start_container(container).await?;
 
-    // Headless clone: kill the desktop the instant the container is up — remove the
-    // `gnome-headless.service` + `rmng-clone-daemon.service` wants-symlinks so the lingering
-    // user manager never pulls them in on this (still-booting) first boot, and best-effort
-    // `disable --now` in case it already reached them. The `rm` (a filesystem op) is the
-    // race-free part; the `systemctl` is mop-up if the user bus is already up. `agent-wrapper`
-    // is left enabled. Runs before the ~seconds of Codex/env injects below, so it wins the race.
+    // Headless clone: remove the desktop the instant the container is up — delete the
+    // `gnome-headless.service` + `rmng-clone-daemon.service` unit files (and their wants-symlinks)
+    // so nothing can start them via any path, plus a `daemon-reload` + `pkill` to reap anything
+    // the lingering user manager already started in the boot race (see `HEADLESS_DISABLE_SCRIPT`).
+    // `agent-wrapper` is left enabled. Runs before the ~seconds of Codex/env injects below.
     if headless {
-        on_progress("inject", "headless: disabling desktop (gnome-headless + clone-daemon)");
+        on_progress("inject", "headless: removing desktop units (gnome-headless + clone-daemon)");
         let code = docker
             .exec_script(container, HEADLESS_DISABLE_SCRIPT, &[], &[], |_stream, line| {
                 tracing::debug!(target: "provision", "headless-disable: {line}");
