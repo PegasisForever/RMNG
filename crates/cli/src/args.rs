@@ -342,8 +342,6 @@ pub enum DesktopCmd {
     Monitors,
     /// List windows (→ `list_windows`)
     Windows,
-    /// List launchable apps (→ `list_apps`)
-    Apps,
     /// Move the mouse to X Y (→ `mouse_move`)
     Move {
         x: i32,
@@ -424,11 +422,6 @@ pub enum DesktopCmd {
         text: String,
         #[arg(long)]
         out: Option<PathBuf>,
-    },
-    /// Launch an app by id, e.g. `firefox.desktop` (→ `launch_app`)
-    Launch {
-        /// App/desktop-entry id
-        id: String,
     },
     /// Move/arrange a window by id (→ `move_window`)
     MoveWindow {

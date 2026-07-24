@@ -45,8 +45,6 @@ These require the shell `Eval` patch.
 | Tool | Args | Returns |
 |---|---|---|
 | `list_windows` | — | current window metadata |
-| `list_apps` | — | installed launcher apps |
-| `launch_app` | `id` | launched app metadata |
 | `move_window` | `id`, `monitor?`, `mode?` | moved/maximized/centered window metadata |
 
 ## Examples

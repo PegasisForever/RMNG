@@ -602,7 +602,7 @@ pub async fn clone_ssh(client: &Client, clone: &str, json: bool) -> Result<u8> {
 
 /// What a desktop verb does with the daemon's `content` array once it comes back.
 enum Kind {
-    /// `monitors`/`windows`/`apps`: print the JSON text result, no screenshot.
+    /// `monitors`/`windows`: print the JSON text result, no screenshot.
     Query,
     /// `screenshot`: write the image and print its path.
     Screenshot,
@@ -821,7 +821,7 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
     // up front and use the same value for every daemon call's response —
     // both the explicit `screenshot` verb and the auto-snap after an action.
     // We sniff it from the verb's own `rescale` field; a no-op for verbs
-    // that don't carry it (Monitors/Windows/Apps/Key/Type/Launch/Movewin)
+    // that don't carry it (Monitors/Windows/Key/Type/Movewin)
     // because their match arms synthesize a default `RescaleArgs` below.
     let screen_target: Option<(u32, u32)> = match cmd {
         DesktopCmd::Screenshot { rescale, .. }
@@ -849,7 +849,6 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             ),
             DesktopCmd::Monitors => ("list_monitors", args_obj(vec![]), Kind::Query, None, None),
             DesktopCmd::Windows => ("list_windows", args_obj(vec![]), Kind::Query, None, None),
-            DesktopCmd::Apps => ("list_apps", args_obj(vec![]), Kind::Query, None, None),
             DesktopCmd::Move {
                 x,
                 y,
@@ -1023,13 +1022,6 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 Kind::Action,
                 None,
                 out.clone(),
-            ),
-            DesktopCmd::Launch { id } => (
-                "launch_app",
-                args_obj(vec![("id", id.clone().into())]),
-                Kind::Action,
-                None,
-                None,
             ),
             DesktopCmd::MoveWindow { id, monitor, mode } => (
                 "move_window",
