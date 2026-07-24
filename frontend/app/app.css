@@ -51,7 +51,10 @@ body {
    Make the editor surface transparent UNCONDITIONALLY so it always inherits that pane in
    both themes. Unscoped on purpose: the editor remounts on every clone switch, and its
    `data-color-scheme` attr is driven by a JS prop that lands a frame late — scoping this to
-   dark would let the base white show through for that frame (the "flash white" on switch). */
+   dark would let the base white show through for that frame (the "flash white" on switch).
+   `!important` because BlockNote's own `.bn-editor{background-color:var(--bn-colors-editor-
+   background)}` has equal specificity and loads after this rule (in the lazy editor chunk),
+   so it would otherwise win the cascade. */
 .bn-editor {
-  background-color: transparent;
+  background-color: transparent !important;
 }
