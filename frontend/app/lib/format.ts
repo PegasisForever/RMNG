@@ -45,3 +45,32 @@ export function relativeAge(iso: string): string {
   if (months < 12) return `${Math.floor(months)}mo ago`;
   return `${Math.floor(days / 365)}y ago`;
 }
+
+/** Coarse "time until" a future instant, e.g. `2h 15m`, `3d 4h`, `5m`. */
+function until(ms: number): string {
+  if (ms <= 0) return "now";
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ${mins % 60}m`;
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+/** Usage-bar hover tooltip: the concrete reset time in the viewer's local time zone plus a
+ *  countdown, e.g. `Resets Jul 24, 3:45 PM EDT (in 2h 15m)`. `toLocaleString` with no locale
+ *  renders in the browser's own zone; `timeZoneName` makes the offset explicit. `now` is passed
+ *  in (rather than read here) so the caller controls when it ticks. Returns null for a missing
+ *  or unparseable timestamp so the caller can omit the tooltip entirely. */
+export function resetTooltip(iso: string | null, now: number): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const at = new Date(t).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+  return t <= now ? `Reset ${at}` : `Resets ${at} (in ${until(t - now)})`;
+}

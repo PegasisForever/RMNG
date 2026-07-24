@@ -16,6 +16,7 @@ import claudeLogo from "../assets/claude.svg";
 import geminiLogo from "../assets/gemini.svg";
 import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, GroupUsage } from "~/lib/types";
 import { ordered, useAccountOrder } from "~/lib/accountOrder";
+import { resetTooltip } from "~/lib/format";
 
 const FIVE_H_MS = 5 * 60 * 60 * 1000;
 const SEVEN_D_MS = 7 * 24 * 60 * 60 * 1000;
@@ -67,8 +68,11 @@ function Bar({
   if (!win) return null;
   const pct = Math.min(100, Math.max(0, win.pct));
   const pace = now != null ? pacePct(win.resetsAt, windowMs, now) : null;
+  // Concrete reset time in the viewer's local zone. Gated on the client clock (`now`) so the
+  // timezone-dependent string never differs between first paint and hydration.
+  const resetTitle = now != null ? resetTooltip(win.resetsAt, now) : null;
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5" title={resetTitle ?? undefined}>
       <span className="w-8 shrink-0 text-[10px] font-medium text-slate-500 dark:text-slate-400">{label}</span>
       <div className="relative h-1.5 flex-1 overflow-hidden rounded-sm bg-slate-200 dark:bg-slate-700">
         <div className={`h-full ${barColor(pct)}`} style={{ width: `${Math.max(1, pct)}%` }} />
