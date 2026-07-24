@@ -472,6 +472,84 @@ async fn proxy_to_daemon(
         .ok_or_else(|| "clone-daemon MCP result missing content".to_string())
 }
 
+/// The clone's desktop/agent user (uid `1000`, name `rmng`) — the owner of the `systemd --user`
+/// graphical session. `rmng exec` seeds its env from that session so GUI apps and the in-clone
+/// `claude` CLI just work.
+const DESKTOP_UID: &str = "1000";
+const DESKTOP_USER: &str = "rmng";
+
+fn is_desktop_user(user: &str) -> bool {
+    user == DESKTOP_UID || user == DESKTOP_USER
+}
+
+/// Parse `systemctl show-environment` output into `KEY=VAL` env entries, keeping only lines whose
+/// key is a valid environment-variable name (skips blanks / any stray non-assignment lines). The
+/// value is passed through verbatim — everything after the first `=` — so entries like
+/// `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus` survive intact.
+fn parse_env_lines(s: &str) -> Vec<String> {
+    s.lines()
+        .filter(|line| match line.split_once('=') {
+            Some((k, _)) => {
+                !k.is_empty()
+                    && k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                    && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
+            None => false,
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// Merge caller `overrides` (`KEY=VAL`) over a `base` env, caller-wins: any base entry whose key a
+/// caller entry also sets is dropped, then the overrides are appended.
+fn merge_env(base: &mut Vec<String>, overrides: &[String]) {
+    let keys: std::collections::HashSet<&str> = overrides
+        .iter()
+        .filter_map(|e| e.split_once('=').map(|(k, _)| k))
+        .collect();
+    base.retain(|e| e.split_once('=').map(|(k, _)| !keys.contains(k)).unwrap_or(true));
+    base.extend(overrides.iter().cloned());
+}
+
+/// The clone's live desktop-session environment, read from its `systemd --user` manager
+/// (`systemctl --user show-environment`): `WAYLAND_DISPLAY`, `DISPLAY`, `XAUTHORITY`,
+/// `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, the session `PATH` (with `~/.local/bin`), plus the
+/// agent/control vars the manager imports from `/etc/environment` (via the `environment.d` →
+/// `/etc/environment` symlink). A bare `docker exec` inherits none of this, so `clone_exec` seeds
+/// the exec env with it for the desktop user. Returns `KEY=VAL` entries, or empty (with a debug
+/// log) when the user manager isn't reachable yet — still-booting, or a headless clone with no
+/// graphical session — in which case the exec simply runs without the session env.
+async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String> {
+    // `show-environment` talks to the per-user bus, which needs XDG_RUNTIME_DIR; the agent user's
+    // runtime dir is the fixed `/run/user/<uid>`.
+    let cmd = [
+        "systemctl".to_string(),
+        "--user".to_string(),
+        "show-environment".to_string(),
+    ];
+    let runtime = format!("XDG_RUNTIME_DIR=/run/user/{DESKTOP_UID}");
+    match app
+        .docker
+        .exec_capture(clone_id, &cmd, DESKTOP_UID, None, &[runtime], None)
+        .await
+    {
+        Ok(r) if r.exit_code == 0 => parse_env_lines(&r.stdout),
+        Ok(r) => {
+            tracing::debug!(
+                clone = clone_id,
+                code = r.exit_code,
+                "show-environment unavailable: {}",
+                r.stderr.trim()
+            );
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::debug!(clone = clone_id, "show-environment exec failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// `POST /api/hosts/:id/exec` — run a single non-interactive command inside the clone via
 /// docker exec (`rmng exec`). Body is [`wire::ExecRequest`]; returns [`wire::ExecResult`]
 /// (exit code + captured stdout/stderr). Empty argv → 400; unknown clone → 404; a bad
@@ -499,7 +577,19 @@ async fn clone_exec(
         ),
         None => None,
     };
-    let user = req.user.clone().unwrap_or_else(|| "1000".to_string());
+    let user = req.user.clone().unwrap_or_else(|| DESKTOP_UID.to_string());
+    // For the desktop agent user, seed the exec env from the clone's live `systemd --user` session
+    // so GUI apps and the in-clone `claude` CLI just work (WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR,
+    // DBUS, the session PATH, agent vars) — a bare docker exec inherits none of it. The caller's
+    // explicit `env` always wins on a key clash. Other run-as users get only what they pass (their
+    // session, if any, is not the desktop one).
+    let env = if is_desktop_user(&user) {
+        let mut base = desktop_session_env(&app, &host.id).await;
+        merge_env(&mut base, &req.env);
+        base
+    } else {
+        req.env.clone()
+    };
     let result = app
         .docker
         .exec_capture(
@@ -507,7 +597,7 @@ async fn clone_exec(
             &req.cmd,
             &user,
             req.workdir.as_deref(),
-            &req.env,
+            &env,
             stdin.as_deref(),
         )
         .await
@@ -2585,6 +2675,61 @@ mod tests {
         assert_eq!(res.exit_code, 3);
         assert_eq!(res.stdout, "out");
         assert_eq!(res.stderr, "err");
+    }
+
+    #[test]
+    fn parse_env_lines_keeps_assignments_and_verbatim_values() {
+        // Real `systemctl --user show-environment` shape: one KEY=VALUE per line, values may
+        // themselves contain `=` (DBUS address) and are passed through untouched. Blank lines and
+        // any non-assignment noise are dropped.
+        let out = "\
+WAYLAND_DISPLAY=wayland-0
+DISPLAY=:0
+XDG_RUNTIME_DIR=/run/user/1000
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+PATH=/home/rmng/.local/bin:/usr/bin
+
+not a var line
+";
+        let got = parse_env_lines(out);
+        assert_eq!(
+            got,
+            vec![
+                "WAYLAND_DISPLAY=wayland-0".to_string(),
+                "DISPLAY=:0".to_string(),
+                "XDG_RUNTIME_DIR=/run/user/1000".to_string(),
+                "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus".to_string(),
+                "PATH=/home/rmng/.local/bin:/usr/bin".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_env_lets_caller_override_and_appends_new() {
+        let mut base = vec![
+            "WAYLAND_DISPLAY=wayland-0".to_string(),
+            "PATH=/session/bin".to_string(),
+            "XDG_RUNTIME_DIR=/run/user/1000".to_string(),
+        ];
+        // Caller overrides PATH and adds a brand-new key; the untouched session vars remain.
+        merge_env(&mut base, &["PATH=/caller/bin".to_string(), "FOO=1".to_string()]);
+        assert_eq!(
+            base,
+            vec![
+                "WAYLAND_DISPLAY=wayland-0".to_string(),
+                "XDG_RUNTIME_DIR=/run/user/1000".to_string(),
+                "PATH=/caller/bin".to_string(),
+                "FOO=1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn desktop_user_detection() {
+        assert!(is_desktop_user("1000"));
+        assert!(is_desktop_user("rmng"));
+        assert!(!is_desktop_user("root"));
+        assert!(!is_desktop_user("0"));
     }
 
     /// End-to-end through the real router: the notes editor saves with `PUT` and the
