@@ -58,7 +58,7 @@ function ClientOnly({ children }: { children: React.ReactNode }) {
 }
 
 export function meta() {
-  return [{ title: "rmng control" }];
+  return [{ title: "RMNG" }];
 }
 
 // SPA mode (ssr:false): the live EventSource("/events") delivers the initial full
