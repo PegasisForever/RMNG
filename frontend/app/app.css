@@ -45,3 +45,11 @@ body {
   text-decoration: none;
   cursor: text;
 }
+
+/* BlockNote's dark theme paints the editor a light grey (#1f1f1f) that clashes with
+   the app's slate-900 note pane (the surrounding <main>). Make the editor surface
+   transparent in dark mode so it inherits that background and blends in. Light mode
+   already matches (white editor on the white pane), so it's left untouched. */
+[data-color-scheme="dark"] .bn-editor {
+  background-color: transparent;
+}
