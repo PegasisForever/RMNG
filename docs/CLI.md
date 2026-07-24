@@ -152,7 +152,6 @@ global MCP — see [MCP.md](MCP.md).
 | `screenshot` | `[--monitor N] [--out PATH]` | `screenshot` | JPEG of the monitor's latest frame |
 | `monitors` | — | `list_monitors` | `[{id,width,height}]` |
 | `windows` | — | `list_windows` | open windows (`id,title,wm_class,monitor,frame,…`) |
-| `apps` | — | `list_apps` | installed launcher apps |
 | `move` | `X Y [--monitor N] [--out PATH]` | `mouse_move` | eased glide to `x,y` |
 | `click` | `[X Y] [--monitor N] [--out PATH]` | `left_click` | optional glide, then left click |
 | `right-click` | `[X Y] [--monitor N] [--out PATH]` | `right_click` | right click |
@@ -161,16 +160,18 @@ global MCP — see [MCP.md](MCP.md).
 | `scroll` | `AMOUNT [X Y] [--monitor N] [--out PATH]` | `scroll` | `amount` vertical notches |
 | `key` | `"ctrl+c" [--out PATH]` | `key` | press a key combo |
 | `type` | `"some text" [--out PATH]` | `type` | type a Unicode string |
-| `launch` | `firefox.desktop` | `launch_app` | launch an app by `.desktop` id |
 | `move-window` | `<win-id> [--monitor N] [--mode maximize\|center-half]` | `move_window` | move/place a window |
 
+> To **launch a GUI app** on the clone desktop, use `rmng clone exec -d <clone> -- <app>` (the
+> `rmng clone exec` section below) — it runs detached and inherits the clone's desktop session env.
+
 **Screenshot on every action.** Every **action verb** (`move`, `click`, `right-click`,
-`middle-click`, `double-click`, `scroll`, `key`, `type`, `launch`, `move-window`) — plus
+`middle-click`, `double-click`, `scroll`, `key`, `type`, `move-window`) — plus
 `screenshot` itself — always produces a post-action JPEG: the CLI writes it to a file and prints
 the file's **absolute path** on stdout (or `{screenshot, text}` under `--json`), so the calling
 agent can `Read` it. Most action tools return the daemon's settle-screenshot inline; for tools
-whose result carries no image (`type`, `launch`, `move-window`) the CLI issues a follow-up
-`screenshot`. **Query verbs** (`monitors`, `windows`, `apps`) print their JSON result and take no
+whose result carries no image (`type`, `move-window`) the CLI issues a follow-up
+`screenshot`. **Query verbs** (`monitors`, `windows`) print their JSON result and take no
 screenshot.
 
 - `--monitor N` — which monitor to act on / screenshot (default `0`).
@@ -184,7 +185,7 @@ rmng desktop w-cp-claude type "hello"        # types, follow-up screenshot, prin
 rmng desktop w-cp-claude windows             # prints JSON, no screenshot
 ```
 
-### `rmng clone exec <clone> [-u|--user USER] [-w|--workdir DIR] [-e|--env KEY=VAL ...] -- <cmd> [args...]`
+### `rmng clone exec <clone> [-u|--user USER] [-w|--workdir DIR] [-e|--env KEY=VAL ...] [-d|--detach] -- <cmd> [args...]`
 Run a **single non-interactive** command inside a clone, docker-exec style (no TTY). The
 control-server runs it via the Docker exec primitive; `rmng clone ssh` covers interactive sessions.
 
@@ -192,11 +193,18 @@ control-server runs it via the Docker exec primitive; `rmng clone ssh` covers in
 - `-u|--user USER` — user to run as. Default **uid `1000`** (the clone's agent user — the
   same account `rmng ssh` lands as).
 - `-w|--workdir DIR` — working directory for the command.
-- `-e|--env KEY=VAL` — set an env var; **repeatable** (accumulates).
+- `-e|--env KEY=VAL` — set an env var; **repeatable** (accumulates). Wins over the session env.
+- `-d|--detach` — **fire-and-forget**: launch the command in the background and return
+  immediately, with no captured output. For GUI apps on the clone desktop (see below). Ignores stdin.
+- **Desktop session env (default user):** when running as the agent user, the command inherits the
+  clone's live `systemd --user` session env — `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_RUNTIME_DIR`,
+  `DBUS_SESSION_BUS_ADDRESS`, the session `PATH` (with `~/.local/bin`), and the agent vars — so GUI
+  apps and the in-clone `claude` CLI just work with no `-e`. (A headed clone only; a headless clone
+  has no graphical session, so `WAYLAND_DISPLAY`/`DISPLAY` are absent.)
 - **stdin passthrough:** a non-terminal stdin is read and forwarded, so
-  `echo hi | rmng clone exec c -- cat` works.
+  `echo hi | rmng clone exec c -- cat` works (not in `--detach`).
 - Command **stdout → CLI stdout**, **stderr → CLI stderr** (kept separate), and the CLI
-  **exits with the command's own exit code**.
+  **exits with the command's own exit code** (detached always exits 0 once spawned).
 - Global `--json` — emit one `{exit_code, stdout, stderr}` object instead of splitting the
   streams onto stdout/stderr.
 
@@ -205,6 +213,7 @@ rmng clone exec w-cp-claude -- echo hi                      # stdout "hi", exit 
 rmng clone exec w-cp-claude -w /home/rmng -e FOO=bar -- env # runs `env` with FOO=bar in /home/rmng
 echo hi | rmng clone exec w-cp-claude -- cat                # stdin passthrough
 rmng clone exec w-cp-claude --json -- false                 # {"exit_code":1,"stdout":"","stderr":""}
+rmng clone exec -d w-cp-claude -- gnome-text-editor         # launch a GUI app on the desktop, detached
 ```
 
 ## Wait semantics (`--wait` / `op wait`)

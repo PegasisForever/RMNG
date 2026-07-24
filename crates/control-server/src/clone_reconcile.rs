@@ -397,7 +397,7 @@ fn opencode_config_json(cc_base_url: Option<&str>, gpt_models: &[String], headle
 /// demand to learn the `rmng` fleet CLI. Same delivery model as the global prompt / MCP config.
 const RMNG_CLI_SKILL_MD: &str = r#"---
 name: rmng-cli
-description: Use when you need to manage the RMNG clone fleet from inside a clone — list hosts, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, or manage clone-source images and account groups. Covers the `rmng` command-line tool.
+description: Use when you need to manage the RMNG clone fleet from inside a clone — list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, or manage clone-source images and account groups. Covers the `rmng` command-line tool.
 ---
 
 # Managing the fleet with `rmng`
@@ -435,14 +435,19 @@ or GUI. The kind can't be changed after creation.
 
 - `rmng clone ssh <clone>` — print a ready-to-paste `ssh` command for a clone.
 - `rmng clone exec <clone> -- <argv…>` — run one non-interactive command inside another clone
-  (docker-exec style). Flags: `-u <user>`, `-w <dir>`, `-e KEY=VAL` (repeatable). Passes through
-  the command's exit code. Example: `rmng clone exec pega-we-142 -- ls -la /home/rmng`.
+  (docker-exec style). Flags: `-u <user>`, `-w <dir>`, `-e KEY=VAL` (repeatable), `-d`/`--detach`
+  (fire-and-forget: return immediately, no captured output). Passes through the command's exit
+  code. As the agent user it inherits the clone's live desktop session env (`WAYLAND_DISPLAY`,
+  `DISPLAY`, the session `PATH`, …), so **`-d` launches a GUI app on a headed clone's desktop**:
+  `rmng clone exec -d pega-we-142 -- gnome-text-editor`. Example:
+  `rmng clone exec pega-we-142 -- ls -la /home/rmng`.
 - `rmng desktop <clone> <verb>` — drive another clone's desktop for computer use (**headed
   clones only** — see above; each action returns a fresh screenshot; add `--json` for
   `{screenshot, text}`). Verbs: `screenshot`,
-  `monitors`, `windows`, `apps`, `move X Y`, `click [X Y]`, `right-click`, `middle-click`,
-  `double-click`, `scroll`, `key <chord>`, `type <text>`, `launch <id>`, `move-window <id>`.
-  Example: `rmng desktop pega-we-142 screenshot`.
+  `monitors`, `windows`, `move X Y`, `click [X Y]`, `right-click`, `middle-click`,
+  `double-click`, `scroll`, `key <chord>`, `type <text>`, `move-window <id>`.
+  Example: `rmng desktop pega-we-142 screenshot`. To *open* an app, use `rmng clone exec -d`
+  (above), not `desktop`.
 
 ## Create / retire clones
 

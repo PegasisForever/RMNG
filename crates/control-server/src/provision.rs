@@ -427,11 +427,15 @@ pub async fn clone_container(
         name: hostname.to_string(),
         image: reference.clone(),
         hostname: hostname.to_string(),
-        env: env
-            .iter()
-            .filter(|v| !v.key.is_empty())
-            .map(|v| (v.key.clone(), v.value.clone()))
-            .collect(),
+        // Clone env lives ONLY in `/etc/environment` (written by `clone_container_after_create`
+        // below, from this same `env`), the single source of truth: the lingering `systemd --user`
+        // manager imports it via the `/usr/lib/environment.d/99-environment.conf -> /etc/environment`
+        // symlink, PAM applies it to SSH logins, and `rmng exec` seeds from the live user session
+        // (`systemctl --user show-environment`). Baking it into the container `Config.Env` too would
+        // only leak it into root / PID 1 — where `XDG_RUNTIME_DIR` and friends are wrong — with no
+        // consumer that can't already reach `/etc/environment`. So the create env stays empty and
+        // `Config.Env` carries just the image's own `ENV`.
+        env: Vec::new(),
         cpus: cfg.docker.clone_cpus,
         memory_mb: cfg.docker.clone_memory_mb,
         sock_source: sock_source_dir(app).await,

@@ -602,7 +602,7 @@ pub async fn clone_ssh(client: &Client, clone: &str, json: bool) -> Result<u8> {
 
 /// What a desktop verb does with the daemon's `content` array once it comes back.
 enum Kind {
-    /// `monitors`/`windows`/`apps`: print the JSON text result, no screenshot.
+    /// `monitors`/`windows`: print the JSON text result, no screenshot.
     Query,
     /// `screenshot`: write the image and print its path.
     Screenshot,
@@ -821,7 +821,7 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
     // up front and use the same value for every daemon call's response —
     // both the explicit `screenshot` verb and the auto-snap after an action.
     // We sniff it from the verb's own `rescale` field; a no-op for verbs
-    // that don't carry it (Monitors/Windows/Apps/Key/Type/Launch/Movewin)
+    // that don't carry it (Monitors/Windows/Key/Type/Movewin)
     // because their match arms synthesize a default `RescaleArgs` below.
     let screen_target: Option<(u32, u32)> = match cmd {
         DesktopCmd::Screenshot { rescale, .. }
@@ -849,7 +849,6 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             ),
             DesktopCmd::Monitors => ("list_monitors", args_obj(vec![]), Kind::Query, None, None),
             DesktopCmd::Windows => ("list_windows", args_obj(vec![]), Kind::Query, None, None),
-            DesktopCmd::Apps => ("list_apps", args_obj(vec![]), Kind::Query, None, None),
             DesktopCmd::Move {
                 x,
                 y,
@@ -1024,13 +1023,6 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 None,
                 out.clone(),
             ),
-            DesktopCmd::Launch { id } => (
-                "launch_app",
-                args_obj(vec![("id", id.clone().into())]),
-                Kind::Action,
-                None,
-                None,
-            ),
             DesktopCmd::MoveWindow { id, monitor, mode } => (
                 "move_window",
                 args_obj(vec![
@@ -1141,6 +1133,7 @@ pub async fn exec(
     workdir: Option<&str>,
     env: &[String],
     cmd: &[String],
+    detach: bool,
     json: bool,
 ) -> Result<u8> {
     use std::io::{IsTerminal, Read, Write};
@@ -1155,7 +1148,9 @@ pub async fn exec(
     // idle open pipe yields nothing within the grace window and we forward no stdin. A
     // ready fd still drains fully, so large piped input is fine (the poll only bounds
     // the wait for the first byte).
-    let stdin_b64 = if std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE) {
+    // Detached execs return no output and take no stdin (nothing is attached), so skip the drain.
+    let stdin_b64 = if detach || std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE)
+    {
         None
     } else {
         let mut buf = Vec::new();
@@ -1169,12 +1164,14 @@ pub async fn exec(
         workdir: workdir.map(str::to_string),
         env: env.to_vec(),
         stdin_b64,
+        detach,
     };
     let result = client.exec(clone, &req).await?;
 
     if json {
         emit_json(&result)?;
-    } else {
+    } else if !detach {
+        // Detached: the server returns an empty result immediately — nothing to print.
         print!("{}", result.stdout);
         std::io::stdout().flush().ok();
         eprint!("{}", result.stderr);

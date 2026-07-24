@@ -237,7 +237,7 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
             Ok(text(format!("typed {} chars", txt.chars().count())))
         }
         // Window management (gnome-shell Eval).
-        "list_windows" | "move_window" | "list_apps" | "launch_app" => {
+        "list_windows" | "move_window" => {
             let (_, conn) = session_snapshot(st).await;
             windows::call(&conn, name, &args).await
         }

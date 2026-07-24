@@ -15,12 +15,14 @@ something is before acting.
 
 ## Opening GUI applications
 
-Always prefer the **`desktop` tool** (`launch_app`, then screenshots + clicks +
-keys) to open and drive GUI applications — do **not** launch them from the command
-line.
+You run inside the graphical session, so open GUI apps straight from the shell:
+`setsid -f <app>` (e.g. `setsid -f firefox`), or `setsid -f gtk-launch <id>.desktop`
+to launch a desktop entry by id. `setsid -f` detaches the app onto the desktop
+without blocking your shell. Then drive it with the **`desktop` tool** (screenshots
++ clicks + keys).
 
 **No display?** If the `desktop` tool reports there is no display / no active
-graphical session, the RDP client is not connected to this host — do not retry in a
+graphical session, the RDP client is not connected to this clone — do not retry in a
 loop; stop.
 
 ## Known app quirks

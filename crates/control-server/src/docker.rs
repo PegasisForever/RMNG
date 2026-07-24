@@ -1974,6 +1974,47 @@ impl DockerCtl {
         Ok(ExecResult { exit_code, stdout, stderr })
     }
 
+    /// Launch a command **detached** (`docker exec` with `detach: true`): the daemon starts it in
+    /// the background and returns at once — nothing is attached, captured, or awaited. Backs
+    /// `rmng exec -d` for fire-and-forget launches like a GUI app on the clone desktop (paired with
+    /// the session-env injection in `clone_exec`). Honors `user`/`workdir`/`env`. The argv is
+    /// wrapped in `setsid` so the process gets its own session and survives the exec teardown —
+    /// without it, a detached exec's process can be reaped when the exec instance is cleaned up.
+    pub async fn exec_detached(
+        &self,
+        container: &str,
+        cmd: &[String],
+        user: &str,
+        workdir: Option<&str>,
+        env: &[String],
+    ) -> Result<()> {
+        let mut argv = vec!["setsid".to_string()];
+        argv.extend(cmd.iter().cloned());
+        let exec = self
+            .daemon()?
+            .create_exec(
+                container,
+                CreateExecOptions {
+                    cmd: Some(argv),
+                    user: Some(user.to_string()),
+                    working_dir: workdir.map(str::to_string),
+                    env: if env.is_empty() { None } else { Some(env.to_vec()) },
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("creating detached exec in {container}"))?;
+        // `detach: true` → the daemon backgrounds the process and `start_exec` returns without
+        // attached streams. We do not await the command; its exit status is intentionally unknown.
+        self.daemon()?
+            .start_exec(&exec.id, Some(StartExecOptions { detach: true, ..Default::default() }))
+            .await
+            .with_context(|| format!("starting detached exec in {container}"))?;
+        Ok(())
+    }
+
     /// Start an **interactive TTY exec** (`tty: true`) and hand back its attached streams so a
     /// caller can proxy a live terminal (the headless-clone `termplane` runs `tmux attach`).
     /// Unlike [`Self::exec_script`]/[`Self::exec_capture`], nothing is buffered or line-split —
