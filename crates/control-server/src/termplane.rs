@@ -1,7 +1,7 @@
 //! Headless-clone terminal plane.
 //!
-//! A headless clone (`Host.headless`) runs no desktop and streams no video. When such a clone
-//! is the selected host and at least one viewer is connected, this plane proxies each of its
+//! A headless clone (`RmngClone.headless`) runs no desktop and streams no video. When such a clone
+//! is the selected clone and at least one viewer is connected, this plane proxies each of its
 //! tmux sessions to the viewer over port 1: it enumerates `tmux list-sessions`, opens one
 //! interactive `tmux attach` PTY per session via `docker exec` (bollard TTY exec), and pumps
 //! bytes both ways. The viewer renders one terminal tab per session on its primary window.
@@ -159,7 +159,7 @@ impl TermPlane {
         }
     }
 
-    /// The selected host's id iff it is a headless clone.
+    /// The selected clone's id iff it is a headless clone.
     fn selected_headless(&self) -> Option<String> {
         let sel = self.app.store.selected()?;
         self.app

@@ -1,4 +1,4 @@
-// An account-group picker shared by the clone modal and the per-host change control.
+// An account-group picker shared by the clone modal and the per-clone change control.
 // Under the group-proxy model a clone binds exactly one pool (a CLIProxyAPI instance)
 // or none, so the value is just a group name or the "none" sentinel. CLIProxyAPI owns
 // intra-group account selection + failover — the operator only picks the pool.

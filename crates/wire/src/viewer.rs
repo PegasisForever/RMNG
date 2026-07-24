@@ -108,7 +108,7 @@ pub enum ViewContent {
     /// clone id is needed here.)
     Desktop,
     /// Headless clone: window 0 shows the tmux tabs (one per `sessions` entry); every other window
-    /// shows a blank placeholder. `clone` is the selected host id: it identifies *which* clone the
+    /// shows a blank placeholder. `clone` is the selected clone id: it identifies *which* clone the
     /// sessions belong to so the viewer rebuilds the terminal (fresh scrollback/grids) when the
     /// selection moves to a different headless clone — two clones can share a session name (`main`),
     /// so the name alone can't distinguish them.
@@ -124,7 +124,7 @@ pub struct ViewSpec {
 }
 
 // --- headless-clone terminal (tmux) view ------------------------------------------------
-// When the selected clone is headless (`Host.headless`), the control-server's `termplane`
+// When the selected clone is headless (`RmngClone.headless`), the control-server's `termplane`
 // proxies each tmux session as a PTY over these port-1 messages instead of streaming video.
 // The session list itself rides in [`ViewSpec`] (`ViewContent::Terminal`); the messages below
 // carry the per-session byte streams and viewer→server input.

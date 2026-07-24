@@ -3,7 +3,7 @@
 /**
  * Live per-container resource usage, sampled by the monitor poller each tick and pushed
  * to the frontend as a named `stats` SSE event carrying a `{ hostId: ContainerStats }`
- * map. Deliberately NOT a field of [`ControlState`] / [`Host`]: it changes every tick, so
+ * map. Deliberately NOT a field of [`ControlState`] / [`RmngClone`]: it changes every tick, so
  * routing it through the state store would rewrite `state.json` every few seconds (every
  * `ControlState` mutation persists — see the control-server's `state.rs`). It rides the
  * same `/events` stream on a separate SSE-only bus instead.

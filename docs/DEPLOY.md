@@ -340,7 +340,7 @@ one public key list, installed on both the bastion and every clone.
   ```
 
   `<control-host>` is the control-server's inferred public address (`ssh.publicHost`, override
-  in Settings if the auto-detected host/IP is wrong); `<clone-id>` is the clone's host id (its
+  in Settings if the auto-detected host/IP is wrong); `<clone-id>` is the clone's id (its
   Docker DNS name on the `rmng` network). `-J` jumps through the bastion on `:2222` and
   terminates at the clone's own `sshd` on `:22` — a real end-to-end SSH session, not a shell
   inside the bastion.
@@ -499,7 +499,7 @@ the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no 
 
 - **`rmng` bridge**: a user-defined bridge with the subnet from `docker.subnet`, created
   lazily at wizard finish and before each clone. Addressing is Docker's embedded DNS, not
-  static IPs: every clone resolves by its container name (== host id), and the
+  static IPs: every clone resolves by its container name (== clone id), and the
   control-server attaches itself under the `rmng-control` alias (so recreating its container
   never strands clone-specific CLIProxyAPI routing). Clone IPs are plain Docker IPAM — nothing
   allocates or stores them. If an `rmng` network already exists with a **different** subnet,

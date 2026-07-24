@@ -596,7 +596,7 @@ pub struct SetupEnv {
 }
 
 /// A clone-source image (labeled `rmng.image=1`) as shown to the browser
-/// (`GET /api/images`). Images replace the retired host-id templates: any clone can be
+/// (`GET /api/images`). Images replace the retired clone-id templates: any clone can be
 /// committed to one, and clone creation picks from these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -614,7 +614,7 @@ pub struct ImageInfo {
     /// Lineage: the reference this image was committed from (`rmng.created-from`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_from: Option<String>,
-    /// Host ids of live clones currently running on this image.
+    /// Ids of live clones currently running on this image.
     pub in_use_by: Vec<String>,
 }
 

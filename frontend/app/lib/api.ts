@@ -36,7 +36,7 @@ async function delJson(url: string): Promise<unknown> {
 /** Clone payload: an existing ticket link/id, a new ticket to create (in team
  *  `team`, using the chosen preset's Linear key), or a plain no-ticket clone
  *  (just a container title + an optional first agent message).
- *  The ticket modes also accept optional host-agent + Claude Code overrides.
+ *  The ticket modes also accept optional clone-agent + Claude Code overrides.
  *  `group` (all modes) binds the clone to an account pool (a CLIProxyAPI instance) —
  *  a group name, or null/omitted for no inference binding.
  *  `preset` picks the clone preset (env vars + Linear key): omitted/"auto" means
@@ -54,26 +54,26 @@ export const activate = (id: string | null) =>
 export const reorder = (order: string[]) => postJson("/api/reorder", { order });
 /** Start a clone from a source image (`image` = a canonical reference from
  *  `listImages`, e.g. `pegasis0/rmng-template:latest`). Progress streams over /events. */
-export const cloneHost = (image: string, payload: ClonePayload) =>
+export const duplicateClone = (image: string, payload: ClonePayload) =>
   postJson("/api/clone", { image, ...payload });
-export const deleteHost = (id: string) => postJson("/api/delete", { id });
-/** Gracefully stop a managed clone while retaining its container and per-host data. */
-export const archiveHost = (id: string) =>
+export const deleteClone = (id: string) => postJson("/api/delete", { id });
+/** Gracefully stop a managed clone while retaining its container and per-clone data. */
+export const archiveClone = (id: string) =>
   postJson(`/api/hosts/${encodeURIComponent(id)}/archive`, {});
 /** Restart a retained archived clone. */
-export const unarchiveHost = (id: string) =>
+export const unarchiveClone = (id: string) =>
   postJson(`/api/hosts/${encodeURIComponent(id)}/unarchive`, {});
-/** Replace a host's port-forward rules. New rules omit `id` (server derives it as
+/** Replace a clone's port-forward rules. New rules omit `id` (server derives it as
  *  `f<localPort>`). 400 on a local-port conflict (validated server-side); the UI
  *  refreshes from the next `/events` frame. */
 export const putForwards = (
-  hostId: string,
+  cloneId: string,
   forwards: Array<{ id?: string; remotePort: number; localPort: number; enabled: boolean; label?: string }>,
-) => putJson(`/api/hosts/${encodeURIComponent(hostId)}/forwards`, { forwards });
+) => putJson(`/api/hosts/${encodeURIComponent(cloneId)}/forwards`, { forwards });
 
 // --- images (clone-source templates) ---------------------------------------
 
-/** The clone-source images (`rmng.image=1`); each carries the host ids of live
+/** The clone-source images (`rmng.image=1`); each carries the ids of the live
  *  clones running on it (`inUseBy`). Powers the sidebar Images section + the
  *  clone dialog's image picker. */
 export const listImages = () => getJson("/api/images") as Promise<ImageInfo[]>;
@@ -154,8 +154,8 @@ export const refreshUsage = (): Promise<void> =>
 
 /** Bind a clone to an account group (or clear it with `null`). Replaces the old
  *  per-provider account swap — one group backs all of a clone's agents. */
-export const setHostGroup = (hostId: string, group: string | null) =>
-  postJson(`/api/hosts/${encodeURIComponent(hostId)}/group`, { group }) as Promise<{
+export const setCloneGroup = (cloneId: string, group: string | null) =>
+  postJson(`/api/hosts/${encodeURIComponent(cloneId)}/group`, { group }) as Promise<{
     ok: boolean;
     group: string | null;
   }>;

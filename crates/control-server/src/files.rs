@@ -1,4 +1,4 @@
-//! On-disk side stores that are **not** part of `ControlState`/SSE: per-host editor notes
+//! On-disk side stores that are **not** part of `ControlState`/SSE: per-clone editor notes
 //! (`data/notes/<id>.json`) and image uploads (`data/uploads/`).
 
 use std::io::Read;
@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 
 const MAX_UPLOAD_BYTES: usize = 15 * 1024 * 1024;
 
-/// A host/note id is a DNS label (path-traversal guard).
+/// A clone/note id is a DNS label (path-traversal guard).
 pub fn is_safe_id(id: &str) -> bool {
     crate::provision::is_dns_label(id)
 }
@@ -41,7 +41,7 @@ fn note_path(data_dir: &str, id: &str) -> Result<PathBuf> {
     Ok(Path::new(data_dir).join("notes").join(format!("{id}.json")))
 }
 
-/// The stored block array, or `None` when the host has no notes yet.
+/// The stored block array, or `None` when the clone has no notes yet.
 pub fn load_notes(data_dir: &str, id: &str) -> Option<Vec<serde_json::Value>> {
     let path = note_path(data_dir, id).ok()?;
     let s = std::fs::read_to_string(path).ok()?;

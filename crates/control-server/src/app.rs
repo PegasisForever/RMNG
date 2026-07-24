@@ -22,7 +22,7 @@ pub struct App {
     /// Group-proxy supervisor: per-group CLIProxyAPI instance lifecycle, per-clone router
     /// keys, and management helpers (see [`crate::cliproxy`]).
     pub cliproxy: Arc<CliProxyManager>,
-    /// Per-host chat fan-out + in-flight state.
+    /// Per-clone chat fan-out + in-flight state.
     pub chat: Arc<ChatState>,
     /// Media plane shared state (clone conns + latest frames).
     pub media: Arc<crate::mediaplane::MediaHandle>,
@@ -30,7 +30,7 @@ pub struct App {
     /// surfaces its own daemon-connection failure, so the server still boots the wizard
     /// even when Docker is down.
     pub docker: Arc<DockerCtl>,
-    /// Volatile per-host CPU/RAM usage bus. The monitor poller publishes a stats map each
+    /// Volatile per-clone CPU/RAM usage bus. The monitor poller publishes a stats map each
     /// tick; `/events` fans it out as a named `stats` SSE event. SSE-only — never persisted
     /// to `state.json` (see [`crate::monitor::StatsBus`]).
     pub stats: Arc<crate::monitor::StatsBus>,
@@ -50,7 +50,7 @@ impl App {
     pub fn new(store: Arc<StateStore>, cfg: AppConfig) -> Self {
         let cliproxy = Arc::new(CliProxyManager::load(&cfg.data_dir));
         let tokens = Arc::new(crate::tokens::TokenBus::load(&cfg.data_dir));
-        tokens.sync_hosts(&store.get().hosts);
+        tokens.sync_clones(&store.get().hosts);
         // `DockerCtl::connect` is infallible and I/O-free: even a missing socket FILE
         // (bare `docker run` without the sock bind) boots the server — the failure is
         // surfaced per call and by `self_setup`'s env report, so the wizard shows it.
@@ -105,13 +105,13 @@ impl App {
         Self::new(store, cfg)
     }
 
-    /// What to dial a host's in-clone services at (agent-wrapper chat and the clone-daemon
-    /// MCP). Managed clones are addressed by container name (== host id):
+    /// What to dial a clone's in-clone services at (agent-wrapper chat and the clone-daemon
+    /// MCP). Managed clones are addressed by container name (== clone id):
     /// Docker's embedded DNS serves it on the rmng bridge. In dev mode the server runs
     /// on the Docker host, which can't use that resolver — so resolve the clone's bridge
     /// IP via an inspect instead (host processes can route to bridge IPs directly).
     /// Unmanaged rows keep their literal `host` endpoint.
-    pub async fn dial_host(&self, host: &wire::Host) -> String {
+    pub async fn dial_clone(&self, host: &wire::RmngClone) -> String {
         if !host.managed {
             return host.host.clone();
         }

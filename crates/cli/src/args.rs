@@ -85,7 +85,7 @@ pub enum CloneCmd {
         /// Headless clone: no desktop; the viewer shows a tmux tab view instead of a stream
         #[arg(long)]
         headless: bool,
-        /// Create as a sub host under this parent clone id (must be top-level). Overrides the
+        /// Create as a sub clone under this parent clone id (must be top-level). Overrides the
         /// default caller auto-detection. Conflicts with --top-level.
         #[arg(long, conflicts_with = "top_level")]
         parent: Option<String>,

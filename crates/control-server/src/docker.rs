@@ -1641,7 +1641,7 @@ impl DockerCtl {
 
     /// The container's IPv4 on the rmng network, or `None` if not attached / not running.
     /// Dev mode's dial path: a host process can't use Docker's embedded DNS, so
-    /// `App::dial_host` resolves a clone's bridge IP through this instead.
+    /// `App::dial_clone` resolves a clone's bridge IP through this instead.
     pub async fn inspect_ip(&self, id: &str) -> Result<Option<String>> {
         Ok(self.inspect_runtime(id).await?.ip)
     }

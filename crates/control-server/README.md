@@ -29,7 +29,7 @@ clipboard broker) · `forward` (port-forward data plane: viewer TCP spliced to t
 `docker` (bollard primitives against the local daemon) · `provision` (clone/pull/commit/delete
 flows over those primitives) · `jobs` (the clone/delete/pull/commit Operation machine) · `linear`
 · `claude` (usage poll + token refresh/push + assign/swap) · `chat` (agent-wrapper proxy +
-per-host SSE) · `monitor` (Docker maintenance and token-activity lifecycle writer) · `homes`
+per-clone SSE) · `monitor` (Docker maintenance and token-activity lifecycle writer) · `homes`
 (clone-home symlinks under `data/hosts/`) · `smb` (smbd supervisor + read-write `clones` share
 over `data/hosts`) · `files` (notes/uploads) · `assets` (on-disk clone-daemon/agent-wrapper
 payloads + the served frontend).
@@ -57,7 +57,7 @@ checks the Docker environment (mirrored row-by-row at `GET /api/setup/env`).
 Operator/fleet **desktop control** uses the `rmng desktop` CLI
 ([crates/cli](../cli/README.md)), which posts to the web port's
 `POST /api/hosts/:id/mcp` endpoint; the server forwards each call verbatim to the addressed
-clone's daemon MCP at `http://{host}:{daemon_mcp}`. Fleet management (hosts, clone/delete,
+clone's daemon MCP at `http://{host}:{daemon_mcp}`. Fleet management (clones, clone/delete,
 images, accounts) and `rmng exec` go through the same `rmng` CLI over the port-2 web API.
 
 The full desktop-automation surface lives in the **clone-daemon** (`:9004`), not here — the

@@ -217,7 +217,7 @@ impl CliProxyManager {
 
     /// The per-clone bearer key, minting + persisting one on first request. Injected into the
     /// clone as `ANTHROPIC_AUTH_TOKEN` / the Codex+OpenCode provider key; the router maps it
-    /// back to the host id. Stable for the clone's life (a group change never rotates it).
+    /// back to the clone id. Stable for the clone's life (a group change never rotates it).
     pub fn mint_router_key(&self, host_id: &str) -> String {
         let mut inner = self.inner.lock().unwrap();
         if let Some(key) = inner.file.router_keys.get(host_id) {
@@ -230,13 +230,13 @@ impl CliProxyManager {
         key
     }
 
-    /// Resolve a presented bearer token to the owning host id (router request auth).
-    pub fn host_for_token(&self, token: &str) -> Option<String> {
+    /// Resolve a presented bearer token to the owning clone id (router request auth).
+    pub fn clone_for_token(&self, token: &str) -> Option<String> {
         self.inner.lock().unwrap().token_index.get(token).cloned()
     }
 
-    /// Drop a host's router key on delete so a stale key can never route again.
-    pub fn forget_host(&self, host_id: &str) {
+    /// Drop a clone's router key on delete so a stale key can never route again.
+    pub fn forget_clone(&self, host_id: &str) {
         let mut inner = self.inner.lock().unwrap();
         if let Some(key) = inner.file.router_keys.remove(host_id) {
             inner.token_index.remove(&key);
@@ -907,8 +907,8 @@ mod tests {
         let mgr = CliProxyManager::load(&dir.to_string_lossy());
         let key = mgr.mint_router_key("host-1");
         assert_eq!(mgr.mint_router_key("host-1"), key, "stable per host");
-        assert_eq!(mgr.host_for_token(&key).as_deref(), Some("host-1"));
-        mgr.forget_host("host-1");
-        assert_eq!(mgr.host_for_token(&key), None);
+        assert_eq!(mgr.clone_for_token(&key).as_deref(), Some("host-1"));
+        mgr.forget_clone("host-1");
+        assert_eq!(mgr.clone_for_token(&key), None);
     }
 }

@@ -12,13 +12,13 @@ import { Sidebar } from "~/components/Sidebar";
 import {
   activate,
   activateLayout,
-  archiveHost,
-  cloneHost,
+  archiveClone,
+  duplicateClone,
   commitImage,
   createGroup,
   deleteGroup,
   deleteGroupAccount,
-  deleteHost,
+  deleteClone,
   deleteImage,
   getConfig,
   getUpdateStatus,
@@ -29,12 +29,12 @@ import {
   refreshUsage,
   reorder,
   restartServer,
-  setHostGroup,
+  setCloneGroup,
   testConfig,
-  unarchiveHost,
+  unarchiveClone,
   updateServer,
 } from "~/lib/api";
-import { type ClaudeUsage, type ControlState, type GroupUsage, type Host, emptyState } from "~/lib/types";
+import { type ClaudeUsage, type ControlState, type GroupUsage, type Clone, emptyState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
@@ -48,7 +48,7 @@ import type { Route } from "./+types/_index";
 
 // BlockNote + the chat panel are browser-only; load them lazily and render only
 // after mount so they never participate in SSR.
-const HostEditor = lazy(() => import("~/components/HostEditor"));
+const CloneEditor = lazy(() => import("~/components/CloneEditor"));
 const ChatPanel = lazy(() => import("~/components/ChatPanel"));
 
 function ClientOnly({ children }: { children: React.ReactNode }) {
@@ -185,7 +185,7 @@ function useLiveState(initial: ControlState) {
 
 export default function Home({ loaderData }: Route.ComponentProps) {
   // The live SSE state powers both the wizard (template-provision progress) and the
-  // dashboard, so it lives here at the gate. `stats` is the volatile per-host usage map.
+  // dashboard, so it lives here at the gate. `stats` is the volatile per-clone usage map.
   const { state, stats, lxcStats, forwards, tokens } = useLiveState(loaderData);
   // First-run gate: hold the config (null while loading). Render a minimal centered
   // "Loading…" until it resolves so the dashboard never flashes before the wizard
@@ -261,13 +261,13 @@ function Dashboard({
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [commitHost, setCommitHost] = useState<Host | null>(null);
+  const [commitClone, setCommitClone] = useState<Clone | null>(null);
   const [committing, setCommitting] = useState(false);
-  const [changeHost, setChangeHost] = useState<Host | null>(null);
+  const [changeClone, setChangeClone] = useState<Clone | null>(null);
   const [changing, setChanging] = useState(false);
   // The group an "add account" OAuth login is in flight for (null = modal closed).
   const [loginGroup, setLoginGroup] = useState<string | null>(null);
-  const [forwardHost, setForwardHost] = useState<Host | null>(null);
+  const [forwardClone, setForwardClone] = useState<Clone | null>(null);
   const [forwarding, setForwarding] = useState(false);
   const [forwardError, setForwardError] = useState<string | null>(null);
 
@@ -304,12 +304,12 @@ function Dashboard({
     });
   }, [state.hosts]);
 
-  const hostsById = new Map(state.hosts.map((h) => [h.id, h]));
-  const orderedHosts = order.flatMap((id) => {
-    const h = hostsById.get(id);
+  const clonesById = new Map(state.hosts.map((h) => [h.id, h]));
+  const orderedClones = order.flatMap((id) => {
+    const h = clonesById.get(id);
     return h ? [h] : [];
   });
-  const selectedHost = state.selected ? hostsById.get(state.selected) ?? null : null;
+  const selectedClone = state.selected ? clonesById.get(state.selected) ?? null : null;
 
   // Refetch images when an image-mutating op (pull/commit/delete) leaves the
   // running set — that's when the image list changed. Keyed on the set of running
@@ -401,10 +401,10 @@ function Dashboard({
           <Menu className="size-4" />
         </button>
         <span className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-800 dark:text-slate-100">
-          {selectedHost ? selectedHost.id : "rmng control"}
+          {selectedClone ? selectedClone.id : "rmng control"}
         </span>
         {/* Notes/Chat toggle lives here on mobile — the only header < lg. */}
-        {selectedHost ? (
+        {selectedClone ? (
           <div className="flex shrink-0 gap-0.5 rounded-md bg-slate-100 p-0.5 text-xs font-medium dark:bg-slate-800">
             <button
               type="button"
@@ -442,12 +442,12 @@ function Dashboard({
           />
         ) : null}
 
-        {/* Left: host selection sidebar. Off-canvas drawer < lg, static ≥ lg.
+        {/* Left: clone selection sidebar. Off-canvas drawer < lg, static ≥ lg.
             Presentational — every server call is a callback wired up here. */}
         <Sidebar
           open={sidebarOpen}
           usageGroups={displayGroups}
-          hosts={orderedHosts}
+          hosts={orderedClones}
           stats={stats}
           lxcStats={lxcStats}
           tokens={tokens}
@@ -465,42 +465,42 @@ function Dashboard({
           onAddAccount={(group) => setLoginGroup(group)}
           onDeleteGroup={onDeleteGroup}
           onRefresh={() => refreshUsage()}
-          onSelectHost={(host) => {
-            run(activate(host.id));
+          onSelectClone={(clone) => {
+            run(activate(clone.id));
             setSidebarOpen(false);
           }}
-          onDeleteHost={(host) => {
-            // Deleting a parent cascades to its sub hosts (server-side), so say so up front.
-            const subCount = state.hosts.filter((h) => h.parent === host.id).length;
+          onDeleteClone={(clone) => {
+            // Deleting a parent cascades to its sub clones (server-side), so say so up front.
+            const subCount = state.hosts.filter((h) => h.parent === clone.id).length;
             const subs =
-              subCount > 0 ? ` and its ${subCount} sub host${subCount === 1 ? "" : "s"}` : "";
-            const msg = host.managed
-              ? `Delete ${host.id}${subs}? This destroys its container${subCount > 0 ? "s" : ""}.`
-              : `Remove ${host.id}? This unregisters the host.`;
-            if (confirm(msg)) run(deleteHost(host.id));
+              subCount > 0 ? ` and its ${subCount} sub clone${subCount === 1 ? "" : "s"}` : "";
+            const msg = clone.managed
+              ? `Delete ${clone.id}${subs}? This destroys its container${subCount > 0 ? "s" : ""}.`
+              : `Remove ${clone.id}? This unregisters the clone.`;
+            if (confirm(msg)) run(deleteClone(clone.id));
           }}
-          onCommitHost={(host) => setCommitHost(host)}
-          onChangeAccountHost={(host) => setChangeHost(host)}
-          onPortForwardHost={(host) => {
+          onCommitClone={(clone) => setCommitClone(clone)}
+          onChangeAccountClone={(clone) => setChangeClone(clone)}
+          onPortForwardClone={(clone) => {
             setForwardError(null);
-            setForwardHost(host);
+            setForwardClone(clone);
           }}
-          onArchiveHost={(host) => run(archiveHost(host.id))}
-          onUnarchiveHost={(host) => run(unarchiveHost(host.id))}
+          onArchiveClone={(clone) => run(archiveClone(clone.id))}
+          onUnarchiveClone={(clone) => run(unarchiveClone(clone.id))}
           onReorder={onReorder}
         />
 
-        {/* Right: per-host editor */}
+        {/* Right: per-clone editor */}
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white dark:bg-slate-900">
-          {selectedHost ? (
+          {selectedClone ? (
             <>
-              {/* Per-host header — only ≥ lg; on mobile the top bar shows id + tabs. */}
+              {/* Per-clone header — only ≥ lg; on mobile the top bar shows id + tabs. */}
               <div className="hidden shrink-0 items-center gap-3 border-b border-slate-100 px-4 py-3 sm:px-6 lg:flex dark:border-slate-800">
                 <h2 className="min-w-0 break-words text-base font-semibold text-slate-900 dark:text-slate-100">
-                  {selectedHost.id}
+                  {selectedClone.id}
                 </h2>
                 <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
-                  {selectedHost.host}:{selectedHost.port}
+                  {selectedClone.host}:{selectedClone.port}
                 </span>
               </div>
               <div className="flex min-h-0 flex-1">
@@ -516,7 +516,7 @@ function Dashboard({
                         <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
                       }
                     >
-                      <HostEditor key={selectedHost.id} hostId={selectedHost.id} />
+                      <CloneEditor key={selectedClone.id} cloneId={selectedClone.id} />
                     </Suspense>
                   </ClientOnly>
                 </div>
@@ -534,9 +534,9 @@ function Dashboard({
                       }
                     >
                       <ChatPanel
-                        key={selectedHost.id}
-                        hostId={selectedHost.id}
-                        archived={selectedHost.archived === true}
+                        key={selectedClone.id}
+                        cloneId={selectedClone.id}
+                        archived={selectedClone.archived === true}
                       />
                     </Suspense>
                   </ClientOnly>
@@ -545,7 +545,7 @@ function Dashboard({
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-slate-400 dark:text-slate-500">
-              Select a host to open its notes.
+              Select a clone to open its notes.
             </div>
           )}
         </main>
@@ -558,7 +558,7 @@ function Dashboard({
           busy={runningClone}
           onClose={() => setCloneOpen(false)}
           onClone={(image, payload) => {
-            run(cloneHost(image, payload));
+            run(duplicateClone(image, payload));
             setCloneOpen(false);
           }}
         />
@@ -589,19 +589,19 @@ function Dashboard({
         />
       ) : null}
 
-      {commitHost ? (
+      {commitClone ? (
         <CommitImageModal
-          hostId={commitHost.id}
+          cloneId={commitClone.id}
           busy={committing}
-          onClose={() => setCommitHost(null)}
+          onClose={() => setCommitClone(null)}
           onCommit={(name) => {
             setCommitting(true);
-            commitImage(commitHost.id, name)
+            commitImage(commitClone.id, name)
               .then(() => setError(null))
               .catch((e: Error) => setError(e.message))
               .finally(() => {
                 setCommitting(false);
-                setCommitHost(null);
+                setCommitClone(null);
               });
           }}
         />
@@ -619,17 +619,17 @@ function Dashboard({
         />
       ) : null}
 
-      {changeHost ? (
+      {changeClone ? (
         <ChangeAccountModal
-          host={changeHost}
+          clone={changeClone}
           busy={changing}
-          onClose={() => setChangeHost(null)}
+          onClose={() => setChangeClone(null)}
           onSubmit={(group) => {
             setChanging(true);
-            setHostGroup(changeHost.id, group)
+            setCloneGroup(changeClone.id, group)
               .then(() => {
                 setError(null);
-                setChangeHost(null);
+                setChangeClone(null);
               })
               .catch((e: Error) => setError(e.message))
               .finally(() => setChanging(false));
@@ -637,18 +637,18 @@ function Dashboard({
         />
       ) : null}
 
-      {forwardHost ? (
+      {forwardClone ? (
         <PortForwardModal
-          host={state.hosts.find((h) => h.id === forwardHost.id) ?? forwardHost}
-          runtime={forwards[forwardHost.id] ?? []}
+          clone={state.hosts.find((h) => h.id === forwardClone.id) ?? forwardClone}
+          runtime={forwards[forwardClone.id] ?? []}
           busy={forwarding}
           error={forwardError}
-          onClose={() => setForwardHost(null)}
+          onClose={() => setForwardClone(null)}
           onSubmit={(list) => {
             setForwarding(true);
             setForwardError(null);
-            putForwards(forwardHost.id, list)
-              .then(() => setForwardHost(null))
+            putForwards(forwardClone.id, list)
+              .then(() => setForwardClone(null))
               .catch((e: Error) => setForwardError(e.message))
               .finally(() => setForwarding(false));
           }}

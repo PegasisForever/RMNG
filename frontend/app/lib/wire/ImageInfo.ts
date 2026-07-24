@@ -2,7 +2,7 @@
 
 /**
  * A clone-source image (labeled `rmng.image=1`) as shown to the browser
- * (`GET /api/images`). Images replace the retired host-id templates: any clone can be
+ * (`GET /api/images`). Images replace the retired clone-id templates: any clone can be
  * committed to one, and clone creation picks from these.
  */
 export type ImageInfo = { 
@@ -27,6 +27,6 @@ base: boolean,
  */
 createdFrom: string | null, 
 /**
- * Host ids of live clones currently running on this image.
+ * Ids of live clones currently running on this image.
  */
 inUseBy: Array<string>, };

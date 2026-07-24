@@ -74,11 +74,11 @@ pub fn router(app: App) -> Router {
         .route("/api/chat/:id/events", get(chat_events))
         .route("/api/chat/:id/abort", post(chat_abort))
         .route("/api/hosts/:id/forwards", put(forwards_put))
-        .route("/api/hosts/:id/group", post(host_group))
+        .route("/api/hosts/:id/group", post(clone_group))
         .route("/api/hosts/:id/archive", post(archive))
         .route("/api/hosts/:id/unarchive", post(unarchive))
-        .route("/api/hosts/:id/mcp", post(host_mcp))
-        .route("/api/hosts/:id/exec", post(host_exec))
+        .route("/api/hosts/:id/mcp", post(clone_mcp))
+        .route("/api/hosts/:id/exec", post(clone_exec))
         // Group-proxy onboarding + CRUD (thin proxies to each group instance's management API).
         .route("/api/groups", post(groups_create))
         .route("/api/groups/:name", axum::routing::delete(groups_delete))
@@ -154,7 +154,7 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
 /// `GET /events` — five multiplexed streams on one connection:
 ///   - the persisted `ControlState` as the default (unnamed) event → the client's
 ///     `onmessage`: full snapshot on connect, then one frame per change;
-///   - the volatile per-host CPU/RAM map as a named `stats` event → the client's
+///   - the volatile per-clone CPU/RAM map as a named `stats` event → the client's
 ///     `addEventListener("stats")`: latest snapshot on connect, then one per poll tick;
 ///   - CT-wide CPU/RAM/disk as a named `lxcStats` event;
 ///   - the volatile port-forward runtime map as a named `forwards` event;
@@ -341,9 +341,9 @@ struct ForwardInput {
     label: Option<String>,
 }
 
-/// Validate a host's proposed forward set against the whole state and normalize it into
+/// Validate a clone's proposed forward set against the whole state and normalize it into
 /// `PortForward`s (ids derived `f{local_port}`). Errors: port 0, duplicate local port
-/// within the request, or a local port already claimed by a *different* host (the viewer
+/// within the request, or a local port already claimed by a *different* clone (the viewer
 /// binds them all on one machine → the local-port space is global).
 fn validate_forwards(
     state: &wire::ControlState,
@@ -351,7 +351,7 @@ fn validate_forwards(
     inputs: Vec<ForwardInput>,
 ) -> Result<Vec<wire::PortForward>, (StatusCode, String)> {
     let bad = |m: String| (StatusCode::BAD_REQUEST, m);
-    // Local ports claimed by OTHER hosts.
+    // Local ports claimed by OTHER clones.
     let mut taken: std::collections::HashSet<u16> = state
         .hosts
         .iter()
@@ -380,7 +380,7 @@ fn validate_forwards(
     Ok(out)
 }
 
-/// `PUT /api/hosts/:id/forwards` — replace a host's forward rules. Validated
+/// `PUT /api/hosts/:id/forwards` — replace a clone's forward rules. Validated
 /// synchronously (returns 400 on conflict); persisted to `state.json`; the media plane
 /// re-pushes the new set to the viewer off the store broadcast.
 async fn forwards_put(
@@ -390,7 +390,7 @@ async fn forwards_put(
 ) -> Result<Json<ControlState>, (StatusCode, String)> {
     let state = app.store.get();
     if !state.hosts.iter().any(|h| h.id == id) {
-        return Err((StatusCode::NOT_FOUND, format!("no host '{id}'")));
+        return Err((StatusCode::NOT_FOUND, format!("no clone '{id}'")));
     }
     let validated = validate_forwards(&state, &id, req.forwards)?;
     let next = app.store.mutate(|s| {
@@ -408,12 +408,12 @@ async fn forwards_put(
 /// array. Unknown clone → 404; daemon unreachable / JSON-RPC error → 502. The daemon MCP
 /// stays the single source of truth for the desktop tool schema — this handler is a thin
 /// pass-through (`proxy_to_daemon`).
-async fn host_mcp(
+async fn clone_mcp(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
     Json(req): Json<wire::McpCallRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
+    let host = clone_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))?;
     // Headless clones have no desktop: `gnome-headless.service` and the capture daemon are
     // disabled at create time, so there is no MCP on :9004 to dial. Short-circuit with a clear
     // reason rather than letting `proxy_to_daemon` surface a bare "connection refused" 502 that
@@ -423,7 +423,7 @@ async fn host_mcp(
         return Err((
             StatusCode::CONFLICT,
             format!(
-                "host '{id}' is headless (no desktop) — `rmng desktop` does not apply; \
+                "clone '{id}' is headless (no desktop) — `rmng desktop` does not apply; \
                  use `rmng exec`/`rmng ssh` or the viewer's terminal instead"
             ),
         ));
@@ -431,7 +431,7 @@ async fn host_mcp(
     if host.archived {
         return Err((
             StatusCode::CONFLICT,
-            format!("host '{id}' is archived; unarchive it first"),
+            format!("clone '{id}' is archived; unarchive it first"),
         ));
     }
     let content = proxy_to_daemon(&app, &host, &req.tool, &req.args)
@@ -441,16 +441,16 @@ async fn host_mcp(
 }
 
 /// Proxy a desktop/window `tools/call` to a clone's clone-daemon MCP (dialed by container
-/// name via Docker DNS — `App::dial_host`) and return its `result.content`. Moved here from
+/// name via Docker DNS — `App::dial_clone`) and return its `result.content`. Moved here from
 /// `mcp.rs` when the global MCP was retired; behavior is unchanged.
 async fn proxy_to_daemon(
     app: &App,
-    host: &wire::Host,
+    host: &wire::RmngClone,
     name: &str,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let port = app.config().listen.daemon_mcp;
-    let url = format!("http://{}:{port}/", app.dial_host(host).await);
+    let url = format!("http://{}:{port}/", app.dial_clone(host).await);
     let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
     let resp = app
         .http
@@ -477,7 +477,7 @@ async fn proxy_to_daemon(
 /// (exit code + captured stdout/stderr). Empty argv → 400; unknown clone → 404; a bad
 /// stdin payload → 400; a daemon/exec failure (e.g. container not running) → 502. Defaults
 /// the run-as user to uid `1000` (the clone's agent user) when unset.
-async fn host_exec(
+async fn clone_exec(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
     Json(req): Json<wire::ExecRequest>,
@@ -485,11 +485,11 @@ async fn host_exec(
     if req.cmd.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "cmd must not be empty".into()));
     }
-    let host = host_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no host '{id}'")))?;
+    let host = clone_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))?;
     if host.archived {
         return Err((
             StatusCode::CONFLICT,
-            format!("host '{id}' is archived; unarchive it first"),
+            format!("clone '{id}' is archived; unarchive it first"),
         ));
     }
     let stdin = match &req.stdin_b64 {
@@ -515,13 +515,13 @@ async fn host_exec(
     Ok(Json(result))
 }
 
-/// Resolve the parent host for a fleet-CLI clone create (the sub-host relationship).
+/// Resolve the parent clone for a fleet-CLI clone create (the sub-clone relationship).
 /// Precedence: a `topLevel` body flag → `None`; an explicit `parent` body id → validated as a
 /// top-level managed clone; otherwise auto-detect the calling clone from its per-clone router
 /// key header (`X-RMNG-Proxy-Key`, the same bearer the `/cc` proxy trusts, mapped by
-/// [`crate::cliproxy::InstanceManager::host_for_token`]) and nest under it only when the caller
-/// is itself top-level — nesting is one level deep, so a request from a sub host (or from
-/// outside the fleet with no key) yields a top-level host. `topLevel` + `parent` is an error.
+/// [`crate::cliproxy::InstanceManager::clone_for_token`]) and nest under it only when the caller
+/// is itself top-level — nesting is one level deep, so a request from a sub clone (or from
+/// outside the fleet with no key) yields a top-level clone. `topLevel` + `parent` is an error.
 fn resolve_parent(
     app: &App,
     body: &serde_json::Value,
@@ -548,12 +548,12 @@ fn resolve_parent(
         |id: &str| st.hosts.iter().any(|h| h.id == id && h.managed && h.parent.is_none());
     if let Some(pid) = explicit {
         return match st.hosts.iter().find(|h| h.id == pid) {
-            None => Err(bad(format!("parent host '{pid}' not found"))),
+            None => Err(bad(format!("parent clone '{pid}' not found"))),
             Some(h) if !h.managed => {
-                Err(bad(format!("parent host '{pid}' is not a managed clone")))
+                Err(bad(format!("parent clone '{pid}' is not a managed clone")))
             }
             Some(h) if h.parent.is_some() => Err(bad(format!(
-                "parent host '{pid}' is itself a sub host; sub hosts are one level deep"
+                "parent clone '{pid}' is itself a sub clone; sub clones are one level deep"
             ))),
             Some(_) => Ok(Some(pid.to_string())),
         };
@@ -562,17 +562,17 @@ fn resolve_parent(
     let caller = headers
         .get("x-rmng-proxy-key")
         .and_then(|v| v.to_str().ok())
-        .and_then(|key| app.cliproxy.host_for_token(key));
+        .and_then(|key| app.cliproxy.clone_for_token(key));
     Ok(caller.filter(|id| top_level_managed(id)))
 }
 
-/// The effective account group + preset for a fleet-CLI clone, applying sub-host inheritance:
-/// a sub host inherits its `parent`'s group / preset unless the request specified one (an
+/// The effective account group + preset for a fleet-CLI clone, applying sub-clone inheritance:
+/// a sub clone inherits its `parent`'s group / preset unless the request specified one (an
 /// explicit `--group`/`--preset`, including `none`, counts as specified and overrides). No
 /// parent, or a parent with no group/preset, yields `None` (same as a plain top-level clone).
 /// Pure — unit-tested. The returned preset borrows `presets` (the live config preset list).
 fn effective_group_preset<'a>(
-    parent: Option<&wire::Host>,
+    parent: Option<&wire::RmngClone>,
     group_specified: bool,
     resolved_group: Option<String>,
     preset_specified: bool,
@@ -627,7 +627,7 @@ async fn clone(
     let prefix = cfg.docker.hostname_prefix.clone();
 
     // Whether the request carried a `preset` field at all (present ⇒ don't inherit the parent's
-    // preset on a sub host). `auto`/`none`/empty resolve to "no explicit preset".
+    // preset on a sub clone). `auto`/`none`/empty resolve to "no explicit preset".
     let preset_field = str_field("preset").map(|s| s.trim().to_string());
     let preset_specified = preset_field.as_ref().is_some_and(|s| !s.is_empty());
     // An explicitly chosen preset (by name); absent/"auto"/"none" means auto-select in
@@ -664,19 +664,19 @@ async fn clone(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
-        // Sub-host resolution (only the fleet-CLI path nests): `topLevel` forces a top-level
-        // host; an explicit `parent` must name a top-level managed clone; otherwise auto-detect
+        // Sub-clone resolution (only the fleet-CLI path nests): `topLevel` forces a top-level
+        // clone; an explicit `parent` must name a top-level managed clone; otherwise auto-detect
         // the caller clone from its per-clone router key header and nest under it when the caller
         // is itself top-level. See `resolve_parent`.
         let parent = resolve_parent(&app, &body, &headers)?;
-        // A sub host inherits its parent clone's group + preset BY DEFAULT — a clone created
+        // A sub clone inherits its parent clone's group + preset BY DEFAULT — a clone created
         // from inside a clone (the common case) should join the same account pool and env as its
         // parent unless the caller overrides it (`--group <name|none>` / `--preset <name|none>`).
-        let parent_host = parent
+        let parent_clone = parent
             .as_deref()
             .and_then(|pid| app.store.get().hosts.into_iter().find(|h| h.id == pid));
         let (eff_group, eff_preset) = effective_group_preset(
-            parent_host.as_ref(),
+            parent_clone.as_ref(),
             requested_group.is_some(),
             group.clone(),
             preset_specified,
@@ -749,7 +749,7 @@ async fn clone(
             agent_playbook: compose_playbook(&cfg, explicit),
             global_prompt: compose_global_prompt(&cfg, explicit),
             headless,
-            // UI create modes always produce top-level hosts.
+            // UI create modes always produce top-level clones.
             parent: None,
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
@@ -787,7 +787,7 @@ async fn clone(
         agent_playbook: compose_playbook(&cfg, Some(&preset)),
         global_prompt: compose_global_prompt(&cfg, Some(&preset)),
         headless,
-        // UI create modes always produce top-level hosts.
+        // UI create modes always produce top-level clones.
         parent: None,
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
@@ -906,7 +906,7 @@ async fn resolve_issue(
 // --- images (clone-source templates) ---------------------------------------
 
 /// `GET /api/images` — the clone-source images (`rmng.image=1`), each with the names of
-/// the managed containers created from it (`in_use_by`; container name == host id for
+/// the managed containers created from it (`in_use_by`; container name == clone id for
 /// clones). Both halves come from the daemon — Docker, not `state.json`, knows which
 /// containers reference which image. A daemon error surfaces as 502.
 async fn images_list(
@@ -968,7 +968,7 @@ async fn images_pull(
 
 #[derive(Deserialize)]
 struct CommitReq {
-    /// Host id of the managed clone to commit.
+    /// Clone id of the managed clone to commit.
     host: String,
     /// DNS-label image name — becomes the full repo of the committed image (`<name>:latest`).
     name: String,
@@ -1067,12 +1067,12 @@ async fn unarchive(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
-/// `POST /api/delete` — destroy a managed CT (or unregister a plain host).
+/// `POST /api/delete` — destroy a managed CT (or unregister a plain clone).
 async fn delete(
     State(app): State<App>,
     Json(req): Json<DeleteReq>,
 ) -> Result<Json<Operation>, (StatusCode, String)> {
-    // Cascade: a sub host is torn down with its parent. Delete each child first — as its own
+    // Cascade: a sub clone is torn down with its parent. Delete each child first — as its own
     // full delete op (container + volumes + token/router-key/notes teardown) — best-effort, so
     // a child that is momentarily busy doesn't block the parent's removal (the frontend renders
     // a child whose parent has vanished as top-level). One level deep ⇒ no recursion.
@@ -1085,13 +1085,13 @@ async fn delete(
         .map(|h| h.id.clone())
         .collect();
     for child in &children {
-        app.cliproxy.forget_host(child);
+        app.cliproxy.forget_clone(child);
         if let Err(e) = jobs::start_delete(&app, child) {
-            tracing::warn!(target: "clone", "cascade delete of sub host '{child}' skipped: {e}");
+            tracing::warn!(target: "clone", "cascade delete of sub clone '{child}' skipped: {e}");
         }
     }
     // Drop the clone's group-proxy router key so a stale bearer can never route again.
-    app.cliproxy.forget_host(&req.id);
+    app.cliproxy.forget_clone(&req.id);
     jobs::start_delete(&app, &req.id)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
@@ -1407,7 +1407,7 @@ struct HostGroupReq {
 
 fn resolve_group(app: &App, group: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
     match group.map(str::trim).filter(|name| !name.is_empty()) {
-        // Explicit clear: `--group none` binds no group (and, for a sub host, opts out of
+        // Explicit clear: `--group none` binds no group (and, for a sub clone, opts out of
         // inheriting the parent's group). Reserved word — a group can't be named "none".
         Some(name) if name.eq_ignore_ascii_case("none") => Ok(None),
         Some(name) if app.config().groups.iter().any(|group| group.name == name) => {
@@ -1422,15 +1422,15 @@ fn resolve_group(app: &App, group: Option<&str>) -> Result<Option<String>, (Stat
 /// with `{ "group": null }`). This is the sole account selection under the group-proxy
 /// model: the `/cc` router maps the clone → its group → that group's CLIProxyAPI instance,
 /// which owns intra-group account selection + OAuth refresh. No clone-side change is needed —
-/// a group swap is a pure map update. Unknown host → 400; unmanaged row → 400; an unknown
+/// a group swap is a pure map update. Unknown clone → 400; unmanaged row → 400; an unknown
 /// group name → 400.
-async fn host_group(
+async fn clone_group(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
     Json(req): Json<HostGroupReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let host =
-        host_by_id(&app, &id).ok_or((StatusCode::BAD_REQUEST, format!("unknown host '{id}'")))?;
+        clone_by_id(&app, &id).ok_or((StatusCode::BAD_REQUEST, format!("unknown clone '{id}'")))?;
     if !host.managed {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1447,9 +1447,9 @@ async fn host_group(
     Ok(Json(json!({ "ok": true, "group": group })))
 }
 
-// --- per-host chat ---------------------------------------------------------
+// --- per-clone chat ---------------------------------------------------------
 
-fn host_by_id(app: &App, id: &str) -> Option<wire::Host> {
+fn clone_by_id(app: &App, id: &str) -> Option<wire::RmngClone> {
     app.store.get().hosts.into_iter().find(|h| h.id == id)
 }
 
@@ -1470,19 +1470,19 @@ async fn chat_send(
     AxPath(id): AxPath<String>,
     Json(req): Json<ChatSendReq>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let host = host_by_id(&app, &id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown host '{id}'")))?;
+    let host = clone_by_id(&app, &id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown clone '{id}'")))?;
     if host.archived {
         return Err((
             StatusCode::CONFLICT,
-            format!("host '{id}' is archived; unarchive it first"),
+            format!("clone '{id}' is archived; unarchive it first"),
         ));
     }
     crate::chat::send_chat(&app, &host, &req.text).map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(StatusCode::ACCEPTED)
 }
 
-/// `GET /api/chat/:id/events` — per-host chat SSE (snapshot + on change).
+/// `GET /api/chat/:id/events` — per-clone chat SSE (snapshot + on change).
 async fn chat_events(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
@@ -1503,11 +1503,11 @@ async fn chat_abort(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    if let Some(host) = host_by_id(&app, &id) {
+    if let Some(host) = clone_by_id(&app, &id) {
         if host.archived {
             return Err((
                 StatusCode::CONFLICT,
-                format!("host '{id}' is archived; unarchive it first"),
+                format!("clone '{id}' is archived; unarchive it first"),
             ));
         }
         crate::chat::abort_chat(&app, &host).await;
@@ -1558,8 +1558,8 @@ fn hop_by_hop_headers(headers: &axum::http::HeaderMap) -> HashSet<HeaderName> {
 /// to its bound group's CLIProxyAPI instance on loopback. See the group-proxy plan
 /// (`docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`).
 ///
-/// 1. `Authorization: Bearer <per-clone key>` → host id (unknown/missing → 401).
-/// 2. host id → `host.group` (none → 409 "clone has no group").
+/// 1. `Authorization: Bearer <per-clone key>` → clone id (unknown/missing → 401).
+/// 2. clone id → `clone.group` (none → 409 "clone has no group").
 /// 3. group → instance loopback port + inbound key (missing/booting → 503; the agent retries).
 /// 4. Forward the method + `*rest` path + query to `http://127.0.0.1:<port>/<rest>`, copying
 ///    every non-hop-by-hop header except `Authorization`, SETTING `Authorization: Bearer
@@ -1568,7 +1568,7 @@ fn hop_by_hop_headers(headers: &axum::http::HeaderMap) -> HashSet<HeaderName> {
 async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
     let deny = |code: StatusCode, msg: &str| (code, msg.to_string()).into_response();
 
-    // 1. Per-clone bearer key → host id.
+    // 1. Per-clone bearer key → clone id.
     let token = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -1579,7 +1579,7 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
         })
         .map(str::trim)
         .filter(|t| !t.is_empty());
-    let Some(host_id) = token.and_then(|t| app.cliproxy.host_for_token(t)) else {
+    let Some(host_id) = token.and_then(|t| app.cliproxy.clone_for_token(t)) else {
         return deny(
             StatusCode::UNAUTHORIZED,
             "unknown or missing router bearer key",
@@ -2175,7 +2175,7 @@ mod tests {
     async fn api_state_returns_current_snapshot() {
         let app = test_app();
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host {
+            s.hosts.push(wire::RmngClone {
                 id: "w1".into(),
                 host: "w1".into(),
                 managed: true,
@@ -2189,10 +2189,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_group_binds_and_clears_and_validates() {
+    async fn clone_group_binds_and_clears_and_validates() {
         let app = test_app();
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host {
+            s.hosts.push(wire::RmngClone {
                 id: "w1".into(),
                 host: "w1".into(),
                 managed: true,
@@ -2207,7 +2207,7 @@ mod tests {
         };
 
         // Bind to a known group.
-        let resp = host_group(
+        let resp = clone_group(
             State(app.clone()),
             AxPath("w1".into()),
             Json(HostGroupReq {
@@ -2229,7 +2229,7 @@ mod tests {
         assert_eq!(host.group.as_deref(), Some("team"));
 
         // Clear the binding with null.
-        let _ = host_group(
+        let _ = clone_group(
             State(app.clone()),
             AxPath("w1".into()),
             Json(HostGroupReq { group: None }),
@@ -2246,7 +2246,7 @@ mod tests {
         assert!(host.group.is_none());
 
         // An unknown group name is a 400.
-        let err = host_group(
+        let err = clone_group(
             State(app.clone()),
             AxPath("w1".into()),
             Json(HostGroupReq {
@@ -2299,11 +2299,11 @@ mod tests {
         assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
     }
 
-    // --- sub hosts: parent resolution + cascade delete ---
+    // --- sub clones: parent resolution + cascade delete ---
 
-    fn push_host(app: &App, id: &str, managed: bool, parent: Option<&str>) {
+    fn push_clone(app: &App, id: &str, managed: bool, parent: Option<&str>) {
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host {
+            s.hosts.push(wire::RmngClone {
                 id: id.into(),
                 host: id.into(),
                 managed,
@@ -2316,12 +2316,12 @@ mod tests {
     #[tokio::test]
     async fn resolve_parent_explicit_flags_and_validation() {
         let app = test_app();
-        push_host(&app, "p", true, None); // top-level managed clone
-        push_host(&app, "c", true, Some("p")); // its sub host
-        push_host(&app, "u", false, None); // unmanaged row
+        push_clone(&app, "p", true, None); // top-level managed clone
+        push_clone(&app, "c", true, Some("p")); // its sub clone
+        push_clone(&app, "u", false, None); // unmanaged row
         let empty = HeaderMap::new();
 
-        // `topLevel` forces a top-level host; no hints also → top-level.
+        // `topLevel` forces a top-level clone; no hints also → top-level.
         assert_eq!(resolve_parent(&app, &json!({ "topLevel": true }), &empty).unwrap(), None);
         assert_eq!(resolve_parent(&app, &json!({}), &empty).unwrap(), None);
         // A valid explicit top-level parent is accepted.
@@ -2329,7 +2329,7 @@ mod tests {
             resolve_parent(&app, &json!({ "parent": "p" }), &empty).unwrap(),
             Some("p".into())
         );
-        // A sub host, an unmanaged row, and an unknown id are all rejected as parents.
+        // A sub clone, an unmanaged row, and an unknown id are all rejected as parents.
         for pid in ["c", "u", "ghost"] {
             assert!(resolve_parent(&app, &json!({ "parent": pid }), &empty).is_err());
         }
@@ -2338,12 +2338,12 @@ mod tests {
     }
 
     #[test]
-    fn sub_host_inherits_group_and_preset_unless_overridden() {
+    fn sub_clone_inherits_group_and_preset_unless_overridden() {
         let presets = vec![
             wire::Preset { name: "parent-preset".into(), ..Default::default() },
             wire::Preset { name: "override-preset".into(), ..Default::default() },
         ];
-        let parent = wire::Host {
+        let parent = wire::RmngClone {
             id: "p".into(),
             managed: true,
             group: Some("parent-group".into()),
@@ -2375,7 +2375,7 @@ mod tests {
         assert!(pr.is_none());
 
         // Parent names a preset that no longer exists → gracefully no preset.
-        let orphan = wire::Host { preset_name: Some("gone".into()), ..parent.clone() };
+        let orphan = wire::RmngClone { preset_name: Some("gone".into()), ..parent.clone() };
         let (_g, pr) = effective_group_preset(Some(&orphan), false, None, false, None, &presets);
         assert!(pr.is_none());
     }
@@ -2397,21 +2397,21 @@ mod tests {
     #[tokio::test]
     async fn resolve_parent_auto_detects_caller_router_key() {
         let app = test_app();
-        push_host(&app, "p", true, None);
-        push_host(&app, "c", true, Some("p"));
+        push_clone(&app, "p", true, None);
+        push_clone(&app, "c", true, Some("p"));
         let header = |key: &str| {
             let mut h = HeaderMap::new();
             h.insert(HeaderName::from_static("x-rmng-proxy-key"), key.parse().unwrap());
             h
         };
 
-        // A top-level caller's own router key nests the new host under it.
+        // A top-level caller's own router key nests the new clone under it.
         let key_p = app.cliproxy.mint_router_key("p");
         assert_eq!(
             resolve_parent(&app, &json!({}), &header(&key_p)).unwrap(),
             Some("p".into())
         );
-        // A sub-host caller can't nest deeper (one level) → top-level.
+        // A sub-clone caller can't nest deeper (one level) → top-level.
         let key_c = app.cliproxy.mint_router_key("c");
         assert_eq!(resolve_parent(&app, &json!({}), &header(&key_c)).unwrap(), None);
         // An unrecognized key → top-level.
@@ -2424,20 +2424,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_cascades_to_sub_hosts() {
+    async fn delete_cascades_to_sub_clones() {
         let app = test_app();
         // Unmanaged rows so teardown needs no Docker; the cascade wiring is what we assert.
-        push_host(&app, "p", false, None);
-        push_host(&app, "c1", false, Some("p"));
-        push_host(&app, "c2", false, Some("p"));
-        push_host(&app, "other", false, None);
+        push_clone(&app, "p", false, None);
+        push_clone(&app, "c1", false, Some("p"));
+        push_clone(&app, "c2", false, Some("p"));
+        push_clone(&app, "other", false, None);
 
         delete(State(app.clone()), Json(DeleteReq { id: "p".into() }))
             .await
             .unwrap();
 
-        // A delete op was enqueued for the parent and each of its sub hosts, but not for the
-        // unrelated top-level host.
+        // A delete op was enqueued for the parent and each of its sub clones, but not for the
+        // unrelated top-level clone.
         let ops = app.store.get().operations;
         let deleting = |id: &str| {
             ops.iter()
@@ -2450,9 +2450,9 @@ mod tests {
     // --- POST /api/hosts/:id/mcp + /exec (the rmng desktop / exec backends) ---
 
     #[tokio::test]
-    async fn host_mcp_unknown_clone_is_404() {
-        let app = test_app(); // no hosts registered
-        let err = host_mcp(
+    async fn clone_mcp_unknown_clone_is_404() {
+        let app = test_app(); // no clones registered
+        let err = clone_mcp(
             State(app.clone()),
             AxPath("ghost".into()),
             Json(wire::McpCallRequest {
@@ -2467,9 +2467,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_exec_unknown_clone_is_404() {
+    async fn clone_exec_unknown_clone_is_404() {
         let app = test_app();
-        let err = host_exec(
+        let err = clone_exec(
             State(app.clone()),
             AxPath("ghost".into()),
             Json(wire::ExecRequest {
@@ -2483,9 +2483,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_exec_empty_cmd_is_400() {
+    async fn clone_exec_empty_cmd_is_400() {
         let app = test_app();
-        let err = host_exec(
+        let err = clone_exec(
             State(app.clone()),
             AxPath("anything".into()),
             Json(wire::ExecRequest::default()),
@@ -2497,10 +2497,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_host_mcp_returns_conflict_with_reason() {
+    async fn headless_clone_mcp_returns_conflict_with_reason() {
         let app = test_app();
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host {
+            s.hosts.push(wire::RmngClone {
                 id: "term-only".into(),
                 host: "term-only".into(),
                 managed: true,
@@ -2509,7 +2509,7 @@ mod tests {
             });
         });
 
-        let err = host_mcp(
+        let err = clone_mcp(
             State(app.clone()),
             AxPath("term-only".into()),
             Json(wire::McpCallRequest {
@@ -2524,10 +2524,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archived_host_runtime_calls_return_conflict() {
+    async fn archived_clone_runtime_calls_return_conflict() {
         let app = test_app();
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host {
+            s.hosts.push(wire::RmngClone {
                 id: "stored".into(),
                 host: "stored".into(),
                 managed: true,
@@ -2536,7 +2536,7 @@ mod tests {
             });
         });
 
-        let mcp = host_mcp(
+        let mcp = clone_mcp(
             State(app.clone()),
             AxPath("stored".into()),
             Json(wire::McpCallRequest {
@@ -2600,7 +2600,7 @@ mod tests {
         let base = format!("http://{addr}");
         let http = reqwest::Client::new();
 
-        // A host with no notes yet reads back an empty `blocks` array (not a bare `[]`).
+        // A clone with no notes yet reads back an empty `blocks` array (not a bare `[]`).
         let empty: serde_json::Value = http
             .get(format!("{base}/api/notes/h1"))
             .send()
@@ -2633,7 +2633,7 @@ mod tests {
         assert_eq!(got, doc);
     }
 
-    // --- group-proxy router (/cc) token → host → group → port resolution ---
+    // --- group-proxy router (/cc) token → clone → group → port resolution ---
 
     fn cc_request(auth: Option<&str>) -> Request {
         let mut b = axum::http::Request::builder()
@@ -2655,7 +2655,7 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
-        // A bearer that maps to no host.
+        // A bearer that maps to no clone.
         assert_eq!(
             cc_proxy(State(app), cc_request(Some("Bearer nope")))
                 .await
@@ -2669,7 +2669,7 @@ mod tests {
         let app = test_app();
         let key = app.cliproxy.mint_router_key("h1");
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host {
+            s.hosts.push(wire::RmngClone {
                 id: "h1".into(),
                 host: "h1".into(),
                 managed: true,
@@ -2685,7 +2685,7 @@ mod tests {
         let app = test_app();
         let key = app.cliproxy.mint_router_key("h1");
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host {
+            s.hosts.push(wire::RmngClone {
                 id: "h1".into(),
                 host: "h1".into(),
                 managed: true,
@@ -2709,7 +2709,7 @@ mod tests {
             .push(wire::Group { name: "g".into() });
         crate::cliproxy::apply_now(&app);
         app.store.mutate(|s| {
-            s.hosts.push(wire::Host {
+            s.hosts.push(wire::RmngClone {
                 id: "h1".into(),
                 host: "h1".into(),
                 managed: true,
@@ -2717,7 +2717,7 @@ mod tests {
                 ..Default::default()
             });
         });
-        // Resolution passes token→host→group→port; the loopback instance isn't running in a
+        // Resolution passes token→clone→group→port; the loopback instance isn't running in a
         // unit test, so the forward fails → 502. Proves the whole resolution chain wired up.
         let resp = cc_proxy(State(app), cc_request(Some(&format!("Bearer {key}")))).await;
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
@@ -2823,17 +2823,17 @@ mod tests {
 #[cfg(test)]
 mod forwards_validation_tests {
     use super::*;
-    use wire::{ControlState, Host};
+    use wire::{ControlState, RmngClone};
 
-    fn state_with(hosts: Vec<Host>) -> ControlState {
+    fn state_with(hosts: Vec<RmngClone>) -> ControlState {
         ControlState {
             hosts,
             ..Default::default()
         }
     }
 
-    fn host(id: &str) -> Host {
-        Host {
+    fn host(id: &str) -> RmngClone {
+        RmngClone {
             id: id.into(),
             host: id.into(),
             ..Default::default()
@@ -2874,7 +2874,7 @@ mod forwards_validation_tests {
     }
 
     #[test]
-    fn rejects_local_port_used_by_another_host() {
+    fn rejects_local_port_used_by_another_clone() {
         let mut other = host("b");
         other.forwards = vec![wire::PortForward {
             id: "f8080".into(),

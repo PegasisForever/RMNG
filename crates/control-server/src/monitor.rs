@@ -8,7 +8,7 @@ use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
-use wire::{ContainerStats, Host, LxcStats, MonitorState};
+use wire::{ContainerStats, RmngClone, LxcStats, MonitorState};
 
 use crate::app::App;
 
@@ -18,7 +18,7 @@ const CGROUP_FETCH_TIMEOUT: Duration = Duration::from_millis(500);
 /// CT 105's parent cgroup enforces `cpu.max=1600000 100000`; no other deployment is supported.
 const CT105_CPU_CAPACITY: f64 = 16.0;
 
-/// Volatile per-host resource-usage bus. The monitor samples each running managed clone's
+/// Volatile per-clone resource-usage bus. The monitor samples each running managed clone's
 /// CPU/RAM every tick and publishes the whole `{ hostId: ContainerStats }` map as a named SSE
 /// event. It stays out of `ControlState` / `state.json`: these numbers move every tick.
 pub struct StatsBus {
@@ -166,7 +166,7 @@ async fn sample_lxc(previous_cpu: &mut Option<LxcCpuSample>) -> Option<LxcStats>
 /// One bounded CPU/RAM sample plus the bridge IP from one Docker runtime inspect. The CPU
 /// stream and inspect run concurrently; the inspect's PID is the sole source for both cgroup
 /// memory and the persisted IP, avoiding a clone-recreate race between separate inspections.
-async fn sample_host(app: &App, host: &Host) -> (Option<ContainerStats>, Option<Option<String>>) {
+async fn sample_clone(app: &App, host: &RmngClone) -> (Option<ContainerStats>, Option<Option<String>>) {
     if !host.managed {
         return (None, None);
     }
@@ -207,7 +207,7 @@ async fn sample_host(app: &App, host: &Host) -> (Option<ContainerStats>, Option<
     )
 }
 
-/// Which CPU/RAM reading to publish for one host this tick. A fresh sample always wins. With no
+/// Which CPU/RAM reading to publish for one clone this tick. A fresh sample always wins. With no
 /// fresh sample, a still-reachable clone keeps its prior reading across a transient sampling gap;
 /// an offline clone drops it so its numbers clear.
 fn pick_stat(
@@ -223,7 +223,7 @@ fn pick_stat(
 }
 
 async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
-    let hosts: Vec<Host> = app
+    let hosts: Vec<RmngClone> = app
         .store
         .get()
         .hosts
@@ -252,7 +252,7 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
             }
         };
         let (stats, ip) = if running == Some(true) {
-            match tokio::time::timeout(FETCH_TIMEOUT, sample_host(app, host)).await {
+            match tokio::time::timeout(FETCH_TIMEOUT, sample_clone(app, host)).await {
                 Ok(sample) => sample,
                 Err(_) => {
                     tracing::debug!(host = %host.id, "clone resource sample timed out");
@@ -295,14 +295,14 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
 
     // An archive operation may complete while Docker and cgroup calls are in flight. Filter a
     // second time so its intentional stop cannot race into lifecycle, stats, or chat updates.
-    let active_hosts: Vec<Host> = app
+    let active_clones: Vec<RmngClone> = app
         .store
         .get()
         .hosts
         .into_iter()
         .filter(|host| host.managed && !host.archived)
         .collect();
-    let active_ids: HashSet<String> = active_hosts.iter().map(|host| host.id.clone()).collect();
+    let active_ids: HashSet<String> = active_clones.iter().map(|host| host.id.clone()).collect();
     next.retain(|id, _| active_ids.contains(id));
     stats_map.retain(|id, _| active_ids.contains(id));
     ip_updates.retain(|id, _| active_ids.contains(id));
@@ -310,7 +310,7 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     app.stats.publish(&stats_map);
     app.lxc_stats.publish(&lxc_stats);
 
-    for host in &active_hosts {
+    for host in &active_clones {
         if next
             .get(&host.id)
             .is_some_and(|state| *state != MonitorState::Offline)
@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn pick_stat_carries_prev_forward_for_a_reachable_host() {
+    fn pick_stat_carries_prev_forward_for_a_reachable_clone() {
         let prev = stat(33.0);
         for state in [MonitorState::Working, MonitorState::Idle] {
             assert_eq!(pick_stat(None, state, Some(&prev)), Some(stat(33.0)));
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn pick_stat_drops_an_offline_host() {
+    fn pick_stat_drops_an_offline_clone() {
         assert_eq!(pick_stat(None, MonitorState::Offline, Some(&stat(33.0))), None);
     }
 

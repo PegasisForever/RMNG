@@ -1,15 +1,15 @@
-// Configure a host's local port forwards (remote clone port → 127.0.0.1:<local> on the
+// Configure a clone's local port forwards (remote clone port → 127.0.0.1:<local> on the
 // machine running the native viewer). Mirrors the change-account modal shell. Live
 // status (listening / error / offline) is merged from the `forwards` SSE event by rule id.
 import { useState } from "react";
 
-import type { Host } from "~/lib/types";
+import type { Clone } from "~/lib/types";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 
 type Row = { id?: string; remotePort: string; localPort: string; enabled: boolean };
 
-function toRows(host: Host): Row[] {
-  return (host.forwards ?? []).map((f) => ({
+function toRows(clone: Clone): Row[] {
+  return (clone.forwards ?? []).map((f) => ({
     id: f.id,
     remotePort: String(f.remotePort),
     localPort: String(f.localPort),
@@ -22,14 +22,14 @@ function statusFor(runtime: ForwardRuntime[], id?: string): ForwardRuntime | und
 }
 
 export function PortForwardModal({
-  host,
+  clone,
   runtime,
   busy,
   error,
   onClose,
   onSubmit,
 }: {
-  host: Host;
+  clone: Clone;
   runtime: ForwardRuntime[];
   busy: boolean;
   error: string | null;
@@ -38,7 +38,7 @@ export function PortForwardModal({
     forwards: Array<{ id?: string; remotePort: number; localPort: number; enabled: boolean; label?: string }>,
   ) => void;
 }) {
-  const [rows, setRows] = useState<Row[]>(() => toRows(host));
+  const [rows, setRows] = useState<Row[]>(() => toRows(clone));
 
   const update = (i: number, patch: Partial<Row>) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
@@ -76,10 +76,10 @@ export function PortForwardModal({
         }}
       >
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-          Port forwards · <span className="text-emerald-700 dark:text-emerald-400">{host.displayName ?? host.id}</span>
+          Port forwards · <span className="text-emerald-700 dark:text-emerald-400">{clone.displayName ?? clone.id}</span>
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Expose a port inside this host at <code>127.0.0.1:&lt;local&gt;</code> on the machine running the viewer.
+          Expose a port inside this clone at <code>127.0.0.1:&lt;local&gt;</code> on the machine running the viewer.
         </p>
 
         {error || runtimeErrors.length > 0 ? (

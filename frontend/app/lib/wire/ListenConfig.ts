@@ -4,19 +4,19 @@
  * The control-server listen ports: video, web, the in-clone daemon MCP, and the forward
  * data plane (see README).
  */
-export type ListenConfig = { web: number, video: number,
+export type ListenConfig = { web: number, video: number, 
 /**
  * The clone-daemon's in-clone HTTP MCP port. The control-server proxies desktop/window
  * tools (`POST /api/hosts/:id/mcp`) to `http://{clone}:{daemon_mcp}`; each clone-daemon
  * listens here (set via `RMNG_DAEMON_MCP_PORT`). Same value for every clone.
  */
-daemonMcp: number,
+daemonMcp: number, 
 /**
  * The control-server's port-forward data plane. The viewer opens one TCP
  * connection here per accepted local socket; the server splices to the clone.
  * Restart-required (bound at startup).
  */
-forward: number,
+forward: number, 
 /**
  * The bastion `sshd` port (jump host into clones). Restart-required (bound at startup).
  */

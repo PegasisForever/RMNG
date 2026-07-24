@@ -22,8 +22,8 @@ import { type CSSProperties, type ReactNode, useState } from "react";
 
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
-import { SidebarHost } from "~/components/SidebarHost";
-import type { GroupUsage, Host, Operation } from "~/lib/types";
+import { SidebarClone } from "~/components/SidebarClone";
+import type { GroupUsage, Clone, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
@@ -43,32 +43,32 @@ export function formatLxcUsage(
   return { cpu, mem, disk };
 }
 
-export function partitionHosts(hosts: Host[]): { activeHosts: Host[]; archivedHosts: Host[] } {
+export function partitionClones(hosts: Clone[]): { activeClones: Clone[]; archivedClones: Clone[] } {
   return {
-    activeHosts: hosts.filter((host) => !host.archived),
-    archivedHosts: hosts.filter((host) => host.archived),
+    activeClones: hosts.filter((clone) => !clone.archived),
+    archivedClones: hosts.filter((clone) => clone.archived),
   };
 }
 
-/** Merge a reordered active-host projection back into the complete persisted order without
+/** Merge a reordered active-clone projection back into the complete persisted order without
  * moving archived rows. This keeps an archived clone's place when it is restored. */
-export function mergeActiveHostOrder(hosts: Host[], activeOrder: string[]): string[] {
+export function mergeActiveCloneOrder(hosts: Clone[], activeOrder: string[]): string[] {
   const nextActive = [...activeOrder];
-  return hosts.map((host) => (host.archived ? host.id : (nextActive.shift() ?? host.id)));
+  return hosts.map((clone) => (clone.archived ? clone.id : (nextActive.shift() ?? clone.id)));
 }
 
-/** Split active hosts into a one-level tree: top-level rows (parentless, or whose parent is
- *  not itself an active host — so a child of an archived/deleted parent still shows) and a
- *  parent-id → sub-hosts map, both preserving the incoming order. */
-export function groupSubHosts(activeHosts: Host[]): {
-  topLevel: Host[];
-  childrenByParent: Map<string, Host[]>;
+/** Split active clones into a one-level tree: top-level rows (parentless, or whose parent is
+ *  not itself an active clone — so a child of an archived/deleted parent still shows) and a
+ *  parent-id → sub-clones map, both preserving the incoming order. */
+export function groupSubClones(activeClones: Clone[]): {
+  topLevel: Clone[];
+  childrenByParent: Map<string, Clone[]>;
 } {
-  const activeIds = new Set(activeHosts.map((h) => h.id));
-  const isChild = (h: Host) => !!h.parent && activeIds.has(h.parent);
-  const topLevel = activeHosts.filter((h) => !isChild(h));
-  const childrenByParent = new Map<string, Host[]>();
-  for (const h of activeHosts) {
+  const activeIds = new Set(activeClones.map((h) => h.id));
+  const isChild = (h: Clone) => !!h.parent && activeIds.has(h.parent);
+  const topLevel = activeClones.filter((h) => !isChild(h));
+  const childrenByParent = new Map<string, Clone[]>();
+  for (const h of activeClones) {
     if (isChild(h)) {
       const arr = childrenByParent.get(h.parent as string) ?? [];
       arr.push(h);
@@ -78,11 +78,11 @@ export function groupSubHosts(activeHosts: Host[]): {
   return { topLevel, childrenByParent };
 }
 
-/** Flatten a reordered top-level id list back into a full active-host order, keeping each
- *  parent's sub hosts directly under it (sub hosts are never independently reordered). */
+/** Flatten a reordered top-level id list back into a full active-clone order, keeping each
+ *  parent's sub clones directly under it (sub clones are never independently reordered). */
 export function flattenTreeOrder(
   topLevelOrder: string[],
-  childrenByParent: Map<string, Host[]>,
+  childrenByParent: Map<string, Clone[]>,
 ): string[] {
   return topLevelOrder.flatMap((id) => [
     id,
@@ -90,11 +90,11 @@ export function flattenTreeOrder(
   ]);
 }
 
-/** The sortable unit is the whole group — a top-level host plus its (expanded) sub hosts —
+/** The sortable unit is the whole group — a top-level clone plus its (expanded) sub clones —
  *  so `setNodeRef`/`transform` wrap all of them and a drag moves them together. The parent
  *  card receives the drag activator props (via the render prop) so grabbing it drags the group;
- *  sub hosts render inside and are not independently draggable. */
-function SortableHostGroup({
+ *  sub clones render inside and are not independently draggable. */
+function SortableCloneGroup({
   id,
   disabled,
   children,
@@ -130,18 +130,18 @@ export interface SidebarProps {
   open?: boolean;
   /** Account pools + their usage (configured groups merged with `ControlState.usageGroups`). */
   usageGroups: GroupUsage[];
-  /** Hosts in display order — already reconciled + reordered by the container. */
-  hosts: Host[];
-  /** Live per-host CPU/RAM map (the volatile `stats` SSE event). */
+  /** Clones in display order — already reconciled + reordered by the container. */
+  hosts: Clone[];
+  /** Live per-clone CPU/RAM map (the volatile `stats` SSE event). */
   stats: Record<string, ContainerStats>;
   /** Live CT 105-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
   lxcStats: LxcStats | null;
   /** Live per-clone new-token totals (the `tokens` SSE event). */
   tokens: Record<string, CloneTokenUsage>;
-  /** Live per-host forward-runtime map (the `forwards` SSE event), fanned out to each
-   *  host row's compact forwards chips. */
+  /** Live per-clone forward-runtime map (the `forwards` SSE event), fanned out to each
+   *  clone row's compact forwards chips. */
   forwards?: Record<string, ForwardRuntime[]>;
-  /** All operations; the sidebar derives per-host badges, the clone-busy state,
+  /** All operations; the sidebar derives per-clone badges, the clone-busy state,
    *  and the Activity list from these. */
   operations: Operation[];
   selectedId: string | null;
@@ -168,23 +168,23 @@ export interface SidebarProps {
   onDeleteGroup: (group: string) => void;
   /** Trigger an immediate usage refresh (the panel's refresh button). */
   onRefresh: () => void | Promise<void>;
-  onSelectHost: (host: Host) => void;
-  onDeleteHost: (host: Host) => void;
+  onSelectClone: (clone: Clone) => void;
+  onDeleteClone: (clone: Clone) => void;
   /** Commit a managed clone to a new clone-source image. */
-  onCommitHost: (host: Host) => void;
+  onCommitClone: (clone: Clone) => void;
   /** Change a managed clone's account-group binding. */
-  onChangeAccountHost: (host: Host) => void;
-  /** Open the port-forward editor for a host. */
-  onPortForwardHost: (host: Host) => void;
+  onChangeAccountClone: (clone: Clone) => void;
+  /** Open the port-forward editor for a clone. */
+  onPortForwardClone: (clone: Clone) => void;
   /** Gracefully stop a managed clone while retaining it. */
-  onArchiveHost: (host: Host) => void;
+  onArchiveClone: (clone: Clone) => void;
   /** Restart a retained managed clone. */
-  onUnarchiveHost: (host: Host) => void;
-  /** New host id order after a drag-reorder. */
+  onUnarchiveClone: (clone: Clone) => void;
+  /** New clone id order after a drag-reorder. */
   onReorder: (nextIds: string[]) => void;
 }
 
-/** The left host-selection panel: account groups, the drag-reorderable host list,
+/** The left clone-selection panel: account groups, the drag-reorderable clone list,
  *  and running-operation progress. Purely presentational — every server interaction
  *  is a prop callback, so it renders standalone (e.g. in Storybook) with mocked data.
  *  Off-canvas drawer < lg, static ≥ lg. */
@@ -209,25 +209,25 @@ export function Sidebar({
   onAddAccount,
   onDeleteGroup,
   onRefresh,
-  onSelectHost,
-  onDeleteHost,
-  onCommitHost,
-  onChangeAccountHost,
-  onPortForwardHost,
-  onArchiveHost,
-  onUnarchiveHost,
+  onSelectClone,
+  onDeleteClone,
+  onCommitClone,
+  onChangeAccountClone,
+  onPortForwardClone,
+  onArchiveClone,
+  onUnarchiveClone,
   onReorder,
 }: SidebarProps) {
   const runningClone = operations.some(
     (o) => o.kind === "clone" && o.status === "running",
   );
-  const opForHost = (id: string) =>
+  const opForClone = (id: string) =>
     operations.find((o) => o.target === id && o.status === "running");
-  const { activeHosts, archivedHosts } = partitionHosts(hosts);
-  const { topLevel, childrenByParent } = groupSubHosts(activeHosts);
+  const { activeClones, archivedClones } = partitionClones(hosts);
+  const { topLevel, childrenByParent } = groupSubClones(activeClones);
   const lxcUsage = formatLxcUsage(lxcStats);
 
-  // Sub hosts are collapsed by default; this holds the parent ids whose children are expanded.
+  // Sub clones are collapsed by default; this holds the parent ids whose children are expanded.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const toggleExpand = (id: string) =>
     setExpanded((prev) => {
@@ -242,22 +242,22 @@ export function Sidebar({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  // Only top-level hosts are drag-reorderable; a reorder keeps each parent's sub hosts under it.
+  // Only top-level clones are drag-reorderable; a reorder keeps each parent's sub clones under it.
   function onDragEnd(event: DragEndEvent) {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const ids = topLevel.map((host) => host.id);
+    const ids = topLevel.map((clone) => clone.id);
     const oldIndex = ids.indexOf(String(active.id));
     const newIndex = ids.indexOf(String(over.id));
     if (oldIndex < 0 || newIndex < 0) return;
     const nextTop = arrayMove(ids, oldIndex, newIndex);
-    onReorder(mergeActiveHostOrder(hosts, flattenTreeOrder(nextTop, childrenByParent)));
+    onReorder(mergeActiveCloneOrder(hosts, flattenTreeOrder(nextTop, childrenByParent)));
   }
 
-  // One SidebarHost row. `isChild` indents it. `drag` (only for a draggable top-level row) carries
+  // One SidebarClone row. `isChild` indents it. `drag` (only for a draggable top-level row) carries
   // the enclosing group's activator props so grabbing the card drags the whole group.
-  const hostRow = (
-    host: Host,
+  const cloneRow = (
+    clone: Clone,
     isChild: boolean,
     drag?: {
       dragAttributes: DraggableAttributes;
@@ -265,30 +265,30 @@ export function Sidebar({
       dragging: boolean;
     },
   ) => (
-    <SidebarHost
-      key={host.id}
-      host={host}
-      stats={stats[host.id]}
-      tokenUsage={tokens[host.id]}
-      forwardRuntime={forwards[host.id]}
+    <SidebarClone
+      key={clone.id}
+      clone={clone}
+      stats={stats[clone.id]}
+      tokenUsage={tokens[clone.id]}
+      forwardRuntime={forwards[clone.id]}
       sshPublicHost={sshPublicHost}
       bastionPort={bastionPort}
-      selected={selectedId === host.id}
-      op={opForHost(host.id)}
+      selected={selectedId === clone.id}
+      op={opForClone(clone.id)}
       isChild={isChild}
-      childCount={isChild ? 0 : (childrenByParent.get(host.id)?.length ?? 0)}
-      expanded={expanded.has(host.id)}
-      onToggleExpand={() => toggleExpand(host.id)}
+      childCount={isChild ? 0 : (childrenByParent.get(clone.id)?.length ?? 0)}
+      expanded={expanded.has(clone.id)}
+      onToggleExpand={() => toggleExpand(clone.id)}
       dragAttributes={drag?.dragAttributes}
       dragListeners={drag?.dragListeners}
       dragging={drag?.dragging}
-      onSelect={() => onSelectHost(host)}
-      onCommit={() => onCommitHost(host)}
-      onDelete={() => onDeleteHost(host)}
-      onChangeAccount={() => onChangeAccountHost(host)}
-      onPortForward={() => onPortForwardHost(host)}
-      onArchive={() => onArchiveHost(host)}
-      onUnarchive={() => onUnarchiveHost(host)}
+      onSelect={() => onSelectClone(clone)}
+      onCommit={() => onCommitClone(clone)}
+      onDelete={() => onDeleteClone(clone)}
+      onChangeAccount={() => onChangeAccountClone(clone)}
+      onPortForward={() => onPortForwardClone(clone)}
+      onArchive={() => onArchiveClone(clone)}
+      onUnarchive={() => onUnarchiveClone(clone)}
     />
   );
 
@@ -353,7 +353,7 @@ export function Sidebar({
         <div className="mb-1 flex items-center justify-between px-1">
           <div className="flex min-w-0 items-baseline gap-2">
             <h2 className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-              Hosts ({activeHosts.length})
+              Clones ({activeClones.length})
             </h2>
             {lxcUsage ? (
               <span
@@ -374,9 +374,9 @@ export function Sidebar({
             + Clone
           </button>
         </div>
-        {activeHosts.length === 0 ? (
+        {activeClones.length === 0 ? (
           <p className="rounded-lg border border-dashed border-slate-300 bg-white p-4 text-center text-xs text-slate-400 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-500">
-            {archivedHosts.length === 0 ? "No hosts yet." : "No active hosts."}
+            {archivedClones.length === 0 ? "No clones yet." : "No active clones."}
           </p>
         ) : (
           <DndContext
@@ -385,27 +385,27 @@ export function Sidebar({
             onDragEnd={onDragEnd}
           >
             <SortableContext
-              items={topLevel.map((host) => host.id)}
+              items={topLevel.map((clone) => clone.id)}
               strategy={verticalListSortingStrategy}
             >
               <div>
-                {topLevel.map((host) => {
-                  const kids = childrenByParent.get(host.id) ?? [];
+                {topLevel.map((clone) => {
+                  const kids = childrenByParent.get(clone.id) ?? [];
                   return (
-                    <SortableHostGroup
-                      key={host.id}
-                      id={host.id}
-                      disabled={opForHost(host.id)?.status === "running"}
+                    <SortableCloneGroup
+                      key={clone.id}
+                      id={clone.id}
+                      disabled={opForClone(clone.id)?.status === "running"}
                     >
                       {(drag) => (
                         <>
-                          {hostRow(host, false, drag)}
-                          {expanded.has(host.id)
-                            ? kids.map((child) => hostRow(child, true))
+                          {cloneRow(clone, false, drag)}
+                          {expanded.has(clone.id)
+                            ? kids.map((child) => cloneRow(child, true))
                             : null}
                         </>
                       )}
-                    </SortableHostGroup>
+                    </SortableCloneGroup>
                   );
                 })}
               </div>
@@ -414,26 +414,26 @@ export function Sidebar({
         )}
       </div>
 
-      {archivedHosts.length > 0 ? (
+      {archivedClones.length > 0 ? (
         <div>
           <h2 className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-            Archived hosts ({archivedHosts.length})
+            Archived clones ({archivedClones.length})
           </h2>
           <div>
-            {archivedHosts.map((host) => (
-              <SidebarHost
-                key={host.id}
-                host={host}
-                tokenUsage={tokens[host.id]}
-                selected={selectedId === host.id}
-                op={opForHost(host.id)}
-                onSelect={() => onSelectHost(host)}
-                onCommit={() => onCommitHost(host)}
-                onDelete={() => onDeleteHost(host)}
-                onChangeAccount={() => onChangeAccountHost(host)}
-                onPortForward={() => onPortForwardHost(host)}
-                onArchive={() => onArchiveHost(host)}
-                onUnarchive={() => onUnarchiveHost(host)}
+            {archivedClones.map((clone) => (
+              <SidebarClone
+                key={clone.id}
+                clone={clone}
+                tokenUsage={tokens[clone.id]}
+                selected={selectedId === clone.id}
+                op={opForClone(clone.id)}
+                onSelect={() => onSelectClone(clone)}
+                onCommit={() => onCommitClone(clone)}
+                onDelete={() => onDeleteClone(clone)}
+                onChangeAccount={() => onChangeAccountClone(clone)}
+                onPortForward={() => onPortForwardClone(clone)}
+                onArchive={() => onArchiveClone(clone)}
+                onUnarchive={() => onUnarchiveClone(clone)}
                 sshPublicHost={sshPublicHost}
                 bastionPort={bastionPort}
               />

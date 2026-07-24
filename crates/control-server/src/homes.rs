@@ -4,7 +4,7 @@
 //! `/var/lib/docker/volumes/rmng-data/_data/hosts/…`).
 //!
 //! The Docker-port successor to the Proxmox-era sshfs reconciler (`mounts.rs`, deleted):
-//! instead of FUSE-mounting each host's home over SSH, it maintains a plain symlink
+//! instead of FUSE-mounting each clone's home over SSH, it maintains a plain symlink
 //! `<data_dir>/hosts/<id>` → `/proc/<uid-1000-pid>/root/home/rmng` for every RUNNING managed
 //! clone. The target is a uid-1000 process's proc-root (not the clone's root-owned init) so
 //! the SMB share (smb.rs, smbd acting as uid 1000) can follow the link; every process in the
@@ -16,7 +16,7 @@
 //!
 //! A 15s reconcile loop (same cadence as the old one) links new/running clones, repoints
 //! stale links (a clone's PID changes across restarts), and removes links for
-//! stopped/deleted/unmanaged hosts. Best-effort throughout: a transient daemon error just
+//! stopped/deleted/unmanaged clones. Best-effort throughout: a transient daemon error just
 //! retries next tick. When a clone's PID is known but `/proc/<pid>` isn't visible in our
 //! namespace (operator forgot `pid: "host"`), it warns ONCE per host, then skips.
 
@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use wire::Host;
+use wire::RmngClone;
 
 use crate::app::App;
 use crate::docker::CLONE_USER;
@@ -145,15 +145,15 @@ fn prune_stale(root: &Path, desired: &HashSet<String>) {
     }
 }
 
-/// One reconcile pass. `warned` tracks host ids we've already logged a missing-`/proc`
+/// One reconcile pass. `warned` tracks clone ids we've already logged a missing-`/proc`
 /// warning for, so the "add `pid: host`" hint fires once, not every tick.
 async fn reconcile(app: &App, warned: &mut HashSet<String>) {
     let cfg = app.config();
     let root = hosts_root(&cfg.data_dir);
     let _ = std::fs::create_dir_all(&root);
 
-    // Only managed clones (container name == host id) with a path-safe id are candidates.
-    let hosts: Vec<Host> = app
+    // Only managed clones (container name == clone id) with a path-safe id are candidates.
+    let hosts: Vec<RmngClone> = app
         .store
         .get()
         .hosts
@@ -208,7 +208,7 @@ async fn reconcile(app: &App, warned: &mut HashSet<String>) {
 
     prune_stale(&root, &desired);
 
-    // Keep the once-warned set bounded to hosts that still exist + are managed.
+    // Keep the once-warned set bounded to clones that still exist + are managed.
     let managed: HashSet<String> = hosts.iter().map(|h| h.id.clone()).collect();
     warned.retain(|id| managed.contains(id));
 }

@@ -324,7 +324,7 @@ export function CloneModal({
                 the agent acts on the merged instruction.
               </p>
               <label className="block font-medium text-slate-500 dark:text-slate-400">
-                Host agent instructions
+                Clone agent instructions
                 <textarea
                   value={agentInstructions}
                   onChange={(e) => setAgentInstructions(e.target.value)}

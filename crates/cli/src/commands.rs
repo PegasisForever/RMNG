@@ -52,7 +52,7 @@ fn ram(stats: &ContainerStats) -> String {
     }
 }
 
-fn host_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
+fn clone_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
     if archived {
         return "archived".to_string();
     }
@@ -66,7 +66,7 @@ fn host_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
 
 pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
     let (st, stats, tokens) = tokio::try_join!(client.state(), client.stats(), client.tokens())?;
-    // `--json` emits the JOINED view the human table shows — each clone's Host object with its
+    // `--json` emits the JOINED view the human table shows — each clone object with its
     // live `stats` + `tokens` nested — so an agent parsing JSON gets CPU/RAM/tokens too (the raw
     // wire `ControlState` omits those volatile metrics). Stable CLI-owned shape; see docs/CLI.md.
     if json {
@@ -88,9 +88,9 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
         return Ok(0);
     }
 
-    // Order rows as a one-level tree: each top-level host followed by its sub hosts, which are
+    // Order rows as a one-level tree: each top-level clone followed by its sub clones, which are
     // indented under it. A child whose parent isn't present renders at top level so nothing is
-    // hidden. Order within each level is the server's host Vec order.
+    // hidden. Order within each level is the server's clone Vec order.
     let present: std::collections::HashSet<&str> = st.hosts.iter().map(|h| h.id.as_str()).collect();
     let mut ordered: Vec<(&_, bool)> = Vec::with_capacity(st.hosts.len());
     for h in &st.hosts {
@@ -136,7 +136,7 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
                 usage
                     .map(|usage| token_count(usage.output_tokens))
                     .unwrap_or_default(),
-                host_status(h.archived, h.monitor_state),
+                clone_status(h.archived, h.monitor_state),
             ]
         })
         .collect();
@@ -192,11 +192,11 @@ pub async fn clone_create(
     json: bool,
 ) -> Result<u8> {
     // Map the explicit "no X" flags to the `none` sentinel the server treats as "bind none"
-    // (and, for a sub host, opt out of inheriting the parent's). Omitting both ⇒ inherit.
+    // (and, for a sub clone, opt out of inheriting the parent's). Omitting both ⇒ inherit.
     let group = if no_group { Some("none") } else { group };
     let preset = if no_preset { Some("none") } else { preset };
     let op = client
-        .clone_host(from, hostname, group, preset, headless, parent, top_level)
+        .duplicate_clone(from, hostname, group, preset, headless, parent, top_level)
         .await?;
     started(client, op, wait, json, "clone").await
 }
@@ -252,7 +252,7 @@ pub async fn clone_bind(
         Some("") | Some("none") | None => None,
         Some(g) => Some(g),
     };
-    let reply = client.set_host_group(clone, group).await?;
+    let reply = client.set_clone_group(clone, group).await?;
     if json {
         emit_json(&reply)?;
     } else {
@@ -527,7 +527,7 @@ fn host_from_base(base: &str) -> &str {
         .unwrap_or(base)
 }
 
-fn validate_ssh_host<'a>(st: &'a ControlState, host: &str) -> Result<&'a wire::Host> {
+fn validate_ssh_host<'a>(st: &'a ControlState, host: &str) -> Result<&'a wire::RmngClone> {
     let target = st
         .hosts
         .iter()
@@ -562,11 +562,11 @@ pub fn build_direct_ssh_command(target: &str) -> String {
 
 /// The address a sibling clone dials: its internal bridge IP when known, else its id (Docker
 /// DNS resolves the id to the same host, so this is safe when a fresh clone isn't IP-sampled).
-fn direct_ssh_target(host: &wire::Host) -> String {
+fn direct_ssh_target(host: &wire::RmngClone) -> String {
     host.local_ip.clone().unwrap_or_else(|| host.id.clone())
 }
 
-/// `rmng ssh <host>`: print the ready-to-paste `ssh` one-liner that jumps through the
+/// `rmng ssh <clone>`: print the ready-to-paste `ssh` one-liner that jumps through the
 /// bastion into the clone. Fetches the redacted config for `ssh.publicHost` and
 /// `listen.bastion`; falls back to a best-effort host guess (with a stderr note) when
 /// `publicHost` isn't set, so the command on stdout stays copy-pasteable either way.
@@ -1221,14 +1221,14 @@ mod tests {
 
     #[test]
     fn direct_ssh_target_prefers_local_ip_then_falls_back_to_id() {
-        let with_ip = wire::Host {
+        let with_ip = wire::RmngClone {
             id: "clone-b".into(),
             local_ip: Some("172.20.0.9".into()),
             ..Default::default()
         };
         assert_eq!(direct_ssh_target(&with_ip), "172.20.0.9");
 
-        let no_ip = wire::Host {
+        let no_ip = wire::RmngClone {
             id: "clone-b".into(),
             local_ip: None,
             ..Default::default()
@@ -1239,7 +1239,7 @@ mod tests {
     #[test]
     fn validate_ssh_host_rejects_unknown_host() {
         let st = ControlState {
-            hosts: vec![wire::Host {
+            hosts: vec![wire::RmngClone {
                 id: "pega-herms".into(),
                 managed: true,
                 ..Default::default()
@@ -1247,26 +1247,26 @@ mod tests {
             ..Default::default()
         };
 
-        let err = validate_ssh_host(&st, "herms").expect_err("host suffix must not match");
+        let err = validate_ssh_host(&st, "herms").expect_err("clone suffix must not match");
         assert_eq!(err.to_string(), "unknown clone 'herms' (see `rmng clone ls`)");
-        validate_ssh_host(&st, "pega-herms").expect("exact host id should match");
+        validate_ssh_host(&st, "pega-herms").expect("exact clone id should match");
     }
 
     #[test]
     fn validate_ssh_host_rejects_unreachable_targets() {
         let st = ControlState {
             hosts: vec![
-                wire::Host {
+                wire::RmngClone {
                     id: "legacy".into(),
                     ..Default::default()
                 },
-                wire::Host {
+                wire::RmngClone {
                     id: "archived".into(),
                     managed: true,
                     archived: true,
                     ..Default::default()
                 },
-                wire::Host {
+                wire::RmngClone {
                     id: "offline".into(),
                     managed: true,
                     monitor_state: Some(MonitorState::Offline),
@@ -1296,7 +1296,7 @@ mod tests {
             hosts: [None, Some(MonitorState::Working), Some(MonitorState::Idle)]
                 .into_iter()
                 .enumerate()
-                .map(|(index, monitor_state)| wire::Host {
+                .map(|(index, monitor_state)| wire::RmngClone {
                     id: format!("clone-{index}"),
                     managed: true,
                     monitor_state,
@@ -1323,9 +1323,9 @@ mod tests {
             }),
             "2.0 GiB/4.0 GiB"
         );
-        assert_eq!(host_status(true, Some(MonitorState::Working)), "archived");
-        assert_eq!(host_status(false, Some(MonitorState::Idle)), "idle");
-        assert_eq!(host_status(false, None), "");
+        assert_eq!(clone_status(true, Some(MonitorState::Working)), "archived");
+        assert_eq!(clone_status(false, Some(MonitorState::Idle)), "idle");
+        assert_eq!(clone_status(false, None), "");
     }
 
     #[test]

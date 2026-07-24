@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { Host } from "./types";
+import type { Clone } from "./types";
 
 /** Browser/OS notifications for clones that stop working.
  *
@@ -10,10 +10,10 @@ import type { Host } from "./types";
  *  the transition detection and the "don't nag about the clone I'm looking at" rule, so a
  *  `false → true` edge on `unread` is precisely one "stopped working" event to surface.
  *
- *  Seeding: a host is only a fresh edge if we've previously seen it *not* unread. A host
+ *  Seeding: a clone is only a fresh edge if we've previously seen it *not* unread. A clone
  *  seen for the first time (initial SSE frame, or a just-created clone) is baselined
  *  silently, so an already-unread clone never fires retroactively on page load. */
-export function useCloneNotifications(hosts: Host[], onActivate?: (id: string) => void) {
+export function useCloneNotifications(hosts: Clone[], onActivate?: (id: string) => void) {
   const seen = useRef<Map<string, boolean>>(new Map());
   // Latest-ref for the activate callback so a notification's click handler (created in an
   // effect) always calls the current one, without re-running the effect on every render.
@@ -42,19 +42,19 @@ export function useCloneNotifications(hosts: Host[], onActivate?: (id: string) =
   }, [hosts]);
 }
 
-function notifyStopped(host: Host, onActivate?: (id: string) => void) {
-  const name = host.displayName ?? host.id;
-  const offline = host.monitorState === "offline";
+function notifyStopped(clone: Clone, onActivate?: (id: string) => void) {
+  const name = clone.displayName ?? clone.id;
+  const offline = clone.monitorState === "offline";
   try {
     const n = new Notification(`${name} stopped working`, {
       body: offline ? "The clone went offline." : "The clone is now idle.",
       // One notification per clone: a repeat edge replaces the prior card rather than stacking.
-      tag: `clone-stopped-${host.id}`,
+      tag: `clone-stopped-${clone.id}`,
     });
     // Click → focus this tab and select the clone that stopped.
     n.onclick = () => {
       window.focus();
-      onActivate?.(host.id);
+      onActivate?.(clone.id);
       n.close();
     };
   } catch {
