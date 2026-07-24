@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wire::{Host, Operation, OperationKind, OperationStatus};
+use wire::{RmngClone, Operation, OperationKind, OperationStatus};
 
 use crate::app::App;
 use crate::provision::{
@@ -32,7 +32,7 @@ impl std::fmt::Display for JobError {
 }
 impl std::error::Error for JobError {}
 
-/// Linear ticket metadata stamped onto a cloned `Host`.
+/// Linear ticket metadata stamped onto a cloned `RmngClone`.
 #[derive(Debug, Clone, Default)]
 pub struct LinearMeta {
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`).
@@ -70,11 +70,11 @@ pub struct CloneSpec {
     pub global_prompt: String,
     /// Create a **headless clone**: same template, but the desktop (`gnome-headless`) and
     /// capture daemon (`rmng-clone-daemon`) user units are disabled at provision and a default
-    /// tmux session is started. Persisted on `Host.headless`; drives the viewer tmux view.
+    /// tmux session is started. Persisted on `RmngClone.headless`; drives the viewer tmux view.
     pub headless: bool,
-    /// Parent host id when this clone should be created as a sub host (one level deep). Already
+    /// Parent clone id when this clone should be created as a sub clone (one level deep). Already
     /// validated by the caller (`web::clone`): the parent exists, is managed, and is itself
-    /// top-level. `None` = top-level clone. Persisted on `Host.parent`; purely cosmetic.
+    /// top-level. `None` = top-level clone. Persisted on `RmngClone.parent`; purely cosmetic.
     pub parent: Option<String>,
 }
 
@@ -258,7 +258,7 @@ pub fn fail_stale_ops(app: &App) {
     }
 }
 
-/// Pick a free host id for a ticket base name (`base`, then `base a..z`). Race-free
+/// Pick a free clone id for a ticket base name (`base`, then `base a..z`). Race-free
 /// when called immediately before `start_clone` (single state snapshot).
 pub fn next_free_hostname(app: &App, base: &str) -> String {
     let st = app.store.get();
@@ -296,7 +296,7 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
     let st = app.store.get();
     if st.hosts.iter().any(|h| h.id == spec.new_hostname) {
         return Err(JobError(format!(
-            "a host named '{}' already exists",
+            "a clone named '{}' already exists",
             spec.new_hostname
         )));
     }
@@ -310,19 +310,19 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
             spec.new_hostname
         )));
     }
-    // Sub-host invariant (defense in depth; `web::resolve_parent` already validated): the parent
+    // Sub-clone invariant (defense in depth; `web::resolve_parent` already validated): the parent
     // must exist, be a managed clone, and be top-level — nesting is one level deep.
     if let Some(parent) = &spec.parent {
         match st.hosts.iter().find(|h| &h.id == parent) {
-            None => return Err(JobError(format!("parent host '{parent}' not found"))),
+            None => return Err(JobError(format!("parent clone '{parent}' not found"))),
             Some(h) if !h.managed => {
                 return Err(JobError(format!(
-                    "parent host '{parent}' is not a managed clone"
+                    "parent clone '{parent}' is not a managed clone"
                 )));
             }
             Some(h) if h.parent.is_some() => {
                 return Err(JobError(format!(
-                    "parent host '{parent}' is itself a sub host; sub hosts are one level deep"
+                    "parent clone '{parent}' is itself a sub clone; sub clones are one level deep"
                 )));
             }
             Some(_) => {}
@@ -350,14 +350,14 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // env first; the operator's chosen preset follows (so a preset key can still override).
     let mut env = control_env_vars(&app).await;
     // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY), minted +
-    // persisted server-side and mapped back to this host id by the `/cc` router. Additive:
+    // persisted server-side and mapped back to this clone id by the `/cc` router. Additive:
     // it lives alongside the existing token push; a clone with no group just gets a 409 from
-    // the router until one is bound. Never serialized onto `Host`/state.
+    // the router until one is bound. Never serialized onto `RmngClone`/state.
     env.extend(crate::provision::router_env_vars(&app, &spec.new_hostname));
     env.extend(spec.env.iter().cloned());
     // `image_ref` is the CANONICAL reference of the image actually used (the caller may have
-    // passed an id form — MCP/raw API); `Host.source` must record the reference so the
-    // commit flow can stamp lineage. The backing container's name is the host id — that's
+    // passed an id form — MCP/raw API); `RmngClone.source` must record the reference so the
+    // commit flow can stamp lineage. The backing container's name is the clone id — that's
     // how every later call (dials, redeploy, credential ops, delete) addresses it.
     let image_ref = match clone_container(
         &app,
@@ -377,10 +377,10 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
 
     // The container is up and its daemon has registered (or timed out still-booting) — the op
     // now sits at the `ready` step (~80%). The clone is NOT connectable yet: the account tokens
-    // still have to be pushed. The client treats a host's PRESENCE in `s.hosts` as "ready to
-    // connect", so we keep the host OUT of state and the op RUNNING until this whole tail
+    // still have to be pushed. The client treats a clone's PRESENCE in `s.hosts` as "ready to
+    // connect", so we keep the clone OUT of state and the op RUNNING until this whole tail
     // settles — otherwise a viewer connecting at "100%" hits a not-yet-provisioned clone. The
-    // host is registered + the op marked `done` at the very end, below, once the clone is
+    // clone is registered + the op marked `done` at the very end, below, once the clone is
     // genuinely streamable.
     //
     // (`progress` at the top of this fn was moved into `clone_container`; make a fresh one for
@@ -394,7 +394,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // Group-proxy binding: the clone's agents route through ONE account group's CLIProxyAPI
     // instance via the control-server's `/cc` router (the per-clone router key was already
     // injected into the clone's env above by `router_env_vars`). Binding is a pure map update
-    // — the group is recorded on the Host below and the router resolves clone → group →
+    // — the group is recorded on the clone below and the router resolves clone → group →
     // instance at request time; there is no clone-side credential push. `None` leaves the
     // clone without inference until a group is bound (the router answers 409 until then).
     let group = spec.group.clone();
@@ -407,16 +407,16 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         }),
     }
 
-    // Register the fully-provisioned host and mark the op done — the clone is now genuinely
-    // connectable. A host's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
+    // Register the fully-provisioned clone and mark the op done — the clone is now genuinely
+    // connectable. A clone's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
     // it is added HERE, at the same instant the bar reaches 100%. `host` is display-only for
     // managed clones (dials go by container name == id); clones ship with fixed `rmng`/`rmng`
     // credentials baked into the base image. RDP port stays 3389 for the media path. The
-    // group binding resolved above is baked in so the UI shows it the moment the host appears.
+    // group binding resolved above is baked in so the UI shows it the moment the clone appears.
     // `daemon_up` reflects whether the clone's daemon has registered (vs. still booting).
     let daemon_up = app.media.is_connected(&spec.new_hostname);
     app.store.mutate(|s| {
-        let mut host = Host {
+        let mut host = RmngClone {
             id: spec.new_hostname.clone(),
             host: spec.new_hostname.clone(),
             port: 3389,
@@ -458,7 +458,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             op.finished_at = Some(now_ms());
         }
     });
-    app.tokens.register_host(&spec.new_hostname);
+    app.tokens.register_clone(&spec.new_hostname);
 
     schedule_prune(app.clone(), op_id.clone(), PRUNE_DONE_MS);
 
@@ -495,8 +495,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
 
 /// Pull the clone template from `reference` (a registry `repo:tag`) — no local retag; the
 /// pulled image keeps its own `repo:tag`, which becomes the clone-source reference. Drives a
-/// `Pull`-kind Operation with the reference as its target; no Host is registered (a template
-/// is not a host). Guard: no op is already in flight for the same reference.
+/// `Pull`-kind Operation with the reference as its target; no clone is registered (a template
+/// is not a clone). Guard: no op is already in flight for the same reference.
 pub fn start_pull(app: &App, reference: &str) -> Result<Operation, JobError> {
     let st = app.store.get();
     if st
@@ -655,8 +655,8 @@ async fn run_update(app: App, op_id: String, reference: String) {
 }
 
 /// Validate + register a commit-from-clone op, then drive it in the background. Guards:
-/// the host is a managed clone, the target tag is free (no existing image AND no in-flight
-/// commit racing for it), and the host has no operation already in flight.
+/// the clone is a managed clone, the target tag is free (no existing image AND no in-flight
+/// commit racing for it), and the clone has no operation already in flight.
 pub fn start_commit(app: &App, host_id: &str, name: &str) -> Result<Operation, JobError> {
     if !is_dns_label(name) {
         return Err(JobError(
@@ -669,7 +669,7 @@ pub fn start_commit(app: &App, host_id: &str, name: &str) -> Result<Operation, J
         .iter()
         .find(|h| h.id == host_id)
         .cloned()
-        .ok_or_else(|| JobError(format!("unknown host '{host_id}'")))?;
+        .ok_or_else(|| JobError(format!("unknown clone '{host_id}'")))?;
     if !host.managed {
         return Err(JobError(format!(
             "'{host_id}' is not a managed clone — only clones can be committed"
@@ -698,7 +698,7 @@ pub fn start_commit(app: &App, host_id: &str, name: &str) -> Result<Operation, J
         )));
     }
 
-    // Target = the image name (what's being produced); source = the host it's committed from.
+    // Target = the image name (what's being produced); source = the clone it's committed from.
     let op = make_op(OperationKind::Commit, name, Some(host_id));
     let (ret, op_id) = (op.clone(), op.id.clone());
     app.store.mutate(|s| s.operations.push(op));
@@ -733,13 +733,13 @@ async fn run_commit(
 }
 
 /// Validate + register a delete op, then drive it in the background. A managed clone is
-/// torn down through `provision::delete_clone` (container name == host id); an unmanaged
-/// row (a legacy/plain host) is simply removed from state.
+/// torn down through `provision::delete_clone` (container name == clone id); an unmanaged
+/// row (a legacy/plain clone) is simply removed from state.
 pub fn start_delete(app: &App, host_id: &str) -> Result<Operation, JobError> {
     let st = app.store.get();
     let host = st.hosts.iter().find(|h| h.id == host_id).cloned();
     let Some(host) = host else {
-        return Err(JobError(format!("unknown host '{host_id}'")));
+        return Err(JobError(format!("unknown clone '{host_id}'")));
     };
     if st
         .operations
@@ -774,7 +774,7 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
         patch_op(&app, &op_id, |op| {
             op.step = "remove".into();
             op.pct = 75.0;
-            op.message = "unregistering host (no container)".into();
+            op.message = "unregistering clone (no container)".into();
         });
     }
 
@@ -790,26 +790,26 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
             op.message = if managed {
                 format!("clone {host_id} destroyed")
             } else {
-                "host removed".into()
+                "clone removed".into()
             };
             op.finished_at = Some(now_ms());
         }
     });
-    app.tokens.forget_host(&host_id);
+    app.tokens.forget_clone(&host_id);
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
     let dd = app.config().data_dir;
     crate::files::delete_notes(&dd, &host_id);
     crate::chat::delete_chat(&dd, &host_id);
 }
 
-/// Stop a managed clone without removing its container, volumes, or per-host files.
+/// Stop a managed clone without removing its container, volumes, or per-clone files.
 pub fn start_archive(app: &App, host_id: &str) -> Result<Operation, JobError> {
     let st = app.store.get();
     let host = st
         .hosts
         .iter()
         .find(|h| h.id == host_id)
-        .ok_or_else(|| JobError(format!("unknown host '{host_id}'")))?;
+        .ok_or_else(|| JobError(format!("unknown clone '{host_id}'")))?;
     if !host.managed {
         return Err(JobError(format!("'{host_id}' is not a managed clone")));
     }
@@ -871,7 +871,7 @@ pub fn start_unarchive(app: &App, host_id: &str) -> Result<Operation, JobError> 
         .hosts
         .iter()
         .find(|h| h.id == host_id)
-        .ok_or_else(|| JobError(format!("unknown host '{host_id}'")))?;
+        .ok_or_else(|| JobError(format!("unknown clone '{host_id}'")))?;
     if !host.managed {
         return Err(JobError(format!("'{host_id}' is not a managed clone")));
     }
@@ -1068,7 +1068,7 @@ mod tests {
     async fn archive_and_unarchive_register_lifecycle_ops() {
         let app = test_app();
         app.store.mutate(|s| {
-            s.hosts.push(Host {
+            s.hosts.push(RmngClone {
                 id: "clone-a".into(),
                 host: "clone-a".into(),
                 managed: true,
@@ -1098,12 +1098,12 @@ mod tests {
     async fn archive_validation_rejects_unmanaged_and_wrong_state() {
         let app = test_app();
         app.store.mutate(|s| {
-            s.hosts.push(Host {
+            s.hosts.push(RmngClone {
                 id: "plain".into(),
                 host: "plain".into(),
                 ..Default::default()
             });
-            s.hosts.push(Host {
+            s.hosts.push(RmngClone {
                 id: "stored".into(),
                 host: "stored".into(),
                 managed: true,

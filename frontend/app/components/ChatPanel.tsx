@@ -1,5 +1,5 @@
-// Per-host chat with the in-container agent (Claude Agent SDK). Client-only, lazy-imported
-// and keyed by host id (same pattern as HostEditor). Subscribes to the per-host
+// Per-clone chat with the in-container agent (Claude Agent SDK). Client-only, lazy-imported
+// and keyed by clone id (same pattern as CloneEditor). Subscribes to the per-clone
 // chat SSE (/api/chat/:id/events) for { busy, messages }, so the agent's reply
 // and the "working" indicator survive a refresh — the POST only kicks the turn
 // off; the reply lands over SSE. Posting a message is fire-and-forget.
@@ -30,7 +30,7 @@ function Bubble({ m }: { m: ChatMessage }) {
   );
 }
 
-export default function ChatPanel({ hostId, archived = false }: { hostId: string; archived?: boolean }) {
+export default function ChatPanel({ cloneId, archived = false }: { cloneId: string; archived?: boolean }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState("");
@@ -46,7 +46,7 @@ export default function ChatPanel({ hostId, archived = false }: { hostId: string
   useEffect(() => {
     setLoading(true);
     setError(null);
-    const es = new EventSource(`/api/chat/${hostId}/events`);
+    const es = new EventSource(`/api/chat/${cloneId}/events`);
     es.onmessage = (e) => {
       try {
         const snap = JSON.parse(e.data) as ChatSnapshot;
@@ -60,7 +60,7 @@ export default function ChatPanel({ hostId, archived = false }: { hostId: string
       }
     };
     return () => es.close();
-  }, [hostId]);
+  }, [cloneId]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -79,7 +79,7 @@ export default function ChatPanel({ hostId, archived = false }: { hostId: string
     // Optimistic user bubble; the server snapshot replaces it once it arrives.
     setMessages((m) => [...m, { id: `tmp-${Date.now()}`, role: "user", text, ts: Date.now() }]);
     try {
-      const res = await fetch(`/api/chat/${hostId}`, {
+      const res = await fetch(`/api/chat/${cloneId}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text }),
@@ -104,7 +104,7 @@ export default function ChatPanel({ hostId, archived = false }: { hostId: string
     setStopping(true);
     setError(null);
     try {
-      const res = await fetch(`/api/chat/${hostId}/abort`, { method: "POST" });
+      const res = await fetch(`/api/chat/${cloneId}/abort`, { method: "POST" });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(data.error ?? "stop failed");
@@ -128,7 +128,7 @@ export default function ChatPanel({ hostId, archived = false }: { hostId: string
           <p className="text-sm text-slate-400 dark:text-slate-500">
             {archived
               ? "This clone is archived. Its chat history is retained."
-              : "Ask the agent anything — it can control this host's desktop."}
+              : "Ask the agent anything — it can control this clone's desktop."}
           </p>
         ) : (
           messages.map((m) => <Bubble key={m.id} m={m} />)

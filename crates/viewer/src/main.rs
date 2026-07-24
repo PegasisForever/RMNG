@@ -454,7 +454,7 @@ enum Content {
     /// A headed clone's H.264 desktop for this monitor.
     Video(VideoContent),
     /// The tmux tab view — only ever on the main window (id 0). `clone` is the owning headless
-    /// host id: when the selection moves to a *different* headless clone the view is rebuilt fresh,
+    /// clone id: when the selection moves to a *different* headless clone the view is rebuilt fresh,
     /// so one clone's `main` tab (and its scrollback) can never be reused for another's.
     Terminal { clone: String, view: terminal::TerminalView },
     /// A blank placeholder: a secondary window while a headless clone is selected.

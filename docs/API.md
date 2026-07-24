@@ -22,20 +22,20 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET | `/api/state` | Single-shot persisted `ControlState` snapshot | 200 `ControlState` |
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
 | GET | `/api/tokens` | One-shot cumulative `CloneTokenUsage` map (same shape as SSE `tokens`) | 200 `{hostId: CloneTokenUsage}` |
-| POST | `/api/activate` | Select the host shown in the viewer | 200 `ControlState` |
-| POST | `/api/reorder` | Reorder the host list | 200 `ControlState` |
+| POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
+| POST | `/api/reorder` | Reorder the clone list | 200 `ControlState` |
 | POST | `/api/clone` | Start a clone from an image (Linear ticket / new ticket / plain / raw hostname) | 200 `{ok, op}` |
-| POST | `/api/delete` | Destroy a clone / unregister a plain host | 200 `Operation` |
+| POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
 | POST | `/api/hosts/:id/group` | Bind or clear a clone's provider-agnostic account group | 200 `{ok,group}` |
-| PUT | `/api/hosts/:id/forwards` | Replace a host's port-forward rules | 200 `ControlState` |
+| PUT | `/api/hosts/:id/forwards` | Replace a clone's port-forward rules | 200 `ControlState` |
 | POST | `/api/layout/activate` | Make a layout preset active and live-apply it to all running clones | 200 `{ok,applied,errors}` |
 | GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
 | POST | `/api/images/pull` | Pull the clone template from a registry (keeps its own `repo:tag`) | 200 `Operation` |
 | POST | `/api/images/commit` | Commit a running clone to a new image | 200 `Operation` |
 | POST | `/api/images/delete` | Remove a clone-source image | 200 `{ok}` |
-| GET/PUT | `/api/notes/:id` | Fetch or save a host's rich-text notes | 200 `[block]` / 204 |
+| GET/PUT | `/api/notes/:id` | Fetch or save a clone's rich-text notes | 200 `[block]` / 204 |
 | POST | `/api/upload` | Upload an image (multipart) | 200 `{url}` |
 | GET | `/uploads/:file` | Serve an uploaded image | 200 binary |
 | GET/PUT | `/api/config` | Read redacted config or merge a partial update | 200 `AppConfigRedacted` / `{config,restartRequired,networkWarning?}` |
@@ -48,8 +48,8 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/groups/:name/accounts/login/complete` | Submit OAuth redirect and finish enrollment | 200 login state |
 | POST | `/api/groups/:name/accounts/delete` | Remove one group credential file | 200 `{ok}` |
 | POST | `/api/usage/refresh` | Refresh polled account usage | 200 `{ok}` |
-| GET/POST | `/api/chat/:id` | Fetch chat snapshot or send a message to the host's agent | 200 / 202 |
-| GET | `/api/chat/:id/events` | Per-host chat SSE | 200 SSE `ChatSnapshot` |
+| GET/POST | `/api/chat/:id` | Fetch chat snapshot or send a message to the clone's agent | 200 / 202 |
+| GET | `/api/chat/:id/events` | Per-clone chat SSE | 200 SSE `ChatSnapshot` |
 | POST | `/api/chat/:id/abort` | Abort the in-flight agent turn | 204 |
 | GET | `/api/server/version` | Check the running image and remote update status | 200 `UpdateStatus` |
 | POST | `/api/server/update` | Update the control-server image | 200 `Operation` |
@@ -79,20 +79,20 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 
 | Field | Type | Notes |
 |---|---|---|
-| `selected` | `string?` | host id shown in the viewer |
+| `selected` | `string?` | clone id shown in the viewer |
 | `monitors` | `MonitorSpec[]` | legacy field, kept for JSON back-compat; no longer populated (always `[]`) — use `activeLayout` + the config's `layoutPresets` |
 | `activeLayout` | `string` | name of the active layout preset, mirrored from config so the sidebar switcher updates over SSE |
 | `layoutPresetNames` | `string[]` | names of all layout presets, in config order — drives the sidebar's segmented preset buttons |
-| `hosts` | `Host[]` | all registered clones + plain hosts |
+| `hosts` | `Clone[]` | all registered clones (managed + unmanaged) |
 | `operations` | `Operation[]` | in-flight + recent clone/delete/archive/unarchive/pull/commit/update jobs |
 | `usageGroups` | `GroupUsage[]` | imported provider credentials and their usage, grouped by account pool |
 
-`Host` carries connection info (`id`, `host`, `port`, `username`, …), the `managed` flag
-(true = a Docker container named after the host id backs it; false = a plain unmanaged
+`Clone` carries connection info (`id`, `host`, `port`, `username`, …), the `managed` flag
+(true = a Docker container named after the clone id backs it; false = a plain unmanaged
 row), `archived` (a retained, intentionally stopped managed clone), the `source` image
 reference, the provider-agnostic account-pool `group`, Linear metadata (`linearWorkspace`,
 `linearTicket`, `linearBranch`, …), the server-owned `monitorState` (`working`/`idle`/`offline`),
-`unread` transition marker, and `forwards` (`PortForward[]` — the host's persisted port-forward
+`unread` transition marker, and `forwards` (`PortForward[]` — the clone's persisted port-forward
 rules; live status rides the `forwards` SSE event below, never `ControlState`).
 `Operation` carries `id`, `kind` (clone/delete/archive/unarchive/pull/commit/update — a persisted
 legacy `"bootstrap"` op still loads, aliased onto `pull`), `target`, `source`, `status`, `step`,
@@ -101,7 +101,7 @@ legacy `"bootstrap"` op still loads, aliased onto `pull`), `target`, `source`, `
 ### `stats` event and `GET /api/stats`
 The same `/events` connection multiplexes a second, named SSE event: `stats`, a live
 `{ <hostId>: ContainerStats }` map for running **managed** clones only (a stopped or
-unmanaged host contributes no entry). `GET /api/stats` returns the exact latest snapshot for
+unmanaged clone contributes no entry). `GET /api/stats` returns the exact latest snapshot for
 one-off clients such as `rmng clone ls`; it does not wait for a monitor tick. `ContainerStats`
 ([control.rs](../crates/wire/src/control.rs)):
 `cpuPct` (percentage of total host CPU capacity — 100 == every available core busy), plus
@@ -140,15 +140,15 @@ Like `stats`, this event is SSE-only and never writes `state.json`.
 
 ### `forwards` event
 The same `/events` connection multiplexes a fourth, named SSE event: `forwards`, the volatile
-port-forward **runtime** map — the live status of each host's forward rules as the viewer
+port-forward **runtime** map — the live status of each clone's forward rules as the viewer
 opens/closes its local listeners. A new subscriber gets the current snapshot immediately, then
 one push per status change. It rides its own SSE-only bus (`crate::forward::ForwardBus`), so —
 like `stats` — it never enters `ControlState`/`state.json`. The *desired* rules themselves are
-persisted on `Host.forwards` and edited via `PUT /api/hosts/:id/forwards`.
+persisted on `Clone.forwards` and edited via `PUT /api/hosts/:id/forwards`.
 
 ---
 
-## Host selection & ordering
+## Clone selection & ordering
 
 ### `POST /api/activate` — body `{ "id": string | null }`
 Set `selected` (or clear with `null`). Returns the updated `ControlState`. The media plane
@@ -189,7 +189,7 @@ Body (one of four modes + optional account/instructions):
 }
 ```
 `image` accepts a `repo:tag` reference (e.g. `pegasis0/rmng-template:latest`), a full `sha256:…` id, or a bare 64-hex id;
-whatever form is passed is canonicalized to the reference and recorded on the host as
+whatever form is passed is canonicalized to the reference and recorded on the clone as
 `source`. The image must carry the `rmng.image=1` label (a raw non-image id is rejected). The
 selected preset's vars are written into the clone's `/etc/environment`, plus `LINEAR_API_KEY=<preset
 key>` (auths the clone's `linear` MCP). Hostname is derived (`pega-{ticket}` or a slug of the
@@ -228,13 +228,13 @@ no ack).
 
 ### `POST /api/delete` — body `{ "id": string }`
 Destroy a managed clone (stops it with `SIGRTMIN+3`, removes the container and its
-`rmng-dind-<id>` inner-Docker volume) or unregister a plain host. Returns the `Operation`;
+`rmng-dind-<id>` inner-Docker volume) or unregister an unmanaged clone. Returns the `Operation`;
 progress over `/events`.
 
 ### `POST /api/hosts/:id/archive`
 Gracefully stop a managed clone while retaining its container, volumes, notes, and chat history.
 Returns an `archive` `Operation`. Unknown, unmanaged, already-archived, or concurrently-operated
-hosts return `400`.
+clones return `400`.
 
 ### `POST /api/hosts/:id/unarchive`
 Restart a retained archived clone. Returns an `unarchive` `Operation`; the prior group binding and
@@ -257,7 +257,7 @@ bodies (references contain `/` and `:`, so nothing uses path params).
 List clone-source images, newest first. Each `ImageInfo` carries `id` (`sha256:…`),
 `reference` (the image's own `repo:tag`, e.g. `pegasis0/rmng-template:latest`), `size_bytes`,
 `created_at`, `base` (true for the published clone template, `rmng.base=1`), `created_from`
-(lineage, `rmng.created-from`), and `in_use_by` (host ids of live clones whose `source` is this
+(lineage, `rmng.created-from`), and `in_use_by` (clone ids of live clones whose `source` is this
 image). `502` if the daemon is unreachable.
 
 ### `POST /api/images/pull` — body `{ "reference"?: string }`
@@ -283,7 +283,7 @@ start with an empty inner Docker. On-disk credentials in the clone's home **are*
 (logged as a warning). Rejects a name that already exists.
 
 ### `POST /api/images/delete` — body `{ "reference": string }` → `{ok}`
-Remove a clone-source image. `409` if any host still runs on it (`in_use_by` non-empty) or a
+Remove a clone-source image. `409` if any clone still runs on it (`in_use_by` non-empty) or a
 running operation (clone/commit/pull) references it as its source or target; the daemon's own
 "in use by a container" `409` is surfaced too. If the same image carries more than one tag,
 deleting one `reference` only untags it while the others stay attached to the same layers — the
@@ -303,7 +303,7 @@ advisory — without it clones see host-wide `/proc` values). Cached from the Do
 ## Notes & uploads
 
 ### `GET /api/notes/:id` → `[block]` &nbsp;·&nbsp; `POST /api/notes/:id` (204)
-Per-host rich-text notes (BlockNote block array), stored at `data/notes/{id}.json`. `:id`
+Per-clone rich-text notes (BlockNote block array), stored at `data/notes/{id}.json`. `:id`
 must be a DNS label. GET returns `[]` if none.
 
 ### `POST /api/upload` (multipart `file`) → `{ "url": "/uploads/<hex>.<ext>" }`
@@ -347,7 +347,7 @@ and collapses the environment report (daemon reachable, sock mount, render node)
 
 ## Account groups and provider credentials
 
-A clone has one optional `Host.group` binding. The `/cc` router resolves that clone to the
+A clone has one optional `Clone.group` binding. The `/cc` router resolves that clone to the
 matching CLIProxyAPI instance; that group owns provider-specific OAuth, account selection, and
 refresh. Claude, Codex, and Gemini via Antigravity are credentials **inside** an account group,
 not separate clone bindings.
@@ -368,7 +368,7 @@ presence-only row when its upstream does not expose pollable quota.
 
 ---
 
-## Per-host agent chat
+## Per-clone agent chat
 
 The control-server proxies chat to each clone's agent-wrapper (`http://{host}:{agent_port}`,
 default `:4096`), persisting history at `data/chats/{id}.json`.

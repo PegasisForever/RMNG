@@ -426,7 +426,7 @@ or GUI. The kind can't be changed after creation.
 ## Inspect the fleet
 
 - `rmng clone ls` — list clones with live CPU, RAM, token totals, status, and account group.
-  Sub hosts are indented under their parent. `--json` gives one object per clone with `stats`
+  Sub clones are indented under their parent. `--json` gives one object per clone with `stats`
   and `tokens` nested.
 - `rmng op ls` — list recent operations (clone / delete / archive / pull / commit / update).
 - `rmng op wait <op-id> [--timeout <secs>]` — block until an operation reaches a terminal state.
@@ -448,17 +448,17 @@ or GUI. The kind can't be changed after creation.
 
 - `rmng clone create <hostname> --from <image>` — create a clone under an exact hostname
   (a DNS label), from an image (`rmng image ls` lists valid references). **Run from inside a
-  clone, the new clone auto-nests as a sub host under you AND inherits your account group and
+  clone, the new clone auto-nests as a sub clone under you AND inherits your account group and
   env preset by default** — a helper you spin up joins the same pool/preset with no flags.
   Override with:
   - `--preset <name>` / `--no-preset` — a different preset, or none.
   - `--group <name>` / `--no-group` — a different account group, or none.
-  - `--top-level` — a top-level clone instead of a sub host (also skips inheritance).
+  - `--top-level` — a top-level clone instead of a sub clone (also skips inheritance).
   - `--parent <clone>` — nest under a specific top-level clone (inherits that parent's group/preset).
   - `--headless` — create a headless clone (no desktop; see "Headed vs headless" above).
     Default is headed.
   Add `--wait` to block until it's ready.
-- `rmng clone rm <clone> [-y]` — destroy a clone (prompts unless `-y`; also removes its sub hosts).
+- `rmng clone rm <clone> [-y]` — destroy a clone (prompts unless `-y`; also removes its sub clones).
   Non-interactive callers MUST pass `-y`.
 - `rmng clone archive <clone>` / `rmng clone restore <clone>` — stop-and-retain, then bring back.
 - `rmng clone bind <clone> <group>` / `rmng clone bind <clone> --none` — (re)bind or clear a
@@ -804,7 +804,7 @@ install -m 0644 -o root -g root "$tmp" "$etc"
     )
 }
 
-fn preset_for_host<'a>(cfg: &'a wire::AppConfig, host: &wire::Host) -> Option<&'a wire::Preset> {
+fn preset_for_clone<'a>(cfg: &'a wire::AppConfig, host: &wire::RmngClone) -> Option<&'a wire::Preset> {
     if let Some(name) = host.preset_name.as_deref().filter(|s| !s.trim().is_empty()) {
         if let Some(preset) = cfg.presets.iter().find(|p| p.name == name) {
             return Some(preset);
@@ -1146,9 +1146,9 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY): recomputed
         // into `/etc/environment` on every resync so an existing clone (created before the
         // group-proxy model) picks it up without a recreate. Minted + persisted server-side;
-        // never serialized onto `Host`/state.
+        // never serialized onto `RmngClone`/state.
         desired_env.extend(crate::provision::router_env_vars(app, id));
-        if let Some(preset) = preset_for_host(&cfg, h) {
+        if let Some(preset) = preset_for_clone(&cfg, h) {
             desired_env.extend(crate::provision::preset_env_vars(preset));
         } else if h.preset_name.as_ref().is_some_and(|s| !s.trim().is_empty()) {
             tracing::warn!(
@@ -1213,9 +1213,9 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
 
         // `gpt_models` (this clone's group GPT list, or the FALLBACK_GPT_MODELS safety net) was
         // resolved once per pass above, alongside the Claude Code default, from the group catalog.
-        // The global agent prompt (layers a+c) is composed from config + this host's preset, so a
+        // The global agent prompt (layers a+c) is composed from config + this clone's preset, so a
         // Settings edit re-applies to existing clones on the next pass (content-hash-stamped).
-        let global_prompt = crate::web::compose_global_prompt(&cfg, preset_for_host(&cfg, h));
+        let global_prompt = crate::web::compose_global_prompt(&cfg, preset_for_clone(&cfg, h));
         match ensure_codex_parity(app, id, &gpt_models, h.headless, &global_prompt).await {
             Ok(true) => {
                 warned.remove(&format!("{id}:codex"));

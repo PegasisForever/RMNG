@@ -5,21 +5,21 @@
  * event as a `{ hostId: CloneTokenUsage }` map. The server retains the activity timestamp
  * privately; it is deliberately absent here so clients cannot derive a clone status.
  */
-export type CloneTokenUsage = {
+export type CloneTokenUsage = { 
 /**
  * Input tokens newly processed by the model. Cache reads are excluded; native Anthropic
  * cache-creation tokens are included because they are newly processed.
  */
-newInputTokens: bigint,
+newInputTokens: bigint, 
 /**
  * Newly generated output tokens. Provider-specific reasoning is included exactly once
  * when its client-facing total does not already include it.
  */
-outputTokens: bigint,
+outputTokens: bigint, 
 /**
  * Number of responses that reported a recognized final usage object.
  */
-requestCount: bigint,
+requestCount: bigint, 
 /**
  * True when this clone was served by the Fable model within the last 5 minutes. Derived
  * server-side from a private timestamp (never sent) and re-projected on a timer so it

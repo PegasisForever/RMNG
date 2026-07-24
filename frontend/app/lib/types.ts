@@ -3,7 +3,7 @@
 // `ControlState` is a superset of the legacy Rust `ControlState`
 // (`{selected, hosts, monitors}`). The native RDP client deserializes the SSE
 // payload as that Rust struct, and serde ignores unknown fields — so the extra
-// `operations` field (and the per-host `container`/`source` extras) ride along
+// `operations` field (and the per-clone `container`/`source` extras) ride along
 // invisibly. In-progress clones are kept OUT of `hosts` until they are fully
 // provisioned, so the client never tries to connect to a half-built container.
 
@@ -14,8 +14,8 @@ export interface MonitorSpec {
   height: number;
 }
 
-export interface Host {
-  /** Stable id; equals the Docker container name for cloneable hosts. */
+export interface Clone {
+  /** Stable id; equals the Docker container name for a managed clone. */
   id: string;
   /** RDP server hostname or IP. */
   host: string;
@@ -29,7 +29,7 @@ export interface Host {
 
   // --- server-only extras (ignored by the Rust client) ---
   /**
-   * True for a managed clone: a Docker container whose *name equals this host's
+   * True for a managed clone: a Docker container whose *name equals this clone's
    * id* backs it (no container id is stored anywhere). False/absent is a plain
    * unmanaged row (deletable in the UI). Old `state.json` rows carrying the
    * retired `ctid`/`container` keys load unmanaged — serde drops the stale keys.
@@ -38,7 +38,7 @@ export interface Host {
   /** True for a retained managed clone that is intentionally stopped. Unlike `offline`,
    *  this is an operator-controlled state and the clone can be started again. */
   archived?: boolean;
-  /** The clone-source image reference this host was cloned from (`pegasis0/rmng-template:latest`). */
+  /** The clone-source image reference this clone was cloned from (`pegasis0/rmng-template:latest`). */
   source?: string;
   /**
    * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's
@@ -47,7 +47,7 @@ export interface Host {
    * intra-group account selection + refresh. Server-only; the Rust client ignores it.
    */
   group?: string;
-  /** Linear workspace name this host's ticket belongs to (selects the card color). */
+  /** Linear workspace name this clone's ticket belongs to (selects the card color). */
   linearWorkspace?: string;
   /** Linear ticket identifier, e.g. "WE-142". */
   linearTicket?: string;
@@ -69,11 +69,11 @@ export interface Host {
   /** Headless clone: no desktop (display + capture units disabled at create). Selecting it
    *  shows the viewer's tmux tab view instead of a video stream. Same template as a regular clone. */
   headless?: boolean;
-  /** Parent host id when this is a sub host (one level deep only). Undefined/null = top-level.
-   *  Cosmetic sidebar/`ps` grouping; a sub host is otherwise an ordinary managed clone. */
+  /** Parent clone id when this is a sub clone (one level deep only). Undefined/null = top-level.
+   *  Cosmetic sidebar/`ps` grouping; a sub clone is otherwise an ordinary managed clone. */
   parent?: string | null;
   /** Local port-forward rules; the native viewer runs the listeners. Live status
-   *  arrives separately via the `forwards` SSE event, keyed by host id then rule id. */
+   *  arrives separately via the `forwards` SSE event, keyed by clone id then rule id. */
   forwards?: PortForward[];
 }
 
@@ -91,10 +91,10 @@ export interface Operation {
   id: string;
   kind: OperationKind;
   /**
-   * What the op acts on: host id (clone/delete) or image name (pull/commit).
+   * What the op acts on: clone id (clone/delete) or image name (pull/commit).
    */
   target: string;
-  /** Clone source image reference (clone), or source host id (commit). */
+  /** Clone source image reference (clone), or source clone id (commit). */
   source?: string;
   status: OperationStatus;
   /** Current step key (maps to a coarse percentage in the UI). */
@@ -141,7 +141,7 @@ export interface ClaudeUsage {
   provider?: "claude" | "codex" | "antigravity";
   /** True for the account claude-swap had active at import time. */
   active: boolean;
-  /** True if this account can be picked when cloning a host — every imported
+  /** True if this account can be picked when creating a clone — every imported
    *  Claude account (the server owns its token lifecycle). Codex accounts never. */
   assignable?: boolean;
   /** Set only when usage has NEVER been successfully fetched (no data to show). */
@@ -180,7 +180,7 @@ export interface GroupUsage {
 export interface ControlState {
   selected: string | null;
   monitors: MonitorSpec[];
-  hosts: Host[];
+  hosts: Clone[];
   operations: Operation[];
   /** Per-group usage view (no tokens). Refreshed by the by-group usage poller. */
   usageGroups: GroupUsage[];
@@ -202,7 +202,7 @@ export function emptyState(): ControlState {
   };
 }
 
-// --- per-host chat (stored separately at data/chats/<id>.json, not in state) ---
+// --- per-clone chat (stored separately at data/chats/<id>.json, not in state) ---
 
 export interface ChatMessage {
   id: string;

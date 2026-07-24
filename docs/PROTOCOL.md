@@ -170,7 +170,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   which the one-time fields (`data_dir`, `clone_socket`, `docker.subnet`) are locked. There is
   **no grandfather rule**: an old `config.json` re-runs the wizard (new machine, no network /
   template pulled yet). A legacy `proxmox` block is scrubbed on load, carrying `hostnamePrefix` into
-  `docker.hostname_prefix`; old `state.json` hosts load as plain unmanaged rows
+  `docker.hostname_prefix`; old `state.json` clones load as plain unmanaged rows
   (`managed: false`; serde drops the stale `ctid`/`container` keys).
 - <a id="preset"></a>**`Preset`**: `name`, `labels` (ticket-id prefixes / Linear team keys,
   e.g. `DEV`, that auto-select this preset when cloning from a ticket — matched
@@ -192,7 +192,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
   expiry), re-pushed to every assigned clone whenever a refresh rotates it — so a *running*
   clone hot-swaps without restart (written via `docker exec` into the clone).
 - **`CloneGroup`**: `name`, `accounts` (member emails). A clone bound to a group
-  (`Host.claude_group`) sticks to its account (preserving its prompt cache) until that
+  (`Clone.claude_group`) sticks to its account (preserving its prompt cache) until that
   account is exhausted (80% 5h or 95% 7d) or leaves the group; the 10-min rotator then
   moves it to the least-loaded / least-used member. Selected at clone/swap time as
   `group:<name>`. A clone selected as `auto` rotates across all imported accounts using
@@ -216,7 +216,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 - **`CodexConfig`**: `poll_secs`, `pinned_email?`, `usage_polling` (bool, default `true`).
 - **`codexGroups`** (`CloneGroup[]`): same structure as `clone_groups`, used for Codex
   account rotation. Selected at clone/swap time as `group:<name>`.
-- **`Host`** carries `codexAccountEmail` / `codexGroup` / `codexSelection` alongside the
+- **`Clone`** carries `codexAccountEmail` / `codexGroup` / `codexSelection` alongside the
   Claude equivalents. One clone can hold both a Claude and a Codex account simultaneously.
 
 - **`MonitorSpec`**: `width`, `height`, `x`, `y`, `primary`.
@@ -282,7 +282,7 @@ subsequent `POST /api/layout/activate` pushes a fresh `SetMonitors` the same way
 ## Per-crate public API
 
 **`wire`** ([lib.rs](../crates/wire/src/lib.rs)) — pure types, no I/O. Modules: `config`
-(`AppConfig` & friends, `AppConfigRedacted`), `control` (`ControlState`, `Host`, `Operation`,
+(`AppConfig` & friends, `AppConfigRedacted`), `control` (`ControlState`, `Clone`, `Operation`,
 `Chat`/`ChatMessage`, `ClaudeUsage`, `MonitorSpec`, the enums), `socket` (clone-socket
 protocol), `viewer` (port-1 logical types), `mcp` (MCP arg DTOs). control + config types
 derive `ts_rs::TS` and export to `frontend/app/lib/wire/`.

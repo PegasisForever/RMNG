@@ -29,7 +29,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::process::Command;
-use wire::Host;
+use wire::RmngClone;
 
 use crate::app::App;
 use crate::files::is_safe_id;
@@ -175,7 +175,7 @@ async fn ensure_for(app: &App, id: &str) -> Outcome {
 /// One reconcile pass over every running managed clone. `warned` tracks host ids we've already
 /// logged a missing-`pid: "host"` warning for, so the hint fires once, not every tick.
 async fn reconcile(app: &App, warned: &mut HashSet<String>) {
-    let hosts: Vec<Host> = app
+    let hosts: Vec<RmngClone> = app
         .store
         .get()
         .hosts

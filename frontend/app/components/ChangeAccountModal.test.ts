@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 
 import { currentValue } from "./ChangeAccountModal";
-import type { Host } from "~/lib/types";
+import type { Clone } from "~/lib/types";
 
-const host = (overrides: Partial<Host> = {}): Host => ({
+const clone = (overrides: Partial<Clone> = {}): Clone => ({
   id: "h1",
   host: "h1",
   port: 3389,
@@ -14,14 +14,14 @@ const host = (overrides: Partial<Host> = {}): Host => ({
 });
 
 test("a clone with no group binding reads as 'none'", () => {
-  const h = host();
+  const h = clone();
 
   expect(currentValue(h)).toBe("none");
   expect("none" !== currentValue(h)).toBe(false);
 });
 
 test("a clone bound to a group reads back its group name", () => {
-  const h = host({ group: "pooled" });
+  const h = clone({ group: "pooled" });
 
   expect(currentValue(h)).toBe("pooled");
 });

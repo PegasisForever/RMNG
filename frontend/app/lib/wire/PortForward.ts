@@ -4,6 +4,6 @@
  * One local-forward rule: a TCP port inside this clone (`remote_port`) exposed at
  * `127.0.0.1:<local_port>` on the machine running the native viewer. Persisted in
  * `state.json`; the viewer runs the listener. `id` is derived server-side as
- * `f{local_port}` (local ports are globally unique across all hosts' rules).
+ * `f{local_port}` (local ports are globally unique across all clones' rules).
  */
 export type PortForward = { id: string, remotePort: number, localPort: number, enabled: boolean, label: string | null, };

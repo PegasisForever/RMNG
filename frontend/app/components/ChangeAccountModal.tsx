@@ -6,27 +6,27 @@ import { useEffect, useState } from "react";
 
 import { AccountGroupSelect, NO_GROUP } from "~/components/AccountGroupSelect";
 import { getConfig } from "~/lib/api";
-import type { Host } from "~/lib/types";
+import type { Clone } from "~/lib/types";
 import type { Group } from "~/lib/wire/Group";
 
-/** The host's current binding as a picker value: its group name, or "none". */
-export function currentValue(host: Host): string {
-  return host.group ?? NO_GROUP;
+/** The clone's current binding as a picker value: its group name, or "none". */
+export function currentValue(clone: Clone): string {
+  return clone.group ?? NO_GROUP;
 }
 
 export function ChangeAccountModal({
-  host,
+  clone,
   busy,
   onClose,
   onSubmit,
 }: {
-  host: Host;
+  clone: Clone;
   busy: boolean;
   onClose: () => void;
   /** The new binding: a group name, or `null` to clear it. */
   onSubmit: (group: string | null) => void;
 }) {
-  const [value, setValue] = useState(() => currentValue(host));
+  const [value, setValue] = useState(() => currentValue(clone));
   const [groups, setGroups] = useState<Group[]>([]);
 
   useEffect(() => {
@@ -51,7 +51,7 @@ export function ChangeAccountModal({
       >
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           Account group ·{" "}
-          <span className="text-emerald-700 dark:text-emerald-400">{host.displayName ?? host.id}</span>
+          <span className="text-emerald-700 dark:text-emerald-400">{clone.displayName ?? clone.id}</span>
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
           Bind this clone to an account pool, or “none” for no inference. The change is a

@@ -1,13 +1,13 @@
 # `rmng` CLI reference — fleet management over the web port
 
 The `rmng` binary ([crates/cli](../crates/cli/README.md), package `rmng-cli`) is the fleet
-management surface: hosts, clones, images, account groups and imported accounts, and operations, all over
+management surface: clones, images, account groups and imported accounts, and operations, all over
 the control-server's **port-2 web API** (via [control-client](../crates/control-client/README.md)).
 It also carries the **operator/fleet desktop control** (`rmng desktop`, folded in from the
 retired global MCP) and a docker-exec-style **`rmng clone exec`** — both reach clones through the
 same web API, which proxies to the clone's daemon MCP / Docker exec. What stays elsewhere:
 the **in-clone** agent's own desktop automation is the daemon MCP's job ([MCP.md](MCP.md)),
-host-agent chat is the web API's (`/api/chat/:id`, [API.md](API.md#per-host-agent-chat)), and
+clone-agent chat is the web API's (`/api/chat/:id`, [API.md](API.md#per-clone-agent-chat)), and
 code moves via git.
 
 - **Source files:** command tree in [crates/cli/src/args.rs](../crates/cli/src/args.rs);
@@ -50,7 +50,7 @@ $RMNG_CONTROL_URL` hint.
 
 | Command (with `--json`) | Emits |
 |---|---|
-| `clone ls` | `{ selected, clones: [Host + {stats, tokens}], operations }` (CLI shape — includes the metrics the table shows) |
+| `clone ls` | `{ selected, clones: [Clone + {stats, tokens}], operations }` (CLI shape — includes the metrics the table shows) |
 | `clone select`, `clone bind` | small status object (`{selected}` / the `{ok, group}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
 | `clone create`, `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
@@ -79,14 +79,14 @@ is always a positional **clone id** (the first column of `rmng clone ls`).
 ### `rmng clone ls`
 Clones table: `ID` (a `*` suffix marks the selected clone), `IP` (the current Docker bridge
 address when available), `IMAGE` (source reference), `PRESET`, `GROUP` (its CLIProxyAPI account
-pool), live `CPU` and `RAM`, cumulative `TOK-IN` / `TOK-OUT`, and lifecycle `STATUS`. Sub hosts
+pool), live `CPU` and `RAM`, cumulative `TOK-IN` / `TOK-OUT`, and lifecycle `STATUS`. Sub clones
 are indented under their parent. CPU/RAM are volatile snapshots for sampled active managed clones.
-`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Host + {stats, tokens}],
+`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats, tokens}],
 operations }` — so the metrics the table shows are available to a machine reader too.
 
 ### `rmng clone create <HOSTNAME> --from <IMAGE> [--group <G>|--no-group] [--preset <P>|--no-preset] [--headless] [--parent <C>|--top-level] [--wait] [--timeout <N>]`
 Create a clone under an **exact hostname** (a DNS label; `400` if taken). **Run from inside a
-clone, the new clone auto-nests as a sub host under the caller AND inherits the caller's account
+clone, the new clone auto-nests as a sub clone under the caller AND inherits the caller's account
 group + env preset by default.** Overrides: `--group <name>`/`--no-group`, `--preset
 <name>`/`--no-preset`, `--parent <clone>` (nest under a specific top-level clone), `--top-level`
 (force top-level, skipping inheritance). `--from` names the clone-source image (`rmng image ls`).
@@ -97,7 +97,7 @@ rmng clone create w-cp --from pegasis0/rmng-template:latest --wait
 ```
 
 ### `rmng clone rm <CLONE> [-y|--yes] [--wait] [--timeout <N>]`
-Destroy a clone (container + volumes; cascades to its sub hosts). Asks `[y/N]` on stderr unless
+Destroy a clone (container + volumes; cascades to its sub clones). Asks `[y/N]` on stderr unless
 `-y`; declining exits 1. **Refuses to run non-interactively without `-y`** (stdin not a terminal).
 
 ### `rmng clone archive <CLONE>` / `rmng clone restore <CLONE>` `[--wait] [--timeout <N>]`

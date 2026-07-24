@@ -37,13 +37,13 @@ const meta = {
     onAddAccount: fn(),
     onDeleteGroup: fn(),
     onRefresh: fn(),
-    onSelectHost: fn(),
-    onDeleteHost: fn(),
-    onCommitHost: fn(),
-    onChangeAccountHost: fn(),
-    onPortForwardHost: fn(),
-    onArchiveHost: fn(),
-    onUnarchiveHost: fn(),
+    onSelectClone: fn(),
+    onDeleteClone: fn(),
+    onCommitClone: fn(),
+    onChangeAccountClone: fn(),
+    onPortForwardClone: fn(),
+    onArchiveClone: fn(),
+    onUnarchiveClone: fn(),
     onReorder: fn(),
   },
 } satisfies Meta<typeof Sidebar>;
@@ -51,7 +51,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** The full panel with hosts and accounts. Drag-reorder is wired to local state so
+/** The full panel with clones and accounts. Drag-reorder is wired to local state so
  *  the list actually reorders (and still logs the `onReorder` action). */
 export const Default: Story = {
   render: (args) => {
@@ -74,7 +74,7 @@ export const Default: Story = {
   },
 };
 
-/** Fresh install — no hosts or groups yet. */
+/** Fresh install — no clones or groups yet. */
 export const Empty: Story = {
   args: { hosts: [], usageGroups: [], lxcStats: null, selectedId: null },
 };
@@ -84,12 +84,12 @@ export const WithActivity: Story = {
   args: { operations: [cloneOperation] },
 };
 
-/** Retained clones are separated from active, drag-reorderable hosts. */
-export const WithArchivedHosts: Story = {
+/** Retained clones are separated from active, drag-reorderable clones. */
+export const WithArchivedClones: Story = {
   args: {
     hosts: [
       ...hosts,
-      { ...hosts[0], id: "archived-host", displayName: "Archived host", archived: true },
+      { ...hosts[0], id: "archived-clone", displayName: "Archived clone", archived: true },
     ],
   },
 };

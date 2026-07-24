@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Notify, broadcast};
-use wire::{CloneTokenUsage, Host};
+use wire::{CloneTokenUsage, RmngClone};
 
 const TOKEN_FILE: &str = "clone-tokens.json";
 const TOKEN_INACTIVE_MS: i64 = 5 * 60 * 1000;
@@ -113,9 +113,9 @@ impl TokenBus {
         PathBuf::from(data_dir).join(TOKEN_FILE)
     }
 
-    /// Initialize records for the persisted managed fleet and drop records for hosts that no
+    /// Initialize records for the persisted managed fleet and drop records for clones that no
     /// longer exist. Existing timestamps retain their real age across a server restart.
-    pub fn sync_hosts(&self, hosts: &[Host]) {
+    pub fn sync_clones(&self, hosts: &[RmngClone]) {
         let managed: HashMap<&str, bool> = hosts
             .iter()
             .filter(|host| host.managed)
@@ -180,8 +180,8 @@ impl TokenBus {
         }
     }
 
-    /// Create a fresh record only after a clone is present in durable host state.
-    pub fn register_host(&self, host_id: &str) {
+    /// Create a fresh record only after a clone is present in durable clone state.
+    pub fn register_clone(&self, host_id: &str) {
         let frame = {
             let mut inner = self.inner.lock().unwrap();
             let next_epoch = inner
@@ -231,7 +231,7 @@ impl TokenBus {
     /// Purge totals after container deletion succeeds. Retain an inactive generation tombstone
     /// only for this process lifetime, so a late response from the deleted clone cannot match a
     /// newly registered clone that reuses the same id.
-    pub fn forget_host(&self, host_id: &str) {
+    pub fn forget_clone(&self, host_id: &str) {
         let mut frame = None;
         let mut changed = false;
         {
@@ -265,7 +265,7 @@ impl TokenBus {
     }
 
     /// The generation a response must carry to be allowed to update a clone. `None` means the
-    /// host has no active managed token record, so no observer should be constructed.
+    /// clone has no active managed token record, so no observer should be constructed.
     pub fn capture_epoch(&self, host_id: &str) -> Option<u64> {
         let inner = self.inner.lock().unwrap();
         let lifecycle = inner.file.lifecycle.get(host_id)?;
@@ -1149,7 +1149,7 @@ mod tests {
                 .join("rmng-token-boundary")
                 .to_string_lossy(),
         );
-        bus.register_host("h");
+        bus.register_clone("h");
         {
             let mut inner = bus.inner.lock().unwrap();
             inner.file.records.get_mut("h").unwrap().last_token_at = Some(1_000);

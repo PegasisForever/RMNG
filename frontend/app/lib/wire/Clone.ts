@@ -2,85 +2,85 @@
 import type { MonitorState } from "./MonitorState";
 import type { PortForward } from "./PortForward";
 
-export type Host = {
+export type Clone = { 
 /**
- * Stable id; equals the Docker container name for cloneable hosts.
+ * Stable id; equals the Docker container name for a managed clone.
  */
-id: string,
+id: string, 
 /**
  * Endpoint hostname/IP for unmanaged rows. Display-only on managed clones (it
  * records the container name == `id`; dials resolve via Docker DNS / inspect).
  */
-host: string,
+host: string, 
 /**
  * Port (defaults to 3389 for the legacy RDP path).
  */
-port: number, username: string, password: string, domain: string | null, gdm_username: string | null, gdm_password: string | null,
+port: number, username: string, password: string, domain: string | null, gdm_username: string | null, gdm_password: string | null, 
 /**
- * True for a managed clone: a Docker container whose *name equals this host's id*
+ * True for a managed clone: a Docker container whose *name equals this clone's id*
  * backs it (every Docker call addresses it by that name — no stored container id).
  * False is a plain unmanaged row (legacy/hand-added, deletable in the UI). Old
  * `state.json` rows carrying the retired `ctid`/`container` keys load as
  * unmanaged — serde drops the stale keys.
  */
-managed: boolean,
+managed: boolean, 
 /**
  * True when this managed clone is intentionally stopped but retained. Its container,
  * named volumes, notes, and chat history remain available for a later unarchive.
  */
-archived: boolean, source: string | null,
+archived: boolean, source: string | null, 
 /**
  * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
  * route through, via the control-server's `/cc` router. `None` = no inference. This is
  * the sole account binding — CLIProxyAPI owns intra-group account selection + refresh.
  */
-group: string | null,
+group: string | null, 
 /**
  * Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
  * string: the workspace set is config (Settings → Linear API keys), not an enum.
  */
-linearWorkspace: string | null, linearTicket: string | null, linearTicketUrl: string | null, linearBranch: string | null,
+linearWorkspace: string | null, linearTicket: string | null, linearTicketUrl: string | null, linearBranch: string | null, 
 /**
  * Clone preset name used at creation. New control-server versions persist this so
  * reconciliation can rebuild `/etc/environment` without relying on a guest-side
- * legacy env file. Older hosts may not have it.
+ * legacy env file. Older clones may not have it.
  */
-presetName: string | null, displayName: string | null, linearLabel: string | null,
+presetName: string | null, displayName: string | null, linearLabel: string | null, 
 /**
  * Current server-owned lifecycle state. It is derived from Docker liveness and passive
  * proxy token activity, never reported by a clone-local process.
  */
-monitorState: MonitorState | null,
+monitorState: MonitorState | null, 
 /**
  * The clone container's IPv4 on the rmng bridge network — the address other
  * clones can dial it at directly (alongside its `id`, which Docker's embedded
- * DNS resolves to the same host). Populated by the monitor poller from a Docker
+ * DNS resolves to the same clone). Populated by the monitor poller from a Docker
  * inspect each tick; `None` for unmanaged rows or a stopped/detached container.
  * A recreated container's new IP self-heals on the next poll.
  */
-localIp: string | null,
+localIp: string | null, 
 /**
  * Set when a clone transitions from `working` to `idle`/`offline` while it is not selected.
  * Clearing the selection state is an explicit operator action, not a clone report.
  */
-unread: boolean,
+unread: boolean, 
 /**
  * A headless clone has **no desktop**: its display (`gnome-headless.service`) and capture
  * daemon (`rmng-clone-daemon.service`) are disabled at create time, so it streams no video.
  * Selecting it drives the viewer's tmux tab view instead of an H.264 desktop stream (see
  * the control-server `termplane`). Created from the same template as a regular clone.
  */
-headless: boolean,
+headless: boolean, 
 /**
- * The id of this host's parent, when it is a sub host. One level deep only — a host
+ * The id of this clone's parent, when it is a sub clone. One level deep only — a clone
  * that has a parent is never itself a parent. `None` = top-level. Purely cosmetic
- * grouping in the sidebar and `rmng clone ls`; a sub host is otherwise an ordinary managed
+ * grouping in the sidebar and `rmng clone ls`; a sub clone is otherwise an ordinary managed
  * clone (its own group binding, router key, tokens, and video). Cascade-deleted with
  * its parent.
  */
-parent: string | null,
+parent: string | null, 
 /**
- * Local port-forward rules for this host (see [`PortForward`]). Persisted; the
+ * Local port-forward rules for this clone (see [`PortForward`]). Persisted; the
  * viewer runs the listeners and reports status out-of-band (volatile `forwards`
  * SSE event, never stored here).
  */

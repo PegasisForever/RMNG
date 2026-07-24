@@ -1,7 +1,7 @@
 // Commit a running clone to a new clone-source image (`docker commit` → tagged
 // `<name>:latest`; the name is a bare DNS label used as the full image repository,
-// no `rmng/template` prefix). Opened from the camera action on a managed host row. The name prefills
-// to the host id (already a DNS label) and is validated to one (mirrors the
+// no `rmng/template` prefix). Opened from the camera action on a managed clone row. The name prefills
+// to the clone id (already a DNS label) and is validated to one (mirrors the
 // server's `is_dns_label`). Note: committing bakes the clone's on-disk
 // credentials into the image; the server logs a warning line — surfaced here too.
 import { useState } from "react";
@@ -12,17 +12,17 @@ function isDnsLabel(s: string): boolean {
 }
 
 export function CommitImageModal({
-  hostId,
+  cloneId,
   busy,
   onClose,
   onCommit,
 }: {
-  hostId: string;
+  cloneId: string;
   busy: boolean;
   onClose: () => void;
   onCommit: (name: string) => void;
 }) {
-  const [name, setName] = useState(hostId);
+  const [name, setName] = useState(cloneId);
   const trimmed = name.trim();
   const labelOk = isDnsLabel(trimmed);
 
@@ -44,7 +44,7 @@ export function CommitImageModal({
         }}
       >
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-          Commit <span className="text-emerald-700 dark:text-emerald-400">{hostId}</span> to an image
+          Commit <span className="text-emerald-700 dark:text-emerald-400">{cloneId}</span> to an image
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
           Snapshots this clone's filesystem to a new clone-source image (tagged{" "}

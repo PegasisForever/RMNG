@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { copyText } from "~/lib/clipboard";
 import { formatTokenCount } from "~/lib/format";
 import { buildSshCommand } from "~/lib/ssh";
-import type { Host, Operation } from "~/lib/types";
+import type { Clone, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
@@ -16,7 +16,7 @@ import { workspaceBadge } from "~/lib/workspace";
 // The control server owns this compact lifecycle indicator: blue = recent token activity,
 // gray = Docker-running but inactive, purple = Docker stopped/gone. An unread working→not-working
 // transition replaces the dot with the red `!` badge below.
-const STATUS_DOT: Record<NonNullable<Host["monitorState"]>, { dot: string; label: string }> = {
+const STATUS_DOT: Record<NonNullable<Clone["monitorState"]>, { dot: string; label: string }> = {
   working: { dot: "bg-blue-500", label: "working" },
   idle: { dot: "bg-slate-400 dark:bg-slate-500", label: "not working" },
   offline: { dot: "bg-purple-500", label: "offline" },
@@ -31,7 +31,7 @@ type Metric = { label: string; value: string; title: string };
  *  not read as dead-zero. Memory includes swap and tmpfs/shared memory while excluding
  *  reclaimable page cache. Returns null when there is no usable sample. `mem*` are typed
  *  bigint by ts-rs but arrive as JSON numbers, hence the `Number()` coercion. */
-export function formatHostUsage(
+export function formatCloneUsage(
   stats: ContainerStats | undefined,
 ): { cpu: string; mem: string } | null {
   if (!stats) return null;
@@ -88,7 +88,7 @@ function GroupTag({ group, fable }: { group?: string; fable?: boolean }) {
 }
 
 // Status dot per forward state (+ a muted "disabled" for rules toggled off), shown in
-// the compact per-host forwards chips.
+// the compact per-clone forwards chips.
 const FORWARD_DOT: Record<ForwardState | "disabled", string> = {
   listening: "bg-emerald-500",
   error: "bg-red-500",
@@ -96,7 +96,7 @@ const FORWARD_DOT: Record<ForwardState | "disabled", string> = {
   disabled: "bg-slate-300 dark:bg-slate-600",
 };
 
-/** A compact wrapping row of this host's port forwards — one `remote→local` chip per
+/** A compact wrapping row of this clone's port forwards — one `remote→local` chip per
  *  rule with a status-colored dot, live state merged from the `forwards` SSE event by
  *  rule id. A disabled rule renders muted; hover shows the full mapping + state/error. */
 function ForwardChips({ forwards, runtime }: { forwards: PortForward[]; runtime: ForwardRuntime[] }) {
@@ -127,15 +127,15 @@ function ForwardChips({ forwards, runtime }: { forwards: PortForward[]; runtime:
   );
 }
 
-export interface SidebarHostProps {
-  host: Host;
-  /** Live CPU/RAM usage for this host's container, pushed over the `stats` SSE event.
-   *  Absent for a stopped/unmanaged host or before the first sample — renders nothing. */
+export interface SidebarCloneProps {
+  clone: Clone;
+  /** Live CPU/RAM usage for this clone's container, pushed over the `stats` SSE event.
+   *  Absent for a stopped/unmanaged clone or before the first sample — renders nothing. */
   stats?: ContainerStats;
   /** Cache-excluded input/output totals for this managed clone from the `tokens` SSE event. */
   tokenUsage?: CloneTokenUsage;
   selected: boolean;
-  /** A running operation targeting this host (delete, or a clone finishing its
+  /** A running operation targeting this clone (delete, or a clone finishing its
    *  post-add `wait-swap` step), if any. */
   op?: Operation;
   onSelect: () => void;
@@ -144,13 +144,13 @@ export interface SidebarHostProps {
   onCommit: () => void;
   /** Change this clone's account-group binding. */
   onChangeAccount: () => void;
-  /** Open the port-forward editor for this host. */
+  /** Open the port-forward editor for this clone. */
   onPortForward: () => void;
   /** Gracefully stop a managed clone while retaining it. */
   onArchive: () => void;
   /** Restart a retained managed clone. */
   onUnarchive: () => void;
-  /** Live runtime status for this host's forwards (from the `forwards` SSE event),
+  /** Live runtime status for this clone's forwards (from the `forwards` SSE event),
    *  merged into the compact forwards chips by rule id. */
   forwardRuntime?: ForwardRuntime[];
   /** `ssh.publicHost` (config) — the `-J` jump target for the copied command. Empty ⇒
@@ -158,19 +158,19 @@ export interface SidebarHostProps {
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied command jumps through. */
   bastionPort: number;
-  /** True when this row is a sub host: it renders indented under its parent and is not
+  /** True when this row is a sub clone: it renders indented under its parent and is not
    *  drag-reorderable (nesting is a cosmetic one-level grouping). */
   isChild?: boolean;
-  /** Number of sub hosts under this (top-level) host. `> 0` shows the expand/collapse control
+  /** Number of sub clones under this (top-level) clone. `> 0` shows the expand/collapse control
    *  at the bottom of the card. */
   childCount?: number;
-  /** Whether this host's sub hosts are currently expanded. */
+  /** Whether this clone's sub clones are currently expanded. */
   expanded?: boolean;
-  /** Toggle this host's sub-host expansion. */
+  /** Toggle this clone's sub-clone expansion. */
   onToggleExpand?: () => void;
-  /** dnd-kit drag activator props from the enclosing sortable group (see `SortableHostGroup`).
+  /** dnd-kit drag activator props from the enclosing sortable group (see `SortableCloneGroup`).
    *  Present only on a draggable top-level row; spread onto the card so grabbing it drags the
-   *  whole group (parent + its expanded sub hosts). Absent ⇒ the row is static (children,
+   *  whole group (parent + its expanded sub clones). Absent ⇒ the row is static (children,
    *  archived rows, Storybook). */
   dragAttributes?: DraggableAttributes;
   dragListeners?: DraggableSyntheticListeners;
@@ -209,11 +209,11 @@ function CopySshMenuItem({ command, onDone }: { command: string; onDone: () => v
   );
 }
 
-/** The per-host overflow menu (⋯) — collapses the commit / change-account / delete
+/** The per-clone overflow menu (⋯) — collapses the commit / change-account / delete
  *  actions. Unmanaged rows (no container) only get Remove. Every trigger/item stops
  *  propagation so opening or invoking an action never selects or drags the row. */
 function OverflowMenu({
-  hostId,
+  cloneId,
   managed,
   archived,
   busy,
@@ -225,7 +225,7 @@ function OverflowMenu({
   onDelete,
   sshCommand,
 }: {
-  hostId: string;
+  cloneId: string;
   managed: boolean;
   archived: boolean;
   busy: boolean;
@@ -282,7 +282,7 @@ function OverflowMenu({
     <div ref={ref} className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
-        aria-label={`actions for ${hostId}`}
+        aria-label={`actions for ${cloneId}`}
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={busy}
@@ -325,8 +325,8 @@ function OverflowMenu({
   );
 }
 
-export function SidebarHost({
-  host,
+export function SidebarClone({
+  clone,
   stats,
   tokenUsage,
   selected,
@@ -348,19 +348,19 @@ export function SidebarHost({
   dragAttributes,
   dragListeners,
   dragging = false,
-}: SidebarHostProps) {
+}: SidebarCloneProps) {
   const busy = op?.status === "running";
-  // Managed clones (backed by a container named after the host id) get the commit /
+  // Managed clones (backed by a container named after the clone id) get the commit /
   // account actions; plain unmanaged rows only get remove.
-  const managed = host.managed === true;
+  const managed = clone.managed === true;
   // Archived clones retain their container but deliberately hide runtime actions until they
   // are restored; unmanaged rows have no container-backed SSH endpoint either.
-  const sshCommand = managed && !host.archived
-    ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, host.id)
+  const sshCommand = managed && !clone.archived
+    ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, clone.id)
     : undefined;
-  const status = host.archived ? undefined : STATUS_DOT[host.monitorState ?? "idle"];
-  const group = host.group || undefined;
-  const usage = host.archived ? null : formatHostUsage(stats);
+  const status = clone.archived ? undefined : STATUS_DOT[clone.monitorState ?? "idle"];
+  const group = clone.group || undefined;
+  const usage = clone.archived ? null : formatCloneUsage(stats);
   const cpuMetric = usage
     ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of total host capacity)" }
     : undefined;
@@ -387,7 +387,7 @@ export function SidebarHost({
     : undefined;
   // All managed clones retain their token slots even before their first observed request.
   const showBindingLine = !!group || !!cpuMetric || !!inputTokenMetric;
-  // Drag is owned by the enclosing SortableHostGroup; a row is draggable only when it received
+  // Drag is owned by the enclosing SortableCloneGroup; a row is draggable only when it received
   // drag listeners (top-level active rows). Children/archived rows get none and stay static.
   const draggable = !!dragListeners;
 
@@ -400,9 +400,9 @@ export function SidebarHost({
       {...dragListeners}
       aria-pressed={selected}
       onClick={onSelect}
-      title={`${host.id} · ${host.host}:${host.port}`}
+      title={`${clone.id} · ${clone.host}:${clone.port}`}
       className={`group flex touch-none items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 dark:border-b-slate-700 ${
-        // Sub host rows are indented under their parent; top-level rows keep the normal gutter.
+        // Sub clone rows are indented under their parent; top-level rows keep the normal gutter.
         isChild ? "pl-6" : "pl-1.5"
       } ${draggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"} ${
         // Per-side borders (explicit colors so they never collide): a slate-200 bottom
@@ -425,7 +425,7 @@ export function SidebarHost({
           {busy ? (
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <span className="min-w-0 flex-1 break-words text-sm font-medium text-slate-800 dark:text-slate-100">
-                {host.displayName ?? host.id}
+                {clone.displayName ?? clone.id}
               </span>
               <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400">
                 {op?.kind === "delete" ? "deleting…" : op?.step}
@@ -443,9 +443,9 @@ export function SidebarHost({
             <div className="min-w-0 flex-1" />
           )}
           <OverflowMenu
-            hostId={host.id}
+            cloneId={clone.id}
             managed={managed}
-            archived={host.archived ?? false}
+            archived={clone.archived ?? false}
             busy={busy}
             onCommit={onCommit}
             onChangeAccount={onChangeAccount}
@@ -462,7 +462,7 @@ export function SidebarHost({
             Hidden while busy — the op step shows in the top block instead. */}
         {!busy ? (
           <p className="break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
-            {host.unread && !selected ? (
+            {clone.unread && !selected ? (
               <span
                 className="mr-1 inline-flex size-3 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white"
                 title="was working and is no longer working"
@@ -477,37 +477,37 @@ export function SidebarHost({
                 aria-label={status.label}
               />
             ) : null}
-            {host.linearWorkspace && host.linearTicket ? (
+            {clone.linearWorkspace && clone.linearTicket ? (
               <span
                 className={`mr-1 inline-block rounded px-1 py-0.5 align-middle text-[10px] font-semibold leading-none ${workspaceBadge(
-                  host.linearWorkspace,
+                  clone.linearWorkspace,
                 )}`}
               >
-                {host.linearTicket}
+                {clone.linearTicket}
               </span>
             ) : null}
-            {host.headless ? (
+            {clone.headless ? (
               <Terminal
                 className="mr-1 inline-block size-3.5 align-middle text-slate-500 dark:text-slate-400"
                 aria-label="headless clone (tmux view)"
               />
             ) : null}
-            {host.displayName ?? host.id}
+            {clone.displayName ?? clone.id}
           </p>
         ) : null}
 
-        {/* Compact list of this host's port forwards (remote→local, live status dot). */}
-        {!busy && host.forwards && host.forwards.length > 0 ? (
-          <ForwardChips forwards={host.forwards} runtime={forwardRuntime ?? []} />
+        {/* Compact list of this clone's port forwards (remote→local, live status dot). */}
+        {!busy && clone.forwards && clone.forwards.length > 0 ? (
+          <ForwardChips forwards={clone.forwards} runtime={forwardRuntime ?? []} />
         ) : null}
 
-        {/* Expand/collapse this host's sub hosts — pinned to the bottom of the card. Stops
+        {/* Expand/collapse this clone's sub clones — pinned to the bottom of the card. Stops
             propagation so it neither selects the row nor starts a drag. */}
         {!busy && childCount > 0 ? (
           <button
             type="button"
             aria-expanded={expanded}
-            title={`${expanded ? "hide" : "show"} ${childCount} sub host${childCount === 1 ? "" : "s"}`}
+            title={`${expanded ? "hide" : "show"} ${childCount} sub clone${childCount === 1 ? "" : "s"}`}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
@@ -516,7 +516,7 @@ export function SidebarHost({
             className="mt-1.5 flex items-center gap-1 rounded text-[10px] font-medium text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
           >
             {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
-            {expanded ? "Hide" : "Show"} {childCount} sub host{childCount === 1 ? "" : "s"}
+            {expanded ? "Hide" : "Show"} {childCount} sub clone{childCount === 1 ? "" : "s"}
           </button>
         ) : null}
       </div>

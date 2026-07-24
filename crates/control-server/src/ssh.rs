@@ -43,7 +43,7 @@ pub fn render_authorized_keys(keys: &[String]) -> String {
 }
 
 /// The jump-only bastion `sshd_config`. `clone_ids` become the `PermitOpen` allowlist
-/// (matched LITERALLY against the client's requested `<host>:22`, which is the clone id).
+/// (matched LITERALLY against the client's requested `<clone>:22`, which is the clone id).
 /// Empty fleet ⇒ `PermitOpen none`. Pure — unit-tested.
 pub fn render_bastion_sshd_config(
     bastion_port: u16,
@@ -279,7 +279,7 @@ pub fn backoff(failures: u32) -> Duration {
 }
 
 /// Sorted, deduped ids of active managed clones — the `PermitOpen` allowlist source.
-pub fn managed_clone_ids(hosts: &[wire::Host]) -> Vec<String> {
+pub fn managed_clone_ids(hosts: &[wire::RmngClone]) -> Vec<String> {
     let mut ids: Vec<String> = hosts
         .iter()
         .filter(|h| h.managed && !h.archived)
@@ -670,16 +670,16 @@ mod tests {
 
     #[test]
     fn managed_clone_ids_filters_and_sorts() {
-        let mut h1 = wire::Host::default();
+        let mut h1 = wire::RmngClone::default();
         h1.id = "b-clone".into();
         h1.managed = true;
-        let mut h2 = wire::Host::default();
+        let mut h2 = wire::RmngClone::default();
         h2.id = "a-clone".into();
         h2.managed = true;
-        let mut unmanaged = wire::Host::default();
+        let mut unmanaged = wire::RmngClone::default();
         unmanaged.id = "legacy".into();
         unmanaged.managed = false;
-        let mut archived = wire::Host::default();
+        let mut archived = wire::RmngClone::default();
         archived.id = "retained".into();
         archived.managed = true;
         archived.archived = true;

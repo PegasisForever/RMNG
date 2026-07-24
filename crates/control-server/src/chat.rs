@@ -1,8 +1,8 @@
-//! Per-host chat with the in-container agent-wrapper. Ports `agent.server.ts` +
+//! Per-clone chat with the in-container agent-wrapper. Ports `agent.server.ts` +
 //! `chats.server.ts` + `chatbus.server.ts`.
 //!
-//! Each host has its own conversation (`data/chats/<id>.json`) and its own SSE
-//! fan-out (keyed by host id — message bodies never touch the global `/events`
+//! Each clone has its own conversation (`data/chats/<id>.json`) and its own SSE
+//! fan-out (keyed by clone id — message bodies never touch the global `/events`
 //! frame). A turn runs **detached** from the POST request (it can take minutes; a
 //! browser refresh must not kill it). The server owns the "busy" flag so the
 //! working indicator + the eventual reply survive a reconnect. Watchdogs abort a
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use wire::{Chat, ChatMessage, ChatRole, Host};
+use wire::{Chat, ChatMessage, ChatRole, RmngClone};
 
 use crate::app::App;
 use crate::files::is_safe_id;
@@ -23,7 +23,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 const MAX_TURN: Duration = Duration::from_secs(30 * 60);
 const ACTIVITY_MAX: usize = 200;
 
-/// Per-host chat fan-out + in-flight state.
+/// Per-clone chat fan-out + in-flight state.
 #[derive(Default)]
 pub struct ChatState {
     senders: Mutex<HashMap<String, tokio::sync::broadcast::Sender<String>>>,
@@ -41,8 +41,8 @@ fn short_id() -> String {
     format!("{:08x}", (t as u64) & 0xFFFF_FFFF)
 }
 
-async fn base_url(app: &App, host: &Host) -> String {
-    format!("http://{}:{}", app.dial_host(host).await, app.config().agent_port)
+async fn base_url(app: &App, host: &RmngClone) -> String {
+    format!("http://{}:{}", app.dial_clone(host).await, app.config().agent_port)
 }
 
 // --- chat storage (mirrors notes) ------------------------------------------
@@ -89,7 +89,7 @@ struct ChatSnapshot {
 }
 
 /// The `{ busy, activity, messages }` snapshot as JSON — the chat history plus the
-/// host agent's live working state. Used by the SSE bus and the fleet MCP `read_chat`.
+/// clone agent's live working state. Used by the SSE bus and the fleet MCP `read_chat`.
 pub fn snapshot_json(app: &App, host_id: &str) -> String {
     let snap = ChatSnapshot {
         busy: app.chat.busy.lock().unwrap().contains(host_id),
@@ -184,13 +184,13 @@ async fn post_abort(app: &App, base: &str) {
 }
 
 /// Persist the user message, kick off the turn detached, return the new chat.
-pub fn send_chat(app: &App, host: &Host, text: &str) -> Result<(), String> {
+pub fn send_chat(app: &App, host: &RmngClone, text: &str) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("empty message".into());
     }
     if is_busy(app, &host.id) {
-        return Err("a message is already being processed for this host".into());
+        return Err("a message is already being processed for this clone".into());
     }
     push_message(app, &host.id, ChatRole::User, text.to_string());
     set_busy(app, &host.id, true);
@@ -199,7 +199,7 @@ pub fn send_chat(app: &App, host: &Host, text: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_turn(app: App, host: Host, text: String) {
+async fn run_turn(app: App, host: RmngClone, text: String) {
     let base = base_url(&app, &host).await;
     let reply = run_turn_inner(&app, &host.id, &base, &text).await;
     push_message(&app, &host.id, ChatRole::Assistant, reply);
@@ -297,8 +297,8 @@ fn extract_data_line(frame: &[u8]) -> Option<String> {
     s.lines().find_map(|l| l.strip_prefix("data:")).map(|j| j.trim().to_string()).filter(|j| !j.is_empty())
 }
 
-/// Interrupt the host's in-flight turn (best-effort).
-pub async fn abort_chat(app: &App, host: &Host) {
+/// Interrupt the clone's in-flight turn (best-effort).
+pub async fn abort_chat(app: &App, host: &RmngClone) {
     post_abort(app, &base_url(app, host).await).await;
 }
 
@@ -314,7 +314,7 @@ pub struct KickoffOpts {
 
 /// After a clone, wait for the wrapper to accept its event stream, then send the kickoff
 /// message (ticket URL or plain first message + optional instruction overrides).
-pub async fn kickoff_agent(app: App, host: Host, opts: KickoffOpts) {
+pub async fn kickoff_agent(app: App, host: RmngClone, opts: KickoffOpts) {
     let mut msg = opts.ticket_url.clone().or(opts.message.clone()).unwrap_or_default().trim().to_string();
     if msg.is_empty() {
         return;
@@ -340,7 +340,7 @@ pub async fn kickoff_agent(app: App, host: Host, opts: KickoffOpts) {
     }
     if let Some(a) = opts.agent_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         msg += &format!(
-            "\n\nAdditional host-agent instructions (these take precedence — merge them with your procedure):\n{a}"
+            "\n\nAdditional clone-agent instructions (these take precedence — merge them with your procedure):\n{a}"
         );
     }
     if let Some(c) = opts.claude_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -355,10 +355,10 @@ pub async fn kickoff_agent(app: App, host: Host, opts: KickoffOpts) {
 
 // --- autonomous background-task message listener ----------------------------
 
-/// Idempotent: keep one persistent `/events` subscription per host that persists
+/// Idempotent: keep one persistent `/events` subscription per clone that persists
 /// UNSOLICITED assistant messages into the chat (the Docker maintenance poller starts this for
 /// running managed clones; a dropped listener is restarted on the next tick).
-pub fn ensure_autonomous_listener(app: &App, host: &Host) {
+pub fn ensure_autonomous_listener(app: &App, host: &RmngClone) {
     {
         let mut l = app.chat.listeners.lock().unwrap();
         if !l.insert(host.id.clone()) {
@@ -372,7 +372,7 @@ pub fn ensure_autonomous_listener(app: &App, host: &Host) {
     });
 }
 
-async fn run_autonomous_listener(app: &App, host: &Host) -> Result<(), ()> {
+async fn run_autonomous_listener(app: &App, host: &RmngClone) -> Result<(), ()> {
     let base = base_url(app, host).await;
     let resp = app
         .http

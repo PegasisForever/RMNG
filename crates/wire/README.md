@@ -18,7 +18,7 @@ transport types (socket, viewer) are serde-only.
 
 - Define `ControlState` and its members as the full superset of the current Rust
   `../../shared/src/lib.rs` (`ControlState`, `HostEntry`, `MonitorSpec`) and the current
-  TS `../../control-server/app/lib/types.ts` extras (`Host` server-only fields,
+  TS `../../control-server/app/lib/types.ts` extras (`Clone` server-only fields,
   `Operation`, `ClaudeUsage`, `Chat`/`ChatMessage`, `templates`).
 - Define the **socket** protocol (`FrameMsg`, `InputMsg`, `Ack`, monitor descriptors).
 - Define the **viewer** protocol (server→viewer video/cursor/clipboard/monitor-list;
@@ -31,10 +31,10 @@ transport types (socket, viewer) are serde-only.
 
 ```text
 ControlState { selected: Option<String>, monitors: Vec<MonitorSpec>,
-               hosts: Vec<Host>, operations: Vec<Operation>,
+               hosts: Vec<RmngClone>, operations: Vec<Operation>,
                templates: Vec<String>, claude_accounts: Vec<ClaudeUsage>,
                codex_accounts: Vec<CodexUsage> }
-Host { id, host, port, username, password, domain?, gdm_username?, gdm_password?,
+RmngClone { id, host, port, username, password, domain?, gdm_username?, gdm_password?,
        container?, source?, claude_account_email?, linear_*?, display_name?,
        monitor_state?, unread?,
        codex_account_email?, codex_group?, codex_selection? }

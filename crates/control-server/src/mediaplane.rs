@@ -208,7 +208,7 @@ type Encoders = Arc<Mutex<HashMap<u32, (Arc<Encoder>, u32, u32)>>>;
 pub fn spawn(app: App) {
     // `spawn` is called from the async `main`, so a tokio runtime exists here; capture its
     // handle so the std-thread media plane can `block_on` async control-plane calls
-    // (`App::dial_host`) from the forward-data serve threads.
+    // (`App::dial_clone`) from the forward-data serve threads.
     let rt_handle = tokio::runtime::Handle::current();
     if let Err(e) = media::init() {
         tracing::error!("media init failed; port 1 disabled: {e}");
@@ -319,7 +319,7 @@ pub fn spawn(app: App) {
     // next incoming frame. `/api/activate` only mutates the store; serve_clone's frame loop
     // otherwise notices the switch lazily — on the next frame from *any* clone — which on a
     // static, damage-driven desktop can be seconds away (the reported "few seconds before the
-    // new host appears"). Watch the store's change bus and, the moment `selected` flips, force
+    // new clone appears"). Watch the store's change bus and, the moment `selected` flips, force
     // a fresh IDR on every encoder + re-prime from the newly-selected clone's last frame /
     // cursor / layout. Shares `last_sel` with the frame loop (same mutex, same lock order
     // last_sel → encoders/viewer), so the two paths serialize and never double-prime.
@@ -438,8 +438,8 @@ const T_TERM_RESIZE: u8 = 4;
 /// Viewer→server tag 5: create a new tmux session — the tab-bar "+" (`TermNewSession`).
 const T_TERM_NEW_SESSION: u8 = 5;
 
-/// Build the viewer's desired forward set: the union of every host's *enabled* rules,
-/// each tagged with its host id, plus the data port.
+/// Build the viewer's desired forward set: the union of every clone's *enabled* rules,
+/// each tagged with its clone id, plus the data port.
 fn build_forwards_msg(state: &wire::ControlState, forward_port: u16) -> wire::forward::ForwardsMsg {
     let rules = state
         .hosts
@@ -644,7 +644,7 @@ fn desktop_view_spec(cfg: &wire::AppConfig) -> wire::viewer::ViewSpec {
     }
 }
 
-/// True if the selected host id names a headless clone (its view is a terminal, owned by
+/// True if the selected clone id names a headless clone (its view is a terminal, owned by
 /// termplane, not a Desktop `ViewSpec`).
 fn is_headless(state: &wire::ControlState, sel: &str) -> bool {
     state.hosts.iter().any(|h| h.id == sel && h.headless)
@@ -1045,7 +1045,7 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
         let _ = stream.write_all(&[1u8]);
         return;
     }
-    // Confine the data plane to *configured, enabled* forwards for this host — otherwise
+    // Confine the data plane to *configured, enabled* forwards for this clone — otherwise
     // the 0.0.0.0 listener is an open TCP proxy into the Docker network. The header must
     // name a forward that exists, is enabled, and targets the same remote port.
     let ok = host
@@ -1056,7 +1056,7 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
         let _ = stream.write_all(&[1u8]);
         return;
     }
-    let dial = rt.block_on(app.dial_host(&host));
+    let dial = rt.block_on(app.dial_clone(&host));
     let addr = format!("{dial}:{}", header.remote_port);
     match TcpStream::connect(&addr) {
         Ok(upstream) => {
@@ -1138,24 +1138,24 @@ mod tests {
 
     #[test]
     fn build_forwards_msg_unions_enabled_rules_only() {
-        use wire::{ControlState, Host, PortForward};
-        let mut a = Host { id: "a".into(), host: "a".into(), ..Default::default() };
+        use wire::{ControlState, RmngClone, PortForward};
+        let mut a = RmngClone { id: "a".into(), host: "a".into(), ..Default::default() };
         a.forwards = vec![
             PortForward { id: "f8080".into(), remote_port: 3000, local_port: 8080, enabled: true, label: None },
             PortForward { id: "f9".into(), remote_port: 9, local_port: 9, enabled: false, label: None },
         ];
-        let mut b = Host { id: "b".into(), host: "b".into(), ..Default::default() };
+        let mut b = RmngClone { id: "b".into(), host: "b".into(), ..Default::default() };
         b.forwards = vec![
             PortForward { id: "f7000".into(), remote_port: 5000, local_port: 7000, enabled: true, label: None },
         ];
-        let mut archived = Host { id: "archived".into(), host: "archived".into(), archived: true, ..Default::default() };
+        let mut archived = RmngClone { id: "archived".into(), host: "archived".into(), archived: true, ..Default::default() };
         archived.forwards = vec![
             PortForward { id: "f9000".into(), remote_port: 9000, local_port: 9000, enabled: true, label: None },
         ];
         let st = ControlState { hosts: vec![a, b, archived], ..Default::default() };
         let msg = build_forwards_msg(&st, 9005);
         assert_eq!(msg.forward_port, 9005);
-        // Only the two enabled rules, tagged with host id.
+        // Only the two enabled rules, tagged with clone id.
         assert_eq!(msg.rules.len(), 2);
         assert!(msg.rules.iter().any(|r| r.host_id == "a" && r.local_port == 8080 && r.remote_port == 3000));
         assert!(msg.rules.iter().any(|r| r.host_id == "b" && r.local_port == 7000));

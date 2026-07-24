@@ -144,9 +144,9 @@ async fn main() -> Result<()> {
     update::reconcile_pending(&app).await;
     jobs::fail_stale_ops(&app);
 
-    // Boot reconciliation: `state.json` is authoritative for host rows, but the daemon is
+    // Boot reconciliation: `state.json` is authoritative for clone rows, but the daemon is
     // authoritative for what actually exists — diff them once so drift is visible instead
-    // of silent. Orphan rows (managed host, no container — someone `docker rm`ed it behind
+    // of silent. Orphan rows (managed clone, no container — someone `docker rm`ed it behind
     // the server) and unknown managed containers (a container with our label but no row —
     // e.g. a build worker left over from a crashed bootstrap) are LOGGED, not auto-fixed:
     // deleting either side automatically could destroy something the operator wanted.
@@ -165,7 +165,7 @@ async fn main() -> Result<()> {
                 for h in hosts.iter().filter(|h| h.managed) {
                     if !live_names.contains(h.id.as_str()) {
                         tracing::warn!(
-                            "reconcile: managed host '{}' has no container on the daemon \
+                            "reconcile: managed clone '{}' has no container on the daemon \
                              (removed behind the server?) — delete the row in the UI or \
                              recreate the clone",
                             h.id
@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
                     hosts.iter().map(|h| h.id.as_str()).collect();
                 for c in live.iter().filter(|c| !known.contains(c.name.as_str())) {
                     tracing::warn!(
-                        "reconcile: managed container '{}' (image {}, {}) has no host row — \
+                        "reconcile: managed container '{}' (image {}, {}) has no clone row — \
                          a leftover from a crashed operation? Remove it with `docker rm`",
                         c.name,
                         c.image,
@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
         tracing::error!("legacy token migration panicked (booting anyway): {e:?}");
     }
 
-    // Background loops: the per-host agent-state monitor poller, the clone-home reconciler
+    // Background loops: the per-clone agent-state monitor poller, the clone-home reconciler
     // (the Docker-port successor to the Proxmox-era sshfs mount loop — it symlinks
     // data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so every clone's home is browsable
     // in one place; needs the container's `pid: "host"`), the smbd supervisor that serves that

@@ -1,9 +1,9 @@
 // Shared, API-free sample data for the Storybook stories. Nothing here touches the
 // network — the components are all dependency-injected, so a story is just "this
-// fixture + these callbacks". Kept in one place so the Sidebar / SidebarHost /
+// fixture + these callbacks". Kept in one place so the Sidebar / SidebarClone /
 // Settings stories stay consistent.
 
-import type { ClaudeUsage, GroupUsage, Host, Operation } from "~/lib/types";
+import type { ClaudeUsage, GroupUsage, Clone, Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
@@ -13,10 +13,10 @@ import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
 const GiB = 1024 ** 3;
 
-// --- hosts (each covers a distinct visual state) ---------------------------
+// --- clones (each covers a distinct visual state) ---------------------------
 
 /** A managed clone actively working, bound to the "pooled" account group, on a ticket. */
-export const hostWorking: Host = {
+export const cloneWorking: Clone = {
   id: "pega-we-142",
   host: "10.99.0.11",
   port: 3389,
@@ -33,7 +33,7 @@ export const hostWorking: Host = {
 };
 
 /** Idle, bound to the "pooled" group, with an unread dot (dropped from working). */
-export const hostIdle: Host = {
+export const cloneIdle: Clone = {
   id: "pega-dev-88",
   host: "10.99.0.12",
   port: 3389,
@@ -50,7 +50,7 @@ export const hostIdle: Host = {
 };
 
 /** Offline (wrapper unreachable), bound to the "team" group. */
-export const hostOffline: Host = {
+export const cloneOffline: Clone = {
   id: "pega-hh-7",
   host: "10.99.0.13",
   port: 3389,
@@ -63,7 +63,7 @@ export const hostOffline: Host = {
 };
 
 /** A managed scratch box with no account group bound (no inference). */
-export const hostNoToken: Host = {
+export const cloneNoToken: Clone = {
   id: "scratch-box",
   host: "10.99.0.20",
   port: 3389,
@@ -74,7 +74,7 @@ export const hostNoToken: Host = {
 };
 
 /** A plain unmanaged row (no container) — only deletable, no commit/account actions. */
-export const hostUnmanaged: Host = {
+export const cloneUnmanaged: Clone = {
   id: "legacy-desktop",
   host: "192.168.1.50",
   port: 3389,
@@ -85,7 +85,7 @@ export const hostUnmanaged: Host = {
 
 /** A managed clone bound to the "team" group. Exercises the two-line sidebar layout
  *  (binding line + a metric-only line, CPU on the first / MEM on the second). */
-export const hostDualProvider: Host = {
+export const cloneDualProvider: Clone = {
   id: "pega-dual-9",
   host: "10.99.0.14",
   port: 3389,
@@ -100,9 +100,9 @@ export const hostDualProvider: Host = {
   monitorState: "working",
 };
 
-/** A sub host: a managed clone spawned by `hostWorking`, shown indented under it in the
+/** A sub clone: a managed clone spawned by `cloneWorking`, shown indented under it in the
  *  sidebar (collapsed by default). Cosmetic one-level nesting via `parent`. */
-export const hostSubHost: Host = {
+export const cloneSubClone: Clone = {
   id: "pega-we-142-helper",
   host: "10.99.0.31",
   port: 3389,
@@ -111,21 +111,21 @@ export const hostSubHost: Host = {
   managed: true,
   source: "pegasis0/rmng-template:latest",
   group: "pooled",
-  parent: hostWorking.id,
+  parent: cloneWorking.id,
   displayName: "helper: run the e2e suite",
   monitorState: "working",
 };
 
-export const hosts: Host[] = [
-  hostWorking,
-  hostSubHost,
-  hostIdle,
-  hostOffline,
-  hostNoToken,
-  hostUnmanaged,
-  hostDualProvider,
+export const hosts: Clone[] = [
+  cloneWorking,
+  cloneSubClone,
+  cloneIdle,
+  cloneOffline,
+  cloneNoToken,
+  cloneUnmanaged,
+  cloneDualProvider,
 ];
-export const hostIds: string[] = hosts.map((h) => h.id);
+export const cloneIds: string[] = hosts.map((h) => h.id);
 
 // --- live container usage (the volatile `stats` SSE map) --------------------
 
@@ -137,22 +137,22 @@ export const lxcStats: LxcStats = {
 };
 
 export const stats: Record<string, ContainerStats> = {
-  [hostWorking.id]: {
+  [cloneWorking.id]: {
     cpuPct: 40,
     memUsed: BigInt(Math.round(5.1 * GiB)),
     memLimit: BigInt(40 * GiB),
   },
-  [hostIdle.id]: {
+  [cloneIdle.id]: {
     cpuPct: 1.2,
     memUsed: BigInt(Math.round(1.4 * GiB)),
     memLimit: BigInt(40 * GiB),
   },
-  [hostNoToken.id]: {
+  [cloneNoToken.id]: {
     cpuPct: 0.3,
     memUsed: BigInt(Math.round(0.6 * GiB)),
     memLimit: BigInt(40 * GiB),
   },
-  [hostDualProvider.id]: {
+  [cloneDualProvider.id]: {
     cpuPct: 18,
     memUsed: BigInt(Math.round(3.2 * GiB)),
     memLimit: BigInt(40 * GiB),
@@ -162,26 +162,26 @@ export const stats: Record<string, ContainerStats> = {
 // --- clone token totals (the volatile `tokens` SSE map) ---------------------
 
 export const tokens: Record<string, CloneTokenUsage> = {
-  [hostWorking.id]: {
+  [cloneWorking.id]: {
     newInputTokens: 128_400n,
     outputTokens: 22_800n,
     requestCount: 4n,
     // Recently served by Fable → the sidebar shows the "fable" chip next to its group badge.
     fableActive: true,
   },
-  [hostIdle.id]: {
+  [cloneIdle.id]: {
     newInputTokens: 54_600n,
     outputTokens: 7_500n,
     requestCount: 2n,
     fableActive: false,
   },
-  [hostOffline.id]: {
+  [cloneOffline.id]: {
     newInputTokens: 20_000n,
     outputTokens: 3_100n,
     requestCount: 1n,
     fableActive: false,
   },
-  [hostDualProvider.id]: {
+  [cloneDualProvider.id]: {
     newInputTokens: 948_000n,
     outputTokens: 41_000n,
     requestCount: 7n,
@@ -262,7 +262,7 @@ export const images: ImageInfo[] = [
     createdAt: "2026-06-20T12:00:00Z",
     base: true,
     createdFrom: null,
-    inUseBy: [hostWorking.id, hostIdle.id],
+    inUseBy: [cloneWorking.id, cloneIdle.id],
   },
   {
     id: "sha256:bbbb1111",
@@ -291,11 +291,11 @@ export const cloneOperation: Operation = {
   startedAt: 1_700_000_000_000,
 };
 
-/** A running delete op targeting an existing host (shows the row's busy state). */
+/** A running delete op targeting an existing clone (shows the row's busy state). */
 export const deleteOperation: Operation = {
   id: "op-delete-1",
   kind: "delete",
-  target: hostIdle.id,
+  target: cloneIdle.id,
   status: "running",
   step: "stopping",
   pct: 30,

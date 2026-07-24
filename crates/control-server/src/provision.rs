@@ -10,7 +10,7 @@
 //! Caller-facing division of responsibility (as with `orchestrate.rs`): `jobs.rs` owns the
 //! `Operation` record + the progress→op-log plumbing and calls the flows here; `claude.rs`
 //! drives credential ops via [`run_clone_op`]. These functions address a clone by its
-//! container *name*, which equals the host id (`Host.managed` rows) — no container id is
+//! container *name*, which equals the clone id (`RmngClone.managed` rows) — no container id is
 //! stored anywhere.
 //!
 //! Guest scripts are embedded (`include_str!`) and streamed over `docker exec bash -s`:
@@ -127,7 +127,7 @@ fn fresh_machine_id() -> Result<Vec<u8>> {
 /// caller's input form: the in-use accounting (web.rs `fill_in_use_by`) and the
 /// images-delete 409 guard both compare `ManagedContainer.image == ImageInfo.reference`,
 /// so a clone created from an id form must still be created FROM the reference — otherwise
-/// its base image would show as unused and be deletable under live clones. `Host.source`
+/// its base image would show as unused and be deletable under live clones. `RmngClone.source`
 /// records it too (commit lineage).
 pub fn resolve_reference(images: &[wire::ImageInfo], input: &str) -> Option<String> {
     images
@@ -185,7 +185,7 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
             ));
             // The fleet `rmng` CLI's control-server base URL, so a clone can run `rmng …`
             // without `--server` — a bare `rmng clone ls`/`rmng clone ssh`/`rmng clone create …`
-            // (the latter spawning a sub host) just works. The CLI resolves `--server` >
+            // (the latter spawning a sub clone) just works. The CLI resolves `--server` >
             // `$RMNG_CONTROL_URL` > `http://localhost:9000`; inside a clone `localhost:9000`
             // is unreachable, so this points it at the same `rmng-control` route the agents
             // already use (the router URL above).
@@ -205,9 +205,9 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
 /// The PER-CLONE group-proxy env: the clone's stable router bearer key, exposed both as
 /// `ANTHROPIC_AUTH_TOKEN` (Claude Code) and `RMNG_PROXY_KEY` (referenced by the generated
 /// Codex + OpenCode provider configs). Minted + persisted by [`crate::cliproxy`] on first
-/// use (stable for the clone's life; the router maps it back to this host id). Kept OUT of
+/// use (stable for the clone's life; the router maps it back to this clone id). Kept OUT of
 /// [`control_env_vars`] because it is per-clone, not a shared constant — and NEVER put on
-/// `Host`/`state.json`/`/events` (it's a secret). Wired into the clone's `/etc/environment`
+/// `RmngClone`/`state.json`/`/events` (it's a secret). Wired into the clone's `/etc/environment`
 /// at create (`jobs.rs`) and on every per-clone resync (`clone_reconcile.rs`).
 pub(crate) fn router_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
     let key = app.cliproxy.mint_router_key(host_id);
@@ -365,7 +365,7 @@ fn clone_pct(step: &str) -> Option<f64> {
 /// `ready` 80 — `ready` is this fn's TERMINAL step (daemon registered, or timed-out
 /// still-booting). The remaining `monitors` 85 / `accounts` 95 / `done` 100 steps are driven
 /// by the caller (`run_clone`), so this fn returning does NOT mean the clone is connectable
-/// yet. Returns the **canonical** image reference on success (`Host.source`; see
+/// yet. Returns the **canonical** image reference on success (`RmngClone.source`; see
 /// [`resolve_reference`] — the caller may have passed an id form, but state must always
 /// record the reference so the commit flow can stamp lineage). The container *name* is the
 /// hostname (== host id) — that's the clone's address (Docker DNS on the rmng bridge; its
@@ -405,7 +405,7 @@ pub async fn clone_container(
     // any image id. The image picker only offers labeled images, but a raw MCP/API caller
     // could pass anything (reference, sha256: id, or bare id), so gate it here AND resolve
     // whatever form was passed to the canonical reference — everything downstream
-    // (`Host.source`, in-use accounting, delete guards) keys on the reference.
+    // (`RmngClone.source`, in-use accounting, delete guards) keys on the reference.
     if !docker.image_exists(image).await? {
         bail!("source image '{image}' does not exist");
     }
@@ -417,7 +417,7 @@ pub async fn clone_container(
     // The rmng bridge is lazy; make sure it's up before joining it.
     docker.ensure_network().await?;
 
-    // Create the container (name == host id) from the CANONICAL reference (equivalent
+    // Create the container (name == clone id) from the CANONICAL reference (equivalent
     // to the caller's input — same image — but keeps `docker ps`'s Image column
     // readable). Its IP is Docker IPAM's business; the name is the address. A stale
     // same-named container 409s here — the daemon message is surfaced verbatim
@@ -1037,7 +1037,7 @@ fn delete_pct(step: &str) -> Option<f64> {
 
 /// Destroy a managed clone: `stop` (the image's `StopSignal=SIGRTMIN+3` gives systemd a
 /// clean 20 s shutdown — without it every stop is a 20 s hang + SIGKILL, gotcha #5) →
-/// `remove(force)` → remove the `rmng-dind-<host>` inner-Docker volume. A 404/in-use on the
+/// `remove(force)` → remove the `rmng-dind-<clone>` inner-Docker volume. A 404/in-use on the
 /// volume is logged, not fatal (the container removal is what matters). `host_id` is both
 /// the container name to stop/remove and the volume-name stem (`rmng-dind-<host_id>`).
 pub async fn delete_clone(
@@ -1150,7 +1150,7 @@ pub fn step_pct(kind: wire::OperationKind, step: &str) -> Option<f64> {
 }
 
 /// Discover the shared clone-socket source directory to bind into a new clone at
-/// `/srv/rmng-sock`. From the self-setup env report's sock-mount discovery (the host source
+/// `/srv/rmng-sock`. From the self-setup env report's sock-mount discovery (the clone source
 /// of our own container's socket mount); empty in dev/test (the bind is then skipped).
 async fn sock_source_dir(app: &App) -> String {
     // The self-setup report records the mount detail as "mounted from <src>"; parse it back

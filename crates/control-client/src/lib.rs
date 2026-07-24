@@ -149,7 +149,7 @@ impl Client {
         Ok(Box::pin(stream))
     }
 
-    /// Select the host shown in the viewer (`None` clears the selection).
+    /// Select the clone shown in the viewer (`None` clears the selection).
     pub async fn activate(&self, id: Option<&str>) -> Result<ControlState> {
         self.post_json("/api/activate", &json!({ "id": id })).await
     }
@@ -157,12 +157,12 @@ impl Client {
     /// Raw hostname clone (`POST /api/clone` hostname mode) with an optional account-group
     /// binding and env preset. `none`/blank group input intentionally clears the binding.
     ///
-    /// Sub hosts: `top_level` forces a top-level host; an explicit `parent` id nests under that
+    /// Sub clones: `top_level` forces a top-level clone; an explicit `parent` id nests under that
     /// clone; otherwise the server auto-detects the caller from the `X-RMNG-Proxy-Key` header,
     /// which we populate from this process's own `RMNG_PROXY_KEY` env var (present when `rmng`
-    /// runs inside a clone) so a clone spawning a clone gets a sub host with no flags.
+    /// runs inside a clone) so a clone spawning a clone gets a sub clone with no flags.
     #[allow(clippy::too_many_arguments)]
-    pub async fn clone_host(
+    pub async fn duplicate_clone(
         &self,
         image: &str,
         hostname: &str,
@@ -175,7 +175,7 @@ impl Client {
         let mut body = json!({ "image": image, "hostname": hostname });
         let obj = body.as_object_mut().unwrap();
         // Send the group verbatim, INCLUDING "none": the server distinguishes an omitted
-        // `group` (a sub host inherits its parent's group) from an explicit `--group none`
+        // `group` (a sub clone inherits its parent's group) from an explicit `--group none`
         // (bind no group, opting out of inheritance).
         if let Some(group) = group.map(str::trim).filter(|group| !group.is_empty()) {
             obj.insert("group".into(), json!(group));
@@ -207,7 +207,7 @@ impl Client {
         )?)
     }
 
-    /// Destroy a managed clone (or unregister a plain host).
+    /// Destroy a managed clone (or unregister a plain clone).
     pub async fn delete(&self, id: &str) -> Result<Operation> {
         self.post_json("/api/delete", &json!({ "id": id })).await
     }
@@ -251,7 +251,7 @@ impl Client {
 
     /// Bind a clone to an account group (or clear it with `None`). The group-proxy
     /// replacement for the old per-provider account swap. `POST /api/hosts/:id/group`.
-    pub async fn set_host_group(&self, host: &str, group: Option<&str>) -> Result<Value> {
+    pub async fn set_clone_group(&self, host: &str, group: Option<&str>) -> Result<Value> {
         self.post_json(
             &format!("/api/hosts/{host}/group"),
             &json!({ "group": group }),
@@ -301,7 +301,7 @@ impl Client {
 /// refused) or timed out — rather than an error the server itself returned (a 4xx/5xx
 /// surfaced by [`Client::check`], which is a plain string error with no `reqwest::Error`
 /// in its chain). The CLI uses this to decide whether the "check your --server" hint is
-/// actually relevant: a `404 no host 'x'` from a perfectly reachable server should not
+/// actually relevant: a `404 no clone 'x'` from a perfectly reachable server should not
 /// nudge the caller toward a connectivity fix.
 pub fn is_transport_error(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
@@ -374,7 +374,7 @@ mod sse_tests {
     fn api_error_is_not_a_transport_error() {
         // A server-returned error (the shape `check` produces) must not be treated as a
         // connectivity failure — otherwise the CLI would wrongly print the --server hint.
-        let err = anyhow::anyhow!("404 Not Found: no host 'x'");
+        let err = anyhow::anyhow!("404 Not Found: no clone 'x'");
         assert!(!is_transport_error(&err));
     }
 
