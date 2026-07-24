@@ -35,6 +35,7 @@ import {
   updateServer,
 } from "~/lib/api";
 import { type ClaudeUsage, type ControlState, type GroupUsage, type Host, emptyState } from "~/lib/types";
+import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
@@ -252,6 +253,11 @@ function Dashboard({
   /** Update the gate's config after a group create/delete (returns the fresh redacted config). */
   onConfigChange: (cfg: AppConfigRedacted) => void;
 }) {
+  // OS notification whenever a clone transitions out of `working` (idle/offline) while
+  // it isn't the selected one — driven by the server's `unread` edge. Clicking it selects
+  // that clone, the same activate path the sidebar uses.
+  useCloneNotifications(state.hosts, (id) => run(activate(id)));
+
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
