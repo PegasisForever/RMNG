@@ -46,10 +46,12 @@ body {
   cursor: text;
 }
 
-/* BlockNote's dark theme paints the editor a light grey (#1f1f1f) that clashes with
-   the app's slate-900 note pane (the surrounding <main>). Make the editor surface
-   transparent in dark mode so it inherits that background and blends in. Light mode
-   already matches (white editor on the white pane), so it's left untouched. */
-[data-color-scheme="dark"] .bn-editor {
+/* BlockNote paints the editor its own theme background (#1f1f1f dark / #fff light) that
+   clashes with the app's note pane (the surrounding <main>: slate-900 dark / white light).
+   Make the editor surface transparent UNCONDITIONALLY so it always inherits that pane in
+   both themes. Unscoped on purpose: the editor remounts on every clone switch, and its
+   `data-color-scheme` attr is driven by a JS prop that lands a frame late — scoping this to
+   dark would let the base white show through for that frame (the "flash white" on switch). */
+.bn-editor {
   background-color: transparent;
 }
