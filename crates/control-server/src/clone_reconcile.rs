@@ -206,10 +206,15 @@ pub(crate) fn payload_stamp_entry_for(entries: &[TarEntry]) -> TarEntry {
     payload_stamp_entry(&desired_payload_hash(entries))
 }
 
+/// Current SSH-provisioning schema version. Bumped from the original `ok` when the fleet key
+/// moved out of `~/.ssh` (gcr-ssh-agent crash fix + migration): an older clone stamped `ok`
+/// no longer matches, so `ensure_ssh_ready` re-runs and applies the relocation + cleanup.
+const SSH_STAMP_VERSION: &str = "v2";
+
 pub(crate) fn ssh_stamp_entry() -> TarEntry {
     TarEntry {
         path: ssh_stamp_path().to_string(),
-        data: b"ok\n".to_vec(),
+        data: format!("{SSH_STAMP_VERSION}\n").into_bytes(),
         mode: 0o644,
         uid: 0,
         gid: 0,
@@ -640,11 +645,38 @@ rm -f /home/rmng/.claude/.credentials.json /home/rmng/.codex/auth.json
 "#
 }
 
-fn ssh_prepare_script() -> &'static str {
-    r#"set -e
-install -d -o rmng -g rmng -m700 /home/rmng/.ssh
-mkdir -p /etc/ssh
-"#
+/// Prepare a clone's filesystem for the SSH material upload, and run the one-time fleet-key
+/// migration. `fleet_body` is the base64 body (field 2) of the shared fleet public key; when
+/// non-empty it gates the migration so we only ever delete the *fleet* key, never a user's own.
+///
+/// Migration: older clones carried the shared fleet key at `~/.ssh/id_ed25519`. GNOME's
+/// `gcr-ssh-agent` auto-adopts any `~/.ssh` private key into the login keyring and then crashes
+/// on it during `ssh`'s session-bind, wedging ALL ssh/git in the clone (the agent can't sign any
+/// key). Now that the key is provisioned outside `~/.ssh` (see [`crate::ssh::CLONE_FLEET_KEY_TAR`]),
+/// delete the poisoned copy — only when it exactly matches the fleet key — and kick
+/// `gcr-ssh-agent` so it respawns clean (it is socket-activated; a fresh spawn re-scans `~/.ssh`,
+/// now without the key). Idempotent: on an already-migrated clone the `id_ed25519` file is gone,
+/// so the guarded block is a no-op.
+fn ssh_prepare_script(fleet_body: &str) -> String {
+    let mut s = String::from(
+        "set -e\n\
+         install -d -o rmng -g rmng -m700 /home/rmng/.ssh\n\
+         mkdir -p /home/rmng/.config/rmng/ssh\n\
+         chown rmng:rmng /home/rmng/.config /home/rmng/.config/rmng /home/rmng/.config/rmng/ssh 2>/dev/null || true\n\
+         chmod 700 /home/rmng/.config/rmng/ssh\n\
+         mkdir -p /etc/ssh\n",
+    );
+    if !fleet_body.is_empty() {
+        s.push_str(&format!(
+            "if [ -f /home/rmng/.ssh/id_ed25519.pub ] && \
+[ \"$(awk '{{print $2}}' /home/rmng/.ssh/id_ed25519.pub 2>/dev/null)\" = \"{fleet_body}\" ]; then\n\
+  rm -f /home/rmng/.ssh/id_ed25519 /home/rmng/.ssh/id_ed25519.pub\n\
+  pkill -u 1000 -f /usr/libexec/gcr-ssh-agent 2>/dev/null || true\n\
+  echo 'rmng-migrate: removed poisoned ~/.ssh/id_ed25519 (fleet key relocated out of ~/.ssh)'\n\
+fi\n"
+        ));
+    }
+    s
 }
 
 fn ssh_bootstrap_script() -> &'static str {
@@ -848,11 +880,16 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
     if read_stamp(app, clone_id, ssh_stamp_path(), "ssh")
         .await?
         .as_deref()
-        == Some("ok")
+        == Some(SSH_STAMP_VERSION)
     {
         return Ok(());
     }
-    exec_ok(app, clone_id, ssh_prepare_script(), "prepare ssh dirs").await?;
+    // Base64 body of the fleet pubkey — gates the ~/.ssh/id_ed25519 migration to the fleet key only.
+    let fleet_body = crate::ssh::fleet_public_key(&app.config().data_dir)
+        .ok()
+        .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
+        .unwrap_or_default();
+    exec_ok(app, clone_id, &ssh_prepare_script(&fleet_body), "prepare ssh dirs").await?;
     let entries = crate::ssh::clone_ssh_tar_entries(
         &app.config().data_dir,
         clone_id,
@@ -1370,9 +1407,28 @@ mod tests {
     fn ssh_stamp_entry_marks_success_with_root_owned_file() {
         let entry = ssh_stamp_entry();
         assert_eq!(entry.path, "etc/rmng/ssh-ready");
-        assert_eq!(entry.data, b"ok\n");
+        assert_eq!(entry.data, b"v2\n");
         assert_eq!(entry.mode, 0o644);
         assert_eq!((entry.uid, entry.gid), (0, 0));
+    }
+
+    #[test]
+    fn ssh_prepare_script_creates_fleet_dir_and_migrates_poisoned_key() {
+        let s = ssh_prepare_script("AAAAC3NzaC1lZDI1NTE5AAAAFLEETBODY");
+        // Creates the out-of-~/.ssh fleet key dir.
+        assert!(s.contains("mkdir -p /home/rmng/.config/rmng/ssh"));
+        // Migration: guarded on the exact fleet pubkey body, removes the poisoned key + kicks gcr.
+        assert!(s.contains("AAAAC3NzaC1lZDI1NTE5AAAAFLEETBODY"));
+        assert!(s.contains("rm -f /home/rmng/.ssh/id_ed25519 /home/rmng/.ssh/id_ed25519.pub"));
+        assert!(s.contains("pkill -u 1000 -f /usr/libexec/gcr-ssh-agent"));
+    }
+
+    #[test]
+    fn ssh_prepare_script_without_fleet_body_skips_migration() {
+        // No fleet key resolved ⇒ never touch ~/.ssh/id_ed25519 (can't verify it's the fleet key).
+        let s = ssh_prepare_script("");
+        assert!(s.contains("mkdir -p /home/rmng/.config/rmng/ssh"));
+        assert!(!s.contains("rm -f /home/rmng/.ssh/id_ed25519"));
     }
 
     #[test]

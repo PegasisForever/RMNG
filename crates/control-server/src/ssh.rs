@@ -108,8 +108,9 @@ pub fn fleet_key_path(data_dir: &str) -> PathBuf {
 
 /// The shared fleet public-key line, generating the keypair on first call (idempotent).
 /// Trimmed to a single line. Used both to append to clones' `authorized_keys` and to seed the
-/// push-gate hash so a first-time key generation propagates.
-fn fleet_public_key(data_dir: &str) -> Result<String> {
+/// push-gate hash so a first-time key generation propagates. Public so the clone reconciler can
+/// match a clone's stale `~/.ssh/id_ed25519` against the fleet key during migration.
+pub fn fleet_public_key(data_dir: &str) -> Result<String> {
     let key_path = fleet_key_path(data_dir);
     ensure_hostkey(&key_path)?;
     let pub_bytes = std::fs::read(key_path.with_extension("pub"))
@@ -130,10 +131,19 @@ pub fn clone_authorized_keys(operator_keys: &[String], fleet_pub: &str) -> Vec<S
     keys
 }
 
+/// The shared fleet client key is provisioned OUTSIDE `~/.ssh` (here) on purpose. GNOME's
+/// `gcr-ssh-agent` auto-adopts every private key it finds in `~/.ssh` into the login keyring,
+/// and a stale keyring record for that key makes the agent crash during `ssh`'s session-bind —
+/// which wedges ALL ssh/git inside the clone (the agent can no longer sign any key). Keeping the
+/// fleet key here, referenced from `~/.ssh/config`'s `IdentityFile`, preserves prompt-free
+/// `ssh <clone-id>` while the keyring never sees it. Path is tar-root-relative (no leading `/`).
+pub(crate) const CLONE_FLEET_KEY_TAR: &str = "home/rmng/.config/rmng/ssh/fleet_ed25519";
+
 /// Dropped at `~rmng/.ssh/config` in every clone so a bare `ssh <clone-id>` from inside a
-/// clone is prompt-free: the fleet key is the default identity, and `accept-new` trusts a
-/// sibling's stable host key on first contact (host keys are persisted per clone id).
-const CLONE_SSH_CONFIG: &str = "Host *\n    StrictHostKeyChecking accept-new\n    User rmng\n";
+/// clone is prompt-free: the fleet key (`/home/rmng/.config/rmng/ssh/fleet_ed25519`, kept out
+/// of `~/.ssh`) is a default identity, and `accept-new` trusts a sibling's stable host key on
+/// first contact (host keys are persisted per clone id).
+const CLONE_SSH_CONFIG: &str = "Host *\n    StrictHostKeyChecking accept-new\n    User rmng\n    IdentityFile /home/rmng/.config/rmng/ssh/fleet_ed25519\n";
 
 /// Generate an ed25519 host key at `key_path` (+ `.pub`) if it doesn't already exist.
 /// Idempotent: an existing key is left byte-for-byte untouched (so identity is stable).
@@ -163,11 +173,14 @@ pub fn ensure_hostkey(key_path: &Path) -> Result<()> {
 
 /// The tar entries that provision SSH into one clone:
 /// - `~rmng/.ssh/authorized_keys` (operator keys + the shared fleet pubkey; clone-user, 0600),
-/// - the shared fleet keypair `~rmng/.ssh/id_ed25519`(.pub) so this clone can dial siblings,
-/// - `~rmng/.ssh/config` (`accept-new`, default user) for a prompt-free `ssh <clone-id>`,
+/// - the shared fleet keypair at [`CLONE_FLEET_KEY_TAR`](.pub) — deliberately OUTSIDE `~/.ssh`
+///   (see that const: gcr-ssh-agent crashes on `~/.ssh` keys) — so this clone can dial siblings,
+/// - `~rmng/.ssh/config` (`accept-new`, default user, `IdentityFile` → the fleet key) for a
+///   prompt-free `ssh <clone-id>`,
 /// - the clone's own stable sshd host key + public half (root, 0600 / 0644).
 /// Generates+persists the per-clone host key and the shared fleet key on first call. The
-/// `~rmng/.ssh` dir is pre-created 700 by the template, so only files are dropped here.
+/// `~rmng/.ssh` dir is pre-created 700 by the template; the fleet key's `.config/rmng/ssh` dir
+/// is created by the reconciler's `ssh_prepare_script` (and auto-created by the docker upload).
 pub fn clone_ssh_tar_entries(
     data_dir: &str,
     clone_id: &str,
@@ -201,14 +214,14 @@ pub fn clone_ssh_tar_entries(
             gid: 1000,
         },
         TarEntry {
-            path: "home/rmng/.ssh/id_ed25519".into(),
+            path: CLONE_FLEET_KEY_TAR.into(),
             data: fleet_priv,
             mode: 0o600,
             uid: 1000,
             gid: 1000,
         },
         TarEntry {
-            path: "home/rmng/.ssh/id_ed25519.pub".into(),
+            path: format!("{CLONE_FLEET_KEY_TAR}.pub"),
             data: fleet_pub_bytes,
             mode: 0o644,
             uid: 1000,
@@ -581,18 +594,31 @@ mod tests {
         assert!(ak_text.contains("ssh-ed25519 AAAA a"), "operator key present:\n{ak_text}");
         assert!(ak_text.contains(fleet_pub), "fleet pubkey folded in:\n{ak_text}");
 
-        // Shared fleet keypair + client config, clone-user owned.
-        let id = entries.iter().find(|e| e.path == "home/rmng/.ssh/id_ed25519").expect("fleet private key entry");
+        // Shared fleet keypair lives OUTSIDE ~/.ssh (gcr-ssh-agent crash avoidance), clone-user owned.
+        let id = entries
+            .iter()
+            .find(|e| e.path == "home/rmng/.config/rmng/ssh/fleet_ed25519")
+            .expect("fleet private key entry");
         assert_eq!(id.mode, 0o600);
         assert_eq!((id.uid, id.gid), (1000, 1000));
         assert!(!id.data.is_empty(), "fleet private key material present");
-        assert!(entries.iter().any(
-            |e| e.path == "home/rmng/.ssh/id_ed25519.pub" && e.mode == 0o644 && (e.uid, e.gid) == (1000, 1000)
-        ));
+        assert!(entries.iter().any(|e| e.path == "home/rmng/.config/rmng/ssh/fleet_ed25519.pub"
+            && e.mode == 0o644
+            && (e.uid, e.gid) == (1000, 1000)));
+        // No private key must land in ~/.ssh (that is exactly what poisons gcr-ssh-agent).
+        assert!(
+            !entries.iter().any(|e| e.path == "home/rmng/.ssh/id_ed25519"),
+            "fleet key must NOT be written into ~/.ssh"
+        );
         let cfg = entries.iter().find(|e| e.path == "home/rmng/.ssh/config").expect("ssh config entry");
         assert_eq!(cfg.mode, 0o600);
         assert_eq!((cfg.uid, cfg.gid), (1000, 1000));
-        assert!(String::from_utf8(cfg.data.clone()).unwrap().contains("StrictHostKeyChecking accept-new"));
+        let cfg_text = String::from_utf8(cfg.data.clone()).unwrap();
+        assert!(cfg_text.contains("StrictHostKeyChecking accept-new"));
+        assert!(
+            cfg_text.contains("IdentityFile /home/rmng/.config/rmng/ssh/fleet_ed25519"),
+            "ssh config points IdentityFile at the relocated fleet key:\n{cfg_text}"
+        );
 
         // The clone's own sshd host key is still root-owned.
         let hk = entries.iter().find(|e| e.path == "etc/ssh/ssh_host_ed25519_key").expect("host key entry");
