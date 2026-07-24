@@ -277,6 +277,14 @@ impl TokenBus {
         (inner.latest_json.clone(), self.tx.subscribe())
     }
 
+    /// Wall-clock ms of this clone's most recent token/output activity, if any. Server-private
+    /// like the timestamp itself (never leaked to the browser); the monitor uses it to decide
+    /// whether an idle transition is still news to the operator (see `monitor::should_flag_unread`).
+    pub fn last_token_at(&self, host_id: &str) -> Option<i64> {
+        let inner = self.inner.lock().unwrap();
+        inner.file.records.get(host_id).and_then(|record| record.last_token_at)
+    }
+
     /// Server-owned stuckness. It has no state mutation and is intentionally not sent to the
     /// browser. A timestamp before/after an invalid lifecycle is not activity for this epoch.
     pub fn is_token_inactive(&self, host_id: &str, now_ms: i64) -> bool {

@@ -103,6 +103,40 @@ impl Default for LxcStatsBus {
     }
 }
 
+/// Volatile per-clone "operator last looked at this clone" timestamps (wall-clock ms). Stamped
+/// when a clone gains or loses selection (see [`crate::web::activate`]) and read by the monitor
+/// to decide whether a `working → idle` slide is still news. Deliberately never persisted: on
+/// restart nothing is unread-seeded anyway (the browser baselines silently), so a cold map is the
+/// correct starting point.
+#[derive(Default)]
+pub struct ViewTracker {
+    seen: StdRwLock<HashMap<String, i64>>,
+}
+
+impl ViewTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that the operator looked at `host_id` at `now_ms`. Monotonic: an out-of-order
+    /// stamp never moves the last-viewed time backwards.
+    pub fn mark(&self, host_id: &str, now_ms: i64) {
+        let mut seen = self.seen.write().unwrap();
+        let entry = seen.entry(host_id.to_string()).or_insert(now_ms);
+        *entry = (*entry).max(now_ms);
+    }
+
+    pub fn last_viewed(&self, host_id: &str) -> Option<i64> {
+        self.seen.read().unwrap().get(host_id).copied()
+    }
+
+    /// Drop timestamps for clones no longer in the active managed fleet, so the map cannot grow
+    /// unbounded across the life of a long-running server.
+    pub fn retain(&self, ids: &HashSet<String>) {
+        self.seen.write().unwrap().retain(|id, _| ids.contains(id));
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LxcCpuSample {
     usage_usec: u64,
@@ -222,6 +256,31 @@ fn pick_stat(
     }
 }
 
+/// Whether a `working → not-working` transition should raise the unread badge + browser
+/// notification for a clone. Suppressed when the clone is currently selected (the operator is
+/// already looking at it), or — for an **idle** slide specifically — when the operator has
+/// viewed the clone at or after its last token activity: they have already seen its final output,
+/// so its slide into idle is not news and it simply shows the gray "not working" dot. An
+/// **offline** transition (the container died) is always surfaced, even if recently viewed.
+fn should_flag_unread(
+    next: MonitorState,
+    is_selected: bool,
+    last_viewed_at: Option<i64>,
+    last_token_at: Option<i64>,
+) -> bool {
+    if is_selected {
+        return false;
+    }
+    if next == MonitorState::Idle {
+        if let (Some(viewed), Some(active)) = (last_viewed_at, last_token_at) {
+            if viewed >= active {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     let hosts: Vec<RmngClone> = app
         .store
@@ -306,6 +365,20 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     next.retain(|id, _| active_ids.contains(id));
     stats_map.retain(|id, _| active_ids.contains(id));
     ip_updates.retain(|id, _| active_ids.contains(id));
+    app.views.retain(&active_ids);
+
+    // Snapshot the two inputs to the unread decision (last-viewed + last-token-activity) before
+    // entering `store.mutate`, so we neither hold the view/token locks across the state mutation
+    // nor re-lock them per host inside the closure.
+    let unread_ctx: HashMap<String, (Option<i64>, Option<i64>)> = active_clones
+        .iter()
+        .map(|host| {
+            (
+                host.id.clone(),
+                (app.views.last_viewed(&host.id), app.tokens.last_token_at(&host.id)),
+            )
+        })
+        .collect();
 
     app.stats.publish(&stats_map);
     app.lxc_stats.publish(&lxc_stats);
@@ -337,9 +410,13 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
             if let Some(&monitor_state) = next.get(&host.id) {
                 if host.monitor_state == Some(MonitorState::Working)
                     && monitor_state != MonitorState::Working
-                    && selected.as_deref() != Some(host.id.as_str())
                 {
-                    host.unread = true;
+                    let (last_viewed, last_token) =
+                        unread_ctx.get(&host.id).copied().unwrap_or((None, None));
+                    let is_selected = selected.as_deref() == Some(host.id.as_str());
+                    if should_flag_unread(monitor_state, is_selected, last_viewed, last_token) {
+                        host.unread = true;
+                    }
                 } else if monitor_state == MonitorState::Working {
                     host.unread = false;
                 }
@@ -389,6 +466,47 @@ mod tests {
         assert!((pct - 50.0).abs() < f64::EPSILON);
 
         assert_eq!(lxc_cpu_pct(&mut previous, 10, start + Duration::from_secs(8)), None);
+    }
+
+    #[test]
+    fn selected_clone_never_flags_unread() {
+        // Whatever the timestamps, a clone the operator is currently looking at is not flagged.
+        assert!(!should_flag_unread(MonitorState::Idle, true, None, Some(10)));
+        assert!(!should_flag_unread(MonitorState::Offline, true, Some(1), Some(10)));
+    }
+
+    #[test]
+    fn idle_is_suppressed_only_when_viewed_since_last_activity() {
+        // Viewed at/after last token activity → operator has seen the output → gray dot, no nag.
+        assert!(!should_flag_unread(MonitorState::Idle, false, Some(10), Some(10)));
+        assert!(!should_flag_unread(MonitorState::Idle, false, Some(11), Some(10)));
+        // Last looked before the clone's final activity → they haven't seen it → flag.
+        assert!(should_flag_unread(MonitorState::Idle, false, Some(9), Some(10)));
+        // Never viewed, or no recorded activity to compare against → flag (current behavior).
+        assert!(should_flag_unread(MonitorState::Idle, false, None, Some(10)));
+        assert!(should_flag_unread(MonitorState::Idle, false, Some(10), None));
+    }
+
+    #[test]
+    fn offline_transition_is_always_flagged_even_if_recently_viewed() {
+        // A container that died is surfaced regardless of when it was last viewed.
+        assert!(should_flag_unread(MonitorState::Offline, false, Some(99), Some(10)));
+    }
+
+    #[test]
+    fn view_tracker_is_monotonic_and_prunes() {
+        let views = ViewTracker::new();
+        assert_eq!(views.last_viewed("a"), None);
+        views.mark("a", 100);
+        views.mark("a", 50); // out-of-order stamp must not move it backwards
+        assert_eq!(views.last_viewed("a"), Some(100));
+        views.mark("a", 150);
+        assert_eq!(views.last_viewed("a"), Some(150));
+
+        views.mark("b", 7);
+        views.retain(&HashSet::from(["a".to_string()]));
+        assert_eq!(views.last_viewed("a"), Some(150));
+        assert_eq!(views.last_viewed("b"), None);
     }
 
     #[test]

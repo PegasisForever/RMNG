@@ -290,6 +290,19 @@ struct ActivateReq {
 }
 
 async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<ControlState> {
+    // Stamp "operator looked at this now" for both the clone being left and the one being
+    // entered: each has just been on screen. The monitor reads these to suppress a later
+    // working→idle notification for a clone whose output the operator already saw (see
+    // `monitor::should_flag_unread`). The clone being left is the crucial one — after the
+    // operator switches away, that timestamp is what marks its final output as already seen.
+    let now = crate::clone_ops::now_ms();
+    let previously_selected = app.store.get().selected;
+    if let Some(prev) = previously_selected.as_deref() {
+        app.views.mark(prev, now);
+    }
+    if let Some(id) = req.id.as_deref() {
+        app.views.mark(id, now);
+    }
     Json(app.store.mutate(|s| {
         // Selecting a clone acknowledges its prior working→not-working transition.
         if let Some(id) = req.id.as_deref() {

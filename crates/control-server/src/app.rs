@@ -44,6 +44,10 @@ pub struct App {
     /// Per-clone newly processed token totals. Its browser projection is SSE-only while its
     /// server-private records persist independently from `ControlState`.
     pub tokens: Arc<crate::tokens::TokenBus>,
+    /// Volatile per-clone "operator last looked at this clone" timestamps. Set on selection
+    /// changes (`web::activate`) and read by the monitor to suppress a `working → idle`
+    /// notification for a clone whose latest output the operator has already seen.
+    pub views: Arc<crate::monitor::ViewTracker>,
 }
 
 impl App {
@@ -75,6 +79,7 @@ impl App {
             lxc_stats: Arc::new(crate::monitor::LxcStatsBus::new()),
             forwards: Arc::new(crate::forward::ForwardBus::new()),
             tokens,
+            views: Arc::new(crate::monitor::ViewTracker::new()),
         }
     }
 
