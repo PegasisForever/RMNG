@@ -91,6 +91,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 user,
                 workdir,
                 env,
+                detach,
                 cmd,
             } => {
                 commands::exec(
@@ -100,6 +101,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                     workdir.as_deref(),
                     env,
                     cmd,
+                    *detach,
                     json,
                 )
                 .await

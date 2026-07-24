@@ -590,6 +590,19 @@ async fn clone_exec(
     } else {
         req.env.clone()
     };
+    // Fire-and-forget: launch detached and return at once (no capture, no wait). Any `stdin_b64` is
+    // ignored — there is nothing attached to feed it to. Exit code is reported as 0 = "spawned".
+    if req.detach {
+        app.docker
+            .exec_detached(&host.id, &req.cmd, &user, req.workdir.as_deref(), &env)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        return Ok(Json(wire::ExecResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+    }
     let result = app
         .docker
         .exec_capture(
@@ -2664,11 +2677,21 @@ mod tests {
             workdir: Some("/tmp".into()),
             env: vec!["A=1".into()],
             stdin_b64: Some("aGk=".into()),
+            detach: false,
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["cmd"][0], "cat");
         assert_eq!(v["stdinB64"], "aGk=");
         assert!(v.get("stdin_b64").is_none(), "must use camelCase key");
+        // `detach` is omitted when false (skip_serializing_if) and present when set.
+        assert!(v.get("detach").is_none(), "detach:false must be omitted from the wire");
+        let detached = serde_json::to_value(wire::ExecRequest {
+            cmd: vec!["x".into()],
+            detach: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(detached["detach"], true);
         // Result: exitCode maps back onto the i64 exit_code field.
         let res: wire::ExecResult =
             serde_json::from_str(r#"{ "exitCode": 3, "stdout": "out", "stderr": "err" }"#).unwrap();

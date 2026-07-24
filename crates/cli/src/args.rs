@@ -137,6 +137,10 @@ pub enum CloneCmd {
         /// Extra environment `KEY=VAL` (repeatable)
         #[arg(short = 'e', long)]
         env: Vec<String>,
+        /// Launch detached (fire-and-forget): return immediately with no captured output —
+        /// for GUI apps on the clone desktop (`rmng clone exec -d c -- gnome-text-editor`)
+        #[arg(short = 'd', long)]
+        detach: bool,
         /// The command argv, after `--` (e.g. `rmng clone exec c -- ls -la`)
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
@@ -592,14 +596,15 @@ mod tests {
     fn clone_exec_separates_command_after_dashes() {
         let cli = Cli::parse_from([
             "rmng", "clone", "exec", "c", "-u", "root", "-w", "/srv", "-e", "A=1", "-e", "B=2",
-            "--", "env",
+            "-d", "--", "env",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::Exec { clone, user, workdir, env, cmd }) => {
+            Cmd::Clone(CloneCmd::Exec { clone, user, workdir, env, detach, cmd }) => {
                 assert_eq!(clone, "c");
                 assert_eq!(user.as_deref(), Some("root"));
                 assert_eq!(workdir.as_deref(), Some("/srv"));
                 assert_eq!(env, vec!["A=1".to_string(), "B=2".to_string()]);
+                assert!(detach, "-d should set detach");
                 assert_eq!(cmd, vec!["env".to_string()]);
             }
             other => panic!("wrong cmd: {other:?}"),

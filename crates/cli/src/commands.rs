@@ -1141,6 +1141,7 @@ pub async fn exec(
     workdir: Option<&str>,
     env: &[String],
     cmd: &[String],
+    detach: bool,
     json: bool,
 ) -> Result<u8> {
     use std::io::{IsTerminal, Read, Write};
@@ -1155,7 +1156,9 @@ pub async fn exec(
     // idle open pipe yields nothing within the grace window and we forward no stdin. A
     // ready fd still drains fully, so large piped input is fine (the poll only bounds
     // the wait for the first byte).
-    let stdin_b64 = if std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE) {
+    // Detached execs return no output and take no stdin (nothing is attached), so skip the drain.
+    let stdin_b64 = if detach || std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE)
+    {
         None
     } else {
         let mut buf = Vec::new();
@@ -1169,12 +1172,14 @@ pub async fn exec(
         workdir: workdir.map(str::to_string),
         env: env.to_vec(),
         stdin_b64,
+        detach,
     };
     let result = client.exec(clone, &req).await?;
 
     if json {
         emit_json(&result)?;
-    } else {
+    } else if !detach {
+        // Detached: the server returns an empty result immediately — nothing to print.
         print!("{}", result.stdout);
         std::io::stdout().flush().ok();
         eprint!("{}", result.stderr);
