@@ -205,15 +205,42 @@ impl MediaHandle {
 /// encoder pipeline fresh — mid-stream VA-encoder resolution renegotiation is unreliable.
 type Encoders = Arc<Mutex<HashMap<u32, (Arc<Encoder>, u32, u32)>>>;
 
-pub fn spawn(app: App) {
+/// Proof that [`init`] completed. Opaque so callers must go through [`init`]
+/// rather than inventing an “enabled” boolean.
+pub struct MediaInit {
+    enabled: bool,
+}
+
+impl MediaInit {
+    #[cfg(test)]
+    pub(crate) fn enabled_for_test(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// Initialize GStreamer (and related media env) once. Must run **before** any
+/// background task that can spawn a child process — inherited scanner pipes
+/// otherwise hang init forever (ports never bind).
+///
+/// Failure is non-fatal: returns a disabled token so the web API still boots.
+pub fn init() -> MediaInit {
+    match media::init() {
+        Ok(()) => MediaInit { enabled: true },
+        Err(e) => {
+            tracing::error!("media init failed; port 1 disabled: {e}");
+            MediaInit { enabled: false }
+        }
+    }
+}
+
+pub fn spawn(app: App, init: MediaInit) {
+    if !init.enabled {
+        return;
+    }
     // `spawn` is called from the async `main`, so a tokio runtime exists here; capture its
     // handle so the std-thread media plane can `block_on` async control-plane calls
     // (`App::dial_clone`) from the forward-data serve threads.
     let rt_handle = tokio::runtime::Handle::current();
-    if let Err(e) = media::init() {
-        tracing::error!("media init failed; port 1 disabled: {e}");
-        return;
-    }
     let cfg = app.config();
     let video_port = cfg.listen.video;
     let forward_port = cfg.listen.forward;
@@ -1083,6 +1110,12 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_init_disabled_token_is_distinguishable() {
+        let disabled = MediaInit { enabled: false };
+        assert!(!disabled.enabled_for_test());
+    }
 
     /// Connect a SOCK_SEQPACKET client to `path` — the daemon side of an accept pair
     /// (mirrors `clone-daemon`'s `Transport::connect`). The returned fd only has to stay
