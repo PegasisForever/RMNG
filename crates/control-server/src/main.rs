@@ -6,6 +6,7 @@
 mod antigravity;
 mod app;
 mod assets;
+mod boot;
 mod buildinfra;
 mod cgroup;
 mod chat;
@@ -202,32 +203,44 @@ async fn main() -> Result<()> {
         tracing::error!("legacy token migration panicked (booting anyway): {e:?}");
     }
 
-    // Background loops: the per-host agent-state monitor poller, the clone-home reconciler
-    // (the Docker-port successor to the Proxmox-era sshfs mount loop — it symlinks
-    // data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so every clone's home is browsable
-    // in one place; needs the container's `pid: "host"`), the smbd supervisor that serves that
-    // same directory as the `clones` SMB share (port 445), so the homes are browsable over
-    // `smb://<host>/clones` too, and the /dev/shm reconciler that keeps each running clone's
-    // shared memory at LXC parity (~50% of RAM) so Chromium/Electron apps don't exhaust
-    // Docker's 64 MB default (also needs `pid: "host"`). Claude/Codex account usage is polled
-    // by-group via `cliproxy::run_usage_poller` (below), which owns all account display now.
-    tokio::spawn(monitor::run(app.clone()));
-    tokio::spawn(clone_reconcile::run(app.clone()));
-    tokio::spawn(homes::run(app.clone()));
-    tokio::spawn(shm::run(app.clone()));
-    tokio::spawn(buildinfra::run(app.clone()));
-    tokio::spawn(smb::run(app.clone()));
-    tokio::spawn(ssh::run(app.clone()));
-    // Group-proxy supervisor: one CLIProxyAPI instance per account group.
-    tokio::spawn(cliproxy::run(app.clone()));
-    // By-group usage poller: reads each instance's auth-dir tokens and publishes
-    // `ControlState.usage_groups` (the old flat claude_accounts pollers stay running).
-    tokio::spawn(cliproxy::run_usage_poller(app.clone()));
-    tokio::spawn(app.tokens.clone().run_persister());
-    tokio::spawn(app.tokens.clone().run_fable_ticker());
-
-    // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
-    mediaplane::spawn(app.clone());
+    // GStreamer init MUST finish before cliproxy/smb/ssh (and any other child
+    // spawners). Those supervisors otherwise inherit gst-plugin-scanner pipes and
+    // hang media init forever — web/video/forward never bind. See
+    // docs/superpowers/specs/2026-07-24-gstreamer-init-before-children-design.md.
+    let app_for_bg = app.clone();
+    let app_for_media = app.clone();
+    boot::run_late_boot(
+        mediaplane::init,
+        move || {
+            // Background loops: the per-host agent-state monitor poller, the clone-home reconciler
+            // (the Docker-port successor to the Proxmox-era sshfs mount loop — it symlinks
+            // data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so every clone's home is browsable
+            // in one place; needs the container's `pid: "host"`), the smbd supervisor that serves that
+            // same directory as the `clones` SMB share (port 445), so the homes are browsable over
+            // `smb://<host>/clones` too, and the /dev/shm reconciler that keeps each running clone's
+            // shared memory at LXC parity (~50% of RAM) so Chromium/Electron apps don't exhaust
+            // Docker's 64 MB default (also needs `pid: "host"`). Claude/Codex account usage is polled
+            // by-group via `cliproxy::run_usage_poller` (below), which owns all account display now.
+            tokio::spawn(monitor::run(app_for_bg.clone()));
+            tokio::spawn(clone_reconcile::run(app_for_bg.clone()));
+            tokio::spawn(homes::run(app_for_bg.clone()));
+            tokio::spawn(shm::run(app_for_bg.clone()));
+            tokio::spawn(buildinfra::run(app_for_bg.clone()));
+            tokio::spawn(smb::run(app_for_bg.clone()));
+            tokio::spawn(ssh::run(app_for_bg.clone()));
+            // Group-proxy supervisor: one CLIProxyAPI instance per account group.
+            tokio::spawn(cliproxy::run(app_for_bg.clone()));
+            // By-group usage poller: reads each instance's auth-dir tokens and publishes
+            // `ControlState.usage_groups` (the old flat claude_accounts pollers stay running).
+            tokio::spawn(cliproxy::run_usage_poller(app_for_bg.clone()));
+            tokio::spawn(app_for_bg.tokens.clone().run_persister());
+            tokio::spawn(app_for_bg.tokens.clone().run_fable_ticker());
+        },
+        move |media_init| {
+            // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
+            mediaplane::spawn(app_for_media, media_init);
+        },
+    );
 
     web::serve(app).await
 }
