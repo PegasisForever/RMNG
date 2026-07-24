@@ -406,6 +406,18 @@ The surface is **noun → verb**: `rmng <noun> <verb> [<clone>] [flags]`. Every 
 under `--json` even errors are JSON). The target is always the **clone id** — the first column
 of `rmng clone ls`.
 
+## Headed vs headless clones
+
+Every clone is one of two kinds, fixed at creation:
+- **headed** (the default) — a full GUI desktop. Supports computer use via `rmng desktop`
+  (screenshot/click/type/…) and a video stream in the viewer. Heavier.
+- **headless** (`rmng clone create … --headless`) — no desktop; a terminal/tmux view only.
+  Lighter and faster to boot. `rmng desktop` does NOT work on a headless clone (it has no
+  desktop MCP) — use `rmng clone exec` / `rmng clone ssh` instead.
+
+Pick **headless** for pure coding/CLI work; pick **headed** only when the task needs a browser
+or GUI. The kind can't be changed after creation.
+
 ## Inspect the fleet
 
 - `rmng clone ls` — list clones with live CPU, RAM, token totals, status, and account group.
@@ -420,8 +432,9 @@ of `rmng clone ls`.
 - `rmng clone exec <clone> -- <argv…>` — run one non-interactive command inside another clone
   (docker-exec style). Flags: `-u <user>`, `-w <dir>`, `-e KEY=VAL` (repeatable). Passes through
   the command's exit code. Example: `rmng clone exec pega-we-142 -- ls -la /home/rmng`.
-- `rmng desktop <clone> <verb>` — drive another clone's desktop for computer use (each action
-  returns a fresh screenshot; add `--json` for `{screenshot, text}`). Verbs: `screenshot`,
+- `rmng desktop <clone> <verb>` — drive another clone's desktop for computer use (**headed
+  clones only** — see above; each action returns a fresh screenshot; add `--json` for
+  `{screenshot, text}`). Verbs: `screenshot`,
   `monitors`, `windows`, `apps`, `move X Y`, `click [X Y]`, `right-click`, `middle-click`,
   `double-click`, `scroll`, `key <chord>`, `type <text>`, `launch <id>`, `move-window <id>`.
   Example: `rmng desktop pega-we-142 screenshot`.
@@ -437,7 +450,8 @@ of `rmng clone ls`.
   - `--group <name>` / `--no-group` — a different account group, or none.
   - `--top-level` — a top-level clone instead of a sub host (also skips inheritance).
   - `--parent <clone>` — nest under a specific top-level clone (inherits that parent's group/preset).
-  - `--headless` — no desktop (tmux view instead of a video stream).
+  - `--headless` — create a headless clone (no desktop; see "Headed vs headless" above).
+    Default is headed.
   Add `--wait` to block until it's ready.
 - `rmng clone rm <clone> [-y]` — destroy a clone (prompts unless `-y`; also removes its sub hosts).
   Non-interactive callers MUST pass `-y`.
