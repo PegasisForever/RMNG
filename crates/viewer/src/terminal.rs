@@ -35,8 +35,15 @@ use gtk4::pango;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::ObjectSubclassIsExt;
 
-/// Font used when the GNOME `monospace-font-name` setting isn't available (non-GNOME / macOS).
-/// A point size (not `px`), so it scales with DPI + text-scaling like the rest of the desktop.
+/// Font used when the desktop's `monospace-font-name` is unset, or names a family that does not
+/// resolve to an installed monospace face. A point size (not `px`), so it scales with DPI +
+/// text-scaling like the rest of the desktop.
+///
+/// macOS gets an explicit family: fontconfig's generic `Monospace` alias does resolve there, but
+/// naming the system terminal font is both faster to resolve and what the platform expects.
+#[cfg(target_os = "macos")]
+const FALLBACK_FONT: &str = "Menlo 11";
+#[cfg(not(target_os = "macos"))]
 const FALLBACK_FONT: &str = "Monospace 11";
 /// Cell-height multiplier over the font's natural ascent+descent (glyphs are vertically centered
 /// in the taller cell). 1.0 = tight/VTE-default; >1.0 adds line spacing.
@@ -72,13 +79,44 @@ fn interface_settings() -> Option<gio::Settings> {
 /// The terminal font: the GNOME `monospace-font-name` (e.g. `"Monaspace Neon Frozen 11"` — a
 /// family plus a point size), or [`FALLBACK_FONT`]. DPI and text-scaling are applied later by the
 /// widget's pango context, so this matches how the rest of the desktop sizes the same font.
-fn load_font(settings: Option<&gio::Settings>) -> pango::FontDescription {
-    if let Some(s) = settings {
-        let name = s.string("monospace-font-name");
-        if !name.is_empty() {
-            let fd = pango::FontDescription::from_string(&name);
-            if fd.family().is_some() {
-                return fd;
+fn load_font(settings: Option<&gio::Settings>, ctx: &pango::Context) -> pango::FontDescription {
+    let requested = settings.map(|s| s.string("monospace-font-name").to_string());
+    pick_font(requested.as_deref(), |family| {
+        ctx.font_map().is_some_and(|fm| {
+            fm.list_families()
+                .iter()
+                .any(|f| f.name().eq_ignore_ascii_case(family) && f.is_monospace())
+        })
+    })
+}
+
+/// Choose the terminal font: the desktop's `requested` monospace font when it resolves to an
+/// installed monospace family, else [`FALLBACK_FONT`].
+///
+/// The family MUST be checked against the font map, not merely parsed. A `FontDescription` built
+/// from a missing family still reports `family() == Some(..)`, and pango then silently substitutes
+/// a **proportional** face — so the old `fd.family().is_some()` guard could not catch it. That is
+/// exactly what happens on macOS: Homebrew pulls in `gsettings-desktop-schemas` as a GStreamer
+/// dependency, so the GNOME schema *is* readable and yields `'Adwaita Mono 11'` for a font that is
+/// not installed. Measuring cell metrics from the substituted proportional face garbles the grid
+/// and ships a wrong column count to the real tmux PTYs. Linux is protected by the same check.
+///
+/// `is_monospace_family` is injected so the decision is testable without a display.
+fn pick_font(
+    requested: Option<&str>,
+    is_monospace_family: impl Fn(&str) -> bool,
+) -> pango::FontDescription {
+    if let Some(name) = requested {
+        if !name.trim().is_empty() {
+            let fd = pango::FontDescription::from_string(name);
+            if let Some(family) = fd.family() {
+                if is_monospace_family(&family) {
+                    return fd;
+                }
+                tracing::warn!(
+                    "terminal font {family:?} is not an installed monospace family; \
+                     falling back to {FALLBACK_FONT}"
+                );
             }
         }
     }
@@ -273,9 +311,9 @@ mod imp {
         /// Lazily build the monospace font + measure the cell size; publish it to the shared cell.
         fn ensure_metrics(&self) -> (f64, f64) {
             if self.font.borrow().is_none() {
-                let fd = load_font(self.settings.borrow().as_ref());
-                gtk4::glib::g_debug!("rmng-term", "terminal font: {}", fd.to_str());
                 let ctx = self.obj().pango_context();
+                let fd = load_font(self.settings.borrow().as_ref(), &ctx);
+                gtk4::glib::g_debug!("rmng-term", "terminal font: {}", fd.to_str());
                 let m = ctx.metrics(Some(&fd), None);
                 let cw = (m.approximate_char_width() as f64 / pango::SCALE as f64).max(1.0);
                 let natural = (m.ascent() + m.descent()) as f64 / pango::SCALE as f64;
@@ -1236,4 +1274,51 @@ fn encode_key(keyval: gdk::Key, state: gdk::ModifierType, app_cursor: bool) -> O
     }
     out.extend_from_slice(s.as_bytes());
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The macOS failure this guard fixes: the desktop setting names a family that is not
+    /// installed, so pango substitutes a proportional face and the cell metrics get measured from
+    /// it. A descriptor for a missing family still reports `family() == Some(..)`, so only a
+    /// font-map check can catch it.
+    #[test]
+    fn unresolvable_family_falls_back() {
+        let fd = pick_font(Some("Adwaita Mono 11"), |_| false);
+        assert_eq!(fd.to_str(), pango::FontDescription::from_string(FALLBACK_FONT).to_str());
+    }
+
+    #[test]
+    fn resolvable_monospace_family_is_honoured() {
+        let fd = pick_font(Some("Menlo 13"), |f| f == "Menlo");
+        assert_eq!(fd.family().as_deref(), Some("Menlo"));
+        assert_eq!(fd.size(), 13 * pango::SCALE);
+    }
+
+    /// A family that resolves but is *proportional* must be rejected too — that is the actual
+    /// substitution failure mode, not just a missing font.
+    #[test]
+    fn resolvable_but_proportional_family_falls_back() {
+        let fd = pick_font(Some("Helvetica 11"), |f| f != "Helvetica");
+        assert_eq!(fd.to_str(), pango::FontDescription::from_string(FALLBACK_FONT).to_str());
+    }
+
+    #[test]
+    fn missing_or_blank_setting_falls_back() {
+        for requested in [None, Some(""), Some("   ")] {
+            let fd = pick_font(requested, |_| true);
+            assert_eq!(fd.to_str(), pango::FontDescription::from_string(FALLBACK_FONT).to_str());
+        }
+    }
+
+    /// The fallback itself must name a real family with a point size, or the guard just swaps one
+    /// broken grid for another.
+    #[test]
+    fn fallback_names_a_family() {
+        let fd = pango::FontDescription::from_string(FALLBACK_FONT);
+        assert!(fd.family().is_some(), "FALLBACK_FONT must name a family");
+        assert!(fd.size() > 0, "FALLBACK_FONT must carry a point size");
+    }
 }
