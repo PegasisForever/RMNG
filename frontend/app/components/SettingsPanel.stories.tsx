@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
 import { SettingsPanel } from "./SettingsPanel";
+import type { Operation } from "~/lib/types";
 import { appConfig, groups, images, usageGroups } from "~/stories/fixtures";
 
 // Mocked server calls — the component never imports the real API, so a story just
@@ -23,6 +24,19 @@ const getUpdateStatus = () =>
     error: null,
   }));
 
+// A self-update op mid-flight, so the inline progress bar under the Update button renders.
+const updateOp: Operation = {
+  id: "op_update_1",
+  kind: "update",
+  target: "rmng-control",
+  status: "running",
+  step: "pull",
+  pct: 45,
+  message: "pulling pegasis0/rmng:latest",
+  log: ["queued self-update", "pulling pegasis0/rmng:latest"],
+  startedAt: 0,
+};
+
 const meta = {
   title: "Settings/SettingsPanel",
   component: SettingsPanel,
@@ -35,7 +49,9 @@ const meta = {
     putConfig: putConfig(),
     testConfig: testConfig(),
     getUpdateStatus: getUpdateStatus(),
-    updateServer: fn(),
+    updateServer: fn(async () => updateOp),
+    // No op in flight in the default story; `UpdateInProgress` supplies one.
+    operations: [],
     restartServer: fn(async () => ({ ok: true })),
     images,
     imagesLoading: false,
@@ -68,4 +84,10 @@ export const PreSetup: Story = {
 /** No account groups configured yet — the manager shows the empty state. */
 export const NoGroups: Story = {
   args: { groups: [], usageGroups: [] },
+};
+
+/** A self-update in flight: its progress renders inline under the Update button, so the
+ *  operator doesn't have to watch the sidebar to know how far along the restart is. */
+export const UpdateInProgress: Story = {
+  args: { operations: [updateOp] },
 };

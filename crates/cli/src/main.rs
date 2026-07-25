@@ -54,31 +54,60 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             CloneCmd::Ls => commands::clone_ls(client, json).await,
             CloneCmd::Create {
                 hostname,
-                from,
-                group,
-                no_group,
                 preset,
                 no_preset,
-                headless,
-                parent,
-                top_level,
-                wait,
+                common,
             } => {
-                commands::clone_create(
+                commands::clone_create(client, hostname, preset.as_deref(), *no_preset, common, json)
+                    .await
+            }
+            CloneCmd::Ticket {
+                ticket,
+                agent_instructions,
+                claude_instructions,
+                common,
+            } => {
+                commands::clone_ticket(
                     client,
-                    hostname,
-                    from,
-                    group.as_deref(),
-                    *no_group,
-                    preset.as_deref(),
-                    *no_preset,
-                    *headless,
-                    parent.as_deref(),
-                    *top_level,
-                    wait,
+                    ticket,
+                    agent_instructions.as_ref(),
+                    claude_instructions.as_ref(),
+                    common,
                     json,
                 )
                 .await
+            }
+            CloneCmd::NewTicket {
+                team,
+                title,
+                description,
+                description_file,
+                agent_instructions,
+                claude_instructions,
+                common,
+            } => {
+                let body = args::read_text(description.as_ref(), description_file.as_ref())?;
+                commands::clone_new_ticket(
+                    client,
+                    team,
+                    title,
+                    &body,
+                    agent_instructions.as_ref(),
+                    claude_instructions.as_ref(),
+                    common,
+                    json,
+                )
+                .await
+            }
+            CloneCmd::Plain {
+                title,
+                message,
+                message_file,
+                preset,
+                common,
+            } => {
+                let body = args::read_text(message.as_ref(), message_file.as_ref())?;
+                commands::clone_plain(client, title, &body, preset.as_deref(), common, json).await
             }
             CloneCmd::Rm { clone, yes, wait } => {
                 commands::clone_rm(client, clone, *yes, wait, json).await
@@ -106,8 +135,8 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 )
                 .await
             }
-            CloneCmd::Bind { clone, group, none } => {
-                commands::clone_bind(client, clone, group.as_deref(), *none, json).await
+            CloneCmd::Bind { clone, group } => {
+                commands::clone_bind(client, clone, group, json).await
             }
             CloneCmd::Select { clone, none } => {
                 commands::select(client, clone.as_deref(), *none, json).await

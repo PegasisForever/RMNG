@@ -76,6 +76,12 @@ async fn main() -> Result<()> {
     // `/api/layout/activate` call runs.
     web::mirror_layout_to_state(&app);
 
+    // Every clone binds an account group. Rows from before that rule (no `group` key at all)
+    // and rows naming a since-deleted group are repointed at the first configured group —
+    // `config::load` above guarantees there is one. Done before the reconcilers start so no
+    // pass ever sees a group-less clone.
+    web::normalize_clone_groups(&app);
+
     // Probe the Docker environment (daemon reachable, self-container detection, sock mount,
     // render node) and cache the report so `GET /api/setup/env` + the wizard can render it.
     // Non-fatal: a down daemon / failed check must NOT stop the server booting — the wizard

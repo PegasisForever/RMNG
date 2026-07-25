@@ -28,7 +28,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
-| POST | `/api/hosts/:id/group` | Bind or clear a clone's provider-agnostic account group | 200 `{ok,group}` |
+| POST | `/api/hosts/:id/group` | Rebind a clone's provider-agnostic account group (required; can't be cleared) | 200 `{ok,group}` |
 | PUT | `/api/hosts/:id/forwards` | Replace a clone's port-forward rules | 200 `ControlState` |
 | POST | `/api/layout/activate` | Make a layout preset active and live-apply it to all running clones | 200 `{ok,applied,errors}` |
 | GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
@@ -172,7 +172,7 @@ Body (one of four modes + optional account/instructions):
   "image": "pegasis0/rmng-template:latest", // required: clone-source image reference (from GET /api/images)
   // -- pick ONE mode --
   "ticket": "DEV-123",              // existing Linear ticket, OR
-  "create": { "team": "dev", "title": "...", "description": "..." },      // new ticket, OR
+  "create": { "team": "dev", "title": "...", "description": "<markdown>" }, // new ticket, OR
   "plain":  { "title": "quick task", "message": "do X" },                 // no ticket, OR
   "hostname": "w-cp-claude",        // raw clone under this exact hostname (fleet CLI mode)
   // -- optional --
@@ -180,14 +180,24 @@ Body (one of four modes + optional account/instructions):
                                     //   absent/"auto" auto-selects by the ticket's labels
                                     //   (400 listing them if nothing matches). Plain mode:
                                     //   REQUIRED while any presets exist. Create mode:
-                                    //   REQUIRED (the preset's key creates the ticket).
+                                    //   REQUIRED (the preset's key creates the ticket) —
+                                    //   the web dialog derives it from the chosen team key.
                                     //   Hostname mode: OPTIONAL (fleet workers usually
                                     //   need none; a named preset still applies its env).
-  "group": "pooled",                // provider-agnostic account pool; omitted/blank = no inference binding
+  "group": "pooled",                // provider-agnostic account pool. Every clone binds one, so
+                                    //   omitting this falls through: parent's group (sub clone)
+                                    //   → the preset's default group → the first configured
+                                    //   group. An unknown name is a 400.
   "agentInstructions": "...",       // extra context for the agent-wrapper
   "claudeInstructions": "..."       // extra instructions for Claude Code
 }
 ```
+**Create mode's `description` is markdown**, and any `/uploads/<name>` image reference in it
+is re-hosted in Linear (`fileUpload` → signed PUT) before the issue is created — otherwise the
+ticket would point at this server's LAN-only upload store and render broken for anyone off the
+network. A file that can't be read or uploaded keeps its original URL and logs a warning
+rather than failing the clone.
+
 `image` accepts a `repo:tag` reference (e.g. `pegasis0/rmng-template:latest`), a full `sha256:…` id, or a bare 64-hex id;
 whatever form is passed is canonicalized to the reference and recorded on the clone as
 `source`. The image must carry the `rmng.image=1` label (a raw non-image id is rejected). The
@@ -240,10 +250,16 @@ clones return `400`.
 Restart a retained archived clone. Returns an `unarchive` `Operation`; the prior group binding and
 cumulative token totals are retained.
 
-### `POST /api/hosts/:id/group` — body `{ "group": string | null }`
-Set the sole provider-agnostic account group for a managed clone, or clear it with `null`/blank.
-The server rejects unknown groups. The `/cc` proxy maps the clone to this group's CLIProxyAPI
-instance, which performs provider-specific account selection and refresh.
+### `POST /api/hosts/:id/group` — body `{ "group": string }`
+Set the sole provider-agnostic account group for a managed clone. The `/cc` proxy maps the clone
+to this group's CLIProxyAPI instance, which performs provider-specific account selection and
+refresh.
+
+The name is **required**: every clone binds a group, so a binding can be changed but never
+cleared. A `null`/blank/absent name is a `400`, as is an unknown one. The server also guarantees
+at least one group exists and repoints any clone whose group is blank or dangling (at boot and on
+every reconciler pass), so a group deleted out from under a live clone lands it on the first
+configured group rather than leaving it without inference.
 
 ---
 
@@ -361,7 +377,7 @@ not separate clone bindings.
 | `POST /api/groups/:name/accounts/login/complete` | redirect payload | login state | Complete OAuth enrollment |
 | `POST /api/groups/:name/accounts/delete` | `{file}` | `{ok}` | Delete one provider credential file from a group |
 | `POST /api/usage/refresh` | — | `{ok}` | Refresh provider usage where the upstream exposes it |
-| `POST /api/hosts/:id/group` | `{group:null|name}` | `{ok,group}` | Change a managed clone's sole group binding without restarting it |
+| `POST /api/hosts/:id/group` | `{group:name}` | `{ok,group}` | Change a managed clone's sole group binding without restarting it |
 
 `usageGroups` in `ControlState` reports group membership and usage. Gemini/Antigravity is a
 presence-only row when its upstream does not expose pollable quota.

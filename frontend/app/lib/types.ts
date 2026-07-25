@@ -42,11 +42,15 @@ export interface Clone {
   source?: string;
   /**
    * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's
-   * agents route through, via the control-server's `/cc` router. Absent/undefined =
-   * no inference bound. This is the sole account binding — CLIProxyAPI owns
-   * intra-group account selection + refresh. Server-only; the Rust client ignores it.
+   * agents route through, via the control-server's `/cc` router. This is the sole
+   * account binding — CLIProxyAPI owns intra-group account selection + refresh.
+   * Server-only; the Rust client ignores it.
+   *
+   * Always present — the server repoints blank/dangling bindings at load and on every
+   * reconciler pass — but can read `""` in the window before that runs, or on a row
+   * written by an older build.
    */
-  group?: string;
+  group: string;
   /** Linear workspace name this clone's ticket belongs to (selects the card color). */
   linearWorkspace?: string;
   /** Linear ticket identifier, e.g. "WE-142". */
@@ -94,8 +98,9 @@ export interface Operation {
    * What the op acts on: clone id (clone/delete) or image name (pull/commit).
    */
   target: string;
-  /** Clone source image reference (clone), or source clone id (commit). */
-  source?: string;
+  /** Clone source image reference (clone), or source clone id (commit). Serialized as
+   *  `null` when absent (the wire type is `Option<String>` with no skip), so accept both. */
+  source?: string | null;
   status: OperationStatus;
   /** Current step key (maps to a coarse percentage in the UI). */
   step: string;

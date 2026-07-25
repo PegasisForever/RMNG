@@ -62,7 +62,7 @@ export const cloneOffline: Clone = {
   monitorState: "idle",
 };
 
-/** A managed scratch box with no account group bound (no inference). */
+/** A managed scratch box on the default group (every clone binds one). */
 export const cloneNoToken: Clone = {
   id: "scratch-box",
   host: "10.99.0.20",
@@ -70,6 +70,7 @@ export const cloneNoToken: Clone = {
   username: "pega",
   password: "",
   managed: true,
+  group: "Default",
   monitorState: "idle",
 };
 
@@ -80,6 +81,9 @@ export const cloneUnmanaged: Clone = {
   port: 3389,
   username: "admin",
   password: "",
+  // Deliberately blank: the one fixture covering the transient pre-normalize state, so the
+  // sidebar is exercised against a row whose group hasn't been filled in yet.
+  group: "",
   monitorState: "idle",
 };
 
@@ -347,6 +351,7 @@ export const appConfig: AppConfigRedacted = {
       name: "webapp",
       labels: ["frontend", "webapp"],
       linearKeySet: true,
+      group: "pooled",
       vars: [{ key: "NODE_ENV", value: "development" }],
       agentPlaybook: "",
       globalPrompt: "",

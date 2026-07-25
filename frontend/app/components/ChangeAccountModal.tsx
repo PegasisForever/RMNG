@@ -1,17 +1,22 @@
 // Change a clone's account-group binding after creation. Under the group-proxy model a
-// clone binds exactly one pool (a CLIProxyAPI instance) or none; changing it is a pure
-// map update on the control-server — no clone-side change and no restart. CLIProxyAPI
-// owns intra-group account selection + failover.
+// clone binds exactly one pool (a CLIProxyAPI instance); changing it is a pure map update
+// on the control-server — no clone-side change and no restart. CLIProxyAPI owns
+// intra-group account selection + failover.
 import { useEffect, useState } from "react";
 
-import { AccountGroupSelect, NO_GROUP } from "~/components/AccountGroupSelect";
+import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { getConfig } from "~/lib/api";
 import type { Clone } from "~/lib/types";
 import type { Group } from "~/lib/wire/Group";
 
-/** The clone's current binding as a picker value: its group name, or "none". */
-export function currentValue(clone: Clone): string {
-  return clone.group ?? NO_GROUP;
+/**
+ * The clone's current binding as a picker value, falling back to the first configured group.
+ * Every clone binds a group — the server repoints blank/dangling bindings at load and on
+ * every reconciler pass — but a row can still read blank in the window before that runs, so
+ * preselect a real group rather than showing a blank select.
+ */
+export function currentValue(clone: Clone, groups: Group[]): string {
+  return clone.group || groups[0]?.name || "";
 }
 
 export function ChangeAccountModal({
@@ -23,18 +28,24 @@ export function ChangeAccountModal({
   clone: Clone;
   busy: boolean;
   onClose: () => void;
-  /** The new binding: a group name, or `null` to clear it. */
-  onSubmit: (group: string | null) => void;
+  /** The new binding: a group name. */
+  onSubmit: (group: string) => void;
 }) {
-  const [value, setValue] = useState(() => currentValue(clone));
   const [groups, setGroups] = useState<Group[]>([]);
+  const [value, setValue] = useState(() => clone.group);
 
   useEffect(() => {
     getConfig()
-      .then((c) => setGroups(c.groups))
+      .then((c) => {
+        setGroups(c.groups);
+        // A blank binding has nothing selected until the list arrives; land on the first
+        // real group so Apply can't submit an empty name.
+        setValue((v) => v || currentValue(clone, c.groups));
+      })
       .catch(() => {
-        // Config unreachable — only the current value / "none" are offered.
+        // Config unreachable — the select stays empty and Apply is disabled below.
       });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -54,8 +65,8 @@ export function ChangeAccountModal({
           <span className="text-emerald-700 dark:text-emerald-400">{clone.displayName ?? clone.id}</span>
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Bind this clone to an account pool, or “none” for no inference. The change is a
-          routing update — no clone restart, and it takes effect on the next request.
+          Bind this clone to an account pool. The change is a routing update — no clone
+          restart, and it takes effect on the next request.
         </p>
 
         <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
@@ -78,8 +89,8 @@ export function ChangeAccountModal({
           </button>
           <button
             type="button"
-            onClick={() => onSubmit(value === NO_GROUP ? null : value)}
-            disabled={busy}
+            onClick={() => onSubmit(value)}
+            disabled={busy || !value}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
             {busy ? "Applying…" : "Apply"}

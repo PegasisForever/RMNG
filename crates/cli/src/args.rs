@@ -56,25 +56,53 @@ pub enum Cmd {
     },
 }
 
+/// Flags shared by every clone-creating verb (`create` / `ticket` / `new-ticket` / `plain`),
+/// matching the controls the web dialog shows below its three tabs.
+#[derive(Args, Debug)]
+pub struct CreateArgs {
+    /// Clone-source image reference to create from (see `rmng image ls`)
+    #[arg(long)]
+    pub from: String,
+    /// Account group OVERRIDE — the pool this clone's agents route through. Every clone binds
+    /// one; omitted falls back to the parent's group (inside a clone), then the preset's
+    /// default, then the first configured group.
+    #[arg(long)]
+    pub group: Option<String>,
+    /// Headless clone: no desktop; the viewer shows a tmux tab view instead of a stream
+    #[arg(long)]
+    pub headless: bool,
+    /// Create as a sub clone under this parent clone id (must be top-level). Overrides the
+    /// default caller auto-detection. Conflicts with --top-level.
+    #[arg(long, conflicts_with = "top_level")]
+    pub parent: Option<String>,
+    /// Force a top-level clone even when run from inside a clone (skip auto-nesting)
+    #[arg(long)]
+    pub top_level: bool,
+    #[command(flatten)]
+    pub wait: WaitArgs,
+}
+
+/// Read `--description` / `--description-file` into one markdown string. The file form
+/// exists because a markdown body with newlines and images is painful to pass as an argv
+/// word; `-` reads stdin, so a heredoc or a pipe works.
+pub fn read_text(inline: Option<&String>, file: Option<&PathBuf>) -> std::io::Result<String> {
+    match (inline, file) {
+        (Some(s), _) => Ok(s.clone()),
+        (None, Some(p)) if p.as_os_str() == "-" => std::io::read_to_string(std::io::stdin()),
+        (None, Some(p)) => std::fs::read_to_string(p),
+        (None, None) => Ok(String::new()),
+    }
+}
+
 /// `rmng clone <verb>` — everything that acts on the fleet unit.
 #[derive(Subcommand, Debug)]
 pub enum CloneCmd {
     /// List clones with live CPU, RAM, token totals, activity, and account-group assignment
     Ls,
-    /// Create a clone under an exact hostname
+    /// Create a clone under an exact hostname (no ticket, no derived name)
     Create {
         /// Exact hostname for the new clone (DNS label)
         hostname: String,
-        /// Clone-source image reference to create from (see `rmng image ls`)
-        #[arg(long)]
-        from: String,
-        /// Account group to route this clone's agents through. Omitted inside a clone ⇒ inherit
-        /// the parent's group; use --no-group to bind none.
-        #[arg(long)]
-        group: Option<String>,
-        /// Bind no account group (opt out of inheriting the parent's)
-        #[arg(long, conflicts_with = "group")]
-        no_group: bool,
         /// Env preset name. Omitted inside a clone ⇒ inherit the parent's preset; use
         /// --no-preset for none.
         #[arg(long)]
@@ -82,18 +110,65 @@ pub enum CloneCmd {
         /// Use no env preset (opt out of inheriting the parent's)
         #[arg(long, conflicts_with = "preset")]
         no_preset: bool,
-        /// Headless clone: no desktop; the viewer shows a tmux tab view instead of a stream
-        #[arg(long)]
-        headless: bool,
-        /// Create as a sub clone under this parent clone id (must be top-level). Overrides the
-        /// default caller auto-detection. Conflicts with --top-level.
-        #[arg(long, conflicts_with = "top_level")]
-        parent: Option<String>,
-        /// Force a top-level clone even when run from inside a clone (skip auto-nesting)
-        #[arg(long)]
-        top_level: bool,
         #[command(flatten)]
-        wait: WaitArgs,
+        common: CreateArgs,
+    },
+    /// Create a clone for an EXISTING Linear ticket (the web dialog's "Existing ticket" tab).
+    /// The hostname derives from the ticket id and the preset is auto-selected from its team
+    /// prefix — there is no --preset here, exactly as in the dialog.
+    Ticket {
+        /// Linear ticket link or bare id (e.g. `WE-142`)
+        ticket: String,
+        /// Extra clone-agent instructions, appended to the default (takes precedence)
+        #[arg(long)]
+        agent_instructions: Option<String>,
+        /// Extra Claude Code instructions, appended to the default (takes precedence)
+        #[arg(long)]
+        claude_instructions: Option<String>,
+        #[command(flatten)]
+        common: CreateArgs,
+    },
+    /// CREATE a Linear ticket, then clone for it (the dialog's "New ticket" tab). The team key
+    /// selects the preset, whose Linear API key opens the issue.
+    NewTicket {
+        /// Linear team key the ticket is created in, e.g. `we` (must be a label on some preset)
+        #[arg(long)]
+        team: String,
+        /// Ticket title
+        #[arg(long)]
+        title: String,
+        /// Ticket description as **markdown**
+        #[arg(long, conflicts_with = "description_file")]
+        description: Option<String>,
+        /// Read the markdown description from a file (`-` for stdin)
+        #[arg(long, value_name = "PATH")]
+        description_file: Option<PathBuf>,
+        /// Extra clone-agent instructions, appended to the default (takes precedence)
+        #[arg(long)]
+        agent_instructions: Option<String>,
+        /// Extra Claude Code instructions, appended to the default (takes precedence)
+        #[arg(long)]
+        claude_instructions: Option<String>,
+        #[command(flatten)]
+        common: CreateArgs,
+    },
+    /// Create a no-ticket clone with a title-derived hostname (the dialog's "No ticket" tab).
+    /// Use `clone create` instead when you want to name the host yourself.
+    Plain {
+        /// Container title — the display name, and the stem of the derived hostname
+        #[arg(long)]
+        title: String,
+        /// First message auto-sent to the agent (omitted ⇒ nothing is sent)
+        #[arg(long)]
+        message: Option<String>,
+        /// Read the first message from a file (`-` for stdin)
+        #[arg(long, value_name = "PATH", conflicts_with = "message")]
+        message_file: Option<PathBuf>,
+        /// Env preset name (required when any presets are configured)
+        #[arg(long)]
+        preset: Option<String>,
+        #[command(flatten)]
+        common: CreateArgs,
     },
     /// Destroy a clone (container + volumes). Non-interactive callers must pass -y.
     Rm {
@@ -149,11 +224,9 @@ pub enum CloneCmd {
     Bind {
         /// Clone id
         clone: String,
-        /// Account group name to bind (omit and pass --none to clear)
-        group: Option<String>,
-        /// Clear the clone's account-group binding
-        #[arg(long, conflicts_with = "group")]
-        none: bool,
+        /// Account group name to bind. Required — every clone binds a group, so a binding can
+        /// be changed but not cleared.
+        group: String,
     },
     /// Point the operator's viewer at a clone (operator-only; no effect on command targeting)
     Select {
@@ -470,32 +543,103 @@ mod tests {
             "--wait", "--timeout", "120",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::Create {
-                hostname, from, group, no_group, preset, no_preset, headless, parent, top_level,
-                wait,
-            }) => {
+            Cmd::Clone(CloneCmd::Create { hostname, preset, no_preset, common }) => {
                 assert_eq!(hostname, "w-cp");
-                assert_eq!(from, "tmpl:latest");
-                assert_eq!(group.as_deref(), Some("pooled"));
-                assert!(!no_group && !no_preset && !headless && !top_level);
+                assert_eq!(common.from, "tmpl:latest");
+                assert_eq!(common.group.as_deref(), Some("pooled"));
+                assert!(!no_preset && !common.headless && !common.top_level);
                 assert_eq!(preset, None);
-                assert_eq!(parent, None);
-                assert!(wait.wait);
-                assert_eq!(wait.timeout, 120);
+                assert_eq!(common.parent, None);
+                assert!(common.wait.wait);
+                assert_eq!(common.wait.timeout, 120);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    /// The three ticket/plain verbs mirror the web dialog's three tabs. The ticket verbs
+    /// deliberately expose NO `--preset`: the server auto-selects it (from the ticket prefix,
+    /// or from the team key), exactly as the dialog does.
+    #[test]
+    fn clone_ticket_verbs_mirror_the_dialog_tabs() {
+        let cli = Cli::parse_from([
+            "rmng", "clone", "ticket", "WE-142", "--from", "t:1", "--wait",
+            "--agent-instructions", "be brief",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Ticket { ticket, agent_instructions, common, .. }) => {
+                assert_eq!(ticket, "WE-142");
+                assert_eq!(agent_instructions.as_deref(), Some("be brief"));
+                assert!(common.wait.wait);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "rmng", "clone", "ticket", "WE-1", "--from", "t:1", "--preset", "p",
+            ])
+            .is_err(),
+            "the ticket verb must not accept --preset (the server auto-selects it)"
+        );
+
+        let cli = Cli::parse_from([
+            "rmng", "clone", "new-ticket", "--from", "t:1", "--team", "we", "--title", "Fix it",
+            "--description", "# heading",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::NewTicket { team, title, description, common, .. }) => {
+                assert_eq!((team.as_str(), title.as_str()), ("we", "Fix it"));
+                assert_eq!(description.as_deref(), Some("# heading"));
+                assert_eq!(common.from, "t:1");
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        // --team and --title are required; --description ⊕ --description-file.
+        assert!(Cli::try_parse_from(["rmng", "clone", "new-ticket", "--from", "t:1"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "rmng", "clone", "new-ticket", "--from", "t:1", "--team", "we", "--title", "x",
+                "--description", "a", "--description-file", "b",
+            ])
+            .is_err()
+        );
+
+        let cli = Cli::parse_from([
+            "rmng", "clone", "plain", "--from", "t:1", "--title", "scratch", "--preset", "p1",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Plain { title, preset, message, .. }) => {
+                assert_eq!(title, "scratch");
+                assert_eq!(preset.as_deref(), Some("p1"));
+                assert_eq!(message, None);
             }
             other => panic!("wrong cmd: {other:?}"),
         }
     }
 
     #[test]
+    fn read_text_prefers_inline_over_file() {
+        let inline = "inline body".to_string();
+        let missing = PathBuf::from("/nonexistent/rmng-test");
+        assert_eq!(read_text(Some(&inline), Some(&missing)).unwrap(), "inline body");
+        assert_eq!(read_text(None, None).unwrap(), "");
+        // A real file is read verbatim, newlines and all — the whole point of the flag.
+        let path = std::env::temp_dir().join("rmng-read-text-test.md");
+        std::fs::write(&path, "# title\n\nbody\n").unwrap();
+        assert_eq!(read_text(None, Some(&path)).unwrap(), "# title\n\nbody\n");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn clone_create_mutually_exclusive_flags() {
-        // --parent ⊕ --top-level, --group ⊕ --no-group, --preset ⊕ --no-preset.
+        // --parent ⊕ --top-level, --preset ⊕ --no-preset. There is no --no-group: every clone
+        // binds a group, so "bind none" isn't expressible.
         assert!(Cli::try_parse_from([
             "rmng", "clone", "create", "w-x", "--from", "i", "--parent", "p", "--top-level",
         ])
         .is_err());
         assert!(Cli::try_parse_from([
-            "rmng", "clone", "create", "w-x", "--from", "i", "--group", "g", "--no-group",
+            "rmng", "clone", "create", "w-x", "--from", "i", "--no-group",
         ])
         .is_err());
         assert!(Cli::try_parse_from([
@@ -535,16 +679,13 @@ mod tests {
         let bind = Cli::parse_from(["rmng", "clone", "bind", "w-cp", "pooled"]);
         assert!(matches!(
             bind.cmd,
-            Cmd::Clone(CloneCmd::Bind { ref clone, group: Some(ref g), none: false })
-                if clone == "w-cp" && g == "pooled"
+            Cmd::Clone(CloneCmd::Bind { ref clone, ref group })
+                if clone == "w-cp" && group == "pooled"
         ));
-        let unbind = Cli::parse_from(["rmng", "clone", "bind", "w-cp", "--none"]);
-        assert!(matches!(
-            unbind.cmd,
-            Cmd::Clone(CloneCmd::Bind { none: true, group: None, .. })
-        ));
-        // group + --none conflict.
-        assert!(Cli::try_parse_from(["rmng", "clone", "bind", "w-cp", "pooled", "--none"]).is_err());
+        // The group is REQUIRED and there is no --none: a binding can be changed, never
+        // cleared. (`clone select --none` is unrelated — that's the viewer's selection.)
+        assert!(Cli::try_parse_from(["rmng", "clone", "bind", "w-cp"]).is_err());
+        assert!(Cli::try_parse_from(["rmng", "clone", "bind", "w-cp", "--none"]).is_err());
         let sel = Cli::parse_from(["rmng", "clone", "select", "--none"]);
         assert!(matches!(sel.cmd, Cmd::Clone(CloneCmd::Select { none: true, clone: None })));
     }

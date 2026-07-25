@@ -19,6 +19,26 @@ pub struct Client {
     http: reqwest::Client,
 }
 
+/// The knobs every `POST /api/clone` mode shares, mirroring the controls the web dialog
+/// shows below its three tabs. The mode-specific fields (`hostname` / `ticket` / `create` /
+/// `plain`) are supplied separately by [`Client::clone_create`].
+#[derive(Debug, Default, Clone)]
+pub struct CloneOpts<'a> {
+    /// Account-group override. `None`/blank ⇒ omit the key entirely, so the server walks its
+    /// own chain (parent → preset default → first configured). Every clone binds one, so
+    /// there is no way to express "no group".
+    pub group: Option<&'a str>,
+    /// Env preset by name; `Some("none")` opts out of inheriting a parent's.
+    pub preset: Option<&'a str>,
+    pub headless: bool,
+    /// Nest under this clone id. `None` + not `top_level` ⇒ the server auto-detects the
+    /// caller from `X-RMNG-Proxy-Key`, so a clone spawning a clone nests with no flags.
+    pub parent: Option<&'a str>,
+    pub top_level: bool,
+    pub agent_instructions: Option<&'a str>,
+    pub claude_instructions: Option<&'a str>,
+}
+
 impl Client {
     /// `base` is the web-API origin, e.g. `http://rmng-control:9000` (no trailing slash).
     pub fn new(base: impl Into<String>) -> Self {
@@ -154,43 +174,45 @@ impl Client {
         self.post_json("/api/activate", &json!({ "id": id })).await
     }
 
-    /// Raw hostname clone (`POST /api/clone` hostname mode) with an optional account-group
-    /// binding and env preset. `none`/blank group input intentionally clears the binding.
+    /// Start a clone. `mode` carries exactly one of the mode-selecting fields the server
+    /// dispatches on — `hostname`, `ticket`, `create`, or `plain` — and `opts` the shared rest.
     ///
-    /// Sub clones: `top_level` forces a top-level clone; an explicit `parent` id nests under that
-    /// clone; otherwise the server auto-detects the caller from the `X-RMNG-Proxy-Key` header,
-    /// which we populate from this process's own `RMNG_PROXY_KEY` env var (present when `rmng`
-    /// runs inside a clone) so a clone spawning a clone gets a sub clone with no flags.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn duplicate_clone(
+    /// The `X-RMNG-Proxy-Key` header is populated from this process's own `RMNG_PROXY_KEY` env
+    /// var (present when `rmng` runs inside a clone), which is how the server identifies the
+    /// calling clone for sub-clone auto-nesting.
+    pub async fn clone_create(
         &self,
         image: &str,
-        hostname: &str,
-        group: Option<&str>,
-        preset: Option<&str>,
-        headless: bool,
-        parent: Option<&str>,
-        top_level: bool,
+        mode: Value,
+        opts: &CloneOpts<'_>,
     ) -> Result<Operation> {
-        let mut body = json!({ "image": image, "hostname": hostname });
+        let mut body = json!({ "image": image });
         let obj = body.as_object_mut().unwrap();
-        // Send the group verbatim, INCLUDING "none": the server distinguishes an omitted
-        // `group` (a sub clone inherits its parent's group) from an explicit `--group none`
-        // (bind no group, opting out of inheritance).
-        if let Some(group) = group.map(str::trim).filter(|group| !group.is_empty()) {
+        for (k, v) in mode.as_object().into_iter().flatten() {
+            obj.insert(k.clone(), v.clone());
+        }
+        if let Some(group) = opts.group.map(str::trim).filter(|g| !g.is_empty()) {
             obj.insert("group".into(), json!(group));
         }
-        if let Some(p) = preset {
+        if let Some(p) = opts.preset {
             obj.insert("preset".into(), json!(p));
         }
-        if headless {
+        if opts.headless {
             obj.insert("headless".into(), json!(true));
         }
-        if let Some(parent) = parent.map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some(parent) = opts.parent.map(str::trim).filter(|p| !p.is_empty()) {
             obj.insert("parent".into(), json!(parent));
         }
-        if top_level {
+        if opts.top_level {
             obj.insert("topLevel".into(), json!(true));
+        }
+        for (key, val) in [
+            ("agentInstructions", opts.agent_instructions),
+            ("claudeInstructions", opts.claude_instructions),
+        ] {
+            if let Some(v) = val.map(str::trim).filter(|v| !v.is_empty()) {
+                obj.insert(key.into(), json!(v));
+            }
         }
         let mut req = self.http.post(format!("{}/api/clone", self.base)).json(&body);
         if let Some(key) = std::env::var("RMNG_PROXY_KEY")
@@ -249,9 +271,10 @@ impl Client {
         Ok(())
     }
 
-    /// Bind a clone to an account group (or clear it with `None`). The group-proxy
-    /// replacement for the old per-provider account swap. `POST /api/hosts/:id/group`.
-    pub async fn set_clone_group(&self, host: &str, group: Option<&str>) -> Result<Value> {
+    /// Bind a clone to an account group. Every clone binds one, so the name is required —
+    /// there is no way to clear a binding. The group-proxy replacement for the old
+    /// per-provider account swap. `POST /api/hosts/:id/group`.
+    pub async fn set_clone_group(&self, host: &str, group: &str) -> Result<Value> {
         self.post_json(
             &format!("/api/hosts/{host}/group"),
             &json!({ "group": group }),

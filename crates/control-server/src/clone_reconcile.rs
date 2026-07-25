@@ -455,25 +455,50 @@ or GUI. The kind can't be changed after creation.
   Example: `rmng desktop pega-we-142 screenshot`. To *open* an app, use `rmng clone exec -d`
   (above), not `desktop`.
 
-## Create / retire clones
+## Create clones
 
-- `rmng clone create <hostname> --from <image>` — create a clone under an exact hostname
-  (a DNS label), from an image (`rmng image ls` lists valid references). **Run from inside a
-  clone, the new clone auto-nests as a sub clone under you AND inherits your account group and
-  env preset by default** — a helper you spin up joins the same pool/preset with no flags.
-  Override with:
-  - `--preset <name>` / `--no-preset` — a different preset, or none.
-  - `--group <name>` / `--no-group` — a different account group, or none.
-  - `--top-level` — a top-level clone instead of a sub clone (also skips inheritance).
-  - `--parent <clone>` — nest under a specific top-level clone (inherits that parent's group/preset).
-  - `--headless` — create a headless clone (no desktop; see "Headed vs headless" above).
-    Default is headed.
-  Add `--wait` to block until it's ready.
+Four create verbs. All of them take `--from <image>` (required; `rmng image ls` lists valid
+references) and share the flags in "Common create flags" below.
+
+- `rmng clone create <hostname> --from <image>` — exact hostname (a DNS label), no ticket.
+  Takes `--preset <name>` / `--no-preset`.
+- `rmng clone ticket <link-or-id> --from <image>` — clone for an EXISTING Linear ticket. The
+  hostname derives from the ticket id (`WE-142` → `<prefix>we-142`) and **the preset is
+  auto-selected from the ticket's team prefix** — there is deliberately no `--preset` here.
+  Also takes `--agent-instructions` / `--claude-instructions` (appended to the defaults,
+  taking precedence).
+- `rmng clone new-ticket --from <image> --team <key> --title <t>` — CREATE a Linear ticket,
+  then clone for it. `--team` is a Linear team key like `we`, and it must be a label on some
+  preset: that preset is the one used, and its Linear API key opens the issue. Description via
+  `--description <markdown>` or `--description-file <path>` (`-` = stdin, which is the sane
+  way to pass a multi-line body). Same instruction flags as `ticket`.
+- `rmng clone plain --from <image> --title <t>` — no-ticket clone with a title-derived
+  hostname. `--message`/`--message-file` is auto-sent to the agent as its first message;
+  `--preset <name>` is required when any presets are configured.
+
+### Common create flags
+
+- `--wait` (with `--timeout <secs>`, default 600) — block until the clone is fully created,
+  streaming progress. **Without it the command returns as soon as the operation starts**, so
+  use `--wait` whenever the next step needs the clone to exist.
+- `--group <name>` — account-group OVERRIDE. Every clone binds exactly one group; omitting
+  this walks parent → the preset's default → the first configured group. There is no way to
+  bind no group.
+- `--headless` — no desktop (see "Headed vs headless" above). Default is headed.
+- `--parent <clone>` — nest under a specific top-level clone. `--top-level` forces a
+  top-level clone instead.
+
+**Run from inside a clone, a new clone auto-nests as a sub clone under you AND inherits your
+account group and env preset by default** — a helper you spin up joins the same pool/preset
+with no flags. `--top-level` skips both.
+
+## Retire clones
+
 - `rmng clone rm <clone> [-y]` — destroy a clone (prompts unless `-y`; also removes its sub clones).
   Non-interactive callers MUST pass `-y`.
 - `rmng clone archive <clone>` / `rmng clone restore <clone>` — stop-and-retain, then bring back.
-- `rmng clone bind <clone> <group>` / `rmng clone bind <clone> --none` — (re)bind or clear a
-  clone's account group.
+- `rmng clone bind <clone> <group>` — rebind a clone's account group. Every clone binds one,
+  so a binding can be changed but never cleared.
 
 ## Images & accounts
 
@@ -1085,6 +1110,12 @@ async fn ensure_payload_current(app: &App, clone_id: &str) -> Result<bool> {
 }
 
 async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
+    // Every clone binds a valid account group. Repair blank/dangling bindings before reading
+    // the host list — this is what catches a group deleted out from under a live clone, and a
+    // hand-edited state.json picked up by the watcher. A no-op (no write, no SSE) in the
+    // steady state, which is every pass but the rare repair.
+    crate::web::normalize_clone_groups(app);
+
     let hosts: Vec<_> = app
         .store
         .get()
@@ -1126,7 +1157,7 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         // model. No group, or a group whose instance can't be read yet (no accounts / still
         // starting), leaves the catalog empty: the GPT list falls back to FALLBACK_GPT_MODELS and
         // (for grouped clones) the Claude default to FALLBACK_CLAUDE_MODEL (Opus).
-        let group = h.group.as_deref().map(str::trim).filter(|g| !g.is_empty());
+        let group = Some(h.group.trim()).filter(|g| !g.is_empty());
         let catalog = match group {
             Some(group) => {
                 if let Some(cached) = catalog_cache.get(group) {

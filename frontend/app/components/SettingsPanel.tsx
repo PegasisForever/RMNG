@@ -18,7 +18,8 @@ import { CSS } from "@dnd-kit/utilities";
 import { ChevronDown, ChevronRight, GripVertical, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import type { ClaudeUsage, GroupUsage } from "~/lib/types";
+import type { ClaudeUsage, GroupUsage, Operation } from "~/lib/types";
+import { OperationProgress } from "~/components/OperationProgress";
 import { ordered, useAccountOrder } from "~/lib/accountOrder";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
@@ -27,6 +28,7 @@ import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
+import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { ImagesSection } from "~/components/ImagesSection";
 import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
 
@@ -134,8 +136,13 @@ export interface SettingsPanelProps {
   testConfig: (what: string) => Promise<{ ok: boolean; message: string }>;
   /** Read the control-server's own version + update-available status. */
   getUpdateStatus: () => Promise<UpdateStatus>;
-  /** Pull the latest control-server image and swap the running container onto it. */
-  updateServer: () => Promise<unknown>;
+  /** Pull the latest control-server image and swap the running container onto it. Returns
+   *  the driving Operation, whose progress renders inline below the button. */
+  updateServer: () => Promise<Operation>;
+  /** Live operations from the SSE state — used to follow the update op started above.
+   *  Note the server restarts itself mid-update, so the op stream *will* cut out; the
+   *  reconnected stream may or may not still carry it. */
+  operations: Operation[];
   /** Restart the control-server container in place (applies changed startup settings). */
   restartServer: () => Promise<{ ok: boolean }>;
   // --- clone-source images (moved here from the sidebar) ---
@@ -458,6 +465,7 @@ export function SettingsPanel({
   testConfig,
   getUpdateStatus,
   updateServer,
+  operations,
   restartServer,
   images,
   imagesLoading,
@@ -482,6 +490,12 @@ export function SettingsPanel({
   // on demand via the "Check for updates" button).
   const [serverStatus, setServerStatus] = useState<UpdateStatus | null>(null);
   const [serverMsg, setServerMsg] = useState<string | null>(null);
+  // The in-flight self-update op, followed through the SSE frames so its progress renders
+  // inline here rather than only in the sidebar. The server restarts itself partway through,
+  // so the stream drops and the op may not come back — `updateOp` simply goes undefined and
+  // the last message stands. Kept until the panel closes; there's nothing to close here.
+  const [updateOpId, setUpdateOpId] = useState<string | null>(null);
+  const updateOp = updateOpId ? operations.find((o) => o.id === updateOpId) : undefined;
 
   useEffect(() => {
     getUpdateStatus().then(setServerStatus).catch((e) => setServerMsg(`✗ ${(e as Error).message}`));
@@ -502,7 +516,7 @@ export function SettingsPanel({
     if (!confirm("Update the control-server now?\n\nIt will pull the latest image and restart itself. The UI will briefly disconnect and reconnect; running clones are unaffected.")) return;
     setServerMsg("updating… the server will restart shortly");
     try {
-      await updateServer();
+      setUpdateOpId((await updateServer()).id);
     } catch (e) {
       setServerMsg(`✗ ${(e as Error).message}`);
     }
@@ -528,6 +542,8 @@ export function SettingsPanel({
       labels: string;
       linearKey: string;
       keySet: boolean;
+      /** Default account group for clones of this preset. */
+      group: string;
       vars: { key: string; value: string }[];
       agentPlaybook: string;
       globalPrompt: string;
@@ -610,6 +626,7 @@ export function SettingsPanel({
         labels: p.labels.join(", "),
         linearKey: "",
         keySet: p.linearKeySet,
+        group: p.group,
         vars: p.vars.map((v) => ({ ...v })),
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
@@ -638,12 +655,13 @@ export function SettingsPanel({
   const addPreset = () =>
     setPresets((ps) => [
       ...ps,
-      { name: "", labels: "", linearKey: "", keySet: false, vars: [{ key: "", value: "" }], agentPlaybook: "", globalPrompt: "" },
+      // A preset always binds a group; seed the first one (the server guarantees ≥ 1).
+      { name: "", labels: "", linearKey: "", keySet: false, group: groups[0]?.name ?? "", vars: [{ key: "", value: "" }], agentPlaybook: "", globalPrompt: "" },
     ]);
   const rmPreset = (i: number) => setPresets((ps) => ps.filter((_, j) => j !== i));
   const setPresetField = (
     i: number,
-    field: "name" | "labels" | "linearKey" | "agentPlaybook" | "globalPrompt",
+    field: "name" | "labels" | "linearKey" | "group" | "agentPlaybook" | "globalPrompt",
     v: string,
   ) =>
     setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, [field]: v } : p)));
@@ -715,6 +733,7 @@ export function SettingsPanel({
             name: p.name.trim(),
             labels: p.labels.split(",").map((s) => s.trim()).filter(Boolean),
             linearKey: p.linearKey, // "" = keep the stored key
+            group: p.group, // "" / deleted group ⇒ server repoints at the first group
             vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
             agentPlaybook: p.agentPlaybook,
             globalPrompt: p.globalPrompt,
@@ -871,7 +890,7 @@ export function SettingsPanel({
             <Section
               title="Presets"
               effect="immediate"
-              hint="A preset = Linear API key + the ticket-id prefixes (Linear team keys, e.g. DEV) that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by the ticket's team prefix (DEV-196 → DEV); other clones require an explicit pick."
+              hint="A preset = Linear API key + the ticket-id prefixes (Linear team keys, e.g. DEV) that auto-select it + a default account group + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by the ticket's team prefix (DEV-196 → DEV); other clones require an explicit pick. The group applies to new clones of this preset unless the clone dialog overrides it."
             >
               <div className="space-y-3">
                 {presets.length === 0 ? <p className="text-xs text-slate-400 dark:text-slate-500">No presets.</p> : null}
@@ -908,6 +927,16 @@ export function SettingsPanel({
                         value={p.linearKey}
                         onChange={(v) => setPresetField(i, "linearKey", v)}
                       />
+                    </div>
+                    <div className="mt-1.5">
+                      <Field label="Account group (default for clones of this preset)">
+                        <AccountGroupSelect
+                          groups={groups}
+                          value={p.group}
+                          onChange={(v) => setPresetField(i, "group", v)}
+                          className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
+                        />
+                      </Field>
                     </div>
                     <div className="mt-2 space-y-1.5">
                       {p.vars.map((v, k) => (
@@ -1002,7 +1031,7 @@ export function SettingsPanel({
                   <button
                     type="button"
                     onClick={doUpdate}
-                    disabled={!serverStatus?.available}
+                    disabled={!serverStatus?.available || !!updateOpId}
                     className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
                   >
                     Update
@@ -1021,6 +1050,7 @@ export function SettingsPanel({
                   ) : null}
                   {serverMsg ? <p className="text-xs text-slate-500 dark:text-slate-400">{serverMsg}</p> : null}
                 </div>
+                {updateOp ? <OperationProgress op={updateOp} /> : null}
               </div>
             </Section>
 

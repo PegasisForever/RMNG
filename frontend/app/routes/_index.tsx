@@ -378,9 +378,10 @@ function Dashboard({
     run(reorder(next));
   };
 
-  const runningClone = state.operations.some(
-    (o) => o.kind === "clone" && o.status === "running",
-  );
+  // The selected clone, when it can actually parent a sub clone: managed, and top-level
+  // (sub clones are one level deep — the server rejects a sub clone as a parent).
+  const subCloneParent =
+    selectedClone?.managed && !selectedClone.parent ? selectedClone : null;
 
   return (
     <div className="flex h-screen flex-col">
@@ -555,12 +556,13 @@ function Dashboard({
         <CloneModal
           images={images}
           imagesLoading={imagesLoading}
-          busy={runningClone}
+          operations={state.operations}
+          parentCandidate={subCloneParent}
           onClose={() => setCloneOpen(false)}
-          onClone={(image, payload) => {
-            run(duplicateClone(image, payload));
-            setCloneOpen(false);
-          }}
+          // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
+          // progress, and closes when the op settles. So this just starts it and hands the
+          // Operation back — errors surface inside the dialog, not in the page banner.
+          onClone={(image, payload) => duplicateClone(image, payload)}
         />
       ) : null}
 
@@ -574,6 +576,7 @@ function Dashboard({
           testConfig={testConfig}
           getUpdateStatus={getUpdateStatus}
           updateServer={updateServer}
+          operations={state.operations}
           restartServer={restartServer}
           images={images}
           imagesLoading={imagesLoading}

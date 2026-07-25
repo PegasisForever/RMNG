@@ -53,7 +53,7 @@ $RMNG_CONTROL_URL` hint.
 | `clone ls` | `{ selected, clones: [Clone + {stats, tokens}], operations }` (CLI shape — includes the metrics the table shows) |
 | `clone select`, `clone bind` | small status object (`{selected}` / the `{ok, group}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
-| `clone create`, `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
+| `clone create`, `clone ticket`, `clone new-ticket`, `clone plain`, `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
 | `op wait` | the terminal `Operation` |
 | `op ls` | `Operation[]` |
 | `image ls` | `ImageInfo[]` |
@@ -84,17 +84,64 @@ are indented under their parent. CPU/RAM are volatile snapshots for sampled acti
 `rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats, tokens}],
 operations }` — so the metrics the table shows are available to a machine reader too.
 
-### `rmng clone create <HOSTNAME> --from <IMAGE> [--group <G>|--no-group] [--preset <P>|--no-preset] [--headless] [--parent <C>|--top-level] [--wait] [--timeout <N>]`
-Create a clone under an **exact hostname** (a DNS label; `400` if taken). **Run from inside a
-clone, the new clone auto-nests as a sub clone under the caller AND inherits the caller's account
-group + env preset by default.** Overrides: `--group <name>`/`--no-group`, `--preset
-<name>`/`--no-preset`, `--parent <clone>` (nest under a specific top-level clone), `--top-level`
-(force top-level, skipping inheritance). `--from` names the clone-source image (`rmng image ls`).
-Prints the started op id (follow with `rmng op wait <op-id>`), or blocks with `--wait`.
+### Creating clones — four verbs
+
+`create` / `ticket` / `new-ticket` / `plain` are the CLI's mirror of the web dialog: `ticket`,
+`new-ticket`, and `plain` are its three tabs; `create` is the fleet-CLI extra that names the
+host itself. Each prints the started op id (follow with `rmng op wait <op-id>`), or blocks
+with `--wait`.
+
+**Common flags** (all four): `--from <IMAGE>` (required), `--group <G>`, `--headless`,
+`--parent <C>` | `--top-level`, `--wait` `[--timeout <N>]`.
+
+**Every clone binds an account group** — there is no `--no-group`. `--group` is an *override*;
+omitting it falls through the chain: the parent's group (inside a clone) → the preset's default
+group → the first configured group. An unknown `--group` name is a `400`.
+
+**Run from inside a clone, a new clone auto-nests as a sub clone under the caller AND inherits
+the caller's account group + env preset by default.** `--parent <clone>` nests under a specific
+top-level clone; `--top-level` forces a top-level clone, skipping inheritance.
+
+#### `rmng clone create <HOSTNAME> [--preset <P>|--no-preset]`
+Exact hostname (a DNS label; `400` if taken), no ticket, no derived display name.
 
 ```sh
 rmng clone create w-cp --from pegasis0/rmng-template:latest --wait
 ```
+
+#### `rmng clone ticket <LINK-OR-ID> [--agent-instructions <T>] [--claude-instructions <T>]`
+Clone for an **existing** Linear ticket. The hostname derives from the ticket id
+(`WE-142` → `<prefix>we-142`) and **the preset is auto-selected from the ticket's team prefix**
+— there is deliberately no `--preset`, matching the dialog. The two instruction flags append to
+the built-in defaults and take precedence where they conflict.
+
+```sh
+rmng clone ticket WE-142 --from pegasis0/rmng-template:latest --wait
+```
+
+#### `rmng clone new-ticket --team <KEY> --title <T> [--description <MD>|--description-file <PATH>] [--agent-instructions <T>] [--claude-instructions <T>]`
+**Create** a Linear ticket, then clone for it. `--team` is a Linear team key (`we`) and must be
+a label on some preset — that preset is used, and its Linear API key opens the issue. Hence no
+`--preset` here either: the team key *is* the preset choice.
+
+The description is **markdown**. `--description-file -` reads stdin, which is how to pass a
+multi-line body. Any `/uploads/<name>` image reference in it (e.g. from a body composed in the
+web dialog) is re-hosted in Linear before the issue is created, so the ticket doesn't depend on
+LAN access to this server.
+
+```sh
+rmng clone new-ticket --from pegasis0/rmng-template:latest \
+  --team we --title 'Fix the flaky login test' --description-file - --wait <<'MD'
+The test fails ~1 in 5 runs on CI.
+
+- [ ] reproduce locally
+MD
+```
+
+#### `rmng clone plain --title <T> [--message <M>|--message-file <PATH>] [--preset <P>]`
+No-ticket clone with a title-derived hostname. `--message` is auto-sent to the agent as its
+first message (omitted ⇒ nothing is sent). `--preset` is required when any presets are
+configured.
 
 ### `rmng clone rm <CLONE> [-y|--yes] [--wait] [--timeout <N>]`
 Destroy a clone (container + volumes; cascades to its sub clones). Asks `[y/N]` on stderr unless
@@ -113,9 +160,11 @@ offline clones are refused. `--json` → `{ command, mode }`.
 Run one non-interactive command inside a clone (docker-exec style); forwards piped stdin and
 passes through the command's exit code. `--json` emits one object with the captured streams.
 
-### `rmng clone bind <CLONE> <GROUP>` / `rmng clone bind <CLONE> --none`
-(Re)bind a clone to one provider-agnostic account group (`POST /api/hosts/:id/group`), or clear
-it with `--none`. Pure routing change; account onboarding/refresh stays frontend/API.
+### `rmng clone bind <CLONE> <GROUP>`
+Rebind a clone to one provider-agnostic account group (`POST /api/hosts/:id/group`). Pure routing
+change; account onboarding/refresh stays frontend/API. The group is **required** — every clone
+binds one, so a binding can be changed but never cleared (there is no `--none`). An unknown or
+missing name is a `400`.
 
 ### `rmng clone select <CLONE>` / `rmng clone select --none`
 Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears it. **Operator-only

@@ -130,10 +130,16 @@ pub struct RmngClone {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
-    /// route through, via the control-server's `/cc` router. `None` = no inference. This is
-    /// the sole account binding — CLIProxyAPI owns intra-group account selection + refresh.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
+    /// route through, via the control-server's `/cc` router. This is the sole account
+    /// binding — CLIProxyAPI owns intra-group account selection + refresh.
+    ///
+    /// **Every clone has one.** `state::normalize_groups` repoints a blank (an old row from
+    /// before groups were mandatory) at the first configured group at load, and there is
+    /// always at least one group (`config::normalize_groups`). Blank is therefore only ever
+    /// transient — it can still appear on a `Default::default()` row in tests, or in a
+    /// hand-edited `state.json` between the edit and the watcher's next reload.
+    #[serde(default)]
+    pub group: String,
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
     /// string: the workspace set is config (Settings → Linear API keys), not an enum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -536,7 +542,7 @@ mod tests {
             host: "1.2.3.4".into(),
             port: 3389,
             gdm_username: Some("u".into()),
-            group: Some("team".into()),
+            group: "team".into(),
             linear_workspace: Some("we".into()),
             monitor_state: Some(MonitorState::Working),
             ..Default::default()
@@ -634,21 +640,27 @@ mod tests {
             id: "h".into(),
             host: "1.2.3.4".into(),
             port: 3389,
-            group: Some("team".into()),
+            group: "team".into(),
             ..Default::default()
         };
         let v = serde_json::to_value(&h).unwrap();
         assert_eq!(v["group"], "team");
-        // Omitted when None.
+        // Always serialized (no skip): the field is mandatory, so a consumer can read it
+        // unconditionally. A `Default` row is blank, which the server normalizes at load.
         let bare = RmngClone {
             id: "h2".into(),
             ..Default::default()
         };
         let bv = serde_json::to_value(&bare).unwrap();
-        assert!(bv.get("group").is_none());
+        assert_eq!(bv["group"], "");
+        // An old row with no `group` key at all still parses (blank), so `state.json` from
+        // before the binding was mandatory loads instead of failing the whole file.
+        let old: RmngClone =
+            serde_json::from_str(r#"{"id":"h3","host":"h3"}"#).unwrap();
+        assert_eq!(old.group, "");
         // Round-trips.
         let back: RmngClone = serde_json::from_value(v).unwrap();
-        assert_eq!(back.group.as_deref(), Some("team"));
+        assert_eq!(back.group, "team");
     }
 
     #[test]

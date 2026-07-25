@@ -1,135 +1,228 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 
-import { AccountGroupSelect, NO_GROUP } from "~/components/AccountGroupSelect";
-import { ImagePicker } from "~/components/ImagePicker";
+import { AccountGroupSelect } from "~/components/AccountGroupSelect";
+import { ImagePicker, rememberCloneImage } from "~/components/ImagePicker";
+import { OperationProgress } from "~/components/OperationProgress";
 import { getConfig, type ClonePayload } from "~/lib/api";
+import type { Clone, Operation } from "~/lib/types";
 import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import { parseTicketInput, workspaceBadge } from "~/lib/workspace";
 
+// BlockNote is browser-only and heavy; the description field pulls it in on demand.
+const MarkdownEditor = lazy(() => import("~/components/MarkdownEditor"));
+
 /**
  * Clone dialog. Pick a clone-source image, then one of three ticket modes: paste an
- * existing Linear ticket (link or `WE-142`) — the preset is auto-selected from the
- * ticket-id prefix unless overridden; create a new ticket (preset + team + title +
- * description — the preset's Linear key creates it); or a plain no-ticket clone
- * (title + optional first message; a preset must be picked when any are configured).
- * The hostname derives from the ticket id (`WE-142` → `pega-we-142`) or the title
- * slug. All resolved server-side.
+ * existing Linear ticket (link or `WE-142`); create a new ticket (team key + title +
+ * rich-text description); or a plain no-ticket clone (title + optional first message).
+ *
+ * **The preset is never picked by hand in the ticket modes** — it follows the team key
+ * (`pick_preset_by_prefix`, mirrored client-side), and the dialog shows which one resolved.
+ * The account group follows the resolved preset's default; the group control is an
+ * *override* that only matters when the operator wants a different pool.
+ *
+ * The hostname derives from the ticket id (`WE-142` → `pega-we-142`) or the title slug.
+ * All resolved server-side.
  */
 export function CloneModal({
   images,
   imagesLoading,
-  busy,
+  operations,
+  parentCandidate,
   onClose,
   onClone,
 }: {
   /** Clone-source images to pick from (from `listImages`). */
   images: ImageInfo[];
   imagesLoading: boolean;
-  busy: boolean;
+  /** Live operations from the SSE state — the started clone op is tracked through these. */
+  operations: Operation[];
+  /** The currently selected clone, offered as a sub-clone parent. Null = nothing selected,
+   *  or the selection can't be a parent (unmanaged, or already a sub clone). */
+  parentCandidate: Clone | null;
   onClose: () => void;
-  /** `image` = the chosen clone-source image reference. */
-  onClone: (image: string, payload: ClonePayload) => void;
+  /** Starts the clone and resolves with the driving Operation. The dialog stays open,
+   *  showing its progress, until the operation settles. */
+  onClone: (image: string, payload: ClonePayload) => Promise<Operation>;
 }) {
   const [image, setImage] = useState<string | null>(null);
   const [mode, setMode] = useState<"existing" | "create" | "plain">("existing");
   const [ticket, setTicket] = useState("");
-  // Linear team key for created tickets (e.g. "we" → WE-…).
+  // Linear team key for created tickets (e.g. "we" → WE-…). Picked from the presets' labels.
   const [team, setTeam] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [message, setMessage] = useState("");
   const [agentInstructions, setAgentInstructions] = useState("");
   const [claudeInstructions, setClaudeInstructions] = useState("");
-  // The account group this clone binds to (a CLIProxyAPI pool), or "none" for no
-  // inference. Defaults to the first configured group once config loads, else "none".
-  const [group, setGroup] = useState(NO_GROUP);
+  // Account-group OVERRIDE. "" = follow the resolved preset's default (the server resolves
+  // it). A non-empty value pins the clone to that pool regardless of preset.
+  const [groupOverride, setGroupOverride] = useState("");
   // Account groups (from config), for the picker options.
   const [groups, setGroups] = useState<Group[]>([]);
-  // Presets (from config) + the chosen one ("" = auto-by-ticket-prefix; create/plain
-  // require an explicit pick, defaulted to the first preset below).
+  // Presets (from config). Only the no-ticket tab picks one by hand.
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
-  const [preset, setPreset] = useState("");
+  const [plainPreset, setPlainPreset] = useState("");
+  // Config settled (loaded or failed). `presets` starts empty, which is indistinguishable
+  // from "none configured" — without this the missing-key warning flashes on every open.
+  const [configLoaded, setConfigLoaded] = useState(false);
   // Headless clone: no desktop; the viewer shows a tmux tab view instead of a video stream.
   const [headless, setHeadless] = useState(false);
+  const [asSubClone, setAsSubClone] = useState(false);
+  // The started clone operation: its id once the POST returns, plus a local error.
+  const [opId, setOpId] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getConfig()
       .then((c) => {
         setPresets(c.presets);
         setGroups(c.groups);
-        if (c.groups.length > 0) setGroup(c.groups[0].name);
       })
       .catch(() => {
         // Config unreachable — just no preset/group options.
-      });
+      })
+      .finally(() => setConfigLoaded(true));
   }, []);
 
-  // Create/plain mode need an explicit preset — default to the first one; back on
-  // the ticket tab "" means auto-by-prefix, so leave whatever the operator chose.
+  // The no-ticket tab needs an explicit preset — default to the first one.
   useEffect(() => {
-    if (mode !== "existing" && preset === "" && presets.length > 0) {
-      setPreset(presets[0].name);
+    if (mode === "plain" && plainPreset === "" && presets.length > 0) {
+      setPlainPreset(presets[0].name);
     }
-  }, [mode, presets, preset]);
+  }, [mode, presets, plainPreset]);
 
   const parsed = parseTicketInput(ticket);
-  // A source image is always required; then: `existing` needs a parseable ticket;
-  // `create` a preset (its key creates the ticket) + team + title; `plain` a title +
-  // a preset whenever any are configured.
+
+  // Every distinct team key across the presets' labels, each mapped to the preset that
+  // claims it — the first one in config order, mirroring the server's `pick_preset_by_prefix`.
+  // This is the new-ticket tab's team dropdown AND its preset selector: they're the same choice.
+  const teamKeys = useMemo(() => {
+    const seen = new Map<string, PresetRedacted>();
+    for (const p of presets) {
+      for (const label of p.labels) {
+        const key = label.toLowerCase();
+        if (!seen.has(key)) seen.set(key, p);
+      }
+    }
+    return [...seen.entries()].map(([key, preset]) => ({ key, preset }));
+  }, [presets]);
+
+  useEffect(() => {
+    if (mode === "create" && team === "" && teamKeys.length > 0) setTeam(teamKeys[0].key);
+  }, [mode, team, teamKeys]);
+
+  // The preset that will actually apply, per mode: auto-selected from the ticket's team
+  // prefix (existing), implied by the chosen team key (create), or picked by hand (plain).
+  const effectivePreset =
+    mode === "plain"
+      ? presets.find((p) => p.name === plainPreset)
+      : mode === "create"
+        ? teamKeys.find((t) => t.key === team)?.preset
+        : parsed
+          ? presets.find((p) => p.labels.some((l) => l.toLowerCase() === parsed.prefix))
+          : undefined;
+
+  // What the group control shows: the override if the operator set one, else the resolved
+  // preset's group. Blank until a preset resolves — on the ticket tabs that's "nothing typed
+  // yet", which is exactly what the empty dropdown should convey.
+  const presetGroup = groups.find((g) => g.name === effectivePreset?.group)?.name ?? "";
+  const shownGroup = groupOverride || presetGroup;
+
+  // Both ticket modes need a Linear API key, but not the same one — mirror the server so the
+  // dialog blocks exactly the requests it would reject. `create` opens the issue with the
+  // *resolved* preset's key (`resolve_issue`), so that one preset must have it; `existing`
+  // only fetches, and the server tries every preset's key in turn (`fetch_issue_any`), so any
+  // one of them will do. `plain` never touches Linear.
+  const linearKeyMissing =
+    !configLoaded || mode === "plain"
+      ? false
+      : mode === "create"
+        ? !effectivePreset?.linearKeySet
+        : !presets.some((p) => p.linearKeySet);
+
+  // A source image is always required; then: `existing` needs a parseable ticket; `create` a
+  // team key + title; `plain` a title + a preset whenever any are configured.
   const modeValid =
     mode === "existing"
       ? !!parsed
       : mode === "create"
-        ? title.trim().length > 0 && team.trim().length > 0 && !!preset
-        : title.trim().length > 0 && (presets.length === 0 || !!preset);
-  const valid = !!image && modeValid;
+        ? title.trim().length > 0 && team.trim().length > 0
+        : title.trim().length > 0 && (presets.length === 0 || !!plainPreset);
+  const valid = !!image && modeValid && !linearKeyMissing;
 
-  // The clone request's group binding: a group name, or null for "none".
-  const groupValue = group === NO_GROUP ? null : group;
+  // --- operation tracking ---------------------------------------------------------------
+  // Once started, follow the op through the SSE frames and close only when it settles.
+  // Finished ops are PRUNED from state a few seconds after they land, so an op that
+  // disappears having previously been seen counts as done (same rule as the CLI's waiter).
+  const op = opId ? operations.find((o) => o.id === opId) : undefined;
+  const [opSeen, setOpSeen] = useState(false);
+  useEffect(() => {
+    if (op) setOpSeen(true);
+  }, [op]);
+  useEffect(() => {
+    if (!opId) return;
+    if (op?.status === "done" || (!op && opSeen)) onClose();
+    if (op?.status === "error") setError(op.message || "the clone failed");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opId, op?.status, op, opSeen]);
+
+  const busy = starting || (!!opId && op?.status !== "error");
 
   function submit() {
     if (!valid || busy || !image) return;
-    if (mode === "plain") {
-      // No ticket: just a title and an optional first message (empty ⇒ no auto-send).
-      onClone(image, {
-        plain: { title: title.trim(), message: message.trim() },
-        group: groupValue,
-        preset: preset || undefined,
-        headless: headless || undefined,
-      });
-      return;
-    }
-    const extra: { agentInstructions?: string; claudeInstructions?: string } =
-      {};
-    if (agentInstructions.trim())
-      extra.agentInstructions = agentInstructions.trim();
-    if (claudeInstructions.trim())
-      extra.claudeInstructions = claudeInstructions.trim();
-    if (mode === "existing")
-      onClone(image, {
-        ticket: ticket.trim(),
-        ...extra,
-        group: groupValue,
-        preset: preset || undefined, // "" ⇒ auto-select by ticket-id prefix
-        headless: headless || undefined,
-      });
-    else
-      onClone(image, {
-        create: { team: team.trim().toLowerCase(), title: title.trim(), description },
-        ...extra,
-        group: groupValue,
-        preset: preset || undefined,
-        headless: headless || undefined,
-      });
+    setError(null);
+    setStarting(true);
+    // A blank override means "let the server resolve it" (preset default → first group),
+    // so it's omitted rather than sent as an empty name.
+    const common = {
+      group: groupOverride || undefined,
+      headless: headless || undefined,
+      parent: asSubClone && parentCandidate ? parentCandidate.id : undefined,
+    };
+    const extra: { agentInstructions?: string; claudeInstructions?: string } = {};
+    if (agentInstructions.trim()) extra.agentInstructions = agentInstructions.trim();
+    if (claudeInstructions.trim()) extra.claudeInstructions = claudeInstructions.trim();
+
+    const payload: ClonePayload =
+      mode === "plain"
+        ? {
+            plain: { title: title.trim(), message: message.trim() },
+            preset: plainPreset || undefined,
+            ...common,
+          }
+        : mode === "existing"
+          ? {
+              ticket: ticket.trim(),
+              ...extra,
+              // No preset field: the server auto-selects by the ticket's team prefix.
+              ...common,
+            }
+          : {
+              create: { team: team.trim().toLowerCase(), title: title.trim(), description },
+              ...extra,
+              preset: effectivePreset?.name,
+              ...common,
+            };
+
+    onClone(image, payload)
+      .then((started) => {
+        rememberCloneImage(image);
+        setOpId(started.id);
+      })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setStarting(false));
   }
 
   const tab = (m: typeof mode, label: string) => (
     <button
       type="button"
+      disabled={busy}
       onClick={() => setMode(m)}
-      className={`flex-1 rounded px-2 py-1 ${
+      className={`flex-1 rounded px-2 py-1 disabled:opacity-50 ${
         mode === m
           ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100"
           : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
@@ -139,191 +232,227 @@ export function CloneModal({
     </button>
   );
 
+  const field =
+    "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500";
+  const label = "block text-xs font-medium text-slate-500 dark:text-slate-400";
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
-      onClick={onClose}
+      onClick={busy ? undefined : onClose}
     >
+      {/* Fixed height, not content height: the three tabs differ a lot in field count, and a
+          dialog that jumps as you switch tabs is disorienting. The body scrolls instead. */}
       <div
-        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
+        className="flex h-[38rem] max-h-[90vh] w-full max-w-md flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
+          if (e.key === "Escape" && !busy) onClose();
         }}
       >
-        <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">New clone</h3>
+        <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
+          New clone
+        </h3>
 
-        <div className="mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
-          Source image
-          <ImagePicker
-            images={images}
-            loading={imagesLoading}
-            value={image}
-            onChange={setImage}
-          />
-        </div>
-
-        <div className="mt-3 flex gap-0.5 rounded-md bg-slate-100 p-0.5 text-xs font-medium dark:bg-slate-800">
-          {tab("existing", "Existing ticket")}
-          {tab("create", "New ticket")}
-          {tab("plain", "No ticket")}
-        </div>
-
-        {mode === "existing" ? (
-          <label className="mt-3 block text-xs font-medium text-slate-500 dark:text-slate-400">
-            Linear ticket link or id
-            <input
-              autoFocus
-              value={ticket}
-              onChange={(e) => setTicket(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-              }}
-              placeholder="https://linear.app/…/issue/WE-142  or  WE-142"
-              spellCheck={false}
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500"
+        <div className="min-h-0 flex-1 overflow-y-auto pr-0.5">
+          <div className="mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
+            Source image
+            <ImagePicker
+              images={images}
+              loading={imagesLoading}
+              value={image}
+              onChange={setImage}
             />
-            {ticket && !parsed ? (
-              <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">
-                couldn’t find a ticket id (like WE-142) in that
-              </p>
-            ) : null}
-            {parsed ? (
-              <p className="mt-1.5 flex items-center gap-1.5 text-[11px] font-normal text-slate-500 dark:text-slate-400">
-                <span
-                  className={`rounded px-1.5 py-0.5 font-medium ${workspaceBadge(parsed.prefix)}`}
-                >
-                  {parsed.identifier}
-                </span>
-                <span aria-hidden>→</span>
-                <span className="font-mono text-slate-700 dark:text-slate-200">
-                  {parsed.hostname}
-                </span>
-              </p>
-            ) : null}
-          </label>
-        ) : mode === "create" ? (
-          <div className="mt-3 space-y-3">
-            <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
-              Team key
+          </div>
+
+          <div className="mt-3 flex gap-0.5 rounded-md bg-slate-100 p-0.5 text-xs font-medium dark:bg-slate-800">
+            {tab("existing", "Existing ticket")}
+            {tab("create", "New ticket")}
+            {tab("plain", "No ticket")}
+          </div>
+
+          {mode === "existing" ? (
+            <label className={`mt-3 ${label}`}>
+              Linear ticket link or id
               <input
-                value={team}
-                onChange={(e) => setTeam(e.target.value)}
-                placeholder="we"
+                autoFocus
+                value={ticket}
+                onChange={(e) => setTicket(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submit();
+                }}
+                placeholder="https://linear.app/…/issue/WE-142  or  WE-142"
                 spellCheck={false}
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500"
+                className={field}
               />
-              <span className="mt-0.5 block text-[11px] font-normal text-slate-400 dark:text-slate-500">
-                The Linear team the ticket is created in (WE-… → “we”), using the
-                selected preset’s API key.
-              </span>
-            </label>
-            <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
-              Title
-              <input
-                autoFocus
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") submit();
-                }}
-                placeholder="Short ticket title"
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500"
-              />
-            </label>
-            <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
-              Description
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={3}
-                placeholder="Optional — what needs doing"
-                className="mt-1 w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500"
-              />
-            </label>
-          </div>
-        ) : (
-          <div className="mt-3 space-y-3">
-            <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
-              Title
-              <input
-                autoFocus
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") submit();
-                }}
-                placeholder="Container title"
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500"
-              />
-            </label>
-            <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">
-              First message to the agent
-              <textarea
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                rows={3}
-                placeholder="Optional — leave empty to not auto-send a first message"
-                className="mt-1 w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500"
-              />
-            </label>
-          </div>
-        )}
-
-        {groups.length > 0 ? (
-          <label className="mt-3 block text-xs font-medium text-slate-500 dark:text-slate-400">
-            Account group
-            <AccountGroupSelect
-              groups={groups}
-              value={group}
-              onChange={setGroup}
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100"
-            />
-            <span className="mt-0.5 block text-[11px] font-normal text-slate-400 dark:text-slate-500">
-              The account pool this clone's agents route through. Its CLIProxyAPI instance
-              owns account selection + failover.
-            </span>
-          </label>
-        ) : null}
-
-        {presets.length > 0 ? (
-          <label className="mt-3 block text-xs font-medium text-slate-500 dark:text-slate-400">
-            Preset
-            <select
-              value={preset}
-              onChange={(e) => setPreset(e.target.value)}
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100"
-            >
-              {mode === "existing" ? (
-                <option value="">Auto (from ticket-id prefix)</option>
+              {ticket && !parsed ? (
+                <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">
+                  couldn’t find a ticket id (like WE-142) in that
+                </p>
               ) : null}
-              {presets.map((p) => (
-                <option key={p.name} value={p.name}>
-                  {p.name}
-                  {p.labels.length > 0 ? ` · ${p.labels.join(", ")}` : ""} (
-                  {p.vars.length} var{p.vars.length === 1 ? "" : "s"})
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : mode === "create" ? (
-          <p className="mt-3 text-[11px] text-red-600 dark:text-red-400">
-            Creating a ticket needs a preset with a Linear API key — add one in
-            Settings.
-          </p>
-        ) : null}
+              {parsed ? (
+                <p className="mt-1.5 flex items-center gap-1.5 text-[11px] font-normal text-slate-500 dark:text-slate-400">
+                  <span
+                    className={`rounded px-1.5 py-0.5 font-medium ${workspaceBadge(parsed.prefix)}`}
+                  >
+                    {parsed.identifier}
+                  </span>
+                  <span aria-hidden>→</span>
+                  <span className="font-mono text-slate-700 dark:text-slate-200">
+                    {parsed.hostname}
+                  </span>
+                </p>
+              ) : null}
+            </label>
+          ) : mode === "create" ? (
+            <div className="mt-3 space-y-3">
+              <label className={label}>
+                Team key
+                {teamKeys.length === 0 ? (
+                  <p className="mt-1 text-[11px] font-normal text-red-600 dark:text-red-400">
+                    No preset declares a team key — add ticket-id prefixes to a preset in
+                    Settings.
+                  </p>
+                ) : (
+                  <select
+                    value={team}
+                    onChange={(e) => setTeam(e.target.value)}
+                    className={field}
+                  >
+                    {teamKeys.map((t) => (
+                      <option key={t.key} value={t.key}>
+                        {t.key.toUpperCase()} · {t.preset.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </label>
+              <label className={label}>
+                Title
+                <input
+                  autoFocus
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Short ticket title"
+                  className={field}
+                />
+              </label>
+              <div className={label}>
+                Description
+                <div className="mt-1 min-h-[8rem] rounded-md border border-slate-300 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
+                  <Suspense
+                    fallback={
+                      <p className="px-3 text-xs text-slate-400 dark:text-slate-500">
+                        Loading editor…
+                      </p>
+                    }
+                  >
+                    <MarkdownEditor
+                      onChange={setDescription}
+                      placeholder="What needs doing — paste images, format freely"
+                    />
+                  </Suspense>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-3 space-y-3">
+              <label className={label}>
+                Title
+                <input
+                  autoFocus
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submit();
+                  }}
+                  placeholder="Container title"
+                  className={field}
+                />
+              </label>
+              <label className={label}>
+                First message to the agent
+                <textarea
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  rows={3}
+                  placeholder="Optional — leave empty to not auto-send a first message"
+                  className={`resize-y ${field}`}
+                />
+              </label>
+              {presets.length > 0 ? (
+                <label className={label}>
+                  Preset
+                  <select
+                    value={plainPreset}
+                    onChange={(e) => setPlainPreset(e.target.value)}
+                    className={field}
+                  >
+                    {presets.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}
+                        {p.labels.length > 0 ? ` · ${p.labels.join(", ")}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+            </div>
+          )}
 
-        {mode !== "plain" ? (
-          <details className="mt-3 text-xs">
-            <summary className="cursor-pointer font-medium text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
-              Instruction overrides (optional)
-            </summary>
-            <div className="mt-2 space-y-3">
-              <p className="text-[11px] font-normal text-slate-400 dark:text-slate-500">
-                Added on top of the defaults and marked as taking precedence —
-                the agent acts on the merged instruction.
-              </p>
-              <label className="block font-medium text-slate-500 dark:text-slate-400">
+          {/* The auto-selected preset, read-only — the ticket tabs never pick one by hand. */}
+          {mode !== "plain" ? (
+            <p className="mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
+              Preset{" "}
+              <span className="font-normal text-slate-700 dark:text-slate-200">
+                {effectivePreset ? (
+                  <>
+                    <span className="font-medium">{effectivePreset.name}</span>
+                    {effectivePreset.labels.length > 0
+                      ? ` · ${effectivePreset.labels.join(", ")}`
+                      : ""}
+                  </>
+                ) : mode === "create" ? (
+                  "—"
+                ) : (
+                  <span className="text-slate-400 dark:text-slate-500">
+                    {parsed ? `no preset claims ${parsed.prefix.toUpperCase()}` : "—"}
+                  </span>
+                )}
+              </span>
+            </p>
+          ) : null}
+
+          {groups.length > 0 ? (
+            <label className={`mt-3 ${label}`}>
+              Account group override
+              <AccountGroupSelect
+                groups={groups}
+                value={shownGroup}
+                blankLabel={
+                  mode === "plain" ? "Preset default" : "Follows the ticket’s preset"
+                }
+                onChange={setGroupOverride}
+                className={field}
+              />
+            </label>
+          ) : null}
+
+          {linearKeyMissing ? (
+            <p className="mt-3 text-[11px] text-red-600 dark:text-red-400">
+              {presets.length === 0
+                ? mode === "create"
+                  ? "Creating a ticket needs a preset with a Linear API key — add one in Settings."
+                  : "Looking up a ticket needs a preset with a Linear API key — add one in Settings."
+                : mode === "create"
+                  ? `Preset “${effectivePreset?.name ?? "—"}” has no Linear API key — creating a ticket needs one. Add it in Settings, or pick a team whose preset has one.`
+                  : "No preset has a Linear API key — looking up a ticket needs one. Add it in Settings."}
+            </p>
+          ) : null}
+
+          {mode !== "plain" ? (
+            <div className="mt-3 space-y-3 text-xs">
+              <label className={`${label} font-medium`}>
                 Clone agent instructions
                 <textarea
                   value={agentInstructions}
@@ -332,46 +461,66 @@ export function CloneModal({
                   placeholder={
                     'Appended to the default ("Follow your \"Implementing a ticket\" procedure"); takes precedence where they conflict.'
                   }
-                  className="mt-1 w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500"
+                  className={`resize-y ${field}`}
                 />
               </label>
-              <label className="block font-medium text-slate-500 dark:text-slate-400">
+              <label className={`${label} font-medium`}>
                 Claude Code instructions
                 <textarea
                   value={claudeInstructions}
                   onChange={(e) => setClaudeInstructions(e.target.value)}
                   rows={3}
-                  placeholder={
-                    "Appended to the default (pull latest → switch to the feature branch → setup docs → implement); takes precedence where they conflict."
-                  }
-                  className="mt-1 w-full resize-y rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500"
+                  placeholder="Appended to the default (pull latest → switch to the feature branch → setup docs → implement); takes precedence where they conflict."
+                  className={`resize-y ${field}`}
                 />
               </label>
             </div>
-          </details>
+          ) : null}
+
+          <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+            <input
+              type="checkbox"
+              checked={headless}
+              onChange={(e) => setHeadless(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+            />
+            Headless (no desktop)
+          </label>
+
+          {parentCandidate ? (
+            <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+              <input
+                type="checkbox"
+                checked={asSubClone}
+                onChange={(e) => setAsSubClone(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+              />
+              <span>
+                Sub clone of{" "}
+                <span className="font-mono text-slate-700 dark:text-slate-200">
+                  {parentCandidate.displayName || parentCandidate.id}
+                </span>
+              </span>
+            </label>
+          ) : null}
+        </div>
+
+        {error ? (
+          <p className="mt-3 shrink-0 text-[11px] text-red-600 dark:text-red-400">{error}</p>
         ) : null}
 
-        <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
-          <input
-            type="checkbox"
-            checked={headless}
-            onChange={(e) => setHeadless(e.target.checked)}
-            className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
-          />
-          <span>
-            Headless (no desktop)
-            <span className="mt-0.5 block text-[11px] font-normal text-slate-400 dark:text-slate-500">
-              Skips the GNOME desktop. The viewer shows a tabbed tmux terminal instead of a
-              video stream. The agent chat still works.
-            </span>
-          </span>
-        </label>
+        {op ? (
+          <div className="mt-3 shrink-0">
+            <OperationProgress op={op} />
+          </div>
+        ) : null}
 
-        <div className="mt-4 flex justify-end gap-2">
+        <div className="mt-4 flex shrink-0 justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+            disabled={busy}
+            className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
           >
             Cancel
           </button>
@@ -381,7 +530,7 @@ export function CloneModal({
             disabled={!valid || busy}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
-            {mode === "create" ? "Create & clone" : "Clone"}
+            {busy ? "Cloning…" : mode === "create" ? "Create & clone" : "Clone"}
           </button>
         </div>
       </div>

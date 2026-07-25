@@ -698,7 +698,9 @@ fn effective_group_preset<'a>(
     let group = if group_specified {
         resolved_group
     } else {
-        parent.and_then(|h| h.group.clone())
+        // A blank parent group can't happen after `normalize_clone_groups`, but filter anyway
+        // rather than inheriting an empty name past `resolve_clone_group`'s fallback chain.
+        parent.map(|h| h.group.clone()).filter(|g| !g.is_empty())
     };
     let preset = if preset_specified {
         explicit
@@ -708,6 +710,46 @@ fn effective_group_preset<'a>(
             .and_then(|name| presets.iter().find(|p| p.name == name))
     };
     (group, preset)
+}
+
+/// A preset's default account group. `config::normalize_groups` keeps every preset pointed at
+/// a real group, but this re-checks against the live config anyway: a config written by an
+/// older build (or by hand) can still carry a blank or dangling name, and binding a clone
+/// to a group with no CLIProxyAPI instance would break its inference silently.
+fn preset_default_group(cfg: &wire::AppConfig, preset: Option<&wire::Preset>) -> Option<String> {
+    let name = preset?.group.trim();
+    cfg.groups
+        .iter()
+        .find(|g| g.name == name)
+        .map(|g| g.name.clone())
+}
+
+/// The account group a new clone binds, resolving the full precedence chain. Every clone binds
+/// one, so this returns a concrete name; the chain is, strongest first:
+///
+/// 1. an explicit `group` on the request (already validated by `resolve_group`),
+/// 2. a sub clone's inherited parent group (arrives as `group` with `group_specified` false),
+/// 3. the effective preset's default group,
+/// 4. the first configured group — the backstop that makes the invariant total.
+///
+/// Step 4 can only be reached with no explicit group, no parent, and a preset with no (or a
+/// dangling) group, which `config::normalize_groups` should have already fixed. Pure —
+/// unit-tested; the `clone` handler applies it per mode because each resolves its preset
+/// differently.
+fn resolve_clone_group(
+    cfg: &wire::AppConfig,
+    group: Option<String>,
+    preset: Option<&wire::Preset>,
+) -> Result<String, (StatusCode, String)> {
+    group
+        .or_else(|| preset_default_group(cfg, preset))
+        .or_else(|| cfg.groups.first().map(|g| g.name.clone()))
+        .ok_or((
+            // Unreachable in practice — `config::normalize_groups` seeds a group at load and
+            // after every save. An error beats silently creating an inference-less clone.
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no account group is configured — add one in Settings".to_string(),
+        ))
 }
 
 /// `POST /api/clone` — start a clone from a source image. Body is one of:
@@ -760,6 +802,11 @@ async fn clone(
         None => None,
     };
 
+    // Applied per mode because each resolves its preset differently (ticket mode's is
+    // label-auto-selected inside `resolve_issue`, so it isn't known until then).
+    let clone_group =
+        |group: Option<String>, preset: Option<&wire::Preset>| resolve_clone_group(&cfg, group, preset);
+
     // suffix-aware display name (duplicate ticket → "title (a)").
     let derive = |app: &App, base: &str, title: &str| -> (String, String) {
         let hostname = jobs::next_free_hostname(app, base);
@@ -803,7 +850,8 @@ async fn clone(
             source_image: image,
             new_hostname: hostname,
             linear: None,
-            group: eff_group,
+            // Inherited parent group first, then the effective preset's default.
+            group: clone_group(eff_group, eff_preset)?,
             first_message: None,
             agent_instructions,
             claude_instructions,
@@ -856,7 +904,7 @@ async fn clone(
                 display_name: Some(display),
                 ..Default::default()
             }),
-            group: group.clone(),
+            group: clone_group(group.clone(), explicit)?,
             first_message: Some(message).filter(|m| !m.is_empty()),
             agent_instructions,
             claude_instructions,
@@ -894,7 +942,9 @@ async fn clone(
         source_image: image,
         new_hostname: hostname,
         linear: Some(meta),
-        group,
+        // Ticket mode's preset may have been label-auto-selected, so its default group is
+        // only knowable here, after `resolve_issue`.
+        group: clone_group(group, Some(&preset))?,
         first_message: None,
         agent_instructions,
         claude_instructions,
@@ -984,8 +1034,18 @@ async fn resolve_issue(
         if title.is_empty() {
             return Err("create.title is required".into());
         }
+        // The description arrives as markdown from the dialog's rich-text editor, so any
+        // pasted image points at this server's LAN-only `/uploads`. Re-host those in Linear
+        // first — otherwise the ticket renders broken images for anyone off the network.
+        let description = linear::rehost_markdown_images(
+            &app.http,
+            &preset.linear_key,
+            &app.config().data_dir,
+            description,
+        )
+        .await;
         let issue =
-            linear::create_issue(&app.http, &preset.linear_key, &prefix, title, description)
+            linear::create_issue(&app.http, &preset.linear_key, &prefix, title, &description)
                 .await
                 .map_err(|e| e.to_string())?;
         return Ok((issue, preset.linear_key.clone(), preset.clone()));
@@ -1330,6 +1390,32 @@ pub(crate) fn mirror_layout_to_state(app: &App) {
     });
 }
 
+/// Repoint every clone whose group is blank or dangling at the first configured group.
+/// Wraps [`crate::state::normalize_groups`] with the current config's group list, and skips
+/// the `mutate` (a disk write + an SSE broadcast to every browser) when nothing changed —
+/// this runs on every reconciler pass, where the steady state is "no change".
+///
+/// Relies on `config::normalize_groups` having guaranteed at least one group; with none, it
+/// is a no-op rather than repointing every clone at a blank name.
+pub(crate) fn normalize_clone_groups(app: &App) {
+    let groups: Vec<String> = app.config().groups.iter().map(|g| g.name.clone()).collect();
+    let Some(fallback) = groups.first().cloned() else {
+        return;
+    };
+    let needs_fix = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .any(|h| !groups.iter().any(|g| g == &h.group));
+    if !needs_fix {
+        return;
+    }
+    app.store.mutate(|s| {
+        crate::state::normalize_groups(s, &fallback, &groups);
+    });
+}
+
 /// `GET /api/config` — the redacted view (no plaintext secrets).
 async fn config_get(State(app): State<App>) -> Json<AppConfigRedacted> {
     Json(app.config().redacted())
@@ -1515,31 +1601,44 @@ async fn server_restart(
 
 #[derive(Deserialize)]
 struct HostGroupReq {
-    /// The account pool this clone's agents route through, or `None`/absent to clear it
-    /// (the clone runs with no inference until a group is bound again).
+    /// The account pool this clone's agents route through. Required — a clone always binds
+    /// a group.
     #[serde(default)]
     group: Option<String>,
 }
 
+/// Resolve a requested group name against the configured groups. `None`/blank means "not
+/// specified" (the caller decides what to default to); a name that isn't configured is an
+/// error. Unlike earlier revisions there is no `"none"` escape hatch — every clone binds a
+/// group, so "bind nothing" is no longer expressible.
 fn resolve_group(app: &App, group: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
     match group.map(str::trim).filter(|name| !name.is_empty()) {
-        // Explicit clear: `--group none` binds no group (and, for a sub clone, opts out of
-        // inheriting the parent's group). Reserved word — a group can't be named "none".
-        Some(name) if name.eq_ignore_ascii_case("none") => Ok(None),
         Some(name) if app.config().groups.iter().any(|group| group.name == name) => {
             Ok(Some(name.to_string()))
         }
-        Some(name) => Err((StatusCode::BAD_REQUEST, format!("unknown group '{name}'"))),
+        Some(name) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("unknown group '{name}' (configured: {})", group_names(&app.config())),
+        )),
         None => Ok(None),
     }
 }
 
-/// `POST /api/hosts/:id/group` — bind a clone to an account group (or clear the binding
-/// with `{ "group": null }`). This is the sole account selection under the group-proxy
-/// model: the `/cc` router maps the clone → its group → that group's CLIProxyAPI instance,
-/// which owns intra-group account selection + OAuth refresh. No clone-side change is needed —
-/// a group swap is a pure map update. Unknown clone → 400; unmanaged row → 400; an unknown
-/// group name → 400.
+/// The configured group names, for error messages.
+fn group_names(cfg: &wire::AppConfig) -> String {
+    cfg.groups
+        .iter()
+        .map(|g| g.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `POST /api/hosts/:id/group` — bind a clone to an account group. This is the sole account
+/// selection under the group-proxy model: the `/cc` router maps the clone → its group → that
+/// group's CLIProxyAPI instance, which owns intra-group account selection + OAuth refresh. No
+/// clone-side change is needed — a group swap is a pure map update. Unknown clone → 400;
+/// unmanaged row → 400; an unknown or missing group name → 400 (the binding is mandatory, so
+/// there is no way to clear it).
 async fn clone_group(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
@@ -1553,7 +1652,13 @@ async fn clone_group(
             format!("'{id}' is not a managed clone"),
         ));
     }
-    let group = resolve_group(&app, req.group.as_deref())?;
+    let group = resolve_group(&app, req.group.as_deref())?.ok_or((
+        StatusCode::BAD_REQUEST,
+        format!(
+            "a group name is required — every clone binds one (configured: {})",
+            group_names(&app.config())
+        ),
+    ))?;
     let group_set = group.clone();
     app.store.mutate(|s| {
         if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
@@ -1713,12 +1818,16 @@ async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
             "clone is archived; unarchive it before using inference",
         );
     }
-    let Some(group) = host.group else {
+    // Blank is unreachable once `normalize_clone_groups` has run (boot + every reconciler
+    // pass), but a hand-edited state.json can be blank for the window before the watcher
+    // reloads it — 409 rather than routing to an instance that doesn't exist.
+    let group = host.group;
+    if group.is_empty() {
         return deny(
             StatusCode::CONFLICT,
             "clone has no group (bind one in Settings before running an agent)",
         );
-    };
+    }
     // Capture before the upstream request can wait on headers. Archive/unarchive advances the
     // epoch, so a response from this request cannot be attributed to a later lifecycle.
     let capture_epoch = app.tokens.capture_epoch(&host_id);
@@ -1932,8 +2041,15 @@ async fn groups_delete(
     let before = cfg.groups.len();
     cfg.groups.retain(|g| g.name != name);
     if cfg.groups.len() != before {
+        // Deleting the last group re-seeds "Default", and any preset that pointed at the
+        // deleted group is repointed — a preset must always name a real group.
+        config::normalize_groups(&mut cfg);
         config::save(&cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         *app.cfg.write().unwrap() = cfg.clone();
+        // Clones bound to the deleted group need the same treatment, and immediately: waiting
+        // for the reconciler's next pass would leave them pointed at a group with no instance,
+        // so every agent request in them 503s until it runs.
+        normalize_clone_groups(&app);
         crate::cliproxy::apply_now(&app);
     }
     Ok(Json(cfg.redacted()))
@@ -2236,8 +2352,13 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
+        // Seed the default group, mirroring `config::load` → `config::normalize_groups`. A
+        // group-less config is not a reachable production state, and clone creation now
+        // resolves a group for every clone, so a bare `Default` here would 500 in tests that
+        // are about something else entirely.
         let cfg = wire::AppConfig {
             data_dir: dir.to_string_lossy().into_owned(),
+            groups: vec![wire::Group { name: wire::DEFAULT_GROUP.into() }],
             ..Default::default()
         };
         App::new(store, cfg)
@@ -2342,16 +2463,19 @@ mod tests {
             .into_iter()
             .find(|h| h.id == "w1")
             .unwrap();
-        assert_eq!(host.group.as_deref(), Some("team"));
+        assert_eq!(host.group, "team");
 
-        // Clear the binding with null.
-        let _ = clone_group(
+        // The binding can't be cleared — every clone binds a group, so a null/absent name
+        // is a 400 and the existing binding is left untouched.
+        let err = clone_group(
             State(app.clone()),
             AxPath("w1".into()),
             Json(HostGroupReq { group: None }),
         )
         .await
-        .unwrap();
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("required"), "msg: {}", err.1);
         let host = app
             .store
             .get()
@@ -2359,7 +2483,7 @@ mod tests {
             .into_iter()
             .find(|h| h.id == "w1")
             .unwrap();
-        assert!(host.group.is_none());
+        assert_eq!(host.group, "team");
 
         // An unknown group name is a 400.
         let err = clone_group(
@@ -2462,7 +2586,7 @@ mod tests {
         let parent = wire::RmngClone {
             id: "p".into(),
             managed: true,
-            group: Some("parent-group".into()),
+            group: "parent-group".into(),
             preset_name: Some("parent-preset".into()),
             ..Default::default()
         };
@@ -2496,18 +2620,78 @@ mod tests {
         assert!(pr.is_none());
     }
 
+    #[test]
+    fn preset_default_group_resolves_against_live_groups() {
+        let cfg = wire::AppConfig {
+            groups: vec![wire::Group { name: "pooled".into() }],
+            ..Default::default()
+        };
+        let bound = wire::Preset { group: "pooled".into(), ..Default::default() };
+        assert_eq!(preset_default_group(&cfg, Some(&bound)), Some("pooled".into()));
+
+        // No preset at all → no default.
+        assert_eq!(preset_default_group(&cfg, None), None);
+
+        // A blank or dangling group can only come from a hand-edited / older config
+        // (`normalize_groups` repoints both) — resolve to None rather than binding the
+        // clone to a group that has no CLIProxyAPI instance behind it.
+        for g in ["", "deleted"] {
+            let p = wire::Preset { group: g.into(), ..Default::default() };
+            assert_eq!(preset_default_group(&cfg, Some(&p)), None, "group {g:?}");
+        }
+    }
+
+    #[test]
+    fn clone_group_walks_the_precedence_chain() {
+        // Group order matters: "first" is the final backstop, so it is deliberately NOT the
+        // preset's group — otherwise the fallback and the preset default are indistinguishable.
+        let cfg = wire::AppConfig {
+            groups: vec![
+                wire::Group { name: "first".into() },
+                wire::Group { name: "pooled".into() },
+                wire::Group { name: "other".into() },
+            ],
+            ..Default::default()
+        };
+        let p = wire::Preset { group: "pooled".into(), ..Default::default() };
+        let g = |group: Option<String>, preset: Option<&wire::Preset>| {
+            resolve_clone_group(&cfg, group, preset).unwrap()
+        };
+
+        // 1. An explicit request group wins over the preset's default.
+        assert_eq!(g(Some("other".into()), Some(&p)), "other");
+        // 2. A sub clone's inherited parent group likewise (it arrives already resolved).
+        assert_eq!(g(Some("other".into()), None), "other");
+        // 3. Nothing explicit → the preset's default.
+        assert_eq!(g(None, Some(&p)), "pooled");
+        // 4. No preset at all → the first configured group.
+        assert_eq!(g(None, None), "first");
+        // 4. …and likewise for a preset whose group was deleted out from under it.
+        let dangling = wire::Preset { group: "deleted".into(), ..Default::default() };
+        assert_eq!(g(None, Some(&dangling)), "first");
+
+        // With no groups configured at all the chain has nothing to land on. Unreachable in
+        // practice (`config::normalize_groups` seeds one) — assert it errors rather than
+        // silently creating a clone that can never reach inference.
+        let empty = wire::AppConfig { groups: vec![], ..Default::default() };
+        let err = resolve_clone_group(&empty, None, Some(&p)).unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[tokio::test]
-    async fn resolve_group_treats_none_as_clear() {
+    async fn resolve_group_validates_against_configured_groups() {
         let app = test_app();
         *app.cfg.write().unwrap() = wire::AppConfig {
             groups: vec![wire::Group { name: "team".into() }],
             ..app.config()
         };
         assert_eq!(resolve_group(&app, Some("team")).unwrap(), Some("team".into()));
-        assert_eq!(resolve_group(&app, Some("none")).unwrap(), None);
-        assert_eq!(resolve_group(&app, Some("NONE")).unwrap(), None); // case-insensitive
+        // Absent/blank = "not specified"; the caller decides the fallback.
         assert_eq!(resolve_group(&app, None).unwrap(), None);
+        assert_eq!(resolve_group(&app, Some("  ")).unwrap(), None);
+        // Unknown names error — and "none" is no longer a sentinel, just an unknown name.
         assert!(resolve_group(&app, Some("ghost")).is_err());
+        assert!(resolve_group(&app, Some("none")).is_err());
     }
 
     #[tokio::test]
@@ -2870,7 +3054,7 @@ not a var line
                 id: "h1".into(),
                 host: "h1".into(),
                 managed: true,
-                group: Some("ghost".into()), // never provisioned → no port
+                group: "ghost".into(), // never provisioned → no port
                 ..Default::default()
             });
         });
@@ -2894,7 +3078,7 @@ not a var line
                 id: "h1".into(),
                 host: "h1".into(),
                 managed: true,
-                group: Some("g".into()),
+                group: "g".into(),
                 ..Default::default()
             });
         });

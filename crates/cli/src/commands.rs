@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use control_client::Client;
-use serde_json::Value;
+use control_client::{Client, CloneOpts};
+use serde_json::{Value, json};
 use wire::{ContainerStats, ControlState, MonitorState, Operation, Provider};
 
 use crate::args::{
-    AccountCmd, DesktopCmd, ImageCmd, Provider as CliProvider, RescaleArgs, WaitArgs,
+    AccountCmd, CreateArgs, DesktopCmd, ImageCmd, Provider as CliProvider, RescaleArgs, WaitArgs,
 };
 use crate::output::{human_size, pct, short_id, table, token_count};
 use crate::wait::{WaitOutcome, wait_for_op};
@@ -125,7 +125,7 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
                 h.local_ip.clone().unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
                 h.preset_name.clone().unwrap_or_default(),
-                h.group.clone().unwrap_or_default(),
+                h.group.clone(),
                 stats
                     .map(|stats| cpu_pct(stats.cpu_pct))
                     .unwrap_or_default(),
@@ -177,28 +177,114 @@ pub async fn select(client: &Client, clone: Option<&str>, none: bool, json: bool
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Build the shared [`CloneOpts`] from the flags every create verb carries. `preset` is
+/// passed separately because only two of the four verbs expose one — the ticket verbs
+/// auto-select it server-side, exactly as the web dialog does.
+fn clone_opts<'a>(
+    common: &'a CreateArgs,
+    preset: Option<&'a str>,
+    agent_instructions: Option<&'a String>,
+    claude_instructions: Option<&'a String>,
+) -> CloneOpts<'a> {
+    CloneOpts {
+        group: common.group.as_deref(),
+        preset,
+        headless: common.headless,
+        parent: common.parent.as_deref(),
+        top_level: common.top_level,
+        agent_instructions: agent_instructions.map(String::as_str),
+        claude_instructions: claude_instructions.map(String::as_str),
+    }
+}
+
+/// `rmng clone create <hostname> --from <image>` — exact-hostname clone, no ticket.
 pub async fn clone_create(
     client: &Client,
     hostname: &str,
-    from: &str,
-    group: Option<&str>,
-    no_group: bool,
     preset: Option<&str>,
     no_preset: bool,
-    headless: bool,
-    parent: Option<&str>,
-    top_level: bool,
-    wait: &WaitArgs,
+    common: &CreateArgs,
     json: bool,
 ) -> Result<u8> {
-    // Map the explicit "no X" flags to the `none` sentinel the server treats as "bind none"
-    // (and, for a sub clone, opt out of inheriting the parent's). Omitting both ⇒ inherit.
-    let group = if no_group { Some("none") } else { group };
+    // `--no-preset` maps to the `none` sentinel the server treats as "no preset" (and, for a
+    // sub clone, opt out of inheriting the parent's). Omitted ⇒ inherit. There is no group
+    // equivalent: every clone binds a group, so omitting `--group` falls through the
+    // parent → preset-default → first-configured chain instead.
     let preset = if no_preset { Some("none") } else { preset };
     let op = client
-        .duplicate_clone(from, hostname, group, preset, headless, parent, top_level)
+        .clone_create(
+            &common.from,
+            json!({ "hostname": hostname }),
+            &clone_opts(common, preset, None, None),
+        )
         .await?;
-    started(client, op, wait, json, "clone").await
+    started(client, op, &common.wait, json, "clone").await
+}
+
+/// `rmng clone ticket <link-or-id>` — clone for an existing Linear ticket. No `--preset`:
+/// the server auto-selects it from the ticket's team prefix, matching the web dialog.
+pub async fn clone_ticket(
+    client: &Client,
+    ticket: &str,
+    agent_instructions: Option<&String>,
+    claude_instructions: Option<&String>,
+    common: &CreateArgs,
+    json: bool,
+) -> Result<u8> {
+    let op = client
+        .clone_create(
+            &common.from,
+            json!({ "ticket": ticket }),
+            &clone_opts(common, None, agent_instructions, claude_instructions),
+        )
+        .await?;
+    started(client, op, &common.wait, json, "clone").await
+}
+
+/// `rmng clone new-ticket --team <key> --title <t>` — create the Linear ticket, then clone
+/// for it. The team key picks the preset (whose API key opens the issue), so again no
+/// `--preset`. `description` is markdown; `/uploads/…` images in it are re-hosted in Linear.
+pub async fn clone_new_ticket(
+    client: &Client,
+    team: &str,
+    title: &str,
+    description: &str,
+    agent_instructions: Option<&String>,
+    claude_instructions: Option<&String>,
+    common: &CreateArgs,
+    json: bool,
+) -> Result<u8> {
+    let op = client
+        .clone_create(
+            &common.from,
+            json!({ "create": {
+                "team": team.trim().to_ascii_lowercase(),
+                "title": title.trim(),
+                "description": description,
+            }}),
+            &clone_opts(common, None, agent_instructions, claude_instructions),
+        )
+        .await?;
+    started(client, op, &common.wait, json, "clone").await
+}
+
+/// `rmng clone plain --title <t>` — no-ticket clone with a title-derived hostname.
+pub async fn clone_plain(
+    client: &Client,
+    title: &str,
+    message: &str,
+    preset: Option<&str>,
+    common: &CreateArgs,
+    json: bool,
+) -> Result<u8> {
+    let op = client
+        .clone_create(
+            &common.from,
+            json!({ "plain": { "title": title.trim(), "message": message } }),
+            &clone_opts(common, preset, None, None),
+        )
+        .await?;
+    started(client, op, &common.wait, json, "clone").await
 }
 
 pub async fn clone_rm(
@@ -236,27 +322,18 @@ pub async fn restore(client: &Client, clone: &str, wait: &WaitArgs, json: bool) 
     started(client, op, wait, json, "restore").await
 }
 
-/// `rmng clone bind <clone> <group>|--none` — (re)bind a clone's account group.
-pub async fn clone_bind(
-    client: &Client,
-    clone: &str,
-    group: Option<&str>,
-    none: bool,
-    json: bool,
-) -> Result<u8> {
-    if group.is_none() && !none {
-        bail!("provide a group name, or --none to clear the binding");
+/// `rmng clone bind <clone> <group>` — rebind a clone's account group. Every clone binds one,
+/// so this can change the binding but never clear it; the server rejects an unknown name.
+pub async fn clone_bind(client: &Client, clone: &str, group: &str, json: bool) -> Result<u8> {
+    let group = group.trim();
+    if group.is_empty() {
+        bail!("provide a group name (see `rmng group ls`)");
     }
-    let group = match group.map(str::trim) {
-        _ if none => None,
-        Some("") | Some("none") | None => None,
-        Some(g) => Some(g),
-    };
     let reply = client.set_clone_group(clone, group).await?;
     if json {
         emit_json(&reply)?;
     } else {
-        println!("set {clone} group → {}", group.unwrap_or("none"));
+        println!("set {clone} group → {group}");
     }
     Ok(0)
 }

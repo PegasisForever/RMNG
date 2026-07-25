@@ -52,9 +52,11 @@ pub struct CloneSpec {
     pub new_hostname: String,
     pub linear: Option<LinearMeta>,
     /// The account pool this clone's agents route through (one CLIProxyAPI instance per
-    /// group). `None` = no inference until a group is bound. This is the sole account binding
-    /// under the group-proxy model — the `/cc` router maps clone → group → instance.
-    pub group: Option<String>,
+    /// group). Always set — every clone binds a group (`web::resolve_clone_group` walks the
+    /// explicit-request → parent → preset-default → first-configured chain). This is the sole
+    /// account binding under the group-proxy model — the `/cc` router maps clone → group →
+    /// instance.
+    pub group: String,
     pub first_message: Option<String>,
     pub agent_instructions: Option<String>,
     pub claude_instructions: Option<String>,
@@ -395,17 +397,12 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // instance via the control-server's `/cc` router (the per-clone router key was already
     // injected into the clone's env above by `router_env_vars`). Binding is a pure map update
     // — the group is recorded on the clone below and the router resolves clone → group →
-    // instance at request time; there is no clone-side credential push. `None` leaves the
-    // clone without inference until a group is bound (the router answers 409 until then).
+    // instance at request time; there is no clone-side credential push. Always bound — the
+    // group was resolved to a concrete name before the spec was built.
     let group = spec.group.clone();
-    match &group {
-        Some(g) => patch_op(&app, &op_id, |op| {
-            op.log.push(format!("account: group {g}"))
-        }),
-        None => patch_op(&app, &op_id, |op| {
-            op.log.push("account: no group bound".into())
-        }),
-    }
+    patch_op(&app, &op_id, |op| {
+        op.log.push(format!("account: group {group}"))
+    });
 
     // Register the fully-provisioned clone and mark the op done — the clone is now genuinely
     // connectable. A clone's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
@@ -968,11 +965,13 @@ mod tests {
 
     #[test]
     fn clonespec_default_has_no_group() {
+        // `Default` leaves it blank; every real spec goes through `web::resolve_clone_group`,
+        // which always yields a concrete name.
         let spec = CloneSpec {
             new_hostname: "x".into(),
             ..Default::default()
         };
-        assert!(spec.group.is_none());
+        assert!(spec.group.is_empty());
     }
 
     #[tokio::test]

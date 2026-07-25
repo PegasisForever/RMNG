@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import { currentValue } from "./ChangeAccountModal";
 import type { Clone } from "~/lib/types";
+import type { Group } from "~/lib/wire/Group";
 
 const clone = (overrides: Partial<Clone> = {}): Clone => ({
   id: "h1",
@@ -10,18 +11,23 @@ const clone = (overrides: Partial<Clone> = {}): Clone => ({
   username: "rmng",
   password: "rmng",
   managed: true,
+  group: "pooled",
   ...overrides,
 });
 
-test("a clone with no group binding reads as 'none'", () => {
-  const h = clone();
-
-  expect(currentValue(h)).toBe("none");
-  expect("none" !== currentValue(h)).toBe(false);
-});
+const groups: Group[] = [{ name: "Default" }, { name: "pooled" }];
 
 test("a clone bound to a group reads back its group name", () => {
-  const h = clone({ group: "pooled" });
+  expect(currentValue(clone(), groups)).toBe("pooled");
+});
 
-  expect(currentValue(h)).toBe("pooled");
+test("a blank binding falls back to the first group", () => {
+  // Every clone binds a group, but a row written before that rule reads blank off the wire
+  // until the server's normalizer repoints it.
+  expect(currentValue(clone({ group: "" }), groups)).toBe("Default");
+});
+
+test("no groups yet (config still loading) yields an empty value", () => {
+  // The Apply button is disabled on empty, so this can't submit a blank binding.
+  expect(currentValue(clone({ group: "" }), [])).toBe("");
 });

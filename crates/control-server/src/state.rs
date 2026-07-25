@@ -110,6 +110,35 @@ impl StateStore {
     }
 }
 
+/// Repoint every clone whose `group` is blank — or names a group that no longer exists — at
+/// `fallback` (the first configured group). Returns true if anything changed, so callers can
+/// skip a persist when there's nothing to do.
+///
+/// Every clone binds a group, but `state.json` predates that rule, so rows written by an
+/// older build carry no `group` key at all and deserialize blank. Hand-edits and
+/// `rmng clone bind` against a since-deleted group can produce the same. Repointing (rather
+/// than erroring) keeps those clones usable: a blank group means `/cc` returns 409 and every
+/// agent in the clone silently loses inference.
+///
+/// Run at boot and on every reconciler pass — the latter is what catches a hand-edited
+/// `state.json` picked up by the watcher, and a group deleted out from under a live clone.
+pub fn normalize_groups(state: &mut ControlState, fallback: &str, groups: &[String]) -> bool {
+    let mut changed = false;
+    for h in state.hosts.iter_mut() {
+        if !groups.iter().any(|g| g == &h.group) {
+            tracing::info!(
+                clone = %h.id,
+                from = %h.group,
+                to = %fallback,
+                "repointing clone at a valid account group",
+            );
+            h.group = fallback.to_string();
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn read_from_disk(path: &Path) -> ControlState {
     match std::fs::read_to_string(path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
@@ -194,6 +223,29 @@ mod tests {
         assert_eq!(st.hosts.len(), 1);
         assert_eq!(st.selected.as_deref(), Some("h1"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn normalize_groups_repoints_blank_and_dangling_clones() {
+        let groups = vec!["first".to_string(), "other".to_string()];
+        let mut st = ControlState {
+            hosts: vec![
+                // An old row from before the binding was mandatory: no `group` at all.
+                RmngClone { id: "old".into(), ..Default::default() },
+                // Bound to a group that has since been deleted.
+                RmngClone { id: "dangling".into(), group: "deleted".into(), ..Default::default() },
+                // Already valid — must be left exactly as-is, not herded onto the first group.
+                RmngClone { id: "fine".into(), group: "other".into(), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        assert!(normalize_groups(&mut st, "first", &groups));
+        assert_eq!(st.hosts[0].group, "first");
+        assert_eq!(st.hosts[1].group, "first");
+        assert_eq!(st.hosts[2].group, "other");
+        // Idempotent — a second pass reports no change, so the reconciler doesn't rewrite
+        // state.json and re-broadcast SSE on every tick.
+        assert!(!normalize_groups(&mut st, "first", &groups));
     }
 
     #[test]

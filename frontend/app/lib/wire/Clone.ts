@@ -31,10 +31,16 @@ managed: boolean,
 archived: boolean, source: string | null, 
 /**
  * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
- * route through, via the control-server's `/cc` router. `None` = no inference. This is
- * the sole account binding — CLIProxyAPI owns intra-group account selection + refresh.
+ * route through, via the control-server's `/cc` router. This is the sole account
+ * binding — CLIProxyAPI owns intra-group account selection + refresh.
+ *
+ * **Every clone has one.** `state::normalize_groups` repoints a blank (an old row from
+ * before groups were mandatory) at the first configured group at load, and there is
+ * always at least one group (`config::normalize_groups`). Blank is therefore only ever
+ * transient — it can still appear on a `Default::default()` row in tests, or in a
+ * hand-edited `state.json` between the edit and the watcher's next reload.
  */
-group: string | null, 
+group: string, 
 /**
  * Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
  * string: the workspace set is config (Settings → Linear API keys), not an enum.

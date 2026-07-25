@@ -9,6 +9,7 @@ const clone: Clone = {
   port: 3389,
   username: "",
   password: "",
+  group: "Default",
   managed: true,
   forwards: [
     { id: "f8080", remotePort: 3000, localPort: 8080, enabled: true, label: "dev server" },

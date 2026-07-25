@@ -1,7 +1,10 @@
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
-import type { Operation } from "~/lib/wire/Operation";
+// The hand-maintained `Operation`, not the generated `wire/Operation`: ts-rs maps the
+// Rust `u64` timestamps to `bigint`, but `JSON.parse` yields plain numbers, so the
+// hand-maintained shape is the one these responses actually have at runtime.
+import type { Operation } from "~/lib/types";
 import type { SetupEnv } from "~/lib/wire/SetupEnv";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
@@ -34,28 +37,32 @@ async function delJson(url: string): Promise<unknown> {
 }
 
 /** Clone payload: an existing ticket link/id, a new ticket to create (in team
- *  `team`, using the chosen preset's Linear key), or a plain no-ticket clone
- *  (just a container title + an optional first agent message).
+ *  `team`, using the resolved preset's Linear key — `create.description` is markdown),
+ *  or a plain no-ticket clone (just a container title + an optional first agent message).
  *  The ticket modes also accept optional clone-agent + Claude Code overrides.
- *  `group` (all modes) binds the clone to an account pool (a CLIProxyAPI instance) —
- *  a group name, or null/omitted for no inference binding.
- *  `preset` picks the clone preset (env vars + Linear key): omitted/"auto" means
- *  auto-select by ticket-id prefix (ticket mode); create/plain require a name. */
+ *  `group` (all modes) OVERRIDES the account pool the clone binds; omit it to let the
+ *  server resolve it (preset default → first configured group). Every clone binds one.
+ *  `preset` picks the clone preset (env vars + Linear key): omitted means auto-select by
+ *  ticket-id prefix (ticket mode); create/plain send a resolved name.
+ *  `parent` nests the new clone as a sub clone under that clone id. */
 export type ClonePayload = (
   | ((
       | { ticket: string }
       | { create: { team: string; title: string; description: string } }
     ) & { agentInstructions?: string; claudeInstructions?: string })
   | { plain: { title: string; message: string } }
-) & { group?: string | null; preset?: string; headless?: boolean };
+) & { group?: string; preset?: string; headless?: boolean; parent?: string };
 
 export const activate = (id: string | null) =>
   postJson("/api/activate", { id });
 export const reorder = (order: string[]) => postJson("/api/reorder", { order });
 /** Start a clone from a source image (`image` = a canonical reference from
- *  `listImages`, e.g. `pegasis0/rmng-template:latest`). Progress streams over /events. */
+ *  `listImages`, e.g. `pegasis0/rmng-template:latest`). Returns the driving Operation so
+ *  the caller can follow it; progress streams over /events. */
 export const duplicateClone = (image: string, payload: ClonePayload) =>
-  postJson("/api/clone", { image, ...payload });
+  postJson("/api/clone", { image, ...payload }).then(
+    (r) => (r as { op: Operation }).op,
+  );
 export const deleteClone = (id: string) => postJson("/api/delete", { id });
 /** Gracefully stop a managed clone while retaining its container and per-clone data. */
 export const archiveClone = (id: string) =>
@@ -154,10 +161,12 @@ export const refreshUsage = (): Promise<void> =>
 
 /** Bind a clone to an account group (or clear it with `null`). Replaces the old
  *  per-provider account swap — one group backs all of a clone's agents. */
-export const setCloneGroup = (cloneId: string, group: string | null) =>
+/** Rebind a clone's account group. Every clone binds one, so a name is required — the
+ *  server 400s on a missing or unknown group. */
+export const setCloneGroup = (cloneId: string, group: string) =>
   postJson(`/api/hosts/${encodeURIComponent(cloneId)}/group`, { group }) as Promise<{
     ok: boolean;
-    group: string | null;
+    group: string;
   }>;
 
 // --- Settings / config (redacted read · partial write · validate) ----------

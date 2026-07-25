@@ -55,16 +55,19 @@ function MetricSlot({ metric }: { metric: Metric }) {
   );
 }
 
-/** The clone's account-group binding: a badge carrying the group name (or a muted "no group"),
- *  taking the remaining width and truncating so the usage figures + ⋯ menu stay on the same row.
- *  Provider-agnostic — a group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns
- *  intra-group selection. When `fable` is set, a small "fable" label sits next to the group
- *  name to flag that this clone was served by the Fable model in the last 5 minutes. */
+/** The clone's account-group binding: a badge carrying the group name, taking the remaining
+ *  width and truncating so the usage figures + ⋯ menu stay on the same row. Provider-agnostic —
+ *  a group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns intra-group selection.
+ *  When `fable` is set, a small "fable" label sits next to the group name to flag that this
+ *  clone was served by the Fable model in the last 5 minutes.
+ *
+ *  Every clone binds a group, so the blank branch is a transient state only — a row written
+ *  before the binding was mandatory, in the window before the server's normalizer repoints it. */
 function GroupTag({ group, fable }: { group?: string; fable?: boolean }) {
   return (
     <span
       className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
-      title={group ? `account group: ${group}` : "no account group — no inference"}
+      title={group ? `account group: ${group}` : "no account group yet — no inference"}
     >
       {group ? (
         // `min-w-0` (not `max-w-full`) so the name truncates before the fable label, keeping

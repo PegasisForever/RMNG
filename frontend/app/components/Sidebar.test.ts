@@ -18,6 +18,7 @@ const clone = (id: string, parent?: string): Clone => ({
   port: 3389,
   username: "",
   password: "",
+  group: "Default",
   managed: true,
   parent,
 });
@@ -55,9 +56,9 @@ test("keeps unavailable LXC rate and disk visibly unavailable", () => {
 
 test("partitions archived clones and preserves their order during active reordering", () => {
   const hosts: Clone[] = [
-    { id: "alpha", host: "alpha", port: 3389, username: "", password: "" },
-    { id: "bravo", host: "bravo", port: 3389, username: "", password: "", archived: true },
-    { id: "charlie", host: "charlie", port: 3389, username: "", password: "" },
+    { id: "alpha", host: "alpha", port: 3389, username: "", password: "", group: "Default" },
+    { id: "bravo", host: "bravo", port: 3389, username: "", password: "", group: "Default", archived: true },
+    { id: "charlie", host: "charlie", port: 3389, username: "", password: "", group: "Default" },
   ];
 
   expect(partitionClones(hosts)).toMatchObject({

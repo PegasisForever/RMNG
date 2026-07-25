@@ -194,6 +194,118 @@ pub fn pick_preset_by_prefix<'a>(
     presets.iter().find(|p| p.labels.iter().any(|pl| pl.eq_ignore_ascii_case(prefix)))
 }
 
+/// Re-host a `/uploads/<name>` image in Linear and return its permanent `assetUrl`.
+///
+/// The clone dialog's rich-text description uploads pasted images to the control-server's
+/// own `/uploads` store (same path the clone notes use), which is LAN-only — a Linear
+/// ticket referencing it would render a broken image for anyone outside the network. So
+/// before the issue is created, every local image is re-uploaded through Linear's
+/// `fileUpload` mutation: it hands back a pre-signed PUT plus the `assetUrl` that will
+/// serve the file afterwards. The signed headers must be sent verbatim.
+pub async fn upload_asset(
+    http: &reqwest::Client,
+    key: &str,
+    filename: &str,
+    content_type: &str,
+    bytes: Vec<u8>,
+) -> Result<String, LinearError> {
+    let data = gql(
+        http,
+        key,
+        "mutation($contentType: String!, $filename: String!, $size: Int!) { \
+           fileUpload(contentType: $contentType, filename: $filename, size: $size) { \
+             success uploadFile { uploadUrl assetUrl headers { key value } } } }",
+        json!({ "contentType": content_type, "filename": filename, "size": bytes.len() }),
+    )
+    .await?;
+    let f = data
+        .pointer("/fileUpload/uploadFile")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| LinearError("Linear refused the file upload".into()))?;
+    let upload_url = f
+        .get("uploadUrl")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LinearError("Linear upload reply had no uploadUrl".into()))?;
+    let asset_url = f
+        .get("assetUrl")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LinearError("Linear upload reply had no assetUrl".into()))?
+        .to_string();
+
+    let mut req = http.put(upload_url).header("content-type", content_type);
+    // Every header Linear signed into the URL has to go back verbatim or the PUT 403s.
+    for h in f.get("headers").and_then(Value::as_array).into_iter().flatten() {
+        if let (Some(k), Some(v)) = (
+            h.get("key").and_then(Value::as_str),
+            h.get("value").and_then(Value::as_str),
+        ) {
+            req = req.header(k, v);
+        }
+    }
+    let resp = req
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| LinearError(format!("Linear asset upload failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(LinearError(format!(
+            "Linear asset upload failed (HTTP {})",
+            resp.status().as_u16()
+        )));
+    }
+    Ok(asset_url)
+}
+
+/// Every distinct `/uploads/<name>` file referenced by a markdown body, in first-seen order.
+///
+/// A generated upload name is `<hex>.<ext>` (see `files::save_upload`), so the name runs to
+/// the first character that is neither alphanumeric nor `.` — which stops at the `)` closing
+/// a markdown image, at whitespace, and at a query string. `read_upload` re-validates the
+/// shape, so a crafted `../` can't escape the uploads dir even if it were scanned here.
+fn upload_names(markdown: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = markdown;
+    while let Some(i) = rest.find("/uploads/") {
+        let after = &rest[i + "/uploads/".len()..];
+        let end = after
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+            .unwrap_or(after.len());
+        let name = &after[..end];
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+        rest = &after[end..];
+    }
+    names
+}
+
+/// Rewrite every `/uploads/<name>` reference in a markdown body to a Linear-hosted
+/// `assetUrl`, uploading each distinct file once. A file that fails to upload keeps its
+/// original URL — a ticket with one unreachable image beats no ticket at all — and the
+/// error is logged, not returned.
+pub async fn rehost_markdown_images(
+    http: &reqwest::Client,
+    key: &str,
+    data_dir: &str,
+    markdown: &str,
+) -> String {
+    let mut out = markdown.to_string();
+    for name in upload_names(markdown) {
+        let (bytes, ct) = match crate::files::read_upload(data_dir, &name) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("linear: image /uploads/{name} unreadable: {e} (left as-is)");
+                continue;
+            }
+        };
+        match upload_asset(http, key, &name, ct, bytes).await {
+            Ok(url) => out = out.replace(&format!("/uploads/{name}"), &url),
+            Err(e) => tracing::warn!("linear: re-hosting /uploads/{name} failed: {e} (left as-is)"),
+        }
+    }
+    out
+}
+
 /// Create a new issue in team `prefix`, with an explicit API key.
 pub async fn create_issue(
     http: &reqwest::Client,
@@ -321,6 +433,22 @@ pub fn ticket_hostname_base(prefix: &str, identifier: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_names_finds_each_distinct_image_once() {
+        let md = "![a](/uploads/ab12.png)\n\ntext ![b](/uploads/cd34.jpeg) and ![a again](/uploads/ab12.png)";
+        assert_eq!(upload_names(md), vec!["ab12.png", "cd34.jpeg"]);
+        // A body with no images does no work at all.
+        assert!(upload_names("# just a heading\n\nno images here").is_empty());
+        // The name stops at the first non-name character, so an absolute URL form and a
+        // query string both yield the bare file name the uploads store is keyed by.
+        assert_eq!(
+            upload_names("http://10.0.0.84:9000/uploads/ff99.png?v=2"),
+            vec!["ff99.png"]
+        );
+        // A bare `/uploads/` with nothing after it isn't a reference.
+        assert!(upload_names("see /uploads/ for details").is_empty());
+    }
 
     #[test]
     fn parses_ticket_refs() {
