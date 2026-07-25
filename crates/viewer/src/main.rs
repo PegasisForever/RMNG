@@ -705,22 +705,26 @@ fn build_ui(
             }
             // 3. Auto pointer-lock: reconcile the actual lock with the policy (remote cursor hidden
             //    ≥180ms → engage; shown ≥300ms → release; manual chords override — see auto_lock.rs).
-            //    Engage targets the active video window; with none active we leave the state alone.
+            //    The target is the active video window's surface; NO target releases (see
+            //    auto_lock::lock_action — holding a macOS lock through a focus loss freezes the
+            //    host cursor process-wide, which mutter prevents for us on Wayland).
             if let Some(pl) = pointer_lock.as_ref() {
                 let want = auto.lock().unwrap().want(Instant::now());
-                if want {
-                    if let Some(mw) = windows
-                        .borrow()
-                        .values()
-                        .find(|w| matches!(w.content, Content::Video(_)) && w.window.is_active())
-                    {
-                        // Idempotent per surface; re-targets if focus moved windows.
-                        if let Some(surface) = mw.window.surface() {
-                            pl.engage(&surface);
+                // Resolve the target into a local so the `windows` borrow is dropped before
+                // engage/release runs — holding it across a GTK call risks a re-entrant borrow.
+                let target = windows
+                    .borrow()
+                    .values()
+                    .find(|w| matches!(w.content, Content::Video(_)) && w.window.is_active())
+                    .and_then(|mw| mw.window.surface());
+                match auto_lock::lock_action(want, target.is_some(), pl.is_engaged()) {
+                    auto_lock::LockAction::Engage => {
+                        if let Some(surface) = target.as_ref() {
+                            pl.engage(surface);
                         }
                     }
-                } else if pl.is_engaged() {
-                    pl.release();
+                    auto_lock::LockAction::Release => pl.release(),
+                    auto_lock::LockAction::Nothing => {}
                 }
             }
             // 4. Cursor (video windows only): (1) the native OS cursor over the video takes the
