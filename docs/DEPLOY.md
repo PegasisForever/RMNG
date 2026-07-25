@@ -260,6 +260,14 @@ The config gives Codex the local desktop MCP (`http://127.0.0.1:9004`) and Linea
 sessions may need a new Codex run to reload instructions/config, but the files are updated
 automatically.
 
+**The polkit sudo-group rule is backported the same way.** New clones get
+`/etc/polkit-1/rules.d/49-rmng-sudo-nopasswd.rules` from template phase 10; clones built from
+an older image get an identical copy from the reconciler. Without it every `auth_admin` action
+fails — a DM-less clone's only logind session is `Class=manager`, and polkit cannot resolve an
+auth cookie to one, so `pkexec` (Steam's first-run dependency install, GNOME Settings'
+privileged panels) dies with `No session for cookie` no matter which agent is running. polkitd
+picks the file up over inotify, so nothing is restarted and no agent work is interrupted.
+
 **Dev caveat**: in a `cargo run` dev checkout the payloads come from
 `crates/control-server/embedded-bin/` — with nothing staged there, a clone boots without
 clone-daemon/agent-wrapper (a WARN says so at create time).

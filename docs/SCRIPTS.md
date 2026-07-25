@@ -86,7 +86,7 @@ inside the script — never baked as image `ENV`, or it would leak into the boot
 | Script | Purpose |
 |---|---|
 | `lib.sh` | Shared env + `log()` helper; sourced (not run) by every phase |
-| `10-desktop.sh` | Locale/tz, headless GNOME + Mutter + VA-API + PipeWire (no gdm3/g-r-d/flatpak), the Recommends strip, container masks |
+| `10-desktop.sh` | Locale/tz, headless GNOME + Mutter + VA-API + PipeWire (no gdm3/g-r-d/flatpak), the Recommends strip, container masks, the polkit sudo-group rule (DM-less ⇒ no resolvable session) |
 | `15-gnome-patch.sh` | `dpkg -i` the patched gnome-shell `.deb` (from the `gnome-build` stage) over stock |
 | `20-toolbox.sh` | Best-effort dev toolbox: CLI tools, Docker, cloud CLIs, browsers, Cursor/VS Code, HMCL/Mission Center/Monaspace, dconf defaults |
 | `30-user.sh` | The uid-1000 clone user (groups, linger, fish), preset-PATH rc, keyring, shared `CLAUDE.md`, Codex `AGENTS.md`/`config.toml`, Claude+Codex Linear MCP defaults, `claude`/`codex`/`uv`/`rustup`/`nvm` toolchains, and the three `systemd --user` units (`gnome-headless`, `rmng-clone-daemon`, `agent-wrapper`) + wants symlinks |

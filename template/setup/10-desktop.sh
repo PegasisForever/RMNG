@@ -116,6 +116,38 @@ apt-get autoremove --purge -y -qq >/dev/null 2>&1 || true
 # linger, independent of graphical.target / any DM.
 systemctl set-default multi-user.target >/dev/null 2>&1 || true
 
+# Going DM-less costs polkit its notion of a login session, so grant the sudo group outright.
+# With no GDM there is no seat/TTY session: linger opens the clone user's only logind session
+# as Class=manager (a bare `systemd --user`), and polkit cannot resolve an auth cookie to a
+# session of that class. Every auth_admin action therefore dies at the agent handshake —
+# `GDBus.Error:org.freedesktop.PolicyKit1.Error.Failed: No session for cookie` — no matter
+# which agent answers, so installing a graphical agent does not fix it. Found via Steam's
+# first-run `pkexec steamdeps --update-apt`, which is unrunnable without this; the same wall
+# hits any pkexec caller and GNOME Settings' privileged panels.
+#
+# YES (not AUTH_ADMIN_KEEP) is the point: it authorizes without an authentication step, so
+# there is no agent to find and no cookie to resolve. Scoping to the sudo group keeps it to
+# the same accounts phase 30 already gives NOPASSWD:ALL in /etc/sudoers.d, so this grants no
+# privilege that sudo does not — and a clone is a single-user disposable sandbox anyway.
+log "polkit: authorize the sudo group (DM-less ⇒ Class=manager session, cookies unresolvable)"
+# No `install -d -m 0755` here: polkitd ships rules.d as 0750 root:polkitd and `install -d`
+# would re-mode an existing directory, publishing the rules to every user. mkdir -p leaves
+# the packaged mode alone and only supplies a default if the directory is somehow absent.
+mkdir -p /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/49-rmng-sudo-nopasswd.rules <<'RULES'
+// A clone has no display manager, so its only logind session is Class=manager (linger's
+// bare `systemd --user`) with no seat or TTY. polkit cannot map an auth cookie back to such
+// a session, so any auth_admin* action fails with "No session for cookie" whatever agent is
+// running. Return YES to skip authentication entirely rather than fix an unfixable lookup.
+// Limited to `sudo`, which phase 30 already grants NOPASSWD:ALL via /etc/sudoers.d.
+polkit.addRule(function (action, subject) {
+    if (subject.isInGroup("sudo")) {
+        return polkit.Result.YES;
+    }
+});
+RULES
+chmod 0644 /etc/polkit-1/rules.d/49-rmng-sudo-nopasswd.rules
+
 # Apt lists deliberately STAY (dropped once, in the Dockerfile's tail cleanup — matching the
 # source flow): phase 20's Ubuntu-archive installs keep working off these lists even when its
 # own post-repo `apt-get update` hits a transient network failure.
