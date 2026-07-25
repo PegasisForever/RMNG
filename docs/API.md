@@ -189,7 +189,15 @@ Body (one of four modes + optional account/instructions):
                                     //   → the preset's default group → the first configured
                                     //   group. An unknown name is a 400.
   "agentInstructions": "...",       // extra context for the agent-wrapper
-  "claudeInstructions": "..."       // extra instructions for Claude Code
+  "claudeInstructions": "...",      // extra instructions for Claude Code
+  "parent": "<clone-id>",           // nest as a sub clone under this clone (must be a managed
+                                    //   top-level one — nesting is ONE level deep). Honoured in
+                                    //   every mode; the web dialog's "sub clone of X" checkbox
+                                    //   sends it. Omitted ⇒ the caller clone is auto-detected
+                                    //   from its `X-RMNG-Proxy-Key` and nested under when it is
+                                    //   itself top-level; no key (e.g. a browser) ⇒ top-level.
+  "topLevel": true                  // force a top-level clone, skipping that auto-detection.
+                                    //   Mutually exclusive with `parent` (400).
 }
 ```
 **Create mode's `description` is markdown**, and any `/uploads/<name>` image reference in it
