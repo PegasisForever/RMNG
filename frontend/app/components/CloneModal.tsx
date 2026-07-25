@@ -309,7 +309,7 @@ export function CloneModal({
       {/* One height for every tab. The pin is on the whole scroll body, not on the
           tab-specific block: the tabs also differ BELOW that block (No ticket shows no preset
           line and no instruction overrides), so pinning only the block still left this tab
-          shorter. 43.5rem is the tallest tab (New ticket, ~694px); the shortest (No ticket,
+          shorter. 49.5rem is the tallest tab (New ticket, ~786px); the shortest (No ticket,
           ~462px) simply carries the slack as empty space above the button bar, which stays
           pinned to the bottom. `max-h-[90vh]` is the fallback for a genuinely short viewport,
           not the normal path. */}
@@ -324,7 +324,7 @@ export function CloneModal({
           New clone
         </h3>
 
-        <div className="h-[43.5rem] min-h-0 shrink overflow-y-auto pr-0.5">
+        <div className="h-[49.5rem] min-h-0 shrink overflow-y-auto pr-0.5">
           <div className="mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
             Source image
             <ImagePicker
@@ -472,8 +472,11 @@ export function CloneModal({
             </div>
           )}
 
-          {/* The auto-selected preset, read-only — the ticket tabs never pick one by hand. */}
-          {mode !== "plain" ? (
+          {/* Existing-ticket only. That tab has no other indication of which preset the
+              ticket id resolved to, so it's shown read-only. New ticket doesn't need it —
+              its team dropdown already reads "DEV · preset 1", i.e. the same choice — and
+              No ticket picks a preset by hand. */}
+          {mode === "existing" ? (
             <p className="mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
               Preset{" "}
               <span className="font-normal text-slate-700 dark:text-slate-200">
@@ -484,7 +487,7 @@ export function CloneModal({
                       ? ` · ${effectivePreset.labels.join(", ")}`
                       : ""}
                   </>
-                ) : mode === "existing" && parsed && presets.length > 0 ? (
+                ) : parsed && presets.length > 0 ? (
                   // Blocking, not cosmetic: with no preset dropdown there's nothing to
                   // override the auto-selection with, so say what to fix.
                   <span className="text-red-600 dark:text-red-400">
@@ -526,8 +529,9 @@ export function CloneModal({
           ) : null}
 
           {/* Always visible (no expander), stacked — their placeholders are long enough that
-              a half-width column truncates them to uselessness. Resizable: they're overrides,
-              usually left empty. */}
+              a half-width column truncates them to uselessness. Five rows each: they take
+              prose, and the dialog has the room now that only the Existing tab carries the
+              preset line. Still resizable. */}
           {mode !== "plain" ? (
             <div className="mt-3 space-y-2 text-xs">
               <label className={`${label} font-medium`}>
@@ -535,7 +539,7 @@ export function CloneModal({
                 <textarea
                   value={agentInstructions}
                   onChange={(e) => setAgentInstructions(e.target.value)}
-                  rows={2}
+                  rows={5}
                   placeholder={
                     'Appended to the default ("Follow your \"Implementing a ticket\" procedure"); takes precedence where they conflict.'
                   }
@@ -547,7 +551,7 @@ export function CloneModal({
                 <textarea
                   value={claudeInstructions}
                   onChange={(e) => setClaudeInstructions(e.target.value)}
-                  rows={2}
+                  rows={5}
                   placeholder="Appended to the default (pull latest → switch to the feature branch → setup docs → implement); takes precedence where they conflict."
                   className={`resize-y ${field}`}
                 />
