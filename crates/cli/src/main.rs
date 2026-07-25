@@ -61,13 +61,13 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 commands::clone_create(client, hostname, preset.as_deref(), *no_preset, common, json)
                     .await
             }
-            CloneCmd::Ticket {
+            CloneCmd::CreateFromTicket {
                 ticket,
                 agent_instructions,
                 claude_instructions,
                 common,
             } => {
-                commands::clone_ticket(
+                commands::clone_create_from_ticket(
                     client,
                     ticket,
                     agent_instructions.as_ref(),
@@ -77,7 +77,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 )
                 .await
             }
-            CloneCmd::NewTicket {
+            CloneCmd::CreateWithNewTicket {
                 team,
                 title,
                 description,
@@ -87,7 +87,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 common,
             } => {
                 let body = args::read_text(description.as_ref(), description_file.as_ref())?;
-                commands::clone_new_ticket(
+                commands::clone_create_with_new_ticket(
                     client,
                     team,
                     title,
@@ -99,7 +99,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 )
                 .await
             }
-            CloneCmd::Plain {
+            CloneCmd::CreatePlain {
                 title,
                 message,
                 message_file,
@@ -107,7 +107,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 common,
             } => {
                 let body = args::read_text(message.as_ref(), message_file.as_ref())?;
-                commands::clone_plain(client, title, &body, preset.as_deref(), common, json).await
+                commands::clone_create_plain(client, title, &body, preset.as_deref(), common, json).await
             }
             CloneCmd::Rm { clone, yes, wait } => {
                 commands::clone_rm(client, clone, *yes, wait, json).await

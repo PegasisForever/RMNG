@@ -35,7 +35,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// Manage clones (the fleet unit): ls / create / rm / archive / restore / ssh / exec / …
+    /// Manage clones (the fleet unit): ls / create-* / rm / archive / restore / ssh / exec / …
     #[command(subcommand)]
     Clone(CloneCmd),
     /// Clone-source image operations
@@ -56,8 +56,9 @@ pub enum Cmd {
     },
 }
 
-/// Flags shared by every clone-creating verb (`create` / `ticket` / `new-ticket` / `plain`),
-/// matching the controls the web dialog shows below its three tabs.
+/// Flags shared by every clone-creating verb (`create`, `create-from-ticket`,
+/// `create-with-new-ticket`, `create-plain`), matching the controls the web dialog shows
+/// below its three tabs.
 #[derive(Args, Debug)]
 pub struct CreateArgs {
     /// Clone-source image reference to create from (see `rmng image ls`)
@@ -116,7 +117,7 @@ pub enum CloneCmd {
     /// Create a clone for an EXISTING Linear ticket (the web dialog's "Existing ticket" tab).
     /// The hostname derives from the ticket id and the preset is auto-selected from its team
     /// prefix — there is no --preset here, exactly as in the dialog.
-    Ticket {
+    CreateFromTicket {
         /// Linear ticket link or bare id (e.g. `WE-142`)
         ticket: String,
         /// Extra clone-agent instructions, appended to the default (takes precedence)
@@ -128,9 +129,10 @@ pub enum CloneCmd {
         #[command(flatten)]
         common: CreateArgs,
     },
-    /// CREATE a Linear ticket, then clone for it (the dialog's "New ticket" tab). The team key
-    /// selects the preset, whose Linear API key opens the issue.
-    NewTicket {
+    /// Create a Linear ticket AND a clone for it (the dialog's "New ticket" tab) — the only
+    /// verb that opens a new ticket. The team key selects the preset, whose Linear API key
+    /// creates the issue.
+    CreateWithNewTicket {
         /// Linear team key the ticket is created in, e.g. `we` (must be a label on some preset)
         #[arg(long)]
         team: String,
@@ -154,7 +156,7 @@ pub enum CloneCmd {
     },
     /// Create a no-ticket clone with a title-derived hostname (the dialog's "No ticket" tab).
     /// Use `clone create` instead when you want to name the host yourself.
-    Plain {
+    CreatePlain {
         /// Container title — the display name, and the stem of the derived hostname
         #[arg(long)]
         title: String,
@@ -557,17 +559,19 @@ mod tests {
         }
     }
 
-    /// The three ticket/plain verbs mirror the web dialog's three tabs. The ticket verbs
-    /// deliberately expose NO `--preset`: the server auto-selects it (from the ticket prefix,
-    /// or from the team key), exactly as the dialog does.
+    /// The three `create-*` verbs mirror the web dialog's three tabs. Every clone-creating
+    /// verb is named `create…` so the action is unmistakable — `clone ticket WE-142` read
+    /// like it did something TO the ticket. The ticket verbs deliberately expose NO
+    /// `--preset`: the server auto-selects it (from the ticket prefix, or from the team key),
+    /// exactly as the dialog does.
     #[test]
-    fn clone_ticket_verbs_mirror_the_dialog_tabs() {
+    fn clone_create_verbs_mirror_the_dialog_tabs() {
         let cli = Cli::parse_from([
-            "rmng", "clone", "ticket", "WE-142", "--from", "t:1", "--wait",
+            "rmng", "clone", "create-from-ticket", "WE-142", "--from", "t:1", "--wait",
             "--agent-instructions", "be brief",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::Ticket { ticket, agent_instructions, common, .. }) => {
+            Cmd::Clone(CloneCmd::CreateFromTicket { ticket, agent_instructions, common, .. }) => {
                 assert_eq!(ticket, "WE-142");
                 assert_eq!(agent_instructions.as_deref(), Some("be brief"));
                 assert!(common.wait.wait);
@@ -576,18 +580,18 @@ mod tests {
         }
         assert!(
             Cli::try_parse_from([
-                "rmng", "clone", "ticket", "WE-1", "--from", "t:1", "--preset", "p",
+                "rmng", "clone", "create-from-ticket", "WE-1", "--from", "t:1", "--preset", "p",
             ])
             .is_err(),
             "the ticket verb must not accept --preset (the server auto-selects it)"
         );
 
         let cli = Cli::parse_from([
-            "rmng", "clone", "new-ticket", "--from", "t:1", "--team", "we", "--title", "Fix it",
+            "rmng", "clone", "create-with-new-ticket", "--from", "t:1", "--team", "we", "--title", "Fix it",
             "--description", "# heading",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::NewTicket { team, title, description, common, .. }) => {
+            Cmd::Clone(CloneCmd::CreateWithNewTicket { team, title, description, common, .. }) => {
                 assert_eq!((team.as_str(), title.as_str()), ("we", "Fix it"));
                 assert_eq!(description.as_deref(), Some("# heading"));
                 assert_eq!(common.from, "t:1");
@@ -595,25 +599,40 @@ mod tests {
             other => panic!("wrong cmd: {other:?}"),
         }
         // --team and --title are required; --description ⊕ --description-file.
-        assert!(Cli::try_parse_from(["rmng", "clone", "new-ticket", "--from", "t:1"]).is_err());
+        assert!(Cli::try_parse_from(["rmng", "clone", "create-with-new-ticket", "--from", "t:1"]).is_err());
         assert!(
             Cli::try_parse_from([
-                "rmng", "clone", "new-ticket", "--from", "t:1", "--team", "we", "--title", "x",
+                "rmng", "clone", "create-with-new-ticket", "--from", "t:1", "--team", "we", "--title", "x",
                 "--description", "a", "--description-file", "b",
             ])
             .is_err()
         );
 
         let cli = Cli::parse_from([
-            "rmng", "clone", "plain", "--from", "t:1", "--title", "scratch", "--preset", "p1",
+            "rmng", "clone", "create-plain", "--from", "t:1", "--title", "scratch", "--preset", "p1",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::Plain { title, preset, message, .. }) => {
+            Cmd::Clone(CloneCmd::CreatePlain { title, preset, message, .. }) => {
                 assert_eq!(title, "scratch");
                 assert_eq!(preset.as_deref(), Some("p1"));
                 assert_eq!(message, None);
             }
             other => panic!("wrong cmd: {other:?}"),
+        }
+
+        // The pre-rename spellings are gone, not aliased — `clone ticket` / `clone new-ticket`
+        // / `clone plain` didn't say they created anything. These verbs were only ever in
+        // unreleased commits, so there's nothing to keep working.
+        for old in [
+            vec!["rmng", "clone", "ticket", "WE-1", "--from", "t:1"],
+            vec!["rmng", "clone", "new-ticket", "--from", "t:1", "--team", "we", "--title", "t"],
+            vec!["rmng", "clone", "plain", "--from", "t:1", "--title", "t"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&old).is_err(),
+                "old verb `{}` should no longer parse",
+                old[2]
+            );
         }
     }
 

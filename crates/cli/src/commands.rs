@@ -176,7 +176,6 @@ pub async fn select(client: &Client, clone: Option<&str>, none: bool, json: bool
     Ok(0)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Build the shared [`CloneOpts`] from the flags every create verb carries. `preset` is
 /// passed separately because only two of the four verbs expose one — the ticket verbs
 /// auto-select it server-side, exactly as the web dialog does.
@@ -221,9 +220,9 @@ pub async fn clone_create(
     started(client, op, &common.wait, json, "clone").await
 }
 
-/// `rmng clone ticket <link-or-id>` — clone for an existing Linear ticket. No `--preset`:
+/// `rmng clone create-from-ticket <link-or-id>` — clone for an existing Linear ticket. No `--preset`:
 /// the server auto-selects it from the ticket's team prefix, matching the web dialog.
-pub async fn clone_ticket(
+pub async fn clone_create_from_ticket(
     client: &Client,
     ticket: &str,
     agent_instructions: Option<&String>,
@@ -241,10 +240,13 @@ pub async fn clone_ticket(
     started(client, op, &common.wait, json, "clone").await
 }
 
-/// `rmng clone new-ticket --team <key> --title <t>` — create the Linear ticket, then clone
+/// `rmng clone create-with-new-ticket --team <key> --title <t>` — create the Linear ticket, then clone
 /// for it. The team key picks the preset (whose API key opens the issue), so again no
 /// `--preset`. `description` is markdown; `/uploads/…` images in it are re-hosted in Linear.
-pub async fn clone_new_ticket(
+// Eight args because this verb takes the most flags of the four; grouping them into a struct
+// would just move the same fields behind one more name.
+#[allow(clippy::too_many_arguments)]
+pub async fn clone_create_with_new_ticket(
     client: &Client,
     team: &str,
     title: &str,
@@ -268,8 +270,8 @@ pub async fn clone_new_ticket(
     started(client, op, &common.wait, json, "clone").await
 }
 
-/// `rmng clone plain --title <t>` — no-ticket clone with a title-derived hostname.
-pub async fn clone_plain(
+/// `rmng clone create-plain --title <t>` — no-ticket clone with a title-derived hostname.
+pub async fn clone_create_plain(
     client: &Client,
     title: &str,
     message: &str,

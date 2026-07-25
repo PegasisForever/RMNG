@@ -1028,7 +1028,7 @@ async fn resolve_issue(
         // The team key IS the preset choice: it comes from the presets' own ticket-id
         // prefixes, so an omitted `preset` resolves through the same `pick_preset_by_prefix`
         // the existing-ticket mode uses. The web dialog sends the name it resolved; the CLI's
-        // `clone new-ticket` sends only `--team` and relies on this.
+        // `clone create-with-new-ticket` sends only `--team` and relies on this.
         let preset = match explicit {
             Some(p) => p,
             None => linear::pick_preset_by_prefix(&cfg.presets, &prefix).ok_or_else(|| {

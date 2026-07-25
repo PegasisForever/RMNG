@@ -462,17 +462,17 @@ references) and share the flags in "Common create flags" below.
 
 - `rmng clone create <hostname> --from <image>` — exact hostname (a DNS label), no ticket.
   Takes `--preset <name>` / `--no-preset`.
-- `rmng clone ticket <link-or-id> --from <image>` — clone for an EXISTING Linear ticket. The
+- `rmng clone create-from-ticket <link-or-id> --from <image>` — clone for an EXISTING Linear ticket. The
   hostname derives from the ticket id (`WE-142` → `<prefix>we-142`) and **the preset is
   auto-selected from the ticket's team prefix** — there is deliberately no `--preset` here.
   Also takes `--agent-instructions` / `--claude-instructions` (appended to the defaults,
   taking precedence).
-- `rmng clone new-ticket --from <image> --team <key> --title <t>` — CREATE a Linear ticket,
+- `rmng clone create-with-new-ticket --from <image> --team <key> --title <t>` — CREATE a Linear ticket,
   then clone for it. `--team` is a Linear team key like `we`, and it must be a label on some
   preset: that preset is the one used, and its Linear API key opens the issue. Description via
   `--description <markdown>` or `--description-file <path>` (`-` = stdin, which is the sane
-  way to pass a multi-line body). Same instruction flags as `ticket`.
-- `rmng clone plain --from <image> --title <t>` — no-ticket clone with a title-derived
+  way to pass a multi-line body). Same instruction flags as `create-from-ticket`.
+- `rmng clone create-plain --from <image> --title <t>` — no-ticket clone with a title-derived
   hostname. `--message`/`--message-file` is auto-sent to the agent as its first message;
   `--preset <name>` is required when any presets are configured.
 
