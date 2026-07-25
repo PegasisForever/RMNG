@@ -256,19 +256,19 @@ fn default_gpt_model(models: &[String]) -> Option<&str> {
         .or_else(|| models.first().map(String::as_str))
 }
 
-/// Claude Code's default model when a group's live `/v1/models` catalog can't be read (no
-/// accounts authenticated yet / its CLIProxyAPI instance is still starting, see
-/// [`crate::cliproxy::group_catalog`]). A mixed group still defaults Claude Code to Opus before
-/// its first successful catalog read, matching the live-catalog precedence in
-/// [`default_claude_model`]. Only the catalog fetch falls back to this; it is never a hard-coded
-/// model list — a served catalog always wins.
-const FALLBACK_CLAUDE_MODEL: &str = "claude-opus-5";
+/// Claude Code's default model. `opus[1m]` is Claude Code's `opus` alias with the 1M-context beta:
+/// a client-side alias it resolves to the group's served Opus via gateway model discovery, so it's
+/// valid without a catalog and tracks the flagship without pinning an id. Used both as the
+/// served-Opus choice in [`default_claude_model`] and as the fallback before a group's live
+/// `/v1/models` catalog can first be read (no accounts authenticated yet / its CLIProxyAPI instance
+/// still starting, see [`crate::cliproxy::group_catalog`]).
+const FALLBACK_CLAUDE_MODEL: &str = "opus[1m]";
 
 /// Claude Code's default model (its `ANTHROPIC_MODEL`), resolved group-aware from the group's
-/// live catalog with the precedence: **`claude-opus-5`** if the group serves it (the current
-/// flagship — pinned explicitly so it wins regardless of catalog order), else any other id
-/// containing `opus` (case-insensitive), else the first `claude-` id, else `gpt_fallback` — a
-/// GPT-only group, so Claude Code still has a working default (its own picker is held to the
+/// live catalog: when the group serves any Opus, **`opus[1m]`** — Claude Code's `opus` alias with
+/// the 1M-context beta, resolved client-side to the served Opus via gateway model discovery (so it
+/// tracks the flagship without pinning an id here); else the first `claude-` id; else `gpt_fallback`
+/// — a GPT-only group, so Claude Code still has a working default (its own picker is held to the
 /// served set). `None` only for a truly empty resolution (an unreadable catalog with no GPT
 /// fallback), in which case the caller uses [`FALLBACK_CLAUDE_MODEL`]. Pure so it can be
 /// unit-tested.
@@ -276,11 +276,14 @@ const FALLBACK_CLAUDE_MODEL: &str = "claude-opus-5";
 /// This is Claude-Code-only. Codex + OpenCode keep defaulting to [`default_gpt_model`]
 /// (`gpt-5.6-terra`); they never see this value.
 fn default_claude_model(catalog: &[String], gpt_fallback: Option<&str>) -> Option<String> {
+    // Any served Opus → Claude Code's `opus[1m]` alias (== FALLBACK_CLAUDE_MODEL); Claude Code
+    // resolves the alias to the served Opus itself, so we don't pin a version.
+    if catalog.iter().any(|id| id.to_lowercase().contains("opus")) {
+        return Some(FALLBACK_CLAUDE_MODEL.to_string());
+    }
     catalog
         .iter()
-        .find(|id| id.eq_ignore_ascii_case("claude-opus-5"))
-        .or_else(|| catalog.iter().find(|id| id.to_lowercase().contains("opus")))
-        .or_else(|| catalog.iter().find(|id| id.starts_with("claude-")))
+        .find(|id| id.starts_with("claude-"))
         .map(String::to_string)
         .or_else(|| gpt_fallback.map(str::to_string))
 }
@@ -1343,8 +1346,8 @@ mod tests {
 
     #[test]
     fn default_claude_model_prefers_opus_then_first_claude_then_gpt() {
-        // `claude-opus-5` (the flagship) wins whenever served, over an older opus and regardless of
-        // catalog order.
+        // Any served Opus → Claude Code's `opus[1m]` alias (opus + 1M-context beta), regardless of
+        // which Opus id(s) the group serves or their case/order.
         let with_opus5 = vec![
             "claude-fable-5".to_string(),
             "claude-opus-4-8".to_string(),
@@ -1353,11 +1356,8 @@ mod tests {
         ];
         assert_eq!(
             default_claude_model(&with_opus5, None).as_deref(),
-            Some("claude-opus-5")
+            Some("opus[1m]")
         );
-
-        // Any opus preferred whenever the group serves one — over other Claude ids, regardless of
-        // catalog order or case.
         let mixed = vec![
             "claude-haiku-4-5".to_string(),
             "claude-opus-4-8".to_string(),
@@ -1366,13 +1366,10 @@ mod tests {
         ];
         assert_eq!(
             default_claude_model(&mixed, Some("gpt-5.6-terra")).as_deref(),
-            Some("claude-opus-4-8")
+            Some("opus[1m]")
         );
         let upper = vec!["claude-sonnet-5".to_string(), "Claude-Opus-4-8".to_string()];
-        assert_eq!(
-            default_claude_model(&upper, None).as_deref(),
-            Some("Claude-Opus-4-8")
-        );
+        assert_eq!(default_claude_model(&upper, None).as_deref(), Some("opus[1m]"));
 
         // No opus → the first `claude-` id, ahead of the GPT fallback.
         let no_opus = vec![
@@ -1394,9 +1391,9 @@ mod tests {
         );
 
         // Empty resolution (unreadable catalog, no GPT fallback) → None; the caller then uses
-        // FALLBACK_CLAUDE_MODEL (Opus 5).
+        // FALLBACK_CLAUDE_MODEL (the `opus[1m]` alias).
         assert_eq!(default_claude_model(&[], None), None);
-        assert_eq!(FALLBACK_CLAUDE_MODEL, "claude-opus-5");
+        assert_eq!(FALLBACK_CLAUDE_MODEL, "opus[1m]");
     }
 
     #[test]
