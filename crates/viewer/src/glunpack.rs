@@ -645,9 +645,11 @@ pub fn register() -> anyhow::Result<()> {
 /// the **same bytes** — no H.264 in the loop, so this isolates the shader's gather + matrix. The
 /// `gldownload` is only here, for the readback; the production path stays on the GPU.
 ///
-/// This validates the 2D path (glupload yields 2D textures) and, on desktop GL, also compiles the
-/// rectangle-texture shader variant to catch syntax errors early (the rect path is exercised live
-/// against vtdec_hw, not via this harness, since raw sysmem upload produces 2D textures).
+/// This validates the **2D path only** — `glupload` from raw sysmem always yields 2D textures, so
+/// the harness cannot reach the rectangle-sampler variant. That is the variant macOS actually uses
+/// in Yuv444 (vtdec_hw emits IOSurface-backed rectangle textures), and it is covered only by
+/// running live against a server in `RMNG_CHROMA=yuv444`. Exercising it here would mean building a
+/// rectangle-texture source by hand; worth doing if the rect path ever regresses.
 pub fn validate(w: usize, h: usize) -> anyhow::Result<()> {
     use anyhow::{Context, anyhow};
     use gstreamer_app::{AppSink, AppSrc};

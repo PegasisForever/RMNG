@@ -108,7 +108,13 @@ fn main() -> Result<()> {
     // Empirically confirmed on this Intel/Mesa box: cairo=clean(slow), ngl/vulkan=stale, gl=clean.
     // Pin `gl` unless the user overrides. Must be set before GTK realizes its first surface; we're
     // still single-threaded here so set_var is sound.
-    // macOS: the legacy `gl` renderer was removed in GTK ≥ 4.18; the pin is Linux-only.
+    // macOS: the legacy `gl` renderer was removed in GTK ≥ 4.18, so the pin is Linux-only — which
+    // means macOS runs `ngl`, the renderer this workaround exists for, with no escape available.
+    // The symptom has never actually been observed on a Mac (Apple's compositor path differs), so
+    // we do not pay for a mitigation up front. If an old frame ever flashes there — most likely in
+    // a downscaled window, since ngl caches a scaled intermediate — the manual escape is
+    // `GSK_RENDERER=cairo` (correct, slower), and the designed fix is rendering the latest frame
+    // ourselves via a GtkGLArea fed by `appsink max-buffers=1 drop=true` instead of for_paintable.
     #[cfg(target_os = "linux")]
     if std::env::var_os("GSK_RENDERER").is_none() {
         unsafe { std::env::set_var("GSK_RENDERER", "gl") };

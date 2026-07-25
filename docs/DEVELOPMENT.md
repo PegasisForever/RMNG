@@ -81,3 +81,43 @@ capture/encode/server side — the **`viewer` builds *and* runs locally** (clien
 See the [dev loop](DEPLOY.md#the-dev-loop). **The clone template is built on the
 `ubuntu:26.04` base OS** (the patched gnome-shell is compiled against 26.04's GNOME only) —
 see [Publishing the template](DEPLOY.md#publishing-the-template).
+
+<a id="macos"></a>
+### macOS (Apple Silicon) — viewer only
+
+Only the **viewer** builds and runs on macOS; the capture/encode/server side is Linux-only by
+design. Verified on macOS 26.4 / Apple M-series with Homebrew:
+
+```sh
+brew install gtk4 gstreamer pkgconf     # verified: gtk4 4.22.4, gstreamer 1.28.4, pkgconf 2.5.1
+cargo build -p viewer --release         # → target/release/rmng-viewer
+```
+
+**Build the viewer package, not the workspace root.** `cargo build` / `check` / `test` / `clippy`
+at the root fail on macOS inside `libspa-sys`: `clone-daemon` depends on pipewire
+unconditionally, and the workspace declares no `default-members`. Everything you need on a Mac is
+`-p viewer` (add `-p cli -p control-client` if you want the `rmng` CLI, which builds clean and is
+HTTP-only).
+
+**Never mix GTK providers.** The official `GStreamer.framework` `.pkg` bundles *its own* GTK4 for
+the gtk4 plugin. Use Homebrew for **both** GStreamer and GTK4 (one GTK in the process) or the
+framework for both — mixing them produces link-time and runtime chaos. No environment variables
+are needed with an all-Homebrew stack at the default `/opt/homebrew` prefix.
+
+Sanity-check the stack before debugging any video problem:
+
+```sh
+gst-inspect-1.0 vtdec_hw            # VideoToolbox HW decoder (applemedia)
+gst-inspect-1.0 gtk4paintablesink   # GL zero-copy sink
+cargo run -p viewer --release -- --glunpack-validate 256 144   # expect max abs err 0
+```
+
+**macOS input notes.** **Cmd and Control are swapped on the wire by default**, so Mac chords
+(Cmd+C, Cmd+T) reach the remote GNOME session as Ctrl and physical Control produces Super —
+disable with `RMNG_CMD_IS_CTRL=0` or `"cmd_is_ctrl": false` in
+`~/.config/rmng-viewer/config.json`. The F-row needs `fn` on a default MacBook (or turn on "Use
+F1, F2 etc. as standard function keys"). **Cmd-Tab and Cmd-Space cannot be forwarded** — the
+Wayland `inhibit_system_shortcuts` protocol that `grab_keys()` uses does not exist on macOS, so
+that call is a silent no-op there; capturing those would need a permission-gated `CGEventTap`,
+which the viewer deliberately avoids (an `NSEvent` local monitor needs no Input Monitoring grant).
+`RMNG_NO_POINTER_LOCK=1` disables pointer lock entirely.
