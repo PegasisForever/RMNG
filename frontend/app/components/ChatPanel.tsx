@@ -1,5 +1,5 @@
-// Per-host chat with the in-container agent (Claude Agent SDK). Client-only, lazy-imported
-// and keyed by host id (same pattern as HostEditor). Subscribes to the per-host
+// Per-clone chat with the in-container agent (Claude Agent SDK). Client-only, lazy-imported
+// and keyed by clone id (same pattern as CloneEditor). Subscribes to the per-clone
 // chat SSE (/api/chat/:id/events) for { busy, messages }, so the agent's reply
 // and the "working" indicator survive a refresh — the POST only kicks the turn
 // off; the reply lands over SSE. Posting a message is fire-and-forget.
@@ -30,7 +30,7 @@ function Bubble({ m }: { m: ChatMessage }) {
   );
 }
 
-export default function ChatPanel({ hostId }: { hostId: string }) {
+export default function ChatPanel({ cloneId, archived = false }: { cloneId: string; archived?: boolean }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState("");
@@ -46,7 +46,7 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
   useEffect(() => {
     setLoading(true);
     setError(null);
-    const es = new EventSource(`/api/chat/${hostId}/events`);
+    const es = new EventSource(`/api/chat/${cloneId}/events`);
     es.onmessage = (e) => {
       try {
         const snap = JSON.parse(e.data) as ChatSnapshot;
@@ -60,27 +60,26 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
       }
     };
     return () => es.close();
-  }, [hostId]);
+  }, [cloneId]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, busy]);
 
-  // `override` lets buttons send a fixed message (e.g. "monitor") instead of the
-  // textarea contents. Falls back to the trimmed input otherwise. Fire-and-forget:
-  // the POST only starts the turn; the reply and final busy state arrive via SSE.
-  async function send(override?: string) {
-    const text = (override ?? input).trim();
-    if (!text || busy) return;
-    if (override === undefined) setInput("");
+  // Fire-and-forget: the POST only starts the turn; the reply and final busy state arrive
+  // through SSE.
+  async function send() {
+    const text = input.trim();
+    if (!text || busy || archived) return;
+    setInput("");
     setError(null);
     setBusy(true); // optimistic; the SSE snapshot confirms (or clears) it
     setActivity(null);
     // Optimistic user bubble; the server snapshot replaces it once it arrives.
     setMessages((m) => [...m, { id: `tmp-${Date.now()}`, role: "user", text, ts: Date.now() }]);
     try {
-      const res = await fetch(`/api/chat/${hostId}`, {
+      const res = await fetch(`/api/chat/${cloneId}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text }),
@@ -93,7 +92,7 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
       // messages and busy state from here.
     } catch (e) {
       setError((e as Error).message);
-      if (override === undefined) setInput(text); // restore the unsent text
+      setInput(text); // restore the unsent text
       setBusy(false); // the turn never started; SSE will reconcile messages
     }
   }
@@ -101,11 +100,11 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
   // Interrupt the in-flight turn. The wrapper interrupts the agent and emits the
   // aborted result over SSE, which clears `busy` (and `stopping`).
   async function stop() {
-    if (!busy || stopping) return;
+    if (!busy || stopping || archived) return;
     setStopping(true);
     setError(null);
     try {
-      const res = await fetch(`/api/chat/${hostId}/abort`, { method: "POST" });
+      const res = await fetch(`/api/chat/${cloneId}/abort`, { method: "POST" });
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(data.error ?? "stop failed");
@@ -127,7 +126,9 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
           <p className="text-sm text-slate-400 dark:text-slate-500">Loading…</p>
         ) : messages.length === 0 ? (
           <p className="text-sm text-slate-400 dark:text-slate-500">
-            Ask the agent anything — it can control this host's desktop.
+            {archived
+              ? "This clone is archived. Its chat history is retained."
+              : "Ask the agent anything — it can control this clone's desktop."}
           </p>
         ) : (
           messages.map((m) => <Bubble key={m.id} m={m} />)
@@ -154,6 +155,11 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
           {error}
         </div>
       ) : null}
+      {archived ? (
+        <div className="border-t border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400">
+          Unarchive this clone to message the agent.
+        </div>
+      ) : null}
 
       <form
         className="flex items-end gap-2 border-t border-slate-200 p-2 dark:border-slate-700"
@@ -172,20 +178,11 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
             }
           }}
           rows={2}
-          placeholder="Message the agent…  (Enter to send)"
-          disabled={busy}
+          placeholder={archived ? "Unarchive to message the agent" : "Message the agent…  (Enter to send)"}
+          disabled={busy || archived}
           className="min-w-0 flex-1 resize-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none disabled:opacity-60 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
         />
-        <button
-          type="button"
-          onClick={() => send("monitor")}
-          disabled={busy}
-          title="Tell the agent to start monitoring this desktop (track working vs idle)"
-          className="shrink-0 rounded-md border border-amber-400 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-40 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-400 dark:hover:bg-amber-900/40"
-        >
-          Monitor
-        </button>
-        {busy ? (
+        {busy && !archived ? (
           <button
             type="button"
             onClick={stop}
@@ -198,7 +195,7 @@ export default function ChatPanel({ hostId }: { hostId: string }) {
         ) : (
           <button
             type="submit"
-            disabled={!input.trim()}
+            disabled={archived || !input.trim()}
             className="shrink-0 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
             Send

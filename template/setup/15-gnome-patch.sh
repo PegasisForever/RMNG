@@ -20,4 +20,13 @@ test -f "$DEB"
 log "install patched gnome-shell (shell-01 + shell-03)"
 dpkg -i "$DEB"
 log "patched gnome-shell installed: $(dpkg-query -W -f='${Version}' gnome-shell)"
+
+# Pin it. The +ngshell repack only outranks the stock *base* it replaced; a later Ubuntu
+# SRU outranks it in dpkg order (e.g. 50.1-0ubuntu1.1 > 50.1-0ubuntu1+ngshell1) and an
+# `apt upgrade` would silently swap the stock shell back in — un-patching Shell.Eval (the
+# clone-daemon window-management MCP tools) and re-showing the screen-sharing indicator in
+# captured frames. Holding it makes apt refuse to touch it; moving to a newer base is a
+# deliberate `apt-mark unhold` + template rebuild (build-shell-deb.sh repacks the new base).
+apt-mark hold gnome-shell
+log "held gnome-shell at $(dpkg-query -W -f='${Version}' gnome-shell)"
 rm -f "$DEB"

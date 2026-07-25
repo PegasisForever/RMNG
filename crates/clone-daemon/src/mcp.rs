@@ -1,10 +1,10 @@
 //! The per-node **computer-use MCP**, served over HTTP from inside the clone
 //! (`RMNG_DAEMON_MCP_PORT`, default 9004). Replaces the old `computer-use`
 //! stdio binary: the in-clone Claude agent connects here directly, and the
-//! control-server's fleet MCP proxies to it.
+//! control-server's web desktop proxy forwards operator calls to it.
 //!
-//! Stateless JSON-RPC (`initialize`/`ping`/`tools/list`/`tools/call`), the same
-//! curl-testable shape the control-server MCP uses — no rmcp/SSE machinery. It
+//! Stateless JSON-RPC (`initialize`/`ping`/`tools/list`/`tools/call`) with a
+//! curl-testable HTTP shape — no rmcp/SSE machinery. It
 //! shares the daemon's live Mutter `rd` session (input injection) and the latest
 //! captured dmabuf per monitor (on-demand screenshots, GPU-encoded via `media`).
 //!
@@ -237,7 +237,7 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
             Ok(text(format!("typed {} chars", txt.chars().count())))
         }
         // Window management (gnome-shell Eval).
-        "list_windows" | "move_window" | "list_apps" | "launch_app" => {
+        "list_windows" | "move_window" => {
             let (_, conn) = session_snapshot(st).await;
             windows::call(&conn, name, &args).await
         }
@@ -287,7 +287,7 @@ async fn ease_move(st: &McpState, rd: &RemoteDesktopSessionProxy<'static>, m: &M
 /// Tell the viewer the cursor warped here (agent-driven) so it snaps + suppresses
 /// the user's local motion briefly (see the viewer's WarpSuppress).
 fn emit_warp(st: &McpState, monitor_id: u32, x: f64, y: f64) {
-    let c = CursorMeta { monitor_id, x: x.round() as i32, y: y.round() as i32, shape: None, warp: true };
+    let c = CursorMeta { monitor_id, x: x.round() as i32, y: y.round() as i32, shape: None, warp: true, hidden: false };
     let _ = st.transport.send(&DaemonMsg::Cursor(c), &[]);
 }
 

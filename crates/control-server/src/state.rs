@@ -43,8 +43,8 @@ impl StateStore {
         }
         let state = read_from_disk(&path);
         let serialized_file = to_file(&state);
-        // Non-`managed` hosts are legacy/unmanaged rows (an old `state.json` whose
-        // `ctid`/`container` keys serde dropped, or hand-added plain hosts): they carry
+        // Non-`managed` clones are legacy/unmanaged rows (an old `state.json` whose
+        // `ctid`/`container` keys serde dropped, or hand-added plain clones): they carry
         // no managed Docker clone and are just deletable UI rows. Surface the count so an
         // operator migrating from an older backend sees at a glance how many rows won't
         // have a live container behind them.
@@ -63,7 +63,7 @@ impl StateStore {
         self.inner.read().unwrap().state.clone()
     }
 
-    /// Cheap read of just the selected host id (hot path: media frame routing).
+    /// Cheap read of just the selected clone id (hot path: media frame routing).
     pub fn selected(&self) -> Option<String> {
         self.inner.read().unwrap().state.selected.clone()
     }
@@ -165,7 +165,7 @@ pub fn spawn_watcher(store: std::sync::Arc<StateStore>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wire::Host;
+    use wire::RmngClone;
 
     fn temp_path() -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -185,7 +185,7 @@ mod tests {
         let path = temp_path();
         let store = StateStore::load(path.clone()).unwrap();
         store.mutate(|s| {
-            s.hosts.push(Host { id: "h1".into(), host: "1.2.3.4".into(), port: 3389, ..Default::default() });
+            s.hosts.push(RmngClone { id: "h1".into(), host: "1.2.3.4".into(), port: 3389, ..Default::default() });
             s.selected = Some("h1".into());
         });
         // round-trips from disk
@@ -197,9 +197,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_state_loads_hosts_as_unmanaged() {
-        // A Proxmox-era state.json (hosts carry the retired `ctid`, plus a top-level
-        // `templates` list) loads with every host `managed: false` — serde drops the
+    fn legacy_state_loads_clones_as_unmanaged() {
+        // A Proxmox-era state.json (clones carry the retired `ctid`, plus a top-level
+        // `templates` list) loads with every clone `managed: false` — serde drops the
         // stale keys, so these are plain unmanaged rows. Guards the state-store load path
         // (the wire crate covers the serde drop; this covers our fixture-through-load).
         let path = temp_path();

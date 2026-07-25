@@ -57,6 +57,18 @@ pub struct PwCursor {
     /// Mutter that is BGRA/ARGB8888 (4 bytes/pixel, premultiplied alpha),
     /// `width * height * 4` long after stride is removed.
     pub shape: Option<(u32, u32, u32, u32, Vec<u8>)>,
+    /// Cursor visibility, known only on frames carrying a bitmap change:
+    /// `Some(true)` = the cursor was hidden (empty bitmap — native Wayland hides —
+    /// or an all-zero sprite — how Xwayland apps hide); `Some(false)` = a new
+    /// visible sprite (`shape` is `Some`); `None` = position-only, no change.
+    pub hidden: Option<bool>,
+}
+
+/// A sprite whose bytes are all zero draws nothing: X11/Xwayland apps "hide"
+/// the cursor by setting such a bitmap (alpha 0 everywhere — and premultiplied
+/// alpha zeroes the color channels too).
+fn is_invisible_bitmap(pixels: &[u8]) -> bool {
+    pixels.iter().all(|&b| b == 0)
 }
 
 /// Per-stream user data carried through the PipeWire listener callbacks.
@@ -427,24 +439,27 @@ fn read_cursor(buffer: &pw::buffer::Buffer<'_>) -> Option<PwCursor> {
 
     // bitmap_offset == 0 → no new bitmap; just a position update.
     if c.bitmap_offset == 0 {
-        return Some(PwCursor { x, y, shape: None });
+        return Some(PwCursor { x, y, shape: None, hidden: None });
     }
 
     // SAFETY: per the SPA contract, when bitmap_offset >= size_of::<spa_meta_cursor>()
     // there is a spa_meta_bitmap at `(cursor_ptr + bitmap_offset)`, and its pixels
     // at `(bitmap_ptr + bitmap.offset)`, all inside the cursor meta region the
     // producer allocated (we negotiated CURSOR_META_SIZE(384, 384)).
-    let shape = unsafe {
+    let (shape, hidden) = unsafe {
         let cursor_ptr = c as *const spa::sys::spa_meta_cursor as *const u8;
         let bitmap_ptr =
             cursor_ptr.add(c.bitmap_offset as usize) as *const spa::sys::spa_meta_bitmap;
         let bitmap = &*bitmap_ptr;
         let bw = bitmap.size.width;
         let bh = bitmap.size.height;
-        // offset 0 → invisible/empty bitmap (no image data). Clamp to the size we
-        // negotiated (384×384) so a malformed bitmap can't drive an OOB read.
-        if bitmap.offset == 0 || bw == 0 || bh == 0 || bw > 384 || bh > 384 {
-            None
+        if bitmap.offset == 0 || bw == 0 || bh == 0 {
+            // Empty bitmap: the cursor was HIDDEN (how native Wayland grabs hide it).
+            (None, Some(true))
+        } else if bw > 384 || bh > 384 {
+            // Malformed/oversized: clamp to the negotiated 384×384 so a bad bitmap
+            // can't drive an OOB read; says nothing about visibility.
+            (None, None)
         } else {
             let stride = bitmap.stride.max(0) as usize;
             let row_bytes = bw as usize * 4; // BGRA/ARGB8888, 4 bpp
@@ -457,11 +472,16 @@ fn read_cursor(buffer: &pw::buffer::Buffer<'_>) -> Option<PwCursor> {
                 let row_slice = std::slice::from_raw_parts(row_start, row_bytes);
                 pixels.extend_from_slice(row_slice);
             }
-            Some((bw, bh, c.hotspot.x as u32, c.hotspot.y as u32, pixels))
+            if is_invisible_bitmap(&pixels) {
+                // All-zero sprite: an Xwayland app's cursor hide.
+                (None, Some(true))
+            } else {
+                (Some((bw, bh, c.hotspot.x as u32, c.hotspot.y as u32, pixels)), Some(false))
+            }
         }
     };
 
-    Some(PwCursor { x, y, shape })
+    Some(PwCursor { x, y, shape, hidden })
 }
 
 /// Read the frame's plane layout + dmabuf fds (or empty fds for shm buffers).
@@ -531,4 +551,21 @@ fn read_frame(buffer: &mut pw::buffer::Buffer<'_>, info: &VideoInfoRaw) -> Optio
         planes,
         fds,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_invisible_bitmap;
+
+    #[test]
+    fn invisible_bitmap_detection() {
+        // Xwayland-style hide: a real-size sprite whose bytes are all zero.
+        assert!(is_invisible_bitmap(&[0u8; 24 * 24 * 4]));
+        // Any non-zero byte (one visible premultiplied pixel) makes it a real sprite.
+        let mut px = vec![0u8; 24 * 24 * 4];
+        px[3] = 0xff;
+        assert!(!is_invisible_bitmap(&px));
+        // Degenerate: an empty pixel buffer draws nothing.
+        assert!(is_invisible_bitmap(&[]));
+    }
 }

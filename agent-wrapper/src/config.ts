@@ -2,6 +2,8 @@
 // clones inheriting it) is the single source of truth. Everything has a sane
 // default so `bun run src/server.ts` works on a fresh container with no env.
 
+import { existsSync } from "node:fs";
+
 function uid(): number {
   try {
     return process.getuid?.() ?? 1000;
@@ -34,9 +36,15 @@ export const CONFIG = {
    * (screenshot/click/key/type/window-mgmt) locally, sharing its Mutter session. */
   daemonMcpUrl: process.env.DAEMON_MCP_URL ?? "http://127.0.0.1:9004",
 
-  /** control-server per-clone MCP (HTTP) — exposes set_state; resolves THIS host by
-   * source IP. The rmng control-server serves it on the clone_mcp port (9002). */
-  controlMcpUrl: process.env.AGENT_CONTROL_MCP_URL ?? "http://10.60.0.1:9002",
+  /** A headless clone has no desktop: the control-server DELETES both gnome-headless.service and
+   * rmng-clone-daemon.service at create time (control-server `provision.rs` HEADLESS_DISABLE_SCRIPT),
+   * so nothing serves the desktop MCP on :9004. Detect that by the absence of the clone-daemon user
+   * unit — a create-time-stable signal (unlike a TCP probe, it can't misfire during the boot race
+   * before the daemon has bound its port). When headless, `mcpServers()` skips the `desktop` server
+   * so the SDK doesn't register (and, with alwaysLoad, keep retrying) a dead endpoint. */
+  headless: !existsSync(
+    `${process.env.HOME ?? "/home/rmng"}/.config/systemd/user/rmng-clone-daemon.service`,
+  ),
 
   /** Graphical-session env (kept for reference; the clone-daemon has its own). */
   runtimeDir,
@@ -51,4 +59,11 @@ export const CONFIG = {
   instructionsPath:
     process.env.AGENT_INSTRUCTIONS_PATH ??
     `${process.env.HOME ?? "/home/rmng"}/.config/rmng/agent-instructions.md`,
+
+  /** The control-server-written MCP descriptor — the single source of truth for the managed
+   * server set (`desktop`+`linear`), already headless-filtered. The wrapper reads this at
+   * startup and maps it to the SDK's `mcpServers`; absent ⇒ the built-in fallback in server.ts. */
+  mcpConfigPath:
+    process.env.RMNG_MCP_CONFIG_PATH ??
+    `${process.env.HOME ?? "/home/rmng"}/.config/rmng/mcp.json`,
 } as const;

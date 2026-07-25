@@ -11,6 +11,8 @@ const STATUS_COLOR: Record<Operation["status"], string> = {
 const VERB: Record<Operation["kind"], string> = {
   clone: "Cloning",
   delete: "Deleting",
+  archive: "Archiving",
+  unarchive: "Restoring",
   pull: "Pulling",
   commit: "Committing",
   update: "Updating",

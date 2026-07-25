@@ -39,6 +39,12 @@ type Writer = Arc<Mutex<Option<TcpStream>>>;
 
 /// Frame one input message to the server: `[0u8][u32be len][json]` (tag 0 = input).
 fn send_relative(writer: &Writer, dx: f64, dy: f64) {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n % 100 == 0 {
+        tracing::debug!("pointer-lock: relative motion #{n} dx={dx} dy={dy} (writer {})",
+            if writer.lock().unwrap().is_some() { "connected" } else { "MISSING" });
+    }
     let json = format!(r#"{{"kind":"pointer_relative","dx":{dx},"dy":{dy}}}"#);
     if let Some(g) = writer.lock().unwrap().as_mut() {
         let hdr = (json.len() as u32).to_be_bytes();
@@ -132,9 +138,11 @@ impl PointerLock {
         };
         let id = wl_surface.id();
         if self.current.borrow().as_ref() == Some(&id) {
+            tracing::debug!("pointer-lock engage: already locked to surface {id:?}, no-op");
             return;
         }
         self.destroy_objects();
+        tracing::info!("pointer-lock engage: lock_pointer on surface {id:?}");
         let locked =
             self.constraints.lock_pointer(&wl_surface, &self.pointer, None, Lifetime::Persistent, &self.qh, ());
         let rel = self.rel_mgr.get_relative_pointer(&self.pointer, &self.qh, ());
@@ -149,6 +157,7 @@ impl PointerLock {
         if self.current.borrow().is_none() {
             return;
         }
+        tracing::info!("pointer-lock release");
         self.destroy_objects();
         *self.current.borrow_mut() = None;
         let _ = self.conn.flush();
@@ -196,8 +205,50 @@ macro_rules! ignore_events {
 
 ignore_events!(ZwpPointerConstraintsV1);
 ignore_events!(ZwpRelativePointerManagerV1);
-ignore_events!(ZwpLockedPointerV1);
-ignore_events!(WlPointer);
+
+// Log lock activation/deactivation: mutter only pins the cursor once it sends
+// `locked`; a lock request that never activates is the primary failure mode.
+impl Dispatch<ZwpLockedPointerV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ZwpLockedPointerV1,
+        event: <ZwpLockedPointerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_protocols::wp::pointer_constraints::zv1::client::zwp_locked_pointer_v1::Event as LE;
+        match event {
+            LE::Locked => tracing::info!("pointer-lock ACTIVATED by compositor"),
+            LE::Unlocked => tracing::info!("pointer-lock DEACTIVATED by compositor"),
+            _ => {}
+        }
+    }
+}
+
+// Our passive pointer's enter/leave shows the pointer-focus state mutter uses
+// to decide constraint activation.
+impl Dispatch<WlPointer, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &WlPointer,
+        event: <WlPointer as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_pointer::Event as PE;
+        match event {
+            PE::Enter { surface, .. } => {
+                tracing::debug!("pointer-lock: seat pointer entered surface {:?}", surface.id());
+            }
+            PE::Leave { surface, .. } => {
+                tracing::debug!("pointer-lock: seat pointer left surface {:?}", surface.id());
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<ZwpRelativePointerV1, ()> for State {
     fn event(

@@ -27,9 +27,11 @@
 //! and widgets live on the GTK main thread; the net thread only ships AU bytes over a queue.
 
 mod config;
+mod auto_lock;
 mod forward;
 mod glunpack;
 mod headless;
+mod terminal;
 // The Wayland pointer-lock implementation only compiles (and links) on Linux.
 // The macOS twin lives in pointer_lock_macos.rs (§4.5).
 // Other platforms get a no-op stub.
@@ -92,10 +94,10 @@ use gtk4::prelude::*;
 use gtk4::{gdk, glib};
 use wire::ChromaMode;
 use wire::socket::{
-    ClipboardData, ClipboardMsg, ClipboardOffer, ClipboardRequest, CursorMeta, CursorShape, MonitorPlacement,
+    ClipboardData, ClipboardMsg, ClipboardOffer, ClipboardRequest, CursorMeta, CursorShape,
 };
 use wire::forward::{ForwardStatusMsg, ForwardsMsg};
-use wire::viewer::ModeMsg;
+use wire::viewer::{ModeMsg, TermData};
 
 fn main() -> Result<()> {
     // GTK's default GL renderer (`ngl`) and `vulkan` cache GdkTextures by identity and keep serving
@@ -160,6 +162,8 @@ type Writer = Arc<Mutex<Option<TcpStream>>>;
 type ServerAddr = Arc<Mutex<String>>;
 /// Inbound clipboard messages, drained on the GUI thread (GTK clipboard ops run there).
 type ClipInbox = Arc<Mutex<VecDeque<ClipboardMsg>>>;
+/// Auto pointer-lock policy, shared net thread (latches) ⇄ GTK main (polls).
+type AutoLockShared = Arc<Mutex<auto_lock::AutoLock>>;
 fn is_text_mime(m: &str) -> bool {
     m.starts_with("text/plain") || m == "UTF8_STRING" || m == "TEXT"
 }
@@ -207,8 +211,20 @@ struct Screen {
 }
 /// Shared monitor layout used for cross-window drag routing (main thread).
 type SharedLayout = Rc<RefCell<Vec<Screen>>>;
-/// The server's reported layout, shared net-thread → GTK main thread.
-type ReportedLayout = Arc<Mutex<Vec<MonitorPlacement>>>;
+
+/// The server's authoritative view spec (the window set + each window's content), shared
+/// net-thread → GTK main thread. `epoch` bumps whenever `spec` changes so the tick reconciles the
+/// windows only on a real change; between changes the tick just fills content — video AUs into
+/// each window's appsrc, terminal output into the tmux view.
+#[derive(Default)]
+struct ViewState {
+    spec: Option<wire::viewer::ViewSpec>,
+    epoch: u64,
+}
+type ViewShared = Arc<Mutex<ViewState>>;
+/// Queued terminal output chunks (session, bytes), net-thread → GTK main thread; drained each
+/// tick into the terminal view.
+type TermOut = Arc<Mutex<VecDeque<(String, Vec<u8>)>>>;
 
 fn run_gui() -> Result<()> {
     // Server address: persisted config is the source of truth (the Settings dialog
@@ -228,14 +244,20 @@ fn run_gui() -> Result<()> {
     };
     let inbox: ClipInbox = Arc::new(Mutex::new(VecDeque::new()));
     let cursors: Cursors = Arc::new(Mutex::new(HashMap::new()));
-    let reported: ReportedLayout = Arc::new(Mutex::new(Vec::new()));
     let warp: WarpSuppress = Arc::new(Mutex::new(None));
     let srcs: VideoSrcs = Arc::new(Mutex::new(HashMap::new()));
+    // Auto pointer-lock policy: net thread latches remote cursor visibility,
+    // the GTK tick polls it and reconciles the actual lock.
+    let auto: AutoLockShared = Arc::new(Mutex::new(auto_lock::AutoLock::new(Instant::now())));
+    // Authoritative view spec (window set + content) + queued terminal output, net thread → tick.
+    // The tick builds/destroys windows from `view` and feeds `term_out` into the tmux tab view.
+    let view: ViewShared = Arc::new(Mutex::new(ViewState::default()));
+    let term_out: TermOut = Arc::new(Mutex::new(VecDeque::new()));
 
-    // Net thread: reconnect loop; read [u8 tag][…] → video queue / clipboard / cursor / layout.
+    // Net thread: reconnect loop; read [u8 tag][…] → video queue / clipboard / cursor / view spec.
     {
-        let (aus, srcs, writer, inbox, cursors, reported, warp, addr, fwd_mgr) =
-            (aus.clone(), srcs.clone(), writer.clone(), inbox.clone(), cursors.clone(), reported.clone(), warp.clone(), addr.clone(), fwd_mgr.clone());
+        let (aus, srcs, writer, inbox, cursors, view, warp, addr, fwd_mgr, auto, term_out) =
+            (aus.clone(), srcs.clone(), writer.clone(), inbox.clone(), cursors.clone(), view.clone(), warp.clone(), addr.clone(), fwd_mgr.clone(), auto.clone(), term_out.clone());
         std::thread::spawn(move || {
             loop {
                 // Re-read the (possibly just-changed) address each reconnect, so the
@@ -261,8 +283,9 @@ fn run_gui() -> Result<()> {
                         let mut rd = std::io::BufReader::new(rd);
                         let mut tag = [0u8; 1];
                         while rd.read_exact(&mut tag).is_ok() {
-                            // tags 1 (clipboard), 2 (cursor), 3 (layout), 4 (mode), 5 (forwards) are all [u32 len][json].
-                            if matches!(tag[0], 1 | 2 | 3 | 4 | 5) {
+                            // tags 1 (clipboard), 2 (cursor), 3 (view spec), 4 (mode),
+                            // 5 (forwards), 7 (term data) are all [u32 len][json].
+                            if matches!(tag[0], 1..=7) {
                                 let mut lb = [0u8; 4];
                                 if rd.read_exact(&mut lb).is_err() {
                                     break;
@@ -284,8 +307,15 @@ fn run_gui() -> Result<()> {
                                         inbox.lock().unwrap().push_back(msg);
                                     }
                                 } else if tag[0] == 3 {
-                                    if let Ok(l) = serde_json::from_slice::<Vec<MonitorPlacement>>(&body) {
-                                        *reported.lock().unwrap() = l;
+                                    // Authoritative view spec: the window set + each window's
+                                    // content. Latch it (bump `epoch` only on a real change) so the
+                                    // tick reconciles windows exactly when it changes.
+                                    if let Ok(spec) = serde_json::from_slice::<wire::viewer::ViewSpec>(&body) {
+                                        let mut v = view.lock().unwrap();
+                                        if v.spec.as_ref() != Some(&spec) {
+                                            v.spec = Some(spec);
+                                            v.epoch = v.epoch.wrapping_add(1);
+                                        }
                                     }
                                 } else if tag[0] == 5 {
                                     // Desired forward set: reconcile local listeners. The
@@ -299,8 +329,25 @@ fn run_gui() -> Result<()> {
                                         let forward_addr = format!("{host}:{}", m.forward_port);
                                         fwd_mgr.reconcile(m.rules, forward_addr);
                                     }
+                                } else if tag[0] == 7 {
+                                    // Terminal output for one session → queue for the tick to render.
+                                    if let Ok(m) = serde_json::from_slice::<TermData>(&body) {
+                                        term_out.lock().unwrap().push_back((m.session, m.data));
+                                    }
                                 } else if let Ok(c) = serde_json::from_slice::<CursorMeta>(&body) {
                                     let now = Instant::now();
+                                    // Latch remote-cursor visibility for auto pointer-lock.
+                                    // `hidden` is the daemon's explicit hide marker; an
+                                    // all-zero sprite is the same hide from an older daemon
+                                    // that forwarded it as a shape. Position-only updates
+                                    // say nothing about visibility.
+                                    if c.hidden {
+                                        auto.lock().unwrap().on_remote_cursor(true, now);
+                                    } else if let Some(s) = &c.shape {
+                                        let invisible =
+                                            s.width == 0 || s.height == 0 || s.rgba.iter().all(|&b| b == 0);
+                                        auto.lock().unwrap().on_remote_cursor(invisible, now);
+                                    }
                                     if c.warp {
                                         // Agent-driven move: draw the synthetic cursor on this
                                         // monitor (below) and hold off local motion sends for
@@ -331,6 +378,9 @@ fn run_gui() -> Result<()> {
                                 }
                                 continue;
                             }
+                            // A video AU (tag 0). Windows + their appsrcs are built from the
+                            // ViewSpec (tag 3), which arrives first; an AU is fed to the matching
+                            // window's appsrc.
                             let mut hdr = [0u8; 8];
                             if rd.read_exact(&mut hdr).is_err() {
                                 break;
@@ -341,13 +391,13 @@ fn run_gui() -> Result<()> {
                             if rd.read_exact(&mut au).is_err() {
                                 break;
                             }
-                            // Fast path: once a monitor's window (hence appsrc) exists, push the
-                            // AU straight to its decoder from here — skipping the GTK tick, which
-                            // otherwise cost up to one 8 ms tick of latency per frame. A monitor's
-                            // first AU(s) still go via the queue for the tick to build the window on
-                            // the main thread. Hold `srcs` across this dispatch (and the tick holds
-                            // it across create+drain) so the hand-off stays strictly ordered — an
-                            // out-of-order AU would corrupt H.264 decode.
+                            // Fast path: once a monitor's window (hence appsrc) exists, push the AU
+                            // straight to its decoder here — skipping the GTK tick's ~8ms of latency
+                            // per frame. If the appsrc isn't registered yet (an AU beat the tick's
+                            // reconcile of the ViewSpec that builds the window), hold it in `aus` for
+                            // the tick to drain into the appsrc once it exists. Hold `srcs` across
+                            // this dispatch (and the tick holds it across create+drain) so the
+                            // hand-off stays ordered — an out-of-order AU would corrupt H.264 decode.
                             let g = srcs.lock().unwrap();
                             if let Some(src) = g.get(&mid) {
                                 let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
@@ -370,7 +420,7 @@ fn run_gui() -> Result<()> {
     }
 
     let app = gtk4::Application::builder().application_id("dev.rmng.viewer").build();
-    app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &reported, &warp, &addr));
+    app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &view, &warp, &addr, &auto, &term_out));
     let empty: [&str; 0] = [];
     app.run_with_args(&empty);
     Ok(())
@@ -385,28 +435,136 @@ struct WinInput {
     inside: Cell<bool>,
 }
 
-/// One monitor's window state we touch on every tick: the video `Picture` (sink
-/// paintable), the client-drawn cursor overlay, the appsrc fed AUs, and the last cursor
-/// version applied. The held `WinInput` is kept alive by the input closures, so it isn't
-/// stored here.
+/// One viewer window. The shell (titlebar, close logic) is stable for the window's whole life;
+/// only `content` swaps — video for a headed clone, the tmux tabs or a blank placeholder for a
+/// headless one — driven by the server's `ViewSpec`. The window set is built from the configured
+/// monitor layout, never from video traffic, so switching clones never creates or destroys a
+/// window (only a layout-preset change does).
 struct MonitorWindow {
+    id: u32,
+    window: gtk4::ApplicationWindow,
+    /// FPS readout counter, bumped by the current video paintable and read by a 1s timer created
+    /// with the shell. Unused on macOS / for non-video content.
+    fps_count: Rc<Cell<u32>>,
+    content: Content,
+}
+
+/// What a [`MonitorWindow`] currently shows.
+enum Content {
+    /// A headed clone's H.264 desktop for this monitor.
+    Video(VideoContent),
+    /// The tmux tab view — only ever on the main window (id 0). `clone` is the owning headless
+    /// clone id: when the selection moves to a *different* headless clone the view is rebuilt fresh,
+    /// so one clone's `main` tab (and its scrollback) can never be reused for another's.
+    Terminal { clone: String, view: terminal::TerminalView },
+    /// A blank placeholder: a secondary window while a headless clone is selected.
+    Placeholder,
+}
+
+/// The live video state for a `Content::Video` window: the appsrc/decoder + the per-tick
+/// cursor/letterbox bits. The held `WinInput` is kept alive by the input closures.
+struct VideoContent {
     video: gtk4::Picture,
     cursor: gtk4::Picture,
     appsrc: AppSrc,
     paintable: gdk::Paintable,
+    /// The decode pipeline, stopped (not leaked) when this window leaves video mode.
+    pipeline: gst::Pipeline,
     last_version: u64,
     /// Native OS cursor built from the latest remote `CursorShape` (set on `video` so the
     /// operator's own pointer takes the remote shape — I-beam, hand, resize, …).
     native_cursor: Option<gdk::Cursor>,
     /// Whether `video`'s cursor is currently hidden (pointer-lock / relative mode).
     cursor_hidden: bool,
-    /// The window itself, so a reconfigure can destroy it when its monitor is removed.
-    window: gtk4::ApplicationWindow,
-    /// The decode pipeline, stopped (not leaked) on window teardown.
-    pipeline: gst::Pipeline,
+    /// The keyboard controller `install_keyboard` added to the *window* (which persists across
+    /// content swaps); removed from the window when this window leaves video mode. The pointer
+    /// controllers live on `video` and drop with it.
+    keyboard: gtk4::EventControllerKey,
+}
+
+impl Content {
+    /// The video state, if this window is currently showing video.
+    fn as_video_mut(&mut self) -> Option<&mut VideoContent> {
+        match self {
+            Content::Video(v) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 type Windows = Rc<RefCell<HashMap<u32, MonitorWindow>>>;
+
+/// Make the app follow the system light/dark preference, the way libadwaita does: read the XDG
+/// desktop settings portal's `color-scheme` and drive `GtkSettings:gtk-application-prefer-dark-theme`,
+/// then keep it in sync. Without this a plain GTK4 app always boots in the light theme regardless
+/// of the desktop setting (fixed only by a manual theme toggle). No-op when there is no portal.
+fn follow_system_color_scheme() {
+    let Some(settings) = gtk4::Settings::default() else { return };
+    let Some(proxy) = color_scheme_portal() else { return };
+    apply_prefer_dark(&settings, read_color_scheme(&proxy));
+    let settings = settings.clone();
+    proxy.connect_local("g-signal", false, move |vals| {
+        let sig = vals.get(2).and_then(|v| v.get::<String>().ok());
+        let params = vals.get(3).and_then(|v| v.get::<glib::Variant>().ok());
+        if let (Some(sig), Some(params)) = (sig, params) {
+            if sig == "SettingChanged"
+                && params.child_value(0).str() == Some("org.freedesktop.appearance")
+                && params.child_value(1).str() == Some("color-scheme")
+            {
+                apply_prefer_dark(&settings, variant_to_u32(&params.child_value(2)));
+            }
+        }
+        None
+    });
+    // The proxy owns the signal subscription; keep it alive for the whole process.
+    std::mem::forget(proxy);
+}
+
+/// `color-scheme` 1 = prefer dark, 2 = prefer light, 0/None = no preference (GTK default = light).
+fn apply_prefer_dark(settings: &gtk4::Settings, scheme: Option<u32>) {
+    let dark = scheme == Some(1);
+    tracing::info!("system color-scheme = {scheme:?} → prefer-dark = {dark}");
+    settings.set_gtk_application_prefer_dark_theme(dark);
+}
+
+fn color_scheme_portal() -> Option<gtk4::gio::DBusProxy> {
+    gtk4::gio::DBusProxy::for_bus_sync(
+        gtk4::gio::BusType::Session,
+        gtk4::gio::DBusProxyFlags::NONE,
+        None,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Settings",
+        gtk4::gio::Cancellable::NONE,
+    )
+    .ok()
+}
+
+fn read_color_scheme(proxy: &gtk4::gio::DBusProxy) -> Option<u32> {
+    let params = ("org.freedesktop.appearance", "color-scheme").to_variant();
+    let reply = proxy
+        .call_sync("ReadOne", Some(&params), gtk4::gio::DBusCallFlags::NONE, 1000, gtk4::gio::Cancellable::NONE)
+        .or_else(|_| {
+            proxy.call_sync("Read", Some(&params), gtk4::gio::DBusCallFlags::NONE, 1000, gtk4::gio::Cancellable::NONE)
+        })
+        .ok()?;
+    variant_to_u32(&reply.child_value(0))
+}
+
+/// The portal wraps the value in one or more `v` variants; peel them until a `u32` surfaces.
+fn variant_to_u32(v: &glib::Variant) -> Option<u32> {
+    let mut cur = v.clone();
+    for _ in 0..4 {
+        if let Some(u) = cur.get::<u32>() {
+            return Some(u);
+        }
+        match cur.as_variant() {
+            Some(inner) => cur = inner,
+            None => break,
+        }
+    }
+    None
+}
 
 #[allow(clippy::too_many_arguments)]
 fn build_ui(
@@ -416,10 +574,15 @@ fn build_ui(
     writer: &Writer,
     inbox: &ClipInbox,
     cursors: &Cursors,
-    reported: &ReportedLayout,
+    view: &ViewShared,
     warp: &WarpSuppress,
     addr: &ServerAddr,
+    auto: &AutoLockShared,
+    term_out: &TermOut,
 ) {
+    // Follow the system light/dark preference (a plain GTK4 app otherwise boots light).
+    follow_system_color_scheme();
+
     // Black background behind every letterboxed video (applies to all windows).
     // Pointer-lock (games): one instance per display, shared across monitor windows;
     // None on X11 / when the compositor lacks the protocols / RMNG_NO_POINTER_LOCK.
@@ -433,6 +596,12 @@ fn build_ui(
         window.video-window { background: black; }
         /* The video grabs keyboard focus on hover/click; don't draw a focus ring on it. */
         picture:focus, picture:focus-visible { outline: none; }
+        /* Terminal tab view: no content padding/border so the terminal fills edge to edge with
+           no rim of the window background showing around it. */
+        notebook.rmng-term,
+        notebook.rmng-term > stack,
+        notebook.rmng-term > header { border: none; }
+        notebook.rmng-term > stack { padding: 0; }
         /* FPS readout in the title bar: tabular figures so the width does not
            jitter as the number changes, and dimmed so it stays unobtrusive. */
         .fps-readout {
@@ -482,9 +651,11 @@ fn build_ui(
 
     let windows: Windows = Rc::new(RefCell::new(HashMap::new()));
     let layout: SharedLayout = Rc::new(RefCell::new(Vec::new()));
+    // Epoch of the last `ViewSpec` reconciled into the window set (so we rebuild only on change).
+    let last_epoch: Rc<Cell<u64>> = Rc::new(Cell::new(0));
 
     {
-        let (aus, srcs, writer, cursors, windows, layout, app, reported, warp, pointer_lock, startup, addr) = (
+        let (aus, srcs, writer, cursors, windows, layout, app, view, warp, pointer_lock, startup, addr, auto, term_out, last_epoch) = (
             aus.clone(),
             srcs.clone(),
             writer.clone(),
@@ -492,108 +663,75 @@ fn build_ui(
             windows.clone(),
             layout.clone(),
             app.clone(),
-            reported.clone(),
+            view.clone(),
             warp.clone(),
             pointer_lock.clone(),
             startup.clone(),
             addr.clone(),
+            auto.clone(),
+            term_out.clone(),
+            last_epoch.clone(),
         );
-        // ~8 ms tick: drain AUs → window per monitor (created lazily here, on the main
-        // thread); refresh the layout; update client cursors.
+        // ~8 ms tick: reconcile the window set to the latest ViewSpec, feed video AUs / terminal
+        // output into existing windows, and update client cursors + pointer-lock.
         glib::timeout_add_local(Duration::from_millis(8), move || {
-            // Bootstrap-only video path: the net thread pushes AUs for already-built monitors
-            // straight to their appsrc; here we drain the first AU(s) of a not-yet-built monitor,
-            // create its window on the main thread, and register its appsrc in `srcs` so the net
-            // thread takes over. Hold `srcs` across the whole drain+create so the hand-off stays
-            // ordered with the net thread (see its matching comment).
+            // 1. Reconcile the window set to the ViewSpec — but only when it actually changed. This
+            //    is the ONLY place windows are created/destroyed; video/terminal data just fills
+            //    windows that already exist.
             {
-                let mut srcs = srcs.lock().unwrap();
+                let (spec, epoch) = {
+                    let v = view.lock().unwrap();
+                    (v.spec.clone(), v.epoch)
+                };
+                if epoch != last_epoch.get() {
+                    last_epoch.set(epoch);
+                    reconcile_view(
+                        spec.as_ref(), &windows, &srcs, &aus, &layout, &startup, &app, &writer,
+                        &addr, &pointer_lock, &warp, &auto,
+                    );
+                }
+            }
+            // 2. Drain any AUs that arrived before their window's appsrc existed (the ViewSpec that
+            //    builds the window hadn't been reconciled yet). Steady-state AUs go straight to the
+            //    appsrc from the net thread.
+            {
+                let srcs = srcs.lock().unwrap();
                 let batch: Vec<(u32, Vec<u8>)> = aus.lock().unwrap().drain(..).collect();
                 for (mid, au) in batch {
-                    let mut w = windows.borrow_mut();
-                    // The "main" window (close button + Settings; closing it quits the whole
-                    // viewer) is the window for monitor_id 0. monitor_id is the daemon layout's
-                    // slot index (0..n-1), and every layout has ≥1 monitor, so id 0 is present
-                    // in EVERY layout — Task 4.2's reconcile (below) can never destroy it. That
-                    // makes this a stable, frozen-at-build-time designation: unlike the old
-                    // "primary" flag (which lived on a monitor that a live layout switch could
-                    // remove, stranding the operator without a close/Settings control), window 0
-                    // is main for its entire lifetime and never needs to be re-decided.
-                    let is_main = mid == 0;
-                    let win = w.entry(mid).or_insert_with(|| {
-                        let win = make_monitor_window(&app, mid, &layout, &writer, &addr, &pointer_lock, &warp, is_main);
-                        srcs.insert(mid, win.appsrc.clone());
-                        // First monitor window exists: the pre-connection startup window
-                        // has served its purpose. `destroy` (not `close`) skips the
-                        // close-request path, and the monitor window built just above
-                        // keeps the app alive.
-                        if let Some(s) = startup.borrow_mut().take() {
-                            s.destroy();
-                        }
-                        win
-                    });
-                    let _ = win.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
-                }
-            }
-            // Prefer the server's reported layout (the clone's real monitor positions);
-            // until it arrives, fall back to a computed left-to-right packing.
-            {
-                let rep = reported.lock().unwrap();
-                if !rep.is_empty() {
-                    *layout.borrow_mut() = rep
-                        .iter()
-                        .map(|m| Screen { id: m.id, x: m.x, y: m.y, w: m.width, h: m.height })
-                        .collect();
-                } else {
-                    let mut mons: Vec<(u32, u32, u32)> = windows
-                        .borrow()
-                        .iter()
-                        .map(|(mid, win)| {
-                            let (fw, fh) = frame_size(&win.paintable);
-                            (*mid, fw as u32, fh as u32)
-                        })
-                        .collect();
-                    *layout.borrow_mut() = compute_layout(&mut mons);
-                }
-            }
-            // Reconcile windows against the reported layout: destroy any monitor window
-            // whose id vanished (a preset with fewer monitors). New ids are still built
-            // lazily on their first AU; resized ids keep their window (the decoder
-            // renegotiates from the new SPS). Runs on the GTK main thread.
-            {
-                let rep = reported.lock().unwrap();
-                if !rep.is_empty() {
-                    let live: std::collections::HashSet<u32> = rep.iter().map(|m| m.id).collect();
-                    let mut w = windows.borrow_mut();
-                    let mut srcs = srcs.lock().unwrap();
-                    let gone: Vec<u32> = w.keys().copied().filter(|id| !live.contains(id)).collect();
-                    for id in gone {
-                        // The main window (monitor_id 0) is never in `gone`: every reported
-                        // layout has ≥1 monitor at slot 0, so `live` always contains 0 — this
-                        // loop structurally can't destroy it (see is_main above). The len<=1
-                        // check below guards a separate, rarer race: a non-main window that
-                        // happens to be the *only* live window right now (id 0's window not
-                        // yet lazily built) getting destroyed here, which would leave zero
-                        // windows and let GTK quit the app before id 0's first AU arrives.
-                        if w.len() <= 1 {
-                            break;
-                        }
-                        if let Some(win) = w.remove(&id) {
-                            let _ = win.pipeline.set_state(gst::State::Null);
-                            win.window.destroy();
-                            srcs.remove(&id);
-                        }
+                    if let Some(src) = srcs.get(&mid) {
+                        let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
                     }
                 }
             }
-            // Cursor: (1) the native OS cursor over the video takes the remote's shape
-            // (rebuilt from CursorShape on change), hidden only in pointer-lock; (2) the
-            // synthetic overlay is drawn on top ONLY while the remote agent drives the
-            // pointer (this monitor's warp window), so the operator sees the agent's target.
+            // 3. Auto pointer-lock: reconcile the actual lock with the policy (remote cursor hidden
+            //    ≥180ms → engage; shown ≥300ms → release; manual chords override — see auto_lock.rs).
+            //    Engage targets the active video window; with none active we leave the state alone.
+            if let Some(pl) = pointer_lock.as_ref() {
+                let want = auto.lock().unwrap().want(Instant::now());
+                if want {
+                    if let Some(mw) = windows
+                        .borrow()
+                        .values()
+                        .find(|w| matches!(w.content, Content::Video(_)) && w.window.is_active())
+                    {
+                        // Idempotent per surface; re-targets if focus moved windows.
+                        if let Some(surface) = mw.window.surface() {
+                            pl.engage(&surface);
+                        }
+                    }
+                } else if pl.is_engaged() {
+                    pl.release();
+                }
+            }
+            // 4. Cursor (video windows only): (1) the native OS cursor over the video takes the
+            //    remote's shape (rebuilt from CursorShape on change), hidden only in pointer-lock;
+            //    (2) the synthetic overlay is drawn on top ONLY while the remote agent drives the
+            //    pointer (this monitor's warp window), so the operator sees the agent's target.
             let locked = pointer_lock.as_ref().is_some_and(|p| p.is_engaged());
             let now = Instant::now();
             let csnap: HashMap<u32, CursorEntry> = cursors.lock().unwrap().clone();
-            for (mid, win) in windows.borrow_mut().iter_mut() {
+            for (mid, mw) in windows.borrow_mut().iter_mut() {
+                let Some(win) = mw.content.as_video_mut() else { continue };
                 let entry = csnap.get(mid);
                 // Rebuild the cursor texture + native gdk cursor when the remote shape changes.
                 if let Some(e) = entry {
@@ -655,79 +793,247 @@ fn build_ui(
                 win.cursor.set_margin_top((off_y + (e.y - hy) as f64 * scale).round().max(0.0) as i32);
                 win.cursor.set_visible(win.cursor.paintable().is_some());
             }
+            // 5. Terminal output → the tmux tab view on the main window (id 0).
+            {
+                let chunks: Vec<(String, Vec<u8>)> = term_out.lock().unwrap().drain(..).collect();
+                if !chunks.is_empty() {
+                    let w = windows.borrow();
+                    if let Some(Content::Terminal { view, .. }) = w.get(&0).map(|mw| &mw.content) {
+                        for (session, data) in chunks {
+                            view.feed(&session, &data);
+                        }
+                    }
+                }
+            }
             glib::ControlFlow::Continue
         });
     }
 }
 
-/// Build one monitor's window: decode pipeline + video/cursor overlay + input controllers.
+/// A blank placeholder for a secondary monitor window while a headless clone is selected (kept
+/// open per the "only the primary window shows tmux" rule, but with no live content).
+fn placeholder_widget() -> gtk4::Widget {
+    let label = gtk4::Label::new(Some("Headless clone selected — no desktop"));
+    label.set_halign(gtk4::Align::Center);
+    label.set_valign(gtk4::Align::Center);
+    label.set_hexpand(true);
+    label.set_vexpand(true);
+    label.add_css_class("dim-label");
+    label.upcast()
+}
+
+/// Reconcile the window set + each window's content to the server's [`wire::viewer::ViewSpec`].
+/// Windows are created/destroyed ONLY when the monitor id set changes (a layout-preset change);
+/// switching clones just swaps content (video ⇄ terminal ⇄ placeholder). An absent/empty spec
+/// tears the windows down and shows the keep-alive startup window. This is the single place that
+/// owns the viewer's window lifecycle — video AUs and terminal output never touch it.
 #[allow(clippy::too_many_arguments)]
-fn make_monitor_window(
-    app: &gtk4::Application,
-    mid: u32,
+fn reconcile_view(
+    spec: Option<&wire::viewer::ViewSpec>,
+    windows: &Windows,
+    srcs: &VideoSrcs,
+    aus: &VideoAus,
     layout: &SharedLayout,
+    startup: &Rc<RefCell<Option<gtk4::ApplicationWindow>>>,
+    app: &gtk4::Application,
     writer: &Writer,
     addr: &ServerAddr,
     pointer_lock: &Option<Rc<PointerLock>>,
     warp: &WarpSuppress,
+    auto: &AutoLockShared,
+) {
+    let monitors: &[wire::viewer::ViewMonitor] = spec.map(|s| s.monitors.as_slice()).unwrap_or(&[]);
+    let (terminal_mode, terminal_clone, sessions): (bool, String, Vec<String>) =
+        match spec.map(|s| &s.content) {
+            Some(wire::viewer::ViewContent::Terminal { clone, sessions }) => {
+                (true, clone.clone(), sessions.clone())
+            }
+            _ => (false, String::new(), Vec::new()),
+        };
+
+    // A terminal clone has no desktop pointer: release any held pointer-lock now rather than
+    // waiting for the auto-policy timeout (no cursor updates arrive to drive it).
+    if terminal_mode {
+        if let Some(pl) = pointer_lock.as_ref() {
+            if pl.is_engaged() {
+                pl.release();
+            }
+        }
+    }
+
+    // Drag-routing layout from the configured monitor geometry.
+    *layout.borrow_mut() = monitors
+        .iter()
+        .map(|m| Screen { id: m.id, x: m.x, y: m.y, w: m.width, h: m.height })
+        .collect();
+
+    let mut w = windows.borrow_mut();
+
+    // Destroy windows whose id is no longer in the layout (only a layout-preset change does this).
+    let live: std::collections::HashSet<u32> = monitors.iter().map(|m| m.id).collect();
+    let gone: Vec<u32> = w.keys().copied().filter(|id| !live.contains(id)).collect();
+    for id in gone {
+        if let Some(mut mw) = w.remove(&id) {
+            teardown_content(&mut mw, srcs);
+            mw.window.destroy();
+        }
+    }
+
+    // Ensure a window per configured monitor, each showing the content the spec asks for.
+    for m in monitors {
+        let fresh = !w.contains_key(&m.id);
+        if fresh {
+            let (window, fps_count) = make_window_shell(app, m.id, m.id == 0, addr, writer);
+            w.insert(
+                m.id,
+                MonitorWindow { id: m.id, window, fps_count, content: Content::Placeholder },
+            );
+        }
+        let mw = w.get_mut(&m.id).expect("window just inserted / already present");
+        if terminal_mode && m.id == 0 {
+            // Main window → the tmux tab view. Rebuild when the owning clone changes so a fresh
+            // clone never inherits the previous one's tabs / scrollback.
+            let same = matches!(&mw.content, Content::Terminal { clone, .. } if *clone == terminal_clone);
+            if !same {
+                teardown_content(mw, srcs);
+                let tv = make_terminal_view(writer);
+                mw.window.set_child(Some(tv.widget()));
+                mw.content = Content::Terminal { clone: terminal_clone.clone(), view: tv };
+            }
+            if let Content::Terminal { view, .. } = &mw.content {
+                view.set_sessions(&sessions);
+            }
+        } else if terminal_mode {
+            // Secondary window while a headless clone is selected: blank placeholder, kept open.
+            if fresh || !matches!(mw.content, Content::Placeholder) {
+                teardown_content(mw, srcs);
+                mw.window.set_child(Some(&placeholder_widget()));
+                mw.content = Content::Placeholder;
+            }
+        } else {
+            // Headed clone: every window shows its monitor's video.
+            if fresh || !matches!(mw.content, Content::Video(_)) {
+                teardown_content(mw, srcs);
+                let vc = make_video_content(
+                    m.id, &mw.window, &mw.fps_count, layout, writer, pointer_lock, warp, auto,
+                );
+                // Register the appsrc and flush any AUs that arrived before it existed — atomically
+                // under the srcs lock, so a net-thread direct push can't slip ahead of the queued
+                // (older) AUs and reorder the decode feed.
+                {
+                    let mut srcs_g = srcs.lock().unwrap();
+                    srcs_g.insert(m.id, vc.appsrc.clone());
+                    let mut q = aus.lock().unwrap();
+                    let mut i = 0;
+                    while i < q.len() {
+                        if q[i].0 == m.id {
+                            let (_, au) = q.remove(i).expect("index in range");
+                            let _ = vc.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                mw.content = Content::Video(vc);
+            }
+        }
+    }
+
+    // Keep-alive: the startup window exists iff there are no content windows (not connected /
+    // nothing selected), carrying the Settings button and holding the app open.
+    if w.is_empty() {
+        if startup.borrow().is_none() {
+            *startup.borrow_mut() = Some(make_startup_window(app, addr, writer));
+        }
+    } else if let Some(s) = startup.borrow_mut().take() {
+        s.destroy();
+    }
+}
+
+/// Detach a window's current content so it can host new content: stop a video pipeline, remove its
+/// window-level keyboard controller, and drop its appsrc. (The pointer controllers live on the
+/// video widget and drop when it is unparented by the next `set_child`.) Leaves the window in a
+/// neutral `Placeholder` state; the caller sets the real content next.
+fn teardown_content(mw: &mut MonitorWindow, srcs: &VideoSrcs) {
+    if let Content::Video(vc) = &mw.content {
+        mw.window.remove_controller(&vc.keyboard);
+        let _ = vc.pipeline.set_state(gst::State::Null);
+        srcs.lock().unwrap().remove(&mw.id);
+    }
+    // Drop the black letterbox background so the next content (terminal/placeholder) shows the
+    // normal themed background, not a black rim. make_video_content re-adds it for video.
+    mw.window.remove_css_class("video-window");
+    mw.content = Content::Placeholder;
+}
+
+/// Build the tmux tab view + the callbacks that route its input/resize/new-session back to the
+/// server over port 1 (viewer→server tags 3/4/5).
+fn make_terminal_view(writer: &Writer) -> terminal::TerminalView {
+    let cb = terminal::TermCallbacks {
+        on_input: {
+            let writer = writer.clone();
+            Rc::new(move |session: &str, data: Vec<u8>| {
+                let msg = wire::viewer::TermInput { session: session.to_string(), data };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    send_tagged(&writer, 3, json);
+                }
+            })
+        },
+        on_resize: {
+            let writer = writer.clone();
+            Rc::new(move |cols: u16, rows: u16| {
+                if let Ok(json) = serde_json::to_string(&wire::viewer::TermResize { cols, rows }) {
+                    send_tagged(&writer, 4, json);
+                }
+            })
+        },
+        on_new_session: {
+            let writer = writer.clone();
+            Rc::new(move || {
+                if let Ok(json) = serde_json::to_string(&wire::viewer::TermNewSession {}) {
+                    send_tagged(&writer, 5, json);
+                }
+            })
+        },
+    };
+    terminal::TerminalView::new(cb)
+}
+
+/// Build a viewer window *shell*: the `ApplicationWindow` + titlebar (FPS readout, fullscreen,
+/// and — main window only — Settings) + close logic. Content (video/terminal/placeholder) is set
+/// by the caller. The shell is stable for the window's whole life; only its content swaps.
+/// Returns the window and the shared FPS counter the video content bumps.
+fn make_window_shell(
+    app: &gtk4::Application,
+    mid: u32,
     is_main: bool,
-) -> MonitorWindow {
-    let (appsrc, paintable, pipeline) = make_decoder(mid).expect("build decoder");
-
-    let video = gtk4::Picture::for_paintable(&paintable);
-    video.set_can_shrink(true);
-    video.set_content_fit(gtk4::ContentFit::Contain); // letterbox: uniform scale, black bars
-    video.set_hexpand(true);
-    video.set_vexpand(true);
-    video.set_halign(gtk4::Align::Fill);
-    video.set_valign(gtk4::Align::Fill);
-    video.set_size_request(480, 270);
-    // Make the video able to hold keyboard focus, and grab it on hover/click (see
-    // install_pointer). Otherwise focus stays on a title-bar button (Settings/fullscreen),
-    // and pressing Enter activates that button instead of reaching the remote — the
-    // window-level key controller only sees keys that bubble past the focused widget.
-    video.set_focusable(true);
-    // Native OS cursor is shown over the video by default; the synthetic overlay below is
-    // drawn only while the remote agent drives the pointer. Pointer-lock hides the native
-    // cursor at its engage site (relative-motion / game mode).
-
-    let cursor = gtk4::Picture::new();
-    cursor.set_can_shrink(true);
-    cursor.set_content_fit(gtk4::ContentFit::Fill);
-    cursor.set_halign(gtk4::Align::Start);
-    cursor.set_valign(gtk4::Align::Start);
-    cursor.set_can_target(false); // input-transparent
-    cursor.set_visible(false);
-
+    addr: &ServerAddr,
+    writer: &Writer,
+) -> (gtk4::ApplicationWindow, Rc<Cell<u32>>) {
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
         .title(format!("RMNG viewer — monitor {mid}"))
         .default_width(1280)
         .default_height(720)
-        // Only the main window (monitor 0) gets a close button; secondary monitor
-        // windows can't be closed individually (their layout mirrors the remote desktop).
+        // Only the main window (monitor 0) gets a close button; secondary monitor windows
+        // can't be closed individually (their layout mirrors the remote desktop).
         .deletable(is_main)
         .build();
-    // Tag this as a monitor window so the `window.video-window { background: black }`
-    // rule paints its letterbox bars black, without affecting dialogs (Settings).
-    window.add_css_class("video-window");
-    let overlay = gtk4::Overlay::new();
-    overlay.set_child(Some(&video));
-    overlay.add_overlay(&cursor);
-    window.set_child(Some(&overlay));
+    // The `video-window` class (black letterbox background) is applied per-content: only while the
+    // window shows video, so a terminal/placeholder window keeps the normal themed background
+    // instead of a black rim around its content.
+
+    // FPS counter: bumped by the current video paintable (see make_video_content) and read by a 1s
+    // header timer. Lives on the shell so it survives content swaps.
+    let fps_count = Rc::new(Cell::new(0u32));
 
     // ── Title bar ──────────────────────────────────────────────────────────────────────
-    // On Linux (and non-macOS): build the GTK HeaderBar with FPS readout, fullscreen
-    // button, and (main window only) server-address button.
-    // On macOS: skip the GTK HeaderBar entirely; native_titlebar::install wires native
-    // NSButton accessories to the real NSWindow titlebar (see native_titlebar.rs).
-    // Do NOT call window.set_titlebar(...) on macOS — that path stays Linux-only.
+    // On Linux (and non-macOS): a GTK HeaderBar with FPS readout, fullscreen button, and (main
+    // window only) server-address button. On macOS: native_titlebar wires NSButton accessories to
+    // the real NSWindow titlebar instead — do NOT call window.set_titlebar(...) there.
     #[cfg(not(target_os = "macos"))]
     {
-        // Header bar: FPS readout (left) + a fullscreen toggle (F11 also toggles).
-        // Styling matches the gtk-kasmvnc-client title bar (see the CSS in build_ui).
         let header = gtk4::HeaderBar::new();
-        // FPS readout at the top-left of the title bar.
         let fps_label = gtk4::Label::new(Some("0 FPS"));
         fps_label.add_css_class("fps-readout");
         header.pack_start(&fps_label);
@@ -738,8 +1044,6 @@ fn make_monitor_window(
             fs_btn.connect_clicked(move |_| toggle_fullscreen(&win));
         }
         header.pack_end(&fs_btn);
-        // Settings (server address) lives only on the main window's title bar, like the
-        // gtk-kasmvnc-client header. pack_end after the fullscreen button puts it to its left.
         if is_main {
             let settings = gtk4::Button::from_icon_name("network-server-symbolic");
             settings.set_tooltip_text(Some("Server address"));
@@ -748,16 +1052,15 @@ fn make_monitor_window(
             header.pack_end(&settings);
         }
         window.set_titlebar(Some(&header));
-
-        // FPS: count presented frames off the paintable, report once a second.
-        let present_count = Rc::new(Cell::new(0u32));
+        // Report FPS once a second from the shared counter (the video paintable bumps it). Weak
+        // ref so the timer self-cancels when the window (hence label) is destroyed on a layout
+        // change, instead of running forever and pinning the dead label.
         {
-            let c = present_count.clone();
-            paintable.connect_invalidate_contents(move |_| c.set(c.get() + 1));
-        }
-        {
-            let (c, label) = (present_count.clone(), fps_label.clone());
+            let (c, label) = (fps_count.clone(), fps_label.downgrade());
             glib::timeout_add_seconds_local(1, move || {
+                let Some(label) = label.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
                 label.set_text(&format!("{} FPS", c.replace(0)));
                 glib::ControlFlow::Continue
             });
@@ -765,10 +1068,9 @@ fn make_monitor_window(
     }
     // TODO(spike): native FPS label on macOS — add NSTextField updated from a 1s glib timer.
 
-    // Close logic copied from gtk-kasmvnc-client: only the main window is closable,
-    // and closing it quits the whole viewer (every monitor window). Secondary windows
-    // have no close button (deletable=false above); block any close request that still
-    // reaches them (e.g. a window-manager-initiated close).
+    // Close logic: only the main window is closable, and closing it quits the whole viewer.
+    // Secondary windows have no close button (deletable=false above); block any close request that
+    // still reaches them (e.g. a window-manager-initiated close).
     {
         let app = app.clone();
         window.connect_close_request(move |_| {
@@ -781,27 +1083,82 @@ fn make_monitor_window(
         });
     }
 
-    let state = Rc::new(WinInput::default());
-    install_pointer(&video, mid, &paintable, &window, layout, writer, &state, pointer_lock, warp);
-    install_keyboard(&window, writer, &state, pointer_lock);
-
-    // macOS: register the native titlebar BEFORE present() so connect_realize fires once
-    // the surface is actually ready. The closure runs asynchronously on the main thread.
+    // macOS: register the native titlebar BEFORE present() so connect_realize fires once the
+    // surface is ready. The closure runs asynchronously on the main thread.
     #[cfg(target_os = "macos")]
     native_titlebar::install(&window, is_main, addr, writer);
 
     window.present();
+    (window, fps_count)
+}
 
-    MonitorWindow {
+/// Build the video content for a window: decoder + letterboxed `Picture` + cursor overlay + input
+/// controllers, set as `window`'s child. Wires the shared FPS counter to the new paintable and
+/// returns the state the tick touches — including the window-level keyboard controller, which the
+/// caller removes (via `teardown_content`) when this window later leaves video mode.
+#[allow(clippy::too_many_arguments)]
+fn make_video_content(
+    mid: u32,
+    window: &gtk4::ApplicationWindow,
+    fps_count: &Rc<Cell<u32>>,
+    layout: &SharedLayout,
+    writer: &Writer,
+    pointer_lock: &Option<Rc<PointerLock>>,
+    warp: &WarpSuppress,
+    auto: &AutoLockShared,
+) -> VideoContent {
+    let (appsrc, paintable, pipeline) = make_decoder(mid).expect("build decoder");
+
+    let video = gtk4::Picture::for_paintable(&paintable);
+    video.set_can_shrink(true);
+    video.set_content_fit(gtk4::ContentFit::Contain); // letterbox: uniform scale, black bars
+    video.set_hexpand(true);
+    video.set_vexpand(true);
+    video.set_halign(gtk4::Align::Fill);
+    video.set_valign(gtk4::Align::Fill);
+    video.set_size_request(480, 270);
+    // Make the video able to hold keyboard focus, and grab it on hover/click (see install_pointer):
+    // otherwise focus stays on a title-bar button and Enter activates it instead of reaching the
+    // remote — the window-level key controller only sees keys that bubble past the focused widget.
+    video.set_focusable(true);
+
+    let cursor = gtk4::Picture::new();
+    cursor.set_can_shrink(true);
+    cursor.set_content_fit(gtk4::ContentFit::Fill);
+    cursor.set_halign(gtk4::Align::Start);
+    cursor.set_valign(gtk4::Align::Start);
+    cursor.set_can_target(false); // input-transparent
+    cursor.set_visible(false);
+
+    let overlay = gtk4::Overlay::new();
+    overlay.set_child(Some(&video));
+    overlay.add_overlay(&cursor);
+    window.set_child(Some(&overlay));
+    // Paint this window's letterbox bars black (via the `window.video-window` CSS rule). Applied
+    // to the window only while it shows video; removed in teardown_content when it leaves.
+    window.add_css_class("video-window");
+
+    // FPS: bump the shared counter on each presented frame (the header timer reads it).
+    #[cfg(not(target_os = "macos"))]
+    {
+        let c = fps_count.clone();
+        paintable.connect_invalidate_contents(move |_| c.set(c.get() + 1));
+    }
+
+    let state = Rc::new(WinInput::default());
+    install_pointer(&video, mid, &paintable, window, layout, writer, &state, pointer_lock, warp);
+    let keyboard = install_keyboard(window, writer, &state, pointer_lock, auto);
+
+    VideoContent {
         video,
         cursor,
         appsrc,
         paintable,
+        pipeline,
         last_version: 0,
         native_cursor: None,
         cursor_hidden: false,
-        window: window.clone(),
-        pipeline,
+        keyboard,
     }
 }
 
@@ -1089,20 +1446,6 @@ fn letterbox(pic: &gtk4::Picture, paintable: &gdk::Paintable) -> (f64, f64, f64)
     (scale, (ww - fw * scale) / 2.0, (wh - fh * scale) / 2.0)
 }
 
-/// Pack monitors left-to-right by id, bottom edges aligned, origin at (0,0) — the layout
-/// the virtual monitors take, used to route a drag across the local-window seam.
-fn compute_layout(mons: &mut Vec<(u32, u32, u32)>) -> Vec<Screen> {
-    mons.sort_by_key(|(id, _, _)| *id);
-    let bottom = mons.iter().map(|(_, _, h)| *h).max().unwrap_or(0);
-    let mut x = 0i32;
-    let mut screens = Vec::with_capacity(mons.len());
-    for (id, w, h) in mons.iter() {
-        screens.push(Screen { id: *id, x, y: (bottom - h) as i32, w: *w, h: *h });
-        x += *w as i32;
-    }
-    screens
-}
-
 /// Follow a button-drag past the origin monitor's edge into an adjacent one (ported from
 /// the old `../gtk` client's `screens::route_drag`). `mx`/`my` are **unclamped** origin-local
 /// coords (the implicit grab delivers overshoot past the edge); lift them into unified
@@ -1252,11 +1595,15 @@ fn install_pointer(
     {
         // A release ends a possible drag: position the cursor at the resolved cross-seam
         // target (so the button-up lands where the drag actually is), then release.
-        let (w, state, layout, video2, paintable2) =
-            (writer.clone(), state.clone(), layout.clone(), video.clone(), paintable.clone());
+        let (w, state, layout, video2, paintable2, pl) =
+            (writer.clone(), state.clone(), layout.clone(), video.clone(), paintable.clone(), pointer_lock.clone());
         click.connect_released(move |g, _n, x, y| {
-            if let Some((tmid, mx, my)) = drag_target(&video2, &paintable2, mid, &layout.borrow(), x, y) {
-                send(&w, format!(r#"{{"kind":"pointer_move","monitor_id":{tmid},"x":{mx:.1},"y":{my:.1}}}"#));
+            // Pointer-lock engaged (games): motion is relative-only; an absolute
+            // pointer_move here would yank the grabbed pointer on every click release.
+            if !pl.as_ref().is_some_and(|p| p.is_engaged()) {
+                if let Some((tmid, mx, my)) = drag_target(&video2, &paintable2, mid, &layout.borrow(), x, y) {
+                    send(&w, format!(r#"{{"kind":"pointer_move","monitor_id":{tmid},"x":{mx:.1},"y":{my:.1}}}"#));
+                }
             }
             let Some(b) = evdev_button(g.current_button()) else { return };
             state.buttons.borrow_mut().remove(&b);
@@ -1398,10 +1745,12 @@ fn install_keyboard(
     writer: &Writer,
     state: &Rc<WinInput>,
     pointer_lock: &Option<Rc<PointerLock>>,
-) {
+    auto: &AutoLockShared,
+) -> gtk4::EventControllerKey {
     let key = gtk4::EventControllerKey::new();
     {
-        let (w, state, window2, pl) = (writer.clone(), state.clone(), window.clone(), pointer_lock.clone());
+        let (w, state, window2, pl, auto) =
+            (writer.clone(), state.clone(), window.clone(), pointer_lock.clone(), auto.clone());
         key.connect_key_pressed(move |_c, keyval, code, s| {
             // Local viewer shortcuts (handled here, NOT forwarded to the remote):
             //   F11 — fullscreen · Ctrl+Alt+G — toggle pointer-lock · Ctrl+Alt+P — release
@@ -1420,11 +1769,17 @@ fn install_keyboard(
                 release_all_input(&w, &state); // drop the leaked Ctrl/Alt before entering the game
                 #[cfg(target_os = "macos")]
                 keyboard_macos::release_all(); // keys are held in the NSEvent monitor's set, not `state`
+                // Manual override on top of the auto policy: flip the effective
+                // state and apply it immediately (the tick keeps it reconciled).
+                // The override self-clears once auto converges — a manual release
+                // during a game grab re-arms after the game shows its cursor.
                 if let Some(pl) = &pl {
-                    if pl.is_engaged() {
+                    if auto.lock().unwrap().toggle(Instant::now()) {
+                        if let Some(surface) = window2.surface() {
+                            pl.engage(&surface);
+                        }
+                    } else {
                         pl.release();
-                    } else if let Some(surface) = window2.surface() {
-                        pl.engage(&surface);
                     }
                 }
                 // The tick hides/restores the video cursor from `is_engaged()`.
@@ -1433,6 +1788,7 @@ fn install_keyboard(
             if ctrl_alt && (keyval == gdk::Key::p || keyval == gdk::Key::P) {
                 // Panic / unstick: release the pointer-lock AND every key+button the remote
                 // still thinks is held (use this any time a key gets stuck down).
+                auto.lock().unwrap().force_release();
                 if let Some(pl) = &pl {
                     pl.release();
                 }
@@ -1489,7 +1845,7 @@ fn install_keyboard(
             }
         });
     }
-    window.add_controller(key);
+    window.add_controller(key.clone());
 
     {
         let (w, state, window2) = (writer.clone(), state.clone(), window.clone());
@@ -1512,6 +1868,7 @@ fn install_keyboard(
             }
         });
     }
+    key
 }
 
 /// Texture the cursor bitmap (SPA delivers BGRA8888 premultiplied, tightly packed).

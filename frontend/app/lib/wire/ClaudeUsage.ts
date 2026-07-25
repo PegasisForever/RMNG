@@ -8,14 +8,23 @@ import type { Provider } from "./Provider";
  */
 export type ClaudeUsage = { 
 /**
- * Stable id: claude `${email}|${orgUuid}`, codex `codex:<id>`.
+ * Stable, unique id: `${group}|${provider}|${email}` (group- and provider-scoped, since
+ * one email can be authenticated into several groups and, within a group, under more than
+ * one provider). Used only as an opaque key — never parsed positionally.
  */
 id: string, email: string, provider: Provider | null, active: boolean, 
 /**
  * Whether the account can run a clone: true for every imported account of either
  * provider (the server owns each account's token lifecycle).
  */
-assignable: boolean | null, error: string | null, stale: boolean | null, lastUpdated: bigint, fiveHour: ClaudeUsageWindow | null, sevenDay: ClaudeUsageWindow | null, spend: ClaudeSpend | null, 
+assignable: boolean | null, error: string | null, stale: boolean | null, lastUpdated: bigint, fiveHour: ClaudeUsageWindow | null, sevenDay: ClaudeUsageWindow | null, 
+/**
+ * Claude only: the model-scoped weekly limit for the Fable model family. Purely
+ * informational — it never gates account rotation (see the rotator, which keys off
+ * `five_hour`/`seven_day` only). `None` for Codex and when the account has no such
+ * scoped limit.
+ */
+fable: ClaudeUsageWindow | null, spend: ClaudeSpend | null, 
 /**
  * Codex only: banked rate-limit reset credits ("usage resets") left on the
  * account. `None` for Claude (no such concept) and when usage is unavailable.

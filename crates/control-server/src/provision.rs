@@ -10,7 +10,7 @@
 //! Caller-facing division of responsibility (as with `orchestrate.rs`): `jobs.rs` owns the
 //! `Operation` record + the progress→op-log plumbing and calls the flows here; `claude.rs`
 //! drives credential ops via [`run_clone_op`]. These functions address a clone by its
-//! container *name*, which equals the host id (`Host.managed` rows) — no container id is
+//! container *name*, which equals the clone id (`RmngClone.managed` rows) — no container id is
 //! stored anywhere.
 //!
 //! Guest scripts are embedded (`include_str!`) and streamed over `docker exec bash -s`:
@@ -26,9 +26,7 @@ use std::time::{Duration, Instant};
 use wire::EnvVar;
 
 use crate::app::App;
-use crate::docker::{CreateSpec, PullEvent, TarEntry, CLONE_USER};
-
-const IMPORT_SCRIPT: &str = include_str!("../scripts/claude-import.sh");
+use crate::docker::{CLONE_USER, CreateSpec, PullEvent, TarEntry};
 
 /// The clone user's uid/gid inside every image (created uid 1000 by `template/setup/30-user.sh`
 /// at template build).
@@ -44,13 +42,61 @@ const WAIT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// Poll interval while waiting for readiness.
 const WAIT_READY_POLL: Duration = Duration::from_secs(2);
 
+/// Headless clone: guarantee neither the desktop (`gnome-headless.service`) nor the capture
+/// daemon (`rmng-clone-daemon.service`) ever runs. Just removing the `default.target.wants`
+/// symlinks is not enough: `rmng-clone-daemon` carries `Wants=gnome-headless.service`, so the
+/// daemon pulls the desktop up as a runtime dependency independent of `[Install]`, and the
+/// lingering user manager starts both at first boot before this script can win the race — which
+/// is exactly why headless clones were observed still running gnome-shell + the daemon on :9004.
+///
+/// A headless clone has no desktop, so the clean fix is to simply **delete both unit files** (real
+/// files the template ships in `~/.config/systemd/user`). With no fragment on disk systemd has
+/// nothing to start by any path — the `[Install]` want, the `Wants=` pull, or a manual start — and
+/// there is no leftover mask symlink to reason about. `daemon-reload` then makes the (possibly
+/// already-running) user manager forget the units so nothing restarts them, and `pkill` reaps
+/// whatever it started in the pre-delete boot window. If the user bus is up gnome is running and
+/// the reload+pkill take effect; if it's down gnome isn't up yet and the missing files keep it from
+/// ever starting — either way it ends up dead. `agent-wrapper.service` is deliberately left enabled.
+const HEADLESS_DISABLE_SCRIPT: &str = r#"set -e
+u=/home/rmng/.config/systemd/user
+rm -f "$u/gnome-headless.service" "$u/rmng-clone-daemon.service" \
+      "$u/default.target.wants/gnome-headless.service" "$u/default.target.wants/rmng-clone-daemon.service"
+runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload 2>/dev/null || true
+pkill -u 1000 -f '/opt/rmng/bin/rmng-clone-daemon' 2>/dev/null || true
+pkill -u 1000 -f 'gnome-shell --headless' 2>/dev/null || true
+exit 0
+"#;
+
+/// Headless clone: pin tmux's multi-client sizing policy, then ensure a default `main` tmux
+/// session exists (idempotent). Runs as the clone user via a login shell so PATH/SHELL match an
+/// interactive session. `termplane` re-creates a missing session on select, so the default session
+/// is a convenience, not load-bearing.
+///
+/// `window-size latest` makes tmux size a session to its **most-recent** client rather than the
+/// smallest: the viewer's proxy attaches as a second client, so without this a co-attached human
+/// shell (or the proxy's own transient default) would clamp the grid to the smaller size — the
+/// "terminal is the wrong size" bug. Written to `~/.tmux.conf` (read when the server starts) and
+/// also applied live via `set-option -g` for the session created just below / any running server.
+const HEADLESS_TMUX_DEFAULT_SCRIPT: &str = r#"set -e
+runuser -u rmng -- bash -lc '
+cat > ~/.tmux.conf <<EOF
+# RMNG: the viewer proxy attaches as a second client — size to the latest (viewer) client, not the
+# smallest, so a co-attached human shell never clamps the terminal grid.
+set -g window-size latest
+EOF
+tmux has-session -t main 2>/dev/null || tmux new-session -d -s main -c /home/rmng
+tmux set-option -g window-size latest 2>/dev/null || true
+'
+"#;
+
 // --- pure ports -----------------------------------------------------------------------
 
 /// A DNS label (host-id / hostname validity + path-traversal guard). Ported verbatim.
 pub fn is_dns_label(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
-        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && !s.starts_with('-')
         && !s.ends_with('-')
 }
@@ -72,22 +118,6 @@ fn fresh_machine_id() -> Result<Vec<u8>> {
     Ok(s.into_bytes())
 }
 
-/// Standard base64 (no line wrapping). Ported verbatim from `orchestrate.rs` — used to
-/// pass the credentials JSON to `claude-import.sh apply`.
-pub fn b64_encode(bytes: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(A[(n >> 18 & 63) as usize] as char);
-        out.push(A[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { A[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
-    }
-    out
-}
-
 /// Resolve a caller-supplied image — a repo-tag reference (e.g. `pegasis0/rmng-template:latest`),
 /// a full `sha256:…` id, or a bare 64-hex id — to the **canonical** [`wire::ImageInfo`] `reference`
 /// of the matching clone-source image. `None` when nothing in the listed clone sources
@@ -97,12 +127,14 @@ pub fn b64_encode(bytes: &[u8]) -> String {
 /// caller's input form: the in-use accounting (web.rs `fill_in_use_by`) and the
 /// images-delete 409 guard both compare `ManagedContainer.image == ImageInfo.reference`,
 /// so a clone created from an id form must still be created FROM the reference — otherwise
-/// its base image would show as unused and be deletable under live clones. `Host.source`
+/// its base image would show as unused and be deletable under live clones. `RmngClone.source`
 /// records it too (commit lineage).
 pub fn resolve_reference(images: &[wire::ImageInfo], input: &str) -> Option<String> {
     images
         .iter()
-        .find(|i| i.reference == input || i.id == input || i.id.strip_prefix("sha256:") == Some(input))
+        .find(|i| {
+            i.reference == input || i.id == input || i.id.strip_prefix("sha256:") == Some(input)
+        })
         .map(|i| i.reference.clone())
 }
 
@@ -117,36 +149,97 @@ pub(crate) fn base_session_env_vars() -> Vec<EnvVar> {
         ("XDG_SESSION_TYPE", "wayland"),
     ]
     .into_iter()
-    .map(|(key, value)| EnvVar { key: key.to_string(), value: value.to_string() })
+    .map(|(key, value)| EnvVar {
+        key: key.to_string(),
+        value: value.to_string(),
+    })
     .collect()
 }
 
-/// The clone→control-server + detector-inference env every clone needs, as
-/// [`EnvVar`]s. Points the detector's feedback + agent
-/// `set_state` MCP at THIS control-server and the detector's vision model at the configured
-/// inference server. The control host is `docker.control_host()` — the `rmng-control`
-/// DNS alias on the rmng bridge (the gateway IP in dev mode; see `docker.rs`). Empty
-/// control URLs (with a warning) if it can't be resolved, so clones fall back to the
-/// compiled detector defaults.
+/// The clone-facing control-server environment every clone needs. The control host is
+/// `docker.control_host()` — the `rmng-control` DNS alias on the rmng bridge (the gateway IP in
+/// dev mode; see `docker.rs`). It provides only the CLIProxyAPI router endpoint.
 pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
     let cfg = app.config();
-    let ev = |key: &str, value: String| EnvVar { key: key.to_string(), value };
+    let ev = |key: &str, value: String| EnvVar {
+        key: key.to_string(),
+        value,
+    };
     let mut vars = Vec::new();
     match app.docker.control_host().await {
         Ok(control) => {
-            vars.push(ev("RMNG_CONTROL_URL", format!("http://{control}:{}", cfg.listen.web)));
-            vars.push(ev("AGENT_CONTROL_MCP_URL", format!("http://{control}:{}", cfg.listen.clone_mcp)));
+            // Group-proxy router: every clone's agents reach the control-server's `/cc`
+            // reverse proxy at a constant URL; the router maps the clone's per-clone bearer
+            // key → its group instance. Claude Code appends `/v1/messages` + `/v1/models`
+            // to ANTHROPIC_BASE_URL; the gateway-discovery flag lets its picker learn the
+            // instance's `/v1/models` catalog. The per-clone bearer (ANTHROPIC_AUTH_TOKEN /
+            // RMNG_PROXY_KEY) is added separately by `router_env_vars` (it's per-clone, not
+            // shared). See `docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`.
+            vars.push(ev(
+                "ANTHROPIC_BASE_URL",
+                format!("http://{control}:{}/cc", cfg.listen.web),
+            ));
+            vars.push(ev(
+                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+                "1".to_string(),
+            ));
+            // The fleet `rmng` CLI's control-server base URL, so a clone can run `rmng …`
+            // without `--server` — a bare `rmng clone ls`/`rmng clone ssh`/`rmng clone create …`
+            // (the latter spawning a sub clone) just works. The CLI resolves `--server` >
+            // `$RMNG_CONTROL_URL` > `http://localhost:9000`; inside a clone `localhost:9000`
+            // is unreachable, so this points it at the same `rmng-control` route the agents
+            // already use (the router URL above).
+            vars.push(ev(
+                "RMNG_CONTROL_URL",
+                format!("http://{control}:{}", cfg.listen.web),
+            ));
         }
         Err(e) => tracing::warn!(
             "control_env_vars: could not resolve the control-server host ({e}); \
-             clones fall back to the compiled detector defaults"
+             clone inference routing will be unavailable until the next reconcile"
         ),
     }
-    let infer = cfg.detector_inference_url.trim();
-    if !infer.is_empty() {
-        vars.push(ev("RMNG_INFERENCE_URL", infer.to_string()));
-    }
     vars
+}
+
+/// The PER-CLONE group-proxy env: the clone's stable router bearer key, exposed both as
+/// `ANTHROPIC_AUTH_TOKEN` (Claude Code) and `RMNG_PROXY_KEY` (referenced by the generated
+/// Codex + OpenCode provider configs). Minted + persisted by [`crate::cliproxy`] on first
+/// use (stable for the clone's life; the router maps it back to this clone id). Kept OUT of
+/// [`control_env_vars`] because it is per-clone, not a shared constant — and NEVER put on
+/// `RmngClone`/`state.json`/`/events` (it's a secret). Wired into the clone's `/etc/environment`
+/// at create (`jobs.rs`) and on every per-clone resync (`clone_reconcile.rs`).
+pub(crate) fn router_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
+    let key = app.cliproxy.mint_router_key(host_id);
+    vec![
+        EnvVar {
+            key: "ANTHROPIC_AUTH_TOKEN".into(),
+            value: key.clone(),
+        },
+        EnvVar {
+            key: "RMNG_PROXY_KEY".into(),
+            value: key,
+        },
+    ]
+}
+
+/// The clone-facing base URL of the group-proxy router's OpenAI-compatible surface
+/// (`http://{control}:{web}/cc/v1`) — what the generated Codex + OpenCode provider configs
+/// point their `base_url`/`baseURL` at. Derived from the same control-host resolution
+/// `control_env_vars` uses; `None` (with a warning) when the control host can't be resolved,
+/// so the config generators fall back to their old behavior instead of baking a broken URL.
+pub(crate) async fn cc_base_url(app: &App) -> Option<String> {
+    let cfg = app.config();
+    match app.docker.control_host().await {
+        Ok(control) => Some(format!("http://{control}:{}/cc/v1", cfg.listen.web)),
+        Err(e) => {
+            tracing::warn!(
+                "cc_base_url: could not resolve the control-server host ({e}); Codex/OpenCode \
+                 provider configs will omit the RMNG group-proxy provider this pass"
+            );
+            None
+        }
+    }
 }
 
 /// The preset's env plus its Linear key as `LINEAR_API_KEY` (auths the clone's
@@ -154,7 +247,10 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
 pub(crate) fn preset_env_vars(p: &wire::Preset) -> Vec<EnvVar> {
     let mut vars = p.vars.clone();
     if !p.linear_key.is_empty() && !vars.iter().any(|v| v.key == "LINEAR_API_KEY") {
-        vars.push(EnvVar { key: "LINEAR_API_KEY".into(), value: p.linear_key.clone() });
+        vars.push(EnvVar {
+            key: "LINEAR_API_KEY".into(),
+            value: p.linear_key.clone(),
+        });
     }
     vars
 }
@@ -167,7 +263,9 @@ pub(crate) fn etc_environment_conf(vars: &[EnvVar]) -> String {
         rows.retain(|(key, _)| *key != v.key);
         rows.push((&v.key, &v.value));
     }
-    rows.into_iter().map(|(key, value)| format!("{key}={value}\n")).collect()
+    rows.into_iter()
+        .map(|(key, value)| format!("{key}={value}\n"))
+        .collect()
 }
 
 pub(crate) fn clone_etc_environment_conf(vars: &[EnvVar]) -> String {
@@ -225,7 +323,11 @@ fn preset_path_rc(env_text: &str) -> Option<PresetPathRc> {
          for d in {dirs}; do\n  case \":$PATH:\" in\n    *\":$d:\"*) : ;;\n    *) PATH=\"$d:$PATH\" ;;\n  esac\ndone\n\
          # <<< rmng-preset-path <<<\n"
     );
-    Some(PresetPathRc { fish, profile, bashrc })
+    Some(PresetPathRc {
+        fish,
+        profile,
+        bashrc,
+    })
 }
 
 /// The three shell-rc payloads a preset `PATH` needs (see [`preset_path_rc`]).
@@ -263,7 +365,7 @@ fn clone_pct(step: &str) -> Option<f64> {
 /// `ready` 80 — `ready` is this fn's TERMINAL step (daemon registered, or timed-out
 /// still-booting). The remaining `monitors` 85 / `accounts` 95 / `done` 100 steps are driven
 /// by the caller (`run_clone`), so this fn returning does NOT mean the clone is connectable
-/// yet. Returns the **canonical** image reference on success (`Host.source`; see
+/// yet. Returns the **canonical** image reference on success (`RmngClone.source`; see
 /// [`resolve_reference`] — the caller may have passed an id form, but state must always
 /// record the reference so the commit flow can stamp lineage). The container *name* is the
 /// hostname (== host id) — that's the clone's address (Docker DNS on the rmng bridge; its
@@ -287,6 +389,8 @@ pub async fn clone_container(
     hostname: &str,
     env: &[EnvVar],
     agent_playbook: &str,
+    global_prompt: &str,
+    headless: bool,
     mut on_progress: impl FnMut(&str, &str),
 ) -> Result<String> {
     if !is_dns_label(hostname) {
@@ -301,7 +405,7 @@ pub async fn clone_container(
     // any image id. The image picker only offers labeled images, but a raw MCP/API caller
     // could pass anything (reference, sha256: id, or bare id), so gate it here AND resolve
     // whatever form was passed to the canonical reference — everything downstream
-    // (`Host.source`, in-use accounting, delete guards) keys on the reference.
+    // (`RmngClone.source`, in-use accounting, delete guards) keys on the reference.
     if !docker.image_exists(image).await? {
         bail!("source image '{image}' does not exist");
     }
@@ -313,7 +417,7 @@ pub async fn clone_container(
     // The rmng bridge is lazy; make sure it's up before joining it.
     docker.ensure_network().await?;
 
-    // Create the container (name == host id) from the CANONICAL reference (equivalent
+    // Create the container (name == clone id) from the CANONICAL reference (equivalent
     // to the caller's input — same image — but keeps `docker ps`'s Image column
     // readable). Its IP is Docker IPAM's business; the name is the address. A stale
     // same-named container 409s here — the daemon message is surfaced verbatim
@@ -323,7 +427,15 @@ pub async fn clone_container(
         name: hostname.to_string(),
         image: reference.clone(),
         hostname: hostname.to_string(),
-        env: env.iter().filter(|v| !v.key.is_empty()).map(|v| (v.key.clone(), v.value.clone())).collect(),
+        // Clone env lives ONLY in `/etc/environment` (written by `clone_container_after_create`
+        // below, from this same `env`), the single source of truth: the lingering `systemd --user`
+        // manager imports it via the `/usr/lib/environment.d/99-environment.conf -> /etc/environment`
+        // symlink, PAM applies it to SSH logins, and `rmng exec` seeds from the live user session
+        // (`systemctl --user show-environment`). Baking it into the container `Config.Env` too would
+        // only leak it into root / PID 1 — where `XDG_RUNTIME_DIR` and friends are wrong — with no
+        // consumer that can't already reach `/etc/environment`. So the create env stays empty and
+        // `Config.Env` carries just the image's own `ENV`.
+        env: Vec::new(),
         cpus: cfg.docker.clone_cpus,
         memory_mb: cfg.docker.clone_memory_mb,
         sock_source: sock_source_dir(app).await,
@@ -332,7 +444,18 @@ pub async fn clone_container(
 
     // From here on, a failure must tear the half-built clone down. Run the rest under
     // a guard that removes the container + its dind volumes on any early return.
-    match clone_container_after_create(app, &container, hostname, env, agent_playbook, &mut on_progress).await {
+    match clone_container_after_create(
+        app,
+        &container,
+        hostname,
+        env,
+        agent_playbook,
+        global_prompt,
+        headless,
+        &mut on_progress,
+    )
+    .await
+    {
         Ok(()) => {
             // Shared build infra: optimistically apply the Hub mirror + remote buildx builder
             // now (idempotent, best-effort; the buildinfra reconciler is the backstop if the
@@ -343,8 +466,14 @@ pub async fn clone_container(
         Err(e) => {
             tracing::warn!("clone {hostname} failed after create; cleaning up: {e}");
             docker.remove_container(&container).await.ok();
-            docker.remove_volume(&crate::docker::DockerCtl::dind_volume_name(hostname)).await.ok();
-            docker.remove_volume(&crate::docker::DockerCtl::ctd_volume_name(hostname)).await.ok();
+            docker
+                .remove_volume(&crate::docker::DockerCtl::dind_volume_name(hostname))
+                .await
+                .ok();
+            docker
+                .remove_volume(&crate::docker::DockerCtl::ctd_volume_name(hostname))
+                .await
+                .ok();
             Err(e)
         }
     }
@@ -358,6 +487,8 @@ async fn clone_container_after_create(
     hostname: &str,
     env: &[EnvVar],
     agent_playbook: &str,
+    global_prompt: &str,
+    headless: bool,
     on_progress: &mut impl FnMut(&str, &str),
 ) -> Result<()> {
     let docker = &app.docker;
@@ -402,6 +533,24 @@ async fn clone_container_after_create(
     on_progress("inject", "starting container to inject identity + preset");
     docker.start_container(container).await?;
 
+    // Headless clone: remove the desktop the instant the container is up — delete the
+    // `gnome-headless.service` + `rmng-clone-daemon.service` unit files (and their wants-symlinks)
+    // so nothing can start them via any path, plus a `daemon-reload` + `pkill` to reap anything
+    // the lingering user manager already started in the boot race (see `HEADLESS_DISABLE_SCRIPT`).
+    // `agent-wrapper` is left enabled. Runs before the ~seconds of Codex/env injects below.
+    if headless {
+        on_progress("inject", "headless: removing desktop units (gnome-headless + clone-daemon)");
+        let code = docker
+            .exec_script(container, HEADLESS_DISABLE_SCRIPT, &[], &[], |_stream, line| {
+                tracing::debug!(target: "provision", "headless-disable: {line}");
+            })
+            .await
+            .unwrap_or(0);
+        if code != 0 {
+            tracing::warn!("clone {hostname}: headless desktop-disable exited {code} (non-fatal)");
+        }
+    }
+
     // Belt-and-suspenders: reconcile /dev/shm the moment the clone is up, so its desktop never
     // touches the 64 MB default even for the first reconcile tick. This clone was just created
     // WITH `shm_size` in its HostConfig, so it's normally already at target and this is a no-op
@@ -414,17 +563,31 @@ async fn clone_container_after_create(
     // did not create it.
     on_progress("inject", "preparing Codex guidance + MCP config");
     let code = docker
-        .exec_script(container, crate::clone_reconcile::codex_prepare_script(), &[], &[], |_stream, line| {
-            tracing::debug!(target: "provision", "codex-prepare: {line}");
-        })
+        .exec_script(
+            container,
+            crate::clone_reconcile::codex_prepare_script(),
+            &[],
+            &[],
+            |_stream, line| {
+                tracing::debug!(target: "provision", "codex-prepare: {line}");
+            },
+        )
         .await?;
     if code != 0 {
-        tracing::warn!("clone {hostname}: Codex config directory prepare exited {code} (reconciler will retry)");
+        tracing::warn!(
+            "clone {hostname}: Codex config directory prepare exited {code} (reconciler will retry)"
+        );
     }
     let code = docker
-        .exec_script(container, crate::clone_reconcile::codex_cli_install_script(), &[], &[], |_stream, line| {
-            tracing::debug!(target: "provision", "codex-cli-install: {line}");
-        })
+        .exec_script(
+            container,
+            crate::clone_reconcile::codex_cli_install_script(),
+            &[],
+            &[],
+            |_stream, line| {
+                tracing::debug!(target: "provision", "codex-cli-install: {line}");
+            },
+        )
         .await?;
     if code != 0 {
         tracing::warn!("clone {hostname}: Codex CLI install exited {code} (reconciler will retry)");
@@ -439,7 +602,13 @@ async fn clone_container_after_create(
         // with a transient one; seen live in the E2E — hostnamectl broken, id unstable
         // across restarts). Writing a unique id per clone gives stable, collision-free
         // D-Bus/journald identity; commit truncates it again, so images never carry it.
-        TarEntry { path: "etc/machine-id".into(), data: fresh_machine_id()?, mode: 0o444, uid: 0, gid: 0 },
+        TarEntry {
+            path: "etc/machine-id".into(),
+            data: fresh_machine_id()?,
+            mode: 0o444,
+            uid: 0,
+            gid: 0,
+        },
         // Per-clone env (base desktop session + control URLs + preset vars), read by PAM for
         // SSH sessions and the lingering user manager.
         TarEntry {
@@ -462,12 +631,24 @@ async fn clone_container_after_create(
             gid: CLONE_GID,
         });
     }
-    let control_mcp_url = env
+    // The group-proxy /cc/v1 base for the generated Codex/OpenCode provider configs, derived
+    // from the ANTHROPIC_BASE_URL (`.../cc`) that `control_env_vars` injected into this env.
+    let cc_base = env
         .iter()
-        .find(|v| v.key == "AGENT_CONTROL_MCP_URL")
-        .map(|v| v.value.as_str());
-    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(hostname, control_mcp_url);
-    codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(&codex_entries));
+        .find(|v| v.key == "ANTHROPIC_BASE_URL")
+        .map(|v| format!("{}/v1", v.value));
+    // One-shot initial config: use the fallback GPT model list here; the clone reconciler
+    // refreshes it with the group's live (blacklist-filtered) `/v1/models` set on its next pass.
+    let gpt_models = crate::clone_reconcile::fallback_gpt_models();
+    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(
+        cc_base.as_deref(),
+        &gpt_models,
+        headless,
+        global_prompt,
+    );
+    codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(
+        &codex_entries,
+    ));
     entries.append(&mut codex_entries);
     if let Some(rc) = &path_rc {
         entries.push(TarEntry {
@@ -501,6 +682,39 @@ async fn clone_container_after_create(
     on_progress("inject", "injecting machine-id + preset env + PATH rc");
     docker.upload_tar(container, entries).await?;
 
+    // Interactive Claude Code reads MCP servers from ~/.claude.json (state-bearing → jq merge, not
+    // a tar entry). Give it the same desktop+linear set as Codex/OpenCode/the agent-wrapper; the
+    // desktop server is removed on headless clones. Stamp it so the reconciler skips re-running
+    // this within its first 30s pass. Best-effort — the reconciler retries on failure.
+    on_progress("inject", "configuring ~/.claude.json MCP servers");
+    let code = docker
+        .exec_script(
+            container,
+            &crate::clone_reconcile::claude_mcp_script(headless),
+            &[],
+            &[],
+            |_stream, line| {
+                tracing::debug!(target: "provision", "claude-mcp: {line}");
+            },
+        )
+        .await
+        .unwrap_or(1);
+    if code == 0 {
+        if let Err(e) = docker
+            .upload_tar(
+                container,
+                vec![crate::clone_reconcile::claude_mcp_stamp_entry_for(headless)],
+            )
+            .await
+        {
+            tracing::warn!("clone {hostname}: writing claude mcp stamp failed: {e:#} (non-fatal)");
+        }
+    } else {
+        tracing::warn!(
+            "clone {hostname}: ~/.claude.json MCP configure exited {code} (reconciler will retry)"
+        );
+    }
+
     // The bashrc block can't go in the tar (it's an APPEND, not a whole file — /etc/bash.bashrc
     // already exists in the image). Delete any prior rmng-preset-path block then re-append,
     // so a re-provision stays idempotent. Only when the preset sets PATH.
@@ -522,6 +736,24 @@ async fn clone_container_after_create(
             // interactive bash misses it. Warn rather than tear the clone down.
             tracing::warn!("clone {hostname}: bashrc preset-PATH append exited {code} (non-fatal)");
         }
+    }
+
+    // Headless clone: there is no clone-daemon, so a media `Hello` never arrives — don't wait
+    // for one. Start the default `main` tmux session (idempotent; the viewer shows it as the
+    // first tab and `termplane` self-heals a missing session on select) and report ready.
+    if headless {
+        on_progress("wait-ready", "headless clone — starting default tmux session");
+        let code = docker
+            .exec_script(container, HEADLESS_TMUX_DEFAULT_SCRIPT, &[], &[], |_stream, line| {
+                tracing::debug!(target: "provision", "headless-tmux: {line}");
+            })
+            .await
+            .unwrap_or(0);
+        if code != 0 {
+            tracing::warn!("clone {hostname}: default tmux session start exited {code} (non-fatal)");
+        }
+        on_progress("ready", &format!("headless clone {hostname} up"));
+        return Ok(());
     }
 
     // wait-ready: poll the mediaplane for the daemon's Hello (keyed by clone_id == hostname).
@@ -549,7 +781,11 @@ async fn clone_container_after_create(
             }
             // Dead: fold the container's log tail into the op log, then fail.
             let logs = docker.container_logs_tail(container, 30).await;
-            let tail = if logs.trim().is_empty() { String::new() } else { format!("\n{logs}") };
+            let tail = if logs.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n{logs}")
+            };
             bail!("clone {hostname} exited before its daemon registered; last logs:{tail}");
         }
         tokio::time::sleep(WAIT_READY_POLL).await;
@@ -619,7 +855,9 @@ pub async fn pull_template(
     // A `repo@sha256:…` digest ref is mis-split by `split_reference` (it treats the digest's
     // own `:` as the tag separator), so refuse it — pull a `repo:tag` reference instead.
     if remote.contains('@') {
-        bail!("digest references ('{remote}') aren't supported — pull a repo:tag reference instead");
+        bail!(
+            "digest references ('{remote}') aren't supported — pull a repo:tag reference instead"
+        );
     }
 
     let docker = &app.docker;
@@ -635,13 +873,20 @@ pub async fn pull_template(
     // `Bytes` drives the fine pct + message with NO log line (it fires up to ~100 times per
     // pull, which would swamp the log). A daemon error (e.g. a Docker Hub rate limit) is
     // surfaced verbatim by `pull_image` (gotcha #9).
-    on_progress(PullProgress::Step { step: "pull".into(), msg: format!("pulling {remote}") });
+    on_progress(PullProgress::Step {
+        step: "pull".into(),
+        msg: format!("pulling {remote}"),
+    });
     {
         let on_progress = &mut on_progress;
         docker
             .pull_image(remote, |event| match event {
                 PullEvent::Status { layer, status } => {
-                    let msg = if layer.is_empty() { status } else { format!("{layer}: {status}") };
+                    let msg = if layer.is_empty() {
+                        status
+                    } else {
+                        format!("{layer}: {status}")
+                    };
                     on_progress(PullProgress::Log { msg });
                 }
                 PullEvent::Bytes { frac } => {
@@ -680,7 +925,10 @@ pub async fn pull_template(
         ),
     }
 
-    on_progress(PullProgress::Step { step: "done".into(), msg: format!("template {remote} ready") });
+    on_progress(PullProgress::Step {
+        step: "done".into(),
+        msg: format!("template {remote} ready"),
+    });
     Ok(remote.to_string())
 }
 
@@ -730,11 +978,18 @@ pub async fn commit_clone_image(
     // Prepare: flush + clear machine-id in the running clone so committed images don't carry
     // the source clone's identity (a fresh id is regenerated on the next clone's first boot,
     // since clone_container also injects an empty machine-id).
-    on_progress("prepare", "flushing filesystem + clearing machine-id in the clone");
+    on_progress(
+        "prepare",
+        "flushing filesystem + clearing machine-id in the clone",
+    );
     let prep_code = docker
-        .exec_script(container, "sync; truncate -s0 /etc/machine-id\n", &[], &[], |_s, line| {
-            tracing::debug!(target: "provision", "commit-prepare: {line}")
-        })
+        .exec_script(
+            container,
+            "sync; truncate -s0 /etc/machine-id\n",
+            &[],
+            &[],
+            |_s, line| tracing::debug!(target: "provision", "commit-prepare: {line}"),
+        )
         .await?;
     if prep_code != 0 {
         tracing::warn!("commit-prepare exited {prep_code} in {container} (non-fatal; proceeding)");
@@ -752,13 +1007,20 @@ pub async fn commit_clone_image(
     );
     let labels = vec![
         (crate::docker::LABEL_IMAGE.to_string(), "1".to_string()),
-        (crate::docker::LABEL_CREATED_FROM.to_string(), source.to_string()),
+        (
+            crate::docker::LABEL_CREATED_FROM.to_string(),
+            source.to_string(),
+        ),
         // `docker commit` INHERITS the parent image's labels, so a clone descended from
         // the wizard base carries `rmng.base=1` — explicitly override it or every user
         // commit wears the base badge and steals the picker preselect (found in E2E).
         (crate::docker::LABEL_BASE.to_string(), "0".to_string()),
     ];
-    docker.commit(container, name, /*set_boot_config=*/ true, /*pause=*/ true, &labels).await?;
+    docker
+        .commit(
+            container, name, /*set_boot_config=*/ true, /*pause=*/ true, &labels,
+        )
+        .await?;
 
     on_progress("done", &format!("image {reference} ready"));
     Ok(reference)
@@ -779,7 +1041,7 @@ fn delete_pct(step: &str) -> Option<f64> {
 
 /// Destroy a managed clone: `stop` (the image's `StopSignal=SIGRTMIN+3` gives systemd a
 /// clean 20 s shutdown — without it every stop is a 20 s hang + SIGKILL, gotcha #5) →
-/// `remove(force)` → remove the `rmng-dind-<host>` inner-Docker volume. A 404/in-use on the
+/// `remove(force)` → remove the `rmng-dind-<clone>` inner-Docker volume. A 404/in-use on the
 /// volume is logged, not fatal (the container removal is what matters). `host_id` is both
 /// the container name to stop/remove and the volume-name stem (`rmng-dind-<host_id>`).
 pub async fn delete_clone(
@@ -834,29 +1096,47 @@ pub struct CloneBinary {
 
 /// The binaries injected into every clone at create time.
 pub const CLONE_BINARIES: &[CloneBinary] = &[
-    CloneBinary { payload: "clone-daemon", bin: "rmng-clone-daemon", dir: "opt/rmng/bin" },
-    CloneBinary { payload: "agent-wrapper", bin: "agent-wrapper", dir: "opt/rmng/bin" },
-    // The fleet CLI: talks to this control-server via RMNG_CONTROL_URL (preset into every
-    // clone's /etc/environment), so in-clone agents can manage the fleet with plain commands.
-    CloneBinary { payload: "rmng-cli", bin: "rmng", dir: "usr/local/bin" },
+    CloneBinary {
+        payload: "clone-daemon",
+        bin: "rmng-clone-daemon",
+        dir: "opt/rmng/bin",
+    },
+    CloneBinary {
+        payload: "agent-wrapper",
+        bin: "agent-wrapper",
+        dir: "opt/rmng/bin",
+    },
+    // Fleet management CLI, installed on every clone for explicit operator use.
+    CloneBinary {
+        payload: "rmng-cli",
+        bin: "rmng",
+        dir: "usr/local/bin",
+    },
 ];
 
-// --- claude-import backend ------------------------------------------------------------
+// --- archive --------------------------------------------------------------------------
 
-/// Run one [`claude-import.sh`] op (`status`|`read`|`clear`|`apply`) inside clone `container`
-/// via `docker exec bash -s`, returning its raw stdout+stderr. `extra` are extra positional
-/// args (e.g. the base64 credentials for `apply`). This is `claude.rs`'s backend (Task 6
-/// delegates its token flows to it), replacing the retired SSH `run_clone_op`.
-///
-/// Script args: `<user> <op> [b64]`. `status` never fails (stderr merged in the script);
-/// the others surface a non-zero exit as an error.
-pub async fn run_clone_op(app: &App, container: &str, op: &str, extra: &[&str]) -> Result<String> {
-    crate::clone_ops::run_clone_op(app, container, IMPORT_SCRIPT, op, extra).await
+fn archive_pct(step: &str) -> Option<f64> {
+    Some(match step {
+        "queued" => 0.0,
+        "stop" => 75.0,
+        "done" => 100.0,
+        _ => return None,
+    })
+}
+
+fn unarchive_pct(step: &str) -> Option<f64> {
+    Some(match step {
+        "queued" => 0.0,
+        "start" => 75.0,
+        "done" => 100.0,
+        _ => return None,
+    })
 }
 
 // --- op-log pct helpers (exposed for jobs.rs step tables) -----------------------------
 
-/// The clone/pull/commit/delete step→pct tables, exposed so `jobs.rs` maps a streamed step
+/// The clone/pull/commit/delete/archive step→pct tables, exposed so `jobs.rs` maps a streamed step
 /// key to the operation's coarse percentage without re-deriving it. (Monitors-apply is
 /// intentionally NOT an Operation — web.rs streams its `[ct]` lines directly — so there is
 /// no monitors table here.)
@@ -866,13 +1146,15 @@ pub fn step_pct(kind: wire::OperationKind, step: &str) -> Option<f64> {
         wire::OperationKind::Pull => pull_pct(step),
         wire::OperationKind::Commit => commit_pct(step),
         wire::OperationKind::Delete => delete_pct(step),
+        wire::OperationKind::Archive => archive_pct(step),
+        wire::OperationKind::Unarchive => unarchive_pct(step),
         // Self-update has no provision step table — `jobs::run_update` drives its pct directly.
         wire::OperationKind::Update => None,
     }
 }
 
 /// Discover the shared clone-socket source directory to bind into a new clone at
-/// `/srv/rmng-sock`. From the self-setup env report's sock-mount discovery (the host source
+/// `/srv/rmng-sock`. From the self-setup env report's sock-mount discovery (the clone source
 /// of our own container's socket mount); empty in dev/test (the bind is then skipped).
 async fn sock_source_dir(app: &App) -> String {
     // The self-setup report records the mount detail as "mounted from <src>"; parse it back
@@ -920,7 +1202,10 @@ mod tests {
             created_from: None,
             in_use_by: Vec::new(),
         };
-        let images = vec![img("rmng/template:base", HEX_A), img("rmng/template:dev", HEX_B)];
+        let images = vec![
+            img("rmng/template:base", HEX_A),
+            img("rmng/template:dev", HEX_B),
+        ];
 
         // Repo-tag reference → itself.
         assert_eq!(
@@ -933,7 +1218,10 @@ mod tests {
             Some("rmng/template:dev")
         );
         // Bare 64-hex id (prefix-stripped form) → its reference.
-        assert_eq!(resolve_reference(&images, HEX_A).as_deref(), Some("rmng/template:base"));
+        assert_eq!(
+            resolve_reference(&images, HEX_A).as_deref(),
+            Some("rmng/template:base")
+        );
         // No match (unknown reference, unknown id, empty) → None.
         assert_eq!(resolve_reference(&images, "rmng/template:nope"), None);
         assert_eq!(resolve_reference(&images, "sha256:cccc"), None);
@@ -946,37 +1234,42 @@ mod tests {
     fn provision_uses_ssh_clone_entries_contract() {
         // Guards that provision's SSH injection targets the clone-user .ssh path (the template
         // pre-creates it 700). If this path ever changes, StrictModes will reject the key.
-        if std::process::Command::new("ssh-keygen").arg("-?").output().is_err() {
+        if std::process::Command::new("ssh-keygen")
+            .arg("-?")
+            .output()
+            .is_err()
+        {
             return;
         }
         let dir = std::env::temp_dir().join(format!("rmng-prov-ssh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let e = crate::ssh::clone_ssh_tar_entries(dir.to_str().unwrap(), "c1", &["ssh-ed25519 A a".into()])
-            .unwrap();
-        assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys" && t.mode == 0o600 && t.uid == 1000));
+        let e = crate::ssh::clone_ssh_tar_entries(
+            dir.to_str().unwrap(),
+            "c1",
+            &["ssh-ed25519 A a".into()],
+        )
+        .unwrap();
+        assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys"
+            && t.mode == 0o600
+            && t.uid == 1000));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn b64_parity() {
-        // Round-trip parity with the classic base64 alphabet + padding.
-        assert_eq!(b64_encode(b""), "");
-        assert_eq!(b64_encode(b"f"), "Zg==");
-        assert_eq!(b64_encode(b"fo"), "Zm8=");
-        assert_eq!(b64_encode(b"foo"), "Zm9v");
-        assert_eq!(b64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(b64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
-        // A KEY=VALUE line, as the credentials-json path uses it.
-        assert_eq!(b64_encode(b"PATH=/x/y"), "UEFUSD0veC95");
     }
 
     #[test]
     fn etc_environment_conf_skips_empty_keys_and_formats() {
         let vars = vec![
-            EnvVar { key: "FOO".into(), value: "1".into() },
-            EnvVar { key: "".into(), value: "dropped".into() },
-            EnvVar { key: "BAR".into(), value: "a b".into() },
+            EnvVar {
+                key: "FOO".into(),
+                value: "1".into(),
+            },
+            EnvVar {
+                key: "".into(),
+                value: "dropped".into(),
+            },
+            EnvVar {
+                key: "BAR".into(),
+                value: "a b".into(),
+            },
         ];
         assert_eq!(etc_environment_conf(&vars), "FOO=1\nBAR=a b\n");
     }
@@ -984,12 +1277,18 @@ mod tests {
     #[test]
     fn clone_etc_environment_conf_includes_base_session_and_lets_preset_override() {
         let vars = vec![
-            EnvVar { key: "XDG_CURRENT_DESKTOP".into(), value: "custom".into() },
-            EnvVar { key: "RMNG_CONTROL_URL".into(), value: "http://rmng-control:9000".into() },
+            EnvVar {
+                key: "XDG_CURRENT_DESKTOP".into(),
+                value: "custom".into(),
+            },
+            EnvVar {
+                key: "ANTHROPIC_BASE_URL".into(),
+                value: "http://rmng-control:9000/cc".into(),
+            },
         ];
         let body = clone_etc_environment_conf(&vars);
         assert!(body.contains("XDG_SESSION_DESKTOP=gnome\n"));
-        assert!(body.contains("RMNG_CONTROL_URL=http://rmng-control:9000\n"));
+        assert!(body.contains("ANTHROPIC_BASE_URL=http://rmng-control:9000/cc\n"));
         assert!(body.contains("XDG_CURRENT_DESKTOP=custom\n"));
         assert_eq!(body.matches("XDG_CURRENT_DESKTOP=").count(), 1);
     }
@@ -1007,8 +1306,17 @@ mod tests {
         // Listed order a:b (a first) → reversed so each prepend leaves a in front.
         let rc = preset_path_rc("PATH=/opt/a/bin:/opt/b/bin:$PATH\n").unwrap();
         // Reversed → "/opt/b/bin" then "/opt/a/bin" in the loop dir list.
-        assert!(rc.fish.contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""), "fish: {}", rc.fish);
-        assert!(rc.profile.contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""), "profile: {}", rc.profile);
+        assert!(
+            rc.fish.contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""),
+            "fish: {}",
+            rc.fish
+        );
+        assert!(
+            rc.profile
+                .contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""),
+            "profile: {}",
+            rc.profile
+        );
         // fish prepends with the contains-guard.
         assert!(rc.fish.contains("set -gx PATH \"$d\" $PATH"));
         // sh/bash use the case-guard prepend.
@@ -1056,7 +1364,14 @@ mod tests {
         // The clone table must be monotonic non-decreasing in emission order, so the progress
         // bar never jumps backwards across the create → ready → monitors → accounts → done tail.
         let clone_order = [
-            "queued", "create", "inject", "start", "wait-ready", "ready", "monitors", "accounts",
+            "queued",
+            "create",
+            "inject",
+            "start",
+            "wait-ready",
+            "ready",
+            "monitors",
+            "accounts",
             "done",
         ];
         let mut prev = -1.0_f64;

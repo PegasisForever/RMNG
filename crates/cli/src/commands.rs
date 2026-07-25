@@ -9,10 +9,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use control_client::Client;
 use serde_json::Value;
-use wire::{ControlState, Operation, Provider};
+use wire::{ContainerStats, ControlState, MonitorState, Operation, Provider};
 
-use crate::args::{AccountCmd, DesktopCmd, ImageCmd, RescaleArgs, WaitArgs};
-use crate::output::{human_size, pct, short_id, table};
+use crate::args::{
+    AccountCmd, DesktopCmd, ImageCmd, Provider as CliProvider, RescaleArgs, WaitArgs,
+};
+use crate::output::{human_size, pct, short_id, table, token_count};
 use crate::wait::{WaitOutcome, wait_for_op};
 
 fn emit_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -30,66 +32,141 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-pub async fn ps(client: &Client, json: bool) -> Result<u8> {
-    let st = client.state().await?;
+fn cpu_pct(cpu_pct: f64) -> String {
+    if cpu_pct < 1.0 {
+        format!("{cpu_pct:.1}%")
+    } else {
+        format!("{cpu_pct:.0}%")
+    }
+}
+
+fn ram(stats: &ContainerStats) -> String {
+    if stats.mem_limit == 0 {
+        human_size(stats.mem_used)
+    } else {
+        format!(
+            "{}/{}",
+            human_size(stats.mem_used),
+            human_size(stats.mem_limit)
+        )
+    }
+}
+
+fn clone_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
+    if archived {
+        return "archived".to_string();
+    }
+    match monitor_state {
+        Some(MonitorState::Working) => "working".to_string(),
+        Some(MonitorState::Idle) => "idle".to_string(),
+        Some(MonitorState::Offline) => "offline".to_string(),
+        None => String::new(),
+    }
+}
+
+pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
+    let (st, stats, tokens) = tokio::try_join!(client.state(), client.stats(), client.tokens())?;
+    // `--json` emits the JOINED view the human table shows — each clone object with its
+    // live `stats` + `tokens` nested — so an agent parsing JSON gets CPU/RAM/tokens too (the raw
+    // wire `ControlState` omits those volatile metrics). Stable CLI-owned shape; see docs/CLI.md.
     if json {
-        emit_json(&st)?;
+        let clones: Vec<Value> = st
+            .hosts
+            .iter()
+            .map(|h| {
+                let mut o = serde_json::to_value(h).unwrap_or_else(|_| serde_json::json!({}));
+                o["stats"] = serde_json::to_value(stats.get(&h.id)).unwrap_or(Value::Null);
+                o["tokens"] = serde_json::to_value(tokens.get(&h.id)).unwrap_or(Value::Null);
+                o
+            })
+            .collect();
+        emit_json(&serde_json::json!({
+            "selected": st.selected,
+            "clones": clones,
+            "operations": st.operations,
+        }))?;
         return Ok(0);
     }
-    let rows: Vec<Vec<String>> = st
-        .hosts
+
+    // Order rows as a one-level tree: each top-level clone followed by its sub clones, which are
+    // indented under it. A child whose parent isn't present renders at top level so nothing is
+    // hidden. Order within each level is the server's clone Vec order.
+    let present: std::collections::HashSet<&str> = st.hosts.iter().map(|h| h.id.as_str()).collect();
+    let mut ordered: Vec<(&_, bool)> = Vec::with_capacity(st.hosts.len());
+    for h in &st.hosts {
+        let is_top = h.parent.as_deref().is_none_or(|p| !present.contains(p));
+        if !is_top {
+            continue;
+        }
+        ordered.push((h, false));
+        for c in &st.hosts {
+            if c.parent.as_deref() == Some(h.id.as_str()) {
+                ordered.push((c, true));
+            }
+        }
+    }
+    let rows: Vec<Vec<String>> = ordered
         .iter()
-        .map(|h| {
+        .map(|(h, is_child)| {
             let sel = if st.selected.as_deref() == Some(&h.id) {
                 "*"
             } else {
                 ""
             };
+            let id_cell = if *is_child {
+                format!("└─ {}{}", h.id, sel)
+            } else {
+                format!("{}{}", h.id, sel)
+            };
+            let stats = stats.get(&h.id);
+            let usage = tokens.get(&h.id);
             vec![
-                format!("{}{}", h.id, sel),
-                h.monitor_state
-                    .map(|m| format!("{m:?}").to_lowercase())
-                    .unwrap_or_default(),
-                h.agent_report
-                    .map(|r| format!("{r:?}").to_lowercase())
-                    .unwrap_or_default(),
+                id_cell,
+                h.local_ip.clone().unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
-                h.claude_account_email
-                    .clone()
-                    .or(h.claude_selection.clone())
+                h.preset_name.clone().unwrap_or_default(),
+                h.group.clone().unwrap_or_default(),
+                stats
+                    .map(|stats| cpu_pct(stats.cpu_pct))
                     .unwrap_or_default(),
-                h.codex_account_email
-                    .clone()
-                    .or(h.codex_selection.clone())
+                stats.map(ram).unwrap_or_default(),
+                usage
+                    .map(|usage| token_count(usage.new_input_tokens))
                     .unwrap_or_default(),
-                h.state_note
-                    .as_deref()
-                    .map(|n| truncate(n, 48))
+                usage
+                    .map(|usage| token_count(usage.output_tokens))
                     .unwrap_or_default(),
+                clone_status(h.archived, h.monitor_state),
             ]
         })
         .collect();
     print!(
         "{}",
         table(
-            &["ID", "STATE", "AGENT", "IMAGE", "CLAUDE", "CODEX", "NOTE"],
-            &rows
+            &[
+                "ID", "IP", "IMAGE", "PRESET", "GROUP", "CPU", "RAM", "TOK-IN", "TOK-OUT",
+                "STATUS",
+            ],
+            &rows,
         )
     );
     Ok(0)
 }
 
-pub async fn select(client: &Client, host: &str, json: bool) -> Result<u8> {
-    let target = (host != "none").then_some(host);
+pub async fn select(client: &Client, clone: Option<&str>, none: bool, json: bool) -> Result<u8> {
+    if clone.is_none() && !none {
+        bail!("provide a clone id, or --none to clear the selection");
+    }
+    let target = if none { None } else { clone };
     if let Some(id) = target {
         let st = client.state().await?;
         if !st.hosts.iter().any(|h| h.id == id) {
-            bail!("unknown host '{id}' (see `rmng ps`)");
+            bail!("unknown clone '{id}' (see `rmng clone ls`)");
         }
     }
     let st = client.activate(target).await?;
     if json {
-        emit_json(&st)?;
+        emit_json(&serde_json::json!({ "selected": st.selected }))?;
     } else {
         match target {
             Some(id) => println!("selected {id}"),
@@ -100,29 +177,43 @@ pub async fn select(client: &Client, host: &str, json: bool) -> Result<u8> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn clone(
+pub async fn clone_create(
     client: &Client,
-    image: &str,
     hostname: &str,
-    claude: Option<&str>,
-    codex: Option<&str>,
+    from: &str,
+    group: Option<&str>,
+    no_group: bool,
     preset: Option<&str>,
+    no_preset: bool,
+    headless: bool,
+    parent: Option<&str>,
+    top_level: bool,
     wait: &WaitArgs,
     json: bool,
 ) -> Result<u8> {
+    // Map the explicit "no X" flags to the `none` sentinel the server treats as "bind none"
+    // (and, for a sub clone, opt out of inheriting the parent's). Omitting both ⇒ inherit.
+    let group = if no_group { Some("none") } else { group };
+    let preset = if no_preset { Some("none") } else { preset };
     let op = client
-        .clone_host(image, hostname, claude, codex, preset)
+        .duplicate_clone(from, hostname, group, preset, headless, parent, top_level)
         .await?;
     started(client, op, wait, json, "clone").await
 }
 
-pub async fn rm(client: &Client, host: &str, yes: bool, wait: &WaitArgs, json: bool) -> Result<u8> {
+pub async fn clone_rm(
+    client: &Client,
+    clone: &str,
+    yes: bool,
+    wait: &WaitArgs,
+    json: bool,
+) -> Result<u8> {
     if !yes {
         use std::io::{BufRead, IsTerminal, Write};
         if !std::io::stdin().is_terminal() {
-            bail!("refusing to delete '{host}' non-interactively without --yes");
+            bail!("refusing to destroy '{clone}' non-interactively without -y/--yes");
         }
-        eprint!("delete host '{host}'? this destroys its container and volumes [y/N] ");
+        eprint!("destroy clone '{clone}'? this removes its container and volumes [y/N] ");
         std::io::stderr().flush().ok();
         let mut line = String::new();
         std::io::stdin().lock().read_line(&mut line)?;
@@ -131,8 +222,43 @@ pub async fn rm(client: &Client, host: &str, yes: bool, wait: &WaitArgs, json: b
             return Ok(1);
         }
     }
-    let op = client.delete(host).await?;
+    let op = client.delete(clone).await?;
     started(client, op, wait, json, "delete").await
+}
+
+pub async fn archive(client: &Client, clone: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
+    let op = client.archive(clone).await?;
+    started(client, op, wait, json, "archive").await
+}
+
+pub async fn restore(client: &Client, clone: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
+    let op = client.unarchive(clone).await?;
+    started(client, op, wait, json, "restore").await
+}
+
+/// `rmng clone bind <clone> <group>|--none` — (re)bind a clone's account group.
+pub async fn clone_bind(
+    client: &Client,
+    clone: &str,
+    group: Option<&str>,
+    none: bool,
+    json: bool,
+) -> Result<u8> {
+    if group.is_none() && !none {
+        bail!("provide a group name, or --none to clear the binding");
+    }
+    let group = match group.map(str::trim) {
+        _ if none => None,
+        Some("") | Some("none") | None => None,
+        Some(g) => Some(g),
+    };
+    let reply = client.set_clone_group(clone, group).await?;
+    if json {
+        emit_json(&reply)?;
+    } else {
+        println!("set {clone} group → {}", group.unwrap_or("none"));
+    }
+    Ok(0)
 }
 
 pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
@@ -178,8 +304,12 @@ pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
             let op = client.image_pull(reference.as_deref()).await?;
             started(client, op, wait, json, "pull").await
         }
-        ImageCmd::Commit { host, name, wait } => {
-            let op = client.image_commit(host, name).await?;
+        ImageCmd::Commit {
+            clone,
+            as_name,
+            wait,
+        } => {
+            let op = client.image_commit(clone, as_name).await?;
             started(client, op, wait, json, "commit").await
         }
         ImageCmd::Rm { reference } => {
@@ -196,47 +326,63 @@ pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
 
 pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8> {
     match cmd {
-        AccountCmd::Ls { claude, codex } => {
+        AccountCmd::Ls { provider } => {
             let st = client.state().await?;
-            let is_codex = |a: &wire::ClaudeUsage| matches!(a.provider, Some(Provider::Codex));
             let accounts: Vec<_> = st
-                .claude_accounts
+                .usage_groups
                 .iter()
-                .filter(|a| {
-                    if *claude {
-                        !is_codex(a)
-                    } else if *codex {
-                        is_codex(a)
-                    } else {
-                        true
-                    }
+                .flat_map(|group| {
+                    group
+                        .accounts
+                        .iter()
+                        .filter(move |account| match provider {
+                            None => true,
+                            Some(CliProvider::Claude) => {
+                                matches!(account.provider, Some(Provider::Claude) | None)
+                            }
+                            Some(CliProvider::Codex) => {
+                                matches!(account.provider, Some(Provider::Codex))
+                            }
+                            Some(CliProvider::Gemini) => {
+                                matches!(account.provider, Some(Provider::Antigravity))
+                            }
+                        })
+                        .map(move |account| (group.name.as_str(), account))
                 })
-                .cloned()
-                .collect();
+                .collect::<Vec<_>>();
             if json {
-                emit_json(&accounts)?;
+                emit_json(
+                    &accounts
+                        .iter()
+                        .map(|(_, account)| *account)
+                        .collect::<Vec<_>>(),
+                )?;
                 return Ok(0);
             }
             let rows: Vec<Vec<String>> = accounts
                 .iter()
-                .map(|a| {
+                .map(|(group, account)| {
                     vec![
-                        a.email.clone(),
-                        if is_codex(a) {
-                            "codex".into()
-                        } else {
-                            "claude".into()
+                        group.to_string(),
+                        account.email.clone(),
+                        match account.provider {
+                            Some(Provider::Codex) => "codex".into(),
+                            Some(Provider::Antigravity) => "gemini".into(),
+                            _ => "claude".into(),
                         },
-                        a.assignable
-                            .map(|b| if b { "yes" } else { "no" }.to_string())
+                        account
+                            .assignable
+                            .map(|assignable| if assignable { "yes" } else { "no" }.to_string())
                             .unwrap_or_default(),
-                        pct(&a.five_hour),
-                        a.five_hour
+                        pct(&account.five_hour),
+                        account
+                            .five_hour
                             .as_ref()
-                            .and_then(|w| w.resets_at.clone())
+                            .and_then(|window| window.resets_at.clone())
                             .unwrap_or_default(),
-                        pct(&a.seven_day),
-                        a.error.clone().unwrap_or_default(),
+                        pct(&account.seven_day),
+                        pct(&account.fable),
+                        account.error.clone().unwrap_or_default(),
                     ]
                 })
                 .collect();
@@ -244,60 +390,25 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                 "{}",
                 table(
                     &[
+                        "GROUP",
                         "EMAIL",
                         "PROVIDER",
                         "ASSIGNABLE",
                         "5H",
                         "5H-RESETS",
                         "7D",
-                        "ERROR"
+                        "FABLE",
+                        "ERROR",
                     ],
-                    &rows
+                    &rows,
                 )
             );
-            // Groups come from config (redacted view), not state.
-            if let Ok(cfg) = client.config().await {
-                let fmt = |gs: &[wire::CloneGroup]| {
-                    gs.iter()
-                        .map(|g| format!("{}={}", g.name, g.accounts.join("+")))
-                        .collect::<Vec<_>>()
-                        .join("  ")
-                };
-                if !cfg.clone_groups.is_empty() {
-                    println!("claude groups: {}", fmt(&cfg.clone_groups));
-                }
-                if !cfg.codex_groups.is_empty() {
-                    println!("codex groups:  {}", fmt(&cfg.codex_groups));
-                }
-            }
-            Ok(0)
-        }
-        AccountCmd::Swap {
-            host,
-            account,
-            codex,
-        } => {
-            let reply = if *codex {
-                client.codex_swap(host, account).await?
-            } else {
-                client.claude_swap(host, account).await?
-            };
-            if json {
-                emit_json(&reply)?;
-            } else {
-                let email = reply
-                    .get("account")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("none");
-                let provider = if *codex { "codex" } else { "claude" };
-                println!("swapped {host} {provider} → {email}");
-            }
             Ok(0)
         }
     }
 }
 
-pub async fn ops(client: &Client, json: bool) -> Result<u8> {
+pub async fn op_ls(client: &Client, json: bool) -> Result<u8> {
     let st = client.state().await?;
     if json {
         emit_json(&st.operations)?;
@@ -346,7 +457,7 @@ async fn started(
             emit_json(&op)?;
         } else {
             println!(
-                "{verb} started: op {} target {} (follow with `rmng wait {}`)",
+                "{verb} started: op {} target {} (follow with `rmng op wait {}`)",
                 op.id, op.target, op.id
             );
         }
@@ -389,7 +500,7 @@ async fn settle(client: &Client, op_id: &str, timeout: u64, json: bool) -> Resul
         }
         WaitOutcome::TimedOut => {
             eprintln!(
-                "timed out after {timeout}s waiting for op {op_id} (it may still be running — check `rmng ops`)"
+                "timed out after {timeout}s waiting for op {op_id} (it may still be running — check `rmng op ls`)"
             );
             Ok(4)
         }
@@ -416,41 +527,82 @@ fn host_from_base(base: &str) -> &str {
         .unwrap_or(base)
 }
 
-fn validate_ssh_host(st: &ControlState, host: &str) -> Result<()> {
-    if st.hosts.iter().any(|h| h.id == host) {
-        Ok(())
-    } else {
-        bail!("unknown host '{host}' (see `rmng ps`)")
+fn validate_ssh_host<'a>(st: &'a ControlState, host: &str) -> Result<&'a wire::RmngClone> {
+    let target = st
+        .hosts
+        .iter()
+        .find(|candidate| candidate.id == host)
+        .ok_or_else(|| anyhow!("unknown clone '{host}' (see `rmng clone ls`)"))?;
+    if !target.managed {
+        bail!("'{host}' is not a managed clone; RMNG has no SSH endpoint for it")
     }
+    if target.archived {
+        bail!("clone '{host}' is archived; restore it first")
+    }
+    if matches!(target.monitor_state, Some(MonitorState::Offline)) {
+        bail!("clone '{host}' is offline; its SSH endpoint is unavailable")
+    }
+    Ok(target)
 }
 
-/// `rmng ssh <host>`: print the ready-to-paste `ssh` one-liner that jumps through the
+/// True when this `rmng` is running INSIDE a clone. Every clone carries its per-clone router
+/// bearer in `RMNG_PROXY_KEY` (`provision::router_env_vars`); an operator laptop does not. We
+/// reuse that same identity signal the group-proxy already trusts — no server round-trip or
+/// peer-IP needed — to decide clone→clone (direct) vs operator→clone (bastion) SSH.
+fn running_inside_clone() -> bool {
+    std::env::var("RMNG_PROXY_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false)
+}
+
+/// The direct one-liner used clone→clone: no bastion jump — clones share the `rmng` Docker
+/// bridge and reach each other by internal IP / Docker-DNS id. `accept-new` trusts the
+/// target's stable host key on first contact (the clone's `~/.ssh/config` sets the same).
+pub fn build_direct_ssh_command(target: &str) -> String {
+    format!("ssh -o StrictHostKeyChecking=accept-new rmng@{target}")
+}
+
+/// The address a sibling clone dials: its internal bridge IP when known, else its id (Docker
+/// DNS resolves the id to the same host, so this is safe when a fresh clone isn't IP-sampled).
+fn direct_ssh_target(host: &wire::RmngClone) -> String {
+    host.local_ip.clone().unwrap_or_else(|| host.id.clone())
+}
+
+/// `rmng ssh <clone>`: print the ready-to-paste `ssh` one-liner that jumps through the
 /// bastion into the clone. Fetches the redacted config for `ssh.publicHost` and
 /// `listen.bastion`; falls back to a best-effort host guess (with a stderr note) when
 /// `publicHost` isn't set, so the command on stdout stays copy-pasteable either way.
-pub async fn ssh_cmd(client: &Client, host: &str) -> Result<u8> {
+pub async fn clone_ssh(client: &Client, clone: &str, json: bool) -> Result<u8> {
     let st = client.state().await?;
-    validate_ssh_host(&st, host)?;
-    let cfg = client.config().await?;
-    let public_host = if !cfg.ssh.public_host.trim().is_empty() {
-        cfg.ssh.public_host.clone()
+    let target = validate_ssh_host(&st, clone)?;
+
+    // From inside a clone: skip the bastion entirely and dial the sibling directly over the
+    // shared Docker bridge. Prefer its internal IP; fall back to the clone id (Docker DNS
+    // resolves it) when a just-started clone hasn't been IP-sampled yet.
+    let (command, mode) = if running_inside_clone() {
+        (build_direct_ssh_command(&direct_ssh_target(target)), "direct")
     } else {
-        let fallback = host_from_base(client.base()).to_string();
-        eprintln!(
-            "note: ssh.publicHost is not set; using {fallback} — set it in Settings → SSH Access for the correct laptop-facing address"
-        );
-        fallback
+        let cfg = client.config().await?;
+        let public_host = if !cfg.ssh.public_host.trim().is_empty() {
+            cfg.ssh.public_host.clone()
+        } else {
+            let fallback = host_from_base(client.base()).to_string();
+            eprintln!(
+                "note: ssh.publicHost is not set; using {fallback} — set it in Settings → SSH Access for the correct laptop-facing address"
+            );
+            fallback
+        };
+        (build_ssh_command(&public_host, cfg.listen.bastion, clone), "bastion")
     };
-    println!(
-        "{}",
-        build_ssh_command(&public_host, cfg.listen.bastion, host)
-    );
+    if json {
+        emit_json(&serde_json::json!({ "command": command, "mode": mode }))?;
+    } else {
+        println!("{command}");
+    }
     Ok(0)
 }
 
 /// What a desktop verb does with the daemon's `content` array once it comes back.
 enum Kind {
-    /// `monitors`/`windows`/`apps`: print the JSON text result, no screenshot.
+    /// `monitors`/`windows`: print the JSON text result, no screenshot.
     Query,
     /// `screenshot`: write the image and print its path.
     Screenshot,
@@ -498,8 +650,7 @@ fn rescale_jpeg(bytes: &[u8], target: Option<(u32, u32)>) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len() / 4);
     let mut cursor = std::io::Cursor::new(&mut out);
     {
-        let mut encoder =
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
         encoder
             .encode(
                 resized.as_bytes(),
@@ -568,11 +719,7 @@ fn rescale_axis(v: i32, src_min: i32, src_max: i32, dst_max: i32) -> i32 {
 /// if they didn't). Used to convert normalized input coords (e.g. M3's
 /// 0–1000) into pixel space. Bails with a useful message when the daemon
 /// reports no monitors (clone not ready, MCP wedged, etc.).
-async fn monitor_size(
-    client: &Client,
-    clone: &str,
-    monitor: Option<u32>,
-) -> Result<(i32, i32)> {
+async fn monitor_size(client: &Client, clone: &str, monitor: Option<u32>) -> Result<(i32, i32)> {
     let content = client
         .desktop(clone, "list_monitors", Value::Object(Default::default()))
         .await?;
@@ -581,24 +728,25 @@ async fn monitor_size(
         .and_then(|c| c.get("text"))
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("list_monitors: no text in response"))?;
-    let mons: Vec<Value> = serde_json::from_str(text)
-        .map_err(|e| anyhow!("list_monitors: not JSON: {e}: {text}"))?;
+    let mons: Vec<Value> =
+        serde_json::from_str(text).map_err(|e| anyhow!("list_monitors: not JSON: {e}: {text}"))?;
     if mons.is_empty() {
         bail!("list_monitors: clone has no monitors");
     }
     let pick = monitor
-        .and_then(|id| mons.iter().find(|m| m.get("id").and_then(Value::as_u64) == Some(id as u64)))
+        .and_then(|id| {
+            mons.iter()
+                .find(|m| m.get("id").and_then(Value::as_u64) == Some(id as u64))
+        })
         .unwrap_or_else(|| &mons[0]);
     let w = pick
         .get("width")
         .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("list_monitors: monitor missing width"))?
-        as i32;
+        .ok_or_else(|| anyhow!("list_monitors: monitor missing width"))? as i32;
     let h = pick
         .get("height")
         .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("list_monitors: monitor missing height"))?
-        as i32;
+        .ok_or_else(|| anyhow!("list_monitors: monitor missing height"))? as i32;
     Ok((w, h))
 }
 
@@ -673,15 +821,15 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
     // up front and use the same value for every daemon call's response —
     // both the explicit `screenshot` verb and the auto-snap after an action.
     // We sniff it from the verb's own `rescale` field; a no-op for verbs
-    // that don't carry it (Monitors/Windows/Apps/Key/Type/Launch/Movewin)
+    // that don't carry it (Monitors/Windows/Key/Type/Movewin)
     // because their match arms synthesize a default `RescaleArgs` below.
     let screen_target: Option<(u32, u32)> = match cmd {
         DesktopCmd::Screenshot { rescale, .. }
         | DesktopCmd::Move { rescale, .. }
         | DesktopCmd::Click { rescale, .. }
-        | DesktopCmd::Rclick { rescale, .. }
-        | DesktopCmd::Mclick { rescale, .. }
-        | DesktopCmd::Dclick { rescale, .. }
+        | DesktopCmd::RightClick { rescale, .. }
+        | DesktopCmd::MiddleClick { rescale, .. }
+        | DesktopCmd::DoubleClick { rescale, .. }
         | DesktopCmd::Scroll { rescale, .. } => match parse_rescale_screen(rescale) {
             Ok(t) => t.map(|(w, h)| (w as u32, h as u32)),
             Err(e) => return Err(anyhow::Error::msg(e)),
@@ -701,7 +849,6 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             ),
             DesktopCmd::Monitors => ("list_monitors", args_obj(vec![]), Kind::Query, None, None),
             DesktopCmd::Windows => ("list_windows", args_obj(vec![]), Kind::Query, None, None),
-            DesktopCmd::Apps => ("list_apps", args_obj(vec![]), Kind::Query, None, None),
             DesktopCmd::Move {
                 x,
                 y,
@@ -709,8 +856,16 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_coords(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_coords(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "mouse_move",
                     args_obj(vec![
@@ -730,62 +885,94 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "left_click",
-                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    args_obj(vec![("x", i(x)), ("y", i(y)), ("monitor", n(*monitor))]),
                     Kind::Action,
                     *monitor,
                     out.clone(),
                 )
             }
-            DesktopCmd::Rclick {
+            DesktopCmd::RightClick {
                 x,
                 y,
                 monitor,
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "right_click",
-                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    args_obj(vec![("x", i(x)), ("y", i(y)), ("monitor", n(*monitor))]),
                     Kind::Action,
                     *monitor,
                     out.clone(),
                 )
             }
-            DesktopCmd::Mclick {
+            DesktopCmd::MiddleClick {
                 x,
                 y,
                 monitor,
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "middle_click",
-                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    args_obj(vec![("x", i(x)), ("y", i(y)), ("monitor", n(*monitor))]),
                     Kind::Action,
                     *monitor,
                     out.clone(),
                 )
             }
-            DesktopCmd::Dclick {
+            DesktopCmd::DoubleClick {
                 x,
                 y,
                 monitor,
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "left_double_click",
-                    args_obj(vec![("x", i(x),), ("y", i(y),), ("monitor", n(*monitor))]),
+                    args_obj(vec![("x", i(x)), ("y", i(y)), ("monitor", n(*monitor))]),
                     Kind::Action,
                     *monitor,
                     out.clone(),
@@ -799,14 +986,22 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 out,
                 rescale,
             } => {
-                let (x, y) =
-                    rescale_optional(client, clone, parse_rescale_cursor(rescale)?, parse_rescale_screen(rescale)?, *monitor, *x, *y).await?;
+                let (x, y) = rescale_optional(
+                    client,
+                    clone,
+                    parse_rescale_cursor(rescale)?,
+                    parse_rescale_screen(rescale)?,
+                    *monitor,
+                    *x,
+                    *y,
+                )
+                .await?;
                 (
                     "scroll",
                     args_obj(vec![
                         ("amount", (*amount).into()),
-                        ("x", i(x),),
-                        ("y", i(y),),
+                        ("x", i(x)),
+                        ("y", i(y)),
                         ("monitor", n(*monitor)),
                     ]),
                     Kind::Action,
@@ -828,14 +1023,7 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 None,
                 out.clone(),
             ),
-            DesktopCmd::Launch { id } => (
-                "launch_app",
-                args_obj(vec![("id", id.clone().into())]),
-                Kind::Action,
-                None,
-                None,
-            ),
-            DesktopCmd::Movewin { id, monitor, mode } => (
+            DesktopCmd::MoveWindow { id, monitor, mode } => (
                 "move_window",
                 args_obj(vec![
                     ("id", id.clone().into()),
@@ -867,14 +1055,15 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
         }
         Kind::Screenshot => {
             let path = write_screenshot(&content, clone, monitor, out.as_deref(), screen_target)?;
-            println!("{}", path.display());
+            if json {
+                emit_json(&serde_json::json!({ "screenshot": path.display().to_string() }))?;
+            } else {
+                println!("{}", path.display());
+            }
             Ok(0)
         }
         Kind::Action => {
             let text = content_text(&content);
-            if !text.is_empty() {
-                println!("{text}");
-            }
             // Guarantee a settle screenshot: reuse the action's own image if it has
             // one, else make a follow-up `screenshot` call.
             let shot = if content_image(&content).is_some() {
@@ -885,7 +1074,17 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                     .await?
             };
             let path = write_screenshot(&shot, clone, monitor, out.as_deref(), screen_target)?;
-            println!("{}", path.display());
+            if json {
+                emit_json(&serde_json::json!({
+                    "screenshot": path.display().to_string(),
+                    "text": text,
+                }))?;
+            } else {
+                if !text.is_empty() {
+                    println!("{text}");
+                }
+                println!("{}", path.display());
+            }
             Ok(0)
         }
     }
@@ -907,7 +1106,11 @@ const STDIN_POLL_GRACE: std::time::Duration = std::time::Duration::from_millis(2
 #[cfg(unix)]
 fn stdin_has_input(grace: std::time::Duration) -> bool {
     use std::os::unix::io::AsRawFd;
-    let mut pfd = libc::pollfd { fd: std::io::stdin().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let mut pfd = libc::pollfd {
+        fd: std::io::stdin().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
     let ms = grace.as_millis().min(i32::MAX as u128) as i32;
     // >0: readable or hung-up (EOF) → drain it. 0: timed out (idle pipe) → forward no stdin.
     // <0: poll error → fall back to attempting the read (the old behavior).
@@ -930,6 +1133,7 @@ pub async fn exec(
     workdir: Option<&str>,
     env: &[String],
     cmd: &[String],
+    detach: bool,
     json: bool,
 ) -> Result<u8> {
     use std::io::{IsTerminal, Read, Write};
@@ -944,7 +1148,9 @@ pub async fn exec(
     // idle open pipe yields nothing within the grace window and we forward no stdin. A
     // ready fd still drains fully, so large piped input is fine (the poll only bounds
     // the wait for the first byte).
-    let stdin_b64 = if std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE) {
+    // Detached execs return no output and take no stdin (nothing is attached), so skip the drain.
+    let stdin_b64 = if detach || std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE)
+    {
         None
     } else {
         let mut buf = Vec::new();
@@ -958,12 +1164,14 @@ pub async fn exec(
         workdir: workdir.map(str::to_string),
         env: env.to_vec(),
         stdin_b64,
+        detach,
     };
     let result = client.exec(clone, &req).await?;
 
     if json {
         emit_json(&result)?;
-    } else {
+    } else if !detach {
+        // Detached: the server returns an empty result immediately — nothing to print.
         print!("{}", result.stdout);
         std::io::stdout().flush().ok();
         eprint!("{}", result.stderr);
@@ -1001,9 +1209,34 @@ mod tests {
     }
 
     #[test]
+    fn direct_ssh_command_skips_the_bastion() {
+        assert_eq!(
+            build_direct_ssh_command("172.20.0.5"),
+            "ssh -o StrictHostKeyChecking=accept-new rmng@172.20.0.5"
+        );
+    }
+
+    #[test]
+    fn direct_ssh_target_prefers_local_ip_then_falls_back_to_id() {
+        let with_ip = wire::RmngClone {
+            id: "clone-b".into(),
+            local_ip: Some("172.20.0.9".into()),
+            ..Default::default()
+        };
+        assert_eq!(direct_ssh_target(&with_ip), "172.20.0.9");
+
+        let no_ip = wire::RmngClone {
+            id: "clone-b".into(),
+            local_ip: None,
+            ..Default::default()
+        };
+        assert_eq!(direct_ssh_target(&no_ip), "clone-b");
+    }
+
+    #[test]
     fn validate_ssh_host_rejects_unknown_host() {
         let st = ControlState {
-            hosts: vec![wire::Host {
+            hosts: vec![wire::RmngClone {
                 id: "pega-herms".into(),
                 managed: true,
                 ..Default::default()
@@ -1011,9 +1244,85 @@ mod tests {
             ..Default::default()
         };
 
-        let err = validate_ssh_host(&st, "herms").expect_err("host suffix must not match");
-        assert_eq!(err.to_string(), "unknown host 'herms' (see `rmng ps`)");
-        validate_ssh_host(&st, "pega-herms").expect("exact host id should match");
+        let err = validate_ssh_host(&st, "herms").expect_err("clone suffix must not match");
+        assert_eq!(err.to_string(), "unknown clone 'herms' (see `rmng clone ls`)");
+        validate_ssh_host(&st, "pega-herms").expect("exact clone id should match");
+    }
+
+    #[test]
+    fn validate_ssh_host_rejects_unreachable_targets() {
+        let st = ControlState {
+            hosts: vec![
+                wire::RmngClone {
+                    id: "legacy".into(),
+                    ..Default::default()
+                },
+                wire::RmngClone {
+                    id: "archived".into(),
+                    managed: true,
+                    archived: true,
+                    ..Default::default()
+                },
+                wire::RmngClone {
+                    id: "offline".into(),
+                    managed: true,
+                    monitor_state: Some(MonitorState::Offline),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            validate_ssh_host(&st, "legacy").unwrap_err().to_string(),
+            "'legacy' is not a managed clone; RMNG has no SSH endpoint for it"
+        );
+        assert_eq!(
+            validate_ssh_host(&st, "archived").unwrap_err().to_string(),
+            "clone 'archived' is archived; restore it first"
+        );
+        assert_eq!(
+            validate_ssh_host(&st, "offline").unwrap_err().to_string(),
+            "clone 'offline' is offline; its SSH endpoint is unavailable"
+        );
+    }
+
+    #[test]
+    fn validate_ssh_host_allows_active_or_unsampled_clones() {
+        let st = ControlState {
+            hosts: [None, Some(MonitorState::Working), Some(MonitorState::Idle)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, monitor_state)| wire::RmngClone {
+                    id: format!("clone-{index}"),
+                    managed: true,
+                    monitor_state,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        for host in ["clone-0", "clone-1", "clone-2"] {
+            validate_ssh_host(&st, host).expect("managed clone should have an SSH command");
+        }
+    }
+
+    #[test]
+    fn ps_formatters_handle_metrics_and_status() {
+        assert_eq!(cpu_pct(0.4), "0.4%");
+        assert_eq!(cpu_pct(18.4), "18%");
+        assert_eq!(
+            ram(&ContainerStats {
+                cpu_pct: 0.0,
+                mem_used: 2 * 1024 * 1024 * 1024,
+                mem_limit: 4 * 1024 * 1024 * 1024,
+            }),
+            "2.0 GiB/4.0 GiB"
+        );
+        assert_eq!(clone_status(true, Some(MonitorState::Working)), "archived");
+        assert_eq!(clone_status(false, Some(MonitorState::Idle)), "idle");
+        assert_eq!(clone_status(false, None), "");
     }
 
     #[test]
@@ -1172,13 +1481,17 @@ mod tests {
         // dimensions. This exercises the full decode→resize→encode path
         // without needing any external test fixture.
         use image::{ImageBuffer, Rgb};
-        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(4, 2, |_, _| {
-            Rgb([255u8, 0, 0])
-        });
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(4, 2, |_, _| Rgb([255u8, 0, 0]));
         let mut src_jpeg = Vec::new();
         let mut encoder = image::codecs::jpeg::JpegEncoder::new(&mut src_jpeg);
         encoder
-            .encode(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgb8)
+            .encode(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                image::ExtendedColorType::Rgb8,
+            )
             .unwrap();
         let src_len = src_jpeg.len();
         assert!(src_len > 0);

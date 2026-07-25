@@ -86,9 +86,6 @@ export function SetupWizard({
       : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
   );
   const [chroma, setChroma] = useState<ChromaMode>(initialConfig.chroma);
-  const [detectorInferenceUrl, setDetectorInferenceUrl] = useState(
-    initialConfig.detectorInferenceUrl,
-  );
   const [portsOpen, setPortsOpen] = useState(false);
   const [listen, setListen] = useState({ ...initialConfig.listen });
   const [agentPort, setAgentPort] = useState(initialConfig.agentPort);
@@ -166,7 +163,6 @@ export function SetupWizard({
         docker: { hostnamePrefix, cloneCpus, cloneMemoryMb },
         layoutPresets: layoutPresetsPatch(),
         chroma,
-        detectorInferenceUrl,
         listen,
         agentPort,
       });
@@ -376,16 +372,6 @@ export function SetupWizard({
                 </select>
               </Field>
 
-              <Field label="Detector inference URL">
-                <input
-                  value={detectorInferenceUrl}
-                  onChange={(e) => setDetectorInferenceUrl(e.target.value)}
-                  placeholder="http://…"
-                  spellCheck={false}
-                  className={input}
-                />
-              </Field>
-
               {/* Ports — collapsed by default. */}
               <div className="border-t border-slate-100 dark:border-slate-800 pt-3">
                 <button
@@ -398,7 +384,7 @@ export function SetupWizard({
                 </button>
                 {portsOpen ? (
                   <div className="mt-2 grid grid-cols-2 gap-3">
-                    {(["web", "video", "cloneMcp", "daemonMcp"] as const).map((k) => (
+                    {(["web", "video", "daemonMcp"] as const).map((k) => (
                       <Field key={k} label={`Port: ${k}`}>
                         <input
                           type="number"
@@ -493,7 +479,6 @@ export function SetupWizard({
                     ["Memory limit per clone", `${cloneMemoryMb} MB`],
                     ["Monitors", `${monitors.length} monitor(s)`],
                     ["Chroma", chroma],
-                    ["Detector URL", detectorInferenceUrl || "(none)"],
                     [
                       "Template image",
                       imgDone ? `${pullTarget} ✓` : "not pulled (pull one later)",

@@ -1,17 +1,19 @@
 //! control-server — the fleet hub (see ../README.md).
 //!
-//! One tokio service binding five listen ports — port 1 (video), port 2 (web API + SSE +
-//! static frontend), port 3 (per-clone MCP), port 4 (fleet MCP), and the forward data plane
-//! (9005) — plus an smbd serving `clones` (every clone's home) and `feedback` (detector-feedback
-//! records) shares on 445. All live.
+//! One tokio service binding the video plane, web API + SSE + static frontend, port-forward
+//! data plane (9005), and SSH bastion; `smbd` serves retained clone homes on port 445.
 
+mod antigravity;
 mod app;
 mod assets;
+mod boot;
 mod buildinfra;
+mod cgroup;
 mod chat;
 mod claude;
-mod clone_reconcile;
+mod cliproxy;
 mod clone_ops;
+mod clone_reconcile;
 mod codex;
 mod config;
 mod docker;
@@ -20,7 +22,6 @@ mod forward;
 mod homes;
 mod jobs;
 mod linear;
-mod mcp;
 mod mediaplane;
 mod monitor;
 mod provision;
@@ -28,6 +29,9 @@ mod shm;
 mod smb;
 mod ssh;
 mod state;
+mod termplane;
+mod token_migrate;
+mod tokens;
 mod update;
 mod web;
 
@@ -42,7 +46,9 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 // `clip` (the clipboard broker) logs debug by default: copy/paste-driven
                 // only (sparse), and the go-to trail for cross-machine clipboard issues.
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=warn,clip=debug")),
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("info,tower_http=warn,clip=debug")
+                }),
         )
         .init();
 
@@ -52,7 +58,10 @@ async fn main() -> Result<()> {
     // Placed after tracing init (so the helper gets logging) and before config::load().
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("self-upgrade") {
-        let handoff = argv.get(2).cloned().unwrap_or_else(|| update::HANDOFF_PATH.to_string());
+        let handoff = argv
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| update::HANDOFF_PATH.to_string());
         update::self_upgrade_main(&handoff).await; // diverges
     }
 
@@ -114,8 +123,12 @@ async fn main() -> Result<()> {
             .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::warn!("build-infra ensure failed: {e:#} (retries next boot)"),
-                Err(_) => tracing::warn!("build-infra ensure timed out after 120s (retries next boot)"),
+                Ok(Err(e)) => {
+                    tracing::warn!("build-infra ensure failed: {e:#} (retries next boot)")
+                }
+                Err(_) => {
+                    tracing::warn!("build-infra ensure timed out after 120s (retries next boot)")
+                }
             }
         }
     }
@@ -132,9 +145,9 @@ async fn main() -> Result<()> {
     update::reconcile_pending(&app).await;
     jobs::fail_stale_ops(&app);
 
-    // Boot reconciliation: `state.json` is authoritative for host rows, but the daemon is
+    // Boot reconciliation: `state.json` is authoritative for clone rows, but the daemon is
     // authoritative for what actually exists — diff them once so drift is visible instead
-    // of silent. Orphan rows (managed host, no container — someone `docker rm`ed it behind
+    // of silent. Orphan rows (managed clone, no container — someone `docker rm`ed it behind
     // the server) and unknown managed containers (a container with our label but no row —
     // e.g. a build worker left over from a crashed bootstrap) are LOGGED, not auto-fixed:
     // deleting either side automatically could destroy something the operator wanted.
@@ -153,7 +166,7 @@ async fn main() -> Result<()> {
                 for h in hosts.iter().filter(|h| h.managed) {
                     if !live_names.contains(h.id.as_str()) {
                         tracing::warn!(
-                            "reconcile: managed host '{}' has no container on the daemon \
+                            "reconcile: managed clone '{}' has no container on the daemon \
                              (removed behind the server?) — delete the row in the UI or \
                              recreate the clone",
                             h.id
@@ -164,7 +177,7 @@ async fn main() -> Result<()> {
                     hosts.iter().map(|h| h.id.as_str()).collect();
                 for c in live.iter().filter(|c| !known.contains(c.name.as_str())) {
                     tracing::warn!(
-                        "reconcile: managed container '{}' (image {}, {}) has no host row — \
+                        "reconcile: managed container '{}' (image {}, {}) has no clone row — \
                          a leftover from a crashed operation? Remove it with `docker rm`",
                         c.name,
                         c.image,
@@ -177,34 +190,57 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Background loops: Claude usage poller, group-rotation loop, per-host agent-state
-    // poller, the clone-home reconciler (the Docker-port successor to the Proxmox-era sshfs
-    // mount loop — it symlinks data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so
-    // every clone's home is browsable in one place; needs the container's `pid: "host"`),
-    // the smbd supervisor that serves that same directory as the `clones` SMB share
-    // (port 445), so the homes are browsable over `smb://<host>/clones` too, and the /dev/shm
-    // reconciler that keeps each running clone's shared memory at LXC parity (~50% of RAM) so
-    // Chromium/Electron apps don't exhaust Docker's 64 MB default (also needs `pid: "host"`).
-    tokio::spawn(claude::run_poller(app.clone()));
-    tokio::spawn(claude::run_rotator(app.clone()));
-    tokio::spawn(codex::run_poller(app.clone()));
-    tokio::spawn(codex::run_rotator(app.clone()));
-    tokio::spawn(monitor::run(app.clone()));
-    tokio::spawn(clone_reconcile::run(app.clone()));
-    tokio::spawn(homes::run(app.clone()));
-    tokio::spawn(shm::run(app.clone()));
-    tokio::spawn(buildinfra::run(app.clone()));
-    tokio::spawn(smb::run(app.clone()));
-    tokio::spawn(ssh::run(app.clone()));
-
-    // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
-    mediaplane::spawn(app.clone());
-
-    // Port 3 (per-clone MCP, header-routed via `x-rmng-clone`).
-    {
-        let cfg = app.config();
-        tokio::spawn(mcp::serve(app.clone(), cfg.listen.clone_mcp));
+    // One-shot legacy-token migration: convert the OLD RMNG-managed OAuth stores
+    // (claude-accounts.json / codex-accounts.json + the old config's cloneGroups/codexGroups)
+    // into the NEW per-group CLIProxyAPI `auth-dir` credential files, so an upgraded deployment
+    // carries every account + its group across with no operator re-login. Stamp-gated (runs
+    // once) and best-effort: it must NOT block boot, so any panic is caught and logged. Runs
+    // here — after config load, BEFORE the `cliproxy` supervisor spawns below — so the migrated
+    // groups + auth-dirs exist when the supervisor first reads `config.groups`.
+    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        token_migrate::migrate_legacy_tokens(&app)
+    })) {
+        tracing::error!("legacy token migration panicked (booting anyway): {e:?}");
     }
+
+    // GStreamer init MUST finish before cliproxy/smb/ssh (and any other child
+    // spawners). Those supervisors otherwise inherit gst-plugin-scanner pipes and
+    // hang media init forever — web/video/forward never bind. See
+    // docs/superpowers/specs/2026-07-24-gstreamer-init-before-children-design.md.
+    let app_for_bg = app.clone();
+    let app_for_media = app.clone();
+    boot::run_late_boot(
+        mediaplane::init,
+        move || {
+            // Background loops: the per-clone agent-state monitor poller, the clone-home reconciler
+            // (the Docker-port successor to the Proxmox-era sshfs mount loop — it symlinks
+            // data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so every clone's home is browsable
+            // in one place; needs the container's `pid: "host"`), the smbd supervisor that serves that
+            // same directory as the `clones` SMB share (port 445), so the homes are browsable over
+            // `smb://<host>/clones` too, and the /dev/shm reconciler that keeps each running clone's
+            // shared memory at LXC parity (~50% of RAM) so Chromium/Electron apps don't exhaust
+            // Docker's 64 MB default (also needs `pid: "host"`). Claude/Codex account usage is polled
+            // by-group via `cliproxy::run_usage_poller` (below), which owns all account display now.
+            tokio::spawn(monitor::run(app_for_bg.clone()));
+            tokio::spawn(clone_reconcile::run(app_for_bg.clone()));
+            tokio::spawn(homes::run(app_for_bg.clone()));
+            tokio::spawn(shm::run(app_for_bg.clone()));
+            tokio::spawn(buildinfra::run(app_for_bg.clone()));
+            tokio::spawn(smb::run(app_for_bg.clone()));
+            tokio::spawn(ssh::run(app_for_bg.clone()));
+            // Group-proxy supervisor: one CLIProxyAPI instance per account group.
+            tokio::spawn(cliproxy::run(app_for_bg.clone()));
+            // By-group usage poller: reads each instance's auth-dir tokens and publishes
+            // `ControlState.usage_groups` (the old flat claude_accounts pollers stay running).
+            tokio::spawn(cliproxy::run_usage_poller(app_for_bg.clone()));
+            tokio::spawn(app_for_bg.tokens.clone().run_persister());
+            tokio::spawn(app_for_bg.tokens.clone().run_fable_ticker());
+        },
+        move |media_init| {
+            // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
+            mediaplane::spawn(app_for_media, media_init);
+        },
+    );
 
     web::serve(app).await
 }

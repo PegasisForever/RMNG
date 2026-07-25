@@ -3,7 +3,7 @@
 // `ControlState` is a superset of the legacy Rust `ControlState`
 // (`{selected, hosts, monitors}`). The native RDP client deserializes the SSE
 // payload as that Rust struct, and serde ignores unknown fields — so the extra
-// `operations` field (and the per-host `container`/`source` extras) ride along
+// `operations` field (and the per-clone `container`/`source` extras) ride along
 // invisibly. In-progress clones are kept OUT of `hosts` until they are fully
 // provisioned, so the client never tries to connect to a half-built container.
 
@@ -14,8 +14,8 @@ export interface MonitorSpec {
   height: number;
 }
 
-export interface Host {
-  /** Stable id; equals the Docker container name for cloneable hosts. */
+export interface Clone {
+  /** Stable id; equals the Docker container name for a managed clone. */
   id: string;
   /** RDP server hostname or IP. */
   host: string;
@@ -29,37 +29,25 @@ export interface Host {
 
   // --- server-only extras (ignored by the Rust client) ---
   /**
-   * True for a managed clone: a Docker container whose *name equals this host's
+   * True for a managed clone: a Docker container whose *name equals this clone's
    * id* backs it (no container id is stored anywhere). False/absent is a plain
    * unmanaged row (deletable in the UI). Old `state.json` rows carrying the
    * retired `ctid`/`container` keys load unmanaged — serde drops the stale keys.
    */
   managed?: boolean;
-  /** The clone-source image reference this host was cloned from (`pegasis0/rmng-template:latest`). */
+  /** True for a retained managed clone that is intentionally stopped. Unlike `offline`,
+   *  this is an operator-controlled state and the clone can be started again. */
+  archived?: boolean;
+  /** The clone-source image reference this clone was cloned from (`pegasis0/rmng-template:latest`). */
   source?: string;
   /**
-   * Email of the Claude account assigned to this host at clone time (its
-   * long-lived CLAUDE_CODE_OAUTH_TOKEN was written into ~/.bashrc and the
-   * agent-wrapper restarted under it). Identifies which account on the usage
-   * panel this host is spending. Server-only; the Rust client ignores it.
+   * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's
+   * agents route through, via the control-server's `/cc` router. Absent/undefined =
+   * no inference bound. This is the sole account binding — CLIProxyAPI owns
+   * intra-group account selection + refresh. Server-only; the Rust client ignores it.
    */
-  claudeAccountEmail?: string;
-  /** Name of the Claude group this clone is balanced within, sticky until its account exhausts (null/absent = single account). */
-  claudeGroup?: string;
-  /**
-   * The operator's Claude selection verbatim: "auto" (server picks the best account
-   * and may hot-swap it), "none" (no token installed), "group:<name>", or an account
-   * email (pinned). Distinguishes auto from a fixed account — `claudeAccountEmail`
-   * alone can't. Absent on hosts created before this field / when Claude isn't used.
-   */
-  claudeSelection?: string;
-  /** Email of the imported Codex account whose token is written into this clone. */
-  codexAccountEmail?: string;
-  /** Name of the Codex group this clone is balanced within (absent = single account). */
-  codexGroup?: string;
-  /** Verbatim operator Codex pick: "auto" | "none" | "group:<name>" | email. */
-  codexSelection?: string;
-  /** Linear workspace name this host's ticket belongs to (selects the card color). */
+  group?: string;
+  /** Linear workspace name this clone's ticket belongs to (selects the card color). */
   linearWorkspace?: string;
   /** Linear ticket identifier, e.g. "WE-142". */
   linearTicket?: string;
@@ -72,44 +60,41 @@ export interface Host {
   /** First Linear label on the ticket, if any. */
   linearLabel?: string;
   /**
-   * The agent's last self-reported desktop verdict (via the `set_state` MCP
-   * tool): `working` (our agent or the in-editor Claude Code is actively working)
-   * or `idle` (finished / awaiting the next task / needs a human). Folded into
-   * `monitorState` by the poller.
-   */
-  agentReport?: "working" | "idle";
-  /** Agent-authored note about the current state (what finished, or what the
-   *  human needs to do/decide). Shown on the host card. */
-  stateNote?: string;
-  /**
-   * Effective host state for the UI, derived by the server-side poller:
-   * `offline` (wrapper unreachable) ▸ `working` (our agent has a turn in flight,
-   * or the agent last reported working) ▸ `idle` (running but not working — the
-   * agent finished or is awaiting the next task; absorbs the old "needs
-   * attention"). A running host is just `working` or `idle`.
+   * Server-owned lifecycle state: Docker supplies liveness and passive proxy token activity
+   * distinguishes working from idle. The sidebar uses this only for its compact indicator.
    */
   monitorState?: "working" | "idle" | "offline";
-  /**
-   * True when this clone dropped from `working` to idle/offline since it was
-   * last viewed. Drives the sidebar unread dot; cleared when you switch to it.
-   */
+  /** Set when an unselected clone transitions from working to idle/offline. */
   unread?: boolean;
+  /** Headless clone: no desktop (display + capture units disabled at create). Selecting it
+   *  shows the viewer's tmux tab view instead of a video stream. Same template as a regular clone. */
+  headless?: boolean;
+  /** Parent clone id when this is a sub clone (one level deep only). Undefined/null = top-level.
+   *  Cosmetic sidebar/`ps` grouping; a sub clone is otherwise an ordinary managed clone. */
+  parent?: string | null;
   /** Local port-forward rules; the native viewer runs the listeners. Live status
-   *  arrives separately via the `forwards` SSE event, keyed by host id then rule id. */
+   *  arrives separately via the `forwards` SSE event, keyed by clone id then rule id. */
   forwards?: PortForward[];
 }
 
-export type OperationKind = "clone" | "delete" | "pull" | "commit" | "update";
+export type OperationKind =
+  | "clone"
+  | "delete"
+  | "archive"
+  | "unarchive"
+  | "pull"
+  | "commit"
+  | "update";
 export type OperationStatus = "running" | "done" | "error";
 
 export interface Operation {
   id: string;
   kind: OperationKind;
   /**
-   * What the op acts on: host id (clone/delete) or image name (pull/commit).
+   * What the op acts on: clone id (clone/delete) or image name (pull/commit).
    */
   target: string;
-  /** Clone source image reference (clone), or source host id (commit). */
+  /** Clone source image reference (clone), or source clone id (commit). */
   source?: string;
   status: OperationStatus;
   /** Current step key (maps to a coarse percentage in the UI). */
@@ -153,10 +138,10 @@ export interface ClaudeUsage {
   id: string;
   email: string;
   /** Which provider this account belongs to (default treated as "claude"). */
-  provider?: "claude" | "codex";
+  provider?: "claude" | "codex" | "antigravity";
   /** True for the account claude-swap had active at import time. */
   active: boolean;
-  /** True if this account can be picked when cloning a host — every imported
+  /** True if this account can be picked when creating a clone — every imported
    *  Claude account (the server owns its token lifecycle). Codex accounts never. */
   assignable?: boolean;
   /** Set only when usage has NEVER been successfully fetched (no data to show). */
@@ -168,6 +153,10 @@ export interface ClaudeUsage {
   lastUpdated: number;
   fiveHour?: ClaudeUsageWindow;
   sevenDay?: ClaudeUsageWindow;
+  /** Claude only: the model-scoped weekly (7d) limit for the Fable model family.
+   *  Display-only — it never affects account rotation. Absent for Codex accounts and
+   *  when the account has no such scoped limit. */
+  fable?: ClaudeUsageWindow;
   spend?: ClaudeSpend;
   /** Codex only: banked rate-limit reset credits ("usage resets") left on the
    *  account. Absent/null for Claude (no such concept) and when usage is
@@ -176,13 +165,25 @@ export interface ClaudeUsage {
   resetCredits?: bigint | null;
 }
 
+/**
+ * Per-group usage view: one account pool (a CLIProxyAPI instance) plus the accounts
+ * authenticated into its `auth-dir`, each with its 5h/7d/fable windows. The by-group
+ * replacement for the old flat `claudeAccounts` list — the same email can appear under
+ * several groups (independent token sets per instance), so account ids are group-scoped
+ * (`<group>|<email>`). Display-only.
+ */
+export interface GroupUsage {
+  name: string;
+  accounts: ClaudeUsage[];
+}
+
 export interface ControlState {
   selected: string | null;
   monitors: MonitorSpec[];
-  hosts: Host[];
+  hosts: Clone[];
   operations: Operation[];
-  /** Per-Claude-account usage view (no tokens). Refreshed by the usage poller. */
-  claudeAccounts: ClaudeUsage[];
+  /** Per-group usage view (no tokens). Refreshed by the by-group usage poller. */
+  usageGroups: GroupUsage[];
   /** Name of the currently active layout preset. */
   activeLayout: string;
   /** Layout preset names in config order — powers the sidebar switcher. */
@@ -195,13 +196,13 @@ export function emptyState(): ControlState {
     monitors: [],
     hosts: [],
     operations: [],
-    claudeAccounts: [],
+    usageGroups: [],
     activeLayout: "",
     layoutPresetNames: [],
   };
 }
 
-// --- per-host chat (stored separately at data/chats/<id>.json, not in state) ---
+// --- per-clone chat (stored separately at data/chats/<id>.json, not in state) ---
 
 export interface ChatMessage {
   id: string;

@@ -11,15 +11,14 @@ use ts_rs::TS;
 
 use crate::control::{LayoutPreset, MonitorSpec};
 
-/// The control-server listen ports: video, web, per-clone MCP, the in-clone daemon MCP,
-/// and the forward data plane (see README).
+/// The control-server listen ports: video, web, the in-clone daemon MCP, and the forward
+/// data plane (see README).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ListenConfig {
     pub web: u16,
     pub video: u16,
-    pub clone_mcp: u16,
     /// The clone-daemon's in-clone HTTP MCP port. The control-server proxies desktop/window
     /// tools (`POST /api/hosts/:id/mcp`) to `http://{clone}:{daemon_mcp}`; each clone-daemon
     /// listens here (set via `RMNG_DAEMON_MCP_PORT`). Same value for every clone.
@@ -70,7 +69,6 @@ impl Default for ListenConfig {
         Self {
             web: 9000,
             video: 9001,
-            clone_mcp: 9002,
             daemon_mcp: default_daemon_mcp(),
             forward: default_forward(),
             bastion: default_bastion(),
@@ -128,9 +126,15 @@ pub struct Preset {
     #[serde(default)]
     pub vars: Vec<EnvVar>,
     /// Optional per-preset text appended (after `"\n\n"`) to the global agent playbook for
-    /// clones of this preset. Empty ⇒ no append. Non-secret.
+    /// clones of this preset. Empty ⇒ no append. Non-secret. (Layer **d**: node-agent extra,
+    /// this preset only.)
     #[serde(default)]
     pub agent_playbook: String,
+    /// Optional per-preset text appended (after `"\n\n"`) to the global agent prompt for clones
+    /// of this preset — written to EVERY agent's global rules file (CLAUDE.md / AGENTS.md).
+    /// Empty ⇒ no append. Non-secret. (Layer **c**: global prompt, all agents, this preset only.)
+    #[serde(default)]
+    pub global_prompt: String,
 }
 
 impl Preset {
@@ -141,6 +145,7 @@ impl Preset {
             linear_key_set: !self.linear_key.is_empty(),
             vars: self.vars.clone(),
             agent_playbook: self.agent_playbook.clone(),
+            global_prompt: self.global_prompt.clone(),
         }
     }
 }
@@ -156,20 +161,21 @@ pub struct PresetRedacted {
     pub linear_key_set: bool,
     pub vars: Vec<EnvVar>,
     pub agent_playbook: String,
+    pub global_prompt: String,
 }
 
-/// A named pool of clone accounts (by email). A clone bound to a group sticks to its
-/// account until that account exceeds the 5h usage cap (or leaves the group), then
-/// moves to the group's least-loaded / least-used member — sticky, because an account
-/// switch cold-starts the clone's prompt cache. Carries no secrets — just a name +
-/// member emails — so it's TS-exported and shown verbatim in the redacted config.
+/// A named account pool backed by one CLIProxyAPI instance (see the group-proxy
+/// redesign, `docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`). A pool is
+/// provider-agnostic — it may hold Claude and/or GPT accounts, added by OAuth login into
+/// that instance's `auth-dir`. A clone binds exactly one group; the control-server routes
+/// every request from that clone's agents to the group's instance. Carries no secrets —
+/// just a name — so it's TS-exported and shown verbatim in the redacted config. Membership
+/// is NOT stored here; it's derived from the instance's `auth-dir` at runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct CloneGroup {
+pub struct Group {
     pub name: String,
-    #[serde(default)]
-    pub accounts: Vec<String>,
 }
 
 /// Docker backend settings for the clone fleet. No secrets — the local daemon is
@@ -300,7 +306,10 @@ pub struct ClaudeConfig {
 
 impl Default for ClaudeConfig {
     fn default() -> Self {
-        Self { poll_secs: 600, pinned_email: None }
+        Self {
+            poll_secs: 600,
+            pinned_email: None,
+        }
     }
 }
 
@@ -330,7 +339,12 @@ fn default_true() -> bool {
 
 impl Default for CodexConfig {
     fn default() -> Self {
-        Self { poll_secs: 600, pinned_email: None, usage_polling: true, auto_reset: false }
+        Self {
+            poll_secs: 600,
+            pinned_email: None,
+            usage_polling: true,
+            auto_reset: false,
+        }
     }
 }
 
@@ -379,14 +393,12 @@ pub struct AppConfig {
     pub claude: ClaudeConfig,
     #[serde(default)]
     pub codex: CodexConfig,
-    /// Named account pools a clone can be bound to for rotation (members are
-    /// emails of imported accounts, from the server's `claude-accounts.json`).
+    /// Provider-agnostic account pools, one CLIProxyAPI instance per group (the group-proxy
+    /// redesign). A clone binds exactly one group; the control-server routes every request
+    /// from that clone's agents to the group's instance, which owns account selection +
+    /// OAuth refresh.
     #[serde(default)]
-    pub clone_groups: Vec<CloneGroup>,
-    /// Named Codex account pools a clone can be bound to for rotation (members are emails
-    /// of imported Codex accounts, from the server's `codex-accounts.json`).
-    #[serde(default)]
-    pub codex_groups: Vec<CloneGroup>,
+    pub groups: Vec<Group>,
     /// Clone presets (env vars + Linear key + auto-select ticket labels). Auto-selected
     /// by ticket label when cloning from a ticket; required pick otherwise.
     #[serde(default)]
@@ -399,18 +411,20 @@ pub struct AppConfig {
     /// through [`AppConfigRedacted`] intact.
     #[serde(default)]
     pub ssh: SshConfig,
-    /// Vision-LLM inference server the needs-human detector (`rmng-clone-daemon wait-for-stuck`)
-    /// polls — OpenAI-compatible `/v1/chat/completions`. Injected into each clone as
-    /// `RMNG_INFERENCE_URL` at clone time. External infra the control-server can't
-    /// auto-detect, so it's configured here (the old compiled-in default pointed at the
-    /// retired stack's subnet address, unreachable from vmbr0 clones).
-    #[serde(default = "default_inference_url")]
-    pub detector_inference_url: String,
     /// The desktop agent's base playbook (operating notes + ticket procedure), injected into
     /// each new clone at creation as its system-prompt append. Seeded with the shipped default
     /// (the wrapper's `agent-instructions.md`); edited in Settings. Applies to the next clone.
+    /// (Layer **b**: node-agent extra, all presets.)
     #[serde(default = "default_agent_playbook")]
     pub agent_playbook: String,
+    /// The global agent prompt every coding agent reads as its native operating memory
+    /// (written to CLAUDE.md / `~/.codex/AGENTS.md` / `~/.config/opencode/AGENTS.md`, and read
+    /// by the node-agent via `settingSources:["user"]`). Seeded with the shipped default; edited
+    /// in Settings. Kept in sync into existing clones by the reconciler. (Layer **a**: global
+    /// prompt, all agents, all presets.) Keep desktop/Cursor procedure OUT of this — that belongs
+    /// in [`agent_playbook`] (the inner Cursor Claude Code reads CLAUDE.md and would recurse).
+    #[serde(default = "default_global_prompt")]
+    pub global_prompt: String,
 }
 
 impl Default for AppConfig {
@@ -427,13 +441,12 @@ impl Default for AppConfig {
             docker: DockerConfig::default(),
             claude: ClaudeConfig::default(),
             codex: CodexConfig::default(),
-            clone_groups: Vec::new(),
-            codex_groups: Vec::new(),
+            groups: Vec::new(),
             presets: Vec::new(),
             chroma: ChromaMode::default(),
             ssh: SshConfig::default(),
-            detector_inference_url: default_inference_url(),
             agent_playbook: default_agent_playbook(),
+            global_prompt: default_global_prompt(),
         }
     }
 }
@@ -447,8 +460,12 @@ fn default_agent_port() -> u16 {
 fn default_agent_playbook() -> String {
     include_str!("../../../agent-wrapper/agent-instructions.md").to_string()
 }
-fn default_inference_url() -> String {
-    "http://10.0.0.42:8080".into()
+/// The shipped global agent prompt (layer **a** default): the shared "operating memory" every
+/// coding agent reads as its native global rules. General engineering guidance only — the
+/// desktop/Cursor ticket procedure lives in the node-agent playbook, never here. This is the
+/// single source of truth for the body the control-server writes to CLAUDE.md / AGENTS.md.
+pub fn default_global_prompt() -> String {
+    "# Working in this clone\n\nThis machine is a **disposable, single-purpose dev sandbox** that belongs to you,\nwith **passwordless `sudo`**. Install packages, toolchains, and global CLIs freely\nand reconfigure the system as needed — the machine itself is throwaway and there is\nno other user to disturb. Optimize for getting the task done.\n\n## When you're blocked\n\nIf you're genuinely stuck — missing access or credentials, an ambiguous\nrequirement, or a call that's the human's to make — **stop and ask** rather than\nguessing or thrashing. A precise question beats a confident wrong turn.\n".to_string()
 }
 fn default_data_dir() -> String {
     "data".into()
@@ -464,15 +481,31 @@ impl AppConfig {
     /// The active preset's monitors. Falls back to the first preset, then to a dual
     /// 2560×1440 side-by-side default (primary on the right) when no presets exist.
     pub fn effective_monitors(&self) -> Vec<MonitorSpec> {
-        if let Some(p) = self.layout_presets.iter().find(|p| p.name == self.active_layout) {
+        if let Some(p) = self
+            .layout_presets
+            .iter()
+            .find(|p| p.name == self.active_layout)
+        {
             return p.monitors.clone();
         }
         if let Some(p) = self.layout_presets.first() {
             return p.monitors.clone();
         }
         vec![
-            MonitorSpec { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
-            MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: false },
+            MonitorSpec {
+                width: 2560,
+                height: 1440,
+                x: 2560,
+                y: 0,
+                primary: true,
+            },
+            MonitorSpec {
+                width: 2560,
+                height: 1440,
+                x: 0,
+                y: 0,
+                primary: false,
+            },
         ]
     }
 
@@ -490,13 +523,12 @@ impl AppConfig {
             docker: self.docker.clone(),
             claude: self.claude.clone(),
             codex: self.codex.clone(),
-            clone_groups: self.clone_groups.clone(),
-            codex_groups: self.codex_groups.clone(),
+            groups: self.groups.clone(),
             presets: self.presets.iter().map(Preset::redacted).collect(),
             chroma: self.chroma,
             ssh: self.ssh.clone(),
-            detector_inference_url: self.detector_inference_url.clone(),
             agent_playbook: self.agent_playbook.clone(),
+            global_prompt: self.global_prompt.clone(),
         }
     }
 }
@@ -518,13 +550,12 @@ pub struct AppConfigRedacted {
     pub docker: DockerConfig,
     pub claude: ClaudeConfig,
     pub codex: CodexConfig,
-    pub clone_groups: Vec<CloneGroup>,
-    pub codex_groups: Vec<CloneGroup>,
+    pub groups: Vec<Group>,
     pub presets: Vec<PresetRedacted>,
     pub chroma: ChromaMode,
     pub ssh: SshConfig,
-    pub detector_inference_url: String,
     pub agent_playbook: String,
+    pub global_prompt: String,
 }
 
 /// Response body for `PUT /api/config`: the redacted config after the merge, plus
@@ -565,7 +596,7 @@ pub struct SetupEnv {
 }
 
 /// A clone-source image (labeled `rmng.image=1`) as shown to the browser
-/// (`GET /api/images`). Images replace the retired host-id templates: any clone can be
+/// (`GET /api/images`). Images replace the retired clone-id templates: any clone can be
 /// committed to one, and clone creation picks from these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -583,7 +614,7 @@ pub struct ImageInfo {
     /// Lineage: the reference this image was committed from (`rmng.created-from`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_from: Option<String>,
-    /// Host ids of live clones currently running on this image.
+    /// Ids of live clones currently running on this image.
     pub in_use_by: Vec<String>,
 }
 
@@ -617,7 +648,10 @@ mod tests {
         assert_eq!(d.docker.template_reference, "pegasis0/rmng-template:latest");
         let mons = c.effective_monitors();
         assert_eq!(mons.len(), 2);
-        assert_eq!((mons[0].width, mons[0].height, mons[0].x), (2560, 1440, 2560));
+        assert_eq!(
+            (mons[0].width, mons[0].height, mons[0].x),
+            (2560, 1440, 2560)
+        );
         assert!(mons[0].primary);
         assert_eq!(mons[1].x, 0);
         assert!(!mons[1].primary);
@@ -654,13 +688,23 @@ mod tests {
         assert_eq!(ChromaMode::default(), ChromaMode::Yuv420);
         assert_eq!(AppConfig::default().chroma, ChromaMode::Yuv420);
         // Wire/JSON representation is lowercase.
-        assert_eq!(serde_json::to_string(&ChromaMode::Yuv420).unwrap(), "\"yuv420\"");
-        assert_eq!(serde_json::to_string(&ChromaMode::Yuv444).unwrap(), "\"yuv444\"");
+        assert_eq!(
+            serde_json::to_string(&ChromaMode::Yuv420).unwrap(),
+            "\"yuv420\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ChromaMode::Yuv444).unwrap(),
+            "\"yuv444\""
+        );
         // Missing field falls back to the default (older config.json stays valid).
         let c: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(c.chroma, ChromaMode::Yuv420);
         // Redaction passes chroma through (non-secret).
-        let r = AppConfig { chroma: ChromaMode::Yuv444, ..Default::default() }.redacted();
+        let r = AppConfig {
+            chroma: ChromaMode::Yuv444,
+            ..Default::default()
+        }
+        .redacted();
         assert_eq!(r.chroma, ChromaMode::Yuv444);
     }
 
@@ -696,28 +740,30 @@ mod tests {
         assert!(c.codex.pinned_email.is_none());
         assert!(c.codex.usage_polling, "usage_polling defaults to true");
         assert!(!c.codex.auto_reset, "auto_reset defaults to false");
-        assert!(c.codex_groups.is_empty());
         // Missing keys fall back to defaults (older config.json stays valid).
         let d: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(d.codex.poll_secs, 600);
         assert!(d.codex.usage_polling);
-        assert!(d.codex_groups.is_empty());
         // usage_polling can be turned off from JSON (camelCase).
-        let off: AppConfig =
-            serde_json::from_str(r#"{ "codex": { "pollSecs": 300, "usagePolling": false, "autoReset": true } }"#).unwrap();
+        let off: AppConfig = serde_json::from_str(
+            r#"{ "codex": { "pollSecs": 300, "usagePolling": false, "autoReset": true } }"#,
+        )
+        .unwrap();
         assert_eq!(off.codex.poll_secs, 300);
         assert!(!off.codex.usage_polling);
         assert!(off.codex.auto_reset, "autoReset parses from camelCase JSON");
-        // Redaction passes codex + codex_groups through (non-secret).
+        // Redaction passes codex through (non-secret).
         let r = AppConfig {
-            codex: CodexConfig { poll_secs: 120, usage_polling: false, ..Default::default() },
-            codex_groups: vec![CloneGroup { name: "g".into(), accounts: vec!["z@o".into()] }],
+            codex: CodexConfig {
+                poll_secs: 120,
+                usage_polling: false,
+                ..Default::default()
+            },
             ..Default::default()
         }
         .redacted();
         assert_eq!(r.codex.poll_secs, 120);
         assert!(!r.codex.usage_polling);
-        assert_eq!(r.codex_groups.len(), 1);
         // Round-trips as camelCase.
         let v = serde_json::to_value(&CodexConfig::default()).unwrap();
         assert!(v.get("usagePolling").is_some());
@@ -739,10 +785,17 @@ mod tests {
                     name: "med".into(),
                     labels: vec!["Backend".into()],
                     linear_key: "lin_api_secret".into(),
-                    vars: vec![EnvVar { key: "A".into(), value: "1".into() }],
+                    vars: vec![EnvVar {
+                        key: "A".into(),
+                        value: "1".into(),
+                    }],
                     agent_playbook: String::new(),
+                    global_prompt: String::new(),
                 },
-                Preset { name: "bare".into(), ..Default::default() },
+                Preset {
+                    name: "bare".into(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
@@ -776,29 +829,61 @@ mod tests {
     }
 
     #[test]
+    fn global_prompt_defaults_to_shipped_body() {
+        // Missing key ⇒ the shipped shared operating-memory body (non-empty).
+        let c: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(!c.global_prompt.is_empty());
+        assert_eq!(c.global_prompt, default_global_prompt());
+        assert!(c.global_prompt.contains("disposable"));
+        // A preset's global prompt defaults to empty (optional append, layer c).
+        let p: Preset = serde_json::from_str(r#"{ "name": "x" }"#).unwrap();
+        assert!(p.global_prompt.is_empty());
+    }
+
+    #[test]
     fn agent_playbook_passes_through_redaction() {
         let c = AppConfig {
             agent_playbook: "GLOBAL NOTES".into(),
+            global_prompt: "GLOBAL PROMPT".into(),
             presets: vec![Preset {
                 name: "p".into(),
                 agent_playbook: "PRESET APPEND".into(),
+                global_prompt: "PRESET PROMPT".into(),
                 ..Default::default()
             }],
             ..Default::default()
         };
         let r = c.redacted();
         assert_eq!(r.agent_playbook, "GLOBAL NOTES");
+        assert_eq!(r.global_prompt, "GLOBAL PROMPT");
         assert_eq!(r.presets[0].agent_playbook, "PRESET APPEND");
+        assert_eq!(r.presets[0].global_prompt, "PRESET PROMPT");
     }
 
     #[test]
     fn effective_monitors_from_active_preset() {
         let mut c = AppConfig::default();
         c.layout_presets = vec![
-            LayoutPreset { name: "A".into(), monitors: vec![
-                MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }] },
-            LayoutPreset { name: "B".into(), monitors: vec![
-                MonitorSpec { width: 3840, height: 2160, x: 0, y: 0, primary: true }] },
+            LayoutPreset {
+                name: "A".into(),
+                monitors: vec![MonitorSpec {
+                    width: 1920,
+                    height: 1080,
+                    x: 0,
+                    y: 0,
+                    primary: true,
+                }],
+            },
+            LayoutPreset {
+                name: "B".into(),
+                monitors: vec![MonitorSpec {
+                    width: 3840,
+                    height: 2160,
+                    x: 0,
+                    y: 0,
+                    primary: true,
+                }],
+            },
         ];
         c.active_layout = "B".into();
         assert_eq!(c.effective_monitors(), c.layout_presets[1].monitors);
@@ -817,7 +902,13 @@ mod tests {
         let mut c = AppConfig::default();
         c.layout_presets = vec![LayoutPreset {
             name: "Only".into(),
-            monitors: vec![MonitorSpec { width: 1280, height: 720, x: 0, y: 0, primary: true }],
+            monitors: vec![MonitorSpec {
+                width: 1280,
+                height: 720,
+                x: 0,
+                y: 0,
+                primary: true,
+            }],
         }];
         c.active_layout = "Nonexistent".into();
         assert_eq!(c.effective_monitors(), c.layout_presets[0].monitors);
@@ -843,8 +934,14 @@ mod tests {
             public_host: "rmng.example.com".into(),
         };
         let json = serde_json::to_string(&c).unwrap();
-        assert!(json.contains("\"authorizedKeys\""), "camelCase key missing: {json}");
-        assert!(json.contains("\"publicHost\":\"rmng.example.com\""), "{json}");
+        assert!(
+            json.contains("\"authorizedKeys\""),
+            "camelCase key missing: {json}"
+        );
+        assert!(
+            json.contains("\"publicHost\":\"rmng.example.com\""),
+            "{json}"
+        );
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.ssh, c.ssh);
     }
@@ -867,8 +964,7 @@ mod listen_tests {
     fn listen_config_forward_defaults_9005() {
         assert_eq!(ListenConfig::default().forward, 9005);
         // absent in JSON → default
-        let lc: ListenConfig =
-            serde_json::from_str(r#"{"web":9000,"video":9001,"cloneMcp":9002}"#).unwrap();
+        let lc: ListenConfig = serde_json::from_str(r#"{"web":9000,"video":9001}"#).unwrap();
         assert_eq!(lc.forward, 9005);
     }
 }

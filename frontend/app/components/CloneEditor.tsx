@@ -1,6 +1,6 @@
-// Per-host BlockNote editor. Client-only (BlockNote/ProseMirror touch the DOM),
+// Per-clone BlockNote editor. Client-only (BlockNote/ProseMirror touch the DOM),
 // so this module is lazy-imported behind a mount gate in _index.tsx and never
-// runs during SSR. Loads the host's document from /api/notes/:id, autosaves
+// runs during SSR. Loads the clone's document from /api/notes/:id, autosaves
 // (debounced) back to it, and uploads pasted/dropped images via /api/upload.
 import "@blocknote/core/fonts/inter.css";
 import "@blocknote/mantine/style.css";
@@ -29,10 +29,10 @@ async function uploadFile(file: File): Promise<string> {
 const SAVE_DEBOUNCE_MS = 600;
 
 function Editor({
-  hostId,
+  cloneId,
   initialContent,
 }: {
-  hostId: string;
+  cloneId: string;
   initialContent: PartialBlock[] | undefined;
 }) {
   // Follow the OS light/dark setting (BlockNote themes via a JS prop, not CSS).
@@ -73,8 +73,8 @@ function Editor({
     ]);
   }, [editor]);
 
-  // Debounced autosave; flushed immediately when the editor unmounts (host
-  // switch) so nothing is lost between hosts.
+  // Debounced autosave; flushed immediately when the editor unmounts (clone
+  // switch) so nothing is lost between clones.
   const pending = useRef<unknown[] | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -86,7 +86,7 @@ function Editor({
     if (pending.current === null) return;
     const blocks = pending.current;
     pending.current = null;
-    fetch(`/api/notes/${hostId}`, {
+    fetch(`/api/notes/${cloneId}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ blocks }),
@@ -122,7 +122,7 @@ function Editor({
   );
 }
 
-export default function HostEditor({ hostId }: { hostId: string }) {
+export default function CloneEditor({ cloneId }: { cloneId: string }) {
   const [initial, setInitial] = useState<"loading" | PartialBlock[] | undefined>(
     "loading",
   );
@@ -130,7 +130,7 @@ export default function HostEditor({ hostId }: { hostId: string }) {
   useEffect(() => {
     let cancelled = false;
     setInitial("loading");
-    fetch(`/api/notes/${hostId}`)
+    fetch(`/api/notes/${cloneId}`)
       .then((r) => r.json())
       .then((d: { blocks?: unknown }) => {
         if (cancelled) return;
@@ -142,10 +142,10 @@ export default function HostEditor({ hostId }: { hostId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [hostId]);
+  }, [cloneId]);
 
   if (initial === "loading") {
     return <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading…</div>;
   }
-  return <Editor key={hostId} hostId={hostId} initialContent={initial} />;
+  return <Editor key={cloneId} cloneId={cloneId} initialContent={initial} />;
 }

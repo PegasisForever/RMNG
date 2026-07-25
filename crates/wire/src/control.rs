@@ -2,7 +2,7 @@
 //!
 //! The JSON shape is a **byte-for-byte superset** of the current
 //! `control-server/app/lib/types.ts` so the React frontend (and, during cutover,
-//! the legacy Rust client) keep parsing it unchanged. Note `Host` mixes casing:
+//! the legacy Rust client) keep parsing it unchanged. Note the `Clone` type mixes casing:
 //! the fields inherited from the legacy control server stay snake_case
 //! (`gdm_username`) while the server-only extras are camelCase (`claudeAccountEmail`).
 
@@ -45,18 +45,13 @@ pub struct LayoutPreset {
 pub enum Provider {
     Claude,
     Codex,
+    /// Google Gemini via Antigravity (Code Assist) OAuth. Usage is display-only — Antigravity
+    /// exposes no per-account quota endpoint to poll (see `control-server/src/antigravity.rs`).
+    Antigravity,
 }
 
-/// The agent's last self-reported verdict (via the `set_state` MCP tool).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub enum AgentReport {
-    Working,
-    Idle,
-}
-
-/// Effective host state for the UI, derived by the server-side poller.
+/// Server-owned lifecycle state. Docker supplies container liveness while passive proxy token
+/// activity distinguishes `working` from a running-but-not-working (`idle`) clone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -69,7 +64,7 @@ pub enum MonitorState {
 /// One local-forward rule: a TCP port inside this clone (`remote_port`) exposed at
 /// `127.0.0.1:<local_port>` on the machine running the native viewer. Persisted in
 /// `state.json`; the viewer runs the listener. `id` is derived server-side as
-/// `f{local_port}` (local ports are globally unique across all hosts' rules).
+/// `f{local_port}` (local ports are globally unique across all clones' rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -85,9 +80,11 @@ pub struct PortForward {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct Host {
-    /// Stable id; equals the Docker container name for cloneable hosts.
+// The Rust type is `RmngClone` (a bare `Clone` would shadow `std::clone::Clone`); the
+// exported TypeScript type and every user-facing reference is a plain `Clone`.
+#[ts(export, rename = "Clone", export_to = "../../../frontend/app/lib/wire/")]
+pub struct RmngClone {
+    /// Stable id; equals the Docker container name for a managed clone.
     pub id: String,
     /// Endpoint hostname/IP for unmanaged rows. Display-only on managed clones (it
     /// records the container name == `id`; dials resolve via Docker DNS / inspect).
@@ -119,42 +116,24 @@ pub struct Host {
     pub gdm_password: Option<String>,
 
     // --- server-only extras (camelCase) ---
-    /// True for a managed clone: a Docker container whose *name equals this host's id*
+    /// True for a managed clone: a Docker container whose *name equals this clone's id*
     /// backs it (every Docker call addresses it by that name — no stored container id).
     /// False is a plain unmanaged row (legacy/hand-added, deletable in the UI). Old
     /// `state.json` rows carrying the retired `ctid`/`container` keys load as
     /// unmanaged — serde drops the stale keys.
     #[serde(default)]
     pub managed: bool,
+    /// True when this managed clone is intentionally stopped but retained. Its container,
+    /// named volumes, notes, and chat history remain available for a later unarchive.
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
+    /// route through, via the control-server's `/cc` router. `None` = no inference. This is
+    /// the sole account binding — CLIProxyAPI owns intra-group account selection + refresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_account_email: Option<String>,
-    /// Name of the Claude group this clone is balanced within (sticky — it moves only
-    /// when its account exhausts); `None` when bound to a single fixed account. When
-    /// set, `claude_account_email` holds the current pick.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_group: Option<String>,
-    /// The operator's Claude *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`,
-    /// or an account email. Distinguishes an auto-managed clone (server picks the best
-    /// account and may hot-swap it) from one pinned to a fixed account or opted out of
-    /// a token entirely — `claude_account_email` alone can't tell these apart. `None` on
-    /// hosts created before this field / when no Claude account is configured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_selection: Option<String>,
-    /// Email of the imported Codex (ChatGPT) account whose token is written into this
-    /// clone's `~/.codex/auth.json`. Independent of `claude_account_email` — a clone can
-    /// hold both. `None` when no Codex account is assigned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_account_email: Option<String>,
-    /// Name of the Codex group this clone is balanced within (sticky, like `claude_group`);
-    /// `None` when bound to a single fixed Codex account.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_group: Option<String>,
-    /// The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
-    /// an account email — the Codex twin of `claude_selection`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_selection: Option<String>,
+    pub group: Option<String>,
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
     /// string: the workspace set is config (Settings → Linear API keys), not an enum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,25 +146,42 @@ pub struct Host {
     pub linear_branch: Option<String>,
     /// Clone preset name used at creation. New control-server versions persist this so
     /// reconciliation can rebuild `/etc/environment` without relying on a guest-side
-    /// legacy env file. Older hosts may not have it.
+    /// legacy env file. Older clones may not have it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_report: Option<AgentReport>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_note: Option<String>,
+    /// Current server-owned lifecycle state. It is derived from Docker liveness and passive
+    /// proxy token activity, never reported by a clone-local process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor_state: Option<MonitorState>,
-    /// True when this clone fell out of `working` (→ idle/offline) since the
-    /// operator last viewed it — drives the sidebar "unread" dot. Set by the
-    /// monitor poller on that transition, cleared when the clone is activated.
+    /// The clone container's IPv4 on the rmng bridge network — the address other
+    /// clones can dial it at directly (alongside its `id`, which Docker's embedded
+    /// DNS resolves to the same clone). Populated by the monitor poller from a Docker
+    /// inspect each tick; `None` for unmanaged rows or a stopped/detached container.
+    /// A recreated container's new IP self-heals on the next poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_ip: Option<String>,
+    /// Set when a clone transitions from `working` to `idle`/`offline` while it is not selected.
+    /// Clearing the selection state is an explicit operator action, not a clone report.
     #[serde(default)]
     pub unread: bool,
-    /// Local port-forward rules for this host (see [`PortForward`]). Persisted; the
+    /// A headless clone has **no desktop**: its display (`gnome-headless.service`) and capture
+    /// daemon (`rmng-clone-daemon.service`) are disabled at create time, so it streams no video.
+    /// Selecting it drives the viewer's tmux tab view instead of an H.264 desktop stream (see
+    /// the control-server `termplane`). Created from the same template as a regular clone.
+    #[serde(default)]
+    pub headless: bool,
+    /// The id of this clone's parent, when it is a sub clone. One level deep only — a clone
+    /// that has a parent is never itself a parent. `None` = top-level. Purely cosmetic
+    /// grouping in the sidebar and `rmng clone ls`; a sub clone is otherwise an ordinary managed
+    /// clone (its own group binding, router key, tokens, and video). Cascade-deleted with
+    /// its parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Local port-forward rules for this clone (see [`PortForward`]). Persisted; the
     /// viewer runs the listeners and reports status out-of-band (volatile `forwards`
     /// SSE event, never stored here).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -198,10 +194,12 @@ pub struct Host {
 pub enum OperationKind {
     Clone,
     Delete,
+    Archive,
+    Unarchive,
     /// Pull the clone template from a registry (replaced the retired in-product
     /// `Bootstrap` build). The `bootstrap` alias keeps a persisted legacy op loadable:
     /// `state.rs::read_from_disk` falls back to an EMPTY state on any parse error, so a
-    /// stored `"kind":"bootstrap"` op without this alias would wipe every host.
+    /// stored `"kind":"bootstrap"` op without this alias would wipe every clone.
     #[serde(alias = "bootstrap")]
     Pull,
     Commit,
@@ -224,7 +222,7 @@ pub enum OperationStatus {
 pub struct Operation {
     pub id: String,
     pub kind: OperationKind,
-    /// Host id being created (clone) or removed (delete).
+    /// Clone id being created, archived, restored, or removed; image reference for template jobs.
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -244,7 +242,7 @@ pub struct Operation {
 
 /// Live per-container resource usage, sampled by the monitor poller each tick and pushed
 /// to the frontend as a named `stats` SSE event carrying a `{ hostId: ContainerStats }`
-/// map. Deliberately NOT a field of [`ControlState`] / [`Host`]: it changes every tick, so
+/// map. Deliberately NOT a field of [`ControlState`] / [`RmngClone`]: it changes every tick, so
 /// routing it through the state store would rewrite `state.json` every few seconds (every
 /// `ControlState` mutation persists — see the control-server's `state.rs`). It rides the
 /// same `/events` stream on a separate SSE-only bus instead.
@@ -252,20 +250,53 @@ pub struct Operation {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ContainerStats {
-    /// CPU use as a percentage of ONE core (100 == a single fully-used core; a container
-    /// busy across several cores reads > 100). The frontend divides by 100 to display
-    /// "cores".
+    /// CPU use as a percentage of total host capacity (100 == every available core busy).
     pub cpu_pct: f64,
-    /// Resident memory in bytes, docker-CLI semantics (`usage` minus reclaimable
-    /// `inactive_file` page cache).
+    /// RAM usage excluding reclaimable page cache, plus swap usage, in bytes. Tmpfs and
+    /// shared-memory charges remain included.
     pub mem_used: u64,
-    /// Memory limit in bytes; 0 when the daemon reports none.
+    /// RAM plus swap limit in bytes; 0 when either cgroup limit is unbounded or unavailable.
     pub mem_limit: u64,
-    /// Total Docker daemon disk usage in bytes. This is daemon-wide, not per-container;
-    /// the monitor repeats it on each live stats sample so the frontend can show one
-    /// sidebar total without routing volatile data through `ControlState`.
-    #[serde(default)]
-    pub docker_disk_used: u64,
+}
+
+/// Live resource usage for the entire CT 105 LXC that hosts RMNG. Published as the volatile
+/// `lxcStats` SSE event, separately from per-clone [`ContainerStats`] rows, so control-server,
+/// Docker, registry, cache, and unmanaged CT work are included without entering `state.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct LxcStats {
+    /// CT-wide CPU use; 100 means CT 105's enforced 16-CPU capacity was busy. `None` is
+    /// emitted until two cgroup samples establish a rate.
+    pub cpu_pct: Option<f64>,
+    /// RAM usage excluding reclaimable page cache, plus swap usage, in bytes. Tmpfs and
+    /// shared-memory charges remain included.
+    pub mem_used: u64,
+    /// RAM plus swap limit in bytes; 0 when either cgroup limit is unbounded or unavailable.
+    pub mem_limit: u64,
+    /// Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
+    pub disk_used: Option<u64>,
+}
+
+/// Safe accumulated new-token totals for one clone, delivered in the named `tokens` SSE
+/// event as a `{ hostId: CloneTokenUsage }` map. The server retains the activity timestamp
+/// privately; it is deliberately absent here so clients cannot derive a clone status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct CloneTokenUsage {
+    /// Input tokens newly processed by the model. Cache reads are excluded; native Anthropic
+    /// cache-creation tokens are included because they are newly processed.
+    pub new_input_tokens: u64,
+    /// Newly generated output tokens. Provider-specific reasoning is included exactly once
+    /// when its client-facing total does not already include it.
+    pub output_tokens: u64,
+    /// Number of responses that reported a recognized final usage object.
+    pub request_count: u64,
+    /// True when this clone was served by the Fable model within the last 5 minutes. Derived
+    /// server-side from a private timestamp (never sent) and re-projected on a timer so it
+    /// decays back to false; drives the sidebar's "fable" badge next to the group binding.
+    pub fable_active: bool,
 }
 
 /// Version + update-available status for the control-server itself, served by
@@ -317,7 +348,9 @@ pub struct ClaudeSpend {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ClaudeUsage {
-    /// Stable id: claude `${email}|${orgUuid}`, codex `codex:<id>`.
+    /// Stable, unique id: `${group}|${provider}|${email}` (group- and provider-scoped, since
+    /// one email can be authenticated into several groups and, within a group, under more than
+    /// one provider). Used only as an opaque key — never parsed positionally.
     pub id: String,
     pub email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,12 +369,31 @@ pub struct ClaudeUsage {
     pub five_hour: Option<ClaudeUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seven_day: Option<ClaudeUsageWindow>,
+    /// Claude only: the model-scoped weekly limit for the Fable model family. Purely
+    /// informational — it never gates account rotation (see the rotator, which keys off
+    /// `five_hour`/`seven_day` only). `None` for Codex and when the account has no such
+    /// scoped limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fable: Option<ClaudeUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend: Option<ClaudeSpend>,
     /// Codex only: banked rate-limit reset credits ("usage resets") left on the
     /// account. `None` for Claude (no such concept) and when usage is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_credits: Option<i64>,
+}
+
+/// Per-group usage view: one account pool (a CLIProxyAPI instance) plus the accounts
+/// authenticated into its `auth-dir`, each with its 5h/7d/fable windows. The by-group
+/// replacement for the flat `claude_accounts` list — the same email can appear under
+/// several groups (independent token sets per instance), so ids are group-scoped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct GroupUsage {
+    pub name: String,
+    #[serde(default)]
+    pub accounts: Vec<ClaudeUsage>,
 }
 
 /// One recorded auto-consumed (or reserved) Codex reset. Persisted in `ControlState`
@@ -366,7 +418,7 @@ pub struct CodexResetMark {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ControlState {
-    /// Id of the host that should be displayed. May be absent or point at a host
+    /// Id of the clone that should be displayed. May be absent or point at a clone
     /// not in the list; consumers must tolerate both.
     #[serde(default)]
     pub selected: Option<String>,
@@ -380,12 +432,14 @@ pub struct ControlState {
     #[serde(default)]
     pub layout_preset_names: Vec<String>,
     #[serde(default)]
-    pub hosts: Vec<Host>,
+    pub hosts: Vec<RmngClone>,
     #[serde(default)]
     pub operations: Vec<Operation>,
-    /// Per-Claude-account usage view (no tokens).
+    /// Per-group usage view (no tokens) under the group-proxy model: for each account pool,
+    /// the accounts authenticated into its CLIProxyAPI instance's `auth-dir`, with 5h/7d/fable
+    /// windows. Refreshed by the by-group usage poller.
     #[serde(default)]
-    pub claude_accounts: Vec<ClaudeUsage>,
+    pub usage_groups: Vec<GroupUsage>,
     /// Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
     /// account per week, so it belongs in `state.json` (unlike per-tick stats).
     #[serde(default)]
@@ -393,14 +447,14 @@ pub struct ControlState {
 }
 
 impl ControlState {
-    /// The currently selected host, if it exists in the list.
-    pub fn selected_host(&self) -> Option<&Host> {
+    /// The currently selected clone, if it exists in the list.
+    pub fn selected_clone(&self) -> Option<&RmngClone> {
         let sel = self.selected.as_deref()?;
         self.hosts.iter().find(|h| h.id == sel)
     }
 }
 
-// --- per-host chat (stored at data/chats/<id>.json, not in ControlState) ---
+// --- per-clone chat (stored at data/chats/<id>.json, not in ControlState) ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
@@ -447,18 +501,18 @@ mod tests {
         let state: ControlState = serde_json::from_str(json).unwrap();
         assert_eq!(state.hosts.len(), 2);
         assert_eq!(state.selected.as_deref(), Some("host-a"));
-        assert_eq!(state.selected_host().unwrap().host, "10.0.0.5");
+        assert_eq!(state.selected_clone().unwrap().host, "10.0.0.5");
         assert_eq!(state.hosts[0].port, 3389); // default
         assert_eq!(state.hosts[1].port, 3390);
         assert!(state.operations.is_empty());
-        assert!(state.claude_accounts.is_empty());
+        assert!(state.usage_groups.is_empty());
     }
 
     #[test]
     fn legacy_state_loads_unmanaged() {
-        // Old `state.json` shapes: Proxmox-era hosts carry the retired `ctid` key (plus
-        // the top-level `templates` list); early docker-port hosts carry the retired
-        // `container` id. All are stale and dropped by serde; such hosts load as plain
+        // Old `state.json` shapes: Proxmox-era clones carry the retired `ctid` key (plus
+        // the top-level `templates` list); early docker-port clones carry the retired
+        // `container` id. All are stale and dropped by serde; such clones load as plain
         // unmanaged rows (`managed: false`).
         let json = r#"{
             "hosts": [
@@ -475,23 +529,27 @@ mod tests {
     }
 
     #[test]
-    fn host_casing_matches_typescript() {
+    fn clone_casing_matches_typescript() {
         // gdm_* stay snake_case; extras are camelCase.
-        let h = Host {
+        let h = RmngClone {
             id: "h".into(),
             host: "1.2.3.4".into(),
             port: 3389,
             gdm_username: Some("u".into()),
-            claude_account_email: Some("a@b.c".into()),
+            group: Some("team".into()),
             linear_workspace: Some("we".into()),
             monitor_state: Some(MonitorState::Working),
             ..Default::default()
         };
         let v = serde_json::to_value(&h).unwrap();
-        assert!(v.get("gdm_username").is_some(), "gdm_username stays snake_case");
-        assert_eq!(v["claudeAccountEmail"], "a@b.c");
+        assert!(
+            v.get("gdm_username").is_some(),
+            "gdm_username stays snake_case"
+        );
+        assert_eq!(v["group"], "team");
         assert_eq!(v["linearWorkspace"], "we");
         assert_eq!(v["monitorState"], "working");
+        assert_eq!(v["archived"], false);
         // omitted optionals are not serialized
         assert!(v.get("source").is_none());
     }
@@ -500,18 +558,40 @@ mod tests {
     fn ts_binding_keeps_gdm_snake_case() {
         // Guards the ts-rs quirk: the gdm_* fields must stay snake_case in the
         // generated TS so the frontend reads the same keys the server emits.
-        let d = <Host as ts_rs::TS>::decl();
+        let d = <RmngClone as ts_rs::TS>::decl();
         assert!(d.contains("gdm_username"), "binding lost gdm_username: {d}");
-        assert!(!d.contains("gdmUsername"), "binding camelCased gdm_username: {d}");
+        assert!(
+            !d.contains("gdmUsername"),
+            "binding camelCased gdm_username: {d}"
+        );
     }
 
     #[test]
     fn operation_kind_serde_and_bootstrap_alias() {
         // Canonical serialization is the lowercase variant name.
-        assert_eq!(serde_json::to_string(&OperationKind::Pull).unwrap(), "\"pull\"");
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Pull).unwrap(),
+            "\"pull\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Archive).unwrap(),
+            "\"archive\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Unarchive).unwrap(),
+            "\"unarchive\""
+        );
         assert_eq!(
             serde_json::from_str::<OperationKind>("\"pull\"").unwrap(),
             OperationKind::Pull
+        );
+        assert_eq!(
+            serde_json::from_str::<OperationKind>("\"archive\"").unwrap(),
+            OperationKind::Archive
+        );
+        assert_eq!(
+            serde_json::from_str::<OperationKind>("\"unarchive\"").unwrap(),
+            OperationKind::Unarchive
         );
         // Legacy persisted ops used `"bootstrap"`; the alias keeps them loadable so a
         // stored op never trips `read_from_disk`'s parse-error → empty-state fallback.
@@ -531,55 +611,82 @@ mod tests {
     }
 
     #[test]
-    fn host_codex_fields_camelcase() {
-        let h = Host {
+    fn legacy_clone_defaults_to_active_and_archive_state_roundtrips() {
+        let legacy: RmngClone = serde_json::from_str(r#"{ "id": "h", "host": "h" }"#).unwrap();
+        assert!(!legacy.archived);
+
+        let archived = RmngClone {
+            id: "h".into(),
+            host: "h".into(),
+            managed: true,
+            archived: true,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&archived).unwrap();
+        assert_eq!(value["archived"], true);
+        assert!(serde_json::from_value::<RmngClone>(value).unwrap().archived);
+    }
+
+    #[test]
+    fn clone_group_binding_camelcase() {
+        // The sole account binding is the group-proxy `group`.
+        let h = RmngClone {
             id: "h".into(),
             host: "1.2.3.4".into(),
             port: 3389,
-            claude_account_email: Some("a@b.c".into()),
-            codex_account_email: Some("z@openai.com".into()),
-            codex_group: Some("team".into()),
-            codex_selection: Some("group:team".into()),
+            group: Some("team".into()),
             ..Default::default()
         };
         let v = serde_json::to_value(&h).unwrap();
-        assert_eq!(v["codexAccountEmail"], "z@openai.com");
-        assert_eq!(v["codexGroup"], "team");
-        assert_eq!(v["codexSelection"], "group:team");
-        // Claude fields still present and untouched.
-        assert_eq!(v["claudeAccountEmail"], "a@b.c");
-        // Omitted codex fields are not serialized.
-        let bare = Host { id: "h2".into(), ..Default::default() };
+        assert_eq!(v["group"], "team");
+        // Omitted when None.
+        let bare = RmngClone {
+            id: "h2".into(),
+            ..Default::default()
+        };
         let bv = serde_json::to_value(&bare).unwrap();
-        assert!(bv.get("codexAccountEmail").is_none());
+        assert!(bv.get("group").is_none());
         // Round-trips.
-        let back: Host = serde_json::from_value(v).unwrap();
-        assert_eq!(back.codex_selection.as_deref(), Some("group:team"));
+        let back: RmngClone = serde_json::from_value(v).unwrap();
+        assert_eq!(back.group.as_deref(), Some("team"));
     }
 
     #[test]
     fn controlstate_roundtrip_camelcase() {
         let st = ControlState {
             selected: Some("h".into()),
-            monitors: vec![MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }],
-            claude_accounts: vec![ClaudeUsage {
-                id: "a@b|org".into(),
-                email: "a@b".into(),
-                provider: Some(Provider::Claude),
-                active: true,
-                assignable: Some(true),
-                error: None,
-                stale: None,
-                last_updated: 123,
-                five_hour: Some(ClaudeUsageWindow { pct: 12.5, resets_at: None }),
-                seven_day: None,
-                spend: None,
-                reset_credits: Some(3),
+            monitors: vec![MonitorSpec {
+                width: 1920,
+                height: 1080,
+                x: 0,
+                y: 0,
+                primary: true,
+            }],
+            usage_groups: vec![GroupUsage {
+                name: "team".into(),
+                accounts: vec![ClaudeUsage {
+                    id: "team|a@b".into(),
+                    email: "a@b".into(),
+                    provider: Some(Provider::Claude),
+                    active: true,
+                    assignable: Some(true),
+                    error: None,
+                    stale: None,
+                    last_updated: 123,
+                    five_hour: Some(ClaudeUsageWindow {
+                        pct: 12.5,
+                        resets_at: None,
+                    }),
+                    seven_day: None,
+                    fable: None,
+                    spend: None,
+                    reset_credits: Some(3),
+                }],
             }],
             ..Default::default()
         };
         let s = serde_json::to_string(&st).unwrap();
-        assert!(s.contains("\"claudeAccounts\""));
+        assert!(s.contains("\"usageGroups\""));
         assert!(s.contains("\"fiveHour\""));
         assert!(s.contains("\"resetCredits\":3"));
         let back: ControlState = serde_json::from_str(&s).unwrap();
@@ -602,7 +709,13 @@ mod tests {
     fn layout_preset_roundtrip_camelcase() {
         let p = LayoutPreset {
             name: "Dual 1440p".into(),
-            monitors: vec![MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: true }],
+            monitors: vec![MonitorSpec {
+                width: 2560,
+                height: 1440,
+                x: 0,
+                y: 0,
+                primary: true,
+            }],
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v["name"], "Dual 1440p");
@@ -651,9 +764,9 @@ mod forward_tests {
     }
 
     #[test]
-    fn host_forwards_defaults_empty_and_is_omitted() {
+    fn clone_forwards_defaults_empty_and_is_omitted() {
         let json = r#"{"id":"h","host":"h"}"#;
-        let h: Host = serde_json::from_str(json).unwrap();
+        let h: RmngClone = serde_json::from_str(json).unwrap();
         assert!(h.forwards.is_empty());
         // empty forwards must not serialize (skip_serializing_if)
         assert!(!serde_json::to_string(&h).unwrap().contains("forwards"));

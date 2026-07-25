@@ -198,6 +198,24 @@ pub async fn setup_with_cursor_mode(sizes: &[(u32, u32)], cursor_mode: u32) -> R
         monitors.push(VirtualMonitor { monitor_id, stream_path, node_id, width, height });
     }
 
+    // Warm up the virtual keyboard so the FIRST real keystroke isn't lost. Mutter creates the
+    // RemoteDesktop session's virtual keyboard (a ClutterVirtualInputDevice) lazily on the first
+    // NotifyKeyboard* call, and that first event is swallowed while the device is realized/attached
+    // in the compositor's input pipeline. Symptom: the operator's first keystroke never reaches the
+    // clone, and the agent's `type "XYZ"` lands "YZ" — once per session, so it recurs on every boot
+    // AND every make-before-break layout swap (each builds a fresh session here). Inject one
+    // throwaway Shift_L tap now: harmless whichever way it falls — if both events land it's a bare
+    // Shift press+release (a no-op tap in every app; not Super, so no GNOME overview), and if the
+    // press is the event that gets dropped the leftover release is an ignored spurious release. The
+    // notifies are `#[zbus(no_reply)]` and D-Bus preserves per-connection order, so these are queued
+    // ahead of any real input; the short settle lets Mutter realize the device before we return and
+    // input starts flowing. A warm-up hiccup is non-fatal (the next key would realize it anyway), so
+    // ignore the result.
+    const XK_SHIFT_L: u32 = 0xffe1;
+    let _ = rd_session.notify_keyboard_keysym(XK_SHIFT_L, true).await;
+    let _ = rd_session.notify_keyboard_keysym(XK_SHIFT_L, false).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     // Leak the session proxies' lifetime to 'static by keeping `conn` in Session.
     Ok(Session { conn, rd: rd_session, monitors })
 }

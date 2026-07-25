@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { AccountGroupSelect } from "~/components/AccountGroupSelect";
+import { AccountGroupSelect, NO_GROUP } from "~/components/AccountGroupSelect";
 import { ImagePicker } from "~/components/ImagePicker";
 import { getConfig, type ClonePayload } from "~/lib/api";
-import type { ClaudeUsage } from "~/lib/types";
-import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import { parseTicketInput, workspaceBadge } from "~/lib/workspace";
@@ -22,8 +21,6 @@ export function CloneModal({
   images,
   imagesLoading,
   busy,
-  accounts,
-  codexAccounts,
   onClose,
   onClone,
 }: {
@@ -31,10 +28,6 @@ export function CloneModal({
   images: ImageInfo[];
   imagesLoading: boolean;
   busy: boolean;
-  /** Assignable Claude accounts (imported accounts), for the picker. */
-  accounts: ClaudeUsage[];
-  /** Assignable Codex accounts. */
-  codexAccounts: ClaudeUsage[];
   onClose: () => void;
   /** `image` = the chosen clone-source image reference. */
   onClone: (image: string, payload: ClonePayload) => void;
@@ -49,25 +42,24 @@ export function CloneModal({
   const [message, setMessage] = useState("");
   const [agentInstructions, setAgentInstructions] = useState("");
   const [claudeInstructions, setClaudeInstructions] = useState("");
-  // The account to clone under: "auto" (rotate across all accounts) | "<email>" |
-  // "group:<name>". Always defaults to auto; the operator picks a specific account
-  // only when they want to override.
-  const [account, setAccount] = useState("auto");
-  // Account groups (from config), for the group options in the picker.
-  const [groups, setGroups] = useState<CloneGroup[]>([]);
-  const [codexAccount, setCodexAccount] = useState("auto");
-  const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
+  // The account group this clone binds to (a CLIProxyAPI pool), or "none" for no
+  // inference. Defaults to the first configured group once config loads, else "none".
+  const [group, setGroup] = useState(NO_GROUP);
+  // Account groups (from config), for the picker options.
+  const [groups, setGroups] = useState<Group[]>([]);
   // Presets (from config) + the chosen one ("" = auto-by-ticket-prefix; create/plain
   // require an explicit pick, defaulted to the first preset below).
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
   const [preset, setPreset] = useState("");
+  // Headless clone: no desktop; the viewer shows a tmux tab view instead of a video stream.
+  const [headless, setHeadless] = useState(false);
 
   useEffect(() => {
     getConfig()
       .then((c) => {
         setPresets(c.presets);
-        setGroups(c.cloneGroups);
-        setCodexGroups(c.codexGroups);
+        setGroups(c.groups);
+        if (c.groups.length > 0) setGroup(c.groups[0].name);
       })
       .catch(() => {
         // Config unreachable — just no preset/group options.
@@ -94,15 +86,18 @@ export function CloneModal({
         : title.trim().length > 0 && (presets.length === 0 || !!preset);
   const valid = !!image && modeValid;
 
+  // The clone request's group binding: a group name, or null for "none".
+  const groupValue = group === NO_GROUP ? null : group;
+
   function submit() {
     if (!valid || busy || !image) return;
     if (mode === "plain") {
       // No ticket: just a title and an optional first message (empty ⇒ no auto-send).
       onClone(image, {
         plain: { title: title.trim(), message: message.trim() },
-        claudeAccount: account,
-        codexAccount,
+        group: groupValue,
         preset: preset || undefined,
+        headless: headless || undefined,
       });
       return;
     }
@@ -116,17 +111,17 @@ export function CloneModal({
       onClone(image, {
         ticket: ticket.trim(),
         ...extra,
-        claudeAccount: account,
-        codexAccount,
+        group: groupValue,
         preset: preset || undefined, // "" ⇒ auto-select by ticket-id prefix
+        headless: headless || undefined,
       });
     else
       onClone(image, {
         create: { team: team.trim().toLowerCase(), title: title.trim(), description },
         ...extra,
-        claudeAccount: account,
-        codexAccount,
+        group: groupValue,
         preset: preset || undefined,
+        headless: headless || undefined,
       });
   }
 
@@ -275,29 +270,19 @@ export function CloneModal({
           </div>
         )}
 
-        {accounts.length > 0 || groups.length > 0 ? (
+        {groups.length > 0 ? (
           <label className="mt-3 block text-xs font-medium text-slate-500 dark:text-slate-400">
-            Claude account
+            Account group
             <AccountGroupSelect
               groups={groups}
-              accounts={accounts}
-              value={account}
-              onChange={setAccount}
+              value={group}
+              onChange={setGroup}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100"
             />
-          </label>
-        ) : null}
-
-        {codexAccounts.length > 0 || codexGroups.length > 0 ? (
-          <label className="mt-3 block text-xs font-medium text-slate-500 dark:text-slate-400">
-            Codex account
-            <AccountGroupSelect
-              groups={codexGroups}
-              accounts={codexAccounts}
-              value={codexAccount}
-              onChange={setCodexAccount}
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100"
-            />
+            <span className="mt-0.5 block text-[11px] font-normal text-slate-400 dark:text-slate-500">
+              The account pool this clone's agents route through. Its CLIProxyAPI instance
+              owns account selection + failover.
+            </span>
           </label>
         ) : null}
 
@@ -339,7 +324,7 @@ export function CloneModal({
                 the agent acts on the merged instruction.
               </p>
               <label className="block font-medium text-slate-500 dark:text-slate-400">
-                Host agent instructions
+                Clone agent instructions
                 <textarea
                   value={agentInstructions}
                   onChange={(e) => setAgentInstructions(e.target.value)}
@@ -365,6 +350,22 @@ export function CloneModal({
             </div>
           </details>
         ) : null}
+
+        <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <input
+            type="checkbox"
+            checked={headless}
+            onChange={(e) => setHeadless(e.target.checked)}
+            className="mt-0.5 h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+          />
+          <span>
+            Headless (no desktop)
+            <span className="mt-0.5 block text-[11px] font-normal text-slate-400 dark:text-slate-500">
+              Skips the GNOME desktop. The viewer shows a tabbed tmux terminal instead of a
+              video stream. The agent chat still works.
+            </span>
+          </span>
+        </label>
 
         <div className="mt-4 flex justify-end gap-2">
           <button

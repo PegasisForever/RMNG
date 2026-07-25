@@ -23,11 +23,6 @@ futures.workspace = true
 axum.workspace = true
 # On-demand screenshots: GPU VPP dmabuf → PNG (shared with control-server).
 media.workspace = true
-# Needs-human detector (wait-for-stuck): HTTP to the inference server + the local MCP,
-# multipart upload to /api/detector-feedback, PNG decode + JPEG cell encode.
-reqwest = { workspace = true, features = ["multipart"] }
-base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # Mutter D-Bus (ScreenCast / RemoteDesktop / DisplayConfig) — pure Rust.
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 # dmabuf capture via GStreamer pipewiresrc -> appsink (the PoC-validated path).

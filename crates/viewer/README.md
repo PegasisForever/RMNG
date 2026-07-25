@@ -78,7 +78,7 @@ the one viewer, sharing all non-render code — not a second implementation.)
 - A manual window-drag is gated by the **pointer event rate**, not the pipeline — expected,
   not a bug (Phase-0 perf finding).
 
-## Relationship to host selection
+## Relationship to clone selection
 
 The viewer shows whatever clone is **`selected`** in `ControlState`. Selection itself
 happens in the browser management UI (port 2); the server re-points port 1 at the new

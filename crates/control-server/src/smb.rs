@@ -1,5 +1,4 @@
-//! `smbd` supervisor + two SMB shares (`clones`, `feedback`). The control-server runs its own
-//! smbd (port 445) exporting two read-write shares. `clones`'s root is `data/hosts` — the symlink
+//! `smbd` supervisor for the `clones` SMB share. Its root is `data/hosts` — the symlink
 //! directory the clone-home reconciler (`homes.rs`) maintains, one link per running clone
 //! pointing at that clone's `/home/rmng`. So an SMB client browsing `\\<host>\clones` sees
 //! every clone's home side by side.
@@ -14,12 +13,6 @@
 //! keeps the group the clone's too. (Trade-off: serving as root with `wide links` means an
 //! authenticated `clones` client can read any root-readable path via a planted symlink — an
 //! accepted risk for this trusted, credential-gated share.)
-//!
-//! The `feedback` share is far simpler: `data/detector-feedback` is a plain control-server-owned
-//! directory (the records `save_detector_feedback` writes), not a `/proc` symlink, so it needs
-//! none of the `wide links` traversal machinery. `force user = root` there is only so the
-//! authenticated `rmng` client can read/write the root-owned records; files it creates land
-//! root-owned, matching the API writer. It works regardless of `pid: "host"`.
 //!
 //! On startup we (re)render `/data/smb.conf` from the live config's `data_dir` (so the
 //! share `path` always tracks where the reconciler writes its links), provision the local
@@ -47,12 +40,8 @@ const BASE_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const STABLE_RUN: Duration = Duration::from_secs(60);
 
-/// Render `smb.conf` for the `clones` share (rooted at `hosts_root`) and the `feedback` share
-/// (rooted at `feedback_root`). Pure (no I/O) so it's unit-testable. Only the two `path` lines
-/// vary; every other line is literal per the design. The `feedback` share is a plain local
-/// directory (the detector-feedback records) — no `wide links`/`follow symlinks`/`inherit owner`,
-/// which exist on `[clones]` only for `/proc/<pid>/root` traversal.
-pub fn render_smb_conf(hosts_root: &Path, feedback_root: &Path) -> String {
+/// Render `smb.conf` for the clone-home share. Pure (no I/O) so it is unit-testable.
+pub fn render_smb_conf(hosts_root: &Path) -> String {
     format!(
         "[global]
    server min protocol = SMB2
@@ -75,16 +64,8 @@ pub fn render_smb_conf(hosts_root: &Path, feedback_root: &Path) -> String {
    force group = rmng
    valid users = rmng
    inherit owner = unix only
-
-[feedback]
-   path = {}
-   read only = no
-   force user = root
-   force group = rmng
-   valid users = rmng
 ",
-        hosts_root.display(),
-        feedback_root.display()
+        hosts_root.display()
     )
 }
 
@@ -96,19 +77,13 @@ fn absolute_hosts_root(data_dir: &str) -> PathBuf {
     std::path::absolute(&root).unwrap_or(root)
 }
 
-/// The feedback share root as an absolute path, sourced from `files::detector_feedback_root` so
-/// the share and the writer never diverge. Lexical `std::path::absolute` only (no symlink
-/// resolution), mirroring [`absolute_hosts_root`].
-fn absolute_feedback_root(data_dir: &str) -> PathBuf {
-    let root = crate::files::detector_feedback_root(data_dir);
-    std::path::absolute(&root).unwrap_or(root)
-}
-
 /// Delay before the next smbd restart given the number of consecutive quick failures.
 /// `BASE * 2^failures`, capped at `MAX`. Pure + saturating throughout, so a runaway crash
 /// loop can never overflow the multiply — it just pins at `MAX`.
 fn backoff(failures: u32) -> Duration {
-    BASE_BACKOFF.saturating_mul(2u32.saturating_pow(failures)).min(MAX_BACKOFF)
+    BASE_BACKOFF
+        .saturating_mul(2u32.saturating_pow(failures))
+        .min(MAX_BACKOFF)
 }
 
 /// Ensure the local `rmng` account + its SMB password exist. Idempotent and best-effort:
@@ -126,7 +101,16 @@ async fn provision_account() {
         .status()
         .await;
     let _ = Command::new("useradd")
-        .args(["-u", "1000", "-g", "1000", "-M", "-s", "/usr/sbin/nologin", "rmng"])
+        .args([
+            "-u",
+            "1000",
+            "-g",
+            "1000",
+            "-M",
+            "-s",
+            "/usr/sbin/nologin",
+            "rmng",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -150,7 +134,9 @@ async fn provision_account() {
         }
         // No samba in dev → nothing to set; the supervisor logs the real error when it
         // tries to spawn smbd. Keep this quiet (debug) so a dev boot isn't noisy.
-        Err(e) => tracing::debug!(target: "smb", "smbpasswd unavailable (samba not installed?): {e}"),
+        Err(e) => {
+            tracing::debug!(target: "smb", "smbpasswd unavailable (samba not installed?): {e}")
+        }
     }
 }
 
@@ -160,7 +146,13 @@ async fn provision_account() {
 /// blind.
 fn spawn_smbd() -> std::io::Result<Child> {
     Command::new("smbd")
-        .args(["--foreground", "--no-process-group", "--debug-stdout", "-s", SMB_CONF])
+        .args([
+            "--foreground",
+            "--no-process-group",
+            "--debug-stdout",
+            "-s",
+            SMB_CONF,
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -241,17 +233,10 @@ async fn supervise() {
 pub async fn run(app: App) {
     let cfg = app.config();
     let root = absolute_hosts_root(&cfg.data_dir);
-    let feedback_root = absolute_feedback_root(&cfg.data_dir);
     let _ = std::fs::create_dir_all(&root); // harmless if homes already made it
-    let _ = std::fs::create_dir_all(&feedback_root); // may not exist until the first report
 
-    match std::fs::write(SMB_CONF, render_smb_conf(&root, &feedback_root)) {
-        Ok(()) => tracing::info!(
-            target: "smb",
-            "wrote {SMB_CONF} (clones {}, feedback {})",
-            root.display(),
-            feedback_root.display()
-        ),
+    match std::fs::write(SMB_CONF, render_smb_conf(&root)) {
+        Ok(()) => tracing::info!(target: "smb", "wrote {SMB_CONF} (clones {})", root.display()),
         Err(e) => tracing::error!(target: "smb", "writing {SMB_CONF}: {e}"),
     }
 
@@ -265,10 +250,7 @@ mod tests {
 
     #[test]
     fn render_smb_conf_has_load_bearing_lines() {
-        let out = render_smb_conf(
-            Path::new("/data/data/hosts"),
-            Path::new("/data/data/detector-feedback"),
-        );
+        let out = render_smb_conf(Path::new("/data/data/hosts"));
         for needle in [
             "[global]",
             "server min protocol = SMB2",
@@ -279,9 +261,6 @@ mod tests {
             "wide links = yes",
             "follow symlinks = yes",
             "inherit owner = unix only",
-            "[feedback]",
-            "path = /data/data/detector-feedback",
-            "read only = no",
             "force user = root",
             "force group = rmng",
             "valid users = rmng",
@@ -294,27 +273,9 @@ mod tests {
     fn render_smb_conf_interpolates_the_share_path() {
         // The clones share root must be exactly where the reconciler links, else the share is
         // silently empty — so `path` tracks the argument, not a hardcoded default.
-        let out = render_smb_conf(
-            Path::new("/srv/rmng/data/hosts"),
-            Path::new("/srv/rmng/data/detector-feedback"),
-        );
+        let out = render_smb_conf(Path::new("/srv/rmng/data/hosts"));
         assert!(out.contains("path = /srv/rmng/data/hosts"), "{out}");
         assert!(!out.contains("/data/data/hosts"), "{out}");
-    }
-
-    #[test]
-    fn render_smb_conf_feedback_is_a_plain_share() {
-        let out = render_smb_conf(
-            Path::new("/data/data/hosts"),
-            Path::new("/srv/rmng/data/detector-feedback"),
-        );
-        assert!(out.contains("[feedback]"), "{out}");
-        assert!(out.contains("path = /srv/rmng/data/detector-feedback"), "{out}");
-        // The feedback section must NOT carry the /proc-traversal options — those are clones-only.
-        let feedback = &out[out.find("[feedback]").expect("feedback section")..];
-        assert!(!feedback.contains("wide links"), "feedback must not enable wide links:\n{out}");
-        assert!(!feedback.contains("follow symlinks"), "{out}");
-        assert!(!feedback.contains("inherit owner"), "{out}");
     }
 
     #[test]

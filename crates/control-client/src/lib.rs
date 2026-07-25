@@ -2,10 +2,15 @@
 //! `rmng` fleet CLI and integration tests. Response shapes are the [`wire`] types
 //! verbatim — this crate adds transport + error surfacing, never its own schema.
 
+use std::collections::HashMap;
+
 use anyhow::{Result, anyhow, bail};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
-use wire::{AppConfigRedacted, ControlState, ExecRequest, ExecResult, ImageInfo, Operation};
+use wire::{
+    AppConfigRedacted, CloneTokenUsage, ContainerStats, ControlState, ExecRequest, ExecResult,
+    ImageInfo, Operation,
+};
 
 /// A connected control-server client.
 #[derive(Clone)]
@@ -91,6 +96,16 @@ impl Client {
         Ok(Self::check(resp).await?.json().await?)
     }
 
+    /// Current volatile per-clone resource-usage map, matching the named `stats` SSE snapshot.
+    pub async fn stats(&self) -> Result<HashMap<String, ContainerStats>> {
+        self.get_json("/api/stats").await
+    }
+
+    /// Current safe per-clone cumulative-token map, matching the named `tokens` SSE snapshot.
+    pub async fn tokens(&self) -> Result<HashMap<String, CloneTokenUsage>> {
+        self.get_json("/api/tokens").await
+    }
+
     /// The `/events` SSE stream, filtered to the default (unnamed) frames = full
     /// [`ControlState`] snapshots: one on connect, then one per change. Named events
     /// (`stats`, `forwards`) and keep-alive comments are skipped.
@@ -134,33 +149,57 @@ impl Client {
         Ok(Box::pin(stream))
     }
 
-    /// Select the host shown in the viewer (`None` clears the selection).
+    /// Select the clone shown in the viewer (`None` clears the selection).
     pub async fn activate(&self, id: Option<&str>) -> Result<ControlState> {
         self.post_json("/api/activate", &json!({ "id": id })).await
     }
 
-    /// Raw hostname clone (`POST /api/clone` hostname mode). Optional Claude/Codex
-    /// account selections (`email` / `"auto"` / `"group:<name>"` / `"none"`) and preset.
-    pub async fn clone_host(
+    /// Raw hostname clone (`POST /api/clone` hostname mode) with an optional account-group
+    /// binding and env preset. `none`/blank group input intentionally clears the binding.
+    ///
+    /// Sub clones: `top_level` forces a top-level clone; an explicit `parent` id nests under that
+    /// clone; otherwise the server auto-detects the caller from the `X-RMNG-Proxy-Key` header,
+    /// which we populate from this process's own `RMNG_PROXY_KEY` env var (present when `rmng`
+    /// runs inside a clone) so a clone spawning a clone gets a sub clone with no flags.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn duplicate_clone(
         &self,
         image: &str,
         hostname: &str,
-        claude: Option<&str>,
-        codex: Option<&str>,
+        group: Option<&str>,
         preset: Option<&str>,
+        headless: bool,
+        parent: Option<&str>,
+        top_level: bool,
     ) -> Result<Operation> {
         let mut body = json!({ "image": image, "hostname": hostname });
         let obj = body.as_object_mut().unwrap();
-        if let Some(a) = claude {
-            obj.insert("claudeAccount".into(), json!(a));
-        }
-        if let Some(a) = codex {
-            obj.insert("codexAccount".into(), json!(a));
+        // Send the group verbatim, INCLUDING "none": the server distinguishes an omitted
+        // `group` (a sub clone inherits its parent's group) from an explicit `--group none`
+        // (bind no group, opting out of inheritance).
+        if let Some(group) = group.map(str::trim).filter(|group| !group.is_empty()) {
+            obj.insert("group".into(), json!(group));
         }
         if let Some(p) = preset {
             obj.insert("preset".into(), json!(p));
         }
-        let v: Value = self.post_json("/api/clone", &body).await?;
+        if headless {
+            obj.insert("headless".into(), json!(true));
+        }
+        if let Some(parent) = parent.map(str::trim).filter(|p| !p.is_empty()) {
+            obj.insert("parent".into(), json!(parent));
+        }
+        if top_level {
+            obj.insert("topLevel".into(), json!(true));
+        }
+        let mut req = self.http.post(format!("{}/api/clone", self.base)).json(&body);
+        if let Some(key) = std::env::var("RMNG_PROXY_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+        {
+            req = req.header("X-RMNG-Proxy-Key", key);
+        }
+        let v: Value = Self::check(req.send().await?).await?.json().await?;
         Ok(serde_json::from_value(
             v.get("op")
                 .cloned()
@@ -168,9 +207,21 @@ impl Client {
         )?)
     }
 
-    /// Destroy a managed clone (or unregister a plain host).
+    /// Destroy a managed clone (or unregister a plain clone).
     pub async fn delete(&self, id: &str) -> Result<Operation> {
         self.post_json("/api/delete", &json!({ "id": id })).await
+    }
+
+    /// Stop a managed clone while retaining its container, volumes, notes, and chat history.
+    pub async fn archive(&self, id: &str) -> Result<Operation> {
+        self.post_json(&format!("/api/hosts/{id}/archive"), &json!({}))
+            .await
+    }
+
+    /// Restart a retained archived clone.
+    pub async fn unarchive(&self, id: &str) -> Result<Operation> {
+        self.post_json(&format!("/api/hosts/{id}/unarchive"), &json!({}))
+            .await
     }
 
     /// The clone-source images.
@@ -198,20 +249,22 @@ impl Client {
         Ok(())
     }
 
-    /// Hot-swap a clone's Claude account. Returns the API's `{ ok, account, group, selection }`.
-    pub async fn claude_swap(&self, host: &str, account: &str) -> Result<Value> {
+    /// Bind a clone to an account group (or clear it with `None`). The group-proxy
+    /// replacement for the old per-provider account swap. `POST /api/hosts/:id/group`.
+    pub async fn set_clone_group(&self, host: &str, group: Option<&str>) -> Result<Value> {
         self.post_json(
-            "/api/claude/swap",
-            &json!({ "host": host, "account": account }),
+            &format!("/api/hosts/{host}/group"),
+            &json!({ "group": group }),
         )
         .await
     }
 
-    /// Hot-swap a clone's Codex account.
-    pub async fn codex_swap(&self, host: &str, account: &str) -> Result<Value> {
+    /// Remove one authenticated account (a credential file) from a group's CLIProxyAPI
+    /// instance. `POST /api/groups/:name/accounts/delete`.
+    pub async fn delete_group_account(&self, group: &str, file: &str) -> Result<Value> {
         self.post_json(
-            "/api/codex/swap",
-            &json!({ "host": host, "account": account }),
+            &format!("/api/groups/{group}/accounts/delete"),
+            &json!({ "file": file }),
         )
         .await
     }
@@ -236,8 +289,11 @@ impl Client {
     /// Run a single non-interactive command inside a clone (`POST /api/hosts/:id/exec`).
     /// Returns the command's exit code plus its captured stdout/stderr.
     pub async fn exec(&self, host: &str, req: &ExecRequest) -> Result<ExecResult> {
-        self.post_json(&format!("/api/hosts/{host}/exec"), &serde_json::to_value(req)?)
-            .await
+        self.post_json(
+            &format!("/api/hosts/{host}/exec"),
+            &serde_json::to_value(req)?,
+        )
+        .await
     }
 }
 
@@ -245,7 +301,7 @@ impl Client {
 /// refused) or timed out — rather than an error the server itself returned (a 4xx/5xx
 /// surfaced by [`Client::check`], which is a plain string error with no `reqwest::Error`
 /// in its chain). The CLI uses this to decide whether the "check your --server" hint is
-/// actually relevant: a `404 no host 'x'` from a perfectly reachable server should not
+/// actually relevant: a `404 no clone 'x'` from a perfectly reachable server should not
 /// nudge the caller toward a connectivity fix.
 pub fn is_transport_error(err: &anyhow::Error) -> bool {
     err.chain().any(|e| {
@@ -318,7 +374,7 @@ mod sse_tests {
     fn api_error_is_not_a_transport_error() {
         // A server-returned error (the shape `check` produces) must not be treated as a
         // connectivity failure — otherwise the CLI would wrongly print the --server hint.
-        let err = anyhow::anyhow!("404 Not Found: no host 'x'");
+        let err = anyhow::anyhow!("404 Not Found: no clone 'x'");
         assert!(!is_transport_error(&err));
     }
 

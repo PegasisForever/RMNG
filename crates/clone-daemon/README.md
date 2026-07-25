@@ -1,76 +1,34 @@
 # clone-daemon
 
-The in-clone agent of the system: one binary, running inside each clone's headless GNOME
-session, that owns everything desktop-side. It does four things:
+`rmng-clone-daemon` runs inside each clone's headless GNOME session. It owns the desktop-facing half of RMNG:
 
-1. **Captures** the clone's virtual monitors (Mutter ScreenCast `RecordVirtual`) as dmabufs
-   and ships them to the control-server's [media](../media/README.md) ingest over a
-   bind-mounted unix socket (`SCM_RIGHTS`), with per-monitor ack back-pressure.
-2. **Injects input** (received from control-server) via Mutter `RemoteDesktop` — absolute +
-   relative pointer, buttons, scroll, X11 keysyms, **and evdev keycodes** (physical-key
-   identity for games).
-3. Serves the **desktop-automation MCP** on `:9004` (`RMNG_DAEMON_MCP_PORT`): screenshot,
-   click/move/scroll/key/type, and window management via gnome-shell `Eval`. The in-clone
-   agent-wrapper calls it on localhost; the control-server's global MCP proxies to it. Full
-   tool list: [docs/MCP.md](../../docs/MCP.md).
-4. Bridges the **clipboard** (rich + lazy) and the **client-drawn cursor** (cursor-mode
-   METADATA via a raw-PipeWire path), and runs the **needs-human detector** subcommands.
+1. Captures virtual Mutter monitors as dmabufs and ships them to the control-server over the bind-mounted Unix socket with per-monitor acknowledgement back-pressure.
+2. Injects viewer input through Mutter `RemoteDesktop`.
+3. Serves the clone-local desktop automation MCP on `:9004` (`RMNG_DAEMON_MCP_PORT`).
+4. Bridges rich clipboard data and client-drawn cursor metadata.
 
-> This reverses the earlier "thin daemon, server-side MCP" design: keeping automation beside
-> the live Mutter session it drives is simpler and avoids a second capture path. The
-> control-server no longer serves desktop tools directly — it proxies here.
+The control server derives clone lifecycle from Docker liveness and passive CLIProxy token traffic; the daemon's only management surface is its clone-local desktop MCP.
 
 ## Modules
 
 | Module | Role |
 |---|---|
-| `mutter.rs` | zbus proxies for `org.gnome.Mutter.{RemoteDesktop,ScreenCast,DisplayConfig}`; `setup_with_cursor_mode` (RD+SC sessions, RecordVirtual N monitors) |
-| `capture.rs` / `capture_pw.rs` | GStreamer dmabuf capture; raw-PipeWire path for `SPA_META_Cursor` cursor metadata GStreamer can't surface |
-| `transport.rs` | `SOCK_SEQPACKET` client: ship `FrameMsg`+fds (SCM_RIGHTS), recv `ServerMsg` |
-| `mcp.rs` | the HTTP JSON-RPC desktop MCP (`:9004`); shares the live `rd` + per-monitor latest dmabuf; emits cursor-warp on MCP-driven moves |
-| `windows.rs` | window-mgmt tools via gnome-shell `org.gnome.Shell.Eval` (needs the shell-03 patch) |
-| `keysym.rs` | key-combo / char → X11 keysym parsing (`ctrl+c`, Unicode `type`) |
-| `clipboard.rs` | rich/lazy clipboard bridge over Mutter's selection API |
-| `detector.rs` | `wait-for-stuck` / `report-detection` subcommands (needs-human detector) |
+| `mutter.rs` | Mutter `RemoteDesktop`, `ScreenCast`, and `DisplayConfig` D-Bus setup |
+| `capture.rs` / `capture_pw.rs` | GStreamer and raw-PipeWire dmabuf capture, including cursor metadata |
+| `transport.rs` | `SOCK_SEQPACKET` media transport with `SCM_RIGHTS` file descriptors |
+| `mcp.rs` | local desktop JSON-RPC MCP on `:9004` |
+| `windows.rs` | gnome-shell `Eval` window-management tools |
+| `keysym.rs` | key chord and Unicode keysym parsing |
+| `clipboard.rs` | rich/lazy clipboard bridge |
 
-## CLI
+## Runtime modes
 
-- **Default (shipping mode):** with `RMNG_SOCKET` set, capture + ship + inject + serve the
-  MCP. With no socket, run a capture-fps self-test. Monitors come from `RMNG_MONITORS`
-  (`WxH+X+Y[*]`, comma-separated). See [docs/PROTOCOL.md](../../docs/PROTOCOL.md#clone-daemon-cli).
-- **`wait-for-stuck`** — needs-human detector: screen mode (default) pulls screenshots from
-  the local MCP, tiles, asks the inference vision-LLM; text mode (`--text-cmd`, e.g. a
-  `tmux capture-pane` command) judges the command's text output against `--criteria` (the
-  operator's semantic working/stuck definition) with a text-only completion + a
-  did-the-text-change signal. Exits 0 when stuck (`--inference-url`, `--ignore-reason`,
-  `--interval`, `--timeout`).
-- **`report-detection`** — POST a wrong-verdict record to the control-server's
-  `/api/detector-feedback` (`--kind`, `--note`, `--control`); uploads the screenshot (screen
-  mode) or pane capture + criteria (text mode). The agent-wrapper spawns `wait-for-stuck`
-  for monitoring. (These replace the retired `computer-use` binary.)
+With `RMNG_SOCKET` set, the daemon captures, ships frames, receives input, and serves the local MCP. Without it, it runs its capture frames-per-second self-test. `RMNG_MONITORS` provides the pre-connect monitor layout in `WxH+X+Y[*]` form; the control server replaces it with the active layout once the daemon connects.
 
-## Capture & socket model
+## Capture and socket model
 
-- The **selected** clone (a human is viewing it on port 1) streams all monitors continuously;
-  the `RecordVirtual` monitors stay held so a frame is always available. The daemon ships
-  **dmabuf only** — all encoding (H.264 for the viewer, PNG for screenshots) happens in
-  control-server / `media`.
-- daemon → server: `Hello`, `FrameMsg`+fds, `CursorMeta`, `Layout`, `Clipboard*`.
-  server → daemon: `Subscribe`, `FrameRequest`, `Ack` (releases the held PipeWire buffer),
-  `Input`, `Clipboard*`. Full schema: [docs/PROTOCOL.md](../../docs/PROTOCOL.md#clone-socket-protocol-clone-daemon--control-server).
-- **Cursor**: cursor-mode METADATA (no baked-in cursor); emit `CursorMeta` (position always,
-  shape RGBA on change, `warp:true` after an MCP-driven move). `RMNG_EMBEDDED_CURSOR=1`
-  composites the cursor into the video instead.
-
-## Session & patches
-
-Runs inside a headless `gnome-session` (no GDM, no g-r-d) under a `systemd --user` unit with
-linger; Mutter's headless backend needs only `/dev/dri/renderD128`. The window-management MCP
-tools require the **shell-03** gnome-shell patch (`org.gnome.Shell.Eval`); the clone also gets
-**shell-01** (hide the screen-share pill) — both via the patched gnome-shell deb the
-control-server installs ([gnome-patch](../../gnome-patch/README.md)).
+The selected clone keeps captured frames available for the human viewer and desktop MCP screenshots. The daemon emits only dmabufs; the control server/media crate encodes H.264 for viewers and images for tool responses. The wire schema is documented in [docs/PROTOCOL.md](../../docs/PROTOCOL.md#clone-socket-protocol-clone-daemon--control-server).
 
 ## Dependencies
 
-`zbus` (Mutter D-Bus), `pipewire`/`gstreamer` (dmabuf capture), `axum`/`reqwest` (MCP +
-detector), `media`, `image`, `tokio`, `nix` (SCM_RIGHTS), `wire`.
+`zbus`, `pipewire`/`gstreamer`, `axum`, `media`, `tokio`, `nix`, `wire`, and the clone-local desktop runtime.

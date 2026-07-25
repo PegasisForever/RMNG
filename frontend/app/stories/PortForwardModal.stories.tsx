@@ -1,9 +1,9 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { PortForwardModal } from "~/components/PortForwardModal";
-import type { Host } from "~/lib/types";
+import type { Clone } from "~/lib/types";
 
-const host: Host = {
+const clone: Clone = {
   id: "pega-abc",
   host: "pega-abc",
   port: 3389,
@@ -20,7 +20,7 @@ const meta: Meta<typeof PortForwardModal> = {
   title: "Modals/PortForwardModal",
   component: PortForwardModal,
   args: {
-    host,
+    clone,
     runtime: [
       { id: "f8080", state: "listening", error: null, activeConns: 2 },
       { id: "f5433", state: "error", error: "127.0.0.1:5433: address already in use", activeConns: 0 },

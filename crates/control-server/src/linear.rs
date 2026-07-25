@@ -203,10 +203,12 @@ pub async fn create_issue(
     description: &str,
 ) -> Result<IssueInfo, LinearError> {
     let tk = prefix.to_uppercase();
+    // Resolve the team id AND the API key's owner in one round-trip: `viewer` is the Linear
+    // user the key authenticates as (its owner), so we assign the new ticket to them below.
     let team_data = gql(
         http,
         key,
-        "query($team: String!) { teams(filter: { key: { eq: $team } }, first: 1) { nodes { id } } }",
+        "query($team: String!) { teams(filter: { key: { eq: $team } }, first: 1) { nodes { id } } viewer { id } }",
         json!({ "team": &tk }),
     )
     .await?;
@@ -215,14 +217,18 @@ pub async fn create_issue(
         .and_then(Value::as_str)
         .ok_or_else(|| LinearError(format!("team {tk} not found")))?
         .to_string();
+    // The key owner's user id. Present for a personal API key; absent/null for an app/OAuth
+    // actor with no personal user — in which case `assigneeId: null` leaves the ticket
+    // unassigned rather than failing creation.
+    let assignee_id = team_data.pointer("/viewer/id").and_then(Value::as_str);
     let mutation = format!(
-        "mutation($teamId: String!, $title: String!, $description: String!) {{ issueCreate(input: {{ teamId: $teamId, title: $title, description: $description }}) {{ success issue {{ {ISSUE_FIELDS} }} }} }}"
+        "mutation($teamId: String!, $title: String!, $description: String!, $assigneeId: String) {{ issueCreate(input: {{ teamId: $teamId, title: $title, description: $description, assigneeId: $assigneeId }}) {{ success issue {{ {ISSUE_FIELDS} }} }} }}"
     );
     let created = gql(
         http,
         key,
         &mutation,
-        json!({ "teamId": team_id, "title": title, "description": description }),
+        json!({ "teamId": team_id, "title": title, "description": description, "assigneeId": assignee_id }),
     )
     .await?;
     let ok = created.pointer("/issueCreate/success").and_then(Value::as_bool).unwrap_or(false);

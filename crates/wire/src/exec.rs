@@ -26,6 +26,11 @@ pub struct ExecRequest {
     /// Base64-encoded stdin fed to the command, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdin_b64: Option<String>,
+    /// Fire-and-forget: launch the command detached (in the background) and return immediately,
+    /// with no captured stdout/stderr and no exit code. Intended for GUI apps on the clone desktop
+    /// (`rmng exec -d`). `stdin_b64` is ignored in this mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detach: bool,
 }
 
 /// The result of an [`ExecRequest`]: the command's real exit code plus its captured

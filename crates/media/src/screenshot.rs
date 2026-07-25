@@ -1,5 +1,5 @@
 //! On-demand screenshot: import a clone's latest dmabuf and encode it to JPEG via
-//! `vapostproc → videoconvert → jpegenc` (the desktop-MCP `screenshot` tool, port 3/4).
+//! `vapostproc → videoconvert → jpegenc` (the clone-local desktop MCP `screenshot` tool).
 //! Infrequent + request-driven, so a one-shot pipeline per call is fine.
 //!
 //! JPEG (not PNG): a full-desktop PNG is multi-MB, and the MCP client caches every

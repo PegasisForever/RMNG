@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wire::{Host, Operation, OperationKind, OperationStatus};
+use wire::{RmngClone, Operation, OperationKind, OperationStatus};
 
 use crate::app::App;
 use crate::provision::{
@@ -32,7 +32,7 @@ impl std::fmt::Display for JobError {
 }
 impl std::error::Error for JobError {}
 
-/// Linear ticket metadata stamped onto a cloned `Host`.
+/// Linear ticket metadata stamped onto a cloned `RmngClone`.
 #[derive(Debug, Clone, Default)]
 pub struct LinearMeta {
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`).
@@ -51,11 +51,10 @@ pub struct CloneSpec {
     pub source_image: String,
     pub new_hostname: String,
     pub linear: Option<LinearMeta>,
-    /// Requested Claude account: an email, `"auto"`, or `None` (= auto).
-    pub claude_account: Option<String>,
-    /// Requested Codex account: an email, `"auto"`, `"group:<name>"`, `"none"`, or `None`
-    /// (= auto). Independent of `claude_account`.
-    pub codex_account: Option<String>,
+    /// The account pool this clone's agents route through (one CLIProxyAPI instance per
+    /// group). `None` = no inference until a group is bound. This is the sole account binding
+    /// under the group-proxy model — the `/cc` router maps clone → group → instance.
+    pub group: Option<String>,
     pub first_message: Option<String>,
     pub agent_instructions: Option<String>,
     pub claude_instructions: Option<String>,
@@ -64,8 +63,19 @@ pub struct CloneSpec {
     /// Resolved env-preset vars to write into the clone's `/etc/environment` at creation.
     pub env: Vec<wire::EnvVar>,
     /// Composed agent playbook (global + preset append) injected into the clone at creation
-    /// as ~/.config/rmng/agent-instructions.md. Empty ⇒ no file injected.
+    /// as ~/.config/rmng/agent-instructions.md. Empty ⇒ no file injected. (Layers b + d.)
     pub agent_playbook: String,
+    /// Composed global agent prompt (global + preset append) written to every agent's native
+    /// rules file (CLAUDE.md / AGENTS.md) at creation. (Layers a + c.)
+    pub global_prompt: String,
+    /// Create a **headless clone**: same template, but the desktop (`gnome-headless`) and
+    /// capture daemon (`rmng-clone-daemon`) user units are disabled at provision and a default
+    /// tmux session is started. Persisted on `RmngClone.headless`; drives the viewer tmux view.
+    pub headless: bool,
+    /// Parent clone id when this clone should be created as a sub clone (one level deep). Already
+    /// validated by the caller (`web::clone`): the parent exists, is managed, and is itself
+    /// top-level. `None` = top-level clone. Persisted on `RmngClone.parent`; purely cosmetic.
+    pub parent: Option<String>,
 }
 
 fn now_ms() -> i64 {
@@ -94,6 +104,8 @@ fn make_op(kind: OperationKind, target: &str, source: Option<&str>) -> Operation
         OperationKind::Pull => format!("queued template pull → {target}"),
         OperationKind::Commit => format!("queued commit of {}", source.unwrap_or("?")),
         OperationKind::Delete => format!("queued delete of {target}"),
+        OperationKind::Archive => format!("queued archive of {target}"),
+        OperationKind::Unarchive => format!("queued unarchive of {target}"),
         OperationKind::Update => "queued control-server update".to_string(),
     };
     Operation {
@@ -246,7 +258,7 @@ pub fn fail_stale_ops(app: &App) {
     }
 }
 
-/// Pick a free host id for a ticket base name (`base`, then `base a..z`). Race-free
+/// Pick a free clone id for a ticket base name (`base`, then `base a..z`). Race-free
 /// when called immediately before `start_clone` (single state snapshot).
 pub fn next_free_hostname(app: &App, base: &str) -> String {
     let st = app.store.get();
@@ -284,7 +296,7 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
     let st = app.store.get();
     if st.hosts.iter().any(|h| h.id == spec.new_hostname) {
         return Err(JobError(format!(
-            "a host named '{}' already exists",
+            "a clone named '{}' already exists",
             spec.new_hostname
         )));
     }
@@ -297,6 +309,24 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
             "'{}' is already being created",
             spec.new_hostname
         )));
+    }
+    // Sub-clone invariant (defense in depth; `web::resolve_parent` already validated): the parent
+    // must exist, be a managed clone, and be top-level — nesting is one level deep.
+    if let Some(parent) = &spec.parent {
+        match st.hosts.iter().find(|h| &h.id == parent) {
+            None => return Err(JobError(format!("parent clone '{parent}' not found"))),
+            Some(h) if !h.managed => {
+                return Err(JobError(format!(
+                    "parent clone '{parent}' is not a managed clone"
+                )));
+            }
+            Some(h) if h.parent.is_some() => {
+                return Err(JobError(format!(
+                    "parent clone '{parent}' is itself a sub clone; sub clones are one level deep"
+                )));
+            }
+            Some(_) => {}
+        }
     }
 
     let op = make_op(
@@ -319,10 +349,15 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // The clone→control-server + inference URLs (auto-detected) go into the clone's session
     // env first; the operator's chosen preset follows (so a preset key can still override).
     let mut env = control_env_vars(&app).await;
+    // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY), minted +
+    // persisted server-side and mapped back to this clone id by the `/cc` router. Additive:
+    // it lives alongside the existing token push; a clone with no group just gets a 409 from
+    // the router until one is bound. Never serialized onto `RmngClone`/state.
+    env.extend(crate::provision::router_env_vars(&app, &spec.new_hostname));
     env.extend(spec.env.iter().cloned());
     // `image_ref` is the CANONICAL reference of the image actually used (the caller may have
-    // passed an id form — MCP/raw API); `Host.source` must record the reference so the
-    // commit flow can stamp lineage. The backing container's name is the host id — that's
+    // passed an id form — MCP/raw API); `RmngClone.source` must record the reference so the
+    // commit flow can stamp lineage. The backing container's name is the clone id — that's
     // how every later call (dials, redeploy, credential ops, delete) addresses it.
     let image_ref = match clone_container(
         &app,
@@ -330,6 +365,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         &spec.new_hostname,
         &env,
         &spec.agent_playbook,
+        &spec.global_prompt,
+        spec.headless,
         progress,
     )
     .await
@@ -340,10 +377,10 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
 
     // The container is up and its daemon has registered (or timed out still-booting) — the op
     // now sits at the `ready` step (~80%). The clone is NOT connectable yet: the account tokens
-    // still have to be pushed. The client treats a host's PRESENCE in `s.hosts` as "ready to
-    // connect", so we keep the host OUT of state and the op RUNNING until this whole tail
+    // still have to be pushed. The client treats a clone's PRESENCE in `s.hosts` as "ready to
+    // connect", so we keep the clone OUT of state and the op RUNNING until this whole tail
     // settles — otherwise a viewer connecting at "100%" hits a not-yet-provisioned clone. The
-    // host is registered + the op marked `done` at the very end, below, once the clone is
+    // clone is registered + the op marked `done` at the very end, below, once the clone is
     // genuinely streamable.
     //
     // (`progress` at the top of this fn was moved into `clone_container`; make a fresh one for
@@ -352,160 +389,34 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // `RMNG_MONITORS` default just covers the brief pre-connect window.)
     let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
 
-    progress("accounts", "assigning agent accounts");
+    progress("accounts", "binding agent account group");
 
-    // Assign a Claude account/group (or explicitly none). The operator's selection + the
-    // resolved account are COLLECTED into locals here and baked into the Host at the terminal
-    // add below (there is no host in `s.hosts` yet); the token itself is installed into the
-    // clone's ~/.claude/.credentials.json now (the server refreshes + re-pushes it thereafter).
-    // A group-bound clone records its group; the rotator re-balances it. "none" installs no
-    // token AND strips any credentials the image carried, so the clone boots provably tokenless.
-    let mut claude_selection: Option<String> = None;
-    let mut claude_account_email: Option<String> = None;
-    let mut claude_group: Option<String> = None;
-    if let Some(assignment) =
-        crate::claude::resolve_assignment(&app, spec.claude_account.as_deref())
-    {
-        let selection = crate::claude::normalize_selection(spec.claude_account.as_deref());
-        let (group, account, pending_auto) = match assignment {
-            crate::claude::Assignment::Group { name, initial } => {
-                (Some(name), Some(initial), false)
-            }
-            crate::claude::Assignment::Account(a) => (None, Some(a), false),
-            crate::claude::Assignment::AutoPending => (None, None, true),
-            crate::claude::Assignment::None => (None, None, false),
-        };
-        claude_selection = Some(selection);
-        claude_account_email = account.clone();
-        claude_group = group.clone();
-        match account {
-            None if pending_auto => {
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push("account: auto (pending imported account)".into())
-                });
-            }
-            None => {
-                // Explicit "none": strip any credentials the image carried so the clone
-                // boots tokenless, instead of trusting the template to be clean. Idempotent
-                // (`rm -f`), so a clean image just reports "cleared". Best-effort like the
-                // assign arm — a failure is logged, not fatal to the clone create.
-                match crate::claude::clear_clone_token(&app, &spec.new_hostname).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push("account: none (credentials cleared)".into())
-                    }),
-                    Err(e) => {
-                        tracing::warn!("clear_clone_token({}) failed: {e}", spec.new_hostname);
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("account: none — failed to clear credentials: {e}"))
-                        });
-                    }
-                }
-                app.claude.forget_pushed(&spec.new_hostname);
-            }
-            Some(email) => {
-                let label = match &group {
-                    Some(g) => format!("{email} (group {g})"),
-                    None => email.clone(),
-                };
-                match crate::claude::push_account_to_clone(&app, &spec.new_hostname, &email).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push(format!("account: assigned {label}"))
-                    }),
-                    Err(e) => {
-                        tracing::warn!("push_account_to_clone({}) failed: {e}", spec.new_hostname);
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("account: failed to assign {label}: {e}"))
-                        });
-                    }
-                }
-            }
-        }
+    // Group-proxy binding: the clone's agents route through ONE account group's CLIProxyAPI
+    // instance via the control-server's `/cc` router (the per-clone router key was already
+    // injected into the clone's env above by `router_env_vars`). Binding is a pure map update
+    // — the group is recorded on the clone below and the router resolves clone → group →
+    // instance at request time; there is no clone-side credential push. `None` leaves the
+    // clone without inference until a group is bound (the router answers 409 until then).
+    let group = spec.group.clone();
+    match &group {
+        Some(g) => patch_op(&app, &op_id, |op| {
+            op.log.push(format!("account: group {g}"))
+        }),
+        None => patch_op(&app, &op_id, |op| {
+            op.log.push("account: no group bound".into())
+        }),
     }
 
-    // Assign a Codex account/group (or explicitly none), independently of Claude — a clone
-    // can hold both. Same shape as the Claude block above; collected into locals + baked into
-    // the Host at the terminal add below.
-    let mut codex_selection: Option<String> = None;
-    let mut codex_account_email: Option<String> = None;
-    let mut codex_group: Option<String> = None;
-    if let Some(assignment) = crate::codex::resolve_assignment(&app, spec.codex_account.as_deref())
-    {
-        let selection = crate::codex::normalize_selection(spec.codex_account.as_deref());
-        let (group, account, pending_auto) = match assignment {
-            crate::codex::Assignment::Group { name, initial } => (Some(name), Some(initial), false),
-            crate::codex::Assignment::Account(a) => (None, Some(a), false),
-            crate::codex::Assignment::AutoPending => (None, None, true),
-            crate::codex::Assignment::None => (None, None, false),
-        };
-        codex_selection = Some(selection);
-        codex_account_email = account.clone();
-        codex_group = group.clone();
-        match account {
-            None if pending_auto => {
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push("codex account: auto (pending imported account)".into())
-                });
-            }
-            None => {
-                // Explicit "none": strip any codex auth the image carried (see the Claude block).
-                match crate::codex::clear_clone_token(&app, &spec.new_hostname).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log
-                            .push("codex account: none (credentials cleared)".into())
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "codex clear_clone_token({}) failed: {e}",
-                            spec.new_hostname
-                        );
-                        patch_op(&app, &op_id, |op| {
-                            op.log.push(format!(
-                                "codex account: none — failed to clear credentials: {e}"
-                            ))
-                        });
-                    }
-                }
-                app.codex.forget_pushed(&spec.new_hostname);
-            }
-            Some(email) => {
-                let label = match &group {
-                    Some(g) => format!("{email} (group {g})"),
-                    None => email.clone(),
-                };
-                match crate::codex::push_account_to_clone(&app, &spec.new_hostname, &email).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push(format!("codex account: assigned {label}"))
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "codex push_account_to_clone({}) failed: {e}",
-                            spec.new_hostname
-                        );
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("codex account: failed to assign {label}: {e}"))
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // Register the fully-provisioned host and mark the op done — the tail (account pushes) is
-    // complete, so the clone is now genuinely connectable. A host's PRESENCE in `s.hosts` is the
-    // client's "ready to connect" signal, so it is added HERE, at the same instant the bar
-    // reaches 100%. `host` is display-only for managed clones (dials go by container name == id);
-    // clones ship with fixed `rmng`/`rmng` credentials baked into the base image. RDP port stays
-    // 3389 for the media path. The Claude/Codex selection collected above is baked in so the UI
-    // shows it the moment the host appears. `daemon_up` reflects whether the clone's daemon has
-    // registered (vs. still booting).
+    // Register the fully-provisioned clone and mark the op done — the clone is now genuinely
+    // connectable. A clone's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
+    // it is added HERE, at the same instant the bar reaches 100%. `host` is display-only for
+    // managed clones (dials go by container name == id); clones ship with fixed `rmng`/`rmng`
+    // credentials baked into the base image. RDP port stays 3389 for the media path. The
+    // group binding resolved above is baked in so the UI shows it the moment the clone appears.
+    // `daemon_up` reflects whether the clone's daemon has registered (vs. still booting).
     let daemon_up = app.media.is_connected(&spec.new_hostname);
     app.store.mutate(|s| {
-        let mut host = Host {
+        let mut host = RmngClone {
             id: spec.new_hostname.clone(),
             host: spec.new_hostname.clone(),
             port: 3389,
@@ -513,13 +424,10 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             password: "rmng".into(),
             managed: true,
             source: Some(image_ref.clone()),
-            claude_selection: claude_selection.clone(),
-            claude_account_email: claude_account_email.clone(),
-            claude_group: claude_group.clone(),
-            codex_selection: codex_selection.clone(),
-            codex_account_email: codex_account_email.clone(),
-            codex_group: codex_group.clone(),
+            group: group.clone(),
             preset_name: spec.preset_name.clone(),
+            headless: spec.headless,
+            parent: spec.parent.clone(),
             ..Default::default()
         };
         if let Some(m) = &spec.linear {
@@ -530,12 +438,15 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             host.display_name = m.display_name.clone();
             host.linear_label = m.label.clone();
         }
-        s.hosts.push(host);
+        s.hosts.insert(0, host);
         if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
             op.status = OperationStatus::Done;
             op.step = "done".into();
             op.pct = 100.0;
-            op.message = if daemon_up {
+            op.message = if spec.headless {
+                // Headless clones run no clone-daemon by design — never expect a media Hello.
+                format!("headless clone {} ready", spec.new_hostname)
+            } else if daemon_up {
                 format!("clone {} ready", spec.new_hostname)
             } else {
                 format!(
@@ -547,6 +458,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             op.finished_at = Some(now_ms());
         }
     });
+    app.tokens.register_clone(&spec.new_hostname);
 
     schedule_prune(app.clone(), op_id.clone(), PRUNE_DONE_MS);
 
@@ -583,8 +495,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
 
 /// Pull the clone template from `reference` (a registry `repo:tag`) — no local retag; the
 /// pulled image keeps its own `repo:tag`, which becomes the clone-source reference. Drives a
-/// `Pull`-kind Operation with the reference as its target; no Host is registered (a template
-/// is not a host). Guard: no op is already in flight for the same reference.
+/// `Pull`-kind Operation with the reference as its target; no clone is registered (a template
+/// is not a clone). Guard: no op is already in flight for the same reference.
 pub fn start_pull(app: &App, reference: &str) -> Result<Operation, JobError> {
     let st = app.store.get();
     if st
@@ -743,8 +655,8 @@ async fn run_update(app: App, op_id: String, reference: String) {
 }
 
 /// Validate + register a commit-from-clone op, then drive it in the background. Guards:
-/// the host is a managed clone, the target tag is free (no existing image AND no in-flight
-/// commit racing for it), and the host has no operation already in flight.
+/// the clone is a managed clone, the target tag is free (no existing image AND no in-flight
+/// commit racing for it), and the clone has no operation already in flight.
 pub fn start_commit(app: &App, host_id: &str, name: &str) -> Result<Operation, JobError> {
     if !is_dns_label(name) {
         return Err(JobError(
@@ -757,7 +669,7 @@ pub fn start_commit(app: &App, host_id: &str, name: &str) -> Result<Operation, J
         .iter()
         .find(|h| h.id == host_id)
         .cloned()
-        .ok_or_else(|| JobError(format!("unknown host '{host_id}'")))?;
+        .ok_or_else(|| JobError(format!("unknown clone '{host_id}'")))?;
     if !host.managed {
         return Err(JobError(format!(
             "'{host_id}' is not a managed clone — only clones can be committed"
@@ -786,7 +698,7 @@ pub fn start_commit(app: &App, host_id: &str, name: &str) -> Result<Operation, J
         )));
     }
 
-    // Target = the image name (what's being produced); source = the host it's committed from.
+    // Target = the image name (what's being produced); source = the clone it's committed from.
     let op = make_op(OperationKind::Commit, name, Some(host_id));
     let (ret, op_id) = (op.clone(), op.id.clone());
     app.store.mutate(|s| s.operations.push(op));
@@ -821,13 +733,13 @@ async fn run_commit(
 }
 
 /// Validate + register a delete op, then drive it in the background. A managed clone is
-/// torn down through `provision::delete_clone` (container name == host id); an unmanaged
-/// row (a legacy/plain host) is simply removed from state.
+/// torn down through `provision::delete_clone` (container name == clone id); an unmanaged
+/// row (a legacy/plain clone) is simply removed from state.
 pub fn start_delete(app: &App, host_id: &str) -> Result<Operation, JobError> {
     let st = app.store.get();
     let host = st.hosts.iter().find(|h| h.id == host_id).cloned();
     let Some(host) = host else {
-        return Err(JobError(format!("unknown host '{host_id}'")));
+        return Err(JobError(format!("unknown clone '{host_id}'")));
     };
     if st
         .operations
@@ -862,7 +774,7 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
         patch_op(&app, &op_id, |op| {
             op.step = "remove".into();
             op.pct = 75.0;
-            op.message = "unregistering host (no container)".into();
+            op.message = "unregistering clone (no container)".into();
         });
     }
 
@@ -878,15 +790,141 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
             op.message = if managed {
                 format!("clone {host_id} destroyed")
             } else {
-                "host removed".into()
+                "clone removed".into()
             };
             op.finished_at = Some(now_ms());
         }
     });
+    app.tokens.forget_clone(&host_id);
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
     let dd = app.config().data_dir;
     crate::files::delete_notes(&dd, &host_id);
     crate::chat::delete_chat(&dd, &host_id);
+}
+
+/// Stop a managed clone without removing its container, volumes, or per-clone files.
+pub fn start_archive(app: &App, host_id: &str) -> Result<Operation, JobError> {
+    let st = app.store.get();
+    let host = st
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .ok_or_else(|| JobError(format!("unknown clone '{host_id}'")))?;
+    if !host.managed {
+        return Err(JobError(format!("'{host_id}' is not a managed clone")));
+    }
+    if host.archived {
+        return Err(JobError(format!("'{host_id}' is already archived")));
+    }
+    if st
+        .operations
+        .iter()
+        .any(|o| o.status == OperationStatus::Running && o.target == host_id)
+    {
+        return Err(JobError(format!(
+            "'{host_id}' already has an operation in flight"
+        )));
+    }
+
+    let op = make_op(OperationKind::Archive, host_id, None);
+    let op_for_return = op.clone();
+    let op_id = op.id.clone();
+    app.store.mutate(|s| s.operations.push(op));
+
+    let app2 = app.clone();
+    let host_id = host_id.to_string();
+    tokio::spawn(async move { run_archive(app2, op_id, host_id).await });
+    Ok(op_for_return)
+}
+
+async fn run_archive(app: App, op_id: String, host_id: String) {
+    let mut progress = op_progress(&app, &op_id, OperationKind::Archive);
+    progress("stop", "stopping the clone (SIGRTMIN+3, up to 20s)");
+    if let Err(e) = app.docker.stop_container(&host_id).await {
+        return fail_op(&app, &op_id, e.to_string());
+    }
+
+    app.store.mutate(|s| {
+        if let Some(host) = s.hosts.iter_mut().find(|h| h.id == host_id) {
+            host.archived = true;
+            host.monitor_state = None;
+            host.local_ip = None;
+            host.unread = false;
+        }
+        if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
+            op.status = OperationStatus::Done;
+            op.step = "done".into();
+            op.pct = 100.0;
+            op.message = format!("clone {host_id} archived");
+            op.finished_at = Some(now_ms());
+        }
+    });
+    app.tokens.set_archived(&host_id, true);
+    drop(progress);
+    schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+}
+
+/// Start an archived managed clone without recreating it.
+pub fn start_unarchive(app: &App, host_id: &str) -> Result<Operation, JobError> {
+    let st = app.store.get();
+    let host = st
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .ok_or_else(|| JobError(format!("unknown clone '{host_id}'")))?;
+    if !host.managed {
+        return Err(JobError(format!("'{host_id}' is not a managed clone")));
+    }
+    if !host.archived {
+        return Err(JobError(format!("'{host_id}' is not archived")));
+    }
+    if st
+        .operations
+        .iter()
+        .any(|o| o.status == OperationStatus::Running && o.target == host_id)
+    {
+        return Err(JobError(format!(
+            "'{host_id}' already has an operation in flight"
+        )));
+    }
+
+    let op = make_op(OperationKind::Unarchive, host_id, None);
+    let op_for_return = op.clone();
+    let op_id = op.id.clone();
+    app.store.mutate(|s| s.operations.push(op));
+
+    let app2 = app.clone();
+    let host_id = host_id.to_string();
+    tokio::spawn(async move { run_unarchive(app2, op_id, host_id).await });
+    Ok(op_for_return)
+}
+
+async fn run_unarchive(app: App, op_id: String, host_id: String) {
+    let mut progress = op_progress(&app, &op_id, OperationKind::Unarchive);
+    progress("start", "starting the archived clone");
+    if let Err(e) = app.docker.start_container(&host_id).await {
+        return fail_op(&app, &op_id, e.to_string());
+    }
+
+    app.store.mutate(|s| {
+        if let Some(host) = s.hosts.iter_mut().find(|h| h.id == host_id) {
+            host.archived = false;
+            host.monitor_state = None;
+            host.local_ip = None;
+            host.unread = false;
+        }
+        if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
+            op.status = OperationStatus::Done;
+            op.step = "done".into();
+            op.pct = 100.0;
+            op.message = format!("clone {host_id} restored");
+            op.finished_at = Some(now_ms());
+        }
+    });
+    app.tokens.set_archived(&host_id, false);
+    drop(progress);
+    crate::shm::ensure_now(&app, &host_id).await;
+    schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
 }
 
 #[cfg(test)]
@@ -929,20 +967,12 @@ mod tests {
     }
 
     #[test]
-    fn clonespec_default_has_no_codex_account() {
+    fn clonespec_default_has_no_group() {
         let spec = CloneSpec {
             new_hostname: "x".into(),
             ..Default::default()
         };
-        assert!(spec.codex_account.is_none());
-    }
-
-    #[tokio::test]
-    async fn run_clone_codex_none_leaves_no_email() {
-        // With no imported codex accounts, resolve_assignment(None) → None, so a clone's
-        // codex_account_email stays None (the block is a no-op) — independent of claude.
-        let app = test_app();
-        assert!(crate::codex::resolve_assignment(&app, None).is_none());
+        assert!(spec.group.is_none());
     }
 
     #[tokio::test]
@@ -1031,6 +1061,76 @@ mod tests {
             err.0.contains("in flight") || err.0.contains("already"),
             "got: {}",
             err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_and_unarchive_register_lifecycle_ops() {
+        let app = test_app();
+        app.store.mutate(|s| {
+            s.hosts.push(RmngClone {
+                id: "clone-a".into(),
+                host: "clone-a".into(),
+                managed: true,
+                ..Default::default()
+            });
+        });
+
+        let archive = start_archive(&app, "clone-a").unwrap();
+        assert_eq!(archive.kind, OperationKind::Archive);
+        assert_eq!(archive.target, "clone-a");
+        assert!(
+            app.store
+                .get()
+                .operations
+                .iter()
+                .any(|op| op.id == archive.id)
+        );
+        assert!(
+            start_unarchive(&app, "clone-a")
+                .unwrap_err()
+                .0
+                .contains("not archived")
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_validation_rejects_unmanaged_and_wrong_state() {
+        let app = test_app();
+        app.store.mutate(|s| {
+            s.hosts.push(RmngClone {
+                id: "plain".into(),
+                host: "plain".into(),
+                ..Default::default()
+            });
+            s.hosts.push(RmngClone {
+                id: "stored".into(),
+                host: "stored".into(),
+                managed: true,
+                archived: true,
+                ..Default::default()
+            });
+        });
+
+        assert!(
+            start_archive(&app, "plain")
+                .unwrap_err()
+                .0
+                .contains("not a managed")
+        );
+        assert!(
+            start_archive(&app, "stored")
+                .unwrap_err()
+                .0
+                .contains("already archived")
+        );
+        let unarchive = start_unarchive(&app, "stored").unwrap();
+        assert_eq!(unarchive.kind, OperationKind::Unarchive);
+        assert!(
+            start_unarchive(&app, "stored")
+                .unwrap_err()
+                .0
+                .contains("in flight")
         );
     }
 }

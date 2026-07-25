@@ -26,8 +26,6 @@ pub fn tools() -> Vec<Value> {
     };
     vec![
         json!({ "name": "list_windows", "description": "List open windows (id, title, wm_class, monitor, geometry, state)", "inputSchema": obj(json!({}), json!([])) }),
-        json!({ "name": "list_apps", "description": "List installed launcher apps (id, name, description)", "inputSchema": obj(json!({}), json!([])) }),
-        json!({ "name": "launch_app", "description": "Launch an app by desktop-file id (e.g. \"firefox.desktop\")", "inputSchema": obj(json!({ "id": { "type": "string" } }), json!(["id"])) }),
         json!({ "name": "move_window", "description": "Tile a window: mode \"maximize\" (default) or \"center-half\", optionally onto monitor index", "inputSchema": obj(json!({ "id": { "type": "integer" }, "monitor": { "type": "integer" }, "mode": { "type": "string", "enum": ["maximize", "center-half"] } }), json!(["id"])) }),
     ]
 }
@@ -37,13 +35,6 @@ pub fn tools() -> Vec<Value> {
 pub async fn call(conn: &zbus::Connection, name: &str, args: &Value) -> Result<Value, String> {
     let script = match name {
         "list_windows" => js_list_windows(),
-        "list_apps" => JS_LIST_APPS.to_string(),
-        "launch_app" => {
-            let id = args.get("id").and_then(Value::as_str).ok_or("id required")?;
-            // JSON-encode the id into a JS string literal — injection-safe.
-            let lit = serde_json::to_string(id).map_err(|e| e.to_string())?;
-            JS_LAUNCH_APP.replace("__ID__", &lit)
-        }
         "move_window" => {
             let id = args.get("id").and_then(Value::as_u64).ok_or("id required")?;
             let monitor = args.get("monitor").and_then(Value::as_i64).unwrap_or(-1) as i32;
@@ -145,18 +136,3 @@ fn js_move_resize(id: u64, monitor: i32, mode: &str) -> String {
     )
 }
 
-const JS_LIST_APPS: &str = "(() => { \
-    const Gio = imports.gi.Gio; const out = []; \
-    for (const info of Gio.AppInfo.get_all()) { \
-        if (!info.should_show()) continue; \
-        out.push({ id: info.get_id() || '', name: info.get_display_name() || info.get_name() || '', description: info.get_description() || '' }); \
-    } \
-    out.sort((a, b) => a.name.localeCompare(b.name)); return out; \
-})()";
-
-const JS_LAUNCH_APP: &str = "(() => { \
-    const Shell = imports.gi.Shell; const id = __ID__; \
-    const app = Shell.AppSystem.get_default().lookup_app(id); \
-    if (!app) throw new Error('no installed app with id ' + id); \
-    app.activate(); return { id: app.get_id(), name: app.get_name() }; \
-})()";

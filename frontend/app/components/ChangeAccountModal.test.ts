@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 
-import { currentCodexValue, currentValue } from "./ChangeAccountModal";
-import type { Host } from "~/lib/types";
+import { currentValue } from "./ChangeAccountModal";
+import type { Clone } from "~/lib/types";
 
-const host = (overrides: Partial<Host> = {}): Host => ({
+const clone = (overrides: Partial<Clone> = {}): Clone => ({
   id: "h1",
   host: "h1",
   port: 3389,
@@ -13,16 +13,15 @@ const host = (overrides: Partial<Host> = {}): Host => ({
   ...overrides,
 });
 
-test("tokenless legacy Claude host is not treated as already auto", () => {
-  const h = host();
+test("a clone with no group binding reads as 'none'", () => {
+  const h = clone();
 
   expect(currentValue(h)).toBe("none");
-  expect("auto" !== currentValue(h)).toBe(true);
+  expect("none" !== currentValue(h)).toBe(false);
 });
 
-test("tokenless legacy Codex host is not treated as already auto", () => {
-  const h = host();
+test("a clone bound to a group reads back its group name", () => {
+  const h = clone({ group: "pooled" });
 
-  expect(currentCodexValue(h)).toBe("none");
-  expect("auto" !== currentCodexValue(h)).toBe(true);
+  expect(currentValue(h)).toBe("pooled");
 });

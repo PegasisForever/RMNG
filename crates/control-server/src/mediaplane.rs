@@ -1,5 +1,5 @@
 //! Port 1 — the media plane (the real version of the `media-server` test bin).
-//! Also backs the **desktop MCP tools** (port 3/4): it keeps each clone's daemon
+//! Also backs the **clone-local desktop MCP tools**: it keeps each clone's daemon
 //! connection (input relay) + latest dmabuf frame (screenshots) in a shared
 //! [`MediaHandle`].
 //!
@@ -34,14 +34,14 @@ use crate::app::App;
 /// One connected viewer: its id + the sender into its per-viewer writer thread.
 /// The writer thread owns the socket; producers only ever `try_send` here, so a slow
 /// viewer's socket never blocks the encode or metadata threads.
-struct ViewerConn {
+pub(crate) struct ViewerConn {
     id: u64,
     tx: SyncSender<Arc<[u8]>>,
 }
 
 /// The live set of viewers, keyed by id. Held under a short-lived lock only to
 /// snapshot/insert/remove; all sends are non-blocking `try_send`.
-type Viewers = Arc<Mutex<HashMap<u64, ViewerConn>>>;
+pub(crate) type Viewers = Arc<Mutex<HashMap<u64, ViewerConn>>>;
 
 /// Bounded per-viewer queue depth. `try_send` overflow disconnects the viewer (it
 /// reconnects + re-primes). Bounds worst-case queued memory at CAP × max-AU per slow
@@ -205,15 +205,42 @@ impl MediaHandle {
 /// encoder pipeline fresh — mid-stream VA-encoder resolution renegotiation is unreliable.
 type Encoders = Arc<Mutex<HashMap<u32, (Arc<Encoder>, u32, u32)>>>;
 
-pub fn spawn(app: App) {
-    // `spawn` is called from the async `main`, so a tokio runtime exists here; capture its
-    // handle so the std-thread media plane can `block_on` async control-plane calls
-    // (`App::dial_host`) from the forward-data serve threads.
-    let rt_handle = tokio::runtime::Handle::current();
-    if let Err(e) = media::init() {
-        tracing::error!("media init failed; port 1 disabled: {e}");
+/// Proof that [`init`] completed. Opaque so callers must go through [`init`]
+/// rather than inventing an “enabled” boolean.
+pub struct MediaInit {
+    enabled: bool,
+}
+
+impl MediaInit {
+    #[cfg(test)]
+    pub(crate) fn enabled_for_test(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// Initialize GStreamer (and related media env) once. Must run **before** any
+/// background task that can spawn a child process — inherited scanner pipes
+/// otherwise hang init forever (ports never bind).
+///
+/// Failure is non-fatal: returns a disabled token so the web API still boots.
+pub fn init() -> MediaInit {
+    match media::init() {
+        Ok(()) => MediaInit { enabled: true },
+        Err(e) => {
+            tracing::error!("media init failed; port 1 disabled: {e}");
+            MediaInit { enabled: false }
+        }
+    }
+}
+
+pub fn spawn(app: App, init: MediaInit) {
+    if !init.enabled {
         return;
     }
+    // `spawn` is called from the async `main`, so a tokio runtime exists here; capture its
+    // handle so the std-thread media plane can `block_on` async control-plane calls
+    // (`App::dial_clone`) from the forward-data serve threads.
+    let rt_handle = tokio::runtime::Handle::current();
     let cfg = app.config();
     let video_port = cfg.listen.video;
     let forward_port = cfg.listen.forward;
@@ -226,12 +253,17 @@ pub fn spawn(app: App) {
     let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
     let encoders: Encoders = Arc::new(Mutex::new(HashMap::new()));
     let last_sel: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // Headless-clone terminal plane: proxies tmux sessions to viewers when the selected clone
+    // is headless. Threaded into the connect path, the selection watcher, and each viewer's
+    // input reader below.
+    let termplane =
+        Arc::new(crate::termplane::TermPlane::new(app.clone(), viewers.clone(), rt_handle.clone()));
 
     // Port 1 TCP: viewers + their input. Each viewer gets a bounded channel + a writer
     // thread; producers only `try_send`, so a slow viewer never blocks the encoders.
     {
-        let (viewers, handle, app, encoders) =
-            (viewers.clone(), handle.clone(), app.clone(), encoders.clone());
+        let (viewers, handle, app, encoders, termplane) =
+            (viewers.clone(), handle.clone(), app.clone(), encoders.clone(), termplane.clone());
         std::thread::spawn(move || match TcpListener::bind(("0.0.0.0", video_port)) {
             Ok(l) => {
                 tracing::info!("port 1 (video) listening on 0.0.0.0:{video_port}");
@@ -270,17 +302,24 @@ pub fn spawn(app: App) {
                     });
 
                     let state = app.store.get();
+                    let cfg = app.config();
                     let selected = app.store.selected();
                     // Queue mode + metadata straight into this viewer's channel (mode is first).
-                    prime_viewer_metadata(&handle, &tx, selected.clone(), chroma, &state, forward_port);
+                    prime_viewer_metadata(&handle, &tx, selected.clone(), chroma, &state, &cfg, forward_port);
                     // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
                     // (independent of encode latency); mode already leads its channel.
                     viewers.lock().unwrap().insert(id, ViewerConn { id, tx });
                     prime_viewer_video(&handle, &encoders, &viewers, selected, chroma);
+                    // If the selected clone is headless, activate its tmux view and prime this
+                    // viewer with the current session list.
+                    termplane.on_viewers_changed();
 
                     // Reader thread owns teardown.
-                    let (handle, app, viewers) = (handle.clone(), app.clone(), viewers.clone());
-                    std::thread::spawn(move || read_viewer_input(read_half, handle, app, viewers, id));
+                    let (handle, app, viewers, termplane) =
+                        (handle.clone(), app.clone(), viewers.clone(), termplane.clone());
+                    std::thread::spawn(move || {
+                        read_viewer_input(read_half, handle, app, viewers, termplane, id)
+                    });
                 }
             }
             Err(e) => tracing::error!("port 1 bind {video_port} failed: {e}"),
@@ -307,18 +346,28 @@ pub fn spawn(app: App) {
     // next incoming frame. `/api/activate` only mutates the store; serve_clone's frame loop
     // otherwise notices the switch lazily — on the next frame from *any* clone — which on a
     // static, damage-driven desktop can be seconds away (the reported "few seconds before the
-    // new host appears"). Watch the store's change bus and, the moment `selected` flips, force
+    // new clone appears"). Watch the store's change bus and, the moment `selected` flips, force
     // a fresh IDR on every encoder + re-prime from the newly-selected clone's last frame /
     // cursor / layout. Shares `last_sel` with the frame loop (same mutex, same lock order
     // last_sel → encoders/viewer), so the two paths serialize and never double-prime.
     {
-        let (app, encoders, viewers, last_sel, handle) =
-            (app.clone(), encoders.clone(), viewers.clone(), last_sel.clone(), handle.clone());
+        let (app, encoders, viewers, last_sel, handle, termplane) = (
+            app.clone(),
+            encoders.clone(),
+            viewers.clone(),
+            last_sel.clone(),
+            handle.clone(),
+            termplane.clone(),
+        );
         std::thread::spawn(move || {
             let (_seed, mut rx) = app.store.subscribe();
+            // Track the configured window set so a layout-preset change re-broadcasts a fresh
+            // ViewSpec even when the *selection* is unchanged (the window set follows the layout,
+            // not the daemon's report). Seeded to the current layout so the first tick is quiet.
+            let mut last_monitors = configured_monitors(&app.config());
             loop {
                 match rx.blocking_recv() {
-                    // Any state mutation (or a lag) → re-check the selection; act only on a change.
+                    // Any state mutation (or a lag) → re-check selection + layout; act on a change.
                     Ok(_) | Err(RecvError::Lagged(_)) => {
                         // A config change (or any mutation) may have altered forwards —
                         // re-push the full set; each viewer reconciles idempotently.
@@ -327,16 +376,36 @@ pub fn spawn(app: App) {
                             broadcast_forwards(&viewers, &state, forward_port);
                         }
                         let sel = app.store.selected();
+                        let monitors = configured_monitors(&app.config());
+                        let monitors_changed = monitors != last_monitors;
+                        last_monitors = monitors;
                         let mut ls = last_sel.lock().unwrap();
-                        if *ls == sel {
+                        let sel_changed = *ls != sel;
+                        if !sel_changed && !monitors_changed {
                             continue;
                         }
-                        *ls = sel.clone();
+                        if sel_changed {
+                            *ls = sel.clone();
+                            // Selection changed: (de)activate the headless terminal view accordingly
+                            // (handles headless→headed, headed→headless, and headless→headless).
+                            termplane.on_viewers_changed();
+                        }
                         // No viewers attached → nothing to repaint; the connect path primes on connect.
                         if viewers.lock().unwrap().is_empty() {
                             continue;
                         }
-                        reprime_all(&handle, &encoders, &viewers, sel, chroma);
+                        if sel_changed {
+                            reprime_all(&handle, &encoders, &viewers, &app, sel, chroma);
+                        } else {
+                            // Only the configured layout changed: refresh the window set in place.
+                            // Headless clones re-broadcast their Terminal ViewSpec (with the new
+                            // monitors) via termplane; headed clones get a fresh Desktop ViewSpec.
+                            match sel.as_deref() {
+                                Some(s) if is_headless(&state, s) => termplane.on_viewers_changed(),
+                                Some(_) => broadcast_json(&viewers, T_VIEWSPEC, &desktop_view_spec(&app.config())),
+                                None => {}
+                            }
+                        }
                     }
                     Err(RecvError::Closed) => break,
                 }
@@ -373,23 +442,36 @@ pub fn spawn(app: App) {
 }
 
 /// Port-1 frame types (1-byte tag prefix). 0 = video, 1 = clipboard, 2 = cursor,
-/// 3 = layout, 4 = mode (chroma handshake, sent once at connect before any video).
+/// 3 = view spec, 4 = mode (chroma handshake, sent once at connect before any video).
 const T_VIDEO: u8 = 0;
 const T_CLIPBOARD: u8 = 1;
 const T_CURSOR: u8 = 2;
-const T_LAYOUT: u8 = 3;
+/// Server→viewer tag 3: the authoritative [`wire::viewer::ViewSpec`] — the viewer's entire
+/// window set + each window's content (Desktop video / Terminal tabs). Sent on connect and
+/// every selection/layout change; replaces the old daemon-reported monitor layout.
+pub(crate) const T_VIEWSPEC: u8 = 3;
 const T_MODE: u8 = 4;
 /// Server→viewer tag 5: the desired forward set (`[5][u32be len][JSON ForwardsMsg]`).
 const T_FORWARDS: u8 = 5;
+/// Server→viewer tag 7: raw terminal output bytes for one session
+/// (`[7][u32be len][JSON TermData]`). The session list rides in the tag-3 `ViewSpec`.
+pub(crate) const T_TERM_DATA: u8 = 7;
 /// Viewer→server tag 2: a forward rule's status changed (`[2][u32be len][JSON ForwardStatusMsg]`).
 const T_FORWARD_STATUS: u8 = 2;
+/// Viewer→server tag 3: keystrokes/paste for a headless clone's tmux session (`TermInput`).
+const T_TERM_INPUT: u8 = 3;
+/// Viewer→server tag 4: resize a session's PTY (`TermResize`).
+const T_TERM_RESIZE: u8 = 4;
+/// Viewer→server tag 5: create a new tmux session — the tab-bar "+" (`TermNewSession`).
+const T_TERM_NEW_SESSION: u8 = 5;
 
-/// Build the viewer's desired forward set: the union of every host's *enabled* rules,
-/// each tagged with its host id, plus the data port.
+/// Build the viewer's desired forward set: the union of every clone's *enabled* rules,
+/// each tagged with its clone id, plus the data port.
 fn build_forwards_msg(state: &wire::ControlState, forward_port: u16) -> wire::forward::ForwardsMsg {
     let rules = state
         .hosts
         .iter()
+        .filter(|h| !h.archived)
         .flat_map(|h| {
             h.forwards.iter().filter(|f| f.enabled).map(move |f| wire::forward::ForwardRule {
                 host_id: h.id.clone(),
@@ -435,7 +517,7 @@ fn broadcast_video(viewers: &Viewers, monitor_id: u32, au: &[u8]) {
 }
 
 /// Fan one tagged JSON message out to every viewer.
-fn broadcast_json<T: serde::Serialize>(viewers: &Viewers, tag: u8, msg: &T) {
+pub(crate) fn broadcast_json<T: serde::Serialize>(viewers: &Viewers, tag: u8, msg: &T) {
     if let Some(buf) = frame_json(tag, msg) {
         broadcast_bytes(viewers, &buf);
     }
@@ -560,17 +642,54 @@ fn encoder_for(
     }
 }
 
+/// The viewer's stable window set, from the server's **configured** monitor layout
+/// (`AppConfig::effective_monitors`). Fleet-wide and always known — independent of any live
+/// video — so the window set is identical across every clone. `id` is the layout slot index,
+/// matching the daemon's `monitor_id` convention (slot 0 = the viewer's main window).
+pub(crate) fn configured_monitors(cfg: &wire::AppConfig) -> Vec<wire::viewer::ViewMonitor> {
+    cfg.effective_monitors()
+        .iter()
+        .enumerate()
+        .map(|(i, m)| wire::viewer::ViewMonitor {
+            id: i as u32,
+            x: m.x as i32,
+            y: m.y as i32,
+            width: m.width,
+            height: m.height,
+            primary: m.primary,
+        })
+        .collect()
+}
+
+/// The `ViewSpec` for a selection: a `Desktop` view of the configured monitors for a headed
+/// clone, an empty view when nothing is selected. Headless clones are **not** described here —
+/// termplane owns their `Terminal` `ViewSpec` (it carries the live tmux session list).
+fn desktop_view_spec(cfg: &wire::AppConfig) -> wire::viewer::ViewSpec {
+    wire::viewer::ViewSpec {
+        monitors: configured_monitors(cfg),
+        content: wire::viewer::ViewContent::Desktop,
+    }
+}
+
+/// True if the selected clone id names a headless clone (its view is a terminal, owned by
+/// termplane, not a Desktop `ViewSpec`).
+fn is_headless(state: &wire::ControlState, sel: &str) -> bool {
+    state.hosts.iter().any(|h| h.id == sel && h.headless)
+}
+
 /// Prime a freshly-connected viewer's metadata: push its mode + the selected clone's
-/// last-known layout/cursor/clipboard offer + the forward set straight into its own
-/// channel (mode FIRST so the viewer picks its decode path before any AU). Touches
-/// only this viewer's `tx` — no encoder, no registry, so it's safe to call before the
-/// viewer is inserted into `viewers`.
+/// view spec / cursor / clipboard offer + the forward set straight into its own channel
+/// (mode FIRST so the viewer picks its decode path before any AU). Touches only this
+/// viewer's `tx` — no encoder, no registry, so it's safe to call before the viewer is
+/// inserted into `viewers`. A headless selection sends no `ViewSpec` here — termplane
+/// broadcasts the `Terminal` spec via `on_viewers_changed` right after this viewer registers.
 fn prime_viewer_metadata(
     handle: &MediaHandle,
     tx: &SyncSender<Arc<[u8]>>,
     selected: Option<String>,
     chroma: ChromaMode,
     state: &wire::ControlState,
+    cfg: &wire::AppConfig,
     forward_port: u16,
 ) {
     // Mode FIRST so the viewer picks its decode path before any AU.
@@ -581,13 +700,23 @@ fn prime_viewer_metadata(
     if let Some(b) = frame_json(T_FORWARDS, &build_forwards_msg(state, forward_port)) {
         let _ = tx.try_send(b);
     }
-    let Some(sel) = selected else { return };
-    // Layout + last cursor shape + current clipboard offer, targeted to this viewer.
-    if let Some(l) = handle.layout.lock().unwrap().get(&sel).cloned() {
-        if let Some(b) = frame_json(T_LAYOUT, &l) {
+    let Some(sel) = selected else {
+        // Nothing selected: clear the viewer's window set (it shows only its keep-alive window).
+        if let Some(b) = frame_json(
+            T_VIEWSPEC,
+            &wire::viewer::ViewSpec { monitors: vec![], content: wire::viewer::ViewContent::Desktop },
+        ) {
+            let _ = tx.try_send(b);
+        }
+        return;
+    };
+    // Headed clone → send the Desktop view spec now (headless is left to termplane).
+    if !is_headless(state, &sel) {
+        if let Some(b) = frame_json(T_VIEWSPEC, &desktop_view_spec(cfg)) {
             let _ = tx.try_send(b);
         }
     }
+    // Last cursor shape + current clipboard offer, targeted to this viewer.
     if let Some(c) = handle.cursor.lock().unwrap().get(&sel).cloned() {
         if let Some(b) = frame_json(T_CURSOR, &c) {
             let _ = tx.try_send(b);
@@ -651,18 +780,29 @@ fn dup_latest_frames(
 }
 
 /// Re-prime ALL viewers after a selection change: force fresh keyframes + rebroadcast
-/// the newly-selected clone's last frame / cursor / layout to everyone.
+/// the newly-selected clone's view spec / cursor / last frame to everyone.
 fn reprime_all(
     handle: &MediaHandle,
     encoders: &Encoders,
     viewers: &Viewers,
+    app: &App,
     selected: Option<String>,
     chroma: ChromaMode,
 ) {
     force_idr_all(encoders);
-    let Some(sel) = selected else { return };
-    if let Some(l) = handle.layout.lock().unwrap().get(&sel).cloned() {
-        broadcast_json(viewers, T_LAYOUT, &l);
+    let Some(sel) = selected else {
+        // Nothing selected: clear every viewer's window set.
+        broadcast_json(
+            viewers,
+            T_VIEWSPEC,
+            &wire::viewer::ViewSpec { monitors: vec![], content: wire::viewer::ViewContent::Desktop },
+        );
+        return;
+    };
+    // Headed clone → broadcast the Desktop view spec. Headless is owned by termplane: its
+    // Terminal spec is broadcast from `on_viewers_changed` on the same selection flip.
+    if !is_headless(&app.store.get(), &sel) {
+        broadcast_json(viewers, T_VIEWSPEC, &desktop_view_spec(&app.config()));
     }
     if let Some(c) = handle.cursor.lock().unwrap().get(&sel).cloned() {
         broadcast_json(viewers, T_CURSOR, &c);
@@ -715,7 +855,7 @@ fn serve_clone(
                         if *ls != sel {
                             *ls = sel.clone();
                             // Repaint every viewer from the newly-selected clone's last frame + cursor.
-                            reprime_all(&handle, &encoders, &viewers, sel.clone(), chroma);
+                            reprime_all(&handle, &encoders, &viewers, &app, sel.clone(), chroma);
                         }
                     }
                     if sel.as_deref() == Some(id.as_str()) {
@@ -760,9 +900,10 @@ fn serve_clone(
                         // Drop encoders for monitors that no longer exist on the selected
                         // clone (added/resized ones are (re)built lazily by encoder_for on
                         // the next frame). Prevents stale encoders lingering after a switch.
+                        // The viewer's window set comes from the configured layout (tag-3
+                        // ViewSpec), not this daemon-reported one, so nothing is sent here.
                         let live: std::collections::HashSet<u32> = l.iter().map(|m| m.id).collect();
                         encoders.lock().unwrap().retain(|mid, _| live.contains(mid));
-                        broadcast_json(&viewers, T_LAYOUT, &l);
                     }
                 }
             }
@@ -808,7 +949,14 @@ fn teardown_if_current(
 /// Viewer → server: `[u8 type][u32be len][JSON]`. type 0 = InputMsg (to the selected
 /// clone), type 1 = ClipboardData (broker fans it out), type 2 = ForwardStatusMsg.
 /// This thread is the SOLE owner of the viewer's teardown.
-fn read_viewer_input(mut sock: TcpStream, handle: Arc<MediaHandle>, app: App, viewers: Viewers, id: u64) {
+fn read_viewer_input(
+    mut sock: TcpStream,
+    handle: Arc<MediaHandle>,
+    app: App,
+    viewers: Viewers,
+    termplane: Arc<crate::termplane::TermPlane>,
+    id: u64,
+) {
     let src = viewer_src(id);
     let mut tag = [0u8; 1];
     let mut hdr = [0u8; 4];
@@ -844,6 +992,19 @@ fn read_viewer_input(mut sock: TcpStream, handle: Arc<MediaHandle>, app: App, vi
                     app.forwards.report(msg);
                 }
             }
+            T_TERM_INPUT => {
+                if let Ok(msg) = serde_json::from_slice::<wire::viewer::TermInput>(&body) {
+                    termplane.input(msg.session, msg.data);
+                }
+            }
+            T_TERM_RESIZE => {
+                if let Ok(msg) = serde_json::from_slice::<wire::viewer::TermResize>(&body) {
+                    termplane.resize(msg.cols, msg.rows);
+                }
+            }
+            T_TERM_NEW_SESSION => {
+                termplane.new_session();
+            }
             _ => break,
         }
     }
@@ -852,6 +1013,8 @@ fn read_viewer_input(mut sock: TcpStream, handle: Arc<MediaHandle>, app: App, vi
     remove_viewer(&viewers, id);
     clip_forget_source(&handle.clip, &src);
     app.forwards.viewer_left();
+    // A departing viewer may leave the headless terminal view with no audience → deactivate.
+    termplane.on_viewers_changed();
 }
 
 /// Read the data-plane header: `[u32be len][JSON ForwardHeader]` (len capped at 64 KiB).
@@ -905,7 +1068,11 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
         let _ = stream.write_all(&[1u8]);
         return;
     };
-    // Confine the data plane to *configured, enabled* forwards for this host — otherwise
+    if host.archived {
+        let _ = stream.write_all(&[1u8]);
+        return;
+    }
+    // Confine the data plane to *configured, enabled* forwards for this clone — otherwise
     // the 0.0.0.0 listener is an open TCP proxy into the Docker network. The header must
     // name a forward that exists, is enabled, and targets the same remote port.
     let ok = host
@@ -916,7 +1083,7 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
         let _ = stream.write_all(&[1u8]);
         return;
     }
-    let dial = rt.block_on(app.dial_host(&host));
+    let dial = rt.block_on(app.dial_clone(&host));
     let addr = format!("{dial}:{}", header.remote_port);
     match TcpStream::connect(&addr) {
         Ok(upstream) => {
@@ -943,6 +1110,12 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn media_init_disabled_token_is_distinguishable() {
+        let disabled = MediaInit { enabled: false };
+        assert!(!disabled.enabled_for_test());
+    }
 
     /// Connect a SOCK_SEQPACKET client to `path` — the daemon side of an accept pair
     /// (mirrors `clone-daemon`'s `Transport::connect`). The returned fd only has to stay
@@ -998,23 +1171,28 @@ mod tests {
 
     #[test]
     fn build_forwards_msg_unions_enabled_rules_only() {
-        use wire::{ControlState, Host, PortForward};
-        let mut a = Host { id: "a".into(), host: "a".into(), ..Default::default() };
+        use wire::{ControlState, RmngClone, PortForward};
+        let mut a = RmngClone { id: "a".into(), host: "a".into(), ..Default::default() };
         a.forwards = vec![
             PortForward { id: "f8080".into(), remote_port: 3000, local_port: 8080, enabled: true, label: None },
             PortForward { id: "f9".into(), remote_port: 9, local_port: 9, enabled: false, label: None },
         ];
-        let mut b = Host { id: "b".into(), host: "b".into(), ..Default::default() };
+        let mut b = RmngClone { id: "b".into(), host: "b".into(), ..Default::default() };
         b.forwards = vec![
             PortForward { id: "f7000".into(), remote_port: 5000, local_port: 7000, enabled: true, label: None },
         ];
-        let st = ControlState { hosts: vec![a, b], ..Default::default() };
+        let mut archived = RmngClone { id: "archived".into(), host: "archived".into(), archived: true, ..Default::default() };
+        archived.forwards = vec![
+            PortForward { id: "f9000".into(), remote_port: 9000, local_port: 9000, enabled: true, label: None },
+        ];
+        let st = ControlState { hosts: vec![a, b, archived], ..Default::default() };
         let msg = build_forwards_msg(&st, 9005);
         assert_eq!(msg.forward_port, 9005);
-        // Only the two enabled rules, tagged with host id.
+        // Only the two enabled rules, tagged with clone id.
         assert_eq!(msg.rules.len(), 2);
         assert!(msg.rules.iter().any(|r| r.host_id == "a" && r.local_port == 8080 && r.remote_port == 3000));
         assert!(msg.rules.iter().any(|r| r.host_id == "b" && r.local_port == 7000));
+        assert!(!msg.rules.iter().any(|r| r.host_id == "archived"));
         assert!(!msg.rules.iter().any(|r| r.local_port == 9)); // disabled excluded
     }
 

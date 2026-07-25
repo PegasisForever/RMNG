@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// One rule pushed to the viewer: the persisted [`crate::PortForward`] subset it needs
-/// to run a listener, tagged with its owning host.
+/// to run a listener, tagged with its owning clone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForwardRule {
@@ -17,7 +17,7 @@ pub struct ForwardRule {
     pub local_port: u16,
 }
 
-/// Server→viewer (port-1 tag 5): the full desired rule set (union across all hosts)
+/// Server→viewer (port-1 tag 5): the full desired rule set (union across all clones)
 /// plus the control-server's data port, sent on connect and on every config change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

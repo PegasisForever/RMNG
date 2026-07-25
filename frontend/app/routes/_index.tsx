@@ -1,14 +1,10 @@
 import { Menu } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 
-import {
-  ChangeAccountModal,
-  currentCodexValue,
-  currentValue,
-} from "~/components/ChangeAccountModal";
+import { ChangeAccountModal } from "~/components/ChangeAccountModal";
 import { CloneModal } from "~/components/CloneModal";
 import { CommitImageModal } from "~/components/CommitImageModal";
-import { ImportAccountModal } from "~/components/ImportAccountModal";
+import { GroupLoginModal } from "~/components/GroupLoginModal";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
@@ -16,9 +12,13 @@ import { Sidebar } from "~/components/Sidebar";
 import {
   activate,
   activateLayout,
-  cloneHost,
+  archiveClone,
+  duplicateClone,
   commitImage,
-  deleteHost,
+  createGroup,
+  deleteGroup,
+  deleteGroupAccount,
+  deleteClone,
   deleteImage,
   getConfig,
   getUpdateStatus,
@@ -26,26 +26,29 @@ import {
   pullTemplate,
   putConfig,
   putForwards,
-  refreshClaudeUsage,
-  refreshCodexUsage,
+  refreshUsage,
   reorder,
   restartServer,
-  swapClaudeAccount,
-  swapCodexAccount,
+  setCloneGroup,
   testConfig,
+  unarchiveClone,
   updateServer,
 } from "~/lib/api";
-import { type ControlState, type Host, emptyState } from "~/lib/types";
+import { type ClaudeUsage, type ControlState, type GroupUsage, type Clone, emptyState } from "~/lib/types";
+import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
+import type { LxcStats } from "~/lib/wire/LxcStats";
+import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
+import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 
 import type { Route } from "./+types/_index";
 
 // BlockNote + the chat panel are browser-only; load them lazily and render only
 // after mount so they never participate in SSR.
-const HostEditor = lazy(() => import("~/components/HostEditor"));
+const CloneEditor = lazy(() => import("~/components/CloneEditor"));
 const ChatPanel = lazy(() => import("~/components/ChatPanel"));
 
 function ClientOnly({ children }: { children: React.ReactNode }) {
@@ -55,7 +58,7 @@ function ClientOnly({ children }: { children: React.ReactNode }) {
 }
 
 export function meta() {
-  return [{ title: "rmng control" }];
+  return [{ title: "RMNG" }];
 }
 
 // SPA mode (ssr:false): the live EventSource("/events") delivers the initial full
@@ -64,45 +67,126 @@ export function clientLoader() {
   return emptyState();
 }
 
+// If no frame or heartbeat has arrived for this long, treat the socket as wedged and
+// rebuild it. The server pings every 15s, so ~3 missed pings — comfortably clear of
+// jitter but quick enough to recover.
+const SSE_STALE_MS = 45_000;
+
 /** Initial state from the SSR loader, kept live by the SSE stream. The same connection
- *  carries the persisted `ControlState` (default event) and a volatile per-host CPU/RAM
- *  map (named `stats` event) — the latter never touches `state.json`. */
+ *  carries persisted `ControlState` plus volatile clone (`stats`) and CT-wide (`lxcStats`)
+ *  resource events; neither metric stream touches `state.json`.
+ *
+ *  A plain `EventSource` auto-reconnects when the browser *notices* the socket died — but
+ *  after a Wi-Fi drop the TCP connection often goes half-open: it stays `OPEN`, delivers
+ *  nothing, and never fires `onerror`, so the UI silently stops updating. We defend against
+ *  that with an observable heartbeat + three recovery triggers: a staleness watchdog, the
+ *  `online` event (Wi-Fi came back), and tab re-focus. Each rebuilds the connection, and a
+ *  fresh `/events` connection replays the full snapshot, so the UI resyncs on reconnect. */
 function useLiveState(initial: ControlState) {
   const [state, setState] = useState(initial);
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
+  const [lxcStats, setLxcStats] = useState<LxcStats | null>(null);
   const [forwards, setForwards] = useState<Record<string, ForwardRuntime[]>>({});
+  const [tokens, setTokens] = useState<Record<string, CloneTokenUsage>>({});
   useEffect(() => {
-    const es = new EventSource("/events");
-    es.onmessage = (e) => {
-      try {
-        setState(JSON.parse(e.data));
-      } catch {
-        // ignore malformed frame
+    let es: EventSource | null = null;
+    let lastActivity = Date.now();
+    let disposed = false; // set on unmount so late callbacks don't reopen
+
+    const connect = () => {
+      if (disposed) return;
+      es?.close();
+      lastActivity = Date.now();
+      es = new EventSource("/events");
+      es.onopen = () => {
+        lastActivity = Date.now();
+      };
+      es.onmessage = (e) => {
+        lastActivity = Date.now();
+        try {
+          setState(JSON.parse(e.data));
+        } catch {
+          // ignore malformed frame
+        }
+      };
+      es.addEventListener("stats", (e) => {
+        lastActivity = Date.now();
+        try {
+          setStats(JSON.parse((e as MessageEvent).data));
+        } catch {
+          // ignore malformed frame
+        }
+      });
+      es.addEventListener("lxcStats", (e) => {
+        lastActivity = Date.now();
+        try {
+          setLxcStats(JSON.parse((e as MessageEvent).data));
+        } catch {
+          // ignore malformed frame
+        }
+      });
+      es.addEventListener("forwards", (e) => {
+        lastActivity = Date.now();
+        try {
+          setForwards(JSON.parse((e as MessageEvent).data));
+        } catch {
+          // ignore malformed frame
+        }
+      });
+      es.addEventListener("tokens", (e) => {
+        lastActivity = Date.now();
+        try {
+          setTokens(JSON.parse((e as MessageEvent).data));
+        } catch {
+          // ignore malformed frame
+        }
+      });
+      // Heartbeat carries no payload — it exists only to keep `lastActivity` fresh so the
+      // watchdog can distinguish a wedged socket from an idle-but-healthy one.
+      es.addEventListener("ping", () => {
+        lastActivity = Date.now();
+      });
+    };
+
+    connect();
+
+    // Watchdog: rebuild a socket the browser has given up on (CLOSED), or one that still
+    // claims to be OPEN but has gone silent past the staleness window (the half-open case).
+    // A CONNECTING socket is the browser's own retry in flight — leave it be.
+    const watchdog = window.setInterval(() => {
+      if (disposed) return;
+      const stale = Date.now() - lastActivity > SSE_STALE_MS;
+      if (es?.readyState === EventSource.CLOSED || (es?.readyState === EventSource.OPEN && stale)) {
+        connect();
+      }
+    }, 5_000);
+
+    // Wi-Fi/network regained → rebuild immediately (the current socket is likely half-open).
+    const onOnline = () => connect();
+    // Tab re-focus after a sleep/background stretch that outran the staleness window.
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastActivity > SSE_STALE_MS) {
+        connect();
       }
     };
-    es.addEventListener("stats", (e) => {
-      try {
-        setStats(JSON.parse((e as MessageEvent).data));
-      } catch {
-        // ignore malformed frame
-      }
-    });
-    es.addEventListener("forwards", (e) => {
-      try {
-        setForwards(JSON.parse((e as MessageEvent).data));
-      } catch {
-        // ignore malformed frame
-      }
-    });
-    return () => es.close();
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(watchdog);
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisible);
+      es?.close();
+    };
   }, []);
-  return { state, stats, forwards };
+  return { state, stats, lxcStats, forwards, tokens };
 }
 
 export default function Home({ loaderData }: Route.ComponentProps) {
   // The live SSE state powers both the wizard (template-provision progress) and the
-  // dashboard, so it lives here at the gate. `stats` is the volatile per-host usage map.
-  const { state, stats, forwards } = useLiveState(loaderData);
+  // dashboard, so it lives here at the gate. `stats` is the volatile per-clone usage map.
+  const { state, stats, lxcStats, forwards, tokens } = useLiveState(loaderData);
   // First-run gate: hold the config (null while loading). Render a minimal centered
   // "Loading…" until it resolves so the dashboard never flashes before the wizard
   // decision; render the wizard INSTEAD of the dashboard while setup isn't complete.
@@ -131,10 +215,13 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     <Dashboard
       state={state}
       stats={stats}
+      lxcStats={lxcStats}
       forwards={forwards}
-      cloneCpus={cfg.docker.cloneCpus}
+      tokens={tokens}
       sshPublicHost={cfg.ssh?.publicHost ?? ""}
       bastionPort={cfg.listen.bastion}
+      groups={cfg.groups}
+      onConfigChange={setCfg}
     />
   );
 }
@@ -142,30 +229,45 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 function Dashboard({
   state,
   stats,
+  lxcStats,
   forwards,
-  cloneCpus,
+  tokens,
   sshPublicHost,
   bastionPort,
+  groups,
+  onConfigChange,
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
+  lxcStats: LxcStats | null;
   forwards: Record<string, ForwardRuntime[]>;
-  cloneCpus: number;
+  tokens: Record<string, CloneTokenUsage>;
   /** `ssh.publicHost` (config) — threaded down to each sidebar row's copied SSH
    *  command; empty ⇒ falls back to `window.location.hostname`. */
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied SSH commands jump through. */
   bastionPort: number;
+  /** Configured account groups (from `config.groups`); the authoritative group list for
+   *  the by-group panels + pickers. */
+  groups: Group[];
+  /** Update the gate's config after a group create/delete (returns the fresh redacted config). */
+  onConfigChange: (cfg: AppConfigRedacted) => void;
 }) {
+  // OS notification whenever a clone transitions out of `working` (idle/offline) while
+  // it isn't the selected one — driven by the server's `unread` edge. Clicking it selects
+  // that clone, the same activate path the sidebar uses.
+  useCloneNotifications(state.hosts, (id) => run(activate(id)));
+
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [commitHost, setCommitHost] = useState<Host | null>(null);
+  const [commitClone, setCommitClone] = useState<Clone | null>(null);
   const [committing, setCommitting] = useState(false);
-  const [changeHost, setChangeHost] = useState<Host | null>(null);
+  const [changeClone, setChangeClone] = useState<Clone | null>(null);
   const [changing, setChanging] = useState(false);
-  const [forwardHost, setForwardHost] = useState<Host | null>(null);
+  // The group an "add account" OAuth login is in flight for (null = modal closed).
+  const [loginGroup, setLoginGroup] = useState<string | null>(null);
+  const [forwardClone, setForwardClone] = useState<Clone | null>(null);
   const [forwarding, setForwarding] = useState(false);
   const [forwardError, setForwardError] = useState<string | null>(null);
 
@@ -202,12 +304,12 @@ function Dashboard({
     });
   }, [state.hosts]);
 
-  const hostsById = new Map(state.hosts.map((h) => [h.id, h]));
-  const orderedHosts = order.flatMap((id) => {
-    const h = hostsById.get(id);
+  const clonesById = new Map(state.hosts.map((h) => [h.id, h]));
+  const orderedClones = order.flatMap((id) => {
+    const h = clonesById.get(id);
     return h ? [h] : [];
   });
-  const selectedHost = state.selected ? hostsById.get(state.selected) ?? null : null;
+  const selectedClone = state.selected ? clonesById.get(state.selected) ?? null : null;
 
   // Refetch images when an image-mutating op (pull/commit/delete) leaves the
   // running set — that's when the image list changed. Keyed on the set of running
@@ -227,6 +329,47 @@ function Dashboard({
 
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
+
+  // The by-group display list: every configured group (authoritative, instant on
+  // create/delete), carrying its live usage accounts from `usageGroups` where present.
+  // The usage poll lags group creation (up to its interval), so an empty group shows up
+  // immediately with no accounts until the next poll fills them in.
+  const usageByName = new Map((state.usageGroups ?? []).map((g) => [g.name, g]));
+  const displayGroups: GroupUsage[] = groups.map(
+    (g) => usageByName.get(g.name) ?? { name: g.name, accounts: [] },
+  );
+
+  // The auth-dir credential file name CLIProxyAPI stores per account (used by the delete
+  // endpoint): `claude-<email>.json` / `codex-<email>.json` / `antigravity-<email>.json`.
+  const authFileName = (a: ClaudeUsage) => {
+    const prefix =
+      a.provider === "codex" ? "codex" : a.provider === "antigravity" ? "antigravity" : "claude";
+    return `${prefix}-${a.email}.json`;
+  };
+
+  const onCreateGroup = (name?: string) => {
+    const n = (name ?? window.prompt("New group name (A–Z, 0–9, . _ -)") ?? "").trim();
+    if (!n) return;
+    createGroup(n)
+      .then((cfg) => {
+        setError(null);
+        onConfigChange(cfg);
+      })
+      .catch((e: Error) => setError(e.message));
+  };
+
+  // Confirm-free — both call sites (sidebar panel, settings group manager) confirm first.
+  const onDeleteGroup = (name: string) => {
+    deleteGroup(name)
+      .then((cfg) => {
+        setError(null);
+        onConfigChange(cfg);
+      })
+      .catch((e: Error) => setError(e.message));
+  };
+
+  const onDeleteGroupAccount = (group: string, account: ClaudeUsage) =>
+    run(deleteGroupAccount(group, authFileName(account)));
 
   // Drag-reorder: optimistically adopt the new order (smooth UI), then persist —
   // the SSE frame confirms after the server writes it.
@@ -258,10 +401,10 @@ function Dashboard({
           <Menu className="size-4" />
         </button>
         <span className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-800 dark:text-slate-100">
-          {selectedHost ? selectedHost.id : "rmng control"}
+          {selectedClone ? selectedClone.id : "rmng control"}
         </span>
         {/* Notes/Chat toggle lives here on mobile — the only header < lg. */}
-        {selectedHost ? (
+        {selectedClone ? (
           <div className="flex shrink-0 gap-0.5 rounded-md bg-slate-100 p-0.5 text-xs font-medium dark:bg-slate-800">
             <button
               type="button"
@@ -299,17 +442,18 @@ function Dashboard({
           />
         ) : null}
 
-        {/* Left: host selection sidebar. Off-canvas drawer < lg, static ≥ lg.
+        {/* Left: clone selection sidebar. Off-canvas drawer < lg, static ≥ lg.
             Presentational — every server call is a callback wired up here. */}
         <Sidebar
           open={sidebarOpen}
-          accounts={state.claudeAccounts ?? []}
-          hosts={orderedHosts}
+          usageGroups={displayGroups}
+          hosts={orderedClones}
           stats={stats}
+          lxcStats={lxcStats}
+          tokens={tokens}
           forwards={forwards}
           operations={state.operations}
           selectedId={state.selected}
-          cloneCpus={cloneCpus}
           sshPublicHost={sshPublicHost}
           bastionPort={bastionPort}
           presetNames={state.layoutPresetNames ?? []}
@@ -317,38 +461,46 @@ function Dashboard({
           onActivateLayout={(name) => run(activateLayout(name))}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenClone={() => setCloneOpen(true)}
-          onRefreshClaude={() => run(refreshClaudeUsage())}
-          onImportAccount={() => setImportOpen(true)}
-          onSelectHost={(host) => {
-            run(activate(host.id));
+          onCreateGroup={() => onCreateGroup()}
+          onAddAccount={(group) => setLoginGroup(group)}
+          onDeleteGroup={onDeleteGroup}
+          onRefresh={() => refreshUsage()}
+          onSelectClone={(clone) => {
+            run(activate(clone.id));
             setSidebarOpen(false);
           }}
-          onDeleteHost={(host) => {
-            const msg = host.managed
-              ? `Delete ${host.id}? This destroys its container.`
-              : `Remove ${host.id}? This unregisters the host.`;
-            if (confirm(msg)) run(deleteHost(host.id));
+          onDeleteClone={(clone) => {
+            // Deleting a parent cascades to its sub clones (server-side), so say so up front.
+            const subCount = state.hosts.filter((h) => h.parent === clone.id).length;
+            const subs =
+              subCount > 0 ? ` and its ${subCount} sub clone${subCount === 1 ? "" : "s"}` : "";
+            const msg = clone.managed
+              ? `Delete ${clone.id}${subs}? This destroys its container${subCount > 0 ? "s" : ""}.`
+              : `Remove ${clone.id}? This unregisters the clone.`;
+            if (confirm(msg)) run(deleteClone(clone.id));
           }}
-          onCommitHost={(host) => setCommitHost(host)}
-          onChangeAccountHost={(host) => setChangeHost(host)}
-          onPortForwardHost={(host) => {
+          onCommitClone={(clone) => setCommitClone(clone)}
+          onChangeAccountClone={(clone) => setChangeClone(clone)}
+          onPortForwardClone={(clone) => {
             setForwardError(null);
-            setForwardHost(host);
+            setForwardClone(clone);
           }}
+          onArchiveClone={(clone) => run(archiveClone(clone.id))}
+          onUnarchiveClone={(clone) => run(unarchiveClone(clone.id))}
           onReorder={onReorder}
         />
 
-        {/* Right: per-host editor */}
+        {/* Right: per-clone editor */}
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white dark:bg-slate-900">
-          {selectedHost ? (
+          {selectedClone ? (
             <>
-              {/* Per-host header — only ≥ lg; on mobile the top bar shows id + tabs. */}
+              {/* Per-clone header — only ≥ lg; on mobile the top bar shows id + tabs. */}
               <div className="hidden shrink-0 items-center gap-3 border-b border-slate-100 px-4 py-3 sm:px-6 lg:flex dark:border-slate-800">
                 <h2 className="min-w-0 break-words text-base font-semibold text-slate-900 dark:text-slate-100">
-                  {selectedHost.id}
+                  {selectedClone.id}
                 </h2>
                 <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
-                  {selectedHost.host}:{selectedHost.port}
+                  {selectedClone.host}:{selectedClone.port}
                 </span>
               </div>
               <div className="flex min-h-0 flex-1">
@@ -364,7 +516,7 @@ function Dashboard({
                         <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
                       }
                     >
-                      <HostEditor key={selectedHost.id} hostId={selectedHost.id} />
+                      <CloneEditor key={selectedClone.id} cloneId={selectedClone.id} />
                     </Suspense>
                   </ClientOnly>
                 </div>
@@ -381,7 +533,11 @@ function Dashboard({
                         <div className="p-4 text-sm text-slate-400 dark:text-slate-500">Loading chat…</div>
                       }
                     >
-                      <ChatPanel key={selectedHost.id} hostId={selectedHost.id} />
+                      <ChatPanel
+                        key={selectedClone.id}
+                        cloneId={selectedClone.id}
+                        archived={selectedClone.archived === true}
+                      />
                     </Suspense>
                   </ClientOnly>
                 </div>
@@ -389,7 +545,7 @@ function Dashboard({
             </>
           ) : (
             <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-slate-400 dark:text-slate-500">
-              Select a host to open its notes.
+              Select a clone to open its notes.
             </div>
           )}
         </main>
@@ -400,15 +556,9 @@ function Dashboard({
           images={images}
           imagesLoading={imagesLoading}
           busy={runningClone}
-          accounts={(state.claudeAccounts ?? []).filter(
-            (a) => a.assignable && a.provider !== "codex",
-          )}
-          codexAccounts={(state.claudeAccounts ?? []).filter(
-            (a) => a.assignable && a.provider === "codex",
-          )}
           onClose={() => setCloneOpen(false)}
           onClone={(image, payload) => {
-            run(cloneHost(image, payload));
+            run(duplicateClone(image, payload));
             setCloneOpen(false);
           }}
         />
@@ -416,12 +566,8 @@ function Dashboard({
 
       {settingsOpen ? (
         <SettingsPanel
-          accountEmails={(state.claudeAccounts ?? [])
-            .filter((a) => a.provider !== "codex")
-            .map((a) => a.email)}
-          codexAccountEmails={(state.claudeAccounts ?? [])
-            .filter((a) => a.provider === "codex")
-            .map((a) => a.email)}
+          groups={groups}
+          usageGroups={state.usageGroups ?? []}
           onClose={() => setSettingsOpen(false)}
           getConfig={getConfig}
           putConfig={putConfig}
@@ -436,91 +582,73 @@ function Dashboard({
           )}
           onPullTemplate={(reference) => run(pullTemplate(reference))}
           onDeleteImage={(reference) => run(deleteImage(reference))}
+          onCreateGroup={(name) => onCreateGroup(name)}
+          onDeleteGroup={onDeleteGroup}
+          onAddAccount={(group) => setLoginGroup(group)}
+          onDeleteAccount={onDeleteGroupAccount}
         />
       ) : null}
 
-      {commitHost ? (
+      {commitClone ? (
         <CommitImageModal
-          hostId={commitHost.id}
+          cloneId={commitClone.id}
           busy={committing}
-          onClose={() => setCommitHost(null)}
+          onClose={() => setCommitClone(null)}
           onCommit={(name) => {
             setCommitting(true);
-            commitImage(commitHost.id, name)
+            commitImage(commitClone.id, name)
               .then(() => setError(null))
               .catch((e: Error) => setError(e.message))
               .finally(() => {
                 setCommitting(false);
-                setCommitHost(null);
+                setCommitClone(null);
               });
           }}
         />
       ) : null}
 
-      {importOpen ? (
-        <ImportAccountModal
-          hosts={state.hosts}
-          onClose={() => setImportOpen(false)}
-          onImported={() => {
-            setImportOpen(false);
-            run(refreshClaudeUsage());
-            run(refreshCodexUsage());
+      {loginGroup ? (
+        <GroupLoginModal
+          group={loginGroup}
+          onClose={() => setLoginGroup(null)}
+          onDone={() => {
+            // The credential lands in the group's auth-dir immediately; it surfaces in the
+            // usage panel at the next by-group usage poll (streamed over /events).
+            setError(null);
           }}
         />
       ) : null}
 
-      {changeHost ? (
+      {changeClone ? (
         <ChangeAccountModal
-          host={changeHost}
-          accounts={(state.claudeAccounts ?? []).filter(
-            (a) => a.assignable && a.provider !== "codex",
-          )}
-          codexAccounts={(state.claudeAccounts ?? []).filter(
-            (a) => a.assignable && a.provider === "codex",
-          )}
+          clone={changeClone}
           busy={changing}
-          onClose={() => setChangeHost(null)}
-          onSubmit={(claude, codex) => {
+          onClose={() => setChangeClone(null)}
+          onSubmit={(group) => {
             setChanging(true);
-            // Baselines must use the SAME group-aware derivation the modal shows
-            // (currentValue/currentCodexValue), or a legacy group-bound host whose
-            // selection is stored only as a group would spuriously fire — or mask — a swap.
-            const jobs: Promise<unknown>[] = [];
-            if (claude !== currentValue(changeHost))
-              jobs.push(swapClaudeAccount(changeHost.id, claude));
-            if (codex !== currentCodexValue(changeHost))
-              jobs.push(swapCodexAccount(changeHost.id, codex));
-            Promise.allSettled(jobs).then((results) => {
-              setChanging(false);
-              const failed = results.find((r) => r.status === "rejected");
-              if (failed) {
-                // Surface the failure and keep the modal open so the operator can retry
-                // (a silent close would look like the token swap succeeded).
-                setError(
-                  (failed as PromiseRejectedResult).reason?.message ??
-                    "account swap failed",
-                );
-              } else {
+            setCloneGroup(changeClone.id, group)
+              .then(() => {
                 setError(null);
-                setChangeHost(null);
-              }
-            });
+                setChangeClone(null);
+              })
+              .catch((e: Error) => setError(e.message))
+              .finally(() => setChanging(false));
           }}
         />
       ) : null}
 
-      {forwardHost ? (
+      {forwardClone ? (
         <PortForwardModal
-          host={state.hosts.find((h) => h.id === forwardHost.id) ?? forwardHost}
-          runtime={forwards[forwardHost.id] ?? []}
+          clone={state.hosts.find((h) => h.id === forwardClone.id) ?? forwardClone}
+          runtime={forwards[forwardClone.id] ?? []}
           busy={forwarding}
           error={forwardError}
-          onClose={() => setForwardHost(null)}
+          onClose={() => setForwardClone(null)}
           onSubmit={(list) => {
             setForwarding(true);
             setForwardError(null);
-            putForwards(forwardHost.id, list)
-              .then(() => setForwardHost(null))
+            putForwards(forwardClone.id, list)
+              .then(() => setForwardClone(null))
               .catch((e: Error) => setForwardError(e.message))
               .finally(() => setForwarding(false));
           }}

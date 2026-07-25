@@ -26,12 +26,19 @@ async function getJson(url: string): Promise<unknown> {
   return data;
 }
 
+async function delJson(url: string): Promise<unknown> {
+  const res = await fetch(url, { method: "DELETE" });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (!res.ok) throw new Error(data.error ?? res.statusText);
+  return data;
+}
+
 /** Clone payload: an existing ticket link/id, a new ticket to create (in team
  *  `team`, using the chosen preset's Linear key), or a plain no-ticket clone
  *  (just a container title + an optional first agent message).
- *  The ticket modes also accept optional host-agent + Claude Code overrides.
- *  `claudeAccount` (all modes) picks the Claude account to run under — an email,
- *  "auto" (the default when omitted), "group:<name>", or "none" (install no token).
+ *  The ticket modes also accept optional clone-agent + Claude Code overrides.
+ *  `group` (all modes) binds the clone to an account pool (a CLIProxyAPI instance) —
+ *  a group name, or null/omitted for no inference binding.
  *  `preset` picks the clone preset (env vars + Linear key): omitted/"auto" means
  *  auto-select by ticket-id prefix (ticket mode); create/plain require a name. */
 export type ClonePayload = (
@@ -40,27 +47,33 @@ export type ClonePayload = (
       | { create: { team: string; title: string; description: string } }
     ) & { agentInstructions?: string; claudeInstructions?: string })
   | { plain: { title: string; message: string } }
-) & { claudeAccount?: string; codexAccount?: string; preset?: string };
+) & { group?: string | null; preset?: string; headless?: boolean };
 
 export const activate = (id: string | null) =>
   postJson("/api/activate", { id });
 export const reorder = (order: string[]) => postJson("/api/reorder", { order });
 /** Start a clone from a source image (`image` = a canonical reference from
  *  `listImages`, e.g. `pegasis0/rmng-template:latest`). Progress streams over /events. */
-export const cloneHost = (image: string, payload: ClonePayload) =>
+export const duplicateClone = (image: string, payload: ClonePayload) =>
   postJson("/api/clone", { image, ...payload });
-export const deleteHost = (id: string) => postJson("/api/delete", { id });
-/** Replace a host's port-forward rules. New rules omit `id` (server derives it as
+export const deleteClone = (id: string) => postJson("/api/delete", { id });
+/** Gracefully stop a managed clone while retaining its container and per-clone data. */
+export const archiveClone = (id: string) =>
+  postJson(`/api/hosts/${encodeURIComponent(id)}/archive`, {});
+/** Restart a retained archived clone. */
+export const unarchiveClone = (id: string) =>
+  postJson(`/api/hosts/${encodeURIComponent(id)}/unarchive`, {});
+/** Replace a clone's port-forward rules. New rules omit `id` (server derives it as
  *  `f<localPort>`). 400 on a local-port conflict (validated server-side); the UI
  *  refreshes from the next `/events` frame. */
 export const putForwards = (
-  hostId: string,
+  cloneId: string,
   forwards: Array<{ id?: string; remotePort: number; localPort: number; enabled: boolean; label?: string }>,
-) => putJson(`/api/hosts/${encodeURIComponent(hostId)}/forwards`, { forwards });
+) => putJson(`/api/hosts/${encodeURIComponent(cloneId)}/forwards`, { forwards });
 
 // --- images (clone-source templates) ---------------------------------------
 
-/** The clone-source images (`rmng.image=1`); each carries the host ids of live
+/** The clone-source images (`rmng.image=1`); each carries the ids of the live
  *  clones running on it (`inUseBy`). Powers the sidebar Images section + the
  *  clone dialog's image picker. */
 export const listImages = () => getJson("/api/images") as Promise<ImageInfo[]>;
@@ -89,47 +102,62 @@ export const updateServer = () => postJson("/api/server/update", {}) as Promise<
  *  disconnects and reconnects. */
 export const restartServer = () => postJson("/api/server/restart", {}) as Promise<{ ok: boolean }>;
 
-/** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */
-export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
-/** Confirm a clone is signed in to Claude Code via claude.ai; returns its identity. */
-export const checkClaudeImport = (host: string) =>
-  postJson("/api/claude/import/check", { host }) as Promise<{
-    email: string;
-    orgName: string | null;
-    subscriptionType: string | null;
+// --- account groups (CLIProxyAPI pools) ------------------------------------
+// A group is a provider-agnostic account pool = one CLIProxyAPI instance. Accounts
+// enter a group by completing that instance's OAuth login (start → complete → poll).
+// Usage per group is display-only and streams in `ControlState.usageGroups`.
+
+/** OAuth provider for a group login. */
+export type LoginProvider = "anthropic" | "codex" | "antigravity";
+
+/** Create an account group (spawns its CLIProxyAPI instance). Returns the redacted config. */
+export const createGroup = (name: string) =>
+  postJson("/api/groups", { name }) as Promise<AppConfigRedacted>;
+/** Delete an account group (stops its instance; the on-disk auth-dir is left in place). */
+export const deleteGroup = (name: string) =>
+  delJson(`/api/groups/${encodeURIComponent(name)}`) as Promise<AppConfigRedacted>;
+/** Begin an OAuth login into a group's instance. Returns the URL the operator opens
+ *  (it redirects to a `localhost` callback on the operator's machine) plus the `state`
+ *  token used to poll/complete. */
+export const startGroupLogin = (group: string, provider: LoginProvider) =>
+  postJson(`/api/groups/${encodeURIComponent(group)}/accounts/login/start`, { provider }) as Promise<{
+    status?: string;
+    url: string;
+    state: string;
   }>;
-/** Import a Claude account from a signed-in clone: the server harvests the clone's
- *  OAuth pair (and owns its refresh lifecycle), then clears the clone's credentials file. */
-export const importClaudeAccount = (host: string) =>
-  postJson("/api/claude/import", { host }) as Promise<{ email: string; cleared: boolean }>;
-/** Change a clone's Claude account/group. `account` is "auto", "none", an email, or
- *  "group:<name>". `account` in the reply is null when set to "none". */
-export const swapClaudeAccount = (host: string, account: string) =>
-  postJson("/api/claude/swap", { host, account }) as Promise<{
+/** Finish an OAuth login by handing back the pasted redirect URL (or an explicit
+ *  code+state). The credential lands in the group instance's auth-dir. */
+export const completeGroupLogin = (
+  group: string,
+  body: { provider: LoginProvider; redirectUrl?: string; code?: string; state?: string },
+) =>
+  postJson(`/api/groups/${encodeURIComponent(group)}/accounts/login/complete`, body) as Promise<{
+    status?: string;
+  } & Record<string, unknown>>;
+/** Poll an in-flight login. The control server normalizes CLIProxyAPI's `get-auth-status`
+ *  to a small stable shape: `pending` while the instance exchanges the code, `done` once the
+ *  credential lands in the group's auth-dir, `error` (with a message) on a failed/expired
+ *  session. */
+export const groupLoginStatus = (group: string, state: string) =>
+  getJson(
+    `/api/groups/${encodeURIComponent(group)}/accounts/login/status?state=${encodeURIComponent(state)}`,
+  ) as Promise<{ state: "pending" | "done" | "error"; error?: string }>;
+/** Remove an authenticated account from a group by its auth-dir credential file name
+ *  (`claude-<email>.json` / `codex-<email>.json` / `antigravity-<email>.json`). */
+export const deleteGroupAccount = (group: string, file: string) =>
+  postJson(`/api/groups/${encodeURIComponent(group)}/accounts/delete`, { file });
+
+/** Trigger an immediate server-side usage poll (the manual refresh button, and auto-fired
+ *  after an account is added). The refreshed `usageGroups` arrive over SSE within ~a second. */
+export const refreshUsage = (): Promise<void> =>
+  postJson("/api/usage/refresh", {}).then(() => undefined);
+
+/** Bind a clone to an account group (or clear it with `null`). Replaces the old
+ *  per-provider account swap — one group backs all of a clone's agents. */
+export const setCloneGroup = (cloneId: string, group: string | null) =>
+  postJson(`/api/hosts/${encodeURIComponent(cloneId)}/group`, { group }) as Promise<{
     ok: boolean;
-    account: string | null;
     group: string | null;
-    selection: string;
-  }>;
-
-export const refreshCodexUsage = () => postJson("/api/codex/refresh", {});
-
-export const checkCodexImport = (host: string) =>
-  postJson("/api/codex/import/check", { host }) as Promise<{
-    email: string;
-    plan: string | null;
-    accountId: string;
-  }>;
-
-export const importCodexAccount = (host: string) =>
-  postJson("/api/codex/import", { host }) as Promise<{ email: string; cleared: boolean }>;
-
-export const swapCodexAccount = (host: string, account: string) =>
-  postJson("/api/codex/swap", { host, account }) as Promise<{
-    ok: boolean;
-    account: string | null;
-    group: string | null;
-    selection: string;
   }>;
 
 // --- Settings / config (redacted read · partial write · validate) ----------

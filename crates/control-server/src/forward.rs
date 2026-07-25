@@ -1,6 +1,6 @@
 //! Volatile port-forward runtime status. Mirrors [`crate::monitor::StatsBus`]: an
 //! in-memory `host_id → (rule_id → ForwardRuntime)` map broadcast to `/events` as a
-//! named `forwards` SSE event. Never persisted — config lives on `Host.forwards`.
+//! named `forwards` SSE event. Never persisted — config lives on `RmngClone.forwards`.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -31,9 +31,9 @@ impl ForwardBus {
 
     fn snapshot_json(&self) -> String {
         let inner = self.inner.read().unwrap();
-        let by_host: HashMap<&String, Vec<&ForwardRuntime>> =
+        let by_clone: HashMap<&String, Vec<&ForwardRuntime>> =
             inner.iter().map(|(h, m)| (h, m.values().collect())).collect();
-        serde_json::to_string(&by_host).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string(&by_clone).unwrap_or_else(|_| "{}".to_string())
     }
 
     fn broadcast(&self) {

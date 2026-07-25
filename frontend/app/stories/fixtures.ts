@@ -1,19 +1,22 @@
 // Shared, API-free sample data for the Storybook stories. Nothing here touches the
 // network — the components are all dependency-injected, so a story is just "this
-// fixture + these callbacks". Kept in one place so the Sidebar / SidebarHost /
+// fixture + these callbacks". Kept in one place so the Sidebar / SidebarClone /
 // Settings stories stay consistent.
 
-import type { ClaudeUsage, Host, Operation } from "~/lib/types";
+import type { ClaudeUsage, GroupUsage, Clone, Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
+import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
+import type { Group } from "~/lib/wire/Group";
+import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
 const GiB = 1024 ** 3;
 
-// --- hosts (each covers a distinct visual state) ---------------------------
+// --- clones (each covers a distinct visual state) ---------------------------
 
-/** A managed clone actively working, pinned to a specific Claude account, on a ticket. */
-export const hostWorking: Host = {
+/** A managed clone actively working, bound to the "pooled" account group, on a ticket. */
+export const cloneWorking: Clone = {
   id: "pega-we-142",
   host: "10.99.0.11",
   port: 3389,
@@ -21,19 +24,16 @@ export const hostWorking: Host = {
   password: "",
   managed: true,
   source: "pegasis0/rmng-template:latest",
-  claudeAccountEmail: "alex@example.com",
-  claudeSelection: "alex@example.com",
+  group: "pooled",
   linearWorkspace: "we",
   linearTicket: "WE-142",
   linearLabel: "frontend",
   displayName: "Normalize sidebar CPU to % of allowance",
   monitorState: "working",
-  agentReport: "working",
-  stateNote: "Refactoring usageLine to divide by the clone's cpu allowance",
 };
 
-/** Idle, balanced within a Claude group, with an unread dot (dropped from working). */
-export const hostIdle: Host = {
+/** Idle, bound to the "pooled" group, with an unread dot (dropped from working). */
+export const cloneIdle: Clone = {
   id: "pega-dev-88",
   host: "10.99.0.12",
   port: 3389,
@@ -41,47 +41,40 @@ export const hostIdle: Host = {
   password: "",
   managed: true,
   source: "pegasis0/rmng-template:latest",
-  claudeGroup: "pooled",
-  claudeAccountEmail: "sam@example.com",
-  claudeSelection: "group:pooled",
+  group: "pooled",
   linearWorkspace: "dev",
   linearTicket: "DEV-88",
   displayName: "Wire up the pull-template wizard",
   monitorState: "idle",
-  stateNote: "Done — awaiting review",
   unread: true,
 };
 
-/** Offline (wrapper unreachable), Claude on auto-select. */
-export const hostOffline: Host = {
+/** Offline (wrapper unreachable), bound to the "team" group. */
+export const cloneOffline: Clone = {
   id: "pega-hh-7",
   host: "10.99.0.13",
   port: 3389,
   username: "pega",
   password: "",
   managed: true,
-  claudeSelection: "auto",
-  claudeAccountEmail: "auto-picked@example.com",
+  group: "team",
   displayName: "Database migration spike",
   monitorState: "idle",
-  stateNote: "Container stopped",
 };
 
-/** A managed scratch box with no Claude token installed. */
-export const hostNoToken: Host = {
+/** A managed scratch box with no account group bound (no inference). */
+export const cloneNoToken: Clone = {
   id: "scratch-box",
   host: "10.99.0.20",
   port: 3389,
   username: "pega",
   password: "",
   managed: true,
-  claudeSelection: "none",
   monitorState: "idle",
-  stateNote: "Manual scratch container",
 };
 
 /** A plain unmanaged row (no container) — only deletable, no commit/account actions. */
-export const hostUnmanaged: Host = {
+export const cloneUnmanaged: Clone = {
   id: "legacy-desktop",
   host: "192.168.1.50",
   port: 3389,
@@ -90,10 +83,9 @@ export const hostUnmanaged: Host = {
   monitorState: "idle",
 };
 
-/** A managed clone holding *both* providers: a pinned Claude account and a Codex group.
- *  Exercises the two-line sidebar layout (Claude line + Codex line, CPU on the first /
- *  MEM on the second) and a Codex group badge. */
-export const hostDualProvider: Host = {
+/** A managed clone bound to the "team" group. Exercises the two-line sidebar layout
+ *  (binding line + a metric-only line, CPU on the first / MEM on the second). */
+export const cloneDualProvider: Clone = {
   id: "pega-dual-9",
   host: "10.99.0.14",
   port: 3389,
@@ -101,93 +93,164 @@ export const hostDualProvider: Host = {
   password: "",
   managed: true,
   source: "pegasis0/rmng-template:latest",
-  claudeAccountEmail: "alex@example.com",
-  claudeSelection: "alex@example.com",
-  codexGroup: "team",
-  codexAccountEmail: "alex@openai.com",
-  codexSelection: "group:team",
+  group: "team",
   linearWorkspace: "we",
   linearTicket: "WE-207",
   displayName: "Port the encoder path to the new VA surface pool",
   monitorState: "working",
-  agentReport: "working",
-  stateNote: "Wiring the dual-provider account pickers into the clone modal",
 };
 
-export const hosts: Host[] = [
-  hostWorking,
-  hostIdle,
-  hostOffline,
-  hostNoToken,
-  hostUnmanaged,
-  hostDualProvider,
+/** A sub clone: a managed clone spawned by `cloneWorking`, shown indented under it in the
+ *  sidebar (collapsed by default). Cosmetic one-level nesting via `parent`. */
+export const cloneSubClone: Clone = {
+  id: "pega-we-142-helper",
+  host: "10.99.0.31",
+  port: 3389,
+  username: "pega",
+  password: "",
+  managed: true,
+  source: "pegasis0/rmng-template:latest",
+  group: "pooled",
+  parent: cloneWorking.id,
+  displayName: "helper: run the e2e suite",
+  monitorState: "working",
+};
+
+export const hosts: Clone[] = [
+  cloneWorking,
+  cloneSubClone,
+  cloneIdle,
+  cloneOffline,
+  cloneNoToken,
+  cloneUnmanaged,
+  cloneDualProvider,
 ];
-export const hostIds: string[] = hosts.map((h) => h.id);
+export const cloneIds: string[] = hosts.map((h) => h.id);
 
 // --- live container usage (the volatile `stats` SSE map) --------------------
 
+export const lxcStats: LxcStats = {
+  cpuPct: 23,
+  memUsed: BigInt(Math.round(18.7 * GiB)),
+  memLimit: BigInt(264 * GiB),
+  diskUsed: BigInt(Math.round(312.1 * GiB)),
+};
+
 export const stats: Record<string, ContainerStats> = {
-  [hostWorking.id]: {
-    cpuPct: 640, // ÷ cloneCpus(16) → 40% of the clone's allowance
+  [cloneWorking.id]: {
+    cpuPct: 40,
     memUsed: BigInt(Math.round(5.1 * GiB)),
-    memLimit: BigInt(32 * GiB),
-    dockerDiskUsed: BigInt(Math.round(91.3 * GiB)),
+    memLimit: BigInt(40 * GiB),
   },
-  [hostIdle.id]: {
-    cpuPct: 12,
+  [cloneIdle.id]: {
+    cpuPct: 1.2,
     memUsed: BigInt(Math.round(1.4 * GiB)),
-    memLimit: BigInt(32 * GiB),
-    dockerDiskUsed: BigInt(Math.round(91.3 * GiB)),
+    memLimit: BigInt(40 * GiB),
   },
-  [hostNoToken.id]: {
-    cpuPct: 3,
+  [cloneNoToken.id]: {
+    cpuPct: 0.3,
     memUsed: BigInt(Math.round(0.6 * GiB)),
-    memLimit: BigInt(32 * GiB),
-    dockerDiskUsed: BigInt(Math.round(91.3 * GiB)),
+    memLimit: BigInt(40 * GiB),
   },
-  [hostDualProvider.id]: {
-    cpuPct: 288, // ÷ cloneCpus(16) → 18% of the clone's allowance
+  [cloneDualProvider.id]: {
+    cpuPct: 18,
     memUsed: BigInt(Math.round(3.2 * GiB)),
-    memLimit: BigInt(32 * GiB),
-    dockerDiskUsed: BigInt(Math.round(91.3 * GiB)),
+    memLimit: BigInt(40 * GiB),
   },
 };
 
-// --- Claude accounts (display-only usage view) -----------------------------
+// --- clone token totals (the volatile `tokens` SSE map) ---------------------
 
-export const claudeAccounts: ClaudeUsage[] = [
+export const tokens: Record<string, CloneTokenUsage> = {
+  [cloneWorking.id]: {
+    newInputTokens: 128_400n,
+    outputTokens: 22_800n,
+    requestCount: 4n,
+    // Recently served by Fable → the sidebar shows the "fable" chip next to its group badge.
+    fableActive: true,
+  },
+  [cloneIdle.id]: {
+    newInputTokens: 54_600n,
+    outputTokens: 7_500n,
+    requestCount: 2n,
+    fableActive: false,
+  },
+  [cloneOffline.id]: {
+    newInputTokens: 20_000n,
+    outputTokens: 3_100n,
+    requestCount: 1n,
+    fableActive: false,
+  },
+  [cloneDualProvider.id]: {
+    newInputTokens: 948_000n,
+    outputTokens: 41_000n,
+    requestCount: 7n,
+    fableActive: false,
+  },
+};
+
+// --- account groups + their usage (display-only) ---------------------------
+// Under the group-proxy model, usage is grouped by pool. Account ids are group-scoped
+// (`<group>|<email>`) since the same email can be authed into several groups.
+
+const usage = (
+  group: string,
+  a: Omit<ClaudeUsage, "id" | "active"> & Partial<Pick<ClaudeUsage, "active">>,
+): ClaudeUsage => ({
+  id: `${group}|${a.provider ?? "claude"}|${a.email}`,
+  active: a.active ?? true,
+  ...a,
+});
+
+export const usageGroups: GroupUsage[] = [
   {
-    id: "alex@example.com|org-a",
-    email: "alex@example.com",
-    provider: "claude",
-    active: true,
-    assignable: true,
-    lastUpdated: 1_700_000_000_000,
-    fiveHour: { pct: 42, resetsAt: null },
-    sevenDay: { pct: 61, resetsAt: null },
+    name: "pooled",
+    accounts: [
+      usage("pooled", {
+        email: "alex@example.com",
+        provider: "claude",
+        assignable: true,
+        lastUpdated: 1_700_000_000_000,
+        fiveHour: { pct: 42, resetsAt: null },
+        sevenDay: { pct: 61, resetsAt: null },
+        fable: { pct: 8, resetsAt: null },
+      }),
+      usage("pooled", {
+        email: "sam@example.com",
+        provider: "claude",
+        active: false,
+        assignable: true,
+        lastUpdated: 1_700_000_000_000,
+        fiveHour: { pct: 88, resetsAt: null },
+        sevenDay: { pct: 73, resetsAt: null },
+      }),
+    ],
   },
   {
-    id: "sam@example.com|org-a",
-    email: "sam@example.com",
-    provider: "claude",
-    active: false,
-    assignable: true,
-    lastUpdated: 1_700_000_000_000,
-    fiveHour: { pct: 88, resetsAt: null },
-    sevenDay: { pct: 73, resetsAt: null },
-  },
-  {
-    id: "codex:alex@openai.com",
-    email: "alex@openai.com",
-    provider: "codex",
-    active: true,
-    assignable: false,
-    lastUpdated: 1_700_000_000_000,
-    fiveHour: { pct: 24, resetsAt: null },
-    sevenDay: { pct: 40, resetsAt: null },
-    resetCredits: 3n,
+    name: "team",
+    accounts: [
+      usage("team", {
+        email: "alex@openai.com",
+        provider: "codex",
+        assignable: false,
+        lastUpdated: 1_700_000_000_000,
+        // Codex exposes only a weekly (7d) limit now — the 5h window was removed upstream.
+        sevenDay: { pct: 40, resetsAt: null },
+        resetCredits: 3n,
+      }),
+      usage("team", {
+        email: "alex@gmail.com",
+        provider: "antigravity",
+        assignable: true,
+        lastUpdated: 1_700_000_000_000,
+        // Antigravity (Gemini) exposes no pollable quota — a display-only presence row (no bars).
+      }),
+    ],
   },
 ];
+
+/** The configured account groups (names only) — the authoritative list for pickers. */
+export const groups: Group[] = [{ name: "pooled" }, { name: "team" }];
 
 // --- clone-source images ----------------------------------------------------
 
@@ -199,7 +262,7 @@ export const images: ImageInfo[] = [
     createdAt: "2026-06-20T12:00:00Z",
     base: true,
     createdFrom: null,
-    inUseBy: [hostWorking.id, hostIdle.id],
+    inUseBy: [cloneWorking.id, cloneIdle.id],
   },
   {
     id: "sha256:bbbb1111",
@@ -228,11 +291,11 @@ export const cloneOperation: Operation = {
   startedAt: 1_700_000_000_000,
 };
 
-/** A running delete op targeting an existing host (shows the row's busy state). */
+/** A running delete op targeting an existing clone (shows the row's busy state). */
 export const deleteOperation: Operation = {
   id: "op-delete-1",
   kind: "delete",
-  target: hostIdle.id,
+  target: cloneIdle.id,
   status: "running",
   step: "stopping",
   pct: 30,
@@ -244,7 +307,7 @@ export const deleteOperation: Operation = {
 // --- redacted app config (for the Settings story) --------------------------
 
 export const appConfig: AppConfigRedacted = {
-  listen: { web: 9000, video: 9001, cloneMcp: 9002, daemonMcp: 9004, forward: 9005, bastion: 2222 },
+  listen: { web: 9000, video: 9001, daemonMcp: 9004, forward: 9005, bastion: 2222 },
   agentPort: 4096,
   dataDir: "/data",
   staticDir: "",
@@ -278,8 +341,7 @@ export const appConfig: AppConfigRedacted = {
     pinnedEmail: "alex@example.com",
   },
   codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
-  codexGroups: [],
-  cloneGroups: [{ name: "pooled", accounts: ["alex@example.com", "sam@example.com"] }],
+  groups: [{ name: "pooled" }, { name: "team" }],
   presets: [
     {
       name: "webapp",
@@ -287,6 +349,7 @@ export const appConfig: AppConfigRedacted = {
       linearKeySet: true,
       vars: [{ key: "NODE_ENV", value: "development" }],
       agentPlaybook: "",
+      globalPrompt: "",
     },
   ],
   chroma: "yuv420",
@@ -294,11 +357,7 @@ export const appConfig: AppConfigRedacted = {
     authorizedKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop"],
     publicHost: "rmng.example.com",
   },
-  detectorInferenceUrl: "http://detector.internal:8080",
   agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
+  globalPrompt: "# Working in this clone\n\n(sample shared operating memory)\n",
 };
 
-/** Emails a Claude group can draw from (the Settings pool). */
-export const accountEmails: string[] = claudeAccounts
-  .filter((a) => a.provider !== "codex")
-  .map((a) => a.email);

@@ -63,6 +63,22 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Compact decimal token count for dense fleet tables: `128400` → `128K`.
+pub fn token_count(tokens: u64) -> String {
+    const UNITS: [&str; 5] = ["", "K", "M", "B", "T"];
+    let mut value = tokens as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    match unit {
+        0 => tokens.to_string(),
+        _ if value < 10.0 => format!("{value:.1}{}", UNITS[unit]),
+        _ => format!("{value:.0}{}", UNITS[unit]),
+    }
+}
+
 /// Shorten `sha256:8e6e9ec2c685…` to the familiar 12-hex-char id.
 pub fn short_id(id: &str) -> String {
     id.strip_prefix("sha256:")
@@ -103,6 +119,14 @@ mod tests {
     fn human_sizes() {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(34855082762), "32.5 GiB");
+    }
+
+    #[test]
+    fn token_counts_are_compact() {
+        assert_eq!(token_count(999), "999");
+        assert_eq!(token_count(1_200), "1.2K");
+        assert_eq!(token_count(128_400), "128K");
+        assert_eq!(token_count(9_500_000), "9.5M");
     }
 
     #[test]

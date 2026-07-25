@@ -193,8 +193,8 @@ chmod 644 "$CLAUDE_DIR/CLAUDE.md"
 
 # Shared user Codex instructions + MCP config. Codex reads global guidance from
 # ~/.codex/AGENTS.md and MCP servers from ~/.codex/config.toml. The control-server
-# overwrites this at clone creation/reconcile with a clone-specific control-server MCP
-# header; the template carries the static guidance, desktop MCP, and Linear MCP defaults.
+# rewrites these files at clone creation/reconciliation with clone-specific CLIProxy routing;
+# the template carries only static guidance and desktop/Linear MCP defaults.
 log "shared user Codex AGENTS.md + MCP config"
 CODEX_DIR="/home/$USERNAME/.codex"
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "$CODEX_DIR"
@@ -226,18 +226,66 @@ chown "$USERNAME:$USERNAME" "$CODEX_DIR/AGENTS.md" "$CODEX_DIR/config.toml"
 chmod 644 "$CODEX_DIR/AGENTS.md"
 chmod 600 "$CODEX_DIR/config.toml"
 
-# User-scope `linear` MCP for every `claude` on the clone (interactive shell, inner Cursor
-# agent; the agent-wrapper registers the same server programmatically). mcpServers lives in
-# ~/.claude.json — a top-level key; settings.json does NOT support it. ${LINEAR_API_KEY}
-# stays literal here (single-quoted jq arg): claude expands it at runtime from the session
-# env, where per-clone /etc/environment (written by the control-server) put the chosen
-# preset's key. No key in the env (e.g. on the base image) ⇒ claude skips the server with a
-# "missing environment variables" warning.
-log "user-scope linear MCP → ~/.claude.json"
+# Shared user OpenCode instructions. OpenCode reads global rules from
+# ~/.config/opencode/AGENTS.md (opencode.ai/docs/rules) — the same shared operating note as
+# CLAUDE.md / Codex AGENTS.md. The control-server also refreshes it on reconcile (and writes the
+# clone-specific opencode.json provider + MCP set); the template carries the static default.
+log "shared user OpenCode AGENTS.md"
+OPENCODE_DIR="/home/$USERNAME/.config/opencode"
+install -d -o "$USERNAME" -g "$USERNAME" -m755 "/home/$USERNAME/.config" "$OPENCODE_DIR"
+cat > "$OPENCODE_DIR/AGENTS.md" <<'OPENCODEAGENTS'
+# Working in this clone
+
+This machine is a **disposable, single-purpose dev sandbox** that belongs to you,
+with **passwordless `sudo`**. Install packages, toolchains, and global CLIs freely
+and reconfigure the system as needed — the machine itself is throwaway and there is
+no other user to disturb. Optimize for getting the task done.
+
+## When you're blocked
+
+If you're genuinely stuck — missing access or credentials, an ambiguous
+requirement, or a call that's the human's to make — **stop and ask** rather than
+guessing or thrashing. A precise question beats a confident wrong turn.
+OPENCODEAGENTS
+chown "$USERNAME:$USERNAME" "$OPENCODE_DIR/AGENTS.md"
+chmod 644 "$OPENCODE_DIR/AGENTS.md"
+
+# Shared OpenCode MCP set (desktop + linear) — the HEADED baseline, matching Codex ~/.codex/config.toml
+# and Claude ~/.claude.json. Schema per opencode.ai/docs/mcp-servers: top-level `mcp`, each server
+# {type:"remote", url, enabled, headers?}; {env:VAR} in headers is expanded by OpenCode at runtime
+# (quoted heredoc keeps it literal here). The control-server rewrites this file on create/reconcile
+# with the resolved model provider, and removes `desktop` on headless clones (no :9004 there).
+cat > "$OPENCODE_DIR/opencode.json" <<'OPENCODEJSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "desktop": { "type": "remote", "url": "http://127.0.0.1:9004", "enabled": true },
+    "linear": {
+      "type": "remote",
+      "url": "https://mcp.linear.app/mcp",
+      "enabled": true,
+      "headers": { "Authorization": "Bearer {env:LINEAR_API_KEY}" }
+    }
+  }
+}
+OPENCODEJSON
+chown "$USERNAME:$USERNAME" "$OPENCODE_DIR/opencode.json"
+chmod 600 "$OPENCODE_DIR/opencode.json"
+
+# User-scope `desktop` + `linear` MCP for every `claude` on the clone (interactive shell, inner
+# Cursor agent; the agent-wrapper registers the same two programmatically). mcpServers lives in
+# ~/.claude.json — a top-level key; settings.json does NOT support it. This is the HEADED baseline:
+# the control-server removes `desktop` from ~/.claude.json on headless clones (no clone-daemon /
+# :9004 there), mirroring how it deletes the desktop units. ${LINEAR_API_KEY} stays literal here
+# (single-quoted jq arg): claude expands it at runtime from the session env, where per-clone
+# /etc/environment (written by the control-server) put the chosen preset's key. No key in the env
+# (e.g. on the base image) ⇒ claude skips the server with a "missing environment variables" warning.
+log "user-scope desktop + linear MCP → ~/.claude.json"
 CLAUDE_JSON="/home/$USERNAME/.claude.json"
 [ -s "$CLAUDE_JSON" ] || echo '{}' > "$CLAUDE_JSON"
 jq --arg auth 'Bearer ${LINEAR_API_KEY}' \
-  '.mcpServers.linear = {"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":$auth}}' \
+  '.mcpServers.linear = {"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":$auth}}
+   | .mcpServers.desktop = {"type":"http","url":"http://127.0.0.1:9004"}' \
   "$CLAUDE_JSON" > "$CLAUDE_JSON.tmp" && mv "$CLAUDE_JSON.tmp" "$CLAUDE_JSON"
 chown "$USERNAME:$USERNAME" "$CLAUDE_JSON"
 chmod 600 "$CLAUDE_JSON"

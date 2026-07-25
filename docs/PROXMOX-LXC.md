@@ -1,10 +1,10 @@
 # Running RMNG's Docker host on a Proxmox LXC CT
 
-Proxmox is no longer part of RMNG — the control-server drives a **local Docker daemon**, not
-`pct`. But an unprivileged Proxmox LXC CT is a perfectly good place to *run that Docker
-daemon* (nested Docker on a shared kernel). This is a documentation-only recipe; the code
-never assumes it. Once Docker is up and healthy in the CT, follow [DEPLOY.md](DEPLOY.md) as
-you would on any host.
+RMNG drives a **local Docker daemon**, not `pct`. An unprivileged Proxmox LXC CT is a good
+place to *run that Docker daemon* (nested Docker on a shared kernel). The CT-wide live resource
+summary intentionally supports the documented production layout only: CT 105 with cgroup v2,
+an enforced 16-CPU capacity, and a ZFS-backed rootfs. Once Docker is up and healthy in the CT, follow
+[DEPLOY.md](DEPLOY.md) as you would on any host.
 
 ## 1. Create an unprivileged CT with nesting + the render node
 
@@ -19,6 +19,14 @@ features: nesting=1,keyctl=1,fuse=1
 # GPU render node passthrough for VA-API (encode on the control-server, capture in clones).
 dev0: /dev/dri/renderD128,mode=0666
 
+# GPU compute node passthrough (AMD KFD → ROCm/HIP) so clones can run GPU compute, not just
+# render. Clones are privileged Docker containers, so they inherit EVERY device node present
+# in the CT's /dev — the same mechanism that delivers renderD128 above — so passing kfd into
+# the CT is all that's needed; there is no per-clone device wiring in the control-server.
+# (Use the path-based `dev` entry, not a raw `lxc.cgroup2.devices.allow c <major>:0`: KFD's
+# major is dynamically allocated and changes across boots.)
+dev1: /dev/kfd,mode=0666
+
 # Let the guest's Docker/systemd operate without the host AppArmor profile fighting it.
 # The unconfined profile alone is NOT enough for nested Docker: the runtime still probes
 # /sys/kernel/security/apparmor and dies with "Could not check if docker-default AppArmor
@@ -30,9 +38,22 @@ lxc.mount.auto: cgroup:mixed proc:rw sys:mixed
 ```
 
 Set them via `pct set <id> --features nesting=1,keyctl=1,fuse=1` and edit the conf for the `dev0` /
-`lxc.apparmor.profile` lines, then restart the CT. Give it enough cores/RAM/disk for the
+`dev1` / `lxc.apparmor.profile` lines, then restart the CT. Give it enough cores/RAM/disk for the
 fleet you intend to run (clones default to 16 cores / 32 GiB each — tune
 `docker.cloneCpus` / `docker.cloneMemoryMb` in the wizard).
+
+RMNG's live memory accounting reads cgroup-v2 counters through the control-server's shared PID
+namespace, so retain the deployment's `privileged: true` and `pid: "host"` settings. Without
+those settings, swap-aware clone memory samples are unavailable.
+
+### CT 105-wide sidebar metrics
+
+The sidebar’s `LXC` header is measured from CT 105 itself rather than by adding clone values. It
+reads the CT-root cgroup through `/proc/1/root`: CPU comes from `cpu.stat` against its enforced
+16-CPU capacity, and memory includes every CT process with the same swap-aware/cache-excluding policy used for
+clone rows. Disk is `statvfs` usage of the CT root filesystem, so this ZFS rootfs figure is
+physical and compression-aware. There is deliberately no logical/pre-compression disk metric: the
+unprivileged CT cannot read ZFS `logicalused`, and RMNG does not query the Proxmox host for it.
 
 ## 1b. Raise the kernel keyring quotas on the Proxmox host
 
