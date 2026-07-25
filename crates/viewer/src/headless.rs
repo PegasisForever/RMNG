@@ -123,6 +123,20 @@ fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) 
 pub fn run() -> Result<()> {
     let addr = std::env::var("RMNG_VIDEO").unwrap_or_else(|_| "127.0.0.1:9001".into());
     let dump = std::env::var("RMNG_DUMP").ok();
+    // `RMNG_AUDIO_DUMP=out.opus` appends every received Opus frame, so the audio path can
+    // be asserted end-to-end on a box with no sound hardware.
+    let audio_dump: Option<Arc<Mutex<std::fs::File>>> = std::env::var("RMNG_AUDIO_DUMP")
+        .ok()
+        .and_then(|p| match std::fs::File::create(&p) {
+            Ok(f) => {
+                tracing::info!("audio dump → {p}");
+                Some(Arc::new(Mutex::new(f)))
+            }
+            Err(e) => {
+                tracing::warn!("audio dump {p}: {e}");
+                None
+            }
+        });
     let counters: Counters = Arc::new(Mutex::new(HashMap::new()));
 
     // Port-forward manager (shared across reconnects). Its status closure frames each
@@ -166,10 +180,13 @@ pub fn run() -> Result<()> {
                 tracing::info!("connected; decoding (headless) …");
                 let mut tag = [0u8; 1];
                 while stream.read_exact(&mut tag).is_ok() {
-                    // tags 1 (clipboard) + 2 (cursor) + 3 (layout) + 4 (mode) + 5 (forwards)
-                    // are all [u32 len][json]. Tag 4 (chroma) arrives before the first AU;
-                    // tag 5 drives the forward listeners; the rest are discarded. (Missing any desyncs.)
-                    if matches!(tag[0], 1 | 2 | 3 | 4 | 5) {
+                    // tags 1 (clipboard) + 2 (cursor) + 3 (view spec) + 4 (mode) + 5 (forwards)
+                    // + 6 (audio) + 7 (term data) are all [u32 len][json]. Tag 4 (chroma) arrives
+                    // before the first AU; tag 5 drives the forward listeners; the rest are
+                    // discarded. Must match the GUI loop's range in `main.rs` — a tag that lands
+                    // here and isn't length-skipped is read as a video AU header and desyncs the
+                    // stream for good.
+                    if matches!(tag[0], 1..=7) {
                         let mut lb = [0u8; 4];
                         if stream.read_exact(&mut lb).is_err() {
                             break;
@@ -194,6 +211,21 @@ pub fn run() -> Result<()> {
                                 let forward_addr = format!("{host}:{}", m.forward_port);
                                 tracing::info!("forwards: {} rule(s) → data port {}", m.rules.len(), m.forward_port);
                                 fwd_mgr.reconcile(m.rules, forward_addr);
+                            }
+                        } else if tag[0] == 6 {
+                            // Audio. Headless never opens a device (no speakers, no mic);
+                            // with RMNG_AUDIO_DUMP set it appends the raw Opus frames to a
+                            // file, so the whole audio path is verifiable with no display
+                            // and no sound hardware. Decode with:
+                            //   gst-launch-1.0 filesrc location=out.opus ! opusparse ! \
+                            //     opusdec ! audioconvert ! wavenc ! filesink location=out.wav
+                            if let Some(f) = audio_dump.as_ref() {
+                                if let Ok(wire::viewer::AudioMsg::Frame { opus, .. }) =
+                                    serde_json::from_slice::<wire::viewer::AudioMsg>(&body)
+                                {
+                                    use std::io::Write;
+                                    let _ = f.lock().unwrap().write_all(&opus);
+                                }
                             }
                         }
                         continue;
