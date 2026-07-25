@@ -23,6 +23,28 @@ pub struct ModeMsg {
     pub chroma: ChromaMode,
 }
 
+/// Audio on the **viewer** protocol (port-1 tag 6), both directions: server→viewer carries
+/// the selected clone's desktop sound, viewer→server carries the operator's microphone.
+/// Shaped like [`crate::socket::ClipboardMsg`] — one `k`-tagged enum for both directions.
+///
+/// The frames are Opus, encoded at whichever endpoint produced them; the control-server
+/// relays them opaquely and never decodes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum AudioMsg {
+    /// One 20 ms Opus frame. A gap in `seq` drives the receiver's packet-loss concealment.
+    Frame {
+        seq: u64,
+        #[serde(with = "crate::socket::serde_bytes_b64")]
+        opus: Vec<u8>,
+    },
+    /// Stream boundary — the selection changed, or audio was re-enabled. The receiver
+    /// flushes its jitter buffer and resets its decoder. Opus is **stateful**: feeding
+    /// clone B's frames to a decoder primed on clone A produces garbage, so a selection
+    /// switch has to be marked explicitly rather than just letting the stream change.
+    Reset,
+}
+
 /// One monitor's geometry in the viewer's layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewerMonitor {
@@ -190,5 +212,19 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"t\":\"video\""));
         assert_eq!(serde_json::from_str::<ToViewer>(&s).unwrap(), m);
+    }
+
+    #[test]
+    fn audio_msg_tagged() {
+        let f = AudioMsg::Frame { seq: 7, opus: vec![0xff, 0x00, 0x42] };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["k"], "frame");
+        assert_eq!(serde_json::from_value::<AudioMsg>(v).unwrap(), f);
+
+        // `Reset` is a unit variant: it must still carry the `k` discriminant, since the
+        // receiver distinguishes it from a frame purely by that tag.
+        let v = serde_json::to_value(AudioMsg::Reset).unwrap();
+        assert_eq!(v["k"], "reset");
+        assert_eq!(serde_json::from_value::<AudioMsg>(v).unwrap(), AudioMsg::Reset);
     }
 }

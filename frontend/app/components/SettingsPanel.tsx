@@ -22,6 +22,7 @@ import type { ClaudeUsage, GroupUsage } from "~/lib/types";
 import { ordered, useAccountOrder } from "~/lib/accountOrder";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
+import type { AudioConfig } from "~/lib/wire/AudioConfig";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
@@ -558,6 +559,7 @@ export function SettingsPanel({
   const [staticDir, setStaticDir] = useState("");
   const [cloneSocket, setCloneSocket] = useState("");
   const [chroma, setChroma] = useState<ChromaMode>("yuv420");
+  const [audio, setAudio] = useState<AudioConfig>({ enabled: true, micEnabled: true });
   const [agentPlaybook, setAgentPlaybook] = useState("");
   const [globalPrompt, setGlobalPrompt] = useState("");
   // SSH access: pasted authorized_keys (one per line) installed on the bastion + every
@@ -595,6 +597,7 @@ export function SettingsPanel({
     setStaticDir(c.staticDir);
     setCloneSocket(c.cloneSocket);
     setChroma(c.chroma);
+    setAudio(c.audio);
     setAgentPlaybook(c.agentPlaybook);
     setGlobalPrompt(c.globalPrompt);
     setSsh({
@@ -702,6 +705,7 @@ export function SettingsPanel({
         staticDir,
         cloneSocket,
         chroma,
+        audio,
         ssh,
         agentPlaybook,
         globalPrompt,
@@ -1231,6 +1235,40 @@ export function SettingsPanel({
                   <option value="yuv444">4:4:4 (AVC444, ≤1440p/monitor)</option>
                 </select>
               </Field>
+            </Section>
+
+            {/* Audio — bidirectional sound on the port-1 viewer stream. Applies live (the
+                next selection change re-sends the subscribe), so no restart badge. */}
+            <Section
+              title="Audio"
+              effect="immediate"
+              hint="Sound for the native viewer only — the browser dashboard stays control-plane. Only the selected clone streams, mirroring video. Opus is encoded at both endpoints; the server relays without decoding."
+            >
+              <label className="col-span-2 flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={audio.enabled}
+                  onChange={(e) => setAudio({ ...audio, enabled: e.target.checked })}
+                  className="mt-0.5"
+                />
+                <span>Play the selected clone's desktop audio in connected viewers</span>
+              </label>
+              <label className="col-span-2 flex items-start gap-2 text-sm text-slate-600 dark:text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={audio.micEnabled}
+                  onChange={(e) => setAudio({ ...audio, micEnabled: e.target.checked })}
+                  className="mt-0.5"
+                />
+                <span>
+                  Send the viewer's microphone into the selected clone
+                  <span className="block text-xs text-slate-500 dark:text-slate-400">
+                    Viewers open their microphone on connect, so anything running in the
+                    selected clone can record it. Turn this off to disable mic capture
+                    fleet-wide; individual viewers can also mute with Ctrl+Alt+M.
+                  </span>
+                </span>
+              </label>
             </Section>
 
             {/* SSH Access — public keys installed on the bastion + every clone, so

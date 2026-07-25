@@ -152,6 +152,32 @@ pub struct ClipboardData {
     pub bytes: Vec<u8>,
 }
 
+/// One 20 ms Opus frame, either direction. Audio is encoded at the **endpoints** (in the
+/// clone for desktop output, in the viewer for the microphone) and the control-server
+/// relays the bytes without ever decoding them — unlike video, which it must transcode
+/// because only the server has the VA-API GPU.
+///
+/// `seq` is a per-stream monotonic counter. Opus is stateful, so the receiver uses a gap
+/// to drive `opusdec`'s packet-loss concealment (a smoothed gap) instead of feeding the
+/// decoder a discontinuity (an audible click).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioData {
+    pub seq: u64,
+    #[serde(with = "serde_bytes_b64")]
+    pub opus: Vec<u8>,
+}
+
+/// Server → daemon: start/stop each audio direction. The audio twin of [`Subscribe`],
+/// and gated the same way — only the **selected** clone is ever subscribed, so an
+/// unselected clone builds no pipeline and burns no CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioSubscribe {
+    /// Capture the desktop's default sink monitor and ship [`DaemonMsg::AudioData`].
+    pub out: bool,
+    /// Accept [`ServerMsg::AudioData`] and write it into the virtual microphone node.
+    pub mic: bool,
+}
+
 /// daemon → server, first message on connect: identifies the clone (so the server
 /// can route a shared bind-mounted socket by clone id rather than peer address).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +202,12 @@ pub enum DaemonMsg {
     ClipboardRequest(ClipboardRequest),
     /// Bytes for an earlier request (the daemon `SelectionRead` its clone clipboard).
     ClipboardData(ClipboardData),
+    /// A 20 ms Opus frame of this clone's desktop audio. Only sent while the server holds
+    /// this clone at `AudioSubscribe { out: true }` — i.e. while it is selected.
+    AudioData(AudioData),
+    /// The clone's audio plumbing came up (or failed), so the server can log a real reason
+    /// instead of silently relaying nothing.
+    AudioStatus { out: bool, mic: bool, detail: String },
     /// An unrecognized message (a `t` tag this build doesn't know). Kept for **forward
     /// compatibility**: a peer that predates a newer variant deserializes it to `Unknown`
     /// and ignores it, instead of treating the decode as a fatal error and dropping the
@@ -210,6 +242,10 @@ pub enum ServerMsg {
     ClipboardOffer(ClipboardOffer),
     ClipboardRequest(ClipboardRequest),
     ClipboardData(ClipboardData),
+    /// Start/stop this clone's audio capture and/or microphone injection.
+    AudioSubscribe(AudioSubscribe),
+    /// A 20 ms Opus frame of operator microphone for this clone's virtual mic node.
+    AudioData(AudioData),
     /// An unrecognized message (a `t` tag this build doesn't know). Kept for **forward
     /// compatibility**: an old daemon deserializes a future server→daemon variant to
     /// `Unknown` and ignores it, instead of a fatal decode error that would crash-loop it
@@ -340,6 +376,30 @@ mod tests {
         assert_eq!(v["monitors"][0]["width"], 1920);
         let back: ServerMsg = serde_json::from_value(v).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn audio_subscribe_and_data_round_trip() {
+        let s = ServerMsg::AudioSubscribe(AudioSubscribe { out: true, mic: false });
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["t"], "audio_subscribe");
+        assert_eq!(v["out"], true);
+        assert_eq!(serde_json::from_value::<ServerMsg>(v).unwrap(), s);
+
+        // Opus frames are arbitrary bytes — they must survive the base64 JSON hop intact,
+        // since a single corrupted frame desyncs a stateful Opus decoder.
+        let opus: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let d = DaemonMsg::AudioData(AudioData { seq: 42, opus: opus.clone() });
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["t"], "audio_data");
+        assert!(v["opus"].is_string(), "opus rides as base64, not a byte array");
+        match serde_json::from_value::<DaemonMsg>(v).unwrap() {
+            DaemonMsg::AudioData(a) => {
+                assert_eq!(a.seq, 42);
+                assert_eq!(a.opus, opus);
+            }
+            other => panic!("expected AudioData, got {other:?}"),
+        }
     }
 
     // Forward compatibility: an unknown `t` tag must deserialize to `Unknown` (Ok), NOT an

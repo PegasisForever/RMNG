@@ -531,6 +531,13 @@ mod tests {
         let mut n = base.clone();
         n.docker.hostname_prefix = "other-".into();
         assert!(!restart_required(&base, &n));
+
+        // Audio applies live — the next selection change re-sends `AudioSubscribe`, and
+        // the server builds no audio pipeline of its own to rewire.
+        let mut n = base.clone();
+        n.audio.enabled = !base.audio.enabled;
+        n.audio.mic_enabled = !base.audio.mic_enabled;
+        assert!(!restart_required(&base, &n));
     }
 
     fn ms(w: u32, h: u32) -> wire::MonitorSpec {
