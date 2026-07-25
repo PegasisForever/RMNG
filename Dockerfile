@@ -109,6 +109,17 @@ WORKDIR /src/cliproxy-sidecar
 COPY cliproxy-sidecar/go.mod cliproxy-sidecar/go.sum ./
 RUN go mod download
 COPY cliproxy-sidecar/ ./
+# Patch the pinned CLIProxyAPI model registry to add Claude Opus 5 (upstream PR
+# router-for-me/CLIProxyAPI#4547, unmerged — without it the sidecar rejects opus-5 with
+# "unknown provider for model claude-opus-5"). Copy the module out of the read-only cache,
+# insert the opus-5 entry into its embedded models.json (idempotent; see tools/patchmodels),
+# and point the build at the patched copy via a filesystem `replace` (no go.sum churn). Drop
+# this once upstream ships opus-5 — the patcher then no-ops and the replace is inert.
+RUN set -eux; \
+    src="$(go list -m -f '{{.Dir}}' github.com/router-for-me/CLIProxyAPI/v7)"; \
+    cp -a "$src" /cliproxy-patched; chmod -R u+w /cliproxy-patched; \
+    go run ./tools/patchmodels /cliproxy-patched/internal/registry/models/models.json; \
+    go mod edit -replace "github.com/router-for-me/CLIProxyAPI/v7=/cliproxy-patched"
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/cliproxy-sidecar .
 
 # ---------------------------------------------------------------------------------------
