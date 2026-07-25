@@ -114,6 +114,86 @@ installed). Install it, then restart the control-server (or hit Settings → Tes
 re-create clones to pick it up (see the caveat on load average in
 [DEPLOY.md](DEPLOY.md#clone-proc-limits-lxcfs)).
 
+## 2c. (Optional) Let clones resolve Tailscale (`*.ts.net`) names
+
+If the CT is on a tailnet and you want clones to reach tailnet services **by name** — opening
+a self-hosted app's link in a clone's browser, say — point the Docker daemon's DNS at the
+Tailscale resolver. Clones inherit the daemon's `dns` setting; RMNG never sets container DNS
+itself (it sets only privileged/cpu/memory/shm/mounts/restart-policy on a clone's
+`HostConfig`), so this is purely host-side and needs no RMNG change.
+
+Routing to the tailnet already works without any of this: the clone's default route is the
+`rmng` bridge gateway, and `-s <docker.subnet> -j MASQUERADE` NATs it onto `tailscale0`. Only
+**name resolution** is missing.
+
+```sh
+# 1. Let the CT use the tailnet resolver (persisted in tailscaled.state; survives reboot).
+tailscale set --accept-dns=true
+
+# 2. Hand that resolver to every NEW container.
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json <<'EOF'
+{
+  "dns": ["100.100.100.100", "64.71.255.204"]
+}
+EOF
+
+# 3. SIGHUP — `dns` is a reloadable option, so dockerd is NOT restarted and running
+#    clones are untouched. Confirm the PID is unchanged.
+systemctl show -p MainPID --value docker
+systemctl reload docker
+systemctl show -p MainPID --value docker
+```
+
+The second entry is the CT's pre-existing `nameserver` (from `/etc/resolv.conf` before step 1),
+kept as a plain resolver fallback. Note what it does **not** buy you: with `tailscaled` stopped,
+`*.ts.net` fails either way — quad100 is a netfilter interception, so when tailscaled is down
+the address is simply unreachable and no fallback can answer for the tailnet. Public names keep
+resolving in both cases (measured: with and without the second entry). Listing it is still
+worth doing — it is what answers if quad100 is reachable but the tailnet resolver misbehaves,
+and it makes the intended upstream explicit rather than implicit.
+
+Verify from a throwaway container on the `rmng` network — tailnet **and** public names must
+both resolve:
+
+```sh
+docker run --rm --network rmng alpine:latest sh -c '
+  for h in <host>.<tailnet>.ts.net registry-1.docker.io github.com; do
+    printf "%-34s " "$h"; getent hosts "$h" >/dev/null 2>&1 && echo OK || echo FAIL
+  done'
+```
+
+`dns` applies to **newly created** containers, so existing clones keep the old resolver until
+they are re-created — the same rule as the lxcfs binds in §2b.
+
+Three counter-intuitive details, each of which costs an afternoon if you rediscover it:
+
+- **`*.ts.net` resolves even with `accept-dns=false`**, via the tailnet's split-DNS route
+  (`ts.net. → <resolver>`, visible in `tailscale dns status`). What the flag actually buys is
+  **public** resolution: without it `100.100.100.100` has no upstream to forward to, so
+  `registry-1.docker.io` and `github.com` fail while tailnet names still work. The failure
+  mode is the opposite of what you would guess.
+- **Nothing listens on `100.100.100.100:53`.** `tailscaled` intercepts it with netfilter
+  (`NetfilterMode: 2`), so `ss -lunp` shows only `:41641`. An empty `ss` output is *not*
+  evidence that quad100 is broken — query it instead, and use a real client (`getent`,
+  `nslookup`); a hand-rolled DNS packet with a malformed 13-byte header gets `SERVFAIL`/
+  `FORMERR` from *every* resolver and looks exactly like "quad100 is dead".
+- **Reaching a `tailscale serve` endpoint requires correct SNI.** `curl https://<tailscale-ip>/`
+  fails the TLS handshake (curl exit 35) even when connectivity is perfect; test by name, or
+  with `--resolve <name>:443:<ip>`. Likewise curl exit 6 ("could not resolve host") means DNS
+  never resolved — no packet was sent, so it says nothing about reachability.
+
+Step 1 hands `/etc/resolv.conf` to Tailscale (it rewrites the file and backs up the original).
+On a Proxmox CT that file is also written by PVE at CT start, and `systemd-resolved` may be
+active alongside in `resolv.conf mode: foreign` — check `resolvectl status` if resolution
+behaves oddly after a CT restart. To undo everything:
+
+```sh
+tailscale set --accept-dns=false
+rm /etc/docker/daemon.json          # or drop just the "dns" key if the file has other settings
+systemctl reload docker
+```
+
 ## 3. Verify the daemon before deploying RMNG
 
 ```sh
