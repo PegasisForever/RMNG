@@ -13,6 +13,61 @@ import { parseTicketInput, workspaceBadge } from "~/lib/workspace";
 // BlockNote is browser-only and heavy; the description field pulls it in on demand.
 const MarkdownEditor = lazy(() => import("~/components/MarkdownEditor"));
 
+/** What the dialog should do about the clone operation it started. */
+export type OpPhase = "running" | "done" | "failed";
+
+/**
+ * Classify the started operation from the live op list. Exported for tests — this is the
+ * rule that decides when the dialog closes, and it has one non-obvious case.
+ *
+ * Finished operations are PRUNED from `ControlState` shortly after they settle (8s after
+ * Done, 60s after Error). A poll of the list can therefore miss the terminal frame entirely,
+ * so **an op that has vanished after being seen counts as done** — the same rule the CLI's
+ * waiter uses. `failed` is passed in as sticky state by the caller, because that vanish rule
+ * would otherwise fire when a FAILED op is pruned and close the dialog over its own error.
+ */
+export function opPhase(
+  op: Operation | undefined,
+  everSeen: boolean,
+  alreadyFailed: boolean,
+): OpPhase {
+  if (alreadyFailed || op?.status === "error") return "failed";
+  if (op?.status === "done") return "done";
+  if (!op && everSeen) return "done";
+  return "running";
+}
+
+/**
+ * The preset that will actually drive the clone, per tab — mirroring what the server does so
+ * the dialog shows the truth rather than a guess. Exported for tests.
+ *
+ * - `plain`: whatever the operator picked by hand.
+ * - `create`: implied by the chosen team key. The key comes from the presets' own labels, so
+ *   picking a team IS picking a preset — which is why that tab has no preset dropdown.
+ * - `existing`: auto-selected from the ticket-id prefix, mirroring the server's
+ *   `pick_preset_by_prefix` (first preset in config order with a case-insensitively matching
+ *   label). Undefined until a ticket parses, so the group control reads blank until then.
+ */
+export function resolvePreset(
+  mode: "existing" | "create" | "plain",
+  presets: PresetRedacted[],
+  { plainPreset, team, ticketPrefix }: {
+    plainPreset?: string;
+    team?: string;
+    ticketPrefix?: string;
+  },
+): PresetRedacted | undefined {
+  if (mode === "plain") return presets.find((p) => p.name === plainPreset);
+  if (mode === "create") {
+    return team
+      ? presets.find((p) => p.labels.some((l) => l.toLowerCase() === team.toLowerCase()))
+      : undefined;
+  }
+  return ticketPrefix
+    ? presets.find((p) => p.labels.some((l) => l.toLowerCase() === ticketPrefix))
+    : undefined;
+}
+
 /**
  * Clone dialog. Pick a clone-source image, then one of three ticket modes: paste an
  * existing Linear ticket (link or `WE-142`); create a new ticket (team key + title +
@@ -115,16 +170,11 @@ export function CloneModal({
     if (mode === "create" && team === "" && teamKeys.length > 0) setTeam(teamKeys[0].key);
   }, [mode, team, teamKeys]);
 
-  // The preset that will actually apply, per mode: auto-selected from the ticket's team
-  // prefix (existing), implied by the chosen team key (create), or picked by hand (plain).
-  const effectivePreset =
-    mode === "plain"
-      ? presets.find((p) => p.name === plainPreset)
-      : mode === "create"
-        ? teamKeys.find((t) => t.key === team)?.preset
-        : parsed
-          ? presets.find((p) => p.labels.some((l) => l.toLowerCase() === parsed.prefix))
-          : undefined;
+  const effectivePreset = resolvePreset(mode, presets, {
+    plainPreset,
+    team,
+    ticketPrefix: parsed?.prefix,
+  });
 
   // What the group control shows: the override if the operator set one, else the resolved
   // preset's group. Blank until a preset resolves — on the ticket tabs that's "nothing typed
@@ -157,24 +207,37 @@ export function CloneModal({
   // --- operation tracking ---------------------------------------------------------------
   // Once started, follow the op through the SSE frames and close only when it settles.
   // Finished ops are PRUNED from state a few seconds after they land, so an op that
-  // disappears having previously been seen counts as done (same rule as the CLI's waiter).
+  // disappears having previously been seen counts as done — the same rule the CLI's waiter
+  // uses, and the reason a slow SSE frame can't strand the dialog open forever.
   const op = opId ? operations.find((o) => o.id === opId) : undefined;
   const [opSeen, setOpSeen] = useState(false);
+  // Sticky: an op that errored has SETTLED. Without this the vanish-means-done rule above
+  // would fire when the failed op is pruned (60s later) and close the dialog out from under
+  // the error message.
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     if (op) setOpSeen(true);
+    if (op?.status === "error") {
+      setFailed(true);
+      setError(op.message || "the clone failed");
+    }
   }, [op]);
   useEffect(() => {
     if (!opId) return;
-    if (op?.status === "done" || (!op && opSeen)) onClose();
-    if (op?.status === "error") setError(op.message || "the clone failed");
+    if (opPhase(op, opSeen, failed) === "done") onClose();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opId, op?.status, op, opSeen]);
+  }, [opId, op, opSeen, failed]);
 
-  const busy = starting || (!!opId && op?.status !== "error");
+  const busy = starting || (!!opId && !failed);
 
   function submit() {
     if (!valid || busy || !image) return;
+    // Clear the previous attempt so a retry after a failure tracks the NEW op, not the old
+    // failed one (which is still in `operations` for another minute before it's pruned).
     setError(null);
+    setOpId(null);
+    setOpSeen(false);
+    setFailed(false);
     setStarting(true);
     // A blank override means "let the server resolve it" (preset default → first group),
     // so it's omitted rather than sent as an empty name.
