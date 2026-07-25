@@ -1183,6 +1183,10 @@ fn make_video_content(
         let c = fps_count.clone();
         paintable.connect_invalidate_contents(move |_| c.set(c.get() + 1));
     }
+    // macOS shows the real NSWindow titlebar (native_titlebar.rs), which carries no FPS readout —
+    // so nothing consumes the counter there and there is no point paying for the invalidate hook.
+    #[cfg(target_os = "macos")]
+    let _ = fps_count;
 
     let state = Rc::new(WinInput::default());
     install_pointer(&video, mid, &paintable, window, layout, writer, &state, pointer_lock, warp);

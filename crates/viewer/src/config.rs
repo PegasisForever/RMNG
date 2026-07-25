@@ -39,6 +39,11 @@ impl Default for Config {
 
 /// Parse an `RMNG_CMD_IS_CTRL` value. `None` means "no opinion" (unset or blank) — the caller
 /// falls through to the persisted config rather than treating absence as "off".
+///
+/// The `allow(dead_code)` covers non-macOS builds: only the macOS keyboard monitor consults this
+/// setting, so on Linux both functions are reachable from tests only. The parser itself is
+/// platform-neutral, so its tests run everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn parse_cmd_is_ctrl_env(v: Option<&str>) -> Option<bool> {
     let s = v?.trim();
     if s.is_empty() {
@@ -48,7 +53,9 @@ pub(crate) fn parse_cmd_is_ctrl_env(v: Option<&str>) -> Option<bool> {
 }
 
 /// The effective Cmd↔Ctrl setting: `RMNG_CMD_IS_CTRL` wins, else the persisted config, which
-/// defaults to enabled.
+/// defaults to enabled. Called only from the macOS keyboard monitor's install (hence the
+/// non-macOS `allow(dead_code)`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn cmd_is_ctrl() -> bool {
     parse_cmd_is_ctrl_env(std::env::var("RMNG_CMD_IS_CTRL").ok().as_deref())
         .unwrap_or_else(|| load().cmd_is_ctrl)
