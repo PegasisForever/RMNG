@@ -306,10 +306,13 @@ export function CloneModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
       onClick={busy ? undefined : onClose}
     >
-      {/* Sized to fit every tab without scrolling — only the tab-specific block below is
-          height-pinned, so the dialog is as tall as its tallest tab and never jumps when you
-          switch. `max-h-[90vh]` + `overflow-y-auto` are the fallback for a genuinely short
-          viewport, not the normal path. */}
+      {/* One height for every tab. The pin is on the whole scroll body, not on the
+          tab-specific block: the tabs also differ BELOW that block (No ticket shows no preset
+          line and no instruction overrides), so pinning only the block still left this tab
+          shorter. 43.5rem is the tallest tab (New ticket, ~694px); the shortest (No ticket,
+          ~462px) simply carries the slack as empty space above the button bar, which stays
+          pinned to the bottom. `max-h-[90vh]` is the fallback for a genuinely short viewport,
+          not the normal path. */}
       <div
         className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
         onClick={(e) => e.stopPropagation()}
@@ -321,7 +324,7 @@ export function CloneModal({
           New clone
         </h3>
 
-        <div className="min-h-0 flex-1 overflow-y-auto pr-0.5">
+        <div className="h-[43.5rem] min-h-0 shrink overflow-y-auto pr-0.5">
           <div className="mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
             Source image
             <ImagePicker
@@ -338,12 +341,8 @@ export function CloneModal({
             {tab("plain", "No ticket")}
           </div>
 
-          {/* The only part that differs per tab, pinned to the tallest tab's height so
-              switching tabs neither resizes the dialog nor shifts the controls below it.
-              New ticket is the tallest at ~17.4rem (team select + title + the 6.5rem editor);
-              existing is ~5.8rem and plain ~15.6rem. Rounded up to 18rem for the ticket tab's
-              conditional error line. */}
-          <div className="min-h-[18rem]">
+          {/* No height pin here — the whole scroll body above carries it, so this block is
+              free to be its natural size on each tab. */}
           {mode === "existing" ? (
             <label className={`mt-3 ${label}`}>
               Linear ticket link or id
@@ -472,7 +471,6 @@ export function CloneModal({
               ) : null}
             </div>
           )}
-          </div>
 
           {/* The auto-selected preset, read-only — the ticket tabs never pick one by hand. */}
           {mode !== "plain" ? (
@@ -527,11 +525,11 @@ export function CloneModal({
             </p>
           ) : null}
 
-          {/* Always visible (no expander), and side by side so showing both costs one field's
-              height rather than two — that's what keeps the whole dialog inside a laptop
-              viewport without scrolling. Resizable: they're overrides, usually left empty. */}
+          {/* Always visible (no expander), stacked — their placeholders are long enough that
+              a half-width column truncates them to uselessness. Resizable: they're overrides,
+              usually left empty. */}
           {mode !== "plain" ? (
-            <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+            <div className="mt-3 space-y-2 text-xs">
               <label className={`${label} font-medium`}>
                 Clone agent instructions
                 <textarea
