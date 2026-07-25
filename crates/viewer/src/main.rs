@@ -878,7 +878,7 @@ fn reconcile_view(
     let gone: Vec<u32> = w.keys().copied().filter(|id| !live.contains(id)).collect();
     for id in gone {
         if let Some(mut mw) = w.remove(&id) {
-            teardown_content(&mut mw, srcs);
+            teardown_content(&mut mw, srcs, pointer_lock);
             mw.window.destroy();
         }
     }
@@ -899,7 +899,7 @@ fn reconcile_view(
             // clone never inherits the previous one's tabs / scrollback.
             let same = matches!(&mw.content, Content::Terminal { clone, .. } if *clone == terminal_clone);
             if !same {
-                teardown_content(mw, srcs);
+                teardown_content(mw, srcs, pointer_lock);
                 let tv = make_terminal_view(writer);
                 mw.window.set_child(Some(tv.widget()));
                 mw.content = Content::Terminal { clone: terminal_clone.clone(), view: tv };
@@ -910,14 +910,14 @@ fn reconcile_view(
         } else if terminal_mode {
             // Secondary window while a headless clone is selected: blank placeholder, kept open.
             if fresh || !matches!(mw.content, Content::Placeholder) {
-                teardown_content(mw, srcs);
+                teardown_content(mw, srcs, pointer_lock);
                 mw.window.set_child(Some(&placeholder_widget()));
                 mw.content = Content::Placeholder;
             }
         } else {
             // Headed clone: every window shows its monitor's video.
             if fresh || !matches!(mw.content, Content::Video(_)) {
-                teardown_content(mw, srcs);
+                teardown_content(mw, srcs, pointer_lock);
                 let vc = make_video_content(
                     m.id, &mw.window, &mw.fps_count, layout, writer, pointer_lock, warp, auto,
                 );
@@ -955,12 +955,21 @@ fn reconcile_view(
 }
 
 /// Detach a window's current content so it can host new content: stop a video pipeline, remove its
-/// window-level keyboard controller, and drop its appsrc. (The pointer controllers live on the
-/// video widget and drop when it is unparented by the next `set_child`.) Leaves the window in a
-/// neutral `Placeholder` state; the caller sets the real content next.
-fn teardown_content(mw: &mut MonitorWindow, srcs: &VideoSrcs) {
+/// window-level keyboard controller, release any pointer lock it held, and drop its appsrc. (The
+/// pointer controllers live on the video widget and drop when it is unparented by the next
+/// `set_child`.) Leaves the window in a neutral `Placeholder` state; the caller sets the real
+/// content next.
+///
+/// Releasing the lock here is what makes window teardown safe on macOS: only a video window can
+/// hold it, the lock is a single process-wide resource, and once this window is gone (or showing a
+/// terminal) there is no key controller left to run the Ctrl+Alt+P escape. The tick re-engages
+/// within one frame if the policy still wants it and a video window is focused.
+fn teardown_content(mw: &mut MonitorWindow, srcs: &VideoSrcs, pointer_lock: &Option<Rc<PointerLock>>) {
     if let Content::Video(vc) = &mw.content {
         mw.window.remove_controller(&vc.keyboard);
+        if let Some(pl) = pointer_lock.as_ref() {
+            pl.release(); // idempotent when not engaged
+        }
         let _ = vc.pipeline.set_state(gst::State::Null);
         srcs.lock().unwrap().remove(&mw.id);
     }
