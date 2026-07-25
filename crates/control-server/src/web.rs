@@ -1016,23 +1016,35 @@ async fn resolve_issue(
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let Some(preset) = explicit else {
-            return Err(
-                "creating a ticket requires a preset (its Linear key creates the issue)".into(),
-            );
-        };
-        if preset.linear_key.is_empty() {
-            return Err(format!(
-                "preset '{}' has no Linear API key — required to create a ticket",
-                preset.name
-            ));
-        }
+        // Validate the team key BEFORE resolving the preset from it, so garbage input reads as
+        // "that isn't a team key" rather than "no preset claims it".
         let prefix = team.trim().to_ascii_lowercase();
         if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err("create.team must be a Linear team key like \"we\"".into());
         }
         if title.is_empty() {
             return Err("create.title is required".into());
+        }
+        // The team key IS the preset choice: it comes from the presets' own ticket-id
+        // prefixes, so an omitted `preset` resolves through the same `pick_preset_by_prefix`
+        // the existing-ticket mode uses. The web dialog sends the name it resolved; the CLI's
+        // `clone new-ticket` sends only `--team` and relies on this.
+        let preset = match explicit {
+            Some(p) => p,
+            None => linear::pick_preset_by_prefix(&cfg.presets, &prefix).ok_or_else(|| {
+                format!(
+                    "no preset claims team {} — add it to a preset's ticket-id prefixes, \
+                     or name a preset explicitly (configured: {})",
+                    prefix.to_uppercase(),
+                    preset_names(cfg),
+                )
+            })?,
+        };
+        if preset.linear_key.is_empty() {
+            return Err(format!(
+                "preset '{}' has no Linear API key — required to create a ticket",
+                preset.name
+            ));
         }
         // The description arrives as markdown from the dialog's rich-text editor, so any
         // pasted image points at this server's LAN-only `/uploads`. Re-host those in Linear
