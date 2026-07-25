@@ -699,6 +699,13 @@ async fn run_shipping(
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(9004);
+        // Height of the MCP's virtual coordinate space: screenshots are downscaled to it and
+        // pointer x/y are read in it (see `mcp`'s module docs). 1080 keeps images and coords
+        // in the range vision models are trained on; `0` serves everything at native res.
+        let virt_height: u32 = std::env::var("RMNG_DESKTOP_HEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1080);
         let (active_mcp, live_mons_mcp, latest_mcp, transport_mcp) = (
             active.clone(),
             live_monitors.clone(),
@@ -707,7 +714,8 @@ async fn run_shipping(
         );
         tokio::spawn(async move {
             if let Err(e) =
-                mcp::serve(active_mcp, live_mons_mcp, latest_mcp, transport_mcp, port).await
+                mcp::serve(active_mcp, live_mons_mcp, latest_mcp, transport_mcp, port, virt_height)
+                    .await
             {
                 tracing::error!("clone-daemon MCP exited: {e:#}");
             }
