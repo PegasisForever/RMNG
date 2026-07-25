@@ -29,16 +29,30 @@ const OUT_CHANNELS: i32 = 2;
 /// framing preserved the boundary. `opusparse` is for recovering boundaries from a flat
 /// byte stream and would collapse pre-framed input.
 ///
-/// `sync=false` for the same reason the video sink uses it: present on arrival, lowest
-/// latency, and there is no A/V sync to maintain (the video path has no PTS discipline to
-/// sync against, and adding one would add latency to both).
+/// **`sync=true`, unlike the video sink**, and that difference is load-bearing rather than
+/// an inconsistency. The clone captures on its own sound card's crystal; these speakers run
+/// on a different one, and they differ by tens of ppm. Nothing reconciles two clocks for
+/// free: a synchronising audio sink slaves itself to the incoming stream (`pulsesink`'s
+/// `slave-method`, "skew" by default), which is the only thing here that can absorb that
+/// drift. With `sync=false` that machinery is disabled, so the difference accumulates in the
+/// queue below until it saturates and starts leaking — and because a leak here drops an
+/// *encoded* frame, it desyncs `opusdec` and turns into audible noise. That failure takes
+/// minutes to appear, which is exactly what makes it worth a comment: it is invisible in a
+/// short test and unmistakable in real use.
+///
+/// The cost is one buffer of latency instead of zero. Audio has no A/V sync to maintain
+/// (the video path carries no PTS discipline to sync against), so this buys correctness
+/// with a delay nobody can hear.
+///
+/// The queue stays `leaky=downstream` as a last-resort backstop for a genuine stall, but
+/// with the sink slaving it should never reach that bound in steady state.
 const PLAY_DESC: &str = "\
     appsrc name=src is-live=true format=time do-timestamp=true \
       max-buffers=32 leaky-type=downstream ! \
     opusdec plc=true ! \
     audioconvert ! audioresample ! \
     queue max-size-time=100000000 leaky=downstream ! \
-    autoaudiosink name=sink sync=false";
+    autoaudiosink name=sink sync=true";
 
 /// Capture: operator microphone → Opus.
 ///
@@ -113,12 +127,18 @@ impl Playback {
 
     /// Selection changed: drop the decoder's state. Opus is stateful, so frames from the
     /// newly-selected clone must not be decoded against the previous clone's history.
+    ///
+    /// The flush is sent to the **pipeline**, not to the appsrc. `Element::send_event` on a
+    /// source hands the event to that element alone; only the pipeline routes a flush
+    /// downstream through `opusdec` and the queue, which is where the stale state actually
+    /// lives. Flushing resets the running time, so `FlushStop(reset_time: true)` is what lets
+    /// `do-timestamp` start the new clone's stream from zero rather than resuming mid-timeline.
     pub fn reset(&self) {
         self.last_seq.store(u64::MAX, Ordering::Relaxed);
-        // Flush the decoder and the queue, then resume — cheaper and less disruptive than
-        // tearing the pipeline down, and it drops exactly the stale buffers we want gone.
-        let _ = self.src.send_event(gst::event::FlushStart::new());
-        let _ = self.src.send_event(gst::event::FlushStop::new(true));
+        // Cheaper and less disruptive than tearing the pipeline down, and it drops exactly
+        // the stale buffers we want gone.
+        let _ = self.pipeline.send_event(gst::event::FlushStart::new());
+        let _ = self.pipeline.send_event(gst::event::FlushStop::new(true));
     }
 
     pub fn set_muted(&self, muted: bool) {
@@ -251,5 +271,50 @@ where
             *slot = Some(m);
         }
         Err(e) => tracing::warn!("microphone unavailable: {e:#}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The playback sink must SYNCHRONISE, which is what engages the sink's clock slaving
+    /// (`pulsesink`'s `slave-method`, "skew" by default).
+    ///
+    /// Regression: this shipped as `sync=false`, copied from the video sink where it is
+    /// right. Audio is different — the clone captures on its sound card's crystal and these
+    /// speakers run on another, differing by tens of ppm, and a non-synchronising sink does
+    /// nothing to reconcile them. The difference accumulated in the queue until it saturated
+    /// and leaked an *encoded* frame, desyncing `opusdec` into noise. It sounded perfect for
+    /// the first minutes, which is precisely why a test is worth more than a manual check.
+    #[test]
+    fn playback_sink_synchronises_to_absorb_clock_drift() {
+        assert!(
+            PLAY_DESC.contains("sync=true"),
+            "playback sink must sync=true or clock drift accumulates into decoder noise"
+        );
+        assert!(
+            !PLAY_DESC.contains("sync=false"),
+            "no element in the playback path may disable sync"
+        );
+    }
+
+    /// `opusdec` is stateful, so a leak must never drop an encoded frame in steady state —
+    /// the queue bound is the backstop, not the mechanism. Pinned because shrinking it would
+    /// silently reintroduce the same noise under a different trigger.
+    #[test]
+    fn playback_queue_keeps_a_generous_bound() {
+        assert!(
+            PLAY_DESC.contains("max-size-time=100000000"),
+            "playback queue should hold ~100ms; a tighter bound leaks encoded frames"
+        );
+    }
+
+    /// Each pushed buffer is exactly one encoder frame (the port-1 framing preserved the
+    /// boundary), so `opusparse` would collapse them rather than help.
+    #[test]
+    fn neither_pipeline_reparses_preframed_opus() {
+        assert!(!PLAY_DESC.contains("opusparse"));
+        assert!(!MIC_DESC.contains("opusparse"));
     }
 }

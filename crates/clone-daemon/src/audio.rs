@@ -73,6 +73,19 @@ const CAPTURE_DESC: &str = "\
 /// `sync=false async=false` because we are a live source clocked upstream — the sink must
 /// not block preroll waiting for a clock. `plc=true` turns a dropped relay frame into a
 /// smoothed gap instead of a click.
+///
+/// `slave-method=resample` is the mic-direction half of the drift fix (the viewer's
+/// `PLAY_DESC` carries the outbound half). The operator's microphone is clocked by their
+/// sound card, this node by the clone's PipeWire graph, and the two differ by tens of ppm;
+/// left unreconciled that accumulates until the queue leaks an *encoded* frame, which
+/// desyncs `opusdec` into noise after minutes of use.
+///
+/// **`sync` stays false here, deliberately asymmetric with the viewer's sink.** Unlike
+/// `pulsesink`, `pipewiresink` defaults to `slave-method=none`, so the resampling has to be
+/// asked for by name — but it does NOT need `sync=true` to engage. Setting `sync=true` on
+/// this sink wedges the pipeline before it reaches PLAYING (verified: `sync=true` alone
+/// hangs, `slave-method=resample` alone runs clean), because a virtual source node has no
+/// consumer clock to synchronise against.
 fn playback_desc() -> String {
     format!(
         "appsrc name=src is-live=true format=time do-timestamp=true \
@@ -81,7 +94,7 @@ fn playback_desc() -> String {
          audioconvert ! audioresample ! \
          audio/x-raw,format=S16LE,rate={RATE},channels={MIC_CHANNELS} ! \
          pipewiresink name=sink client-name={MIC_FEED_CLIENT} \
-           sync=false async=false"
+           sync=false async=false slave-method=resample"
     )
 }
 
@@ -276,5 +289,48 @@ impl Playback {
         if let Err(e) = self.src.push_buffer(buf) {
             tracing::debug!("mic push failed: {e:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mic-playback sink must resample to absorb clock drift, and must NOT synchronise.
+    ///
+    /// That combination looks inconsistent with the viewer's playback sink, which does the
+    /// opposite (`sync=true`, relying on `pulsesink`'s default slaving). Both are needed and
+    /// neither generalises:
+    ///
+    ///   - `pipewiresink` defaults to `slave-method=none`, unlike `pulsesink`'s "skew", so
+    ///     the resampling has to be requested by name — without it the operator's sound-card
+    ///     clock and the clone's PipeWire graph diverge until the queue leaks an encoded
+    ///     frame and `opusdec` desyncs into noise.
+    ///   - `sync=true` on THIS sink wedges the pipeline before it reaches PLAYING, because a
+    ///     virtual source node offers no consumer clock to synchronise against. Verified
+    ///     directly: `sync=true` alone hangs, `slave-method=resample` alone runs clean.
+    ///
+    /// So this pins both halves — a future "make these two sinks consistent" edit would
+    /// reintroduce either the noise or a hang.
+    #[test]
+    fn mic_sink_resamples_without_synchronising() {
+        let desc = playback_desc();
+        assert!(
+            desc.contains("slave-method=resample"),
+            "pipewiresink defaults to slave-method=none; drift needs it named explicitly"
+        );
+        assert!(
+            desc.contains("sync=false"),
+            "sync=true wedges this sink before PLAYING — a virtual source has no consumer clock"
+        );
+    }
+
+    /// The leaky queue sits BEFORE the encoder on the capture path. Dropping a raw buffer
+    /// under load is a click; dropping an encoded frame desyncs the far-end decoder.
+    #[test]
+    fn capture_leaks_raw_buffers_not_encoded_frames() {
+        let q = CAPTURE_DESC.find("leaky=downstream").expect("capture queue is leaky");
+        let enc = CAPTURE_DESC.find("opusenc").expect("capture encodes");
+        assert!(q < enc, "the leaky queue must precede opusenc, not follow it");
     }
 }
