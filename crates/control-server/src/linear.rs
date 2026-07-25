@@ -218,8 +218,13 @@ pub async fn upload_asset(
         json!({ "contentType": content_type, "filename": filename, "size": bytes.len() }),
     )
     .await?;
+    let ok = data
+        .pointer("/fileUpload/success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let f = data
         .pointer("/fileUpload/uploadFile")
+        .filter(|_| ok)
         .filter(|v| !v.is_null())
         .ok_or_else(|| LinearError("Linear refused the file upload".into()))?;
     let upload_url = f
@@ -232,8 +237,12 @@ pub async fn upload_asset(
         .ok_or_else(|| LinearError("Linear upload reply had no assetUrl".into()))?
         .to_string();
 
-    let mut req = http.put(upload_url).header("content-type", content_type);
-    // Every header Linear signed into the URL has to go back verbatim or the PUT 403s.
+    let mut req = http
+        .put(upload_url)
+        .header("content-type", content_type)
+        .header("cache-control", "public, max-age=31536000");
+    // Every header Linear signed into the URL has to go back verbatim or the GCS signed URL
+    // rejects the PUT with a 403 — the signature covers them.
     for h in f.get("headers").and_then(Value::as_array).into_iter().flatten() {
         if let (Some(k), Some(v)) = (
             h.get("key").and_then(Value::as_str),
