@@ -191,4 +191,44 @@ mod tests {
         assert!(s.contains("\"t\":\"video\""));
         assert_eq!(serde_json::from_str::<ToViewer>(&s).unwrap(), m);
     }
+
+    /// Tag 3 changed shape incompatibly: it used to be a bare array of monitor placements and is
+    /// now a [`ViewSpec`] object. A pre-`ViewSpec` server therefore leaves a current viewer with
+    /// no window at all — it sits at "connected, waiting for video" while video AUs pile up and
+    /// get dropped at `AU_QUEUE_CAP`. Pin the incompatibility here so it stays a documented fact
+    /// rather than a field mystery.
+    ///
+    /// Subtlety worth knowing before touching this type: serde's derived `Deserialize` accepts a
+    /// struct **either** as a map **or** as a positional sequence, so an incoming JSON array is
+    /// not rejected out of hand — it is tried as `[monitors, content]`. The legacy payload fails
+    /// only because its first element is a monitor *object* where `Vec<ViewMonitor>` is expected
+    /// (observed error: "invalid type: map, expected a sequence"). So the safety here rests on the
+    /// element types, not on array-vs-object. Two corollaries: do not give `content` a serde
+    /// default (a legacy array would then parse into a degenerate spec — silently worse than a
+    /// loud failure), and do not reorder these fields into a shape a legacy array could satisfy.
+    #[test]
+    fn legacy_monitor_array_is_not_a_view_spec() {
+        let legacy = br#"[{"id":0,"x":1920,"y":0,"width":1920,"height":1080,"primary":true}]"#;
+        assert!(
+            serde_json::from_slice::<ViewSpec>(legacy).is_err(),
+            "a legacy tag-3 array must fail loudly, not parse into a degenerate ViewSpec"
+        );
+    }
+
+    #[test]
+    fn current_view_spec_round_trips() {
+        let spec = ViewSpec {
+            monitors: vec![ViewMonitor {
+                id: 0,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                primary: true,
+            }],
+            content: ViewContent::Desktop,
+        };
+        let s = serde_json::to_string(&spec).unwrap();
+        assert_eq!(serde_json::from_str::<ViewSpec>(&s).unwrap(), spec);
+    }
 }

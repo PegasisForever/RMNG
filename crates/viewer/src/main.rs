@@ -316,12 +316,29 @@ fn run_gui() -> Result<()> {
                                     // Authoritative view spec: the window set + each window's
                                     // content. Latch it (bump `epoch` only on a real change) so the
                                     // tick reconciles windows exactly when it changes.
-                                    if let Ok(spec) = serde_json::from_slice::<wire::viewer::ViewSpec>(&body) {
-                                        let mut v = view.lock().unwrap();
-                                        if v.spec.as_ref() != Some(&spec) {
-                                            v.spec = Some(spec);
-                                            v.epoch = v.epoch.wrapping_add(1);
+                                    match serde_json::from_slice::<wire::viewer::ViewSpec>(&body) {
+                                        Ok(spec) => {
+                                            let mut v = view.lock().unwrap();
+                                            if v.spec.as_ref() != Some(&spec) {
+                                                v.spec = Some(spec);
+                                                v.epoch = v.epoch.wrapping_add(1);
+                                            }
                                         }
+                                        // NOT recoverable and NOT silent: no window can exist
+                                        // without a spec, so the viewer would otherwise sit at
+                                        // "connected, waiting for video" forever while AUs pile up
+                                        // and get dropped at AU_QUEUE_CAP — with nothing in the log
+                                        // to say why. The overwhelmingly likely cause is a server
+                                        // running an incompatible build: tag 3 used to be a bare
+                                        // array of monitor placements (see the `wire::viewer`
+                                        // test `legacy_monitor_array_is_not_a_view_spec`).
+                                        Err(e) => tracing::error!(
+                                            "tag 3: cannot parse the view spec ({e}) — no window \
+                                             can be built, so no video will render. The server is \
+                                             probably running an incompatible build; upgrade it. \
+                                             Payload was: {}",
+                                            String::from_utf8_lossy(&body[..body.len().min(200)])
+                                        ),
                                     }
                                 } else if tag[0] == 5 {
                                     // Desired forward set: reconcile local listeners. The
