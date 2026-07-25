@@ -282,14 +282,19 @@ pub fn install(writer: Writer) {
 pub fn note_window_active(active: bool) {
     KB.with(|k| {
         if let Some(s) = &*k.borrow() {
-            if active {
-                s.active_windows.fetch_add(1, Ordering::Relaxed);
+            let count = if active {
+                s.active_windows.fetch_add(1, Ordering::Relaxed) + 1
             } else {
                 // Saturating decrement: never underflow if notifications are unbalanced.
-                let _ = s.active_windows.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
-                    Some(c.saturating_sub(1))
-                });
-            }
+                s.active_windows
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| Some(c.saturating_sub(1)))
+                    .map(|prev| prev.saturating_sub(1))
+                    .unwrap_or(0)
+            };
+            tracing::debug!(
+                "keyboard gate: active={active} count={count} (forwarding {})",
+                if count > 0 { "ON" } else { "OFF" }
+            );
         }
     });
 }

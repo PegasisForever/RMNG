@@ -480,6 +480,12 @@ struct VideoContent {
     /// content swaps); removed from the window when this window leaves video mode. The pointer
     /// controllers live on `video` and drop with it.
     keyboard: gtk4::EventControllerKey,
+    /// The window's `is-active` handler, connected by `install_keyboard`. Disconnected when this
+    /// window leaves video mode: the window shell outlives its content, so without this each
+    /// content swap stacks another handler (N× `release_all_input` per focus change, and on macOS
+    /// N× the keyboard-gate count). `Option` so `teardown_content` can take it by value —
+    /// `GObject::disconnect` consumes the id.
+    active_notify: Option<glib::SignalHandlerId>,
 }
 
 impl Content {
@@ -965,8 +971,18 @@ fn reconcile_view(
 /// terminal) there is no key controller left to run the Ctrl+Alt+P escape. The tick re-engages
 /// within one frame if the policy still wants it and a video window is focused.
 fn teardown_content(mw: &mut MonitorWindow, srcs: &VideoSrcs, pointer_lock: &Option<Rc<PointerLock>>) {
-    if let Content::Video(vc) = &mw.content {
+    if let Content::Video(vc) = &mut mw.content {
         mw.window.remove_controller(&vc.keyboard);
+        if let Some(id) = vc.active_notify.take() {
+            mw.window.disconnect(id);
+        }
+        // macOS: balance install_keyboard's priming. The handler is gone, so its own decrement
+        // will never fire; if this window is the key window right now the gate would stay armed
+        // for content that has no remote desktop.
+        #[cfg(target_os = "macos")]
+        if mw.window.is_active() {
+            keyboard_macos::note_window_active(false);
+        }
         if let Some(pl) = pointer_lock.as_ref() {
             pl.release(); // idempotent when not engaged
         }
@@ -1160,7 +1176,7 @@ fn make_video_content(
 
     let state = Rc::new(WinInput::default());
     install_pointer(&video, mid, &paintable, window, layout, writer, &state, pointer_lock, warp);
-    let keyboard = install_keyboard(window, writer, &state, pointer_lock, auto);
+    let (keyboard, active_notify) = install_keyboard(window, writer, &state, pointer_lock, auto);
 
     VideoContent {
         video,
@@ -1172,6 +1188,7 @@ fn make_video_content(
         native_cursor: None,
         cursor_hidden: false,
         keyboard,
+        active_notify: Some(active_notify),
     }
 }
 
@@ -1759,7 +1776,7 @@ fn install_keyboard(
     state: &Rc<WinInput>,
     pointer_lock: &Option<Rc<PointerLock>>,
     auto: &AutoLockShared,
-) -> gtk4::EventControllerKey {
+) -> (gtk4::EventControllerKey, glib::SignalHandlerId) {
     let key = gtk4::EventControllerKey::new();
     {
         let (w, state, window2, pl, auto) =
@@ -1860,7 +1877,7 @@ fn install_keyboard(
     }
     window.add_controller(key.clone());
 
-    {
+    let active_notify = {
         let (w, state, window2) = (writer.clone(), state.clone(), window.clone());
         window.connect_is_active_notify(move |win| {
             tracing::debug!("window active: {:?} active={}", win.title().map(|t| t.to_string()), win.is_active());
@@ -1879,9 +1896,19 @@ fn install_keyboard(
                 #[cfg(target_os = "macos")]
                 keyboard_macos::release_all(); // drop remote-held keys tracked by the monitor
             }
-        });
+        })
+    };
+
+    // macOS: prime the keyboard gate. `is-active` only *notifies* on a transition, so a window
+    // whose content becomes video while it is already the key window would never arm the monitor
+    // — keys would stay local until the operator Cmd-Tabbed away and back. The matching
+    // decrement is in teardown_content.
+    #[cfg(target_os = "macos")]
+    if window.is_active() {
+        keyboard_macos::note_window_active(true);
     }
-    key
+
+    (key, active_notify)
 }
 
 /// Texture the cursor bitmap (SPA delivers BGRA8888 premultiplied, tightly packed).
