@@ -306,10 +306,12 @@ export function CloneModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
       onClick={busy ? undefined : onClose}
     >
-      {/* Fixed height, not content height: the three tabs differ a lot in field count, and a
-          dialog that jumps as you switch tabs is disorienting. The body scrolls instead. */}
+      {/* Sized to fit every tab without scrolling — only the tab-specific block below is
+          height-pinned, so the dialog is as tall as its tallest tab and never jumps when you
+          switch. `max-h-[90vh]` + `overflow-y-auto` are the fallback for a genuinely short
+          viewport, not the normal path. */}
       <div
-        className="flex h-[38rem] max-h-[90vh] w-full max-w-md flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
+        className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === "Escape" && !busy) onClose();
@@ -336,6 +338,12 @@ export function CloneModal({
             {tab("plain", "No ticket")}
           </div>
 
+          {/* The only part that differs per tab, pinned to the tallest tab's height so
+              switching tabs neither resizes the dialog nor shifts the controls below it.
+              New ticket is the tallest at ~17.4rem (team select + title + the 6.5rem editor);
+              existing is ~5.8rem and plain ~15.6rem. Rounded up to 18rem for the ticket tab's
+              conditional error line. */}
+          <div className="min-h-[18rem]">
           {mode === "existing" ? (
             <label className={`mt-3 ${label}`}>
               Linear ticket link or id
@@ -404,7 +412,7 @@ export function CloneModal({
               </label>
               <div className={label}>
                 Description
-                <div className="mt-1 min-h-[8rem] rounded-md border border-slate-300 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
+                <div className="mt-1 min-h-[6.5rem] rounded-md border border-slate-300 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
                   <Suspense
                     fallback={
                       <p className="px-3 text-xs text-slate-400 dark:text-slate-500">
@@ -464,6 +472,7 @@ export function CloneModal({
               ) : null}
             </div>
           )}
+          </div>
 
           {/* The auto-selected preset, read-only — the ticket tabs never pick one by hand. */}
           {mode !== "plain" ? (
@@ -518,8 +527,11 @@ export function CloneModal({
             </p>
           ) : null}
 
+          {/* Always visible (no expander), and side by side so showing both costs one field's
+              height rather than two — that's what keeps the whole dialog inside a laptop
+              viewport without scrolling. Resizable: they're overrides, usually left empty. */}
           {mode !== "plain" ? (
-            <div className="mt-3 space-y-3 text-xs">
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
               <label className={`${label} font-medium`}>
                 Clone agent instructions
                 <textarea
@@ -537,7 +549,7 @@ export function CloneModal({
                 <textarea
                   value={claudeInstructions}
                   onChange={(e) => setClaudeInstructions(e.target.value)}
-                  rows={3}
+                  rows={2}
                   placeholder="Appended to the default (pull latest → switch to the feature branch → setup docs → implement); takes precedence where they conflict."
                   className={`resize-y ${field}`}
                 />
@@ -545,32 +557,35 @@ export function CloneModal({
             </div>
           ) : null}
 
-          <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
-            <input
-              type="checkbox"
-              checked={headless}
-              onChange={(e) => setHeadless(e.target.checked)}
-              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
-            />
-            Headless (no desktop)
-          </label>
-
-          {parentCandidate ? (
-            <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          {/* One row: two independent switches, neither of which needs a whole line. */}
+          <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+            <label className="flex cursor-pointer items-center gap-2">
               <input
                 type="checkbox"
-                checked={asSubClone}
-                onChange={(e) => setAsSubClone(e.target.checked)}
+                checked={headless}
+                onChange={(e) => setHeadless(e.target.checked)}
                 className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
               />
-              <span>
-                Sub clone of{" "}
-                <span className="font-mono text-slate-700 dark:text-slate-200">
-                  {parentCandidate.displayName || parentCandidate.id}
-                </span>
-              </span>
+              Headless (no desktop)
             </label>
-          ) : null}
+
+            {parentCandidate ? (
+              <label className="flex min-w-0 cursor-pointer items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={asSubClone}
+                  onChange={(e) => setAsSubClone(e.target.checked)}
+                  className="h-3.5 w-3.5 shrink-0 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+                />
+                <span className="truncate">
+                  Sub clone of{" "}
+                  <span className="font-mono text-slate-700 dark:text-slate-200">
+                    {parentCandidate.displayName || parentCandidate.id}
+                  </span>
+                </span>
+              </label>
+            ) : null}
+          </div>
         </div>
 
         {error ? (
