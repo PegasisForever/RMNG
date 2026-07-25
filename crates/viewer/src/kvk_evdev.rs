@@ -264,7 +264,6 @@ mod tests {
         assert_eq!(translate(0x32), 41, "kVK_ANSI_Grave        → KEY_GRAVE (41)");
     }
 
-    #[test]
     /// 0x72 is Help on a 1990s Apple keyboard and **Insert** on every PC keyboard attached to a
     /// Mac; Chromium's dom_code_data.inc maps kVK 0x72 → INSERT. KEY_HELP(138) made Shift+Insert
     /// and Ctrl+Insert unreachable, which is how paste works in a lot of remote software.

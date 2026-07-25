@@ -474,10 +474,6 @@ mod tests {
         assert!(held.is_empty());
     }
 
-    /// Cmd+Tab INTO the viewer: ⌘'s press went to the previous app, so the first event we
-    /// see is its release — class flag already clear → reads as up → dropped, not inverted
-    /// into a phantom press.
-    #[test]
     /// A *swap*, not a one-way map: physical Control must still produce Super, or the GNOME
     /// overview and every Super chord become unreachable from a Mac keyboard.
     #[test]
@@ -521,6 +517,9 @@ mod tests {
         assert_eq!(to_evdev(0x39, true), KEY_CAPSLOCK);
     }
 
+    /// Cmd+Tab INTO the viewer: ⌘'s press went to the previous app, so the first event we
+    /// see is its release — class flag already clear → reads as up → dropped, not inverted
+    /// into a phantom press.
     #[test]
     fn cmd_tab_spurious_release_reads_as_up_and_drops() {
         let mut held = HashSet::new();
