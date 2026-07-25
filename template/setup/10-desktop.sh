@@ -130,7 +130,10 @@ systemctl set-default multi-user.target >/dev/null 2>&1 || true
 # the same accounts phase 30 already gives NOPASSWD:ALL in /etc/sudoers.d, so this grants no
 # privilege that sudo does not — and a clone is a single-user disposable sandbox anyway.
 log "polkit: authorize the sudo group (DM-less ⇒ Class=manager session, cookies unresolvable)"
-install -d -m 0755 /etc/polkit-1/rules.d
+# No `install -d -m 0755` here: polkitd ships rules.d as 0750 root:polkitd and `install -d`
+# would re-mode an existing directory, publishing the rules to every user. mkdir -p leaves
+# the packaged mode alone and only supplies a default if the directory is somehow absent.
+mkdir -p /etc/polkit-1/rules.d
 cat > /etc/polkit-1/rules.d/49-rmng-sudo-nopasswd.rules <<'RULES'
 // A clone has no display manager, so its only logind session is Class=manager (linger's
 // bare `systemd --user`) with no seat or TTY. polkit cannot map an auth cookie back to such

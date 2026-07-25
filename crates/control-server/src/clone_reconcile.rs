@@ -797,6 +797,53 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 "#
 }
 
+/// Install the polkit rule that authorizes the `sudo` group — the backport of the phase-10
+/// template step (`template/setup/10-desktop.sh`) onto clones built from an older image.
+///
+/// A clone has no display manager, so its only logind session is the one linger opens:
+/// `Class=manager`, no seat, no TTY. polkit cannot resolve an auth cookie to a session of that
+/// class, so every `auth_admin*` action fails at the agent handshake with
+/// `GDBus.Error:org.freedesktop.PolicyKit1.Error.Failed: No session for cookie` regardless of
+/// which agent answers — installing a graphical agent does not help. Returning `YES` authorizes
+/// without an authentication step, so there is no agent to find and no cookie to resolve.
+///
+/// Scoped to `sudo`, which the template already grants `NOPASSWD:ALL` in `/etc/sudoers.d`, so
+/// this confers no privilege the clone user did not already have.
+///
+/// No `systemctl restart polkit`: polkitd watches `rules.d` with inotify and picks up a new file
+/// within a second or two (verified), and restarting it would tear down in-flight authorizations
+/// on every pass. Deliberately NOT `install -d` for the directory — polkitd ships it `0750
+/// root:polkitd` and `install -d` re-modes an existing directory, which would publish the rules
+/// to every user; `mkdir -p` leaves the packaged mode intact.
+///
+/// Idempotent by content compare, so a clone that already has the rule is a no-op and produces
+/// no log line.
+fn polkit_sudo_rule_script() -> &'static str {
+    r#"set -e
+dest=/etc/polkit-1/rules.d/49-rmng-sudo-nopasswd.rules
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+cat > "$tmp" <<'RULES'
+// A clone has no display manager, so its only logind session is Class=manager (linger's
+// bare `systemd --user`) with no seat or TTY. polkit cannot map an auth cookie back to such
+// a session, so any auth_admin* action fails with "No session for cookie" whatever agent is
+// running. Return YES to skip authentication entirely rather than fix an unfixable lookup.
+// Limited to `sudo`, which phase 30 already grants NOPASSWD:ALL via /etc/sudoers.d.
+polkit.addRule(function (action, subject) {
+    if (subject.isInGroup("sudo")) {
+        return polkit.Result.YES;
+    }
+});
+RULES
+if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+  exit 0
+fi
+mkdir -p /etc/polkit-1/rules.d
+install -m 0644 -o root -g root "$tmp" "$dest"
+echo "installed polkit sudo-group rule at $dest"
+"#
+}
+
 fn etc_environment_sync_script(desired_env: &str) -> String {
     let desired_b64 = B64.encode(desired_env);
     format!(
@@ -1236,6 +1283,19 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                     tracing::warn!(target: "clone_reconcile", "clone {id}: tmp.mount reconcile failed: {e:#}");
                 } else {
                     tracing::debug!(target: "clone_reconcile", "clone {id}: tmp.mount reconcile still failing: {e:#}");
+                }
+            }
+        }
+
+        match exec_ok(app, id, polkit_sudo_rule_script(), "polkit sudo rule").await {
+            Ok(()) => {
+                warned.remove(&format!("{id}:polkit"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:polkit")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: polkit rule reconcile failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: polkit rule reconcile still failing: {e:#}");
                 }
             }
         }
@@ -1763,6 +1823,46 @@ mod tests {
         assert!(script.contains("daemon-reload"));
         assert!(!script.contains("systemctl stop tmp.mount"));
         assert!(!script.contains("umount"));
+    }
+
+    #[test]
+    fn polkit_sudo_rule_script_is_idempotent_and_preserves_rules_dir_mode() {
+        let script = polkit_sudo_rule_script();
+        assert!(script.contains("/etc/polkit-1/rules.d/49-rmng-sudo-nopasswd.rules"));
+        assert!(script.contains(r#"subject.isInGroup("sudo")"#));
+        assert!(script.contains("polkit.Result.YES"));
+        // Content compare before write: an already-reconciled clone must be a silent no-op.
+        assert!(script.contains(r#"cmp -s "$tmp" "$dest""#));
+        assert!(script.contains("install -m 0644 -o root -g root"));
+        // `install -d` would re-mode polkitd's 0750 root:polkitd rules.d to world-readable.
+        assert!(!script.contains("install -d"));
+        assert!(script.contains("mkdir -p /etc/polkit-1/rules.d"));
+        // polkitd hot-reloads rules.d via inotify; a restart would drop in-flight auths.
+        assert!(!script.contains("systemctl restart polkit"));
+        // AUTH_ADMIN* would reintroduce the agent handshake this rule exists to avoid.
+        assert!(!script.contains("AUTH_ADMIN"));
+    }
+
+    /// The rule body must match `template/setup/10-desktop.sh` byte for byte. The reconciler
+    /// decides whether to act by `cmp`-ing against the on-disk file, so a one-character drift
+    /// (even in a comment) makes it rewrite the rule on every 30s pass of every new-image
+    /// clone forever. Caught exactly that way: the two copies disagreed on one comment line.
+    #[test]
+    fn polkit_rule_body_matches_the_template_phase_10_copy() {
+        let template = include_str!("../../../template/setup/10-desktop.sh");
+        // Compare the whole heredoc body, comments included — `cmp` does not care that a
+        // differing line is only a comment, so neither can this test.
+        let extract = |s: &str| {
+            let open = "<<'RULES'\n";
+            let start = s.find(open).expect("RULES heredoc present") + open.len();
+            let end = s[start..].find("\nRULES\n").expect("heredoc terminated") + start + 1;
+            s[start..end].to_string()
+        };
+        assert_eq!(
+            extract(polkit_sudo_rule_script()),
+            extract(template),
+            "reconciler and template phase 10 must write identical polkit rules"
+        );
     }
 
     #[test]
