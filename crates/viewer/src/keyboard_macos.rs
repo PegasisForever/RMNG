@@ -57,6 +57,35 @@ const KVK_P: u32 = 0x23;
 /// hold, so it can't be tracked in the held-set like the other modifiers.
 const KEY_CAPSLOCK: u32 = 58;
 
+/// evdev codes the Cmd↔Ctrl swap exchanges (`input-event-codes.h`).
+const KEY_LEFTCTRL: u32 = 29;
+const KEY_RIGHTCTRL: u32 = 97;
+const KEY_LEFTMETA: u32 = 125;
+const KEY_RIGHTMETA: u32 = 126;
+
+/// Exchange Cmd and Control so Mac chords (Cmd+C, Cmd+T) reach the remote GNOME session as Ctrl.
+///
+/// A **swap**, not a one-way map: physical Control becomes Super, so the overview and every Super
+/// chord stay reachable. Applying it twice is the identity. Non-modifier codes pass through, which
+/// keeps CapsLock's special case in the `FlagsChanged` path intact.
+fn swap_cmd_ctrl(evdev: u32) -> u32 {
+    match evdev {
+        KEY_LEFTMETA => KEY_LEFTCTRL,
+        KEY_RIGHTMETA => KEY_RIGHTCTRL,
+        KEY_LEFTCTRL => KEY_LEFTMETA,
+        KEY_RIGHTCTRL => KEY_RIGHTMETA,
+        other => other,
+    }
+}
+
+/// The single translate choke point: physical kVK → the evdev code that actually goes on the wire.
+/// Every send path routes through this, so the held-set stores exactly what was sent and releases
+/// pair with their presses even when the swap is on.
+fn to_evdev(kvk: u32, cmd_is_ctrl: bool) -> u32 {
+    let code = kvk_evdev::translate(kvk);
+    if cmd_is_ctrl { swap_cmd_ctrl(code) } else { code }
+}
+
 /// App-global state, initialised once by [`install`]. `active_windows` counts how many
 /// video/monitor windows are currently the key window (0 ⇒ a dialog / the pre-connection
 /// window has focus, so keys stay local); `pressed` is the set of evdev keycodes currently
@@ -168,7 +197,7 @@ fn flags_transition(held: &mut HashSet<u32>, keycode: u32, now_down: bool) -> Op
 }
 
 /// Install the app-global keyboard monitor. Call once, from `build_ui`, on the main thread.
-pub fn install(writer: Writer) {
+pub fn install(writer: Writer, cmd_is_ctrl: bool) {
     let active_windows = Arc::new(AtomicUsize::new(0));
     let pressed: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
 
@@ -204,7 +233,7 @@ pub fn install(writer: Writer) {
                 if ev.isARepeat() {
                     return null_mut();
                 }
-                let keycode = kvk_evdev::translate(kc);
+                let keycode = to_evdev(kc, cmd_is_ctrl);
                 tracing::debug!("key down: kVK={:#04x} evdev={}", kc, keycode);
                 if keycode != 0 {
                     pressed.lock().unwrap().insert(keycode);
@@ -216,7 +245,7 @@ pub fn install(writer: Writer) {
             } else if etype == NSEventType::KeyUp.0 {
                 // Only release keys we actually forwarded a press for. This naturally passes
                 // through shortcut keys (never in the held-set) and avoids phantom releases.
-                let keycode = kvk_evdev::translate(kc);
+                let keycode = to_evdev(kc, cmd_is_ctrl);
                 tracing::debug!("key up: kVK={:#04x} evdev={}", kc, keycode);
                 if keycode != 0 && pressed.lock().unwrap().remove(&keycode) {
                     send_key(&writer, keycode, false);
@@ -227,7 +256,7 @@ pub fn install(writer: Writer) {
                 // Modifier transition. Forward it, but PASS IT THROUGH (don't consume) so
                 // GDK/GTK keep their modifier state in sync — the F11 / Ctrl+Alt+G/P
                 // shortcuts are recognised by the GTK handler from that state.
-                let keycode = kvk_evdev::translate(kc);
+                let keycode = to_evdev(kc, cmd_is_ctrl);
                 if keycode == KEY_CAPSLOCK {
                     // Lock key: AppKit reports a state toggle, not a hold. Emit a tap so the
                     // remote toggles its own lock. Best-effort (verify on-device).
@@ -272,7 +301,10 @@ pub fn install(writer: Writer) {
     };
 
     KB.with(|k| *k.borrow_mut() = Some(Shared { active_windows, pressed, writer, _monitor: monitor }));
-    tracing::info!("macOS keyboard monitor installed (physical keys → remote)");
+    tracing::info!(
+        "macOS keyboard monitor installed (physical keys → remote; Cmd↔Ctrl swap {})",
+        if cmd_is_ctrl { "ON" } else { "off" }
+    );
 }
 
 /// Note a video/monitor window gaining or losing key-window status. Forwarding is enabled
@@ -445,6 +477,50 @@ mod tests {
     /// Cmd+Tab INTO the viewer: ⌘'s press went to the previous app, so the first event we
     /// see is its release — class flag already clear → reads as up → dropped, not inverted
     /// into a phantom press.
+    #[test]
+    /// A *swap*, not a one-way map: physical Control must still produce Super, or the GNOME
+    /// overview and every Super chord become unreachable from a Mac keyboard.
+    #[test]
+    fn cmd_and_ctrl_swap_both_ways() {
+        assert_eq!(swap_cmd_ctrl(125), 29, "KEY_LEFTMETA  → KEY_LEFTCTRL");
+        assert_eq!(swap_cmd_ctrl(126), 97, "KEY_RIGHTMETA → KEY_RIGHTCTRL");
+        assert_eq!(swap_cmd_ctrl(29), 125, "KEY_LEFTCTRL  → KEY_LEFTMETA");
+        assert_eq!(swap_cmd_ctrl(97), 126, "KEY_RIGHTCTRL → KEY_RIGHTMETA");
+    }
+
+    /// Applying it twice is the identity — the property that makes it a swap.
+    #[test]
+    fn swap_is_an_involution() {
+        for code in [125u32, 126, 29, 97, 30, 58, 0] {
+            assert_eq!(swap_cmd_ctrl(swap_cmd_ctrl(code)), code, "code {code}");
+        }
+    }
+
+    #[test]
+    fn non_modifier_keys_pass_through_the_swap() {
+        // kVK_A and kVK_Space: whatever the table says, the swap must not touch them.
+        for kvk in [0x00u32, 0x31] {
+            let plain = kvk_evdev::translate(kvk);
+            assert_eq!(swap_cmd_ctrl(plain), plain, "kVK {kvk:#04x}");
+        }
+    }
+
+    #[test]
+    fn to_evdev_applies_the_swap_only_when_enabled() {
+        // kVK_Command / kVK_Control.
+        assert_eq!(to_evdev(0x37, false), 125, "swap off: Cmd stays Super");
+        assert_eq!(to_evdev(0x37, true), 29, "swap on: Cmd becomes Ctrl");
+        assert_eq!(to_evdev(0x3B, false), 29, "swap off: Control stays Ctrl");
+        assert_eq!(to_evdev(0x3B, true), 125, "swap on: Control becomes Super");
+    }
+
+    /// CapsLock is special-cased by keycode in the FlagsChanged path; the swap must not disturb
+    /// it, or the lock-toggle branch stops matching.
+    #[test]
+    fn capslock_survives_the_swap() {
+        assert_eq!(to_evdev(0x39, true), KEY_CAPSLOCK);
+    }
+
     #[test]
     fn cmd_tab_spurious_release_reads_as_up_and_drops() {
         let mut held = HashSet::new();

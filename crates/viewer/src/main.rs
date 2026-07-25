@@ -642,8 +642,12 @@ fn build_ui(
     // GDK's macOS backend runs keys through the Cocoa text-input machinery and synthesizes
     // keycode-0 "null key" events for IME-committed text, which our kVK table mistranslated
     // to a phantom, out-of-order KEY_A. One app-global monitor (single remote keyboard).
+    //
+    // Cmd↔Ctrl is swapped by default so Mac chords reach the remote GNOME session as Ctrl
+    // (physical Control becomes Super, so overview chords stay reachable). Disable with
+    // RMNG_CMD_IS_CTRL=0 or "cmd_is_ctrl": false in the viewer config.
     #[cfg(target_os = "macos")]
-    keyboard_macos::install(writer.clone());
+    keyboard_macos::install(writer.clone(), config::cmd_is_ctrl());
 
     // A window exists from launch, before any connection: monitor windows are built
     // lazily on each monitor's first video AU, so a wrong/unset server address used
@@ -1314,7 +1318,9 @@ pub(crate) fn show_server_addr_dialog(parent: &gtk4::ApplicationWindow, addr: &S
             }
             entry.remove_css_class("error");
             *addr.lock().unwrap() = text.clone();
-            if let Err(e) = config::save(&config::Config { server_addr: text }) {
+            // Update only the address: `..load()` preserves every other persisted field (e.g.
+            // cmd_is_ctrl), which a from-scratch literal would silently reset to its default.
+            if let Err(e) = config::save(&config::Config { server_addr: text, ..config::load() }) {
                 tracing::warn!("config save failed: {e}");
             }
             // Drop the current connection so the net thread's blocking read returns; it
