@@ -23,7 +23,7 @@
 //! - `0x66` `kVK_JIS_Eisu` — uncertain evdev mapping (DOM code "Lang2" vs
 //!   "NonConvert" varies across sources); sentineled until verified on hardware
 //! - `0x68` `kVK_JIS_Kana` — similarly uncertain ("Lang1" / "KatakanaHiragana")
-//! - `0x6C`, `0x6E`, `0x70`, `0x7F` — unassigned
+//! - `0x6C`, `0x70`, `0x7F` — unassigned
 
 /// Sentinel: no evdev equivalent — caller must skip the event.
 const U: u8 = 0;
@@ -148,11 +148,11 @@ pub static KVK_TO_EVDEV: [u8; 128] = [
     /*0x6B*/ 70, // kVK_F14               KEY_SCROLLLOCK (USB ScrollLock physical pos)
     /*0x6C*/  U, // (unassigned)
     /*0x6D*/ 68, // kVK_F10               KEY_F10
-    /*0x6E*/  U, // (unassigned)
+    /*0x6E*/127, // kVK_ContextualMenu    KEY_COMPOSE  (PC "Menu" key; Linux calls it Compose)
     /*0x6F*/ 88, // kVK_F12               KEY_F12
     /*0x70*/  U, // (unassigned)
     /*0x71*/119, // kVK_F15               KEY_PAUSE    (USB Pause physical pos)
-    /*0x72*/138, // kVK_Help              KEY_HELP
+    /*0x72*/110, // kVK_Help              KEY_INSERT   (Insert on any PC keyboard; Chromium agrees)
     /*0x73*/102, // kVK_Home              KEY_HOME
     /*0x74*/104, // kVK_PageUp            KEY_PAGEUP
     /*0x75*/111, // kVK_ForwardDelete     KEY_DELETE   (the Del key, not Backspace)
@@ -262,6 +262,22 @@ mod tests {
         assert_eq!(translate(0x2F), 52, "kVK_ANSI_Period       → KEY_DOT (52)");
         assert_eq!(translate(0x2C), 53, "kVK_ANSI_Slash        → KEY_SLASH (53)");
         assert_eq!(translate(0x32), 41, "kVK_ANSI_Grave        → KEY_GRAVE (41)");
+    }
+
+    #[test]
+    /// 0x72 is Help on a 1990s Apple keyboard and **Insert** on every PC keyboard attached to a
+    /// Mac; Chromium's dom_code_data.inc maps kVK 0x72 → INSERT. KEY_HELP(138) made Shift+Insert
+    /// and Ctrl+Insert unreachable, which is how paste works in a lot of remote software.
+    #[test]
+    fn help_key_is_insert() {
+        assert_eq!(translate(0x72), 110, "kVK_Help/Insert → KEY_INSERT");
+    }
+
+    /// Apple's HIToolbox/Events.h defines kVK_ContextualMenu = 0x6E — the PC Menu key. Linux
+    /// delivers that key as KEY_COMPOSE(127), not KEY_MENU(139).
+    #[test]
+    fn contextual_menu_is_compose() {
+        assert_eq!(translate(0x6E), 127, "kVK_ContextualMenu → KEY_COMPOSE");
     }
 
     #[test]
