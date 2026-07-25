@@ -807,6 +807,13 @@ async fn clone(
     let clone_group =
         |group: Option<String>, preset: Option<&wire::Preset>| resolve_clone_group(&cfg, group, preset);
 
+    // Sub-clone resolution, shared by every mode: a `topLevel` flag forces top-level, an
+    // explicit `parent` id is validated as a top-level managed clone, and otherwise the caller
+    // clone is auto-detected from its per-clone router key. The web dialog's "sub clone of X"
+    // checkbox sends `parent`, so this is NOT fleet-CLI-only — resolving it here rather than
+    // inside the hostname branch is what makes that checkbox work in the UI create modes.
+    let parent = resolve_parent(&app, &body, &headers)?;
+
     // suffix-aware display name (duplicate ticket → "title (a)").
     let derive = |app: &App, base: &str, title: &str| -> (String, String) {
         let hostname = jobs::next_free_hostname(app, base);
@@ -827,11 +834,6 @@ async fn clone(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
-        // Sub-clone resolution (only the fleet-CLI path nests): `topLevel` forces a top-level
-        // clone; an explicit `parent` must name a top-level managed clone; otherwise auto-detect
-        // the caller clone from its per-clone router key header and nest under it when the caller
-        // is itself top-level. See `resolve_parent`.
-        let parent = resolve_parent(&app, &body, &headers)?;
         // A sub clone inherits its parent clone's group + preset BY DEFAULT — a clone created
         // from inside a clone (the common case) should join the same account pool and env as its
         // parent unless the caller overrides it (`--group <name|none>` / `--preset <name|none>`).
@@ -913,8 +915,7 @@ async fn clone(
             agent_playbook: compose_playbook(&cfg, explicit),
             global_prompt: compose_global_prompt(&cfg, explicit),
             headless,
-            // UI create modes always produce top-level clones.
-            parent: None,
+            parent: parent.clone(),
         };
         let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
         return Ok(Json(json!({ "ok": true, "op": op })));
@@ -953,8 +954,7 @@ async fn clone(
         agent_playbook: compose_playbook(&cfg, Some(&preset)),
         global_prompt: compose_global_prompt(&cfg, Some(&preset)),
         headless,
-        // UI create modes always produce top-level clones.
-        parent: None,
+        parent,
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
@@ -2549,6 +2549,47 @@ mod tests {
         let err = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
+    }
+
+    /// Every create mode honours `parent`, not just the fleet-CLI hostname mode.
+    ///
+    /// Regression: `parent` was resolved inside the hostname branch only, and the plain/ticket
+    /// branches hardcoded `parent: None`. The web dialog's "sub clone of X" checkbox sends
+    /// `parent` in plain/create mode, so it was silently dropped — the clone came back
+    /// top-level with no error. `resolve_parent` had its own passing unit test the whole time,
+    /// which is exactly why this slipped through: the bug was in who calls it.
+    ///
+    /// A source-level assert, deliberately. Every runtime route into `spec.parent` is gated by
+    /// a web-layer check identical to `start_clone`'s, so no request body can distinguish
+    /// "the branch propagated `parent`" from "the branch dropped it" — a behavioural test here
+    /// passes against the bug (verified: reverting both branches to `parent: None` leaves such
+    /// a test green). Observing the spec itself would need a Docker image or a test seam that
+    /// earns less than it costs, for three call sites in one function.
+    ///
+    /// So this asserts the property that actually broke: a `CloneSpec` literal in `clone()`
+    /// that hardcodes the field, rather than passing the resolved `parent` through.
+    #[test]
+    fn no_create_mode_hardcodes_parent_none() {
+        let src = include_str!("web.rs");
+        let handler = src
+            .split_once("async fn clone(")
+            .expect("clone handler")
+            .1
+            .split_once("\nfn preset_names(")
+            .expect("end of clone handler")
+            .0;
+        assert!(
+            !handler.contains("parent: None"),
+            "a CloneSpec in clone() hardcodes `parent: None` — the web dialog's \
+             \"sub clone of X\" checkbox sends `parent` in plain/create mode, so that \
+             silently drops it and the clone comes back top-level"
+        );
+        // And the resolution it must use is still shared across the modes, not per-branch.
+        assert_eq!(
+            handler.matches("resolve_parent(&app").count(),
+            1,
+            "`parent` should be resolved once for all create modes"
+        );
     }
 
     // --- sub clones: parent resolution + cascade delete ---
