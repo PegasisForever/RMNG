@@ -48,7 +48,7 @@ path uses this compact framing carrying `socket.rs` types).
 
 | Variant | Fields | Use |
 |---|---|---|
-| `pointer_move` | `monitor_id`, `x`, `y` (f64) | absolute pointer in monitor-pixel space |
+| `pointer_move` | `monitor_id`, `x`, `y` (f64) | absolute pointer in monitor-pixel space (**native**, see below) |
 | `pointer_relative` | `dx`, `dy` (f64) | unaccelerated delta — pointer-lock / games |
 | `button` | `button` (evdev: `0x110`–`0x112` left/right/middle, `0x113`/`0x114` back/forward), `pressed` | mouse button |
 | `axis` | `axis` (0=vert,1=horiz), `step` (±1) | discrete scroll |
@@ -60,6 +60,11 @@ physical keys; `pointer_relative` while pointer-lock is engaged (Ctrl+Alt+G). Wh
 sends a `CursorMeta{warp:true}` (an MCP-driven move) the viewer snaps the drawn remote cursor
 and **suppresses local `pointer_move`/`pointer_relative` for ~0.5 s** so the operator's mouse
 doesn't fight the agent.
+
+> **This path is native and stays native.** Coordinates here are the monitor's real pixels, and
+> the H.264 stream is encoded at full resolution. The 1080p virtual space is a property of the
+> **daemon MCP tool channel only** ([MCP.md](MCP.md)) — the daemon converts virtual → native
+> before it ever reaches this socket. Don't "fix" the viewer or the encoder to 1080p to match.
 
 ---
 
@@ -250,7 +255,9 @@ setting).
 **clone-daemon:** `RMNG_SOCKET` (media socket; **absent → capture self-test mode**),
 `RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (boot-default layout CSV, below —
 corrected to the config's active layout preset by the server's `SetMonitors` on `Hello`),
-`RMNG_DAEMON_MCP_PORT` (`9004`), `RMNG_EMBEDDED_CURSOR` (composite cursor into frames
+`RMNG_DAEMON_MCP_PORT` (`9004`), `RMNG_DESKTOP_HEIGHT` (`1080`; height of the MCP's virtual
+coordinate/screenshot space — `0` serves everything at native res; see [MCP.md](MCP.md)),
+`RMNG_EMBEDDED_CURSOR` (composite cursor into frames
 instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NUDGE`
 (oscillate cursor to force damage — test only), `RUST_LOG`.
 

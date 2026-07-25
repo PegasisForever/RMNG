@@ -237,91 +237,44 @@ pub struct WaitArgs {
     pub timeout: u64,
 }
 
-/// Optional `--rescale-cursor <range>` (and optional `--rescale-screen <W>x<H>`)
-/// for desktop action verbs. Two independent knobs:
+/// Optional `--resolution <W>x<H>` / `--native` for the desktop verbs that deal in
+/// coordinates or images.
 ///
-///   * `--rescale-cursor <range>` rescales the verb's **input** X Y from a
-///     normalized coord space (e.g. MiniMax M3's 0–1000) into pixel coords
-///     before calling the daemon. Two modes:
-///       - alone: the CLI issues one extra `list_monitors` call per action to
-///         discover the target monitor's W×H.
-///       - with `--rescale-screen`: uses the caller's W×H directly, skipping
-///         the auto-detect RPC. Useful for repeated calls where the screen
-///         size is known and stable.
-///
-///   * `--rescale-screen <W>x<H>` rescales the **output screenshot** the
-///     daemon returns (both explicit `screenshot` and the auto-snap after
-///     action verbs) to the requested W×H. Saves tokens when feeding the
-///     image back to a model. Independent of `--rescale-cursor` — you can use
-///     either, both, or neither.
+/// Both the screenshot the daemon returns **and** the space its `x`/`y` are read in
+/// come from this one value, so they can never disagree — the daemon does the scaling
+/// (see `clone-daemon/src/mcp.rs`), and the CLI just forwards the choice. Omitting both
+/// flags gets the daemon's default (1080p-height, i.e. 1920×1080 on a 16:9 monitor).
 #[derive(Args, Debug, Clone, Default)]
-pub struct RescaleArgs {
-    /// Rescale input X Y from this coord space into the target monitor's pixel
-    /// space. Accepts `<max>` (assumes 0-based) or `<min>-<max>` (e.g. `0-1000`
-    /// for MiniMax M3).
-    #[arg(long, value_name = "RANGE")]
-    pub rescale_cursor: Option<String>,
-    /// Rescale the **screenshot** the daemon returns to `<W>x<H>` pixels.
-    /// Independent of `--rescale-cursor`: useful for shrinking the JPEG before
-    /// feeding it to a vision model (saves tokens), or upscaling for a clearer
-    /// view. Works on every desktop verb (the action verbs auto-snap a settle
-    /// screenshot after the call).
-    #[arg(long, value_name = "WxH")]
-    pub rescale_screen: Option<String>,
+pub struct ResolutionArgs {
+    /// Coordinate + screenshot space for this call, `<W>x<H>` (e.g. `1280x720`).
+    /// Omit for the daemon default (1080p-height — 1920x1080 on a 16:9 monitor).
+    #[arg(long, value_name = "WxH", conflicts_with = "native")]
+    pub resolution: Option<String>,
+    /// Use the monitor's native resolution instead of the 1080p default.
+    #[arg(long)]
+    pub native: bool,
 }
 
-impl RescaleArgs {
-    /// Parse `--rescale-cursor` into `(min, max)` source-space bounds, or
-    /// `None` if unset. Returns an error for malformed input so the CLI can
-    /// fail fast rather than silently sending nonsense coords to the daemon.
-    pub fn parsed_cursor(&self) -> Result<Option<(i32, i32)>, String> {
-        let Some(s) = self.rescale_cursor.as_deref() else {
-            return Ok(None);
-        };
-        if let Some((lo, hi)) = s.split_once('-') {
-            let lo: i32 = lo
-                .parse()
-                .map_err(|e| format!("--rescale-cursor: bad min: {e}"))?;
-            let hi: i32 = hi
-                .parse()
-                .map_err(|e| format!("--rescale-cursor: bad max: {e}"))?;
-            if hi <= lo {
-                return Err("--rescale-cursor: max must be > min".into());
-            }
-            Ok(Some((lo, hi)))
-        } else {
-            let hi: i32 = s
-                .parse()
-                .map_err(|e| format!("--rescale-cursor: bad max: {e}"))?;
-            if hi <= 0 {
-                return Err("--rescale-cursor: max must be > 0".into());
-            }
-            Ok(Some((0, hi)))
+impl ResolutionArgs {
+    /// The value to forward to the daemon as its `resolution` argument, or `None` to let
+    /// the daemon apply its default. Validates `<W>x<H>` here so a typo fails the command
+    /// outright rather than being silently ignored on the far side.
+    pub fn resolution_arg(&self) -> Result<Option<String>, String> {
+        if self.native {
+            return Ok(Some("native".into()));
         }
-    }
-
-    /// Parse `--rescale-screen` into `(W, H)` pixels, or `None` if unset. Only
-    /// meaningful when `--rescale-from` is also set (enforced by clap's
-    /// `requires`); we still tolerate the call without `rescale_from` for
-    /// unit-testability.
-    pub fn parsed_screen(&self) -> Result<Option<(i32, i32)>, String> {
-        let Some(s) = self.rescale_screen.as_deref() else {
+        let Some(s) = self.resolution.as_deref() else {
             return Ok(None);
         };
         let (w, h) = s
-            .split_once('x')
-            .or_else(|| s.split_once('X'))
-            .ok_or_else(|| format!("--rescale-screen: expected WxH, got '{s}'"))?;
-        let w: i32 = w
-            .parse()
-            .map_err(|e| format!("--rescale-screen: bad W: {e}"))?;
-        let h: i32 = h
-            .parse()
-            .map_err(|e| format!("--rescale-screen: bad H: {e}"))?;
+            .split_once(['x', 'X'])
+            .ok_or_else(|| format!("--resolution: expected WxH, got '{s}'"))?;
+        let w: i32 = w.trim().parse().map_err(|e| format!("--resolution: bad W: {e}"))?;
+        let h: i32 = h.trim().parse().map_err(|e| format!("--resolution: bad H: {e}"))?;
         if w <= 0 || h <= 0 {
-            return Err("--rescale-screen: W and H must be > 0".into());
+            return Err("--resolution: W and H must be > 0".into());
         }
-        Ok(Some((w, h)))
+        Ok(Some(format!("{w}x{h}")))
     }
 }
 
@@ -336,7 +289,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        rescale: RescaleArgs,
+        resolution: ResolutionArgs,
     },
     /// List monitors (→ `list_monitors`)
     Monitors,
@@ -351,7 +304,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        rescale: RescaleArgs,
+        resolution: ResolutionArgs,
     },
     /// Left click, optionally at X Y (→ `left_click`)
     Click {
@@ -362,7 +315,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        rescale: RescaleArgs,
+        resolution: ResolutionArgs,
     },
     /// Right click, optionally at X Y (→ `right_click`)
     RightClick {
@@ -373,7 +326,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        rescale: RescaleArgs,
+        resolution: ResolutionArgs,
     },
     /// Middle click, optionally at X Y (→ `middle_click`)
     MiddleClick {
@@ -384,7 +337,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        rescale: RescaleArgs,
+        resolution: ResolutionArgs,
     },
     /// Left double click, optionally at X Y (→ `left_double_click`)
     DoubleClick {
@@ -395,7 +348,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        rescale: RescaleArgs,
+        resolution: ResolutionArgs,
     },
     /// Scroll by AMOUNT, optionally at X Y (→ `scroll`)
     Scroll {
@@ -407,7 +360,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        rescale: RescaleArgs,
+        resolution: ResolutionArgs,
     },
     /// Press a key chord, e.g. `ctrl+c` (→ `key`)
     Key {
@@ -650,31 +603,63 @@ mod tests {
     }
 
     #[test]
-    fn desktop_click_accepts_both_rescale_flags() {
-        let cli = Cli::parse_from([
-            "rmng", "desktop", "w-cp", "click", "500", "500", "--rescale-cursor", "0-1000",
-            "--rescale-screen", "1920x1080",
-        ]);
+    fn desktop_click_accepts_resolution() {
+        let cli =
+            Cli::parse_from(["rmng", "desktop", "w-cp", "click", "500", "500", "--resolution", "1280x720"]);
         match cli.cmd {
-            Cmd::Desktop { cmd: DesktopCmd::Click { rescale, .. }, .. } => {
-                assert_eq!(rescale.rescale_cursor.as_deref(), Some("0-1000"));
-                assert_eq!(rescale.rescale_screen.as_deref(), Some("1920x1080"));
+            Cmd::Desktop { cmd: DesktopCmd::Click { x, y, resolution, .. }, .. } => {
+                // Coordinates are forwarded verbatim — the daemon owns the scaling now.
+                assert_eq!((x, y), (Some(500), Some(500)));
+                assert_eq!(resolution.resolution_arg(), Ok(Some("1280x720".into())));
             }
             other => panic!("wrong cmd: {other:?}"),
         }
     }
 
     #[test]
-    fn desktop_screenshot_accepts_rescale_screen_alone() {
-        let cli = Cli::parse_from([
-            "rmng", "desktop", "w-cp", "screenshot", "--rescale-screen", "1280x720",
-        ]);
+    fn desktop_screenshot_accepts_native() {
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "screenshot", "--native"]);
         match cli.cmd {
-            Cmd::Desktop { cmd: DesktopCmd::Screenshot { rescale, .. }, .. } => {
-                assert_eq!(rescale.rescale_screen.as_deref(), Some("1280x720"));
-                assert_eq!(rescale.rescale_cursor, None);
+            Cmd::Desktop { cmd: DesktopCmd::Screenshot { resolution, .. }, .. } => {
+                assert_eq!(resolution.resolution_arg(), Ok(Some("native".into())));
             }
             other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    /// The two flags name the same knob, so clap must reject them together rather than
+    /// silently letting one win.
+    #[test]
+    fn desktop_rejects_resolution_and_native_together() {
+        assert!(
+            Cli::try_parse_from([
+                "rmng", "desktop", "w-cp", "screenshot", "--resolution", "1280x720", "--native",
+            ])
+            .is_err()
+        );
+    }
+
+    /// Neither flag ⇒ nothing sent ⇒ the daemon applies its 1080p default.
+    #[test]
+    fn resolution_arg_is_none_when_unset() {
+        assert_eq!(ResolutionArgs::default().resolution_arg(), Ok(None));
+    }
+
+    #[test]
+    fn resolution_arg_accepts_either_x_case() {
+        for s in ["1280x720", "1280X720", " 1280 x 720 "] {
+            let r = ResolutionArgs { resolution: Some(s.into()), native: false };
+            assert_eq!(r.resolution_arg(), Ok(Some("1280x720".into())), "input {s:?}");
+        }
+    }
+
+    /// A typo must fail the command here rather than reach the daemon, which would fall back
+    /// to native and silently put the caller's clicks in the wrong space.
+    #[test]
+    fn resolution_arg_rejects_malformed_values() {
+        for bad in ["1920", "1920x", "x1080", "0x1080", "1920x0", "-1x-1", "axb", ""] {
+            let r = ResolutionArgs { resolution: Some(bad.into()), native: false };
+            assert!(r.resolution_arg().is_err(), "should reject {bad:?}");
         }
     }
 

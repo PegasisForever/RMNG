@@ -147,17 +147,19 @@ each verb maps 1:1 to a daemon-MCP tool, forwarded by the control-server to that
 daemon MCP (`http://{clone}:9004`). This is the operator-facing replacement for the retired
 global MCP — see [MCP.md](MCP.md).
 
+Verbs marked **⤢** also take `[--resolution WxH | --native]` (see "Coordinate space" below).
+
 | Verb | Args | Daemon tool | Does |
 |---|---|---|---|
-| `screenshot` | `[--monitor N] [--out PATH]` | `screenshot` | JPEG of the monitor's latest frame |
-| `monitors` | — | `list_monitors` | `[{id,width,height}]` |
+| `screenshot` ⤢ | `[--monitor N] [--out PATH]` | `screenshot` | JPEG of the monitor's latest frame |
+| `monitors` | — | `list_monitors` | `[{id,width,height,native_width,native_height}]` |
 | `windows` | — | `list_windows` | open windows (`id,title,wm_class,monitor,frame,…`) |
-| `move` | `X Y [--monitor N] [--out PATH]` | `mouse_move` | eased glide to `x,y` |
-| `click` | `[X Y] [--monitor N] [--out PATH]` | `left_click` | optional glide, then left click |
-| `right-click` | `[X Y] [--monitor N] [--out PATH]` | `right_click` | right click |
-| `middle-click` | `[X Y] [--monitor N] [--out PATH]` | `middle_click` | middle click |
-| `double-click` | `[X Y] [--monitor N] [--out PATH]` | `left_double_click` | left double-click |
-| `scroll` | `AMOUNT [X Y] [--monitor N] [--out PATH]` | `scroll` | `amount` vertical notches |
+| `move` ⤢ | `X Y [--monitor N] [--out PATH]` | `mouse_move` | eased glide to `x,y` |
+| `click` ⤢ | `[X Y] [--monitor N] [--out PATH]` | `left_click` | optional glide, then left click |
+| `right-click` ⤢ | `[X Y] [--monitor N] [--out PATH]` | `right_click` | right click |
+| `middle-click` ⤢ | `[X Y] [--monitor N] [--out PATH]` | `middle_click` | middle click |
+| `double-click` ⤢ | `[X Y] [--monitor N] [--out PATH]` | `left_double_click` | left double-click |
+| `scroll` ⤢ | `AMOUNT [X Y] [--monitor N] [--out PATH]` | `scroll` | `amount` vertical notches |
 | `key` | `"ctrl+c" [--out PATH]` | `key` | press a key combo |
 | `type` | `"some text" [--out PATH]` | `type` | type a Unicode string |
 | `move-window` | `<win-id> [--monitor N] [--mode maximize\|center-half]` | `move_window` | move/place a window |
@@ -178,9 +180,26 @@ screenshot.
 - `--out PATH` — where to write the JPEG. Default `$TMPDIR/rmng-<clone>-mon<N>.jpg`
   (`std::env::temp_dir()`), overwritten each call.
 
+**Coordinate space.** Screenshots come back at **1920×1080** by default (1080p-height,
+aspect-preserving) regardless of the monitor's native resolution, and `X Y` are read in that
+same space — so you can click straight off the image without converting anything. The daemon
+owns the scaling (see [MCP.md](MCP.md)); the CLI just forwards your choice, which means the
+image and the coordinates can never disagree.
+
+- `--resolution WxH` — use this space instead, for both the coordinates and the returned image
+  (e.g. `--resolution 1280x720` to cut tokens further). Capped at the monitor's native size.
+- `--native` — use the monitor's native resolution (e.g. 2560×1440). Mutually exclusive with
+  `--resolution`.
+
+Pass the *same* flag to the action and to any screenshot you read coordinates off — each call is
+independent, so mixing spaces between calls will misplace clicks. Within one call the action and
+its settle screenshot always agree.
+
 ```sh
-rmng desktop w-cp-claude screenshot          # → prints /tmp/rmng-w-cp-claude-mon0.jpg
+rmng desktop w-cp-claude screenshot          # → prints /tmp/rmng-w-cp-claude-mon0.jpg (1920×1080)
 rmng desktop w-cp-claude click 640 480       # click, then prints the settle screenshot path
+rmng desktop w-cp-claude screenshot --native # full-res 2560×1440 capture
+rmng desktop w-cp-claude click 1707 640 --native   # …and a click in that same native space
 rmng desktop w-cp-claude type "hello"        # types, follow-up screenshot, prints path
 rmng desktop w-cp-claude windows             # prints JSON, no screenshot
 ```

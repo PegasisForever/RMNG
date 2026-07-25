@@ -26,6 +26,15 @@ const JPEG_QUALITY: i32 = 90;
 
 /// Encode one captured dmabuf frame to JPEG bytes. `fd` is consumed. `planes` is the
 /// daemon-reported per-plane (offset, stride) of the dmabuf.
+///
+/// `w`/`h` are the frame's **native** size (appsrc caps + `VideoMeta`); `target_w`/`target_h`
+/// are the size the JPEG comes out at — `vapostproc` scales on-GPU, so the caller gets the
+/// virtual-space image without a host-side decode/resize round-trip. Pass the native size for
+/// both to disable scaling. Both targets must be **even** (4:2:0 chroma) — see `round_even`
+/// in the daemon's `mcp` module, which is the sole caller.
+// The dmabuf's identity (fd + fourcc + modifier + size + plane layout) is irreducibly wide;
+// bundling it into a struct for one call site would obscure more than it saves.
+#[allow(clippy::too_many_arguments)]
 pub fn screenshot_jpeg(
     fd: OwnedFd,
     fourcc: u32,
@@ -33,9 +42,17 @@ pub fn screenshot_jpeg(
     w: u32,
     h: u32,
     planes: &[wire::socket::PlaneLayout],
+    target_w: u32,
+    target_h: u32,
 ) -> Result<Vec<u8>> {
+    // The caps right after `vapostproc` are what makes the scale happen on the GPU (mirrors
+    // the encoder's `vapostproc ! video/x-raw(memory:VAMemory)` precedent). Plain `video/x-raw`
+    // — no memory feature — so the VA surface lands back in system memory for
+    // `videoconvert`+`jpegenc`; adding `videoscale` here would pull the resize onto the CPU.
     let desc = format!(
-        "appsrc name=src ! vapostproc ! videoconvert ! jpegenc quality={JPEG_QUALITY} ! \
+        "appsrc name=src ! vapostproc ! \
+         video/x-raw,width={target_w},height={target_h},pixel-aspect-ratio=1/1 ! \
+         videoconvert ! jpegenc quality={JPEG_QUALITY} ! \
          appsink name=out max-buffers=1 sync=false"
     );
     let pipeline =

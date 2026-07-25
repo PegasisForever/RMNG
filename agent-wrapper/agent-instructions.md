@@ -9,9 +9,11 @@ the task done.
 
 ## Coordinates
 
-Give all click/move coordinates as **absolute pixels** in the screenshot's own
-space, top-left origin (0,0). Re-screenshot whenever you're unsure where
-something is before acting.
+The screenshot you get back is **1920×1080** (1080p) by default, whatever the
+monitor's real resolution is. Give all click/move coordinates as **absolute
+pixels in that same space**, top-left origin (0,0) — the desktop tool scales them
+for you, so never convert to the monitor's native resolution yourself.
+Re-screenshot whenever you're unsure where something is before acting.
 
 ## Opening GUI applications
 

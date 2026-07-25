@@ -20,11 +20,6 @@ serde_json.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 base64 = "0.22"
-# Used by `rmng desktop … --rescale-screen <W>x<H>` to decode the daemon's
-# JPEG, resize, and re-encode before writing to disk. Default features
-# (PNG + JPEG encoders + decoders) — the daemon always sends JPEG today
-# but PNG support is one less thing to revisit if it ever changes.
-image = "0.25"
 
 # `poll(2)` on stdin so `rmng exec` only drains piped input that is actually
 # ready, instead of blocking forever on an idle open pipe (a script / agent
