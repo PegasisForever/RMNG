@@ -284,7 +284,7 @@ fn render_config_yaml(meta: &InstanceMeta, auth_dir: &str) -> String {
 
 /// Models hidden from every group instance's `/v1/models` catalog. Per OAuth channel;
 /// `oauth-excluded-models` accepts exact ids + `*` wildcards (prefix/suffix/substring) and is
-/// listing-scoped. KEPT: claude-opus-4-8 / claude-sonnet-5 / claude-haiku-4-5 / claude-fable-5
+/// listing-scoped. KEPT: claude-opus-5 / claude-opus-4-8 / claude-sonnet-5 / claude-haiku-4-5 / claude-fable-5
 /// (claude) and the gpt-5.6 tiers + gpt-5.5 (codex).
 const EXCLUDED_CLAUDE_MODELS: &[&str] = &[
     "*-4-7",
