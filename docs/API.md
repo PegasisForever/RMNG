@@ -214,7 +214,7 @@ key>` (auths the clone's `linear` MCP). Hostname is derived (`pega-{ticket}` or 
 plain title, with a numeric suffix on collision). Returns `{ "ok": true, "op": Operation }` or
 `400 {error}`.
 
-**Hostname mode** (what `rmng clone` sends): the caller owns the exact hostname — a DNS
+**Hostname mode** (what `rmng clone create` sends): the caller owns the exact hostname — a DNS
 label, uniqueness enforced (`400` on a taken name) — with no ticket, no derived display name,
 and no kickoff first message. `group`, `agentInstructions`, and `claudeInstructions` still apply.
 A non-empty group must exist in config; it is the sole clone inference binding. Every clone also
