@@ -194,11 +194,13 @@ export function CloneModal({
         ? !effectivePreset?.linearKeySet
         : !presets.some((p) => p.linearKeySet);
 
-  // A source image is always required; then: `existing` needs a parseable ticket; `create` a
-  // team key + title; `plain` a title + a preset whenever any are configured.
+  // A source image is always required; then: `existing` needs a parseable ticket AND a preset
+  // that claims its prefix — with the preset dropdown gone there's no way to override the
+  // auto-selection, so a prefix nothing claims is a request the server would 400; `create`
+  // needs a team key + title; `plain` a title + a preset whenever any are configured.
   const modeValid =
     mode === "existing"
-      ? !!parsed
+      ? !!parsed && (presets.length === 0 || !!effectivePreset)
       : mode === "create"
         ? title.trim().length > 0 && team.trim().length > 0
         : title.trim().length > 0 && (presets.length === 0 || !!plainPreset);
@@ -475,12 +477,15 @@ export function CloneModal({
                       ? ` · ${effectivePreset.labels.join(", ")}`
                       : ""}
                   </>
-                ) : mode === "create" ? (
-                  "—"
-                ) : (
-                  <span className="text-slate-400 dark:text-slate-500">
-                    {parsed ? `no preset claims ${parsed.prefix.toUpperCase()}` : "—"}
+                ) : mode === "existing" && parsed && presets.length > 0 ? (
+                  // Blocking, not cosmetic: with no preset dropdown there's nothing to
+                  // override the auto-selection with, so say what to fix.
+                  <span className="text-red-600 dark:text-red-400">
+                    no preset claims {parsed.prefix.toUpperCase()} — add it to a preset’s
+                    ticket-id prefixes in Settings
                   </span>
+                ) : (
+                  <span className="text-slate-400 dark:text-slate-500">—</span>
                 )}
               </span>
             </p>
