@@ -605,7 +605,12 @@ fn broker_data(handle: &MediaHandle, viewers: &Viewers, data: ClipboardData) {
 }
 
 fn force_idr_all(encoders: &Encoders) {
-    for (e, _, _) in encoders.lock().unwrap().values() {
+    // Snapshot the handles, then release the lock before touching GStreamer: `force_idr`
+    // pushes an event into the pipeline and can block on its streaming thread. Holding the
+    // global map across that would stall every clone's reader thread (see `encoder_for`).
+    let snapshot: Vec<Arc<Encoder>> =
+        encoders.lock().unwrap().values().map(|(e, _, _)| e.clone()).collect();
+    for e in snapshot {
         e.force_idr();
     }
 }
@@ -621,25 +626,42 @@ fn encoder_for(
     h: u32,
     chroma: ChromaMode,
 ) -> Option<Arc<Encoder>> {
+    // Fast path: an encoder at the right size already exists. Short critical section.
+    {
+        let map = encoders.lock().unwrap();
+        if let Some((e, ew, eh)) = map.get(&monitor_id) {
+            if *ew == w && *eh == h {
+                return Some(e.clone());
+            }
+            tracing::info!(
+                "monitor {monitor_id} resolution {ew}x{eh} → {w}x{h}; rebuilding encoder"
+            );
+        }
+    }
+    // Build with the lock RELEASED. `Encoder::new` constructs a whole GStreamer pipeline and
+    // blocks in `set_state(Playing)` (hundreds of ms, longer under GPU/CPU contention). This
+    // map is global across clones, so building under it head-of-line-blocks every other
+    // clone's reader thread — one slow encoder init froze the entire fleet's media sockets.
+    let built = {
+        let viewers = viewers.clone();
+        match Encoder::new(chroma, move |au, _idr| broadcast_video(&viewers, monitor_id, &au)) {
+            Ok(e) => Arc::new(e),
+            Err(err) => {
+                tracing::error!("encoder for monitor {monitor_id} init failed: {err}");
+                return None;
+            }
+        }
+    };
+    // Re-acquire and re-check: another thread may have built this monitor's encoder while we
+    // were unlocked. First writer wins; our spare is dropped (cheap next to a fleet stall).
     let mut map = encoders.lock().unwrap();
     if let Some((e, ew, eh)) = map.get(&monitor_id) {
         if *ew == w && *eh == h {
             return Some(e.clone());
         }
-        tracing::info!("monitor {monitor_id} resolution {ew}x{eh} → {w}x{h}; rebuilding encoder");
     }
-    let viewers = viewers.clone();
-    match Encoder::new(chroma, move |au, _idr| broadcast_video(&viewers, monitor_id, &au)) {
-        Ok(e) => {
-            let e = Arc::new(e);
-            map.insert(monitor_id, (e.clone(), w, h));
-            Some(e)
-        }
-        Err(err) => {
-            tracing::error!("encoder for monitor {monitor_id} init failed: {err}");
-            None
-        }
-    }
+    map.insert(monitor_id, (built.clone(), w, h));
+    Some(built)
 }
 
 /// The viewer's stable window set, from the server's **configured** monitor layout
@@ -849,6 +871,16 @@ fn serve_clone(
                             LatestFrame { monitor_id: f.monitor_id, fd: dup, fourcc: f.fourcc, modifier: f.modifier, width: f.width, height: f.height, planes: f.planes.clone() },
                         );
                     }
+                    // Ack as soon as the frame is received and `latest` owns its own dup of the
+                    // fd — BEFORE any encoding. The daemon's 1-deep gate exists precisely to shed
+                    // frames when we cannot keep up, but it only clears on this Ack: acking after
+                    // the encode inverts that contract. A slow encoder then stops the Acks, the
+                    // daemon's gate never clears, its capture thread blocks forever in a blocking
+                    // `sendmsg`, and the socket wedges — for EVERY clone, since this thread also
+                    // stops draining. Observed live: all clone sockets frozen at a constant
+                    // Recv-Q with the capture threads parked in `sock_alloc_send_pskb`.
+                    // Acking here degrades to a lower frame rate under load instead of deadlock.
+                    let _ = conn.send(&ServerMsg::Ack(Ack { monitor_id: f.monitor_id, seq: f.seq }));
                     let sel = app.store.selected();
                     {
                         let mut ls = last_sel.lock().unwrap();
@@ -865,7 +897,6 @@ fn serve_clone(
                             }
                         }
                     }
-                    let _ = conn.send(&ServerMsg::Ack(Ack { monitor_id: f.monitor_id, seq: f.seq }));
                 }
             }
             Ok((DaemonMsg::ClipboardOffer(o), _)) => {
@@ -1167,6 +1198,30 @@ mod tests {
         teardown_if_current(&conns, &latest, "x", &conn_b);
         assert!(!conns.lock().unwrap().contains_key("x"));
         assert!(!latest.lock().unwrap().contains_key("x"));
+    }
+
+    /// The Ack must be emitted from the frame path BEFORE the encode step, not after it.
+    /// The daemon's 1-deep gate only reopens on this Ack, so an Ack sequenced behind a slow
+    /// (or wedged) encoder deadlocks the clone socket — and, because the same thread drains
+    /// every clone, the whole fleet. Guards the source order rather than the runtime
+    /// behaviour: `enc.push` needs a VA-API GPU pipeline that CI/test hosts do not have.
+    #[test]
+    fn frame_path_acks_before_encoding() {
+        let src = include_str!("mediaplane.rs");
+        let frame_arm = src
+            .split_once("Ok((DaemonMsg::Frame(f), fds))")
+            .expect("frame arm present")
+            .1
+            .split_once("Ok((DaemonMsg::ClipboardOffer")
+            .expect("frame arm ends at the next match arm")
+            .0;
+        let ack = frame_arm.find("ServerMsg::Ack").expect("frame arm sends an Ack");
+        let push = frame_arm.find("enc.push(").expect("frame arm pushes to an encoder");
+        assert!(
+            ack < push,
+            "Ack must precede enc.push in the frame arm: acking after the encode makes the \
+             daemon's flow-control gate depend on encoder progress and wedges the socket"
+        );
     }
 
     #[test]
