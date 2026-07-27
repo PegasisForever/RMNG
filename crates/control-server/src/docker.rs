@@ -43,7 +43,7 @@ use bollard::models::{
 use bollard::query_parameters::{
     CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
     ListImagesOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder, StatsOptionsBuilder,
+    RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder,
     StopContainerOptionsBuilder,
 };
 use futures::StreamExt;
@@ -1656,27 +1656,6 @@ impl DockerCtl {
         }
     }
 
-    /// One-shot CPU sample for a running container (`stream=false` so the daemon returns a
-    /// single frame then disconnects; `one_shot=false` so it collects TWO CPU cycles and
-    /// fills `precpu_stats`, which the delta math needs). The result is a percentage of total
-    /// host capacity. Memory is sampled separately from the same runtime inspect's PID, so
-    /// Docker's presentation-oriented memory field never enters the stats payload.
-    pub async fn container_cpu_pct(&self, name: &str) -> Option<f64> {
-        let opts = StatsOptionsBuilder::new().stream(false).one_shot(false).build();
-        let docker = self.daemon().ok()?;
-        let mut stream = docker.stats(name, Some(opts));
-        // `stream=false` yields exactly one frame (after the two cycles) then closes; a
-        // stopped or missing container errors / yields nothing → None.
-        let s = stream.next().await?.ok()?;
-        let cpu = s.cpu_stats.unwrap_or_default();
-        let precpu = s.precpu_stats.unwrap_or_default();
-        let cpu_total = cpu.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0);
-        let precpu_total = precpu.cpu_usage.as_ref().and_then(|u| u.total_usage).unwrap_or(0);
-        let system = cpu.system_cpu_usage.unwrap_or(0);
-        let presystem = precpu.system_cpu_usage.unwrap_or(0);
-        Some(cpu_percent(cpu_total, precpu_total, system, presystem))
-    }
-
     /// The container's host PID (`State.Pid`), or `None` when it isn't running (the daemon
     /// reports pid 0 for stopped containers) or doesn't exist (404). The clone-home
     /// reconciler ([`crate::homes`]) turns this into a `/proc/<pid>/root/home/rmng` symlink
@@ -2239,19 +2218,6 @@ impl PullAggregator {
     }
 }
 
-/// Docker's CPU-percent formula relative to total host capacity. Pure over the raw counters
-/// bollard's stats hand back, so it's unit-testable without a daemon. Yields 0 — never
-/// NaN/∞ — when either delta is non-positive (the first sample carries no `precpu`, and an
-/// idle window has a zero system delta).
-fn cpu_percent(cpu_total: u64, precpu_total: u64, system: u64, presystem: u64) -> f64 {
-    let cpu_delta = cpu_total.saturating_sub(precpu_total) as f64;
-    let system_delta = system.saturating_sub(presystem) as f64;
-    if cpu_delta <= 0.0 || system_delta <= 0.0 {
-        return 0.0;
-    }
-    (cpu_delta / system_delta) * 100.0
-}
-
 /// A short (12-hex) form of a full container/image id for log lines. `sha256:` prefixes
 /// are stripped first.
 fn short_id(id: &str) -> String {
@@ -2482,39 +2448,6 @@ mod tests {
         assert_eq!(ctl.control_host().await.unwrap(), "10.99.0.1");
         ctl.set_subnet("10.98.0.0/24");
         assert_eq!(ctl.control_host().await.unwrap(), "10.98.0.1");
-    }
-
-    // --- cpu percent ------------------------------------------------------------------
-
-    #[test]
-    fn cpu_percent_is_relative_to_total_host_capacity() {
-        assert_eq!(cpu_percent(500, 0, 1000, 0), 50.0);
-        assert_eq!(cpu_percent(1000, 0, 1000, 0), 100.0);
-        assert_eq!(cpu_percent(250, 0, 1000, 0), 25.0);
-    }
-
-    #[test]
-    fn cpu_percent_uses_deltas_not_absolutes() {
-        // Only the movement between the two samples counts: 200 / 800 = 25% of the host.
-        assert_eq!(cpu_percent(1200, 1000, 5800, 5000), 25.0);
-    }
-
-    #[test]
-    fn cpu_percent_zero_system_delta_is_zero_not_nan() {
-        // A zero (or backwards) system delta must not divide-by-zero into NaN/∞.
-        let v = cpu_percent(500, 0, 1000, 1000);
-        assert_eq!(v, 0.0);
-        assert!(v.is_finite());
-        // System counter went backwards (daemon restart / rollover): still 0, not negative.
-        assert_eq!(cpu_percent(500, 0, 900, 1000), 0.0);
-    }
-
-    #[test]
-    fn cpu_percent_missing_precpu_first_sample_is_zero() {
-        // The very first sample has no precpu, so cpu_total == precpu_total (both 0) → a
-        // zero container delta → 0%, never a spurious spike.
-        assert_eq!(cpu_percent(0, 0, 0, 0), 0.0);
-        assert_eq!(cpu_percent(500, 0, 0, 0), 0.0);
     }
 
     // --- subnet plan ------------------------------------------------------------------

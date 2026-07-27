@@ -138,13 +138,23 @@ impl ViewTracker {
 }
 
 #[derive(Clone, Copy)]
-struct LxcCpuSample {
+struct CpuSample {
     usage_usec: u64,
     sampled_at: Instant,
 }
 
-fn lxc_cpu_pct(previous: &mut Option<LxcCpuSample>, usage_usec: u64, now: Instant) -> Option<f64> {
-    let previous = previous.replace(LxcCpuSample { usage_usec, sampled_at: now })?;
+/// Turn a cumulative cgroup `usage_usec` counter into a percentage of CT 105's enforced capacity,
+/// against the caller's previous sample (which this replaces).
+///
+/// Shared by the CT-wide gauge and every per-clone row so both sit on one basis: a clone reading
+/// 50% and the CT reading 50% mean the same eight busy cores. That is the whole reason per-clone
+/// CPU does not come from Docker's stats API — see [`crate::cgroup`] for why its denominator is
+/// wrong here.
+///
+/// `None` until two samples establish a rate, and again whenever the counter moves backwards —
+/// a container restart resets it to zero, and a stale delta would read as a spike.
+fn cpu_pct(previous: &mut Option<CpuSample>, usage_usec: u64, now: Instant) -> Option<f64> {
+    let previous = previous.replace(CpuSample { usage_usec, sampled_at: now })?;
     let usage_delta = usage_usec.checked_sub(previous.usage_usec)? as f64;
     let elapsed_usec = now.checked_duration_since(previous.sampled_at)?.as_secs_f64() * 1_000_000.0;
     (elapsed_usec > 0.0).then_some((usage_delta / elapsed_usec) * 100.0 / CT105_CPU_CAPACITY)
@@ -152,7 +162,7 @@ fn lxc_cpu_pct(previous: &mut Option<LxcCpuSample>, usage_usec: u64, now: Instan
 
 /// One CT 105-wide CPU/RAM/disk sample. Every cgroup input is read through PID 1's root so the
 /// result includes the Docker daemon and other LXC processes, not merely managed clones.
-async fn sample_lxc(previous_cpu: &mut Option<LxcCpuSample>) -> Option<LxcStats> {
+async fn sample_lxc(previous_cpu: &mut Option<CpuSample>) -> Option<LxcStats> {
     let (cpu, memory, disk) = tokio::join!(
         tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::lxc_cpu_usage_usec()),
         tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::lxc_memory_usage()),
@@ -190,26 +200,27 @@ async fn sample_lxc(previous_cpu: &mut Option<LxcCpuSample>) -> Option<LxcStats>
     };
 
     Some(LxcStats {
-        cpu_pct: lxc_cpu_pct(previous_cpu, cpu, Instant::now()),
+        cpu_pct: cpu_pct(previous_cpu, cpu, Instant::now()),
         mem_used: memory.used,
         mem_limit: memory.limit,
         disk_used,
     })
 }
 
-/// One bounded CPU/RAM sample plus the bridge IP from one Docker runtime inspect. The CPU
-/// stream and inspect run concurrently; the inspect's PID is the sole source for both cgroup
-/// memory and the persisted IP, avoiding a clone-recreate race between separate inspections.
-async fn sample_clone(app: &App, host: &RmngClone) -> (Option<ContainerStats>, Option<Option<String>>) {
+/// One bounded CPU/RAM sample plus the bridge IP from one Docker runtime inspect. CPU and memory
+/// both come from the clone's own cgroup through the inspect's PID, which is also the sole source
+/// for the persisted IP — avoiding a clone-recreate race between separate inspections.
+///
+/// `previous_cpu` carries this clone's prior CPU counter across ticks, so the first sample after a
+/// clone appears yields no CPU reading (the CT-wide gauge behaves the same way).
+async fn sample_clone(
+    app: &App, host: &RmngClone, previous_cpu: &mut Option<CpuSample>,
+) -> (Option<ContainerStats>, Option<Option<String>>) {
     if !host.managed {
         return (None, None);
     }
 
-    let (cpu, runtime) = tokio::join!(
-        app.docker.container_cpu_pct(&host.id),
-        app.docker.inspect_runtime(&host.id),
-    );
-    let runtime = match runtime {
+    let runtime = match app.docker.inspect_runtime(&host.id).await {
         Ok(runtime) => runtime,
         Err(e) => {
             tracing::debug!(host = %host.id, error = %e, "clone runtime inspect unavailable");
@@ -220,7 +231,11 @@ async fn sample_clone(app: &App, host: &RmngClone) -> (Option<ContainerStats>, O
     let Some(pid) = runtime.pid else {
         return (None, ip);
     };
-    let memory = match tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::memory_usage(pid)).await {
+    let (memory, cpu) = tokio::join!(
+        tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::memory_usage(pid)),
+        tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::cpu_usage_usec(pid)),
+    );
+    let memory = match memory {
         Ok(Ok(memory)) => memory,
         Ok(Err(e)) => {
             tracing::debug!(host = %host.id, pid, error = %e, "clone cgroup-v2 memory sample unavailable");
@@ -231,7 +246,18 @@ async fn sample_clone(app: &App, host: &RmngClone) -> (Option<ContainerStats>, O
             return (None, ip);
         }
     };
-    let Some(cpu_pct) = cpu else {
+    let cpu = match cpu {
+        Ok(Ok(cpu)) => cpu,
+        Ok(Err(e)) => {
+            tracing::debug!(host = %host.id, pid, error = %e, "clone cgroup-v2 CPU sample unavailable");
+            return (None, ip);
+        }
+        Err(_) => {
+            tracing::debug!(host = %host.id, pid, "clone cgroup-v2 CPU sample timed out");
+            return (None, ip);
+        }
+    };
+    let Some(cpu_pct) = cpu_pct(previous_cpu, cpu, Instant::now()) else {
         return (None, ip);
     };
 
@@ -281,7 +307,10 @@ fn should_flag_unread(
     true
 }
 
-async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
+async fn poll_once(
+    app: &App, previous_lxc_cpu: &mut Option<CpuSample>,
+    previous_clone_cpu: &mut HashMap<String, CpuSample>,
+) {
     let hosts: Vec<RmngClone> = app
         .store
         .get()
@@ -291,39 +320,48 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
         .collect();
     if hosts.is_empty() {
         let lxc_stats = sample_lxc(previous_lxc_cpu).await;
+        previous_clone_cpu.clear();
         app.stats.publish(&HashMap::new());
         app.lxc_stats.publish(&lxc_stats);
         return;
     }
 
-    let probes = futures::future::join_all(hosts.iter().map(|host| async move {
-        // An unavailable Docker daemon leaves the lifecycle unchanged; it is not proof that the
-        // container stopped. Only a successful liveness response may write `offline`.
-        let running = match tokio::time::timeout(FETCH_TIMEOUT, app.docker.is_running(&host.id)).await {
-            Ok(Ok(running)) => Some(running),
-            Ok(Err(error)) => {
-                tracing::warn!(host = %host.id, "Docker liveness check failed: {error}");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(host = %host.id, "Docker liveness check timed out");
-                None
-            }
-        };
-        let (stats, ip) = if running == Some(true) {
-            match tokio::time::timeout(FETCH_TIMEOUT, sample_clone(app, host)).await {
-                Ok(sample) => sample,
-                Err(_) => {
-                    tracing::debug!(host = %host.id, "clone resource sample timed out");
-                    (None, None)
+    // Each probe owns its clone's prior CPU counter for the duration of the tick and hands the
+    // updated one back, so the concurrent futures need no shared lock over the map.
+    let probes = futures::future::join_all(hosts.iter().map(|host| {
+        let mut cpu_sample = previous_clone_cpu.get(&host.id).copied();
+        async move {
+            // An unavailable Docker daemon leaves the lifecycle unchanged; it is not proof that
+            // the container stopped. Only a successful liveness response may write `offline`.
+            let running = match tokio::time::timeout(FETCH_TIMEOUT, app.docker.is_running(&host.id)).await {
+                Ok(Ok(running)) => Some(running),
+                Ok(Err(error)) => {
+                    tracing::warn!(host = %host.id, "Docker liveness check failed: {error}");
+                    None
                 }
-            }
-        } else if running == Some(false) {
-            (None, Some(None))
-        } else {
-            (None, None)
-        };
-        (host.id.clone(), running, stats, ip)
+                Err(_) => {
+                    tracing::warn!(host = %host.id, "Docker liveness check timed out");
+                    None
+                }
+            };
+            let (stats, ip) = if running == Some(true) {
+                match tokio::time::timeout(FETCH_TIMEOUT, sample_clone(app, host, &mut cpu_sample)).await {
+                    Ok(sample) => sample,
+                    Err(_) => {
+                        tracing::debug!(host = %host.id, "clone resource sample timed out");
+                        (None, None)
+                    }
+                }
+            } else if running == Some(false) {
+                // A stopped container's counter is gone; drop the sample so a later restart rates
+                // from its fresh zero rather than against a pre-stop total.
+                cpu_sample = None;
+                (None, Some(None))
+            } else {
+                (None, None)
+            };
+            (host.id.clone(), running, stats, ip, cpu_sample)
+        }
     }));
     let (lxc_stats, probes) = tokio::join!(sample_lxc(previous_lxc_cpu), probes);
     let prev_stats = app.stats.latest_map();
@@ -332,7 +370,15 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     let mut next: HashMap<String, MonitorState> = HashMap::with_capacity(probes.len());
     let mut stats_map = HashMap::new();
     let mut ip_updates: HashMap<String, Option<String>> = HashMap::new();
-    for (id, running, stats, ip) in probes {
+    for (id, running, stats, ip, cpu_sample) in probes {
+        match cpu_sample {
+            Some(sample) => {
+                previous_clone_cpu.insert(id.clone(), sample);
+            }
+            None => {
+                previous_clone_cpu.remove(&id);
+            }
+        }
         let Some(running) = running else {
             continue;
         };
@@ -365,6 +411,9 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
     next.retain(|id, _| active_ids.contains(id));
     stats_map.retain(|id, _| active_ids.contains(id));
     ip_updates.retain(|id, _| active_ids.contains(id));
+    // Bound the CPU-sample map to the live fleet, so archived and deleted clones cannot
+    // accumulate in it across the life of a long-running server.
+    previous_clone_cpu.retain(|id, _| active_ids.contains(id));
     app.views.retain(&active_ids);
 
     // Snapshot the two inputs to the unread decision (last-viewed + last-token-activity) before
@@ -433,8 +482,9 @@ async fn poll_once(app: &App, previous_lxc_cpu: &mut Option<LxcCpuSample>) {
 pub async fn run(app: App) {
     tracing::info!("monitor poller started (every {}s)", POLL_INTERVAL.as_secs());
     let mut previous_lxc_cpu = None;
+    let mut previous_clone_cpu = HashMap::new();
     loop {
-        poll_once(&app, &mut previous_lxc_cpu).await;
+        poll_once(&app, &mut previous_lxc_cpu, &mut previous_clone_cpu).await;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -460,12 +510,48 @@ mod tests {
     fn lxc_cpu_uses_elapsed_time_and_ct105_capacity() {
         let start = Instant::now();
         let mut previous = None;
-        assert_eq!(lxc_cpu_pct(&mut previous, 1_000, start), None);
+        assert_eq!(cpu_pct(&mut previous, 1_000, start), None);
 
-        let pct = lxc_cpu_pct(&mut previous, 32_001_000, start + Duration::from_secs(4)).unwrap();
+        let pct = cpu_pct(&mut previous, 32_001_000, start + Duration::from_secs(4)).unwrap();
         assert!((pct - 50.0).abs() < f64::EPSILON);
 
-        assert_eq!(lxc_cpu_pct(&mut previous, 10, start + Duration::from_secs(8)), None);
+        assert_eq!(cpu_pct(&mut previous, 10, start + Duration::from_secs(8)), None);
+    }
+
+    #[test]
+    fn clone_cpu_is_rated_against_the_same_capacity_as_the_ct_gauge() {
+        // The bug this guards: Docker's stats divide by `system_cpu_usage`, which counts all 32
+        // threads CT 105 can see, while its cgroup enforces only 16 cores — halving every
+        // per-clone reading. One clone burning 8 of the 16 cores is 50%, on the same basis the
+        // CT-wide gauge uses, so the rows and the total are directly comparable.
+        let start = Instant::now();
+        let mut previous = None;
+        assert_eq!(cpu_pct(&mut previous, 0, start), None, "one sample cannot make a rate");
+
+        // 8 cores busy for 4s == 32s of CPU time.
+        let pct = cpu_pct(&mut previous, 32_000_000, start + Duration::from_secs(4)).unwrap();
+        assert!((pct - 50.0).abs() < f64::EPSILON, "expected 50%, got {pct}");
+
+        // A fully idle clone reads zero rather than carrying the previous rate forward.
+        let idle = cpu_pct(&mut previous, 32_000_000, start + Duration::from_secs(8)).unwrap();
+        assert_eq!(idle, 0.0);
+    }
+
+    #[test]
+    fn a_restarted_clones_counter_reset_is_not_a_spike() {
+        // A container restart zeroes `usage_usec`. Rating the new total against the pre-restart
+        // one would underflow; this must yield no reading until two fresh samples land.
+        let start = Instant::now();
+        let mut previous = None;
+        assert_eq!(cpu_pct(&mut previous, 900_000_000, start), None);
+        assert_eq!(
+            cpu_pct(&mut previous, 1_000, start + Duration::from_secs(4)),
+            None,
+            "a backwards counter must not produce a reading"
+        );
+        // The reset sample is retained, so the next tick rates normally from it.
+        let pct = cpu_pct(&mut previous, 6_401_000, start + Duration::from_secs(8)).unwrap();
+        assert!((pct - 10.0).abs() < 1e-9, "expected 10%, got {pct}");
     }
 
     #[test]

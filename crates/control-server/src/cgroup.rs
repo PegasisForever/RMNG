@@ -1,8 +1,15 @@
-//! CT 105 clone cgroup-v2 memory counters read through the shared PID namespace.
+//! CT 105 clone cgroup-v2 CPU and memory counters read through the shared PID namespace.
 //!
 //! The control-server runs with `pid: "host"`, so `/proc/<clone-pid>/root` exposes a clone's
 //! own cgroup namespace. Reading counters there avoids Docker's presentation-oriented memory
 //! figure: we can include swap and keep tmpfs/shmem while excluding reclaimable page cache.
+//!
+//! CPU is read here for a second reason — correctness. Docker's stats API divides a container's
+//! CPU delta by `system_cpu_usage`, which counts every thread the host exposes. CT 105 sees 32
+//! threads but its parent cgroup enforces `cpu.max=1600000 100000`, i.e. 16 cores, so a clone
+//! saturating its entire allowance can only ever read as 50%. Sampling `cpu.stat` here and
+//! rating it against that enforced capacity puts per-clone CPU on the same basis as the CT-wide
+//! figure, so the two are directly comparable.
 
 use std::path::{Path, PathBuf};
 
@@ -34,7 +41,20 @@ pub async fn lxc_memory_usage() -> Result<MemoryUsage> {
 
 /// CT 105's cumulative CPU time, in microseconds, including every descendant cgroup.
 pub async fn lxc_cpu_usage_usec() -> Result<u64> {
-    let path = Path::new(LXC_CGROUP_ROOT).join("cpu.stat");
+    cpu_usage_from_root(Path::new(LXC_CGROUP_ROOT)).await
+}
+
+/// One clone's cumulative CPU time, in microseconds, read through its `/proc/<pid>/root` view.
+/// A cumulative counter, so a caller needs two samples to derive a rate (see the monitor's
+/// `cpu_pct`). Errors exactly like [`memory_usage`] does — the container may have stopped, or
+/// the control-server may lack `pid: "host"` — and callers keep their prior reading.
+pub async fn cpu_usage_usec(pid: i64) -> Result<u64> {
+    cpu_usage_from_root(&PathBuf::from(format!("/proc/{pid}/root/sys/fs/cgroup"))).await
+}
+
+/// Kept separate from the `/proc` paths so synthetic cgroup-v2 fixtures can exercise the reader.
+async fn cpu_usage_from_root(root: &Path) -> Result<u64> {
+    let path = root.join("cpu.stat");
     let stat = tokio::fs::read_to_string(&path)
         .await
         .with_context(|| format!("reading {}", path.display()))?;
@@ -195,6 +215,20 @@ mod tests {
         assert_eq!(disk_used(10, 3, 4096).unwrap(), 28_672);
         assert!(disk_used(3, 10, 4096).is_err());
         assert!(disk_used(u64::MAX, 0, 2).is_err());
+    }
+
+    #[tokio::test]
+    async fn reads_cpu_usage_from_a_cgroup_root() {
+        // The per-clone path reads the same `cpu.stat` shape as the CT-wide one, just under a
+        // different root — this is what replaced Docker's (wrongly scaled) stats API.
+        let root = test_root();
+        write(&root, "cpu.stat", "usage_usec 4200\nuser_usec 1000\nsystem_usec 3200\n");
+        assert_eq!(cpu_usage_from_root(&root).await.unwrap(), 4200);
+
+        // A vanished container (its `/proc/<pid>/root` is gone) is an error, not a zero sample —
+        // zero would read as a real idle clone.
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(cpu_usage_from_root(&root).await.is_err());
     }
 
     #[tokio::test]
