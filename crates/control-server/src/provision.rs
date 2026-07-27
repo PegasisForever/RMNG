@@ -690,6 +690,37 @@ async fn clone_container_after_create(
     on_progress("inject", "injecting machine-id + preset env + PATH rc");
     docker.upload_tar(container, entries).await?;
 
+    // Run the same `~/.ssh/id_ed25519` migration the reconciler does. A clone created from a
+    // SOURCE IMAGE committed while the old layout was live inherits the poisoned fleet key baked
+    // into that image — and because the block above already stamped the current
+    // `SSH_STAMP_VERSION`, `ensure_ssh_ready` short-circuits on every later reconcile and would
+    // never clean it up. gcr-ssh-agent then adopts the key and crashes on it, wedging ALL ssh/git
+    // in the clone (a bare `git pull` fails to sign with the user's own key) from birth.
+    //
+    // Ordering: after the `upload_tar` above, so the fleet key is present at its new location
+    // before the old copy is removed — the script's guard compares the two pubkeys and only
+    // deletes on an exact match, so it is a safe no-op if that upload was skipped.
+    let fleet_body = crate::ssh::fleet_public_key(&cfg.data_dir)
+        .ok()
+        .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
+        .unwrap_or_default();
+    if !fleet_body.is_empty() {
+        on_progress("inject", "migrating any image-baked ~/.ssh fleet key");
+        let script = crate::clone_reconcile::ssh_prepare_script(&fleet_body);
+        // Best-effort, exactly like the ssh material above: a clone that boots with the poisoned
+        // key is degraded, not dead, and the operator can still reach it to fix it by hand.
+        match docker
+            .exec_script(container, &script, &[], &[], |_stream, line| {
+                tracing::debug!(target: "provision", "ssh-migrate: {line}");
+            })
+            .await
+        {
+            Ok(0) => {}
+            Ok(code) => tracing::warn!("clone {hostname}: ssh key migration exited {code} (non-fatal)"),
+            Err(e) => tracing::warn!("clone {hostname}: ssh key migration failed: {e:#} (non-fatal)"),
+        }
+    }
+
     // Interactive Claude Code reads MCP servers from ~/.claude.json (state-bearing → jq merge, not
     // a tar entry). Give it the same desktop+linear set as Codex/OpenCode/the agent-wrapper; the
     // desktop server is removed on headless clones. Stamp it so the reconciler skips re-running
@@ -1260,7 +1291,34 @@ mod tests {
         assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys"
             && t.mode == 0o600
             && t.uid == 1000));
+        // No PRIVATE key may land in ~/.ssh: gcr-ssh-agent adopts anything it finds there into the
+        // login keyring and then crashes on it, wedging all ssh/git in the clone. The fleet key
+        // belongs at CLONE_FLEET_KEY_TAR, outside ~/.ssh.
+        assert!(
+            !e.iter().any(|t| t.path == "home/rmng/.ssh/id_ed25519"),
+            "the fleet private key must never be provisioned into ~/.ssh"
+        );
+        assert!(e.iter().any(|t| t.path == crate::ssh::CLONE_FLEET_KEY_TAR));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The create path stamps the ssh-ready version itself, which makes `ensure_ssh_ready`
+    /// short-circuit on every later reconcile. So the create path must ALSO run the migration —
+    /// otherwise a clone made from a source image that has the poisoned `~/.ssh/id_ed25519` baked
+    /// in (any image committed while the old layout was live) stays wedged forever.
+    #[test]
+    fn create_path_runs_the_ssh_key_migration() {
+        let src = include_str!("provision.rs");
+        let idx = src
+            .find("docker.upload_tar(container, entries)")
+            .expect("the create-path tar upload");
+        let after = &src[idx..];
+        let mig = after
+            .find("ssh_prepare_script")
+            .expect("create path must run the ~/.ssh fleet-key migration after the tar upload");
+        // It must come before the clone is reported ready.
+        let ready = after.find("wait-ready").unwrap_or(usize::MAX);
+        assert!(mig < ready, "the migration must run before the clone is reported ready");
     }
 
     #[test]

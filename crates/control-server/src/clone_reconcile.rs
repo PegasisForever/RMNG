@@ -693,7 +693,13 @@ rm -f /home/rmng/.claude/.credentials.json /home/rmng/.codex/auth.json
 /// `gcr-ssh-agent` so it respawns clean (it is socket-activated; a fresh spawn re-scans `~/.ssh`,
 /// now without the key). Idempotent: on an already-migrated clone the `id_ed25519` file is gone,
 /// so the guarded block is a no-op.
-fn ssh_prepare_script(fleet_body: &str) -> String {
+///
+/// This also runs on the **create** path (`provision.rs`), not just the reconcile one: a clone
+/// created FROM a source image that was committed while the old layout was live inherits the
+/// poisoned key baked into that image, and the create path stamps [`SSH_STAMP_VERSION`] itself —
+/// which would otherwise make `ensure_ssh_ready` short-circuit forever and leave the clone wedged
+/// from birth.
+pub(crate) fn ssh_prepare_script(fleet_body: &str) -> String {
     let mut s = String::from(
         "set -e\n\
          install -d -o rmng -g rmng -m700 /home/rmng/.ssh\n\
