@@ -7,7 +7,6 @@
 //!   - otherwise → **capture self-test**: log fourcc/modifier/size + fps (cursor
 //!     nudge generates damage on the static headless desktop).
 
-mod audio;
 mod capture;
 mod capture_pw;
 mod clipboard;
@@ -555,11 +554,6 @@ async fn run_shipping(
     {
         let (transport, flags, reconfig_tx) = (transport.clone(), in_flight.clone(), reconfig_tx);
         std::thread::spawn(move || {
-            // Audio pipelines, owned by this thread: built on the server's first
-            // `AudioSubscribe` (only the selected clone is ever subscribed) and dropped on
-            // unsubscribe, so an unselected clone holds none and burns no CPU.
-            let mut audio_out: Option<audio::Capture> = None;
-            let mut audio_mic: Option<audio::Playback> = None;
             loop {
                 match transport.recv() {
                     Ok(ServerMsg::Input(im)) => {
@@ -606,54 +600,6 @@ async fn run_shipping(
                         }
                         if reconfig_tx.blocking_send(mons).is_err() {
                             tracing::warn!("reconfigure channel closed; ignoring SetMonitors");
-                        }
-                    }
-                    Ok(ServerMsg::AudioSubscribe(s)) => {
-                        let mut detail = String::new();
-                        // Desktop audio out. Rebuild only on an edge so a repeated
-                        // subscribe (e.g. a re-selected clone) doesn't cut the stream.
-                        if s.out && audio_out.is_none() {
-                            match audio::start_capture(transport.clone()) {
-                                Ok(c) => audio_out = Some(c),
-                                Err(e) => {
-                                    tracing::warn!("audio capture failed: {e:#}");
-                                    detail = format!("capture: {e}");
-                                }
-                            }
-                        } else if !s.out {
-                            audio_out = None; // Drop → set_state(Null), releases the node.
-                        }
-                        // Operator mic in. The virtual node is created on demand rather
-                        // than at boot: a clone that is never selected never needs one.
-                        if s.mic && audio_mic.is_none() {
-                            let started = audio::ensure_mic_node()
-                                .and_then(|()| audio::start_playback());
-                            match started {
-                                Ok(p) => audio_mic = Some(p),
-                                Err(e) => {
-                                    tracing::warn!("mic playback failed: {e:#}");
-                                    detail = format!("{detail} mic: {e}");
-                                }
-                            }
-                        } else if !s.mic {
-                            audio_mic = None;
-                        }
-                        // Report what actually came up, so the server logs a real reason
-                        // instead of silently relaying nothing.
-                        let _ = transport.send(
-                            &DaemonMsg::AudioStatus {
-                                out: audio_out.is_some(),
-                                mic: audio_mic.is_some(),
-                                detail: detail.trim().to_string(),
-                            },
-                            &[],
-                        );
-                    }
-                    Ok(ServerMsg::AudioData(a)) => {
-                        // Operator microphone → the virtual mic node. Silently dropped when
-                        // not subscribed (an in-flight frame can outrace an unsubscribe).
-                        if let Some(p) = audio_mic.as_ref() {
-                            p.push(a);
                         }
                     }
                     Ok(_) => {} // Subscribe/FrameRequest — not used by the daemon

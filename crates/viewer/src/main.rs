@@ -26,7 +26,6 @@
 //! `gtk4paintablesink`'s paintable is a GTK object (`!Send`), so all pipelines, paintables
 //! and widgets live on the GTK main thread; the net thread only ships AU bytes over a queue.
 
-mod audio;
 mod config;
 mod auto_lock;
 mod forward;
@@ -278,18 +277,6 @@ fn run_gui() -> Result<()> {
                             *writer.lock().unwrap() = Some(w);
                         }
                         tracing::info!("connected to {cur}");
-                        // Microphone → the selected clone. Opened once and kept across
-                        // reconnects; frames go up on the same tag-6 the server sends
-                        // desktop audio down on.
-                        {
-                            let w = writer.clone();
-                            audio::ensure_mic(move |seq, opus| {
-                                let msg = wire::viewer::AudioMsg::Frame { seq, opus };
-                                if let Ok(j) = serde_json::to_string(&msg) {
-                                    send_tagged(&w, 6, j);
-                                }
-                            });
-                        }
                         // Buffer the read half: one recv fills the buffer so the per-frame
                         // tag/header/AU `read_exact`s are served from memory instead of one
                         // syscall each (the write half is the independent `try_clone` above).
@@ -341,31 +328,6 @@ fn run_gui() -> Result<()> {
                                             .unwrap_or(server);
                                         let forward_addr = format!("{host}:{}", m.forward_port);
                                         fwd_mgr.reconcile(m.rules, forward_addr);
-                                    }
-                                } else if tag[0] == 6 {
-                                    // Desktop audio for the selected clone. The pipeline is
-                                    // built on the first frame, so a viewer whose machine has
-                                    // no output device just logs once and plays nothing.
-                                    match serde_json::from_slice::<wire::viewer::AudioMsg>(&body) {
-                                        Ok(wire::viewer::AudioMsg::Frame { seq, opus }) => {
-                                            let mut slot = audio::AUDIO.lock().unwrap();
-                                            if slot.is_none() {
-                                                match audio::Playback::start() {
-                                                    Ok(p) => *slot = Some(p),
-                                                    Err(e) => tracing::warn!("audio playback unavailable: {e:#}"),
-                                                }
-                                            }
-                                            if let Some(p) = slot.as_ref() {
-                                                p.push(seq, opus);
-                                            }
-                                        }
-                                        Ok(wire::viewer::AudioMsg::Reset) => {
-                                            // Selection changed: drop the stale decoder state.
-                                            if let Some(p) = audio::AUDIO.lock().unwrap().as_ref() {
-                                                p.reset();
-                                            }
-                                        }
-                                        Err(e) => tracing::debug!("bad audio frame: {e}"),
                                     }
                                 } else if tag[0] == 7 {
                                     // Terminal output for one session → queue for the tick to render.
@@ -1083,44 +1045,6 @@ fn make_window_shell(
         }
         header.pack_end(&fs_btn);
         if is_main {
-            // Speaker + mic toggles. Main window only: they control one process-wide stream,
-            // so per-monitor copies would just be redundant controls for the same state.
-            let spk = gtk4::Button::from_icon_name("audio-volume-high-symbolic");
-            spk.set_tooltip_text(Some("Mute clone audio (Ctrl+Alt+S)"));
-            spk.connect_clicked(|b| {
-                let muted = audio::toggle_speaker();
-                b.set_icon_name(if muted {
-                    "audio-volume-muted-symbolic"
-                } else {
-                    "audio-volume-high-symbolic"
-                });
-                b.set_tooltip_text(Some(if muted {
-                    "Unmute clone audio (Ctrl+Alt+S)"
-                } else {
-                    "Mute clone audio (Ctrl+Alt+S)"
-                }));
-            });
-            header.pack_end(&spk);
-
-            // The mic is live from connect, so this button is the operator's visible cue
-            // that their room is being captured — not just a control.
-            let mic = gtk4::Button::from_icon_name("audio-input-microphone-symbolic");
-            mic.set_tooltip_text(Some("Microphone is ON — click to mute (Ctrl+Alt+M)"));
-            mic.connect_clicked(|b| {
-                let muted = audio::toggle_mic();
-                b.set_icon_name(if muted {
-                    "microphone-disabled-symbolic"
-                } else {
-                    "audio-input-microphone-symbolic"
-                });
-                b.set_tooltip_text(Some(if muted {
-                    "Microphone muted — click to unmute (Ctrl+Alt+M)"
-                } else {
-                    "Microphone is ON — click to mute (Ctrl+Alt+M)"
-                }));
-            });
-            header.pack_end(&mic);
-
             let settings = gtk4::Button::from_icon_name("network-server-symbolic");
             settings.set_tooltip_text(Some("Server address"));
             let (win, addr, writer) = (window.clone(), addr.clone(), writer.clone());
@@ -1832,24 +1756,6 @@ fn install_keyboard(
                     }
                 }
                 // The tick hides/restores the video cursor from `is_engaged()`.
-                return glib::Propagation::Stop;
-            }
-            if ctrl_alt && (keyval == gdk::Key::m || keyval == gdk::Key::M) {
-                // Mute/unmute the microphone. Like every shortcut here, release the
-                // Ctrl/Alt already forwarded to the clone before we knew this was local.
-                release_all_input(&w, &state);
-                #[cfg(target_os = "macos")]
-                keyboard_macos::release_all();
-                let muted = audio::toggle_mic();
-                tracing::info!("microphone {}", if muted { "muted" } else { "live" });
-                return glib::Propagation::Stop;
-            }
-            if ctrl_alt && (keyval == gdk::Key::s || keyval == gdk::Key::S) {
-                release_all_input(&w, &state);
-                #[cfg(target_os = "macos")]
-                keyboard_macos::release_all();
-                let muted = audio::toggle_speaker();
-                tracing::info!("clone audio {}", if muted { "muted" } else { "playing" });
                 return glib::Propagation::Stop;
             }
             if ctrl_alt && (keyval == gdk::Key::p || keyval == gdk::Key::P) {

@@ -64,34 +64,6 @@ pub enum ChromaMode {
     Yuv444,
 }
 
-/// Bidirectional audio for the port-1 viewer stream.
-///
-/// Two independent switches: an operator may want to hear a clone without opening a
-/// microphone into it, or run a fleet where mic injection is off entirely. Only the
-/// **selected** clone ever streams, mirroring video — so this is fleet-wide, like
-/// [`ChromaMode`], rather than per-clone.
-///
-/// Audio is Opus at both endpoints; the control-server relays frames without decoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct AudioConfig {
-    /// Stream the selected clone's desktop audio down to connected viewers.
-    #[serde(default)]
-    pub enabled: bool,
-    /// Allow viewers to feed their microphone into the selected clone's virtual mic node.
-    /// This is the fleet-wide kill switch for a real privacy surface — with it on, a
-    /// connected viewer's microphone is live to whatever runs in the selected clone.
-    #[serde(default)]
-    pub mic_enabled: bool,
-}
-
-impl Default for AudioConfig {
-    fn default() -> Self {
-        Self { enabled: true, mic_enabled: true }
-    }
-}
-
 impl Default for ListenConfig {
     fn default() -> Self {
         Self {
@@ -455,11 +427,6 @@ pub struct AppConfig {
     /// (the media plane's encode path is wired at startup).
     #[serde(default)]
     pub chroma: ChromaMode,
-    /// Bidirectional audio between the selected clone and the native viewer.
-    /// Applies **live** (the next selection change re-sends `AudioSubscribe`), so unlike
-    /// [`chroma`](Self::chroma) this is not restart-required.
-    #[serde(default)]
-    pub audio: AudioConfig,
     /// SSH bastion access settings (jump host into clones). Non-secret — public keys pass
     /// through [`AppConfigRedacted`] intact.
     #[serde(default)]
@@ -497,7 +464,6 @@ impl Default for AppConfig {
             groups: Vec::new(),
             presets: Vec::new(),
             chroma: ChromaMode::default(),
-            audio: AudioConfig::default(),
             ssh: SshConfig::default(),
             agent_playbook: default_agent_playbook(),
             global_prompt: default_global_prompt(),
@@ -580,7 +546,6 @@ impl AppConfig {
             groups: self.groups.clone(),
             presets: self.presets.iter().map(Preset::redacted).collect(),
             chroma: self.chroma,
-            audio: self.audio,
             ssh: self.ssh.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
@@ -608,7 +573,6 @@ pub struct AppConfigRedacted {
     pub groups: Vec<Group>,
     pub presets: Vec<PresetRedacted>,
     pub chroma: ChromaMode,
-    pub audio: AudioConfig,
     pub ssh: SshConfig,
     pub agent_playbook: String,
     pub global_prompt: String,

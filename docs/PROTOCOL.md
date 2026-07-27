@@ -35,16 +35,7 @@ path uses this compact framing carrying `socket.rs` types).
 | `0` | video | `[0][u32be monitor_id][u32be len][AnnexB access-unit]` |
 | `1` | clipboard | `[1][u32be len][JSON ClipboardMsg]` |
 | `2` | cursor | `[2][u32be len][JSON CursorMeta]` |
-| `3` | view spec | `[3][u32be len][JSON ViewSpec]` — the window set + each window's content |
-| `4` | mode | `[4][u32be len][JSON ModeMsg]` — chroma; sent once at connect before any AU |
-| `5` | forwards | `[5][u32be len][JSON ForwardsMsg]` — the desired port-forward set |
-| `6` | audio | `[6][u32be len][JSON AudioMsg]` — one 20 ms Opus frame, or `Reset` |
-| `7` | term data | `[7][u32be len][JSON TermData]` — raw PTY output for one tmux session |
-
-Only tag `0` is binary; **tags 1–7 are all `[tag][u32be len][JSON]`**. Both viewer read
-loops (`viewer/src/main.rs` and `viewer/src/headless.rs`) key off exactly that range, so a
-new tag has to stay inside it and carry JSON — a tag ≥ 8 is read as a video AU header and
-desyncs the stream permanently.
+| `3` | layout | `[3][u32be len][JSON MonitorPlacement[]]` |
 
 **Viewer → server:** `[u8 tag][u32be len][JSON body]`, body cap 1 MiB.
 
@@ -52,37 +43,6 @@ desyncs the stream permanently.
 |---|---|---|
 | `0` | `InputMsg` | an input event for the **selected** clone (note: upstream tag 0 carries input, not video) |
 | `1` | `ClipboardMsg` | the viewer's clipboard offer/request/data (brokered to clones) |
-| `2` | `ForwardStatusMsg` | a forward rule's status changed |
-| `3` | `TermInput` | keystrokes/paste for a headless clone's tmux session |
-| `4` | `TermResize` | resize a session's PTY |
-| `5` | `TermNewSession` | create a new tmux session (the tab-bar "+") |
-| `6` | `AudioMsg` | one 20 ms Opus frame of the operator's microphone |
-
-Unlike `DaemonMsg`/`ServerMsg` (which carry `#[serde(other)] Unknown` arms), this framing
-has **no forward compatibility**: the server's `read_viewer_input` drops the connection on
-an unrecognized tag.
-
-### Audio (port-1 tag 6, both directions)
-
-Server→viewer carries the **selected** clone's desktop sound; viewer→server carries the
-operator's microphone. Opus, 48 kHz, 20 ms frames — stereo down, mono up.
-
-```rust
-enum AudioMsg {            // serde tag `k`, snake_case
-    Frame { seq: u64, opus: Vec<u8> },  // opus is base64 in JSON
-    Reset,                              // stream boundary — flush the decoder
-}
-```
-
-Encoding happens at the **endpoints** (clone-daemon and viewer); the control-server relays
-frames without ever decoding one, so the media plane holds no audio GStreamer element.
-`seq` gaps drive `opusdec`'s packet-loss concealment. `Reset` is sent on every selection
-change: Opus is stateful, so decoding clone B's frames against a decoder primed on clone A
-produces garbage.
-
-Gating mirrors video exactly — only the selected clone is subscribed
-(`ServerMsg::AudioSubscribe { out, mic }`), and only while at least one viewer is attached.
-Fleet-wide switches live in `config.audio` (`enabled`, `micEnabled`) and apply live.
 
 `InputMsg` ([socket.rs](../crates/wire/src/socket.rs), serde tag `kind`, snake_case):
 
@@ -130,16 +90,11 @@ control-server **and** every clone (a named volume, not a bind, so siblings can 
 | `cursor` | `CursorMeta` | cursor position (+shape on change, +`warp` if MCP-driven) |
 | `layout` | `{monitors: MonitorPlacement[]}` | the actual applied monitor layout |
 | `clipboard_offer` / `clipboard_request` / `clipboard_data` | resp. types | clipboard bridge |
-| `audio_data` | `{seq, opus}` | one 20 ms Opus frame of desktop audio (only while subscribed) |
-| `audio_status` | `{out, mic, detail}` | which audio pipelines came up, and why not |
 
 `ServerMsg` (server → daemon), serde tag `t`: `subscribe {stream:bool}` (start/stop the
 continuous feed), `frame_request {monitor_id}` (one-shot, screenshot path), `ack
 {monitor_id, seq}` (flow control — the daemon waits for the ack before the next frame),
-`input(InputMsg)`, the three `clipboard_*` messages, `audio_subscribe {out, mic}` (start/stop
-each audio direction — the audio twin of `subscribe`, sent only to the selected clone),
-`audio_data {seq, opus}` (operator microphone for the clone's virtual mic), and
-`set_monitors {monitors:
+`input(InputMsg)`, the three `clipboard_*` messages, and `set_monitors {monitors:
 MonitorSpec[]}` — apply a layout **live**: the daemon does a make-before-break session swap
 (rebuilds a fresh Mutter session with the desired monitors, switches capture + input to it,
 then stops the old one — running apps never close). Sent once on the daemon's `Hello` (to
@@ -147,35 +102,6 @@ correct a stale baked boot layout) and again on every `POST /api/layout/activate
 
 `FrameMsg`: `monitor_id`, `fourcc` (DRM, e.g. `0x34325241` "AR24"), `modifier` (DRM format
 modifier), `width`, `height`, `planes: [{offset, stride}]`, `seq` (echoed in `ack`).
-
-### Audio (clone side)
-
-**Out.** Clones run PipeWire + WirePlumber + `pipewire-pulse` already (pulled in as
-`wireplumber`'s Recommends), and WirePlumber auto-creates a 48 kHz stereo null sink
-(`auto_null`) whenever no real sink exists — which on a headless container is always. The
-daemon captures that sink's monitor with `pipewiresrc stream-properties="p,stream.capture.sink=true"`
-and no `target-object`, so it follows the *current default sink* rather than pinning a node
-that WirePlumber may destroy and replace.
-
-**In.** The daemon creates a virtual microphone on demand
-(`support.null-audio-sink` + `media.class=Audio/Source/Virtual` + `monitor.passthrough`,
-via `pw-cli create-node`) named `rmng-mic`, which apps in the clone see as a normal capture
-device. `object.linger=true` is required — without it the node dies with the `pw-cli` that
-created it.
-
-Two behaviours worth knowing before touching this code:
-
-- **WirePlumber will not route a playback stream into an `Audio/Source/Virtual` node.** The
-  stream sits with its target set and no link is ever formed, so the mic records silence.
-  The daemon links the ports explicitly (`pw-link`) after the pipeline reaches Playing.
-- **`pipewiresink` negotiates its own channel layout** (stereo `output_FL`/`output_FR`,
-  even under a mono caps filter), so the link step enumerates whatever ports exist rather
-  than assuming names.
-
-No `opusparse` on either decode path: each message carries exactly one encoder frame, which
-is what `opusdec` wants. `opusparse` recovers boundaries from a *flat* byte stream and
-collapses pre-framed input (65 KB of concatenated frames parses back to 0.12 s of audio) —
-it is only correct for the `RMNG_AUDIO_DUMP` file, which really is a flat stream.
 
 ### CursorMeta
 ```rust

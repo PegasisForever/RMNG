@@ -46,14 +46,7 @@ pub(crate) type Viewers = Arc<Mutex<HashMap<u64, ViewerConn>>>;
 /// Bounded per-viewer queue depth. `try_send` overflow disconnects the viewer (it
 /// reconnects + re-primes). Bounds worst-case queued memory at CAP × max-AU per slow
 /// viewer; tune here if joins on very bursty desktops need more slack.
-///
-/// Raised from 128 when audio landed: audio adds ~50 frames/s on the **same** ordered
-/// channel, so a brief video burst could otherwise exhaust the slots and disconnect a
-/// viewer over an audio frame. Audio frames are ~320 B against tens of KB per video AU, so
-/// the memory bound is barely affected — it is the slot count that needed the headroom.
-/// (Audio deliberately shares this one channel: a separate one would reorder frames
-/// against the `AudioMsg::Reset` marker that exists to prevent stale-decoder garbage.)
-const VIEWER_CHAN_CAP: usize = 256;
+const VIEWER_CHAN_CAP: usize = 128;
 
 /// Monotonic per-process viewer id.
 fn next_viewer_id() -> u64 {
@@ -315,17 +308,7 @@ pub fn spawn(app: App, init: MediaInit) {
                     prime_viewer_metadata(&handle, &tx, selected.clone(), chroma, &state, &cfg, forward_port);
                     // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
                     // (independent of encode latency); mode already leads its channel.
-                    let first_viewer = {
-                        let mut v = viewers.lock().unwrap();
-                        v.insert(id, ViewerConn { id, tx });
-                        v.len() == 1
-                    };
-                    // First viewer → start the selected clone's audio. Later viewers join the
-                    // stream already running; re-subscribing for each would `Reset` (and so
-                    // briefly cut) everyone else's audio for no reason.
-                    if first_viewer {
-                        audio_resubscribe(&handle, &viewers, &app, selected.as_deref());
-                    }
+                    viewers.lock().unwrap().insert(id, ViewerConn { id, tx });
                     prime_viewer_video(&handle, &encoders, &viewers, selected, chroma);
                     // If the selected clone is headless, activate its tmux view and prime this
                     // viewer with the current session list.
@@ -458,12 +441,8 @@ pub fn spawn(app: App, init: MediaInit) {
     });
 }
 
-/// Port-1 frame types (1-byte tag prefix). Server→viewer: 0 = video, 1 = clipboard,
-/// 2 = cursor, 3 = view spec, 4 = mode (chroma handshake, sent once at connect before any
-/// video), 5 = forwards, 6 = audio, 7 = terminal data. Tags 1–7 are all
-/// `[tag][u32be len][JSON]`; only tag 0 is binary. Both viewer read loops
-/// (`viewer/src/main.rs` and `viewer/src/headless.rs`) key off that `1..=7` range, so a new
-/// tag must stay inside it and carry JSON.
+/// Port-1 frame types (1-byte tag prefix). 0 = video, 1 = clipboard, 2 = cursor,
+/// 3 = view spec, 4 = mode (chroma handshake, sent once at connect before any video).
 const T_VIDEO: u8 = 0;
 const T_CLIPBOARD: u8 = 1;
 const T_CURSOR: u8 = 2;
@@ -474,15 +453,6 @@ pub(crate) const T_VIEWSPEC: u8 = 3;
 const T_MODE: u8 = 4;
 /// Server→viewer tag 5: the desired forward set (`[5][u32be len][JSON ForwardsMsg]`).
 const T_FORWARDS: u8 = 5;
-/// Port-1 tag 6, **both directions**: `[6][u32be len][JSON AudioMsg]` — one 20 ms Opus
-/// frame of the selected clone's desktop audio (server→viewer) or of the operator's
-/// microphone (viewer→server), plus the `Reset` stream boundary.
-///
-/// The server never decodes these; it is a pure relay. Audio is encoded at the endpoints
-/// (clone-daemon and viewer), unlike video, which the server must transcode because only
-/// it has the VA-API GPU. That keeps the media plane free of any audio GStreamer element,
-/// so `boot.rs`'s plugin-scan ordering contract is untouched.
-pub(crate) const T_AUDIO: u8 = 6;
 /// Server→viewer tag 7: raw terminal output bytes for one session
 /// (`[7][u32be len][JSON TermData]`). The session list rides in the tag-3 `ViewSpec`.
 pub(crate) const T_TERM_DATA: u8 = 7;
@@ -809,46 +779,6 @@ fn dup_latest_frames(
         .unwrap_or_default()
 }
 
-/// Point audio at `sel`: unsubscribe every other clone, subscribe the selected one, and
-/// mark a stream boundary for the viewers. The audio twin of `force_idr_all` — called on
-/// every selection change and on the first viewer's connect.
-///
-/// Ordering matters. Unsubscribe the outgoing clone **first** so its capture pipeline is
-/// torn down before the new one starts, then broadcast `Reset` so viewers drop any of the
-/// old clone's in-flight frames, and only then subscribe the new clone. Opus is stateful:
-/// a viewer that decodes clone A's tail into a decoder already primed on clone B produces
-/// audible garbage.
-///
-/// Headless clones run no clone-daemon, so they never hold a `conns` entry and drop out
-/// naturally; the explicit `headless` check is belt-and-braces.
-fn audio_resubscribe(handle: &MediaHandle, viewers: &Viewers, app: &App, selected: Option<&str>) {
-    let cfg = app.config();
-    let (want_out, want_mic) = (cfg.audio.enabled, cfg.audio.mic_enabled);
-    let state = app.store.get();
-    let conns: Vec<(String, Arc<Conn>)> =
-        handle.conns.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
-    // Deselect first, so the outgoing clone stops capturing before the new one starts.
-    let (selected_conn, deselected) = conns
-        .into_iter()
-        .partition::<Vec<_>, _>(|(id, _)| selected == Some(id.as_str()));
-    for (_, c) in &deselected {
-        let _ = c.send(&ServerMsg::AudioSubscribe(wire::socket::AudioSubscribe {
-            out: false,
-            mic: false,
-        }));
-    }
-    // Then flush the viewers' decoders, so no stale frame outlives the switch.
-    broadcast_json(viewers, T_AUDIO, &wire::viewer::AudioMsg::Reset);
-    for (id, c) in &selected_conn {
-        let headless = is_headless(&state, id);
-        let _ = c.send(&ServerMsg::AudioSubscribe(wire::socket::AudioSubscribe {
-            out: want_out && !headless,
-            mic: want_mic && !headless,
-        }));
-    }
-}
-
 /// Re-prime ALL viewers after a selection change: force fresh keyframes + rebroadcast
 /// the newly-selected clone's view spec / cursor / last frame to everyone.
 fn reprime_all(
@@ -860,9 +790,6 @@ fn reprime_all(
     chroma: ChromaMode,
 ) {
     force_idr_all(encoders);
-    // Audio follows the same selection flip as video (and must be re-pointed even when
-    // nothing is selected, to silence the outgoing clone).
-    audio_resubscribe(handle, viewers, app, selected.as_deref());
     let Some(sel) = selected else {
         // Nothing selected: clear every viewer's window set.
         broadcast_json(
@@ -953,26 +880,6 @@ fn serve_clone(
             }
             Ok((DaemonMsg::ClipboardData(d), _)) => {
                 broker_data(&handle, &viewers, d);
-            }
-            Ok((DaemonMsg::AudioData(a), _)) => {
-                if let Some(id) = clone_id.clone() {
-                    // Re-check the selection: it can flip between the clone's send and this
-                    // recv, and a just-deselected clone's tail frames must not reach a viewer
-                    // decoder that has already been `Reset` for the incoming clone.
-                    if app.store.selected().as_deref() == Some(id.as_str()) {
-                        broadcast_json(
-                            &viewers,
-                            T_AUDIO,
-                            &wire::viewer::AudioMsg::Frame { seq: a.seq, opus: a.opus },
-                        );
-                    }
-                }
-            }
-            Ok((DaemonMsg::AudioStatus { out, mic, detail }, _)) => {
-                tracing::info!(
-                    "clone {:?} audio: out={out} mic={mic} {detail}",
-                    clone_id.as_deref().unwrap_or("?")
-                );
             }
             Ok((DaemonMsg::Cursor(c), _)) => {
                 if let Some(id) = clone_id.clone() {
@@ -1095,23 +1002,6 @@ fn read_viewer_input(
                     termplane.resize(msg.cols, msg.rows);
                 }
             }
-            T_AUDIO => {
-                // Operator microphone → the selected clone's virtual mic node. Relayed
-                // opaquely; only `Frame` carries payload (a viewer never sends `Reset`).
-                let Ok(wire::viewer::AudioMsg::Frame { seq, opus }) =
-                    serde_json::from_slice::<wire::viewer::AudioMsg>(&body)
-                else {
-                    continue;
-                };
-                if !app.config().audio.mic_enabled {
-                    continue;
-                }
-                let Some(clone) = app.store.selected() else { continue };
-                let conn = handle.conns.lock().unwrap().get(&clone).cloned();
-                if let Some(c) = conn {
-                    let _ = c.send(&ServerMsg::AudioData(wire::socket::AudioData { seq, opus }));
-                }
-            }
             T_TERM_NEW_SESSION => {
                 termplane.new_session();
             }
@@ -1123,12 +1013,6 @@ fn read_viewer_input(
     remove_viewer(&viewers, id);
     clip_forget_source(&handle.clip, &src);
     app.forwards.viewer_left();
-    // Last viewer gone → stop the selected clone's capture pipelines. Passing `None` as the
-    // selection unsubscribes every clone, which is exactly right: with no audience there is
-    // nobody to hear it, and a clone left capturing would burn CPU indefinitely.
-    if viewers.lock().unwrap().is_empty() {
-        audio_resubscribe(&handle, &viewers, &app, None);
-    }
     // A departing viewer may leave the headless terminal view with no audience → deactivate.
     termplane.on_viewers_changed();
 }

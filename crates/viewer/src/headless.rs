@@ -123,20 +123,6 @@ fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) 
 pub fn run() -> Result<()> {
     let addr = std::env::var("RMNG_VIDEO").unwrap_or_else(|_| "127.0.0.1:9001".into());
     let dump = std::env::var("RMNG_DUMP").ok();
-    // `RMNG_AUDIO_DUMP=out.opus` appends every received Opus frame, so the audio path can
-    // be asserted end-to-end on a box with no sound hardware.
-    let audio_dump: Option<Arc<Mutex<std::fs::File>>> = std::env::var("RMNG_AUDIO_DUMP")
-        .ok()
-        .and_then(|p| match std::fs::File::create(&p) {
-            Ok(f) => {
-                tracing::info!("audio dump → {p}");
-                Some(Arc::new(Mutex::new(f)))
-            }
-            Err(e) => {
-                tracing::warn!("audio dump {p}: {e}");
-                None
-            }
-        });
     let counters: Counters = Arc::new(Mutex::new(HashMap::new()));
 
     // Port-forward manager (shared across reconnects). Its status closure frames each
@@ -211,21 +197,6 @@ pub fn run() -> Result<()> {
                                 let forward_addr = format!("{host}:{}", m.forward_port);
                                 tracing::info!("forwards: {} rule(s) → data port {}", m.rules.len(), m.forward_port);
                                 fwd_mgr.reconcile(m.rules, forward_addr);
-                            }
-                        } else if tag[0] == 6 {
-                            // Audio. Headless never opens a device (no speakers, no mic);
-                            // with RMNG_AUDIO_DUMP set it appends the raw Opus frames to a
-                            // file, so the whole audio path is verifiable with no display
-                            // and no sound hardware. Decode with:
-                            //   gst-launch-1.0 filesrc location=out.opus ! opusparse ! \
-                            //     opusdec ! audioconvert ! wavenc ! filesink location=out.wav
-                            if let Some(f) = audio_dump.as_ref() {
-                                if let Ok(wire::viewer::AudioMsg::Frame { opus, .. }) =
-                                    serde_json::from_slice::<wire::viewer::AudioMsg>(&body)
-                                {
-                                    use std::io::Write;
-                                    let _ = f.lock().unwrap().write_all(&opus);
-                                }
                             }
                         }
                         continue;
