@@ -2021,11 +2021,17 @@ impl DockerCtl {
     /// the caller pumps `output` (raw terminal bytes; with a TTY there is no stdout/stderr
     /// split) and writes keystrokes to `input`. The initial window size is applied before
     /// returning; later changes go through [`Self::resize_exec`] with the returned `id`.
+    ///
+    /// `env` (`KEY=VAL`, same shape as [`Self::exec_capture`]) is **merged over** the container's
+    /// `Config.Env` by the daemon rather than replacing it — so it can also override `PATH`, and a
+    /// caller must not pass a worse one. `termplane` uses it to seed the clone's session env,
+    /// because a `tmux attach` here can be what starts the tmux server (see its call site).
     pub async fn exec_tty(
         &self,
         container: &str,
         cmd: &[String],
         user: &str,
+        env: &[String],
         cols: u16,
         rows: u16,
     ) -> Result<TtyExec> {
@@ -2036,6 +2042,7 @@ impl DockerCtl {
                 CreateExecOptions {
                     cmd: Some(cmd.to_vec()),
                     user: Some(user.to_string()),
+                    env: if env.is_empty() { None } else { Some(env.to_vec()) },
                     attach_stdin: Some(true),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),

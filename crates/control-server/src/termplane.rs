@@ -392,7 +392,11 @@ async fn pump_session(
         "-c".to_string(),
         format!("exec -a {PROXY_MARKER} tmux attach-session -t {session}"),
     ];
-    let tty = match app.docker.exec_tty(&clone_id, &cmd, CLONE_USER, size.0, size.1).await {
+    // Seeded with the clone's session env for the same reason as `new_tmux_session`: an attach
+    // against a dead socket starts the server, and that server's env is what every shell in it
+    // inherits forever.
+    let env = session_env(&app, &clone_id).await;
+    let tty = match app.docker.exec_tty(&clone_id, &cmd, CLONE_USER, &env, size.0, size.1).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(target: "termplane", "attach {clone_id}/{session} failed: {e:#}");
@@ -468,6 +472,23 @@ async fn list_sessions(app: &App, clone_id: &str) -> Vec<String> {
     }
 }
 
+/// The clone's session env (`/etc/environment` + the `systemd --user` session), seeded onto every
+/// exec here that can **start the tmux server**.
+///
+/// A bare `docker exec` inherits only the container's `Config.Env` — a handful of keys baked at
+/// create — because nothing on this path runs PAM, so it misses everything the control-server wrote
+/// to `/etc/environment` (`RMNG_CONTROL_URL`, the `XDG_*`/desktop vars, …). Without this the viewer
+/// terminal's shells lacked them and bare `rmng …` failed to resolve the control-server, even
+/// though the same command worked over SSH.
+///
+/// It has to go on the server-starting exec specifically: **tmux fixes its env when the server
+/// starts**, and every shell in it inherits that forever. Passing env to a `new-session` against an
+/// already-running server does nothing, which is also why an already-broken server stays broken
+/// until it is killed.
+async fn session_env(app: &App, clone_id: &str) -> Vec<String> {
+    crate::web::desktop_session_env(app, clone_id).await
+}
+
 /// `tmux new-session -d -s <name> -c <home>` (detached, starting in the clone user's home).
 async fn new_tmux_session(app: &App, clone_id: &str, name: &str) -> anyhow::Result<()> {
     let cmd = [
@@ -479,7 +500,9 @@ async fn new_tmux_session(app: &App, clone_id: &str, name: &str) -> anyhow::Resu
         "-c".to_string(),
         format!("/home/{CLONE_USER}"),
     ];
-    let r = app.docker.exec_capture(clone_id, &cmd, CLONE_USER, None, &[], None).await?;
+    // Seeded: this is the call that starts the tmux server when none is running (see `session_env`).
+    let env = session_env(app, clone_id).await;
+    let r = app.docker.exec_capture(clone_id, &cmd, CLONE_USER, None, &env, None).await?;
     if r.exit_code != 0 {
         anyhow::bail!("tmux new-session exit {}: {}", r.exit_code, r.stderr.trim());
     }

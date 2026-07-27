@@ -77,8 +77,16 @@ exit 0
 /// shell (or the proxy's own transient default) would clamp the grid to the smaller size — the
 /// "terminal is the wrong size" bug. Written to `~/.tmux.conf` (read when the server starts) and
 /// also applied live via `set-option -g` for the session created just below / any running server.
+///
+/// `/etc/environment` is sourced explicitly because this is the exec that **starts the tmux
+/// server**, and tmux fixes its env then — every shell in that server inherits it forever. `runuser
+/// -u … -- bash -lc` does NOT run PAM, so `pam_env` never loads `/etc/environment` and the server
+/// would otherwise be born without `RMNG_CONTROL_URL` + the `XDG_*`/desktop vars (breaking bare
+/// `rmng …` in the viewer terminal). Safe to `.` because the control-server writes that file as
+/// plain unquoted `KEY=VALUE` lines (`clone_etc_environment_conf`).
 const HEADLESS_TMUX_DEFAULT_SCRIPT: &str = r#"set -e
 runuser -u rmng -- bash -lc '
+set -a; . /etc/environment; set +a
 cat > ~/.tmux.conf <<EOF
 # RMNG: the viewer proxy attaches as a second client — size to the latest (viewer) client, not the
 # smallest, so a co-attached human shell never clamps the terminal grid.

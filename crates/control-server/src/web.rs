@@ -528,11 +528,16 @@ fn merge_env(base: &mut Vec<String>, overrides: &[String]) {
 /// (`systemctl --user show-environment`): `WAYLAND_DISPLAY`, `DISPLAY`, `XAUTHORITY`,
 /// `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, the session `PATH` (with `~/.local/bin`), plus the
 /// agent/control vars the manager imports from `/etc/environment` (via the `environment.d` →
-/// `/etc/environment` symlink). A bare `docker exec` inherits none of this, so `clone_exec` seeds
-/// the exec env with it for the desktop user. Returns `KEY=VAL` entries, or empty (with a debug
-/// log) when the user manager isn't reachable yet — still-booting, or a headless clone with no
-/// graphical session — in which case the exec simply runs without the session env.
-async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String> {
+/// `/etc/environment` symlink). A bare `docker exec` inherits none of this — it gets only the
+/// container's `Config.Env`, since nothing on that path runs PAM — so `clone_exec` and the
+/// `termplane` tmux execs seed the exec env with it for the desktop user.
+///
+/// This works on a **headless** clone too: the user manager runs there (linger), it just carries no
+/// compositor vars (`WAYLAND_DISPLAY`/`DISPLAY`/`XAUTHORITY`). Everything from `/etc/environment` is
+/// present either way. Returns `KEY=VAL` entries, or empty (with a debug log) when the user manager
+/// isn't reachable yet — a still-booting clone — in which case the exec simply runs without the
+/// session env.
+pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String> {
     // `show-environment` talks to the per-user bus, which needs XDG_RUNTIME_DIR; the agent user's
     // runtime dir is the fixed `/run/user/<uid>`.
     let cmd = [
