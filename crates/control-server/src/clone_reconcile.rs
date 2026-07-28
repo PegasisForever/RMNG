@@ -259,6 +259,22 @@ const RETIRED_ENV_KEYS: &[&str] = &[
 ///
 /// Dropping-then-appending (rather than editing in place) is what makes a headed→headless flip
 /// work: `desktop` is simply not in the appended set, and its old table was already removed.
+/// TOML tables RMNG used to write into `~/.codex/config.toml` and no longer does, plus the bare
+/// top-level keys that went with them.
+///
+/// The same trap as [`RETIRED_ENV_KEYS`], one file over: a merge that only replaces what it
+/// currently emits never removes what it USED to emit. The group-proxy era pointed Codex at the
+/// `/cc/v1` router with `model_provider = "rmng"` + a `[model_providers.rmng]` block; that route
+/// now 404s, and an explicit `model_provider` beats the `~/.codex/auth.json` the server writes —
+/// so leaving them behind means Codex is authenticated and still broken, on every clone, forever.
+/// Verified against a real production clone: all six lines survived a merge that lacked this.
+///
+/// `model_reasoning_effort` is deliberately NOT here. It is a plain preference with no dead
+/// endpoint behind it, and stripping it would be RMNG deleting an operator's setting rather than
+/// cleaning up its own wiring.
+const RETIRED_CODEX_TABLES: &[&str] = &["model_providers.rmng"];
+const RETIRED_CODEX_KEYS: &[&str] = &["model_provider", "model"];
+
 pub(crate) fn codex_mcp_merge_script(headless: bool) -> String {
     let managed: Vec<&str> = managed_mcp().iter().map(|m| m.name).collect();
     // `mcp_servers.desktop|mcp_servers.linear` — the tables this pass owns. Built from the
@@ -267,8 +283,11 @@ pub(crate) fn codex_mcp_merge_script(headless: bool) -> String {
     let owned = managed
         .iter()
         .map(|n| format!("mcp_servers.{n}"))
+        .chain(RETIRED_CODEX_TABLES.iter().map(|t| (*t).to_string()))
         .collect::<Vec<_>>()
         .join("|");
+    // Bare top-level keys (outside any table) RMNG used to set and now retires.
+    let retired_keys = RETIRED_CODEX_KEYS.join("|");
     let desired = codex_mcp_toml(headless);
     let desired_b64 = B64.encode(&desired);
     format!(
@@ -285,8 +304,11 @@ RMNG_CODEX_MCP
 # Copy every line EXCEPT the managed [mcp_servers.*] tables. `skip` turns on at an owned table
 # header and off at the next header of any kind, so a user's own tables and all top-level keys
 # pass through untouched.
-awk -v owned='^\[({owned})\]$' '
-  /^[[:space:]]*\[/ {{ skip = ($0 ~ owned) }}
+awk -v owned='^\[({owned})\]$' -v retired='^[[:space:]]*({retired_keys})[[:space:]]*=' '
+  /^[[:space:]]*\[/ {{ skip = ($0 ~ owned); intable = 1 }}
+  # Retired bare keys only count BEFORE the first table header — inside a table the same name
+  # could legitimately be a user key (e.g. [profiles.x] model = "...").
+  !intable && $0 ~ retired {{ next }}
   !skip {{ print }}
 ' "$f" > "$tmp"
 # Collapse the blank lines the removal may have left at EOF, then append the managed tables.
@@ -1406,7 +1428,6 @@ mod tests {
         // A hand-customized file: settings before AND after the managed tables, a user's own
         // MCP server, and a table whose name merely starts the same way.
         let original = "# my own settings\n\
-             model = \"gpt-5.6-terra\"\n\
              model_reasoning_effort = \"high\"\n\
              approval_policy = \"never\"\n\
              \n\
@@ -1441,7 +1462,6 @@ mod tests {
         // Every operator-owned line survives, wherever it sat relative to the managed tables.
         for keep in [
             "# my own settings",
-            "model = \"gpt-5.6-terra\"",
             "model_reasoning_effort = \"high\"",
             "approval_policy = \"never\"",
             "[sandbox_workspace_write]",
@@ -1467,6 +1487,45 @@ mod tests {
         assert!(hl.contains("[mcp_servers.linear]"));
         assert!(hl.contains("[mcp_servers.my_own]"), "headless dropped the user's own server");
         assert!(hl.contains("model_reasoning_effort = \"high\""));
+
+        // The group-proxy era's dead wiring must be REMOVED, not merely left alone. A merge that
+        // only replaces what it currently emits never removes what it used to — the same trap
+        // RETIRED_ENV_KEYS exists for. `model_provider = "rmng"` beats the `~/.codex/auth.json`
+        // the server writes, and its `base_url` is a route that now 404s, so leaving these behind
+        // means Codex is authenticated and still broken. This body is a real production clone's.
+        std::fs::write(
+            &cfg,
+            "# Managed by RMNG. Re-created by the RMNG clone reconciler.\n\
+             \n\
+             model_provider = \"rmng\"\n\
+             model = \"gpt-5.6-terra\"\n\
+             model_reasoning_effort = \"high\"\n\
+             \n\
+             [mcp_servers.desktop]\n\
+             url = \"http://127.0.0.1:9004\"\n\
+             \n\
+             [model_providers.rmng]\n\
+             name = \"RMNG\"\n\
+             base_url = \"http://rmng-control:9000/cc/v1\"\n\
+             env_key = \"RMNG_PROXY_KEY\"\n\
+             \n\
+             [profiles.fast]\n\
+             model = \"gpt-5.5\"\n",
+        )
+        .unwrap();
+        let cleaned = run(false);
+        assert!(!cleaned.contains("model_providers.rmng"), "dead provider table survived:\n{cleaned}");
+        assert!(!cleaned.contains("rmng-control:9000"), "dead base_url survived:\n{cleaned}");
+        assert!(!cleaned.contains("RMNG_PROXY_KEY"), "dead env_key survived:\n{cleaned}");
+        assert!(
+            !cleaned.contains("model_provider = "),
+            "the bare model_provider key still overrides auth.json:\n{cleaned}"
+        );
+        // ...but a plain preference RMNG never owned is NOT ours to delete.
+        assert!(cleaned.contains("model_reasoning_effort = \"high\""), "{cleaned}");
+        // ...and a `model` key INSIDE a user's own table is theirs, not the retired top-level one.
+        assert!(cleaned.contains("[profiles.fast]"), "{cleaned}");
+        assert!(cleaned.contains("model = \"gpt-5.5\""), "a user's in-table model was stripped:\n{cleaned}");
 
         // A clone with no config.toml at all gets a valid one rather than an error.
         std::fs::remove_file(&cfg).unwrap();

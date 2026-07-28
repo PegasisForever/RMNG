@@ -551,6 +551,14 @@ pub fn unmigrate_group_proxy_tokens(app: &App) {
         );
     }
 
+    // Pull what we just wrote into the LIVE stores. `App::new` loaded both files long before
+    // this ran, so without this the process keeps the pre-migration snapshot — and the first
+    // refresh persists that stale snapshot back over the credentials recovered above, while the
+    // stamp guarantees the migration never retries. Silent, permanent, and the whole reason the
+    // recovery would otherwise be worthless.
+    app.claude.reload_from_disk();
+    app.codex.reload_from_disk();
+
     // Clone rows carry the same dead `group` key; heal them against the pools that survived.
     heal_clone_bindings(app, &cfg.clone_groups, &cfg.codex_groups);
 
@@ -700,6 +708,61 @@ mod tests {
     ///
     /// This pins the pure mapping the migration applies; `read_raw_preset_groups` itself is a
     /// thin file read.
+    /// The migration's output must reach the RUNNING process, not just the disk.
+    ///
+    /// `App::new` loads both token stores at startup; the migration runs long after. Without a
+    /// reload the process keeps the pre-migration snapshot — and because every store mutation
+    /// persists the whole in-memory vector (`ClaudeStore::save`), the first token refresh writes
+    /// that stale snapshot back over the recovered credentials. The stamp then prevents any
+    /// retry. On the production boxes this would have meant running on week-old, already-rotated
+    /// refresh tokens while the log said the migration succeeded.
+    #[test]
+    fn reload_replaces_the_snapshot_app_new_loaded() {
+        let dir = std::env::temp_dir().join(format!("rmng-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CLAUDE_STORE);
+
+        // The state at boot: one stale account, as `App::new` would have read it.
+        std::fs::write(
+            &path,
+            r#"{"accounts":[{"id":"old|","email":"stale@x.com","accessToken":"OLD",
+                "refreshToken":"OLDR","expiresAt":1}]}"#,
+        )
+        .unwrap();
+        let store = crate::claude::ClaudeStore::load(dir.to_str().unwrap());
+        assert!(store.get_by_email("stale@x.com").is_some());
+
+        // What the migration writes afterwards: the recovered set, which does NOT contain the
+        // stale account and DOES contain one the boot snapshot never had.
+        write_store(
+            &path,
+            &ClaudeStoreFile {
+                accounts: vec![ClaudeAccount {
+                    id: "fresh@x.com|".into(),
+                    email: "fresh@x.com".into(),
+                    access_token: "NEW".into(),
+                    refresh_token: "NEWR".into(),
+                    expires_at: 2,
+                    scopes: default_claude_scopes(),
+                    ..Default::default()
+                }],
+            },
+        )
+        .unwrap();
+
+        // Before the reload the process is still on the boot snapshot — this is the bug.
+        assert!(store.get_by_email("fresh@x.com").is_none());
+        store.reload_from_disk();
+        // After it, the recovered account is live and the stale one is gone, so a refresh can no
+        // longer persist the old set back over the new file.
+        let fresh = store.get_by_email("fresh@x.com").expect("recovered account not adopted");
+        assert_eq!(fresh.access_token, "NEW");
+        assert!(store.get_by_email("stale@x.com").is_none(), "stale account survived the reload");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn preset_pool_binding_maps_to_both_providers() {
         // (raw group, claude pools that survived, codex pools that survived) → what a preset gets.

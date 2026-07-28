@@ -117,6 +117,26 @@ impl ClaudeStore {
         }
     }
 
+    /// Re-read the on-disk store into memory, discarding the current snapshot.
+    ///
+    /// Exists for exactly one caller: the reverse migration
+    /// ([`crate::token_unmigrate`]) writes this file AFTER `App::new` has already loaded it, so
+    /// without a reload the process would keep running on whatever was there before — and the
+    /// first refresh would persist that stale snapshot back over the freshly recovered
+    /// credentials, then the stamp would stop it ever being retried. The recovery is silent and
+    /// permanent, so the reload is not optional.
+    pub fn reload_from_disk(&self) {
+        let fresh = std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<AccountsFile>(&s).ok())
+            .map(|f| f.accounts)
+            .unwrap_or_default();
+        *self.accounts.lock().unwrap() = fresh;
+        // Anything recorded as pushed refers to a token from the previous snapshot; forcing a
+        // re-push is the safe direction (idempotent) versus leaving a clone on a dead token.
+        self.pushed.lock().unwrap().clear();
+    }
+
     fn save(&self, accounts: &[StoredClaudeAccount]) -> Result<()> {
         if let Some(d) = self.path.parent() {
             std::fs::create_dir_all(d).ok();
@@ -141,7 +161,7 @@ impl ClaudeStore {
         self.accounts.lock().unwrap().clone()
     }
 
-    fn get_by_email(&self, email: &str) -> Option<StoredClaudeAccount> {
+    pub(crate) fn get_by_email(&self, email: &str) -> Option<StoredClaudeAccount> {
         self.accounts
             .lock()
             .unwrap()
