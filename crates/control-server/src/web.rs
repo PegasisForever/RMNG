@@ -49,7 +49,6 @@ pub fn router(app: App) -> Router {
         .route("/events", get(events))
         .route("/api/state", get(state_get))
         .route("/api/stats", get(stats_get))
-        .route("/api/tokens", get(tokens_get))
         .route("/api/activate", post(activate))
         .route("/api/reorder", post(reorder))
         .route("/api/clone", post(clone))
@@ -77,44 +76,26 @@ pub fn router(app: App) -> Router {
             axum::routing::delete(chat_schedule_cancel),
         )
         .route("/api/hosts/:id/forwards", put(forwards_put))
-        .route("/api/hosts/:id/group", post(clone_group))
         .route("/api/hosts/:id/archive", post(archive))
         .route("/api/hosts/:id/unarchive", post(unarchive))
         .route("/api/hosts/:id/mcp", post(clone_mcp))
         .route("/api/hosts/:id/exec", post(clone_exec))
-        // Group-proxy onboarding + CRUD (thin proxies to each group instance's management API).
-        .route("/api/groups", post(groups_create))
-        .route("/api/groups/:name", axum::routing::delete(groups_delete))
-        .route(
-            "/api/groups/:name/accounts/login/start",
-            post(group_login_start),
-        )
-        .route(
-            "/api/groups/:name/accounts/login/status",
-            get(group_login_status),
-        )
-        .route(
-            "/api/groups/:name/accounts/login/complete",
-            post(group_login_complete),
-        )
-        .route(
-            "/api/groups/:name/accounts/delete",
-            post(group_account_delete),
-        )
-        .route("/api/usage/refresh", post(usage_refresh))
-        // The `rmng-cliproxy` sidecar's status + the operator's deliberate roll-forward. The
-        // `/cc` router itself no longer lives here — it moved into that container so a
-        // control-server update can't interrupt in-flight agent work (see `groupproxy.rs`).
-        .route("/api/groupproxy", get(groupproxy_get))
-        .route("/api/groupproxy/restart", post(groupproxy_restart))
-        // Internal, admin-secret-authenticated: the out-of-process `/cc` proxy's token-delta
-        // intake. Registered BEFORE the SPA fallback below.
-        .route("/internal/tokens", post(internal_tokens))
-        // Tombstone for the `/cc` router that used to live here. Without it these paths reach
-        // the SPA fallback and an agent POST gets `200 text/html` (or a bare 405) — an opaque
-        // parse error rather than a diagnosis. See [`cc_moved`].
-        .route("/cc", axum::routing::any(cc_moved))
-        .route("/cc/*rest", axum::routing::any(cc_moved));
+        // Claude + Codex accounts. The server owns each account's OAuth refresh lifecycle and
+        // pushes only short-lived access tokens into clones; these twelve are symmetric across
+        // the two providers. Account POOLS are not edited here — they live in `config.json`
+        // (`cloneGroups`/`codexGroups`) and are saved wholesale through `PUT /api/config`.
+        .route("/api/claude/import/check", post(claude_import_check))
+        .route("/api/claude/import", post(claude_import))
+        .route("/api/claude/refresh", post(claude_refresh))
+        .route("/api/claude/swap", post(claude_swap))
+        .route("/api/claude/delete", post(claude_delete))
+        .route("/api/claude/rotate", post(claude_rotate))
+        .route("/api/codex/import/check", post(codex_import_check))
+        .route("/api/codex/import", post(codex_import))
+        .route("/api/codex/refresh", post(codex_refresh))
+        .route("/api/codex/swap", post(codex_swap))
+        .route("/api/codex/delete", post(codex_delete))
+        .route("/api/codex/rotate", post(codex_rotate));
 
     // Frontend from the filesystem: a non-empty `static_dir` overrides (dev hot-reload
     // without a rebuild); otherwise the assets search path resolves it (the image's
@@ -229,19 +210,6 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     });
     let fwd_stream = fwd_initial.chain(fwd_updates);
 
-    let (token_snapshot, token_rx) = app.tokens.subscribe();
-    let token_initial =
-        futures::stream::once(
-            async move { Ok(Event::default().event("tokens").data(token_snapshot)) },
-        );
-    let token_updates = BroadcastStream::new(token_rx).filter_map(|r| async move {
-        match r {
-            Ok(json) => Some(Ok(Event::default().event("tokens").data(json))),
-            Err(_) => None,
-        }
-    });
-    let token_stream = token_initial.chain(token_updates);
-
     // Observable heartbeat: a named `ping` event every 15s. Unlike the low-level keep-alive
     // *comment* below (which `EventSource` swallows silently), the client can see this — so
     // its watchdog can tell a wedged/half-open socket (pings stop arriving → reconnect)
@@ -259,11 +227,8 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
         state_stream,
         futures::stream::select(
             futures::stream::select(
-                futures::stream::select(
-                    futures::stream::select(stats_stream, lxc_stream),
-                    fwd_stream,
-                ),
-                token_stream,
+                futures::stream::select(stats_stream, lxc_stream),
+                fwd_stream,
             ),
             heartbeat,
         ),
@@ -286,13 +251,6 @@ async fn state_get(State(app): State<App>) -> Json<ControlState> {
 /// `stats` `/events` frame. Volatile by design: it is never persisted in [`ControlState`].
 async fn stats_get(State(app): State<App>) -> Response {
     let (snapshot, _rx) = app.stats.subscribe();
-    ([(header::CONTENT_TYPE, "application/json")], snapshot).into_response()
-}
-
-/// `GET /api/tokens` — the current safe per-clone cumulative-token snapshot, matching the first
-/// named `tokens` `/events` frame. It intentionally contains no activity timestamps or account data.
-async fn tokens_get(State(app): State<App>) -> Response {
-    let (snapshot, _rx) = app.tokens.subscribe();
     ([(header::CONTENT_TYPE, "application/json")], snapshot).into_response()
 }
 
@@ -696,29 +654,38 @@ fn resolve_parent(
     let caller = headers
         .get("x-rmng-proxy-key")
         .and_then(|v| v.to_str().ok())
-        .and_then(|key| app.cliproxy.clone_for_token(key));
+        .and_then(|key| app.clone_keys.clone_for_token(key));
     Ok(caller.filter(|id| top_level_managed(id)))
 }
 
-/// The effective account group + preset for a fleet-CLI clone, applying sub-clone inheritance:
-/// a sub clone inherits its `parent`'s group / preset unless the request specified one (an
-/// explicit `--group`/`--preset`, including `none`, counts as specified and overrides). No
-/// parent, or a parent with no group/preset, yields `None` (same as a plain top-level clone).
-/// Pure — unit-tested. The returned preset borrows `presets` (the live config preset list).
-fn effective_group_preset<'a>(
+/// The effective account selections + preset for a fleet-CLI clone, applying sub-clone
+/// inheritance: a sub clone inherits its `parent`'s accounts / preset unless the request
+/// specified them (an explicit `--claude-account`/`--codex-account`/`--preset`, including
+/// `none`, counts as specified and overrides). No parent, or a parent with nothing to inherit,
+/// yields `None` — which the account layer reads as "auto". Pure — unit-tested. The returned
+/// preset borrows `presets` (the live config preset list).
+fn effective_accounts_preset<'a>(
     parent: Option<&wire::RmngClone>,
-    group_specified: bool,
-    resolved_group: Option<String>,
+    claude_specified: bool,
+    claude_account: Option<String>,
+    codex_specified: bool,
+    codex_account: Option<String>,
     preset_specified: bool,
     explicit: Option<&'a wire::Preset>,
     presets: &'a [wire::Preset],
-) -> (Option<String>, Option<&'a wire::Preset>) {
-    let group = if group_specified {
-        resolved_group
+) -> (Option<String>, Option<String>, Option<&'a wire::Preset>) {
+    // A clone's *selection* is what's inherited, not the resolved account: the parent may be on
+    // `auto` and have landed on a specific email, and a sub clone asking for `auto` should get
+    // its own pick rather than being pinned to whatever its parent happens to be running.
+    let claude = if claude_specified {
+        claude_account
     } else {
-        // A blank parent group can't happen after `normalize_clone_groups`, but filter anyway
-        // rather than inheriting an empty name past `resolve_clone_group`'s fallback chain.
-        parent.map(|h| h.group.clone()).filter(|g| !g.is_empty())
+        parent.and_then(|h| h.claude_selection.clone()).filter(|s| !s.is_empty())
+    };
+    let codex = if codex_specified {
+        codex_account
+    } else {
+        parent.and_then(|h| h.codex_selection.clone()).filter(|s| !s.is_empty())
     };
     let preset = if preset_specified {
         explicit
@@ -727,47 +694,7 @@ fn effective_group_preset<'a>(
             .and_then(|h| h.preset_name.as_deref())
             .and_then(|name| presets.iter().find(|p| p.name == name))
     };
-    (group, preset)
-}
-
-/// A preset's default account group. `config::normalize_groups` keeps every preset pointed at
-/// a real group, but this re-checks against the live config anyway: a config written by an
-/// older build (or by hand) can still carry a blank or dangling name, and binding a clone
-/// to a group with no CLIProxyAPI instance would break its inference silently.
-fn preset_default_group(cfg: &wire::AppConfig, preset: Option<&wire::Preset>) -> Option<String> {
-    let name = preset?.group.trim();
-    cfg.groups
-        .iter()
-        .find(|g| g.name == name)
-        .map(|g| g.name.clone())
-}
-
-/// The account group a new clone binds, resolving the full precedence chain. Every clone binds
-/// one, so this returns a concrete name; the chain is, strongest first:
-///
-/// 1. an explicit `group` on the request (already validated by `resolve_group`),
-/// 2. a sub clone's inherited parent group (arrives as `group` with `group_specified` false),
-/// 3. the effective preset's default group,
-/// 4. the first configured group — the backstop that makes the invariant total.
-///
-/// Step 4 can only be reached with no explicit group, no parent, and a preset with no (or a
-/// dangling) group, which `config::normalize_groups` should have already fixed. Pure —
-/// unit-tested; the `clone` handler applies it per mode because each resolves its preset
-/// differently.
-fn resolve_clone_group(
-    cfg: &wire::AppConfig,
-    group: Option<String>,
-    preset: Option<&wire::Preset>,
-) -> Result<String, (StatusCode, String)> {
-    group
-        .or_else(|| preset_default_group(cfg, preset))
-        .or_else(|| cfg.groups.first().map(|g| g.name.clone()))
-        .ok_or((
-            // Unreachable in practice — `config::normalize_groups` seeds a group at load and
-            // after every save. An error beats silently creating an inference-less clone.
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "no account group is configured — add one in Settings".to_string(),
-        ))
+    (claude, codex, preset)
 }
 
 /// `POST /api/clone` — start a clone from a source image. Body is one of:
@@ -793,8 +720,12 @@ async fn clone(
     let image = str_field("image")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| bad("body must include { image }".into()))?;
-    let requested_group = str_field("group");
-    let group = resolve_group(&app, requested_group.as_deref())?;
+    // Account selections, verbatim as the operator wrote them: an email, `auto`, `none`, or
+    // `group:<pool>`. Validation happens in `claude::resolve_assignment` at assign time, which
+    // owns the pool lists; an unknown email falls back to the best-scored account with a warning
+    // rather than failing the whole create.
+    let claude_account = str_field("claudeAccount");
+    let codex_account = str_field("codexAccount");
     let agent_instructions = str_field("agentInstructions");
     let claude_instructions = str_field("claudeInstructions");
     // Cross-cutting like `group`/`preset`: a headless clone (no desktop) in any create mode.
@@ -822,8 +753,6 @@ async fn clone(
 
     // Applied per mode because each resolves its preset differently (ticket mode's is
     // label-auto-selected inside `resolve_issue`, so it isn't known until then).
-    let clone_group =
-        |group: Option<String>, preset: Option<&wire::Preset>| resolve_clone_group(&cfg, group, preset);
 
     // Sub-clone resolution, shared by every mode: a `topLevel` flag forces top-level, an
     // explicit `parent` id is validated as a top-level managed clone, and otherwise the caller
@@ -858,10 +787,12 @@ async fn clone(
         let parent_clone = parent
             .as_deref()
             .and_then(|pid| app.store.get().hosts.into_iter().find(|h| h.id == pid));
-        let (eff_group, eff_preset) = effective_group_preset(
+        let (eff_claude, eff_codex, eff_preset) = effective_accounts_preset(
             parent_clone.as_ref(),
-            requested_group.is_some(),
-            group.clone(),
+            claude_account.is_some(),
+            claude_account.clone(),
+            codex_account.is_some(),
+            codex_account.clone(),
             preset_specified,
             explicit,
             &cfg.presets,
@@ -870,8 +801,8 @@ async fn clone(
             source_image: image,
             new_hostname: hostname,
             linear: None,
-            // Inherited parent group first, then the effective preset's default.
-            group: clone_group(eff_group, eff_preset)?,
+            claude_account: eff_claude,
+            codex_account: eff_codex,
             first_message: None,
             agent_instructions,
             claude_instructions,
@@ -924,7 +855,8 @@ async fn clone(
                 display_name: Some(display),
                 ..Default::default()
             }),
-            group: clone_group(group.clone(), explicit)?,
+            claude_account: claude_account.clone(),
+            codex_account: codex_account.clone(),
             first_message: Some(message).filter(|m| !m.is_empty()),
             agent_instructions,
             claude_instructions,
@@ -963,7 +895,8 @@ async fn clone(
         linear: Some(meta),
         // Ticket mode's preset may have been label-auto-selected, so its default group is
         // only knowable here, after `resolve_issue`.
-        group: clone_group(group, Some(&preset))?,
+        claude_account: claude_account.clone(),
+        codex_account: codex_account.clone(),
         first_message: None,
         agent_instructions,
         claude_instructions,
@@ -1291,13 +1224,17 @@ async fn delete(
         .map(|h| h.id.clone())
         .collect();
     for child in &children {
-        app.cliproxy.forget_clone(child);
+        app.clone_keys.forget(child);
+        app.claude.forget_pushed(child);
+        app.codex.forget_pushed(child);
         if let Err(e) = jobs::start_delete(&app, child) {
             tracing::warn!(target: "clone", "cascade delete of sub clone '{child}' skipped: {e}");
         }
     }
     // Drop the clone's group-proxy router key so a stale bearer can never route again.
-    app.cliproxy.forget_clone(&req.id);
+    app.clone_keys.forget(&req.id);
+    app.claude.forget_pushed(&req.id);
+    app.codex.forget_pushed(&req.id);
     jobs::start_delete(&app, &req.id)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
@@ -1421,30 +1358,6 @@ pub(crate) fn mirror_layout_to_state(app: &App) {
 }
 
 /// Repoint every clone whose group is blank or dangling at the first configured group.
-/// Wraps [`crate::state::normalize_groups`] with the current config's group list, and skips
-/// the `mutate` (a disk write + an SSE broadcast to every browser) when nothing changed —
-/// this runs on every reconciler pass, where the steady state is "no change".
-///
-/// Relies on `config::normalize_groups` having guaranteed at least one group; with none, it
-/// is a no-op rather than repointing every clone at a blank name.
-pub(crate) fn normalize_clone_groups(app: &App) {
-    let groups: Vec<String> = app.config().groups.iter().map(|g| g.name.clone()).collect();
-    let Some(fallback) = groups.first().cloned() else {
-        return;
-    };
-    let needs_fix = app
-        .store
-        .get()
-        .hosts
-        .iter()
-        .any(|h| !groups.iter().any(|g| g == &h.group));
-    if !needs_fix {
-        return;
-    }
-    app.store.mutate(|s| {
-        crate::state::normalize_groups(s, &fallback, &groups);
-    });
-}
 
 /// `GET /api/config` — the redacted view (no plaintext secrets).
 async fn config_get(State(app): State<App>) -> Json<AppConfigRedacted> {
@@ -1629,74 +1542,7 @@ async fn server_restart(
 
 // --- clone → group binding -------------------------------------------------
 
-#[derive(Deserialize)]
-struct HostGroupReq {
-    /// The account pool this clone's agents route through. Required — a clone always binds
-    /// a group.
-    #[serde(default)]
-    group: Option<String>,
-}
 
-/// Resolve a requested group name against the configured groups. `None`/blank means "not
-/// specified" (the caller decides what to default to); a name that isn't configured is an
-/// error. Unlike earlier revisions there is no `"none"` escape hatch — every clone binds a
-/// group, so "bind nothing" is no longer expressible.
-fn resolve_group(app: &App, group: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
-    match group.map(str::trim).filter(|name| !name.is_empty()) {
-        Some(name) if app.config().groups.iter().any(|group| group.name == name) => {
-            Ok(Some(name.to_string()))
-        }
-        Some(name) => Err((
-            StatusCode::BAD_REQUEST,
-            format!("unknown group '{name}' (configured: {})", group_names(&app.config())),
-        )),
-        None => Ok(None),
-    }
-}
-
-/// The configured group names, for error messages.
-fn group_names(cfg: &wire::AppConfig) -> String {
-    cfg.groups
-        .iter()
-        .map(|g| g.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// `POST /api/hosts/:id/group` — bind a clone to an account group. This is the sole account
-/// selection under the group-proxy model: the `/cc` router maps the clone → its group → that
-/// group's CLIProxyAPI instance, which owns intra-group account selection + OAuth refresh. No
-/// clone-side change is needed — a group swap is a pure map update. Unknown clone → 400;
-/// unmanaged row → 400; an unknown or missing group name → 400 (the binding is mandatory, so
-/// there is no way to clear it).
-async fn clone_group(
-    State(app): State<App>,
-    AxPath(id): AxPath<String>,
-    Json(req): Json<HostGroupReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let host =
-        clone_by_id(&app, &id).ok_or((StatusCode::BAD_REQUEST, format!("unknown clone '{id}'")))?;
-    if !host.managed {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("'{id}' is not a managed clone"),
-        ));
-    }
-    let group = resolve_group(&app, req.group.as_deref())?.ok_or((
-        StatusCode::BAD_REQUEST,
-        format!(
-            "a group name is required — every clone binds one (configured: {})",
-            group_names(&app.config())
-        ),
-    ))?;
-    let group_set = group.clone();
-    app.store.mutate(|s| {
-        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-            h.group = group_set;
-        }
-    });
-    Ok(Json(json!({ "ok": true, "group": group })))
-}
 
 // --- per-clone chat ---------------------------------------------------------
 
@@ -1766,45 +1612,6 @@ async fn chat_abort(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `ANY /cc` + `/cc/*rest` — the group-proxy router moved to the `rmng-cliproxy` sidecar.
-///
-/// This exists for one migration window: a clone created before the split holds
-/// `ANTHROPIC_BASE_URL=http://rmng-control:9000/cc`, and any agent process ALREADY RUNNING at
-/// upgrade time keeps that value until it restarts (PAM reads `/etc/environment` at session
-/// start, not continuously). Without this route those requests fall through to the SPA
-/// fallback and come back as `200 text/html` on a GET or a bare bodyless `405` on a POST —
-/// which surfaces inside the agent as an unintelligible parse/API error.
-///
-/// So answer in the shape an agent client can actually read: `503` with an
-/// Anthropic-style JSON error body naming the new endpoint, plus a `Location` header for
-/// anything following redirects manually. 503 rather than 410 is deliberate — it is the one
-/// status every agent SDK already treats as retryable, and the condition IS transient: the
-/// reconciler restarts the wrapper within ~30 s, after which the retry lands on the sidecar.
-async fn cc_moved() -> Response {
-    let body = serde_json::json!({
-        "type": "error",
-        "error": {
-            "type": "api_error",
-            "message": format!(
-                "the RMNG group proxy moved out of the control-server: use \
-                 http://{}:{}/cc instead of this host. This clone's environment is stale; the \
-                 reconciler refreshes it and restarts the agent within ~30s — retry.",
-                crate::groupproxy::CONTAINER,
-                crate::groupproxy::PORT,
-            ),
-        },
-    });
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [
-            (header::LOCATION, crate::groupproxy::cc_base_url()),
-            (header::RETRY_AFTER, "30".to_string()),
-        ],
-        Json(body),
-    )
-        .into_response()
-}
-
 #[derive(Deserialize)]
 struct ChatScheduleReq {
     text: String,
@@ -1851,357 +1658,338 @@ async fn chat_schedule_cancel(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// --- group-proxy container: lifecycle + the internal token-delta intake ------
 
-/// `GET /api/groupproxy` — the `rmng-cliproxy` sidecar's status: is it running, on which
-/// image/revision, and is that image behind the control-server's own. Feeds the Settings
-/// panel's group-proxy section, whose whole purpose is making "the proxy is behind" visible —
-/// a control-server update deliberately does NOT roll the sidecar forward (that would kill the
-/// in-flight agent turns this split exists to protect), so the operator needs to see the drift.
-async fn groupproxy_get(State(app): State<App>) -> Json<wire::GroupProxyStatus> {
-    Json(app.docker.group_proxy_status().await)
+// --- Claude + Codex accounts ------------------------------------------------
+
+/// An error body the frontend's `postJson` reads as `{ error }` (vs. a bare string).
+fn err_json(code: StatusCode, msg: impl ToString) -> (StatusCode, Json<serde_json::Value>) {
+    (code, Json(json!({ "error": msg.to_string() })))
 }
 
-/// `POST /api/groupproxy/restart` — recreate the `rmng-cliproxy` container on the
-/// control-server's CURRENT image. This is the operator's deliberate roll-forward: it drops
-/// every in-flight agent request in the fleet, which is exactly why it is a button and not a
-/// side effect of the control-server update. Returns the sidecar's post-restart status.
-async fn groupproxy_restart(
+type JsonResult = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
+
+#[derive(Deserialize)]
+struct ImportCheckReq {
+    host: String,
+}
+
+/// `POST /api/claude/import/check` — confirm a clone is signed in to Claude Code via
+/// claude.ai and report the account identity (so the UI can show it before the
+/// operator mints + pastes a long-lived token).
+async fn claude_import_check(
     State(app): State<App>,
-) -> Result<Json<wire::GroupProxyStatus>, (StatusCode, String)> {
-    // Mint the shared secret first if it's somehow absent, so the recreated container comes up
-    // with a working admin channel rather than 401ing the control-server until the next
-    // `apply_now`.
-    let _ = app.cliproxy.ensure_admin_secret();
-    app.docker
-        .recreate_group_proxy(&app.config())
+    Json(req): Json<ImportCheckReq>,
+) -> JsonResult {
+    let host = clone_by_id(&app, &req.host).ok_or_else(|| {
+        err_json(
+            StatusCode::BAD_REQUEST,
+            format!("unknown host '{}'", req.host),
+        )
+    })?;
+    let st = crate::claude::check_clone_auth(&app, &host)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
-    Ok(Json(app.docker.group_proxy_status().await))
-}
-
-/// `POST /internal/tokens` — the group-proxy container's token-delta intake, authenticated by
-/// the shared admin secret (see [`crate::groupproxy`]). The `/cc` proxy now runs out of process,
-/// so its [`crate::tokens::ResponseObserver`] can't touch `clone-tokens.json` directly: two
-/// writers would corrupt it. Instead it coalesces increments and POSTs them here in batches,
-/// buffering across a control-server restart.
-///
-/// Each delta carries the clone's token lifecycle epoch, re-validated here by
-/// [`crate::tokens::TokenBus`] — a delta from a response that began before an archive/unarchive
-/// is dropped exactly as an in-process stale observer was. A bad/missing secret is a 401, which
-/// the sender treats as permanent and drops (rather than pinning its buffer forever).
-async fn internal_tokens(
-    State(app): State<App>,
-    headers: HeaderMap,
-    Json(deltas): Json<Vec<crate::tokens::TokenDelta>>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let presented = headers
-        .get(crate::groupproxy::ADMIN_HEADER)
-        .and_then(|v| v.to_str().ok());
-    if !crate::groupproxy::admin_authorized(app.cliproxy.admin_secret().as_deref(), presented) {
-        return Err((StatusCode::UNAUTHORIZED, "admin key required".into()));
-    }
-    for delta in &deltas {
-        app.tokens.apply_remote_delta(&app.store, delta);
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// --- group-proxy CRUD + onboarding -----------------------------------------
-
-/// Send a group-instance management request through the group-proxy container's admin-forward
-/// surface (`/admin/:group/mgmt/*`, [`crate::groupproxy::admin_mgmt_url`]), authenticated with
-/// the shared admin secret; the sidecar attaches the instance's own `X-Management-Key` on the
-/// far side. The instances bind loopback inside that container, so this indirection is the only
-/// route to them now.
-///
-/// Retries on a *connection* error for up to ~20 s. Two things can be briefly absent: a freshly
-/// created group's CLIProxyAPI instance (the supervisor reconciles on a short interval), and the
-/// `rmng-cliproxy` container itself right after an operator-triggered roll-forward. Both would
-/// otherwise surface the first onboarding call after `POST /api/groups` as a gateway error; this
-/// waits them out. Only connect errors are retried — a real HTTP response (even non-2xx) returns
-/// immediately.
-async fn mgmt_send_retry(
-    app: &App,
-    method: reqwest::Method,
-    url: &str,
-    body: Option<&serde_json::Value>,
-) -> Result<reqwest::Response, (StatusCode, String)> {
-    let secret = app.cliproxy.ensure_admin_secret();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        let mut rb = app
-            .http
-            .request(method.clone(), url)
-            .header(crate::groupproxy::ADMIN_HEADER, &secret);
-        if let Some(b) = body {
-            rb = rb.json(b);
-        }
-        match rb.send().await {
-            Ok(resp) => return Ok(resp),
-            Err(e) if e.is_connect() && std::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            }
-            Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("group proxy: {e}"))),
-        }
-    }
-}
-
-async fn mgmt_get_json(
-    app: &App,
-    group: &str,
-    path_and_query: &str,
-) -> Result<serde_json::Value, (StatusCode, String)> {
-    let resp = mgmt_send_retry(
-        app,
-        reqwest::Method::GET,
-        &crate::groupproxy::admin_mgmt_url(group, path_and_query),
-        None,
-    )
-    .await?;
-    mgmt_body(resp).await
-}
-
-/// Read a management-API response body as JSON, mapping a non-2xx status to a 502 with the
-/// body text so the operator sees why onboarding failed.
-async fn mgmt_body(resp: reqwest::Response) -> Result<serde_json::Value, (StatusCode, String)> {
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("group instance {}: {text}", status.as_u16()),
-        ));
-    }
-    Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "ok": true, "raw": text })))
+        .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({
+        "ok": true,
+        "email": st.email,
+        "orgName": st.org_name,
+        "subscriptionType": st.subscription_type,
+    })))
 }
 
 #[derive(Deserialize)]
-struct GroupCreateReq {
-    name: String,
+struct ImportReq {
+    host: String,
 }
 
-/// `POST /api/groups` — create an account group: validate the name, add a `wire::Group` to
-/// `config.groups` if absent, persist the config, then `cliproxy::apply_now` so the
-/// supervisor spawns its instance. Returns the redacted config.
-async fn groups_create(
-    State(app): State<App>,
-    Json(req): Json<GroupCreateReq>,
-) -> Result<Json<AppConfigRedacted>, (StatusCode, String)> {
-    let name = req.name.trim().to_string();
-    if !crate::cliproxy::safe_group(&name) {
-        return Err((
+/// `POST /api/claude/import` — import a Claude account from a signed-in clone: store
+/// the clone's OAuth pair (the server owns its refresh lifecycle from here on), then
+/// clear the clone's credentials file. Kicks an immediate usage poll so it shows at once.
+async fn claude_import(State(app): State<App>, Json(req): Json<ImportReq>) -> JsonResult {
+    let host = clone_by_id(&app, &req.host).ok_or_else(|| {
+        err_json(
             StatusCode::BAD_REQUEST,
-            "group name must be 1–64 chars of [A-Za-z0-9._-]".into(),
-        ));
-    }
-    let mut cfg = app.config();
-    if !cfg.groups.iter().any(|g| g.name == name) {
-        cfg.groups.push(wire::Group { name });
-        config::save(&cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        *app.cfg.write().unwrap() = cfg.clone();
-        crate::cliproxy::apply_now(&app);
-    }
-    Ok(Json(cfg.redacted()))
+            format!("unknown host '{}'", req.host),
+        )
+    })?;
+    let res = crate::claude::import_clone_account(&app, &host)
+        .await
+        .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
+    let _ = crate::claude::poll_once(&app).await;
+    Ok(Json(
+        json!({ "ok": true, "email": res.email, "cleared": res.cleared }),
+    ))
 }
 
-/// `DELETE /api/groups/:name` — remove a group from `config.groups` + persist. The supervisor
-/// stops its instance on the next reconcile; the on-disk `auth-dir` is left in place.
-async fn groups_delete(
-    State(app): State<App>,
-    AxPath(name): AxPath<String>,
-) -> Result<Json<AppConfigRedacted>, (StatusCode, String)> {
-    let mut cfg = app.config();
-    let before = cfg.groups.len();
-    cfg.groups.retain(|g| g.name != name);
-    if cfg.groups.len() != before {
-        // Deleting the last group re-seeds "Default", and any preset that pointed at the
-        // deleted group is repointed — a preset must always name a real group.
-        config::normalize_groups(&mut cfg);
-        config::save(&cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        *app.cfg.write().unwrap() = cfg.clone();
-        // Clones bound to the deleted group need the same treatment, and immediately: waiting
-        // for the reconciler's next pass would leave them pointed at a group with no instance,
-        // so every agent request in them 503s until it runs.
-        normalize_clone_groups(&app);
-        crate::cliproxy::apply_now(&app);
+/// `POST /api/claude/refresh` — force one usage poll now.
+async fn claude_refresh(State(app): State<App>) -> Json<serde_json::Value> {
+    Json(
+        refresh_response(
+            crate::claude::poll_once(&app),
+            crate::claude::rotate_once(&app),
+        )
+        .await,
+    )
+}
+
+async fn refresh_response(
+    poll: impl Future<Output = anyhow::Result<bool>>,
+    rotate: impl Future<Output = ()>,
+) -> serde_json::Value {
+    match poll.await {
+        Ok(any429) => {
+            rotate.await;
+            json!({ "ok": true, "rateLimited": any429, "rotated": true })
+        }
+        Err(_) => json!({ "ok": true, "rateLimited": false, "rotated": false }),
     }
-    Ok(Json(cfg.redacted()))
 }
 
 #[derive(Deserialize)]
-struct LoginStartReq {
-    provider: String,
+struct SwapReq {
+    host: String,
+    /// Account email, `auto`, `none`, or `group:<name>`.
+    account: String,
 }
 
-/// `POST /api/groups/:name/accounts/login/start` — begin an OAuth login into the group's
-/// instance. Proxies the instance's `{anthropic,codex,antigravity}-auth-url`; returns `{status, url,
-/// state}`. The operator opens `url`, completes the login, and pastes the redirect back via
-/// `login/complete`.
-async fn group_login_start(
+/// `POST /api/claude/swap` — change a clone's Claude account/group. `account` is an
+/// email, `auto`, `group:<name>`, or `none`. Binding to a group enrolls the clone in
+/// rotation; `none` removes the clone's credentials so it runs with no token.
+async fn claude_swap(
     State(app): State<App>,
-    AxPath(name): AxPath<String>,
-    Json(req): Json<LoginStartReq>,
+    Json(req): Json<SwapReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let path = match req.provider.trim().to_ascii_lowercase().as_str() {
-        "anthropic" | "claude" => "/anthropic-auth-url",
-        "codex" | "openai" | "chatgpt" => "/codex-auth-url",
-        "antigravity" | "gemini" | "google" => "/antigravity-auth-url",
-        other => {
-            return Err((
+    let host = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .find(|h| h.id == req.host)
+        .ok_or_else(|| {
+            (
                 StatusCode::BAD_REQUEST,
-                format!("unknown provider '{other}'"),
-            ));
-        }
-    };
-    let v = mgmt_get_json(&app, &name, path).await?;
-    Ok(Json(v))
-}
-
-/// `GET /api/groups/:name/accounts/login/status?state=…` — poll the instance's
-/// `get-auth-status` for an in-flight login and normalize the answer to a small stable shape
-/// the browser branches on: `{"state":"pending"|"done"|"error","error"?:string}`.
-///
-/// CLIProxyAPI v7's `GetAuthStatus` (`internal/api/handlers/management/auth_files.go`) always
-/// answers HTTP 200 with `{"status":"ok"|"wait"|"error","error"?:string}`: `wait` while the
-/// background token exchange runs, `ok` once the credential is saved and the OAuth session is
-/// marked `Completed`, and `error` (with a human message) for a failed / expired / unknown
-/// session. `state` is required — an empty state makes the instance return a bare
-/// `{"status":"ok"}` that would falsely read as done.
-async fn group_login_status(
-    State(app): State<App>,
-    AxPath(name): AxPath<String>,
-    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let state = q.get("state").map(String::as_str).unwrap_or("");
-    if state.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "state query param required".into()));
-    }
-    let enc = urlencode(state);
-    let v = mgmt_get_json(&app, &name, &format!("/get-auth-status?state={enc}")).await?;
-    let normalized = normalize_login_status(&v);
-    // The moment the login completes the credential file is in the group's auth-dir — poke the
-    // usage poller so the new account shows up in ~a second instead of at the next 600s poll.
-    if normalized.get("state").and_then(serde_json::Value::as_str) == Some("done") {
-        app.cliproxy.poke_usage();
-    }
-    Ok(Json(normalized))
-}
-
-/// Collapse CLIProxyAPI's `get-auth-status` body (`{"status":"ok"|"wait"|"error",…}`) into
-/// `{"state":"pending"|"done"|"error","error"?:string}`. An unknown or missing `status` is
-/// treated as `pending` so a surprising body keeps the poller waiting instead of falsely
-/// completing the flow.
-fn normalize_login_status(v: &serde_json::Value) -> serde_json::Value {
-    match v.get("status").and_then(serde_json::Value::as_str) {
-        Some("ok") => json!({ "state": "done" }),
-        Some("error") => {
-            let msg = v
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("Authentication failed");
-            json!({ "state": "error", "error": msg })
-        }
-        _ => json!({ "state": "pending" }),
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LoginCompleteReq {
-    provider: String,
-    #[serde(default)]
-    redirect_url: Option<String>,
-    #[serde(default)]
-    code: Option<String>,
-    #[serde(default)]
-    state: Option<String>,
-}
-
-/// `POST /api/groups/:name/accounts/login/complete` — finish the OAuth login by handing the
-/// instance either the pasted `{redirectUrl}` or an explicit `{code, state}`. Proxies the
-/// instance's `oauth-callback`.
-async fn group_login_complete(
-    State(app): State<App>,
-    AxPath(name): AxPath<String>,
-    Json(req): Json<LoginCompleteReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let body = if let Some(redirect) = req.redirect_url.as_deref().filter(|s| !s.is_empty()) {
-        json!({ "provider": req.provider, "redirect_url": redirect })
-    } else if let (Some(code), Some(state)) = (
-        req.code.as_deref().filter(|s| !s.is_empty()),
-        req.state.as_deref().filter(|s| !s.is_empty()),
-    ) {
-        json!({ "provider": req.provider, "code": code, "state": state })
-    } else {
+                format!("unknown host '{}'", req.host),
+            )
+        })?;
+    if !host.managed {
         return Err((
             StatusCode::BAD_REQUEST,
-            "provide either redirectUrl or both code and state".into(),
+            format!("'{}' is not a managed clone", host.id),
         ));
-    };
-    let resp = mgmt_send_retry(
-        &app,
-        reqwest::Method::POST,
-        &crate::groupproxy::admin_mgmt_url(&name, "/oauth-callback"),
-        Some(&body),
-    )
-    .await?;
-    Ok(Json(mgmt_body(resp).await?))
-}
-
-#[derive(Deserialize)]
-struct GroupAccountDeleteReq {
-    file: String,
-}
-
-/// `POST /api/groups/:name/accounts/delete` — remove an authenticated account from the
-/// group's instance by its `auth-dir` credential file name. Proxies the instance's
-/// `DELETE /auth-files?name=<file>`.
-async fn group_account_delete(
-    State(app): State<App>,
-    AxPath(name): AxPath<String>,
-    Json(req): Json<GroupAccountDeleteReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let file = req.file.trim();
-    if file.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "file is required".into()));
     }
-    let resp = mgmt_send_retry(
-        &app,
-        reqwest::Method::DELETE,
-        &crate::groupproxy::admin_mgmt_url(
-            &name,
-            &format!("/auth-files?name={}", urlencode(file)),
-        ),
-        None,
-    )
-    .await?;
-    Ok(Json(mgmt_body(resp).await?))
+    let assignment =
+        crate::claude::resolve_assignment(&app, Some(&req.account), host.claude_account_email.as_deref())
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "no imported Claude accounts".into(),
+                )
+            })?;
+    let selection = crate::claude::normalize_selection(Some(&req.account));
+    let (group, email) = match assignment {
+        crate::claude::Assignment::None => {
+            crate::claude::clear_clone_token(&app, &host.id)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            app.claude.forget_pushed(&host.id);
+            (None, None)
+        }
+        crate::claude::Assignment::Group { name, initial } => {
+            crate::claude::push_account_to_clone(&app, &host.id, &initial)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            (Some(name), Some(initial))
+        }
+        crate::claude::Assignment::Account(a) => {
+            crate::claude::push_account_to_clone(&app, &host.id, &a)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            (None, Some(a))
+        }
+        crate::claude::Assignment::AutoPending => (None, None),
+    };
+    let (id, email_set, group_set, sel_set) = (
+        host.id.clone(),
+        email.clone(),
+        group.clone(),
+        selection.clone(),
+    );
+    app.store.mutate(|s| {
+        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+            h.claude_account_email = email_set;
+            h.claude_group = group_set;
+            h.claude_selection = Some(sel_set);
+        }
+    });
+    Ok(Json(
+        json!({ "ok": true, "account": email, "group": group, "selection": selection }),
+    ))
 }
 
-/// `POST /api/usage/refresh` — trigger an immediate by-group usage poll (the manual refresh
-/// button). Fire-and-forget: the poll runs in the background poller and the refreshed
-/// `usage_groups` arrive over SSE within ~a second.
-async fn usage_refresh(State(app): State<App>) -> impl IntoResponse {
-    app.cliproxy.poke_usage();
+/// A request naming a single imported account by email — the body for the delete endpoints.
+#[derive(Deserialize)]
+struct AccountRef {
+    account: String,
+}
+
+/// `POST /api/claude/delete` — remove an imported Claude account by email. 400 if any clone
+/// is pinned to it (the message lists them); otherwise deletes the token and reassigns
+/// auto/group clones off it. Returns the ids of clones that were moved.
+async fn claude_delete(State(app): State<App>, Json(req): Json<AccountRef>) -> JsonResult {
+    let moved = crate::claude::delete_account(&app, req.account.trim())
+        .await
+        .map_err(|e| err_json(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({ "ok": true, "moved": moved })))
+}
+
+/// `POST /api/claude/rotate` — run one group-rotation pass immediately (the rotator
+/// otherwise runs every 10 min). Useful for ops + testing.
+async fn claude_rotate(State(app): State<App>) -> Json<serde_json::Value> {
+    crate::claude::rotate_once(&app).await;
     Json(json!({ "ok": true }))
 }
 
-/// Minimal percent-encoding for a query-string value (state tokens / file names). Encodes
-/// everything outside the RFC 3986 unreserved set — no dependency for one small use.
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
+// --- Codex accounts --------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CodexImportReq {
+    host: String,
+}
+
+/// `POST /api/codex/import/check` — confirm a clone is signed in to Codex via ChatGPT and
+/// report its identity so the UI can show it before importing.
+async fn codex_import_check(State(app): State<App>, Json(req): Json<CodexImportReq>) -> JsonResult {
+    let host = clone_by_id(&app, &req.host).ok_or_else(|| {
+        err_json(
+            StatusCode::BAD_REQUEST,
+            format!("unknown host '{}'", req.host),
+        )
+    })?;
+    let auth = crate::codex::check_clone_auth(&app, &host)
+        .await
+        .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({
+        "ok": true,
+        "email": auth.email,
+        "plan": auth.plan,
+        "accountId": auth.account_id,
+    })))
+}
+
+/// `POST /api/codex/import` — import a Codex account from a signed-in clone.
+async fn codex_import(State(app): State<App>, Json(req): Json<CodexImportReq>) -> JsonResult {
+    let host = clone_by_id(&app, &req.host).ok_or_else(|| {
+        err_json(
+            StatusCode::BAD_REQUEST,
+            format!("unknown host '{}'", req.host),
+        )
+    })?;
+    let res = crate::codex::import_clone_account(&app, &host)
+        .await
+        .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
+    let _ = crate::codex::poll_once(&app).await;
+    Ok(Json(
+        json!({ "ok": true, "email": res.email, "cleared": res.cleared }),
+    ))
+}
+
+/// `POST /api/codex/refresh` — force one usage poll now.
+async fn codex_refresh(State(app): State<App>) -> Json<serde_json::Value> {
+    Json(
+        refresh_response(
+            crate::codex::poll_once(&app),
+            crate::codex::rotate_once(&app),
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct CodexSwapReq {
+    host: String,
+    /// Account email, `auto`, `none`, or `group:<name>`.
+    account: String,
+}
+
+/// `POST /api/codex/swap` — change a clone's Codex account/group.
+async fn codex_swap(
+    State(app): State<App>,
+    Json(req): Json<CodexSwapReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let host = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .find(|h| h.id == req.host)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("unknown host '{}'", req.host),
+            )
+        })?;
+    if !host.managed {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("'{}' is not a managed clone", host.id),
+        ));
     }
-    out
+    let assignment = crate::codex::resolve_assignment(&app, Some(&req.account), host.codex_account_email.as_deref())
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "no imported Codex accounts".into()))?;
+    let selection = crate::codex::normalize_selection(Some(&req.account));
+    let (group, email) = match assignment {
+        crate::codex::Assignment::None => {
+            crate::codex::clear_clone_token(&app, &host.id)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            app.codex.forget_pushed(&host.id);
+            (None, None)
+        }
+        crate::codex::Assignment::Group { name, initial } => {
+            crate::codex::push_account_to_clone(&app, &host.id, &initial)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            (Some(name), Some(initial))
+        }
+        crate::codex::Assignment::Account(a) => {
+            crate::codex::push_account_to_clone(&app, &host.id, &a)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+            (None, Some(a))
+        }
+        crate::codex::Assignment::AutoPending => (None, None),
+    };
+    let (id, email_set, group_set, sel_set) = (
+        host.id.clone(),
+        email.clone(),
+        group.clone(),
+        selection.clone(),
+    );
+    app.store.mutate(|s| {
+        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+            h.codex_account_email = email_set;
+            h.codex_group = group_set;
+            h.codex_selection = Some(sel_set);
+        }
+    });
+    Ok(Json(
+        json!({ "ok": true, "account": email, "group": group, "selection": selection }),
+    ))
+}
+
+/// `POST /api/codex/delete` — remove an imported Codex account by email (the Codex twin of
+/// [`claude_delete`]). 400 if any clone is pinned to it; otherwise deletes + reassigns.
+async fn codex_delete(State(app): State<App>, Json(req): Json<AccountRef>) -> JsonResult {
+    let moved = crate::codex::delete_account(&app, req.account.trim())
+        .await
+        .map_err(|e| err_json(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({ "ok": true, "moved": moved })))
+}
+
+/// `POST /api/codex/rotate` — run one Codex group-rotation pass immediately.
+async fn codex_rotate(State(app): State<App>) -> Json<serde_json::Value> {
+    crate::codex::rotate_once(&app).await;
+    Json(json!({ "ok": true }))
 }
 
 #[cfg(test)]
@@ -2254,53 +2042,10 @@ mod tests {
 
     // --- normalize_login_status: CLIProxyAPI v7 get-auth-status → {state, error?} ---
 
-    #[test]
-    fn login_status_wait_is_pending() {
-        // `GetAuthStatus` returns `{"status":"wait"}` while the token exchange runs.
-        let out = normalize_login_status(&json!({ "status": "wait" }));
-        assert_eq!(out, json!({ "state": "pending" }));
-    }
 
-    #[test]
-    fn login_status_ok_is_done() {
-        // Session `Completed` → `{"status":"ok"}`.
-        let out = normalize_login_status(&json!({ "status": "ok" }));
-        assert_eq!(out, json!({ "state": "done" }));
-    }
 
-    #[test]
-    fn login_status_error_surfaces_message() {
-        // Errored/expired/unknown session → `{"status":"error","error":"..."}`.
-        let out = normalize_login_status(
-            &json!({ "status": "error", "error": "unknown or expired state" }),
-        );
-        assert_eq!(
-            out,
-            json!({ "state": "error", "error": "unknown or expired state" })
-        );
-    }
 
-    #[test]
-    fn login_status_error_without_message_falls_back() {
-        let out = normalize_login_status(&json!({ "status": "error" }));
-        assert_eq!(
-            out,
-            json!({ "state": "error", "error": "Authentication failed" })
-        );
-    }
 
-    #[test]
-    fn login_status_unknown_status_stays_pending() {
-        // A surprising body must not falsely read as done.
-        assert_eq!(
-            normalize_login_status(&json!({ "foo": "bar" })),
-            json!({ "state": "pending" }),
-        );
-        assert_eq!(
-            normalize_login_status(&json!({ "status": "something-new" })),
-            json!({ "state": "pending" }),
-        );
-    }
 
     // --- POST /api/images/pull (the endpoint that replaced /api/images/bootstrap) ---
     //
@@ -2320,13 +2065,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
-        // Seed the default group, mirroring `config::load` → `config::normalize_groups`. A
-        // group-less config is not a reachable production state, and clone creation now
-        // resolves a group for every clone, so a bare `Default` here would 500 in tests that
-        // are about something else entirely.
         let cfg = wire::AppConfig {
             data_dir: dir.to_string_lossy().into_owned(),
-            groups: vec![wire::Group { name: wire::DEFAULT_GROUP.into() }],
             ..Default::default()
         };
         App::new(store, cfg)
@@ -2393,93 +2133,17 @@ mod tests {
         assert_eq!(st.selected.as_deref(), Some("w1"));
     }
 
-    #[tokio::test]
-    async fn clone_group_binds_and_clears_and_validates() {
-        let app = test_app();
-        app.store.mutate(|s| {
-            s.hosts.push(wire::RmngClone {
-                id: "w1".into(),
-                host: "w1".into(),
-                managed: true,
-                ..Default::default()
-            });
-        });
-        *app.cfg.write().unwrap() = wire::AppConfig {
-            groups: vec![wire::Group {
-                name: "team".into(),
-            }],
-            ..app.config()
-        };
-
-        // Bind to a known group.
-        let resp = clone_group(
-            State(app.clone()),
-            AxPath("w1".into()),
-            Json(HostGroupReq {
-                group: Some("team".into()),
-            }),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(resp["ok"], true);
-        assert_eq!(resp["group"], "team");
-        let host = app
-            .store
-            .get()
-            .hosts
-            .into_iter()
-            .find(|h| h.id == "w1")
-            .unwrap();
-        assert_eq!(host.group, "team");
-
-        // The binding can't be cleared — every clone binds a group, so a null/absent name
-        // is a 400 and the existing binding is left untouched.
-        let err = clone_group(
-            State(app.clone()),
-            AxPath("w1".into()),
-            Json(HostGroupReq { group: None }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("required"), "msg: {}", err.1);
-        let host = app
-            .store
-            .get()
-            .hosts
-            .into_iter()
-            .find(|h| h.id == "w1")
-            .unwrap();
-        assert_eq!(host.group, "team");
-
-        // An unknown group name is a 400.
-        let err = clone_group(
-            State(app.clone()),
-            AxPath("w1".into()),
-            Json(HostGroupReq {
-                group: Some("nope".into()),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("unknown group"), "msg: {}", err.1);
-    }
 
     // --- POST /api/clone `hostname` mode (raw clone, fleet CLI) ---
 
     #[tokio::test]
     async fn clone_hostname_mode_registers_clone_op() {
         let app = test_app();
-        // Hostname mode still resolves the account-group binding, so the group must exist.
-        *app.cfg.write().unwrap() = wire::AppConfig {
-            groups: vec![wire::Group {
-                name: "team".into(),
-            }],
-            ..app.config()
-        };
-        let body = json!({ "image": "tmpl:latest", "hostname": "w-mod-claude", "group": "team" });
+        let body = json!({
+            "image": "tmpl:latest",
+            "hostname": "w-mod-claude",
+            "claudeAccount": "auto",
+        });
         let resp = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap().0;
         assert_eq!(resp["ok"], true);
         let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
@@ -2587,121 +2251,70 @@ mod tests {
     }
 
     #[test]
-    fn sub_clone_inherits_group_and_preset_unless_overridden() {
+    fn sub_clone_inherits_accounts_and_preset_unless_overridden() {
         let presets = vec![
             wire::Preset { name: "parent-preset".into(), ..Default::default() },
             wire::Preset { name: "override-preset".into(), ..Default::default() },
         ];
+        // The parent is on `auto` and has LANDED on a concrete account. What a sub clone
+        // inherits is the *selection*, not the resolved email — otherwise a child asking for
+        // `auto` would be silently pinned to whatever its parent happens to be running.
         let parent = wire::RmngClone {
             id: "p".into(),
             managed: true,
-            group: "parent-group".into(),
+            claude_selection: Some("auto".into()),
+            claude_account_email: Some("landed@x.com".into()),
+            codex_selection: Some("group:gpt".into()),
             preset_name: Some("parent-preset".into()),
             ..Default::default()
         };
         let name = |p: Option<&wire::Preset>| p.map(|p| p.name.clone());
 
-        // Nothing specified → inherit both from the parent.
-        let (g, pr) = effective_group_preset(Some(&parent), false, None, false, None, &presets);
-        assert_eq!(g, Some("parent-group".into()));
+        // Nothing specified → inherit all three from the parent.
+        let (c, x, pr) =
+            effective_accounts_preset(Some(&parent), false, None, false, None, false, None, &presets);
+        assert_eq!(c, Some("auto".into()), "the selection is inherited, not the resolved email");
+        assert_eq!(x, Some("group:gpt".into()));
         assert_eq!(name(pr), Some("parent-preset".into()));
 
-        // Explicit group/preset override inheritance.
-        let (g, pr) = effective_group_preset(
-            Some(&parent), true, Some("other-group".into()), true, Some(&presets[1]), &presets,
+        // Explicit values override inheritance, per provider independently.
+        let (c, x, pr) = effective_accounts_preset(
+            Some(&parent),
+            true,
+            Some("me@x.com".into()),
+            false,
+            None,
+            true,
+            Some(&presets[1]),
+            &presets,
         );
-        assert_eq!(g, Some("other-group".into()));
+        assert_eq!(c, Some("me@x.com".into()));
+        assert_eq!(x, Some("group:gpt".into()), "an unspecified provider still inherits");
         assert_eq!(name(pr), Some("override-preset".into()));
 
-        // Explicit `none` (specified, but resolves to None) opts out of inheritance.
-        let (g, pr) = effective_group_preset(Some(&parent), true, None, true, None, &presets);
-        assert_eq!(g, None);
+        // Explicit `none` (specified, but resolving to None) opts out of inheritance.
+        let (c, x, pr) =
+            effective_accounts_preset(Some(&parent), true, None, true, None, true, None, &presets);
+        assert_eq!(c, None);
+        assert_eq!(x, None);
         assert_eq!(pr, None);
 
         // No parent → no inheritance.
-        let (g, pr) = effective_group_preset(None, false, None, false, None, &presets);
-        assert_eq!(g, None);
+        let (c, x, pr) =
+            effective_accounts_preset(None, false, None, false, None, false, None, &presets);
+        assert_eq!(c, None);
+        assert_eq!(x, None);
         assert!(pr.is_none());
 
         // Parent names a preset that no longer exists → gracefully no preset.
         let orphan = wire::RmngClone { preset_name: Some("gone".into()), ..parent.clone() };
-        let (_g, pr) = effective_group_preset(Some(&orphan), false, None, false, None, &presets);
+        let (_c, _x, pr) =
+            effective_accounts_preset(Some(&orphan), false, None, false, None, false, None, &presets);
         assert!(pr.is_none());
     }
 
-    #[test]
-    fn preset_default_group_resolves_against_live_groups() {
-        let cfg = wire::AppConfig {
-            groups: vec![wire::Group { name: "pooled".into() }],
-            ..Default::default()
-        };
-        let bound = wire::Preset { group: "pooled".into(), ..Default::default() };
-        assert_eq!(preset_default_group(&cfg, Some(&bound)), Some("pooled".into()));
 
-        // No preset at all → no default.
-        assert_eq!(preset_default_group(&cfg, None), None);
 
-        // A blank or dangling group can only come from a hand-edited / older config
-        // (`normalize_groups` repoints both) — resolve to None rather than binding the
-        // clone to a group that has no CLIProxyAPI instance behind it.
-        for g in ["", "deleted"] {
-            let p = wire::Preset { group: g.into(), ..Default::default() };
-            assert_eq!(preset_default_group(&cfg, Some(&p)), None, "group {g:?}");
-        }
-    }
-
-    #[test]
-    fn clone_group_walks_the_precedence_chain() {
-        // Group order matters: "first" is the final backstop, so it is deliberately NOT the
-        // preset's group — otherwise the fallback and the preset default are indistinguishable.
-        let cfg = wire::AppConfig {
-            groups: vec![
-                wire::Group { name: "first".into() },
-                wire::Group { name: "pooled".into() },
-                wire::Group { name: "other".into() },
-            ],
-            ..Default::default()
-        };
-        let p = wire::Preset { group: "pooled".into(), ..Default::default() };
-        let g = |group: Option<String>, preset: Option<&wire::Preset>| {
-            resolve_clone_group(&cfg, group, preset).unwrap()
-        };
-
-        // 1. An explicit request group wins over the preset's default.
-        assert_eq!(g(Some("other".into()), Some(&p)), "other");
-        // 2. A sub clone's inherited parent group likewise (it arrives already resolved).
-        assert_eq!(g(Some("other".into()), None), "other");
-        // 3. Nothing explicit → the preset's default.
-        assert_eq!(g(None, Some(&p)), "pooled");
-        // 4. No preset at all → the first configured group.
-        assert_eq!(g(None, None), "first");
-        // 4. …and likewise for a preset whose group was deleted out from under it.
-        let dangling = wire::Preset { group: "deleted".into(), ..Default::default() };
-        assert_eq!(g(None, Some(&dangling)), "first");
-
-        // With no groups configured at all the chain has nothing to land on. Unreachable in
-        // practice (`config::normalize_groups` seeds one) — assert it errors rather than
-        // silently creating a clone that can never reach inference.
-        let empty = wire::AppConfig { groups: vec![], ..Default::default() };
-        let err = resolve_clone_group(&empty, None, Some(&p)).unwrap_err();
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[tokio::test]
-    async fn resolve_group_validates_against_configured_groups() {
-        let app = test_app();
-        *app.cfg.write().unwrap() = wire::AppConfig {
-            groups: vec![wire::Group { name: "team".into() }],
-            ..app.config()
-        };
-        assert_eq!(resolve_group(&app, Some("team")).unwrap(), Some("team".into()));
-        // Absent/blank = "not specified"; the caller decides the fallback.
-        assert_eq!(resolve_group(&app, None).unwrap(), None);
-        assert_eq!(resolve_group(&app, Some("  ")).unwrap(), None);
-        // Unknown names error — and "none" is no longer a sentinel, just an unknown name.
-        assert!(resolve_group(&app, Some("ghost")).is_err());
-        assert!(resolve_group(&app, Some("none")).is_err());
-    }
 
     #[tokio::test]
     async fn resolve_parent_auto_detects_caller_router_key() {
@@ -2715,13 +2328,13 @@ mod tests {
         };
 
         // A top-level caller's own router key nests the new clone under it.
-        let key_p = app.cliproxy.mint_router_key("p");
+        let key_p = app.clone_keys.mint("p");
         assert_eq!(
             resolve_parent(&app, &json!({}), &header(&key_p)).unwrap(),
             Some("p".into())
         );
         // A sub-clone caller can't nest deeper (one level) → top-level.
-        let key_c = app.cliproxy.mint_router_key("c");
+        let key_c = app.clone_keys.mint("c");
         assert_eq!(resolve_parent(&app, &json!({}), &header(&key_c)).unwrap(), None);
         // An unrecognized key → top-level.
         assert_eq!(resolve_parent(&app, &json!({}), &header("bogus")).unwrap(), None);
@@ -3011,111 +2624,8 @@ not a var line
     // What stays here is the control-server half of the boundary: the internal token-delta
     // intake's auth.
 
-    /// The token-delta intake must reject anything that isn't the shared admin secret — it
-    /// mutates durable per-clone accounting, and the group-proxy is the only legitimate caller.
-    #[tokio::test]
-    async fn internal_tokens_rejects_a_wrong_or_missing_admin_key() {
-        let app = test_app();
-        let secret = app.cliproxy.ensure_admin_secret();
-        let delta = crate::tokens::TokenDelta {
-            host_id: "h1".into(),
-            epoch: 1,
-            input: 5,
-            ..Default::default()
-        };
 
-        let err = internal_tokens(State(app.clone()), HeaderMap::new(), Json(vec![delta.clone()]))
-            .await
-            .expect_err("no admin key must be rejected");
-        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
 
-        let mut wrong = HeaderMap::new();
-        wrong.insert(
-            HeaderName::from_static(crate::groupproxy::ADMIN_HEADER),
-            "nope".parse().unwrap(),
-        );
-        let err = internal_tokens(State(app.clone()), wrong, Json(vec![delta.clone()]))
-            .await
-            .expect_err("a wrong admin key must be rejected");
-        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
-
-        // The real secret is accepted. (The delta names a clone with no token record, so it is
-        // dropped by the epoch guard — this asserts the auth gate, not the accounting.)
-        let mut ok = HeaderMap::new();
-        ok.insert(
-            HeaderName::from_static(crate::groupproxy::ADMIN_HEADER),
-            secret.parse().unwrap(),
-        );
-        assert_eq!(
-            internal_tokens(State(app), ok, Json(vec![delta])).await.unwrap(),
-            StatusCode::NO_CONTENT
-        );
-    }
-
-    /// A delta that arrives over the boundary must land on the same durable totals the
-    /// in-process observer used to write — and a delta stamped with a stale lifecycle epoch
-    /// must be dropped, exactly as `TokenBus::record` dropped a stale in-process observer.
-    #[tokio::test]
-    async fn internal_tokens_applies_current_epoch_and_drops_stale() {
-        let app = test_app();
-        let secret = app.cliproxy.ensure_admin_secret();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            HeaderName::from_static(crate::groupproxy::ADMIN_HEADER),
-            secret.parse().unwrap(),
-        );
-        app.store.mutate(|s| {
-            s.hosts.push(wire::RmngClone {
-                id: "h1".into(),
-                host: "h1".into(),
-                managed: true,
-                ..Default::default()
-            })
-        });
-        app.tokens.register_clone("h1");
-        let epoch = app.tokens.capture_epoch("h1").expect("an active clone has an epoch");
-
-        internal_tokens(
-            State(app.clone()),
-            headers.clone(),
-            Json(vec![crate::tokens::TokenDelta {
-                host_id: "h1".into(),
-                epoch,
-                input: 7,
-                output: 3,
-                count_request: true,
-                ..Default::default()
-            }]),
-        )
-        .await
-        .unwrap();
-        assert!(app.tokens.last_token_at("h1").is_some(), "the delta was applied");
-
-        // Archive/unarchive advances the epoch; the pre-transition epoch must no longer apply.
-        app.tokens.set_archived("h1", true);
-        app.tokens.set_archived("h1", false);
-        let before = app.tokens.last_token_at("h1");
-        internal_tokens(
-            State(app.clone()),
-            headers,
-            Json(vec![crate::tokens::TokenDelta {
-                host_id: "h1".into(),
-                epoch,
-                input: 1_000_000,
-                ..Default::default()
-            }]),
-        )
-        .await
-        .unwrap();
-        assert_eq!(app.tokens.last_token_at("h1"), before, "a stale epoch changes nothing");
-    }
-
-    #[test]
-    fn urlencode_escapes_reserved_chars() {
-        assert_eq!(urlencode("abcABC123-_.~"), "abcABC123-_.~");
-        assert_eq!(urlencode("a b&c=d"), "a%20b%26c%3Dd");
-        assert_eq!(urlencode("claude-a@b.json"), "claude-a%40b.json");
-    }
 
     /// Spin up `/events` and read the opening bytes. All three multiplexed streams send a
     /// snapshot on connect: the default (unnamed) `ControlState` frame plus the named
@@ -3334,33 +2844,4 @@ mod playbook_tests {
 
     // --- the /cc tombstone ---------------------------------------------------------------
 
-    /// A pre-split clone's still-running agent POSTs to the old `/cc` path. The whole point of
-    /// the tombstone is that it must NOT look like a page: an agent SDK parsing `200 text/html`
-    /// (the SPA fallback) reports an unintelligible error instead of a retryable one.
-    #[tokio::test]
-    async fn cc_tombstone_answers_json_not_the_spa_fallback() {
-        let resp = cc_moved().await;
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        let ctype = resp
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-        assert!(ctype.contains("application/json"), "content-type was {ctype:?}");
-        // Retryable + points at where it moved, so a manual follower can get there.
-        assert_eq!(
-            resp.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()),
-            Some(crate::groupproxy::cc_base_url().as_str())
-        );
-        assert!(resp.headers().contains_key(header::RETRY_AFTER));
-
-        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&body).expect("a JSON error body");
-        assert_eq!(v["type"], "error");
-        let msg = v["error"]["message"].as_str().unwrap_or_default();
-        // Names the new host so the message alone is enough to diagnose it.
-        assert!(msg.contains(crate::groupproxy::CONTAINER), "message was {msg:?}");
-    }
 }

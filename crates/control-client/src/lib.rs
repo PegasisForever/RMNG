@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
 use wire::{
-    AppConfigRedacted, CloneTokenUsage, ContainerStats, ControlState, ExecRequest, ExecResult,
+    AppConfigRedacted, ContainerStats, ControlState, ExecRequest, ExecResult,
     ImageInfo, Operation,
 };
 
@@ -24,10 +24,13 @@ pub struct Client {
 /// `plain`) are supplied separately by [`Client::clone_create`].
 #[derive(Debug, Default, Clone)]
 pub struct CloneOpts<'a> {
-    /// Account-group override. `None`/blank ⇒ omit the key entirely, so the server walks its
-    /// own chain (parent → preset default → first configured). Every clone binds one, so
-    /// there is no way to express "no group".
-    pub group: Option<&'a str>,
+    /// Claude account selection, verbatim: an email, `auto`, `none`, or `group:<pool>`.
+    /// `None`/blank ⇒ omit the key entirely, so the server walks its own chain (a sub clone
+    /// inherits its parent's selection; otherwise `auto`).
+    pub claude_account: Option<&'a str>,
+    /// Codex account selection, same forms. Independent of `claude_account` — a clone can
+    /// hold both.
+    pub codex_account: Option<&'a str>,
     /// Env preset by name; `Some("none")` opts out of inheriting a parent's.
     pub preset: Option<&'a str>,
     pub headless: bool,
@@ -121,10 +124,6 @@ impl Client {
         self.get_json("/api/stats").await
     }
 
-    /// Current safe per-clone cumulative-token map, matching the named `tokens` SSE snapshot.
-    pub async fn tokens(&self) -> Result<HashMap<String, CloneTokenUsage>> {
-        self.get_json("/api/tokens").await
-    }
 
     /// The `/events` SSE stream, filtered to the default (unnamed) frames = full
     /// [`ControlState`] snapshots: one on connect, then one per change. Named events
@@ -191,8 +190,11 @@ impl Client {
         for (k, v) in mode.as_object().into_iter().flatten() {
             obj.insert(k.clone(), v.clone());
         }
-        if let Some(group) = opts.group.map(str::trim).filter(|g| !g.is_empty()) {
-            obj.insert("group".into(), json!(group));
+        if let Some(a) = opts.claude_account.map(str::trim).filter(|a| !a.is_empty()) {
+            obj.insert("claudeAccount".into(), json!(a));
+        }
+        if let Some(a) = opts.codex_account.map(str::trim).filter(|a| !a.is_empty()) {
+            obj.insert("codexAccount".into(), json!(a));
         }
         if let Some(p) = opts.preset {
             obj.insert("preset".into(), json!(p));
@@ -271,25 +273,36 @@ impl Client {
         Ok(())
     }
 
-    /// Bind a clone to an account group. Every clone binds one, so the name is required —
-    /// there is no way to clear a binding. The group-proxy replacement for the old
-    /// per-provider account swap. `POST /api/hosts/:id/group`.
-    pub async fn set_clone_group(&self, host: &str, group: &str) -> Result<Value> {
+    /// Hot-swap a clone's Claude account. `account` is a selection: an email, `auto`,
+    /// `none`, or `group:<pool>`. `POST /api/claude/swap`.
+    pub async fn claude_swap(&self, host: &str, account: &str) -> Result<Value> {
         self.post_json(
-            &format!("/api/hosts/{host}/group"),
-            &json!({ "group": group }),
+            "/api/claude/swap",
+            &json!({ "host": host, "account": account }),
         )
         .await
     }
 
-    /// Remove one authenticated account (a credential file) from a group's CLIProxyAPI
-    /// instance. `POST /api/groups/:name/accounts/delete`.
-    pub async fn delete_group_account(&self, group: &str, file: &str) -> Result<Value> {
+    /// Hot-swap a clone's Codex account. `POST /api/codex/swap`.
+    pub async fn codex_swap(&self, host: &str, account: &str) -> Result<Value> {
         self.post_json(
-            &format!("/api/groups/{group}/accounts/delete"),
-            &json!({ "file": file }),
+            "/api/codex/swap",
+            &json!({ "host": host, "account": account }),
         )
         .await
+    }
+
+    /// Delete an imported Claude account by email. Errors (surfaced by `check`) if a clone
+    /// is pinned to it. Returns the API's `{ ok, moved: [clone ids] }`.
+    pub async fn claude_delete(&self, account: &str) -> Result<Value> {
+        self.post_json("/api/claude/delete", &json!({ "account": account }))
+            .await
+    }
+
+    /// Delete an imported Codex account by email.
+    pub async fn codex_delete(&self, account: &str) -> Result<Value> {
+        self.post_json("/api/codex/delete", &json!({ "account": account }))
+            .await
     }
 
     /// The redacted server config (presets, account groups, docker settings — no secrets).

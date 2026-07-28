@@ -1,7 +1,7 @@
 //! Docker-backed clone maintenance and server-owned lifecycle state.
 //!
-//! Docker determines whether a managed container is running; passive proxy token activity
-//! distinguishes `working` from a Docker-running but inactive (`idle`) clone.
+//! Docker determines whether a managed container is running; agent-wrapper busy frames (see
+//! [`ActivityBus`]) distinguish `working` from a Docker-running but inactive (`idle`) clone.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock as StdRwLock;
@@ -134,6 +134,69 @@ impl ViewTracker {
     /// unbounded across the life of a long-running server.
     pub fn retain(&self, ids: &HashSet<String>) {
         self.seen.write().unwrap().retain(|id, _| ids.contains(id));
+    }
+}
+
+/// How long after a clone's last observed agent activity it still counts as `working`.
+///
+/// Matches the window the retired proxy-token accounting used, so the sidebar's working/idle
+/// behaviour is unchanged by the switch of underlying signal.
+const ACTIVITY_INACTIVE_MS: i64 = 5 * 60 * 1000;
+
+/// Volatile per-clone "agent was last busy" timestamps (wall-clock ms) — the signal behind
+/// `working` vs `idle`.
+///
+/// **Why this exists.** Activity used to be inferred from tokens passing through the `/cc`
+/// proxy, which no longer sits in the data path (agents now talk to Anthropic directly, so the
+/// server never sees their traffic). The original pre-proxy signal — polling the agent-wrapper's
+/// `GET /status` — no longer exists either; that endpoint was removed when token accounting
+/// landed.
+///
+/// So we take it from the one channel that survived both: the agent-wrapper's `/events` SSE
+/// stream emits `{busy: true}` when a turn starts and `{busy: false}` when it ends, and
+/// [`crate::chat::run_autonomous_listener`] is already subscribed to it for every running managed
+/// clone. Stamping those frames here costs no new connection, no clone-side change, and — unlike
+/// reading `ChatState.busy` — covers autonomous background work, not just operator-solicited
+/// turns.
+///
+/// Deliberately never persisted: a cold map after a restart reads as `idle` until the clone next
+/// works, which is the correct default (the browser re-baselines anyway).
+#[derive(Default)]
+pub struct ActivityBus {
+    last_active: StdRwLock<HashMap<String, i64>>,
+}
+
+impl ActivityBus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record agent activity for `clone_id` at `now_ms`. Monotonic, like [`ViewTracker::mark`]:
+    /// an out-of-order frame never moves the timestamp backwards.
+    pub fn mark(&self, clone_id: &str, now_ms: i64) {
+        let mut map = self.last_active.write().unwrap();
+        let entry = map.entry(clone_id.to_string()).or_insert(now_ms);
+        *entry = (*entry).max(now_ms);
+    }
+
+    /// Wall-clock ms of this clone's last observed activity, if any.
+    pub fn last_active_at(&self, clone_id: &str) -> Option<i64> {
+        self.last_active.read().unwrap().get(clone_id).copied()
+    }
+
+    /// Whether `clone_id` has been quiet long enough to read as `idle`. A clone we have never
+    /// seen work is inactive — it has produced nothing to be "working" on.
+    pub fn is_inactive(&self, clone_id: &str, now_ms: i64) -> bool {
+        match self.last_active_at(clone_id) {
+            Some(last) => now_ms.saturating_sub(last) >= ACTIVITY_INACTIVE_MS,
+            None => true,
+        }
+    }
+
+    /// Drop entries for clones no longer in the active managed fleet, so the map cannot grow
+    /// unbounded across the life of a long-running server.
+    pub fn retain(&self, ids: &HashSet<String>) {
+        self.last_active.write().unwrap().retain(|id, _| ids.contains(id));
     }
 }
 
@@ -384,7 +447,7 @@ async fn poll_once(
         };
         let state = if !running {
             MonitorState::Offline
-        } else if app.tokens.is_token_inactive(&id, now) {
+        } else if app.activity.is_inactive(&id, now) {
             MonitorState::Idle
         } else {
             MonitorState::Working
@@ -415,6 +478,7 @@ async fn poll_once(
     // accumulate in it across the life of a long-running server.
     previous_clone_cpu.retain(|id, _| active_ids.contains(id));
     app.views.retain(&active_ids);
+    app.activity.retain(&active_ids);
 
     // Snapshot the two inputs to the unread decision (last-viewed + last-token-activity) before
     // entering `store.mutate`, so we neither hold the view/token locks across the state mutation
@@ -424,7 +488,7 @@ async fn poll_once(
         .map(|host| {
             (
                 host.id.clone(),
-                (app.views.last_viewed(&host.id), app.tokens.last_token_at(&host.id)),
+                (app.views.last_viewed(&host.id), app.activity.last_active_at(&host.id)),
             )
         })
         .collect();
@@ -593,6 +657,37 @@ mod tests {
         views.retain(&HashSet::from(["a".to_string()]));
         assert_eq!(views.last_viewed("a"), Some(150));
         assert_eq!(views.last_viewed("b"), None);
+    }
+
+    #[test]
+    fn activity_bus_is_monotonic_and_prunes() {
+        let act = ActivityBus::new();
+        assert_eq!(act.last_active_at("a"), None);
+        act.mark("a", 100);
+        act.mark("a", 50); // out-of-order frame must not move it backwards
+        assert_eq!(act.last_active_at("a"), Some(100));
+        act.mark("a", 150);
+        assert_eq!(act.last_active_at("a"), Some(150));
+
+        act.mark("b", 7);
+        act.retain(&HashSet::from(["a".to_string()]));
+        assert_eq!(act.last_active_at("a"), Some(150));
+        assert_eq!(act.last_active_at("b"), None);
+    }
+
+    /// The working/idle boundary. A never-seen clone must read inactive (it has produced
+    /// nothing to be working on), and the window must be a `>=` so a clone sitting exactly on
+    /// the boundary settles to idle rather than flapping.
+    #[test]
+    fn activity_bus_inactivity_window() {
+        let act = ActivityBus::new();
+        assert!(act.is_inactive("never-seen", 1_000), "an unknown clone is not 'working'");
+
+        act.mark("a", 1_000);
+        assert!(!act.is_inactive("a", 1_000), "just-active is working");
+        assert!(!act.is_inactive("a", 1_000 + ACTIVITY_INACTIVE_MS - 1), "still inside the window");
+        assert!(act.is_inactive("a", 1_000 + ACTIVITY_INACTIVE_MS), "the boundary reads idle");
+        assert!(act.is_inactive("a", 1_000 + ACTIVITY_INACTIVE_MS * 2));
     }
 
     #[test]

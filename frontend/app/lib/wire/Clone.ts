@@ -30,17 +30,41 @@ managed: boolean,
  */
 archived: boolean, source: string | null, 
 /**
- * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
- * route through, via the control-server's `/cc` router. This is the sole account
- * binding — CLIProxyAPI owns intra-group account selection + refresh.
- *
- * **Every clone has one.** `state::normalize_groups` repoints a blank (an old row from
- * before groups were mandatory) at the first configured group at load, and there is
- * always at least one group (`config::normalize_groups`). Blank is therefore only ever
- * transient — it can still appear on a `Default::default()` row in tests, or in a
- * hand-edited `state.json` between the edit and the watcher's next reload.
+ * Email of the imported Claude account whose access token is written into this clone's
+ * `~/.claude/.credentials.json`. The control-server owns the refresh lifecycle and
+ * re-pushes on every rotation; the clone never holds a refresh token.
  */
-group: string, 
+claudeAccountEmail: string | null, 
+/**
+ * Name of the Claude group this clone is balanced within (sticky — it moves only
+ * when its account exhausts); `None` when bound to a single fixed account. When
+ * set, `claude_account_email` holds the current pick.
+ */
+claudeGroup: string | null, 
+/**
+ * The operator's Claude *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`,
+ * or an account email. Distinguishes an auto-managed clone (server picks the best
+ * account and may hot-swap it) from one pinned to a fixed account or opted out of
+ * a token entirely — `claude_account_email` alone can't tell these apart. `None` on
+ * clones created before this field / when no Claude account is configured.
+ */
+claudeSelection: string | null, 
+/**
+ * Email of the imported Codex (ChatGPT) account whose token is written into this
+ * clone's `~/.codex/auth.json`. Independent of `claude_account_email` — a clone can
+ * hold both. `None` when no Codex account is assigned.
+ */
+codexAccountEmail: string | null, 
+/**
+ * Name of the Codex group this clone is balanced within (sticky, like `claude_group`);
+ * `None` when bound to a single fixed Codex account.
+ */
+codexGroup: string | null, 
+/**
+ * The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
+ * an account email — the Codex twin of `claude_selection`.
+ */
+codexSelection: string | null, 
 /**
  * Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
  * string: the workspace set is config (Settings → Linear API keys), not an enum.

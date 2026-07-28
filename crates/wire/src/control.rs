@@ -45,9 +45,6 @@ pub struct LayoutPreset {
 pub enum Provider {
     Claude,
     Codex,
-    /// Google Gemini via Antigravity (Code Assist) OAuth. Usage is display-only — Antigravity
-    /// exposes no per-account quota endpoint to poll (see `control-server/src/antigravity.rs`).
-    Antigravity,
 }
 
 /// Server-owned lifecycle state. Docker supplies container liveness while passive proxy token
@@ -129,17 +126,36 @@ pub struct RmngClone {
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's agents
-    /// route through, via the control-server's `/cc` router. This is the sole account
-    /// binding — CLIProxyAPI owns intra-group account selection + refresh.
-    ///
-    /// **Every clone has one.** `state::normalize_groups` repoints a blank (an old row from
-    /// before groups were mandatory) at the first configured group at load, and there is
-    /// always at least one group (`config::normalize_groups`). Blank is therefore only ever
-    /// transient — it can still appear on a `Default::default()` row in tests, or in a
-    /// hand-edited `state.json` between the edit and the watcher's next reload.
-    #[serde(default)]
-    pub group: String,
+    /// Email of the imported Claude account whose access token is written into this clone's
+    /// `~/.claude/.credentials.json`. The control-server owns the refresh lifecycle and
+    /// re-pushes on every rotation; the clone never holds a refresh token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_account_email: Option<String>,
+    /// Name of the Claude group this clone is balanced within (sticky — it moves only
+    /// when its account exhausts); `None` when bound to a single fixed account. When
+    /// set, `claude_account_email` holds the current pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_group: Option<String>,
+    /// The operator's Claude *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`,
+    /// or an account email. Distinguishes an auto-managed clone (server picks the best
+    /// account and may hot-swap it) from one pinned to a fixed account or opted out of
+    /// a token entirely — `claude_account_email` alone can't tell these apart. `None` on
+    /// clones created before this field / when no Claude account is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_selection: Option<String>,
+    /// Email of the imported Codex (ChatGPT) account whose token is written into this
+    /// clone's `~/.codex/auth.json`. Independent of `claude_account_email` — a clone can
+    /// hold both. `None` when no Codex account is assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_account_email: Option<String>,
+    /// Name of the Codex group this clone is balanced within (sticky, like `claude_group`);
+    /// `None` when bound to a single fixed Codex account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_group: Option<String>,
+    /// The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
+    /// an account email — the Codex twin of `claude_selection`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_selection: Option<String>,
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
     /// string: the workspace set is config (Settings → Linear API keys), not an enum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,27 +300,6 @@ pub struct LxcStats {
     pub disk_used: Option<u64>,
 }
 
-/// Safe accumulated new-token totals for one clone, delivered in the named `tokens` SSE
-/// event as a `{ hostId: CloneTokenUsage }` map. The server retains the activity timestamp
-/// privately; it is deliberately absent here so clients cannot derive a clone status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct CloneTokenUsage {
-    /// Input tokens newly processed by the model. Cache reads are excluded; native Anthropic
-    /// cache-creation tokens are included because they are newly processed.
-    pub new_input_tokens: u64,
-    /// Newly generated output tokens. Provider-specific reasoning is included exactly once
-    /// when its client-facing total does not already include it.
-    pub output_tokens: u64,
-    /// Number of responses that reported a recognized final usage object.
-    pub request_count: u64,
-    /// True when this clone was served by the Fable model within the last 5 minutes. Derived
-    /// server-side from a private timestamp (never sent) and re-projected on a timer so it
-    /// decays back to false; drives the sidebar's "fable" badge next to the group binding.
-    pub fable_active: bool,
-}
-
 /// Version + update-available status for the control-server itself, served by
 /// `GET /api/server/version`. `current_*` come from the running image's OCI labels /
 /// RepoDigest; `remote_digest` from a registry manifest query (no pull). `available` is
@@ -326,35 +321,6 @@ pub struct UpdateStatus {
     pub reference: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-}
-
-/// The `rmng-cliproxy` sidecar's status, served by `GET /api/groupproxy`.
-///
-/// That container owns the `/cc` router + every per-group CLIProxyAPI process, and a
-/// control-server update deliberately does NOT roll it forward — recreating it would drop every
-/// in-flight agent turn in the fleet, which is precisely the interruption the split removes. So
-/// the operator needs the drift to be *visible*: `behind` is true whenever it is running a
-/// different image than the control-server, and `POST /api/groupproxy/restart` is the deliberate
-/// roll-forward. `detail` is always populated (including for a down daemon), so the UI renders
-/// something useful in every state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct GroupProxyStatus {
-    /// The container/DNS name (`rmng-cliproxy`).
-    pub container: String,
-    pub running: bool,
-    /// Short image id it is running, when it exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    /// `org.opencontainers.image.revision` of that image, when the image carries one (a plain
-    /// `docker build` leaves it empty — a dev build).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<String>,
-    /// It is running a different image than the control-server.
-    pub behind: bool,
-    /// Human-readable state for the Settings panel.
-    pub detail: String,
 }
 
 /// 0–100 utilization for a rolling usage window + when it resets.
@@ -418,19 +384,6 @@ pub struct ClaudeUsage {
     pub reset_credits: Option<i64>,
 }
 
-/// Per-group usage view: one account pool (a CLIProxyAPI instance) plus the accounts
-/// authenticated into its `auth-dir`, each with its 5h/7d/fable windows. The by-group
-/// replacement for the flat `claude_accounts` list — the same email can appear under
-/// several groups (independent token sets per instance), so ids are group-scoped.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct GroupUsage {
-    pub name: String,
-    #[serde(default)]
-    pub accounts: Vec<ClaudeUsage>,
-}
-
 /// One recorded auto-consumed (or reserved) Codex reset. Persisted in `ControlState`
 /// so a server restart can't re-spend on an account already reset this 7d window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -470,11 +423,11 @@ pub struct ControlState {
     pub hosts: Vec<RmngClone>,
     #[serde(default)]
     pub operations: Vec<Operation>,
-    /// Per-group usage view (no tokens) under the group-proxy model: for each account pool,
-    /// the accounts authenticated into its CLIProxyAPI instance's `auth-dir`, with 5h/7d/fable
-    /// windows. Refreshed by the by-group usage poller.
+    /// Per-account usage view (no tokens). Despite the name it holds **both** providers'
+    /// rows, distinguished by [`ClaudeUsage::provider`]; `clone_ops::replace_provider_views`
+    /// is what lets the Claude and Codex pollers publish here without clobbering each other.
     #[serde(default)]
-    pub usage_groups: Vec<GroupUsage>,
+    pub claude_accounts: Vec<ClaudeUsage>,
     /// Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
     /// account per week, so it belongs in `state.json` (unlike per-tick stats).
     #[serde(default)]
@@ -560,7 +513,7 @@ mod tests {
         assert_eq!(state.hosts[0].port, 3389); // default
         assert_eq!(state.hosts[1].port, 3390);
         assert!(state.operations.is_empty());
-        assert!(state.usage_groups.is_empty());
+        assert!(state.claude_accounts.is_empty());
     }
 
     #[test]
@@ -591,7 +544,7 @@ mod tests {
             host: "1.2.3.4".into(),
             port: 3389,
             gdm_username: Some("u".into()),
-            group: "team".into(),
+            claude_account_email: Some("a@b.c".into()),
             linear_workspace: Some("we".into()),
             monitor_state: Some(MonitorState::Working),
             ..Default::default()
@@ -601,7 +554,7 @@ mod tests {
             v.get("gdm_username").is_some(),
             "gdm_username stays snake_case"
         );
-        assert_eq!(v["group"], "team");
+        assert_eq!(v["claudeAccountEmail"], "a@b.c");
         assert_eq!(v["linearWorkspace"], "we");
         assert_eq!(v["monitorState"], "working");
         assert_eq!(v["archived"], false);
@@ -683,33 +636,41 @@ mod tests {
     }
 
     #[test]
-    fn clone_group_binding_camelcase() {
-        // The sole account binding is the group-proxy `group`.
+    fn clone_codex_fields_camelcase() {
         let h = RmngClone {
             id: "h".into(),
             host: "1.2.3.4".into(),
             port: 3389,
-            group: "team".into(),
+            claude_account_email: Some("a@b.c".into()),
+            codex_account_email: Some("z@openai.com".into()),
+            codex_group: Some("team".into()),
+            codex_selection: Some("group:team".into()),
             ..Default::default()
         };
         let v = serde_json::to_value(&h).unwrap();
-        assert_eq!(v["group"], "team");
-        // Always serialized (no skip): the field is mandatory, so a consumer can read it
-        // unconditionally. A `Default` row is blank, which the server normalizes at load.
+        assert_eq!(v["codexAccountEmail"], "z@openai.com");
+        assert_eq!(v["codexGroup"], "team");
+        assert_eq!(v["codexSelection"], "group:team");
+        // Claude fields still present and untouched.
+        assert_eq!(v["claudeAccountEmail"], "a@b.c");
+        // Omitted account fields are not serialized — the six are independent options, so a
+        // clone with no accounts assigned carries none of the keys at all.
         let bare = RmngClone {
             id: "h2".into(),
             ..Default::default()
         };
         let bv = serde_json::to_value(&bare).unwrap();
-        assert_eq!(bv["group"], "");
-        // An old row with no `group` key at all still parses (blank), so `state.json` from
-        // before the binding was mandatory loads instead of failing the whole file.
+        assert!(bv.get("codexAccountEmail").is_none());
+        assert!(bv.get("claudeAccountEmail").is_none());
+        // A `state.json` row written under the group-proxy model carries a `group` key that
+        // no longer exists; serde drops it rather than failing the whole file.
         let old: RmngClone =
-            serde_json::from_str(r#"{"id":"h3","host":"h3"}"#).unwrap();
-        assert_eq!(old.group, "");
+            serde_json::from_str(r#"{"id":"h3","host":"h3","group":"team"}"#).unwrap();
+        assert_eq!(old.id, "h3");
+        assert!(old.claude_account_email.is_none());
         // Round-trips.
         let back: RmngClone = serde_json::from_value(v).unwrap();
-        assert_eq!(back.group, "team");
+        assert_eq!(back.codex_selection.as_deref(), Some("group:team"));
     }
 
     #[test]
@@ -723,31 +684,28 @@ mod tests {
                 y: 0,
                 primary: true,
             }],
-            usage_groups: vec![GroupUsage {
-                name: "team".into(),
-                accounts: vec![ClaudeUsage {
-                    id: "team|a@b".into(),
-                    email: "a@b".into(),
-                    provider: Some(Provider::Claude),
-                    active: true,
-                    assignable: Some(true),
-                    error: None,
-                    stale: None,
-                    last_updated: 123,
-                    five_hour: Some(ClaudeUsageWindow {
-                        pct: 12.5,
-                        resets_at: None,
-                    }),
-                    seven_day: None,
-                    fable: None,
-                    spend: None,
-                    reset_credits: Some(3),
-                }],
+            claude_accounts: vec![ClaudeUsage {
+                id: "a@b|org".into(),
+                email: "a@b".into(),
+                provider: Some(Provider::Claude),
+                active: true,
+                assignable: Some(true),
+                error: None,
+                stale: None,
+                last_updated: 123,
+                five_hour: Some(ClaudeUsageWindow {
+                    pct: 12.5,
+                    resets_at: None,
+                }),
+                seven_day: None,
+                fable: None,
+                spend: None,
+                reset_credits: Some(3),
             }],
             ..Default::default()
         };
         let s = serde_json::to_string(&st).unwrap();
-        assert!(s.contains("\"usageGroups\""));
+        assert!(s.contains("\"claudeAccounts\""));
         assert!(s.contains("\"fiveHour\""));
         assert!(s.contains("\"resetCredits\":3"));
         let back: ControlState = serde_json::from_str(&s).unwrap();

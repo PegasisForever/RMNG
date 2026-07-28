@@ -32,6 +32,9 @@ use crate::docker::{CLONE_USER, CreateSpec, PullEvent, TarEntry};
 /// at template build).
 /// tar entries under `home/rmng/**` carry this verbatim so the daemon extracts them owned
 /// by the clone user (gotcha #2).
+/// The guest script `claude.rs` runs inside a clone for its credential ops.
+const IMPORT_SCRIPT: &str = include_str!("../scripts/claude-import.sh");
+
 const CLONE_UID: u64 = 1000;
 const CLONE_GID: u64 = 1000;
 
@@ -164,15 +167,16 @@ pub(crate) fn base_session_env_vars() -> Vec<EnvVar> {
     .collect()
 }
 
-/// The clone-facing control-plane environment every clone needs. It carries TWO independent
-/// endpoints, and keeping them distinct is the point:
+/// The clone-facing control-plane environment every clone needs: `RMNG_CONTROL_URL`, the
+/// control-server's own address (`docker.control_host()` — the `rmng-control` DNS alias, or the
+/// gateway IP in dev mode), so the in-clone fleet CLI works without an explicit `--server`.
 ///
-///   - `ANTHROPIC_BASE_URL` → the **group-proxy sidecar** (`rmng-cliproxy:9010/cc`), a fixed
-///     bridge address that does not depend on the control-server existing. That is what makes
-///     a control-server update non-disruptive: agent traffic never touches this process.
-///   - `RMNG_CONTROL_URL` → the **control-server** (`docker.control_host()` — the `rmng-control`
-///     DNS alias, or the gateway IP in dev mode). The fleet CLI is meant to fail while the
-///     control-server is restarting; inference is not.
+/// **Nothing here points at an inference endpoint.** Agents talk to Anthropic/OpenAI directly,
+/// authenticated by the short-lived tokens the server writes into their credential files (see
+/// [`crate::claude::apply_clone_token`]). The group-proxy era's `ANTHROPIC_BASE_URL` +
+/// `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` are gone; `clone_reconcile::RETIRED_ENV_KEYS`
+/// is what strips them from clones that still carry them, since dropping a key here does not by
+/// itself remove it from a clone's existing `/etc/environment`.
 pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
     let cfg = app.config();
     let ev = |key: &str, value: String| EnvVar {
@@ -180,19 +184,6 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
         value,
     };
     let mut vars = Vec::new();
-
-    // Group-proxy router: every clone's agents reach the `rmng-cliproxy` sidecar's `/cc`
-    // reverse proxy at a constant URL; the router maps the clone's per-clone bearer key → its
-    // group instance. Claude Code appends `/v1/messages` + `/v1/models` to ANTHROPIC_BASE_URL;
-    // the gateway-discovery flag lets its picker learn the instance's `/v1/models` catalog.
-    // The per-clone bearer (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY) is added separately by
-    // `router_env_vars` (it's per-clone, not shared). Unlike RMNG_CONTROL_URL below this needs
-    // no host resolution — the sidecar's DNS alias on the rmng bridge is a constant.
-    vars.push(ev("ANTHROPIC_BASE_URL", crate::groupproxy::cc_base_url()));
-    vars.push(ev(
-        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-        "1".to_string(),
-    ));
 
     match app.docker.control_host().await {
         Ok(control) => {
@@ -209,43 +200,28 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
         Err(e) => tracing::warn!(
             "control_env_vars: could not resolve the control-server host ({e}); the in-clone \
              `rmng` CLI will need an explicit --server until the next reconcile (inference is \
-             unaffected — it routes to the group-proxy sidecar)"
+             unaffected — agents authenticate with the credentials the server injects, not \
+             with anything reached over this URL)"
         ),
     }
     vars
 }
 
-/// The PER-CLONE group-proxy env: the clone's stable router bearer key, exposed both as
-/// `ANTHROPIC_AUTH_TOKEN` (Claude Code) and `RMNG_PROXY_KEY` (referenced by the generated
-/// Codex + OpenCode provider configs). Minted + persisted by [`crate::cliproxy`] on first
-/// use (stable for the clone's life; the router maps it back to this clone id). Kept OUT of
-/// [`control_env_vars`] because it is per-clone, not a shared constant — and NEVER put on
-/// `RmngClone`/`state.json`/`/events` (it's a secret). Wired into the clone's `/etc/environment`
-/// at create (`jobs.rs`) and on every per-clone resync (`clone_reconcile.rs`).
-pub(crate) fn router_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
-    let key = app.cliproxy.mint_router_key(host_id);
-    vec![
-        EnvVar {
-            key: "ANTHROPIC_AUTH_TOKEN".into(),
-            value: key.clone(),
-        },
-        EnvVar {
-            key: "RMNG_PROXY_KEY".into(),
-            value: key,
-        },
-    ]
-}
-
-/// The clone-facing base URL of the group-proxy router's OpenAI-compatible surface
-/// (`http://rmng-cliproxy:9010/cc/v1`) — what the generated Codex + OpenCode provider configs
-/// point their `base_url`/`baseURL` at. The same fixed sidecar address `control_env_vars` bakes
-/// into `ANTHROPIC_BASE_URL`.
+/// The PER-CLONE identity env: the clone's stable bearer key, as `RMNG_PROXY_KEY`.
 ///
-/// Still `Option` — the generators branch on it and the callers thread it as such — but since
-/// the split it is a constant that cannot fail to resolve: the sidecar's DNS alias on the rmng
-/// bridge doesn't depend on the control-server's own container being discoverable.
-pub(crate) async fn cc_base_url(_app: &App) -> Option<String> {
-    Some(crate::groupproxy::cc_v1_base_url())
+/// Named for the group proxy that first minted it, and deliberately not renamed — see
+/// [`crate::clonekey`]. It is no longer an inference credential (agents authenticate with the
+/// tokens the server injects into their credential files); it is how a clone proves *which*
+/// clone it is, for sub-clone creation and clone↔clone SSH.
+///
+/// Kept OUT of [`control_env_vars`] because it is per-clone, not a shared constant — and NEVER
+/// put on `RmngClone`/`state.json`/`/events` (it's a secret). Wired into the clone's
+/// `/etc/environment` at create (`jobs.rs`) and on every per-clone resync (`clone_reconcile.rs`).
+pub(crate) fn clone_key_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
+    vec![EnvVar {
+        key: "RMNG_PROXY_KEY".into(),
+        value: app.clone_keys.mint(host_id),
+    }]
 }
 
 /// The preset's env plus its Linear key as `LINEAR_API_KEY` (auths the clone's
@@ -273,22 +249,18 @@ pub(crate) fn preset_env_vars(p: &wire::Preset) -> Vec<EnvVar> {
 /// blank for an ungrouped clone, which then keeps Claude Code's built-in default.
 pub(crate) fn compose_clone_env(
     control: Vec<EnvVar>,
-    router: Vec<EnvVar>,
+    clone_key: Vec<EnvVar>,
     preset: &[EnvVar],
-    group: &str,
-    catalog: &[String],
 ) -> Vec<EnvVar> {
     let mut env = control;
-    env.extend(router);
+    env.extend(clone_key);
     env.extend(preset.iter().cloned());
     // Seeded HERE rather than left to the reconciler: every other var above reaches the clone in
     // the create path's one `upload_tar` (~3 s), but `ANTHROPIC_MODEL` used to be added only by
     // the per-clone resync — so a fresh clone spent up to a full `RECONCILE_INTERVAL` (measured:
-    // 30 s) with no default model, running Claude Code on its built-in one instead of the
-    // group's. The resync still owns keeping it current, and now finds it already correct.
-    if !group.trim().is_empty() {
-        env.push(crate::clone_reconcile::claude_model_env_var(catalog));
-    }
+    // 30 s) with no default model, running Claude Code on its built-in one instead of ours. The
+    // resync still owns keeping it current, and now finds it already correct.
+    env.push(crate::clone_reconcile::claude_model_env_var());
     env
 }
 
@@ -668,21 +640,7 @@ async fn clone_container_after_create(
             gid: CLONE_GID,
         });
     }
-    // The group-proxy /cc/v1 base for the generated Codex/OpenCode provider configs, derived
-    // from the ANTHROPIC_BASE_URL (`.../cc`) that `control_env_vars` injected into this env.
-    let cc_base = env
-        .iter()
-        .find(|v| v.key == "ANTHROPIC_BASE_URL")
-        .map(|v| format!("{}/v1", v.value));
-    // One-shot initial config: use the fallback GPT model list here; the clone reconciler
-    // refreshes it with the group's live (blacklist-filtered) `/v1/models` set on its next pass.
-    let gpt_models = crate::clone_reconcile::fallback_gpt_models();
-    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(
-        cc_base.as_deref(),
-        &gpt_models,
-        headless,
-        global_prompt,
-    );
+    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(headless, global_prompt);
     codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(
         &codex_entries,
     ));
@@ -1200,6 +1158,19 @@ fn unarchive_pct(step: &str) -> Option<f64> {
         "done" => 100.0,
         _ => return None,
     })
+}
+
+// --- claude-import backend ------------------------------------------------------------
+
+/// Run one [`claude-import.sh`] op (`status`|`read`|`clear`|`apply`) inside clone `container`
+/// via `docker exec bash -s`, returning its raw stdout+stderr. `extra` are extra positional
+/// args (e.g. the base64 credentials for `apply`). This is `claude.rs`'s backend.
+///
+/// Script args: `<user> <op> [b64]`. `status` never fails (stderr merged in the script);
+/// the others surface a non-zero exit as an error. `codex.rs` calls the generalized
+/// `clone_ops::run_clone_op` directly with its own script.
+pub async fn run_clone_op(app: &App, container: &str, op: &str, extra: &[&str]) -> Result<String> {
+    crate::clone_ops::run_clone_op(app, container, IMPORT_SCRIPT, op, extra).await
 }
 
 // --- op-log pct helpers (exposed for jobs.rs step tables) -----------------------------

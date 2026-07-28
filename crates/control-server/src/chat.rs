@@ -332,6 +332,11 @@ struct TurnFrame {
     solicited: Option<bool>,
     #[serde(default)]
     error: Option<String>,
+    /// The agent-wrapper's turn-liveness flag: `true` when a turn starts, `false` when it ends
+    /// (and once as a snapshot when the SSE stream opens). This is the fleet's `working`/`idle`
+    /// signal — see [`crate::monitor::ActivityBus`] for why it is read from here.
+    #[serde(default)]
+    busy: Option<bool>,
 }
 
 async fn post_abort(app: &App, base: &str) {
@@ -649,6 +654,17 @@ async fn run_autonomous_listener(app: &App, host: &RmngClone) -> Result<(), ()> 
             let frame: Vec<u8> = buf.drain(..pos + 2).collect();
             let Some(json) = extract_data_line(&frame[..frame.len() - 2]) else { continue };
             let Ok(f) = serde_json::from_str::<TurnFrame>(&json) else { continue };
+            // Turn liveness → the monitor's working/idle signal.
+            //
+            // `busy: true` marks a turn STARTING and `activity` lines stream throughout it, so
+            // both are stamped: a turn running longer than the inactivity window would otherwise
+            // slide to `idle` mid-work, because nothing else would have touched the clock since
+            // the start frame. `busy: false` is deliberately NOT stamped — it marks the END of
+            // work, and treating it as activity would hold a finished clone at `working` for a
+            // further full window.
+            if f.busy == Some(true) || f.activity.is_some() {
+                app.activity.mark(&host.id, crate::clone_ops::now_ms());
+            }
             if let Some(r) = f.reply {
                 if f.solicited == Some(false) {
                     let r = r.trim();

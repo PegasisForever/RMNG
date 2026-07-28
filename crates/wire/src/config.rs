@@ -123,13 +123,6 @@ pub struct Preset {
     /// Linear personal API key (**secret**; injected into clones as `LINEAR_API_KEY`).
     #[serde(default)]
     pub linear_key: String,
-    /// Account group clones of this preset bind by default, applied when the clone request
-    /// names no group of its own. Every preset has one — `config::normalize_groups` fills a
-    /// blank (or dangling) value with the first configured group at load and on every save,
-    /// and there is always at least one group. Blank only ever appears transiently, in a
-    /// config file written by hand or by an older build.
-    #[serde(default)]
-    pub group: String,
     #[serde(default)]
     pub vars: Vec<EnvVar>,
     /// Optional per-preset text appended (after `"\n\n"`) to the global agent playbook for
@@ -150,7 +143,6 @@ impl Preset {
             name: self.name.clone(),
             labels: self.labels.clone(),
             linear_key_set: !self.linear_key.is_empty(),
-            group: self.group.clone(),
             vars: self.vars.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
@@ -167,31 +159,23 @@ pub struct PresetRedacted {
     pub name: String,
     pub labels: Vec<String>,
     pub linear_key_set: bool,
-    /// Default account group ([`Preset::group`]) — not a secret, shown verbatim.
-    pub group: String,
     pub vars: Vec<EnvVar>,
     pub agent_playbook: String,
     pub global_prompt: String,
 }
 
-/// The group seeded when no account group is configured. Not privileged in any way — it
-/// only exists so the "every preset and clone binds a group" invariant has something to
-/// bind to on a fresh install. Renaming or deleting it is fine as long as another group
-/// remains; deleting the last one re-seeds this name.
-pub const DEFAULT_GROUP: &str = "Default";
-
-/// A named account pool backed by one CLIProxyAPI instance (see the group-proxy
-/// redesign, `docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`). A pool is
-/// provider-agnostic — it may hold Claude and/or GPT accounts, added by OAuth login into
-/// that instance's `auth-dir`. A clone binds exactly one group; the control-server routes
-/// every request from that clone's agents to the group's instance. Carries no secrets —
-/// just a name — so it's TS-exported and shown verbatim in the redacted config. Membership
-/// is NOT stored here; it's derived from the instance's `auth-dir` at runtime.
+/// A named pool of clone accounts (by email). A clone bound to a group sticks to its
+/// account until that account exceeds the 5h usage cap (or leaves the group), then
+/// moves to the group's least-loaded / least-used member — sticky, because an account
+/// switch cold-starts the clone's prompt cache. Carries no secrets — just a name +
+/// member emails — so it's TS-exported and shown verbatim in the redacted config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct Group {
+pub struct CloneGroup {
     pub name: String,
+    #[serde(default)]
+    pub accounts: Vec<String>,
 }
 
 /// Docker backend settings for the clone fleet. No secrets — the local daemon is
@@ -409,16 +393,14 @@ pub struct AppConfig {
     pub claude: ClaudeConfig,
     #[serde(default)]
     pub codex: CodexConfig,
-    /// Provider-agnostic account pools, one CLIProxyAPI instance per group (the group-proxy
-    /// redesign). A clone binds exactly one group; the control-server routes every request
-    /// from that clone's agents to the group's instance, which owns account selection +
-    /// OAuth refresh.
-    ///
-    /// **Never empty at runtime** — `config::normalize_groups` seeds
-    /// [`DEFAULT_GROUP`] when the list would otherwise be empty (at load, on save,
-    /// and after a delete), so every preset and clone always has a group to bind.
+    /// Named account pools a clone can be bound to for rotation (members are
+    /// emails of imported accounts, from the server's `claude-accounts.json`).
     #[serde(default)]
-    pub groups: Vec<Group>,
+    pub clone_groups: Vec<CloneGroup>,
+    /// Named Codex account pools a clone can be bound to for rotation (members are emails
+    /// of imported Codex accounts, from the server's `codex-accounts.json`).
+    #[serde(default)]
+    pub codex_groups: Vec<CloneGroup>,
     /// Clone presets (env vars + Linear key + auto-select ticket labels). Auto-selected
     /// by ticket label when cloning from a ticket; required pick otherwise.
     #[serde(default)]
@@ -461,7 +443,8 @@ impl Default for AppConfig {
             docker: DockerConfig::default(),
             claude: ClaudeConfig::default(),
             codex: CodexConfig::default(),
-            groups: Vec::new(),
+            clone_groups: Vec::new(),
+            codex_groups: Vec::new(),
             presets: Vec::new(),
             chroma: ChromaMode::default(),
             ssh: SshConfig::default(),
@@ -543,7 +526,8 @@ impl AppConfig {
             docker: self.docker.clone(),
             claude: self.claude.clone(),
             codex: self.codex.clone(),
-            groups: self.groups.clone(),
+            clone_groups: self.clone_groups.clone(),
+            codex_groups: self.codex_groups.clone(),
             presets: self.presets.iter().map(Preset::redacted).collect(),
             chroma: self.chroma,
             ssh: self.ssh.clone(),
@@ -570,7 +554,8 @@ pub struct AppConfigRedacted {
     pub docker: DockerConfig,
     pub claude: ClaudeConfig,
     pub codex: CodexConfig,
-    pub groups: Vec<Group>,
+    pub clone_groups: Vec<CloneGroup>,
+    pub codex_groups: Vec<CloneGroup>,
     pub presets: Vec<PresetRedacted>,
     pub chroma: ChromaMode,
     pub ssh: SshConfig,
@@ -805,7 +790,6 @@ mod tests {
                     name: "med".into(),
                     labels: vec!["Backend".into()],
                     linear_key: "lin_api_secret".into(),
-                    group: "pooled".into(),
                     vars: vec![EnvVar {
                         key: "A".into(),
                         value: "1".into(),
@@ -826,9 +810,8 @@ mod tests {
         assert!(!json.contains("lin_api_secret"));
         assert_eq!(r.presets.len(), 2);
         assert!(r.presets[0].linear_key_set && r.presets[0].name == "med");
-        assert_eq!(r.presets[0].labels, vec!["Backend"]); // labels/vars/group pass through
+        assert_eq!(r.presets[0].labels, vec!["Backend"]); // labels/vars pass through
         assert_eq!(r.presets[0].vars.len(), 1);
-        assert_eq!(r.presets[0].group, "pooled");
         assert!(!r.presets[1].linear_key_set);
         // Non-secret fields pass through verbatim; the Docker backend has no secret.
         assert_eq!(r.clone_socket, "/srv/rmng-sock/clones.sock");

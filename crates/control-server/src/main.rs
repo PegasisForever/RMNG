@@ -3,7 +3,6 @@
 //! One tokio service binding the video plane, web API + SSE + static frontend, port-forward
 //! data plane (9005), and SSH bastion; `smbd` serves retained clone homes on port 445.
 
-mod antigravity;
 mod app;
 mod assets;
 mod boot;
@@ -11,15 +10,14 @@ mod buildinfra;
 mod cgroup;
 mod chat;
 mod claude;
-mod cliproxy;
 mod clone_ops;
+mod clonekey;
 mod clone_reconcile;
 mod codex;
 mod config;
 mod docker;
 mod files;
 mod forward;
-mod groupproxy;
 mod homes;
 mod jobs;
 mod linear;
@@ -31,8 +29,7 @@ mod smb;
 mod ssh;
 mod state;
 mod termplane;
-mod token_migrate;
-mod tokens;
+mod token_unmigrate;
 mod update;
 mod web;
 
@@ -66,14 +63,6 @@ async fn main() -> Result<()> {
         update::self_upgrade_main(&handoff).await; // diverges
     }
 
-    // Group-proxy sidecar mode (the long-lived `rmng-cliproxy` container, created by
-    // `docker::ensure_group_proxy` from this same image). It owns the `/cc` router AND the
-    // per-group CLIProxyAPI processes, so a control-server update never interrupts an agent
-    // mid-turn — see `groupproxy.rs`. Diverges, exactly like `self-upgrade`.
-    if argv.get(1).map(String::as_str) == Some("group-proxy") {
-        groupproxy::main().await; // diverges
-    }
-
     let cfg = config::load()?;
     let store = Arc::new(state::StateStore::load(config::state_path(&cfg))?);
     state::spawn_watcher(store.clone());
@@ -84,12 +73,6 @@ async fn main() -> Result<()> {
     // switcher renders correctly on a fresh boot, before any `/api/config` PUT or
     // `/api/layout/activate` call runs.
     web::mirror_layout_to_state(&app);
-
-    // Every clone binds an account group. Rows from before that rule (no `group` key at all)
-    // and rows naming a since-deleted group are repointed at the first configured group —
-    // `config::load` above guarantees there is one. Done before the reconcilers start so no
-    // pass ever sees a group-less clone.
-    web::normalize_clone_groups(&app);
 
     // Probe the Docker environment (daemon reachable, self-container detection, sock mount,
     // render node) and cache the report so `GET /api/setup/env` + the wizard can render it.
@@ -144,53 +127,6 @@ async fn main() -> Result<()> {
                 Err(_) => {
                     tracing::warn!("build-infra ensure timed out after 120s (retries next boot)")
                 }
-            }
-        }
-    }
-
-    // The group-proxy sidecar (`rmng-cliproxy`): the container that owns the `/cc` router and
-    // every per-group CLIProxyAPI process. Ensured here — after `self_setup` (which gave us our
-    // container id and the `rmng` network) — and create-if-absent / start-if-stopped ONLY: if it
-    // is already running we leave it alone even when its image differs from ours, because
-    // recreating it would kill every in-flight agent turn in the fleet. That is exactly what
-    // this split exists to prevent; the operator rolls it forward from Settings
-    // (`POST /api/groupproxy/restart`) when clones are idle. See `groupproxy.rs`.
-    //
-    // `apply_now` runs FIRST so every configured group's port/secrets and the shared admin
-    // secret are on the /data volume before the sidecar reads them (it opens that file
-    // read-only and never allocates). Non-fatal + bounded, same posture as build-infra: a
-    // failure here costs inference until the next boot or a manual restart, but must not stop
-    // the server (the operator fixes it from the very UI this boot brings up).
-    {
-        let cfg = app.config();
-        if cfg.setup_complete {
-            cliproxy::apply_now(&app);
-            match app.docker.env().await.self_container {
-                Some(self_id) => {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        app.docker.ensure_group_proxy(&cfg, &self_id),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::error!(
-                            "group-proxy sidecar ensure failed: {e:#} — clone inference is down \
-                             until it is running (retry from Settings → Group proxy)"
-                        ),
-                        Err(_) => tracing::error!(
-                            "group-proxy sidecar ensure timed out after 60s — clone inference \
-                             may be down (retry from Settings → Group proxy)"
-                        ),
-                    }
-                }
-                // Dev mode: no self-container to copy mounts from, so there is no sidecar to
-                // ensure. Run `rmng-control-server group-proxy` by hand alongside the server.
-                None => tracing::info!(
-                    "dev mode (not a container): skipping the {} sidecar — run \
-                     `rmng-control-server group-proxy` separately for clone inference",
-                    groupproxy::CONTAINER
-                ),
             }
         }
     }
@@ -252,20 +188,25 @@ async fn main() -> Result<()> {
         }
     }
 
-    // One-shot legacy-token migration: convert the OLD RMNG-managed OAuth stores
-    // (claude-accounts.json / codex-accounts.json + the old config's cloneGroups/codexGroups)
-    // into the NEW per-group CLIProxyAPI `auth-dir` credential files, so an upgraded deployment
-    // carries every account + its group across with no operator re-login. Stamp-gated (runs
-    // once) and best-effort: it must NOT block boot, so any panic is caught and logged. Runs
-    // here — after config load, BEFORE the `cliproxy` supervisor spawns below — so the migrated
-    // groups + auth-dirs exist when the supervisor first reads `config.groups`.
+    // One-shot reverse token migration: recover the OAuth credentials the retired group-proxy
+    // era left in the per-group CLIProxyAPI `auth-dir`s and write them back into the RMNG-owned
+    // stores (claude-accounts.json / codex-accounts.json + cloneGroups/codexGroups), so an
+    // upgraded deployment carries every account across with no operator re-login. Stamp-gated
+    // (runs once) and best-effort: it must NOT block boot, so any panic is caught and logged.
+    //
+    // ORDERING IS LOAD-BEARING. The `rmng-cliproxy` sidecar is torn down FIRST: while it runs it
+    // keeps per-group CLIProxyAPI processes alive, and those refresh OAuth tokens on their own
+    // schedule. Since a refresh token is single-use, a rotation landing after we copy a
+    // credential would invalidate the copy — leaving dead tokens in the stores and forcing a
+    // re-login of every account, exactly what this migration exists to avoid.
+    app.docker.remove_retired_group_proxy().await;
     if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        token_migrate::migrate_legacy_tokens(&app)
+        token_unmigrate::unmigrate_group_proxy_tokens(&app)
     })) {
-        tracing::error!("legacy token migration panicked (booting anyway): {e:?}");
+        tracing::error!("group-proxy token reverse-migration panicked (booting anyway): {e:?}");
     }
 
-    // GStreamer init MUST finish before cliproxy/smb/ssh (and any other child
+    // GStreamer init MUST finish before smb/ssh (and any other child
     // spawners). Those supervisors otherwise inherit gst-plugin-scanner pipes and
     // hang media init forever — web/video/forward never bind. See
     // docs/superpowers/specs/2026-07-24-gstreamer-init-before-children-design.md.
@@ -281,8 +222,7 @@ async fn main() -> Result<()> {
             // same directory as the `clones` SMB share (port 445), so the homes are browsable over
             // `smb://<host>/clones` too, and the /dev/shm reconciler that keeps each running clone's
             // shared memory at LXC parity (~50% of RAM) so Chromium/Electron apps don't exhaust
-            // Docker's 64 MB default (also needs `pid: "host"`). Claude/Codex account usage is polled
-            // by-group via `cliproxy::run_usage_poller` (below), which owns all account display now.
+            // Docker's 64 MB default (also needs `pid: "host"`).
             tokio::spawn(monitor::run(app_for_bg.clone()));
             tokio::spawn(clone_reconcile::run(app_for_bg.clone()));
             tokio::spawn(homes::run(app_for_bg.clone()));
@@ -293,16 +233,15 @@ async fn main() -> Result<()> {
             tokio::spawn(chat::run_scheduler(app_for_bg.clone()));
             tokio::spawn(smb::run(app_for_bg.clone()));
             tokio::spawn(ssh::run(app_for_bg.clone()));
-            // NOTE: the per-group CLIProxyAPI supervisor + the `/cc` router do NOT run here
-            // anymore — they live in the `rmng-cliproxy` sidecar container (ensured above),
-            // so recreating this container never interrupts an agent mid-turn. See
-            // `groupproxy.rs`. What stays here is the usage poller below, which reads the
-            // shared auth-dirs off the /data volume directly (no instance dial).
-            // By-group usage poller: reads each instance's auth-dir tokens and publishes
-            // `ControlState.usage_groups` (the old flat claude_accounts pollers stay running).
-            tokio::spawn(cliproxy::run_usage_poller(app_for_bg.clone()));
-            tokio::spawn(app_for_bg.tokens.clone().run_persister());
-            tokio::spawn(app_for_bg.tokens.clone().run_fable_ticker());
+            // Claude + Codex account subsystems. Each provider runs a usage poller (which
+            // also refreshes tokens and fans any rotation out to the clones running that
+            // account) and a rotator (which re-balances group-bound clones off an exhausted
+            // account). Together they are the only thing that writes a clone's credential
+            // files — the reconciler deliberately has no token logic.
+            tokio::spawn(claude::run_poller(app_for_bg.clone()));
+            tokio::spawn(claude::run_rotator(app_for_bg.clone()));
+            tokio::spawn(codex::run_poller(app_for_bg.clone()));
+            tokio::spawn(codex::run_rotator(app_for_bg.clone()));
         },
         move |media_init| {
             // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.

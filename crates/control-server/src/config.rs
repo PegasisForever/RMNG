@@ -13,7 +13,7 @@ pub fn config_path() -> PathBuf {
 
 pub fn load() -> Result<AppConfig> {
     let path = config_path();
-    let mut cfg = match std::fs::read_to_string(&path) {
+    let cfg = match std::fs::read_to_string(&path) {
         Ok(s) => {
             let mut cfg: AppConfig =
                 serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
@@ -35,31 +35,7 @@ pub fn load() -> Result<AppConfig> {
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    // Seed the default group + repoint dangling preset groups. Persisted so the file on
-    // disk matches what the server is running, and so a fresh install shows "Default" in
-    // Settings without the operator having to save first.
-    if normalize_groups(&mut cfg) {
-        tracing::info!("seeding the default account group / repointing preset groups");
-        save(&cfg)?;
-    }
     Ok(cfg)
-}
-
-/// Parse `./config.json` WITHOUT the legacy-migration / default-group rewrites [`load`] can
-/// perform. For the `rmng-cliproxy` sidecar (see [`crate::groupproxy`]), which shares the
-/// `/data` volume with the control-server and must never be a second writer of any file in it:
-/// the control-server has already normalized this file at its own boot, and a concurrent
-/// `save` from two processes could interleave.
-///
-/// A missing file yields defaults, matching [`load`]; a malformed one is a hard error, so the
-/// caller keeps the config it already had rather than silently reverting to defaults.
-pub fn load_read_only() -> Result<AppConfig> {
-    let path = config_path();
-    match std::fs::read_to_string(&path) {
-        Ok(s) => serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AppConfig::default()),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
 }
 
 /// Fold legacy config fields into the current shape; true = the file must be
@@ -94,8 +70,6 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                     name: name.to_string(),
                     labels: Vec::new(),
                     linear_key: String::new(),
-                    // Repointed at the first group by `normalize_groups` after load.
-                    group: String::new(),
                     vars,
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
@@ -164,7 +138,6 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wire::Group;
 
     #[test]
     fn merge_preserves_blank_scalars_and_applies_changes() {
@@ -187,20 +160,15 @@ mod tests {
     fn merge_presets_by_name() {
         use wire::{EnvVar, Preset};
         let mut base = AppConfig::default();
-        // Pre-normalized base: a group exists and both presets name it, so `normalize_groups`
-        // is a no-op here and the assertions below isolate the by-name merge.
-        base.groups = vec![wire::Group { name: "g".into() }];
         base.presets = vec![
             Preset {
                 name: "med".into(),
                 linear_key: "OLD-MED".into(),
-                group: "g".into(),
                 ..Default::default()
             },
             Preset {
                 name: "gone".into(),
                 linear_key: "OLD-GONE".into(),
-                group: "g".into(),
                 ..Default::default()
             },
         ];
@@ -283,67 +251,39 @@ mod tests {
     }
 
     #[test]
-    fn merge_replaces_groups_wholesale() {
-        // The editor always sends the full group list, so a plain array replace is right.
+    fn merge_replaces_account_pools_wholesale() {
+        // The editor always sends the full pool list, so a plain array replace is right.
         let mut base = AppConfig::default();
-        base.groups = vec![Group { name: "old".into() }];
+        base.clone_groups = vec![wire::CloneGroup { name: "old".into(), accounts: vec![] }];
         let incoming = serde_json::json!({
-            "groups": [{ "name": "team" }, { "name": "beta" }],
+            "cloneGroups": [
+                { "name": "team", "accounts": ["a@x.com"] },
+                { "name": "beta", "accounts": [] },
+            ],
+            "codexGroups": [{ "name": "gpt", "accounts": ["z@o.com"] }],
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.groups.len(), 2);
-        assert_eq!(merged.groups[0].name, "team");
-        assert_eq!(merged.groups[1].name, "beta");
-        // An empty array clears all groups — but `normalize_groups` immediately re-seeds
-        // the default, because a config with no group leaves presets and clones with
-        // nothing to bind.
-        let cleared = merge_update(&merged, serde_json::json!({ "groups": [] })).unwrap();
-        assert_eq!(cleared.groups.len(), 1);
-        assert_eq!(cleared.groups[0].name, wire::DEFAULT_GROUP);
+        assert_eq!(merged.clone_groups.len(), 2);
+        assert_eq!(merged.clone_groups[0].name, "team");
+        assert_eq!(merged.clone_groups[0].accounts, vec!["a@x.com"]);
+        assert_eq!(merged.clone_groups[1].name, "beta");
+        // The two providers' pools are independent.
+        assert_eq!(merged.codex_groups.len(), 1);
+        assert_eq!(merged.codex_groups[0].name, "gpt");
+        // An empty array clears the pools outright — unlike the group-proxy model there is no
+        // "every clone must bind one" invariant to re-seed a default for.
+        let cleared = merge_update(&merged, serde_json::json!({ "cloneGroups": [] })).unwrap();
+        assert!(cleared.clone_groups.is_empty());
+        // Clearing one provider leaves the other alone.
+        assert_eq!(cleared.codex_groups.len(), 1);
     }
 
-    #[test]
-    fn normalize_groups_seeds_default_and_repoints_presets() {
-        use wire::Preset;
-        // Empty groups → seed "Default", and every preset points at it.
-        let mut cfg = AppConfig::default();
-        cfg.presets = vec![Preset {
-            name: "p".into(),
-            ..Default::default()
-        }];
-        assert!(normalize_groups(&mut cfg));
-        assert_eq!(cfg.groups.len(), 1);
-        assert_eq!(cfg.groups[0].name, wire::DEFAULT_GROUP);
-        assert_eq!(cfg.presets[0].group, wire::DEFAULT_GROUP);
-        // Idempotent — a normalized config reports no change.
-        assert!(!normalize_groups(&mut cfg));
-
-        // A preset naming a deleted group is repointed at the FIRST group, not the default:
-        // the default is only a fallback for "no groups at all".
-        let mut cfg = AppConfig::default();
-        cfg.groups = vec![Group { name: "a".into() }, Group { name: "b".into() }];
-        cfg.presets = vec![
-            Preset {
-                name: "keeps".into(),
-                group: "b".into(),
-                ..Default::default()
-            },
-            Preset {
-                name: "dangling".into(),
-                group: "deleted".into(),
-                ..Default::default()
-            },
-        ];
-        assert!(normalize_groups(&mut cfg));
-        assert_eq!(cfg.presets[0].group, "b"); // a valid group is left alone
-        assert_eq!(cfg.presets[1].group, "a");
-    }
 
     #[test]
-    fn merge_replaces_groups_alongside_codex_config() {
+    fn merge_replaces_account_pools_alongside_codex_config() {
         use wire::CodexConfig;
         let mut base = AppConfig::default();
-        base.groups = vec![Group { name: "old".into() }];
+        base.clone_groups = vec![wire::CloneGroup { name: "old".into(), accounts: vec![] }];
         base.codex = CodexConfig {
             poll_secs: 600,
             usage_polling: true,
@@ -351,19 +291,19 @@ mod tests {
         };
         // Editor sends the full group list + a codex config patch.
         let incoming = serde_json::json!({
-            "groups": [{ "name": "team" }],
+            "cloneGroups": [{ "name": "team", "accounts": [] }],
             "codex": { "pollSecs": 300, "usagePolling": false },
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.groups.len(), 1);
-        assert_eq!(merged.groups[0].name, "team");
+        assert_eq!(merged.clone_groups.len(), 1);
+        assert_eq!(merged.clone_groups[0].name, "team");
         assert_eq!(merged.codex.poll_secs, 300);
         assert!(!merged.codex.usage_polling);
         // A codex-only patch leaves the groups untouched.
         let m2 =
             merge_update(&merged, serde_json::json!({ "codex": { "pollSecs": 120 } })).unwrap();
-        assert_eq!(m2.groups.len(), 1, "codex patch must not disturb groups");
-        assert_eq!(m2.groups[0].name, "team");
+        assert_eq!(m2.clone_groups.len(), 1, "codex patch must not disturb pools");
+        assert_eq!(m2.clone_groups[0].name, "team");
     }
 
     /// A base config that has finished first-run setup (one-time fields locked).
@@ -760,35 +700,6 @@ pub fn state_path(cfg: &AppConfig) -> PathBuf {
     Path::new(&cfg.data_dir).join("state.json")
 }
 
-/// Enforce the two account-group invariants, in this order (the second depends on the
-/// first): **there is always at least one group**, and **every preset names a real one**.
-///
-/// An empty `groups` seeds [`wire::DEFAULT_GROUP`]. Then any preset whose `group` is blank
-/// or names a group that no longer exists is repointed at the first group. Repointing
-/// rather than rejecting is deliberate: deleting a group is a normal operation, and it must
-/// not leave the config unsavable or start failing every clone of a preset that referenced
-/// it. Returns true if anything changed, so callers can persist.
-///
-/// Run at load, after every `merge_update`, and after a group delete — the three ways the
-/// invariants can be broken.
-pub fn normalize_groups(cfg: &mut AppConfig) -> bool {
-    let mut changed = false;
-    if cfg.groups.is_empty() {
-        cfg.groups.push(wire::Group {
-            name: wire::DEFAULT_GROUP.to_string(),
-        });
-        changed = true;
-    }
-    let first = cfg.groups[0].name.clone();
-    for p in cfg.presets.iter_mut() {
-        if !cfg.groups.iter().any(|g| g.name == p.group) {
-            p.group = first.clone();
-            changed = true;
-        }
-    }
-    changed
-}
-
 /// Atomically write `config.json` at 0600 (it holds secrets).
 pub fn save(cfg: &AppConfig) -> Result<()> {
     let path = config_path();
@@ -837,7 +748,6 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
     enforce_categories(base, &merged)?;
     validate_docker_subnet(&merged.docker.subnet)?;
     validate_layout_presets(&mut merged.layout_presets)?;
-    normalize_groups(&mut merged);
     Ok(merged)
 }
 
@@ -993,20 +903,10 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // Default account group. Absent/blank leaves it empty here; `normalize_groups` (run
-        // at the end of `merge_update`) repoints it at the first configured group, which is
-        // also what catches a row naming a group that was deleted in the same save.
-        let group = r
-            .get("group")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
         out.push(wire::Preset {
             name,
             labels,
             linear_key,
-            group,
             vars,
             agent_playbook,
             global_prompt,

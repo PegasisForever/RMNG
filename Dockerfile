@@ -21,13 +21,8 @@
 #                    (bun build --compile).
 #   2. rust-build  — rustup stable; dev deps; cargo build --release clone-daemon + rmng-cli
 #                    + control-server.
-#   3. go-build    — cliproxy-sidecar: one CLIProxyAPI (v7) instance per account group. These
-#                    are spawned/supervised by the `rmng-cliproxy` container — this same image
-#                    run as `rmng-control-server group-proxy` (see groupproxy.rs), NOT by the
-#                    control-server process. Independent of 1/2, so BuildKit runs all three in
-#                    parallel.
-#   4. runtime     — ubuntu:26.04, runtime libs + samba (smbd serves clone homes over SMB)
-#                    + /usr/local/bin/cliproxy-sidecar + /usr/local/share/rmng payloads
+#   3. runtime     — ubuntu:26.04, runtime libs + samba (smbd serves clone homes over SMB)
+#                    + /usr/local/share/rmng payloads
 #                    (2 binaries + static/), a local rmng uid-1000 user for the share,
 #                    WORKDIR /data, EXPOSE 9000 9001 9005 445.
 
@@ -99,33 +94,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp target/release/rmng-control-server /out/rmng-control-server
 
 # ---------------------------------------------------------------------------------------
-# 3. go build stage — cliproxy-sidecar (fully parallel with 1/2)
-# ---------------------------------------------------------------------------------------
-# One CLIProxyAPI service instance per account group. The control-server writes each
-# instance's config.yaml + auth-dir and spawns this binary per group (crates/control-server/
-# src/cliproxy.rs), routing clone traffic to it. Static (CGO off) so it drops straight into
-# the runtime stage; upstream TLS uses the runtime's ca-certificates.
-FROM golang:1.26 AS go-build
-WORKDIR /src/cliproxy-sidecar
-# Manifest first so the module-download layer caches across source-only edits.
-COPY cliproxy-sidecar/go.mod cliproxy-sidecar/go.sum ./
-RUN go mod download
-COPY cliproxy-sidecar/ ./
-# Patch the pinned CLIProxyAPI model registry to add Claude Opus 5 (upstream PR
-# router-for-me/CLIProxyAPI#4547, unmerged — without it the sidecar rejects opus-5 with
-# "unknown provider for model claude-opus-5"). Copy the module out of the read-only cache,
-# insert the opus-5 entry into its embedded models.json (idempotent; see tools/patchmodels),
-# and point the build at the patched copy via a filesystem `replace` (no go.sum churn). Drop
-# this once upstream ships opus-5 — the patcher then no-ops and the replace is inert.
-RUN set -eux; \
-    src="$(go list -m -f '{{.Dir}}' github.com/router-for-me/CLIProxyAPI/v7)"; \
-    cp -a "$src" /cliproxy-patched; chmod -R u+w /cliproxy-patched; \
-    go run ./tools/patchmodels /cliproxy-patched/internal/registry/models/models.json; \
-    go mod edit -replace "github.com/router-for-me/CLIProxyAPI/v7=/cliproxy-patched"
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/cliproxy-sidecar .
-
-# ---------------------------------------------------------------------------------------
-# 4. runtime stage
+# 3. runtime stage
 # ---------------------------------------------------------------------------------------
 FROM ubuntu:26.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
@@ -174,12 +143,6 @@ LABEL org.opencontainers.image.revision="$GIT_SHA" \
 
 COPY --from=rust-build /out/rmng-control-server /usr/local/bin/rmng-control-server
 
-# Per-group inference proxy. One process is spawned per account group by the supervisor in
-# cliproxy.rs, which runs inside the `rmng-cliproxy` sidecar container — this same image under
-# the `group-proxy` subcommand. That container is why this binary ships here and not in a
-# separate image: the sidecar reuses the control-server image wholesale.
-COPY --from=go-build   /out/cliproxy-sidecar    /usr/local/bin/cliproxy-sidecar
-
 # Payloads + frontend on the image filesystem, stored PLAIN (assets.rs / web.rs read
 # these). The control-server injects clone-daemon / agent-wrapper (→ /opt/rmng/bin) and
 # the rmng CLI (→ /usr/local/bin) into every clone at CREATE time — the sole delivery
@@ -192,9 +155,7 @@ COPY --from=bun-build   /src/frontend/build/client      /usr/local/share/rmng/st
 
 # CWD-relative config.json + data/ land in the /data volume (config.rs uses relative paths).
 WORKDIR /data
-# 9000 web/API, 9001 video, 9005 forward, 445 SMB (clone homes). NOT listed: 9010, the
-# `/cc` router the `rmng-cliproxy` sidecar (this same image, `group-proxy` subcommand) serves
-# — it is bridge-internal by design and never published to the host.
+# 9000 web/API, 9001 video, 9005 forward, 445 SMB (clone homes).
 EXPOSE 9000 9001 9005 445
 # Logging default only (not a setting — no config lives in env, per the no-env invariant).
 ENV RUST_LOG=info,tower_http=warn,clip=debug

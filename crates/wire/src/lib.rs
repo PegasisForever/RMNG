@@ -26,13 +26,13 @@ pub mod socket;
 pub mod viewer;
 
 pub use config::{
-    AppConfig, AppConfigRedacted, ChromaMode, ClaudeConfig, CodexConfig, ConfigPutResponse,
-    DEFAULT_GROUP, DockerConfig, EnvCheckRow, EnvVar, Group, ImageInfo, ListenConfig, Preset,
+    AppConfig, AppConfigRedacted, ChromaMode, ClaudeConfig, CloneGroup, CodexConfig,
+    ConfigPutResponse, DockerConfig, EnvCheckRow, EnvVar, ImageInfo, ListenConfig, Preset,
     PresetRedacted, SetupEnv, SshConfig,
 };
 pub use control::{
-    Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, CloneTokenUsage,
-    CodexResetMark, ContainerStats, ControlState, GroupProxyStatus, GroupUsage, RmngClone,
+    Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
+    CodexResetMark, ContainerStats, ControlState, RmngClone,
     LayoutPreset, LxcStats,
     MonitorSpec, MonitorState, Operation, OperationKind, OperationStatus, PortForward, Provider,
     ScheduledMessage, UpdateStatus,

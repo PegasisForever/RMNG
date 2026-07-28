@@ -135,9 +135,6 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 )
                 .await
             }
-            CloneCmd::Bind { clone, group } => {
-                commands::clone_bind(client, clone, group, json).await
-            }
             CloneCmd::Select { clone, none } => {
                 commands::select(client, clone.as_deref(), *none, json).await
             }

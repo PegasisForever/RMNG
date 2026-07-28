@@ -6,7 +6,7 @@
 //! injected payload binaries, then restart the clone daemon and agent wrapper so their running
 //! processes use the current payload and configuration.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
@@ -221,148 +221,60 @@ pub(crate) fn ssh_stamp_entry() -> TarEntry {
     }
 }
 
-/// Fallback GPT model list for Codex + OpenCode, used ONLY when the group's live `/v1/models`
-/// catalog can't be read — the group has no GPT accounts authenticated yet, or its CLIProxyAPI
-/// instance is still starting (see [`crate::cliproxy::group_catalog`]). In steady state the
-/// model list is derived live from that catalog (already blacklist-filtered), so new GPT models
-/// appear automatically; this const is just the safety net so a clone never gets a broken config.
+/// Claude Code's default model — `opus[1m]`, its `opus` alias with the 1M-context beta.
 ///
-/// Codex/OpenCode list GPT models only (never Claude), so their pickers can't surface a Claude
-/// model — the soft per-agent visibility rule from the group-proxy plan. There is NO bare
-/// `gpt-5.6` — it ships as the tiers `gpt-5.6-terra` / `-sol` / `-luna`, plus the previous
-/// generation `gpt-5.5`. `terra` is the preferred default. The blacklisted GPT ids
-/// (gpt-5.4[-mini], gpt-5.3-codex-spark, codex-auto-review, gpt-image-*) are hidden from every
-/// catalog via `cliproxy::EXCLUDED_CODEX_MODELS`.
-const FALLBACK_GPT_MODELS: &[&str] = &["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5"];
-
-/// [`FALLBACK_GPT_MODELS`] as an owned `Vec<String>` — what callers pass to the config
-/// generators when a group's live `/v1/models` catalog can't be read (or isn't queried, e.g. the
-/// one-shot initial provision, which the reconciler refreshes with the live list on its next
-/// pass).
-pub(crate) fn fallback_gpt_models() -> Vec<String> {
-    FALLBACK_GPT_MODELS.iter().map(|s| s.to_string()).collect()
-}
-
-/// The GPT model a picker defaults to: prefer `gpt-5.6-terra` when the group serves it, else the
-/// first served id. `None` only for an empty list (callers guarantee a non-empty list via the
-/// [`FALLBACK_GPT_MODELS`] fallback, and both config generators guard on this being `Some`).
-/// This is the Codex + OpenCode default and is intentionally left unchanged — only Claude Code's
-/// default (see [`default_claude_model`]) prefers Opus.
-fn default_gpt_model(models: &[String]) -> Option<&str> {
-    models
-        .iter()
-        .map(String::as_str)
-        .find(|m| *m == "gpt-5.6-terra")
-        .or_else(|| models.first().map(String::as_str))
-}
-
-/// Claude Code's default model. `opus[1m]` is Claude Code's `opus` alias with the 1M-context beta:
-/// a client-side alias it resolves to the group's served Opus via gateway model discovery, so it's
-/// valid without a catalog and tracks the flagship without pinning an id. Used both as the
-/// served-Opus choice in [`default_claude_model`] and as the fallback before a group's live
-/// `/v1/models` catalog can first be read (no accounts authenticated yet / its CLIProxyAPI instance
-/// still starting, see [`crate::cliproxy::group_catalog`]).
+/// A client-side alias Claude Code resolves against the models its endpoint serves, so it tracks
+/// the flagship without pinning a version id here. It used to be resolved per-group from the
+/// CLIProxyAPI instance's live `/v1/models` catalog; with the group proxy gone every clone talks
+/// to Anthropic directly, so there is no catalog to consult and this constant IS the answer.
 const FALLBACK_CLAUDE_MODEL: &str = "opus[1m]";
 
-/// Claude Code's default model (its `ANTHROPIC_MODEL`), resolved group-aware from the group's
-/// live catalog: when the group serves any Opus, **`opus[1m]`** — Claude Code's `opus` alias with
-/// the 1M-context beta, resolved client-side to the served Opus via gateway model discovery (so it
-/// tracks the flagship without pinning an id here); else the first `claude-` id; else `gpt_fallback`
-/// — a GPT-only group, so Claude Code still has a working default (its own picker is held to the
-/// served set). `None` only for a truly empty resolution (an unreadable catalog with no GPT
-/// fallback), in which case the caller uses [`FALLBACK_CLAUDE_MODEL`]. Pure so it can be
-/// unit-tested.
-///
-/// This is Claude-Code-only. Codex + OpenCode keep defaulting to [`default_gpt_model`]
-/// (`gpt-5.6-terra`); they never see this value.
-fn default_claude_model(catalog: &[String], gpt_fallback: Option<&str>) -> Option<String> {
-    // Any served Opus → Claude Code's `opus[1m]` alias (== FALLBACK_CLAUDE_MODEL); Claude Code
-    // resolves the alias to the served Opus itself, so we don't pin a version.
-    if catalog.iter().any(|id| id.to_lowercase().contains("opus")) {
-        return Some(FALLBACK_CLAUDE_MODEL.to_string());
-    }
-    catalog
-        .iter()
-        .find(|id| id.starts_with("claude-"))
-        .map(String::to_string)
-        .or_else(|| gpt_fallback.map(str::to_string))
-}
-
-/// A grouped clone's `ANTHROPIC_MODEL` line, resolved from its group's full live catalog.
+/// A clone's `ANTHROPIC_MODEL` line.
 ///
 /// Shared by BOTH env-writing paths so they agree byte-for-byte: the create path
 /// (`jobs::run_clone`) and the per-clone resync below. Keeping one definition is what stops a
 /// fresh clone from being born without the var and then having the reconciler add it up to
 /// `RECONCILE_INTERVAL` later — a visible ~30 s window in which the clone's Claude Code ran on
-/// its built-in default instead of the group's.
-///
-/// An unreadable catalog (no accounts yet, instance still starting) yields
-/// [`FALLBACK_CLAUDE_MODEL`] rather than nothing, so the var is always present; the resync
-/// upgrades it once the group answers.
-pub(crate) fn claude_model_env_var(catalog: &[String]) -> wire::EnvVar {
-    let catalog_gpt: Vec<String> = catalog
-        .iter()
-        .filter(|id| !id.starts_with("claude-"))
-        .cloned()
-        .collect();
-    let value = default_claude_model(catalog, default_gpt_model(&catalog_gpt))
-        .unwrap_or_else(|| FALLBACK_CLAUDE_MODEL.to_string());
+/// its built-in default instead of ours.
+pub(crate) fn claude_model_env_var() -> wire::EnvVar {
     wire::EnvVar {
         key: "ANTHROPIC_MODEL".into(),
-        value,
+        value: FALLBACK_CLAUDE_MODEL.to_string(),
     }
 }
 
-fn codex_config_toml(cc_base_url: Option<&str>, gpt_models: &[String], headless: bool) -> String {
+/// Env keys RMNG used to write into `/etc/environment` and no longer does.
+///
+/// [`etc_environment_sync_script`] builds its strip-list from the **desired** keys, so a key we
+/// simply stop emitting is never removed from a clone that already has it — it would survive
+/// forever. These four are the group-proxy era's inference wiring: `ANTHROPIC_BASE_URL` points at
+/// the `rmng-cliproxy` container, which no longer exists, so a clone that kept it would fail every
+/// agent request with no self-heal. Listing them here strips them (they are never re-appended),
+/// and the resulting change trips [`ENV_CHANGED_MARKER`] → the agent-wrapper restart, which is the
+/// only thing that can update an already-running wrapper's frozen process environment.
+///
+/// `RMNG_PROXY_KEY` is deliberately NOT here: it outlived the proxy as the clone's identity token
+/// (sub-clone parent detection in `web.rs`, and clone↔clone SSH in the fleet CLI).
+const RETIRED_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+];
+
+/// The managed Codex config: the shared MCP tables, and nothing else.
+///
+/// The group-proxy era added a `[model_providers.rmng]` block pointing Codex at the `/cc/v1`
+/// OpenAI-compatible surface and keyed by `RMNG_PROXY_KEY`. That surface is gone — Codex
+/// authenticates from `~/.codex/auth.json`, which the server writes directly (see
+/// [`crate::codex::apply_clone_token`]) — so no provider block is emitted and Codex uses its own
+/// default model against its own endpoint.
+fn codex_config_toml(headless: bool) -> String {
     let mut body =
         String::from("# Managed by RMNG. Re-created by the RMNG clone reconciler.\n\n");
-
-    // Group-proxy provider (bare top-level keys MUST precede any [table] in TOML). When the
-    // control host resolves, route Codex through the control-server's /cc/v1 OpenAI-compatible
-    // surface and make it the active provider defaulting to a GPT model, so a Claude model can
-    // never be picked from Codex. Additive: the old ~/.codex/auth.json push still runs; with
-    // this provider active Codex uses RMNG_PROXY_KEY over the proxy instead. Gated on a resolved
-    // default model too, so an empty model list never yields a provider with no default (broken).
-    let cc_base = cc_base_url.map(str::trim).filter(|s| !s.is_empty());
-    let provider = cc_base.zip(default_gpt_model(gpt_models));
-    if let Some((_base, model)) = provider {
-        body.push_str("model_provider = \"rmng\"\n");
-        body.push_str(&format!("model = \"{model}\"\n"));
-        // Default Codex to HIGH reasoning effort on the default GPT tier (gpt-5.6-terra).
-        body.push_str("model_reasoning_effort = \"high\"\n\n");
-    }
-
     // The managed MCP tables (single source of truth: `managed_mcp`). `desktop` (clone-daemon
     // :9004) is dropped on headless clones; `linear` auths from the env at runtime.
     body.push_str(&codex_mcp_toml(headless));
-
-    if let Some((base, _model)) = provider {
-        // The RMNG group-proxy provider. Schema per the Codex config reference
-        // (https://learn.chatgpt.com/docs/config-file/config-reference and .../config-sample):
-        //   - base_url ends in /v1; for the Responses wire protocol Codex appends `/responses`
-        //     (so it POSTs `{base}/responses`, which the /cc router forwards to the instance).
-        //   - wire_api = "responses" is the only supported value and matches the surface the
-        //     instance serves.
-        //   - env_key names the env var Codex reads at runtime and sends as the Bearer token
-        //     (RMNG_PROXY_KEY, injected into /etc/environment per clone).
-        //   - supports_websockets = false forces HTTP+SSE — it disables the Responses-API
-        //     WebSocket transport, satisfying the plan's "Codex custom providers with WebSockets
-        //     disabled" requirement (this is the real key; the sample config shows it commented).
-        // requires_openai_auth is intentionally omitted (defaults false — we auth with the
-        // env_key bearer, not a ChatGPT login). Codex has no per-provider model allow-list; the
-        // single top-level `model` + `model_provider` above selects the default GPT model.
-        body.push_str(&format!(
-            r#"
-[model_providers.rmng]
-name = "RMNG"
-base_url = "{base}"
-wire_api = "responses"
-env_key = "RMNG_PROXY_KEY"
-supports_websockets = false
-"#
-        ));
-    }
-
     body
 }
 
@@ -388,37 +300,21 @@ supports_websockets = false
 ///   - the top-level `model` sets the default as `"<provider>/<id>"`.
 /// The global managed path is ~/.config/opencode/opencode.json. `gpt_models` is the group's live
 /// (blacklist-filtered) `/v1/models` GPT set, or [`FALLBACK_GPT_MODELS`] when that can't be read.
-fn opencode_config_json(cc_base_url: Option<&str>, gpt_models: &[String], headless: bool) -> String {
+fn opencode_config_json(headless: bool) -> String {
     // The managed MCP map (single source of truth: `managed_mcp`). `permission: {"*":"allow"}`
     // runs OpenCode fully autonomously (no approval prompts), matching how the other clone agents
     // run — Claude Code / node-agent use bypassPermissions, and the clone is a disposable sandbox.
-    let mut cfg = serde_json::json!({
+    //
+    // No `provider` block: the group-proxy era pointed OpenCode at the `/cc/v1` OpenAI-compatible
+    // surface keyed by `RMNG_PROXY_KEY`, and that surface no longer exists. Unlike Claude Code and
+    // Codex, OpenCode has no RMNG-managed credential file to fall back on, so it is left
+    // unconfigured — the operator supplies their own provider if they want to use it. This
+    // matches OpenCode's state before the group proxy existed.
+    let cfg = serde_json::json!({
         "$schema": "https://opencode.ai/config.json",
         "mcp": opencode_mcp_map(headless),
         "permission": { "*": "allow" },
     });
-
-    // The rmng provider only when the control host resolves AND a default model exists — an empty
-    // model list would yield a provider with no default (broken). Additive to the MCP section.
-    if let (Some(base), Some(default_model)) = (
-        cc_base_url.map(str::trim).filter(|s| !s.is_empty()),
-        default_gpt_model(gpt_models),
-    ) {
-        let models: serde_json::Map<String, serde_json::Value> = gpt_models
-            .iter()
-            .map(|m| (m.clone(), serde_json::json!({ "name": m })))
-            .collect();
-        cfg["model"] = serde_json::json!(format!("rmng/{default_model}"));
-        cfg["provider"] = serde_json::json!({
-            "rmng": {
-                "npm": "@ai-sdk/openai-compatible",
-                "name": "RMNG",
-                "options": { "baseURL": base, "apiKey": "{env:RMNG_PROXY_KEY}" },
-                "models": models,
-            }
-        });
-    }
-
     serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into())
 }
 
@@ -564,12 +460,7 @@ fn rmng_cli_skill_entries() -> Vec<TarEntry> {
 /// reads. All identical body across the three rules files (`opencode.ai/docs/rules`,
 /// codex/claude equivalents), so a single source drives every agent's operating memory. The
 /// content-hash stamp on this set means a Settings edit to layer a/c re-applies on the next pass.
-pub(crate) fn codex_parity_entries(
-    cc_base_url: Option<&str>,
-    gpt_models: &[String],
-    headless: bool,
-    global_prompt: &str,
-) -> Vec<TarEntry> {
+pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<TarEntry> {
     let guidance = |path: &str| TarEntry {
         path: path.to_string(),
         data: global_prompt.as_bytes().to_vec(),
@@ -584,16 +475,15 @@ pub(crate) fn codex_parity_entries(
         guidance("home/rmng/.config/opencode/AGENTS.md"),
         TarEntry {
             path: "home/rmng/.codex/config.toml".to_string(),
-            data: codex_config_toml(cc_base_url, gpt_models, headless).into_bytes(),
+            data: codex_config_toml(headless).into_bytes(),
             mode: 0o600,
             uid: CLONE_UID,
             gid: CLONE_GID,
         },
-        // OpenCode's global config: the shared MCP set (always) plus the rmng provider (when it
-        // resolves). Unlike before, this file is always written — the MCP section is unconditional.
+        // OpenCode's global config: the shared MCP set. Always written.
         TarEntry {
             path: "home/rmng/.config/opencode/opencode.json".to_string(),
-            data: opencode_config_json(cc_base_url, gpt_models, headless).into_bytes(),
+            data: opencode_config_json(headless).into_bytes(),
             mode: 0o600,
             uid: CLONE_UID,
             gid: CLONE_GID,
@@ -877,6 +767,9 @@ echo "installed polkit sudo-group rule at $dest"
 
 fn etc_environment_sync_script(desired_env: &str) -> String {
     let desired_b64 = B64.encode(desired_env);
+    // One `KEY` per line, appended to the strip-list below. These are stripped but never
+    // re-appended, which is what actually removes a key we no longer emit — see RETIRED_ENV_KEYS.
+    let retired = RETIRED_ENV_KEYS.join("\n");
     format!(
         r#"set -e
 etc=/etc/environment
@@ -899,7 +792,10 @@ if [ -f "$legacy" ]; then
   cat "$tmp" > "$base"
   awk '/^[A-Za-z_][A-Za-z0-9_]*=/' "$legacy" >> "$base"
 fi
-grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$desired" | sed 's/=.*//' | sort -u > "$keys_file"
+{{ grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$desired" | sed 's/=.*//'; cat <<'RMNG_RETIRED_KEYS'
+{retired}
+RMNG_RETIRED_KEYS
+}} | sed '/^$/d' | sort -u > "$keys_file"
 awk -F= 'NR==FNR {{ drop[$1]=1; next }} !($1 in drop)' "$keys_file" "$base" > "$tmp"
 if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | wc -l)" -eq 0 ]; then
   printf '\n' >> "$tmp"
@@ -1064,12 +960,10 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
 async fn ensure_codex_parity(
     app: &App,
     clone_id: &str,
-    gpt_models: &[String],
     headless: bool,
     global_prompt: &str,
 ) -> Result<bool> {
-    let cc_base = crate::provision::cc_base_url(app).await;
-    let entries = codex_parity_entries(cc_base.as_deref(), gpt_models, headless, global_prompt);
+    let entries = codex_parity_entries(headless, global_prompt);
     let desired = desired_payload_hash(&entries);
     if read_stamp(app, clone_id, codex_parity_stamp_path(), "codex parity")
         .await?
@@ -1232,7 +1126,6 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
     // the host list — this is what catches a group deleted out from under a live clone, and a
     // hand-edited state.json picked up by the watcher. A no-op (no write, no SSE) in the
     // steady state, which is every pass but the rare repair.
-    crate::web::normalize_clone_groups(app);
 
     let hosts: Vec<_> = app
         .store
@@ -1244,12 +1137,6 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
 
     let cfg = app.config();
     let control_env = crate::provision::control_env_vars(app).await;
-
-    // Per-pass group → full live `/v1/models` catalog cache (both claude + gpt ids), so N clones
-    // sharing a group hit the group's `/v1/models` at most once per reconcile pass (the loop runs
-    // every RECONCILE_INTERVAL). Both the Codex/OpenCode GPT list and Claude Code's default model
-    // are derived from this one fetch.
-    let mut catalog_cache: HashMap<String, Vec<String>> = HashMap::new();
 
     for h in &hosts {
         let id = h.id.as_str();
@@ -1269,45 +1156,11 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         }
         warned.remove(&format!("{id}:ssh"));
 
-        // Resolve this clone's group model catalog once per pass — N clones sharing a group hit
-        // the group's `/v1/models` at most once. The FULL catalog (both claude + gpt ids, already
-        // blacklist-filtered) yields BOTH the OpenCode/Codex GPT list and Claude Code's default
-        // model. No group, or a group whose instance can't be read yet (no accounts / still
-        // starting), leaves the catalog empty: the GPT list falls back to FALLBACK_GPT_MODELS and
-        // (for grouped clones) the Claude default to FALLBACK_CLAUDE_MODEL (Opus).
-        let group = Some(h.group.trim()).filter(|g| !g.is_empty());
-        let catalog = match group {
-            Some(group) => {
-                if let Some(cached) = catalog_cache.get(group) {
-                    cached.clone()
-                } else {
-                    let cat = crate::cliproxy::group_catalog(app, group).await;
-                    catalog_cache.insert(group.to_string(), cat.clone());
-                    cat
-                }
-            }
-            None => Vec::new(),
-        };
-        // The group's live GPT ids (non-`claude-`), empty when the catalog can't be read.
-        let catalog_gpt: Vec<String> = catalog
-            .iter()
-            .filter(|id| !id.starts_with("claude-"))
-            .cloned()
-            .collect();
-        // Codex/OpenCode default to the live GPT list, or the fallback safety net when empty. This
-        // preserves the pre-live Codex/OpenCode behavior (they still default to `gpt-5.6-terra`).
-        let gpt_models = if catalog_gpt.is_empty() {
-            fallback_gpt_models()
-        } else {
-            catalog_gpt.clone()
-        };
-
         let mut desired_env = control_env.clone();
-        // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY): recomputed
-        // into `/etc/environment` on every resync so an existing clone (created before the
-        // group-proxy model) picks it up without a recreate. Minted + persisted server-side;
-        // never serialized onto `RmngClone`/state.
-        desired_env.extend(crate::provision::router_env_vars(app, id));
+        // Per-clone identity key (`RMNG_PROXY_KEY`): recomputed into `/etc/environment` on every
+        // resync so an existing clone picks it up without a recreate. Minted + persisted
+        // server-side; never serialized onto `RmngClone`/state. See `crate::clonekey`.
+        desired_env.extend(crate::provision::clone_key_env_vars(app, id));
         if let Some(preset) = preset_for_clone(&cfg, h) {
             desired_env.extend(crate::provision::preset_env_vars(preset));
         } else if h.preset_name.as_ref().is_some_and(|s| !s.trim().is_empty()) {
@@ -1317,17 +1170,10 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                 h.preset_name
             );
         }
-        // Claude Code's default model (ANTHROPIC_MODEL), group-aware from the live catalog: Opus
-        // when the group serves one, else the first Claude id, else the group's default GPT
-        // (GPT-only group), else the Opus fallback before the first catalog read. Only grouped
-        // clones get it — a clone with no group keeps Claude Code's built-in default. Codex and
-        // OpenCode are unaffected (they default to `gpt-5.6-terra` via `default_gpt_model`).
-        //
-        // The create path seeds this same var from the same helper, so a fresh clone already has
-        // it and this pass is a no-op content-compare rather than a 30 s-late rewrite.
-        if group.is_some() {
-            desired_env.push(claude_model_env_var(&catalog));
-        }
+        // Claude Code's default model (ANTHROPIC_MODEL). The create path seeds this same var
+        // from the same helper, so a fresh clone already has it and this pass is a no-op
+        // content-compare rather than a 30 s-late rewrite.
+        desired_env.push(claude_model_env_var());
         let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
         let env_script = etc_environment_sync_script(&desired_env);
         match exec_ok_marked(
@@ -1414,7 +1260,7 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         // The global agent prompt (layers a+c) is composed from config + this clone's preset, so a
         // Settings edit re-applies to existing clones on the next pass (content-hash-stamped).
         let global_prompt = crate::web::compose_global_prompt(&cfg, preset_for_clone(&cfg, h));
-        match ensure_codex_parity(app, id, &gpt_models, h.headless, &global_prompt).await {
+        match ensure_codex_parity(app, id, h.headless, &global_prompt).await {
             Ok(true) => {
                 warned.remove(&format!("{id}:codex"));
                 tracing::info!(
@@ -1521,164 +1367,11 @@ pub async fn run(app: App) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_gpt_model_prefers_terra_else_first() {
-        let with_terra = vec!["gpt-5.5".to_string(), "gpt-5.6-terra".to_string()];
-        assert_eq!(default_gpt_model(&with_terra), Some("gpt-5.6-terra"));
-        let without_terra = vec!["gpt-5.6-sol".to_string(), "gpt-5.5".to_string()];
-        assert_eq!(default_gpt_model(&without_terra), Some("gpt-5.6-sol"));
-        let empty: Vec<String> = Vec::new();
-        assert_eq!(default_gpt_model(&empty), None);
-    }
 
-    #[test]
-    fn default_claude_model_prefers_opus_then_first_claude_then_gpt() {
-        // Any served Opus → Claude Code's `opus[1m]` alias (opus + 1M-context beta), regardless of
-        // which Opus id(s) the group serves or their case/order.
-        let with_opus5 = vec![
-            "claude-fable-5".to_string(),
-            "claude-opus-4-8".to_string(),
-            "claude-opus-5".to_string(),
-            "claude-sonnet-5".to_string(),
-        ];
-        assert_eq!(
-            default_claude_model(&with_opus5, None).as_deref(),
-            Some("opus[1m]")
-        );
-        let mixed = vec![
-            "claude-haiku-4-5".to_string(),
-            "claude-opus-4-8".to_string(),
-            "claude-sonnet-5".to_string(),
-            "gpt-5.6-terra".to_string(),
-        ];
-        assert_eq!(
-            default_claude_model(&mixed, Some("gpt-5.6-terra")).as_deref(),
-            Some("opus[1m]")
-        );
-        let upper = vec!["claude-sonnet-5".to_string(), "Claude-Opus-4-8".to_string()];
-        assert_eq!(default_claude_model(&upper, None).as_deref(), Some("opus[1m]"));
 
-        // No opus → the first `claude-` id, ahead of the GPT fallback.
-        let no_opus = vec![
-            "claude-haiku-4-5".to_string(),
-            "claude-sonnet-5".to_string(),
-            "gpt-5.6-terra".to_string(),
-        ];
-        assert_eq!(
-            default_claude_model(&no_opus, Some("gpt-5.6-terra")).as_deref(),
-            Some("claude-haiku-4-5")
-        );
 
-        // GPT-only group (no `claude-` id) → the group's default GPT model, so Claude Code still
-        // has a working default.
-        let gpt_only = vec!["gpt-5.5".to_string(), "gpt-5.6-terra".to_string()];
-        assert_eq!(
-            default_claude_model(&gpt_only, default_gpt_model(&gpt_only)).as_deref(),
-            Some("gpt-5.6-terra")
-        );
 
-        // Empty resolution (unreadable catalog, no GPT fallback) → None; the caller then uses
-        // FALLBACK_CLAUDE_MODEL (the `opus[1m]` alias).
-        assert_eq!(default_claude_model(&[], None), None);
-        assert_eq!(FALLBACK_CLAUDE_MODEL, "opus[1m]");
-    }
 
-    /// `ANTHROPIC_MODEL` is always resolvable, including before a group's catalog can be read.
-    ///
-    /// Regression: the create path used to omit this var entirely and leave it to the reconciler,
-    /// so a fresh clone went up to one `RECONCILE_INTERVAL` (30 s) without a default model. The
-    /// create path now seeds it through this helper — which must therefore never yield "no var",
-    /// even when the group answers with nothing.
-    #[test]
-    fn claude_model_env_var_is_always_present_even_with_an_unreadable_catalog() {
-        let empty = claude_model_env_var(&[]);
-        assert_eq!(empty.key, "ANTHROPIC_MODEL");
-        assert_eq!(empty.value, FALLBACK_CLAUDE_MODEL);
-
-        // A live catalog resolves to the same value the reconciler would have written.
-        let served = vec!["claude-opus-4-8".to_string(), "gpt-5.6-terra".to_string()];
-        assert_eq!(claude_model_env_var(&served).value, "opus[1m]");
-
-        // GPT-only group: still a concrete, working default rather than an absent var.
-        let gpt_only = vec!["gpt-5.5".to_string(), "gpt-5.6-terra".to_string()];
-        assert_eq!(claude_model_env_var(&gpt_only).value, "gpt-5.6-terra");
-    }
-
-    /// The create path must seed `ANTHROPIC_MODEL` itself.
-    ///
-    /// Regression (the bug this fixes): the create path composed the clone's env WITHOUT this
-    /// var and left it to the per-clone resync, so a freshly-created clone's `/etc/environment`
-    /// was missing it for up to one `RECONCILE_INTERVAL`. Measured on CT 101: every other var
-    /// landed at t=3.6 s, `ANTHROPIC_MODEL` at t=35.4 s.
-    ///
-    /// This asserts on `compose_clone_env` — the function the create path actually calls — so
-    /// deleting the seeding fails the test. Asserting only on the pure model helper does not:
-    /// that stays green with the create path unwired, which is exactly the bug.
-    #[test]
-    fn the_create_path_env_already_carries_the_group_model() {
-        let control = vec![wire::EnvVar {
-            key: "RMNG_CONTROL_URL".into(),
-            value: "http://rmng-control:9000".into(),
-        }];
-        let router = vec![wire::EnvVar {
-            key: "RMNG_PROXY_KEY".into(),
-            value: "k".into(),
-        }];
-        let catalog = vec!["claude-opus-4-8".to_string()];
-
-        let env =
-            crate::provision::compose_clone_env(control.clone(), router.clone(), &[], "default", &catalog);
-        let rendered = crate::provision::clone_etc_environment_conf(&env);
-        assert!(
-            rendered.contains("ANTHROPIC_MODEL=opus[1m]\n"),
-            "create-path env must already carry the group model; got:\n{rendered}"
-        );
-
-        // Even before the group's catalog can be read, the var ships (with the fallback) rather
-        // than being absent until the first resync.
-        let cold = crate::provision::compose_clone_env(control.clone(), router.clone(), &[], "default", &[]);
-        let cold_rendered = crate::provision::clone_etc_environment_conf(&cold);
-        assert!(cold_rendered.contains(&format!("ANTHROPIC_MODEL={FALLBACK_CLAUDE_MODEL}\n")));
-
-        // An ungrouped clone keeps Claude Code's built-in default — no var at all.
-        let ungrouped = crate::provision::compose_clone_env(control, router, &[], "  ", &catalog);
-        assert!(!ungrouped.iter().any(|v| v.key == "ANTHROPIC_MODEL"));
-    }
-
-    /// The create path and the resync must write `ANTHROPIC_MODEL` with the SAME precedence, or
-    /// they would fight: one writes preset-wins, the other group-wins, and the value would flip
-    /// every reconcile pass. Both compose `[control…, router…, preset…, ANTHROPIC_MODEL]`, so the
-    /// group value lands last and wins in both.
-    #[test]
-    fn the_group_model_outranks_a_preset_var_on_both_env_paths() {
-        let preset = vec![wire::EnvVar {
-            key: "ANTHROPIC_MODEL".into(),
-            value: "preset-pinned".into(),
-        }];
-        let catalog = vec!["claude-opus-4-8".to_string()];
-
-        let env = crate::provision::compose_clone_env(Vec::new(), Vec::new(), &preset, "default", &catalog);
-        let rendered = crate::provision::clone_etc_environment_conf(&env);
-        assert!(rendered.contains("ANTHROPIC_MODEL=opus[1m]\n"));
-        assert!(!rendered.contains("preset-pinned"));
-        // `etc_environment_conf` keeps the last duplicate only — one line, not two.
-        assert_eq!(rendered.matches("ANTHROPIC_MODEL=").count(), 1);
-    }
-
-    #[test]
-    fn empty_gpt_models_never_emit_a_broken_provider() {
-        // With a cc base but no models, Codex omits the provider and OpenCode omits its provider
-        // block — an empty list must never yield a provider with no default model. OpenCode still
-        // writes the MCP section (that's unconditional).
-        let toml = codex_config_toml(Some("http://rmng-cliproxy:9010/cc/v1"), &[], false);
-        assert!(!toml.contains("model_provider"));
-        assert!(!toml.contains("model_providers.rmng"));
-        let oc = opencode_config_json(Some("http://rmng-cliproxy:9010/cc/v1"), &[], false);
-        assert!(!oc.contains("\"provider\""));
-        assert!(!oc.contains("@ai-sdk/openai-compatible"));
-        assert!(oc.contains("\"mcp\""));
-        assert!(oc.contains("mcp.linear.app"));
-    }
 
     #[test]
     fn payload_stamp_path_is_under_opt_rmng() {
@@ -1721,7 +1414,7 @@ mod tests {
     #[test]
     fn codex_parity_entries_install_global_guidance_and_linear_mcp() {
         let prompt = "# House rules\n\nBe excellent. SENTINEL-A+C.\n";
-        let entries = codex_parity_entries(None, &fallback_gpt_models(), false, prompt);
+        let entries = codex_parity_entries(false, prompt);
         // The SAME global prompt body lands in all three agents' native rules files.
         for path in [
             "home/rmng/.claude/CLAUDE.md",
@@ -1763,36 +1456,6 @@ mod tests {
         assert!(!config_body.contains("base_url"));
     }
 
-    #[test]
-    fn codex_config_adds_active_rmng_provider_when_cc_base_present() {
-        let models = fallback_gpt_models();
-        let toml = codex_config_toml(Some("http://rmng-cliproxy:9010/cc/v1"), &models, false);
-        assert!(toml.contains("model_provider = \"rmng\""));
-        assert!(toml.contains("[model_providers.rmng]"));
-        assert!(toml.contains("base_url = \"http://rmng-cliproxy:9010/cc/v1\""));
-        assert!(toml.contains("wire_api = \"responses\""));
-        assert!(toml.contains("env_key = \"RMNG_PROXY_KEY\""));
-        // HTTP+SSE only: the Responses-API WebSocket transport is explicitly disabled.
-        assert!(toml.contains("supports_websockets = false"));
-        // Default model prefers gpt-5.6-terra at HIGH reasoning effort (Claude models can't be
-        // picked from Codex).
-        assert_eq!(default_gpt_model(&models), Some("gpt-5.6-terra"));
-        assert!(toml.contains("model = \"gpt-5.6-terra\""));
-        assert!(toml.contains("model_reasoning_effort = \"high\""));
-        // GPT-only, never a Claude model.
-        assert!(!toml.to_lowercase().contains("claude"));
-        // Bare top-level keys must precede the first [table] (valid TOML).
-        let mp = toml.find("model_provider = ").unwrap();
-        let first_table = toml.find("[mcp_servers.desktop]").unwrap();
-        assert!(
-            mp < first_table,
-            "top-level keys must come before tables:\n{toml}"
-        );
-        // No cc base → the old behavior (no rmng provider at all).
-        let plain = codex_config_toml(None, &models, false);
-        assert!(!plain.contains("model_providers.rmng"));
-        assert!(!plain.contains("model_provider"));
-    }
 
     #[test]
     fn claude_mcp_script_sets_desktop_headed_and_deletes_it_headless() {
@@ -1822,7 +1485,7 @@ mod tests {
     fn agent_configs_omit_desktop_mcp_when_headless() {
         // Headless clones have no desktop (the clone-daemon on :9004 is deleted), so the shared
         // `desktop` MCP must disappear from every generated agent config while `linear` stays.
-        let hl = codex_parity_entries(None, &fallback_gpt_models(), true, "guide");
+        let hl = codex_parity_entries(true, "guide");
         let codex = String::from_utf8(
             hl.iter()
                 .find(|e| e.path == "home/rmng/.codex/config.toml")
@@ -1847,7 +1510,7 @@ mod tests {
         assert!(oc.contains("mcp.linear.app"));
 
         // Headed keeps desktop in both.
-        let headed = codex_parity_entries(None, &fallback_gpt_models(), false, "guide");
+        let headed = codex_parity_entries(false, "guide");
         let oc_headed = String::from_utf8(
             headed
                 .iter()
@@ -1862,7 +1525,7 @@ mod tests {
 
     #[test]
     fn rmng_cli_skill_written_to_both_skill_locations() {
-        let entries = codex_parity_entries(None, &fallback_gpt_models(), false, "guide");
+        let entries = codex_parity_entries(false, "guide");
         for path in [
             "home/rmng/.claude/skills/rmng-cli/SKILL.md",
             "home/rmng/.agents/skills/rmng-cli/SKILL.md",
@@ -1915,51 +1578,39 @@ mod tests {
         assert_eq!(desc_hl[0]["name"], "linear");
     }
 
+    /// OpenCode gets the shared MCP set and nothing more. Its group-proxy provider block is
+    /// gone with the `/cc/v1` surface it pointed at, and — unlike Claude Code and Codex — there
+    /// is no RMNG-managed credential file to fall back on, so it ships unconfigured.
     #[test]
-    fn opencode_config_is_gpt_only_openai_compatible_provider() {
-        let models = fallback_gpt_models();
-        // No cc base → MCP-only config (no provider), but the file is still produced.
-        let none_base = opencode_config_json(None, &models, false);
-        assert!(!none_base.contains("\"provider\""));
-        assert!(!none_base.contains("@ai-sdk/openai-compatible"));
-        assert!(none_base.contains("\"mcp\""));
-        // Fully autonomous: allow every tool without approval prompts.
-        let v: serde_json::Value = serde_json::from_str(&none_base).unwrap();
-        assert_eq!(v["permission"]["*"], "allow");
-
-        let json = opencode_config_json(Some("http://rmng-cliproxy:9010/cc/v1"), &models, false);
-        assert!(json.contains("\"npm\": \"@ai-sdk/openai-compatible\""));
-        assert!(json.contains("\"baseURL\": \"http://rmng-cliproxy:9010/cc/v1\""));
-        assert!(json.contains("{env:RMNG_PROXY_KEY}"));
-        assert!(json.contains("gpt-5.6-terra"));
-        // Default model is set as "<provider>/<id>" pointing at the GPT default.
-        assert!(json.contains("\"model\": \"rmng/gpt-5.6-terra\""));
-        // The two shared MCP servers ride alongside the provider.
+    fn opencode_config_is_mcp_only_with_no_provider() {
+        let json = opencode_config_json(false);
+        assert!(!json.contains("\"provider\""), "no provider block: {json}");
+        assert!(!json.contains("@ai-sdk/openai-compatible"));
+        assert!(!json.contains("RMNG_PROXY_KEY"), "the identity key is not an inference credential");
+        assert!(!json.contains("\"model\""), "no default model without a provider to serve it");
+        // The shared MCP set + full autonomy still ship.
         assert!(json.contains("\"mcp\""));
         assert!(json.contains("127.0.0.1:9004"));
         assert!(json.contains("mcp.linear.app"));
-        // No Anthropic/Claude *provider* is generated for OpenCode (the substring "claude" must not
-        // appear — the MCP urls don't contain it either).
-        let lower = json.to_lowercase();
-        assert!(!lower.contains("anthropic"));
-        assert!(!lower.contains("claude"));
-        // The parity entries always carry the opencode file now (MCP section is unconditional),
-        // with or without a cc base.
-        for cc in [Some("http://rmng-cliproxy:9010/cc/v1"), None] {
-            let entries = codex_parity_entries(cc, &models, false, "guide");
-            assert!(
-                entries
-                    .iter()
-                    .any(|e| e.path == "home/rmng/.config/opencode/opencode.json")
-            );
-        }
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["permission"]["*"], "allow");
+        // Headless drops the desktop MCP but keeps linear.
+        let hl = opencode_config_json(true);
+        assert!(!hl.contains("127.0.0.1:9004"));
+        assert!(hl.contains("mcp.linear.app"));
+        // The parity entries always carry the opencode file.
+        assert!(
+            codex_parity_entries(false, "guide")
+                .iter()
+                .any(|e| e.path == "home/rmng/.config/opencode/opencode.json")
+        );
     }
 
     #[test]
     fn codex_parity_stamp_hash_changes_when_config_changes() {
         let original =
-            codex_parity_stamp_entry_for(&codex_parity_entries(None, &fallback_gpt_models(), false, "guide"));
-        let mut changed = codex_parity_entries(None, &fallback_gpt_models(), false, "guide");
+            codex_parity_stamp_entry_for(&codex_parity_entries(false, "guide"));
+        let mut changed = codex_parity_entries(false, "guide");
         changed
             .iter_mut()
             .find(|e| e.path == "home/rmng/.codex/config.toml")
@@ -2046,7 +1697,7 @@ mod tests {
     #[test]
     fn etc_environment_sync_uses_desired_env_and_removes_legacy_environment_d() {
         let script = etc_environment_sync_script(
-            "ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\nLINEAR_API_KEY=secret\n",
+            "RMNG_CONTROL_URL=http://rmng-control:9000\nLINEAR_API_KEY=secret\n",
         );
         assert!(script.contains("base64 -d"));
         assert!(script.contains("/etc/environment"));
@@ -2062,50 +1713,105 @@ mod tests {
     /// while one that restarts every pass interrupts chat twice a minute. Both failure modes
     /// live in shell, not Rust, so run the real script against a real file rather than
     /// asserting on its text.
+    /// Run the real sync script against a temp `/etc/environment`, returning whether it
+    /// announced a change. Redirects `$etc` (and parks the legacy path somewhere absent) so no
+    /// root or container is needed.
+    fn run_env_sync(dir: &std::path::Path, etc: &std::path::Path, desired: &str) -> bool {
+        let script = etc_environment_sync_script(desired)
+            .replace("etc=/etc/environment", &format!("etc={}", etc.display()))
+            .replace(
+                "legacy=/home/rmng/.config/environment.d/30-rmng-preset.conf",
+                &format!("legacy={}/nonexistent-legacy", dir.display()),
+            )
+            .replace("install -m 0644 -o root -g root", "install -m 0644")
+            .replace("rmdir /home/rmng/.config/environment.d", "rmdir /nonexistent");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run env sync script");
+        assert!(out.status.success(), "script failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).contains(ENV_CHANGED_MARKER)
+    }
+
+    /// A key RMNG stops emitting is NOT removed by the desired-keys strip-list — it would
+    /// survive on the clone forever. `ANTHROPIC_BASE_URL` pointing at the deleted
+    /// `rmng-cliproxy` container would then fail every agent request with no self-heal, so
+    /// [`RETIRED_ENV_KEYS`] must strip it while leaving operator-owned lines untouched.
+    #[test]
+    fn env_sync_strips_retired_keys_but_keeps_operator_lines() {
+        let dir = std::env::temp_dir().join(format!("rmng-envretire-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let etc = dir.join("environment");
+        // A clone as the group-proxy era left it, plus the operator's own customizations.
+        std::fs::write(
+            &etc,
+            "# operator's own notes\n\
+             ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\n\
+             CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n\
+             ANTHROPIC_AUTH_TOKEN=deadbeef\n\
+             RMNG_PROXY_KEY=keepme\n\
+             MY_OWN_VAR=hello\n\
+             export EDITOR=vim\n",
+        )
+        .unwrap();
+
+        let changed = run_env_sync(
+            &dir,
+            &etc,
+            "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n",
+        );
+        assert!(changed, "stripping dead keys is a change; the agent-wrapper must restart");
+        let body = std::fs::read_to_string(&etc).unwrap();
+
+        // The dead group-proxy wiring is gone.
+        assert!(!body.contains("ANTHROPIC_BASE_URL"), "stale proxy URL survived:\n{body}");
+        assert!(!body.contains("ANTHROPIC_AUTH_TOKEN"), "stale router token survived:\n{body}");
+        assert!(!body.contains("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"), "{body}");
+        // `RMNG_PROXY_KEY` outlived the proxy as the clone's identity token — it must NOT be
+        // treated as retired (sub-clone parent detection + clone↔clone SSH both read it).
+        assert!(body.contains("RMNG_PROXY_KEY=keepme"), "identity key was dropped:\n{body}");
+        assert!(body.contains("RMNG_CONTROL_URL=http://rmng-control:9000"), "{body}");
+        // Operator-owned content is never touched.
+        assert!(body.contains("# operator's own notes"), "comment lost:\n{body}");
+        assert!(body.contains("MY_OWN_VAR=hello"), "operator var lost:\n{body}");
+        assert!(body.contains("export EDITOR=vim"), "export line lost:\n{body}");
+
+        // Idempotent: a second pass with the same desired env is not a change.
+        let changed =
+            run_env_sync(&dir, &etc, "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n");
+        assert!(!changed, "a converged clone must not restart its agent-wrapper every pass");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn env_sync_prints_the_marker_only_when_it_actually_rewrites() {
         let dir = std::env::temp_dir().join(format!("rmng-envsync-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let etc = dir.join("environment");
-
-        // Run the script with `$etc` redirected at our temp file (and the legacy path parked
-        // somewhere that does not exist), so no root/container is needed.
         let run = |desired: &str| -> (String, bool) {
-            let script = etc_environment_sync_script(desired)
-                .replace("etc=/etc/environment", &format!("etc={}", etc.display()))
-                .replace(
-                    "legacy=/home/rmng/.config/environment.d/30-rmng-preset.conf",
-                    &format!("legacy={}/nonexistent-legacy", dir.display()),
-                )
-                .replace("install -m 0644 -o root -g root", "install -m 0644")
-                .replace("rmdir /home/rmng/.config/environment.d", "rmdir /nonexistent");
-            let out = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(&script)
-                .output()
-                .expect("run env sync script");
-            assert!(out.status.success(), "script failed: {}", String::from_utf8_lossy(&out.stderr));
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            let printed = stdout.contains(ENV_CHANGED_MARKER);
-            (stdout, printed)
+            let printed = run_env_sync(&dir, &etc, desired);
+            (String::new(), printed)
         };
 
         // First write: the file did not exist, so this is a change.
-        let (_, printed) = run("ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\n");
+        let (_, printed) = run("RMNG_CONTROL_URL=http://rmng-control:9000\n");
         assert!(printed, "first write must announce the change");
         assert!(
-            std::fs::read_to_string(&etc).unwrap().contains("rmng-cliproxy:9010"),
+            std::fs::read_to_string(&etc).unwrap().contains("rmng-control:9000"),
             "the new value must land on disk"
         );
 
         // Identical desired env: no rewrite, so NO marker — this is what keeps the reconciler
         // from restarting the agent-wrapper on every 30 s pass.
-        let (_, printed) = run("ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\n");
+        let (_, printed) = run("RMNG_CONTROL_URL=http://rmng-control:9000\n");
         assert!(!printed, "an unchanged env must not announce a change");
 
-        // A real change (the group-proxy split moving the URL) announces again.
-        let (_, printed) = run("ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\nEXTRA=1\n");
+        // A real change announces again.
+        let (_, printed) = run("RMNG_CONTROL_URL=http://rmng-control:9000\nEXTRA=1\n");
         assert!(printed, "a changed env must announce it");
 
         let _ = std::fs::remove_dir_all(&dir);

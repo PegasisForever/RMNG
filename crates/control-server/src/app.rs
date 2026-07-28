@@ -6,7 +6,9 @@ use std::sync::{Arc, RwLock};
 use wire::AppConfig;
 
 use crate::chat::ChatState;
-use crate::cliproxy::CliProxyManager;
+use crate::claude::ClaudeStore;
+use crate::clonekey::CloneKeys;
+use crate::codex::CodexStore;
 use crate::docker::DockerCtl;
 use crate::state::StateStore;
 
@@ -16,12 +18,15 @@ pub struct App {
     /// Live config (mutable via `/api/config` in Phase 2; read per use elsewhere).
     pub cfg: Arc<RwLock<AppConfig>>,
     pub http: reqwest::Client,
-    /// Group-proxy state: per-group CLIProxyAPI instance identities, per-clone router keys, and
-    /// the shared admin secret (see [`crate::cliproxy`]). The control-server is this file's sole
-    /// WRITER; the `rmng-cliproxy` sidecar opens it read-only. The transparent proxy transport
-    /// that used to sit beside this lives in that sidecar now — no agent traffic passes through
-    /// this process.
-    pub cliproxy: Arc<CliProxyManager>,
+    /// Claude accounts: the 0600 OAuth secret store + last-good usage cache. The server owns
+    /// each account's refresh lifecycle and pushes only short-lived access tokens into clones
+    /// (see [`crate::claude`]) — nothing that can refresh ever leaves this process.
+    pub claude: Arc<ClaudeStore>,
+    /// Codex (ChatGPT) accounts — the sibling of [`Self::claude`] (see [`crate::codex`]).
+    pub codex: Arc<CodexStore>,
+    /// Per-clone identity bearers (`RMNG_PROXY_KEY`). Outlived the group proxy that minted them:
+    /// sub-clone parent detection and clone↔clone SSH both key off this (see [`crate::clonekey`]).
+    pub clone_keys: Arc<CloneKeys>,
     /// Per-clone chat fan-out + in-flight state.
     pub chat: Arc<ChatState>,
     /// Media plane shared state (clone conns + latest frames).
@@ -41,9 +46,9 @@ pub struct App {
     /// reports + data-conn counts); `/events` fans it out as a named `forwards` SSE
     /// event. SSE-only — never persisted (see [`crate::forward::ForwardBus`]).
     pub forwards: Arc<crate::forward::ForwardBus>,
-    /// Per-clone newly processed token totals. Its browser projection is SSE-only while its
-    /// server-private records persist independently from `ControlState`.
-    pub tokens: Arc<crate::tokens::TokenBus>,
+    /// Volatile per-clone agent-activity timestamps, fed by the agent-wrapper's `busy`/`activity`
+    /// SSE frames. The `working` vs `idle` signal (see [`crate::monitor::ActivityBus`]).
+    pub activity: Arc<crate::monitor::ActivityBus>,
     /// Volatile per-clone "operator last looked at this clone" timestamps. Set on selection
     /// changes (`web::activate`) and read by the monitor to suppress a `working → idle`
     /// notification for a clone whose latest output the operator has already seen.
@@ -52,9 +57,9 @@ pub struct App {
 
 impl App {
     pub fn new(store: Arc<StateStore>, cfg: AppConfig) -> Self {
-        let cliproxy = Arc::new(CliProxyManager::load(&cfg.data_dir));
-        let tokens = Arc::new(crate::tokens::TokenBus::load(&cfg.data_dir));
-        tokens.sync_clones(&store.get().hosts);
+        let claude = Arc::new(ClaudeStore::load(&cfg.data_dir));
+        let codex = Arc::new(CodexStore::load(&cfg.data_dir));
+        let clone_keys = Arc::new(CloneKeys::load(&cfg.data_dir));
         // `DockerCtl::connect` is infallible and I/O-free: even a missing socket FILE
         // (bare `docker run` without the sock bind) boots the server — the failure is
         // surfaced per call and by `self_setup`'s env report, so the wizard shows it.
@@ -66,14 +71,16 @@ impl App {
                 .user_agent("rmng-control-server")
                 .build()
                 .expect("reqwest client"),
-            cliproxy,
+            claude,
+            codex,
+            clone_keys,
             chat: Arc::new(ChatState::default()),
             media: Arc::new(crate::mediaplane::MediaHandle::default()),
             docker,
             stats: Arc::new(crate::monitor::StatsBus::new()),
             lxc_stats: Arc::new(crate::monitor::LxcStatsBus::new()),
             forwards: Arc::new(crate::forward::ForwardBus::new()),
-            tokens,
+            activity: Arc::new(crate::monitor::ActivityBus::new()),
             views: Arc::new(crate::monitor::ViewTracker::new()),
         }
     }

@@ -64,11 +64,13 @@ pub struct CreateArgs {
     /// Clone-source image reference to create from (see `rmng image ls`)
     #[arg(long)]
     pub from: String,
-    /// Account group OVERRIDE — the pool this clone's agents route through. Every clone binds
-    /// one; omitted falls back to the parent's group (inside a clone), then the preset's
-    /// default, then the first configured group.
+    /// Claude account for the new clone: an email, `auto`, `none`, or `group:<pool>`.
+    /// Omitted inherits the parent's selection (inside a clone), else `auto`.
     #[arg(long)]
-    pub group: Option<String>,
+    pub claude_account: Option<String>,
+    /// Codex account, same forms. Independent of --claude-account.
+    #[arg(long)]
+    pub codex_account: Option<String>,
     /// Headless clone: no desktop; the viewer shows a tmux tab view instead of a stream
     #[arg(long)]
     pub headless: bool,
@@ -222,14 +224,6 @@ pub enum CloneCmd {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
-    /// Bind a clone to an account group
-    Bind {
-        /// Clone id
-        clone: String,
-        /// Account group name to bind. Required — every clone binds a group, so a binding can
-        /// be changed but not cleared.
-        group: String,
-    },
     /// Point the operator's viewer at a clone (operator-only; no effect on command targeting)
     Select {
         /// Clone id (omit and pass --none to clear the selection)
@@ -274,7 +268,6 @@ pub enum ImageCmd {
 pub enum Provider {
     Claude,
     Codex,
-    Gemini,
 }
 
 #[derive(Subcommand, Debug)]
@@ -284,6 +277,25 @@ pub enum AccountCmd {
         /// Only show accounts for this provider
         #[arg(long)]
         provider: Option<Provider>,
+    },
+    /// Hot-swap a clone's account for one provider (no restart — the credential file is
+    /// rewritten and the agent re-reads it on its next request)
+    Swap {
+        /// Clone id
+        clone: String,
+        /// An email, `auto`, `none`, or `group:<pool>`
+        account: String,
+        /// Swap the Codex account instead of the Claude one
+        #[arg(long)]
+        codex: bool,
+    },
+    /// Delete an imported account by email, moving any clones running it
+    Rm {
+        /// Account email
+        account: String,
+        /// Remove a Codex account instead of a Claude one
+        #[arg(long)]
+        codex: bool,
     },
 }
 
@@ -494,14 +506,14 @@ mod tests {
     #[test]
     fn clone_create_positional_hostname_and_from() {
         let cli = Cli::parse_from([
-            "rmng", "clone", "create", "w-cp", "--from", "tmpl:latest", "--group", "pooled",
+            "rmng", "clone", "create", "w-cp", "--from", "tmpl:latest", "--claude-account", "pooled",
             "--wait", "--timeout", "120",
         ]);
         match cli.cmd {
             Cmd::Clone(CloneCmd::Create { hostname, preset, no_preset, common }) => {
                 assert_eq!(hostname, "w-cp");
                 assert_eq!(common.from, "tmpl:latest");
-                assert_eq!(common.group.as_deref(), Some("pooled"));
+                assert_eq!(common.claude_account.as_deref(), Some("pooled"));
                 assert!(!no_preset && !common.headless && !common.top_level);
                 assert_eq!(preset, None);
                 assert_eq!(common.parent, None);
@@ -646,21 +658,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn clone_bind_and_select_none_flags() {
-        let bind = Cli::parse_from(["rmng", "clone", "bind", "w-cp", "pooled"]);
-        assert!(matches!(
-            bind.cmd,
-            Cmd::Clone(CloneCmd::Bind { ref clone, ref group })
-                if clone == "w-cp" && group == "pooled"
-        ));
-        // The group is REQUIRED and there is no --none: a binding can be changed, never
-        // cleared. (`clone select --none` is unrelated — that's the viewer's selection.)
-        assert!(Cli::try_parse_from(["rmng", "clone", "bind", "w-cp"]).is_err());
-        assert!(Cli::try_parse_from(["rmng", "clone", "bind", "w-cp", "--none"]).is_err());
-        let sel = Cli::parse_from(["rmng", "clone", "select", "--none"]);
-        assert!(matches!(sel.cmd, Cmd::Clone(CloneCmd::Select { none: true, clone: None })));
-    }
 
     #[test]
     fn op_ls_and_wait() {

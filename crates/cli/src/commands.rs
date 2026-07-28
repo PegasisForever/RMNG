@@ -14,7 +14,7 @@ use wire::{ContainerStats, ControlState, MonitorState, Operation, Provider};
 use crate::args::{
     AccountCmd, CreateArgs, DesktopCmd, ImageCmd, Provider as CliProvider, WaitArgs,
 };
-use crate::output::{human_size, pct, short_id, table, token_count};
+use crate::output::{human_size, pct, short_id, table};
 use crate::wait::{WaitOutcome, wait_for_op};
 
 fn emit_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -65,10 +65,10 @@ fn clone_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
 }
 
 pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
-    let (st, stats, tokens) = tokio::try_join!(client.state(), client.stats(), client.tokens())?;
-    // `--json` emits the JOINED view the human table shows — each clone object with its
-    // live `stats` + `tokens` nested — so an agent parsing JSON gets CPU/RAM/tokens too (the raw
-    // wire `ControlState` omits those volatile metrics). Stable CLI-owned shape; see docs/CLI.md.
+    let (st, stats) = tokio::try_join!(client.state(), client.stats())?;
+    // `--json` emits the JOINED view the human table shows — each clone object with its live
+    // `stats` nested — so an agent parsing JSON gets CPU/RAM too (the raw wire `ControlState`
+    // omits those volatile metrics). Stable CLI-owned shape; see docs/CLI.md.
     if json {
         let clones: Vec<Value> = st
             .hosts
@@ -76,7 +76,6 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
             .map(|h| {
                 let mut o = serde_json::to_value(h).unwrap_or_else(|_| serde_json::json!({}));
                 o["stats"] = serde_json::to_value(stats.get(&h.id)).unwrap_or(Value::Null);
-                o["tokens"] = serde_json::to_value(tokens.get(&h.id)).unwrap_or(Value::Null);
                 o
             })
             .collect();
@@ -119,23 +118,23 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
                 format!("{}{}", h.id, sel)
             };
             let stats = stats.get(&h.id);
-            let usage = tokens.get(&h.id);
             vec![
                 id_cell,
                 h.local_ip.clone().unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
                 h.preset_name.clone().unwrap_or_default(),
-                h.group.clone(),
+                h.claude_account_email
+                    .clone()
+                    .or_else(|| h.claude_selection.clone())
+                    .unwrap_or_default(),
+                h.codex_account_email
+                    .clone()
+                    .or_else(|| h.codex_selection.clone())
+                    .unwrap_or_default(),
                 stats
                     .map(|stats| cpu_pct(stats.cpu_pct))
                     .unwrap_or_default(),
                 stats.map(ram).unwrap_or_default(),
-                usage
-                    .map(|usage| token_count(usage.new_input_tokens))
-                    .unwrap_or_default(),
-                usage
-                    .map(|usage| token_count(usage.output_tokens))
-                    .unwrap_or_default(),
                 clone_status(h.archived, h.monitor_state),
             ]
         })
@@ -144,8 +143,7 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
         "{}",
         table(
             &[
-                "ID", "IP", "IMAGE", "PRESET", "GROUP", "CPU", "RAM", "TOK-IN", "TOK-OUT",
-                "STATUS",
+                "ID", "IP", "IMAGE", "PRESET", "CLAUDE", "CODEX", "CPU", "RAM", "STATUS",
             ],
             &rows,
         )
@@ -186,7 +184,8 @@ fn clone_opts<'a>(
     claude_instructions: Option<&'a String>,
 ) -> CloneOpts<'a> {
     CloneOpts {
-        group: common.group.as_deref(),
+        claude_account: common.claude_account.as_deref(),
+        codex_account: common.codex_account.as_deref(),
         preset,
         headless: common.headless,
         parent: common.parent.as_deref(),
@@ -324,18 +323,52 @@ pub async fn restore(client: &Client, clone: &str, wait: &WaitArgs, json: bool) 
     started(client, op, wait, json, "restore").await
 }
 
-/// `rmng clone bind <clone> <group>` — rebind a clone's account group. Every clone binds one,
-/// so this can change the binding but never clear it; the server rejects an unknown name.
-pub async fn clone_bind(client: &Client, clone: &str, group: &str, json: bool) -> Result<u8> {
-    let group = group.trim();
-    if group.is_empty() {
-        bail!("provide a group name (see `rmng group ls`)");
+/// `rmng account swap <clone> <account> [--codex]` — hot-swap a clone's account for one
+/// provider. `account` is a selection verbatim: an email, `auto`, `none`, or `group:<pool>`.
+/// The token is installed into the clone's credential file immediately — no restart.
+pub async fn account_swap(
+    client: &Client,
+    clone: &str,
+    account: &str,
+    codex: bool,
+    json: bool,
+) -> Result<u8> {
+    let account = account.trim();
+    if account.is_empty() {
+        bail!("provide an account: an email, `auto`, `none`, or `group:<pool>`");
     }
-    let reply = client.set_clone_group(clone, group).await?;
+    let reply = if codex {
+        client.codex_swap(clone, account).await?
+    } else {
+        client.claude_swap(clone, account).await?
+    };
     if json {
         emit_json(&reply)?;
     } else {
-        println!("set {clone} group → {group}");
+        let provider = if codex { "codex" } else { "claude" };
+        println!("set {clone} {provider} account → {account}");
+    }
+    Ok(0)
+}
+
+/// `rmng account rm <account> [--codex]` — delete an imported account by email. The server
+/// refuses if a clone is explicitly PINNED to it (an operator choice, not a rotation), and
+/// otherwise moves every clone that was running it onto another account.
+pub async fn account_rm(client: &Client, account: &str, codex: bool, json: bool) -> Result<u8> {
+    let reply = if codex {
+        client.codex_delete(account).await?
+    } else {
+        client.claude_delete(account).await?
+    };
+    if json {
+        emit_json(&reply)?;
+    } else {
+        let moved = reply
+            .get("moved")
+            .and_then(|m| m.as_array())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        println!("removed {account} ({moved} clone(s) moved)");
     }
     Ok(0)
 }
@@ -405,48 +438,35 @@ pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
 
 pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8> {
     match cmd {
+        AccountCmd::Swap { clone, account, codex } => {
+            account_swap(client, clone, account, *codex, json).await
+        }
+        AccountCmd::Rm { account, codex } => account_rm(client, account, *codex, json).await,
         AccountCmd::Ls { provider } => {
             let st = client.state().await?;
+            // `claude_accounts` holds BOTH providers' rows, tagged by `provider`.
             let accounts: Vec<_> = st
-                .usage_groups
+                .claude_accounts
                 .iter()
-                .flat_map(|group| {
-                    group
-                        .accounts
-                        .iter()
-                        .filter(move |account| match provider {
-                            None => true,
-                            Some(CliProvider::Claude) => {
-                                matches!(account.provider, Some(Provider::Claude) | None)
-                            }
-                            Some(CliProvider::Codex) => {
-                                matches!(account.provider, Some(Provider::Codex))
-                            }
-                            Some(CliProvider::Gemini) => {
-                                matches!(account.provider, Some(Provider::Antigravity))
-                            }
-                        })
-                        .map(move |account| (group.name.as_str(), account))
+                .filter(|account| match provider {
+                    None => true,
+                    Some(CliProvider::Claude) => {
+                        matches!(account.provider, Some(Provider::Claude) | None)
+                    }
+                    Some(CliProvider::Codex) => matches!(account.provider, Some(Provider::Codex)),
                 })
-                .collect::<Vec<_>>();
+                .collect();
             if json {
-                emit_json(
-                    &accounts
-                        .iter()
-                        .map(|(_, account)| *account)
-                        .collect::<Vec<_>>(),
-                )?;
+                emit_json(&accounts)?;
                 return Ok(0);
             }
             let rows: Vec<Vec<String>> = accounts
                 .iter()
-                .map(|(group, account)| {
+                .map(|account| {
                     vec![
-                        group.to_string(),
                         account.email.clone(),
                         match account.provider {
                             Some(Provider::Codex) => "codex".into(),
-                            Some(Provider::Antigravity) => "gemini".into(),
                             _ => "claude".into(),
                         },
                         account
@@ -469,7 +489,6 @@ pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8
                 "{}",
                 table(
                     &[
-                        "GROUP",
                         "EMAIL",
                         "PROVIDER",
                         "ASSIGNABLE",
