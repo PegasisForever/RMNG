@@ -118,8 +118,11 @@ export function CloneModal({
   const [claudeInstructions, setClaudeInstructions] = useState("");
   // Account-group OVERRIDE. "" = follow the resolved preset's default (the server resolves
   // it). A non-empty value pins the clone to that pool regardless of preset.
-  const [claudeAccount, setClaudeAccount] = useState("auto");
-  const [codexAccount, setCodexAccount] = useState("auto");
+  // Blank = "follow the preset". Seeding these to `auto` would make the preset's configured
+  // default unreachable: the server's chain takes an explicit request over the preset, and
+  // `auto` IS explicit — so every clone made here would silently override the preset.
+  const [claudeAccount, setClaudeAccount] = useState("");
+  const [codexAccount, setCodexAccount] = useState("");
   // Account groups (from config), for the picker options.
   const [groups, setGroups] = useState<CloneGroup[]>([]);
   const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
@@ -509,6 +512,11 @@ export function CloneModal({
               groups={groups}
               accounts={accounts.filter((a) => a.provider !== "codex")}
               value={claudeAccount}
+              blankLabel={
+                effectivePreset?.claudeAccount
+                  ? `Preset default (${effectivePreset.claudeAccount})`
+                  : "Preset default / auto"
+              }
               onChange={setClaudeAccount}
               className={field}
             />
@@ -520,6 +528,11 @@ export function CloneModal({
               groups={codexGroups}
               accounts={accounts.filter((a) => a.provider === "codex")}
               value={codexAccount}
+              blankLabel={
+                effectivePreset?.codexAccount
+                  ? `Preset default (${effectivePreset.codexAccount})`
+                  : "Preset default / auto"
+              }
               onChange={setCodexAccount}
               className={field}
             />

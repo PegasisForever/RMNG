@@ -144,11 +144,6 @@ fn codex_parity_stamp_path() -> &'static str {
     "etc/rmng/codex-parity-hash"
 }
 
-/// Stamp marking the one-time group-proxy migration of a clone's dead provider credentials.
-fn dead_creds_stamp_path() -> &'static str {
-    "etc/rmng/group-proxy-migrated"
-}
-
 pub(crate) fn desired_payload_hash(entries: &[TarEntry]) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for e in entries {
@@ -520,18 +515,6 @@ if ! runuser -u rmng -- bash -lc 'command -v codex >/dev/null 2>&1'; then
   runuser -u rmng -- bash -lc 'set -o pipefail; CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
     || { echo "codex install failed" >&2; exit 1; }
 fi
-"#
-}
-
-/// The group-proxy migration on an existing clone: delete the now-dead provider credential
-/// files. Under the group-proxy model CLIProxyAPI owns tokens and clones reach inference only
-/// through the `/cc` router (its env + agent configs are rewritten by the other reconcile
-/// steps), so a clone must never carry its own `~/.claude/.credentials.json` /
-/// `~/.codex/auth.json`. Idempotent (`rm -f`); combined with the additive env/config injection
-/// this makes an existing clone work after its agent restarts — no container recreate.
-fn dead_creds_cleanup_script() -> &'static str {
-    r#"set -e
-rm -f /home/rmng/.claude/.credentials.json /home/rmng/.codex/auth.json
 "#
 }
 
@@ -951,45 +934,6 @@ async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<
     Ok(true)
 }
 
-/// One-time group-proxy migration: remove the dead provider credential files from an existing
-/// clone (see [`dead_creds_cleanup_script`]). Stamped so it runs once; best-effort at the call
-/// site. Returns whether the cleanup ran this pass.
-async fn ensure_dead_creds_removed(app: &App, clone_id: &str) -> Result<bool> {
-    if read_stamp(
-        app,
-        clone_id,
-        dead_creds_stamp_path(),
-        "group-proxy migration",
-    )
-    .await?
-    .as_deref()
-        == Some("ok")
-    {
-        return Ok(false);
-    }
-    exec_ok(
-        app,
-        clone_id,
-        dead_creds_cleanup_script(),
-        "remove dead provider credentials",
-    )
-    .await?;
-    app.docker
-        .upload_tar(
-            clone_id,
-            vec![TarEntry {
-                path: dead_creds_stamp_path().to_string(),
-                data: b"ok\n".to_vec(),
-                mode: 0o644,
-                uid: 0,
-                gid: 0,
-            }],
-        )
-        .await
-        .with_context(|| format!("{clone_id}: writing group-proxy migration stamp"))?;
-    Ok(true)
-}
-
 async fn ensure_codex_cli(app: &App, clone_id: &str) -> Result<()> {
     let code = app
         .docker
@@ -1238,26 +1182,6 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
-        // Group-proxy migration: strip the now-dead provider credential files so an existing
-        // clone stops using its own tokens and routes through the `/cc` proxy instead (its env
-        // + agent configs were rewritten above). Best-effort + stamped — a failure is logged
-        // and retried next pass, never fatal to the rest of the reconcile.
-        match ensure_dead_creds_removed(app, id).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:creds-migrate"));
-                tracing::info!(target: "clone_reconcile", "clone {id}: removed dead provider credentials (group-proxy migration)");
-            }
-            Ok(false) => {
-                warned.remove(&format!("{id}:creds-migrate"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:creds-migrate")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: group-proxy credential migration failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: group-proxy credential migration still failing: {e:#}");
-                }
-            }
-        }
 
         match ensure_payload_current(app, id).await {
             Ok(true) => {
@@ -1343,6 +1267,43 @@ mod tests {
         let s = ssh_prepare_script("");
         assert!(s.contains("mkdir -p /home/rmng/.config/rmng/ssh"));
         assert!(!s.contains("rm -f /home/rmng/.ssh/id_ed25519"));
+    }
+
+    /// NOTHING the reconciler runs may delete a clone's provider credential files.
+    ///
+    /// The group-proxy era had a step that did exactly that (`dead_creds_cleanup_script`) —
+    /// correct then, because the proxy owned tokens and a clone must not carry its own. Under
+    /// the restored model those two files ARE the auth: `claude::apply_clone_token` and
+    /// `codex::apply_clone_token` write them, and both agents re-read them per request.
+    ///
+    /// It survived the revert and ran on every pass, ~30 s after each clone was created. The
+    /// failure was invisible: the create op logged `account: assigned …` and went green, the
+    /// clone row kept showing the account, and `push_stale_tokens` would NOT repair it — its
+    /// in-memory `pushed` map already recorded that exact token as delivered, so the clone
+    /// stayed tokenless until the account's token next rotated or the server restarted.
+    ///
+    /// This test greps the emitted scripts rather than asserting a function is absent, so it
+    /// also catches the deletion being reintroduced somewhere else in the file.
+    #[test]
+    fn no_reconcile_script_removes_provider_credentials() {
+        let scripts: Vec<(&str, String)> = vec![
+            ("codex_prepare", codex_prepare_script().to_string()),
+            ("ssh_bootstrap", ssh_bootstrap_script().to_string()),
+            ("polkit_sudo_rule", polkit_sudo_rule_script().to_string()),
+            ("tmp_mount_mask", tmp_mount_mask_script().to_string()),
+            ("claude_mcp", claude_mcp_script(false)),
+            ("claude_mcp_headless", claude_mcp_script(true)),
+            ("etc_environment_sync", etc_environment_sync_script("A=1\n")),
+        ];
+        for (name, body) in scripts {
+            for cred in [".claude/.credentials.json", ".codex/auth.json"] {
+                assert!(
+                    !body.contains(cred),
+                    "{name} touches {cred} — that file IS the clone's auth under the restored \
+                     credential-injection model, and deleting it fails silently"
+                );
+            }
+        }
     }
 
     #[test]

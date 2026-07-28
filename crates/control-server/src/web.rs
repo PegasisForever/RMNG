@@ -765,11 +765,37 @@ async fn clone(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| bad("body must include { image }".into()))?;
     // Account selections, verbatim as the operator wrote them: an email, `auto`, `none`, or
-    // `group:<pool>`. Validation happens in `claude::resolve_assignment` at assign time, which
-    // owns the pool lists; an unknown email falls back to the best-scored account with a warning
-    // rather than failing the whole create.
+    // `group:<pool>`.
+    //
+    // A named POOL is validated here, at the boundary, because the assign-time path cannot fail
+    // usefully: `claude::pick_group_account` returns `None` for an unknown pool, which makes
+    // `resolve_assignment` return `None`, which makes `jobs::run_clone` skip the whole account
+    // step — producing a running, tokenless clone and not one line of explanation. A typo'd
+    // `--claude-account group:pooed` should not cost you a silent clone.
+    //
+    // An unknown *email* is deliberately NOT rejected: that path warns and falls back to the
+    // best-scored account, which is a recoverable outcome the operator can see in the account
+    // column, and rejecting it would break `auto`-style workflows against a not-yet-imported
+    // address.
     let claude_account = str_field("claudeAccount");
     let codex_account = str_field("codexAccount");
+    let cfg_pools = app.config();
+    let check_pool = |sel: Option<&String>, pools: &[wire::CloneGroup], flag: &str| {
+        let Some(name) = sel.and_then(|s| s.trim().strip_prefix("group:")) else {
+            return Ok(());
+        };
+        let name = name.trim();
+        if pools.iter().any(|p| p.name == name) {
+            return Ok(());
+        }
+        let known: Vec<&str> = pools.iter().map(|p| p.name.as_str()).collect();
+        Err(bad(format!(
+            "unknown {flag} pool '{name}' (configured: {})",
+            if known.is_empty() { "none".to_string() } else { known.join(", ") }
+        )))
+    };
+    check_pool(claude_account.as_ref(), &cfg_pools.clone_groups, "claudeAccount")?;
+    check_pool(codex_account.as_ref(), &cfg_pools.codex_groups, "codexAccount")?;
     let agent_instructions = str_field("agentInstructions");
     let claude_instructions = str_field("claudeInstructions");
     // Cross-cutting like `group`/`preset`: a headless clone (no desktop) in any create mode.
@@ -2303,6 +2329,61 @@ mod tests {
         }
         // `parent` + `topLevel` together is an error.
         assert!(resolve_parent(&app, &json!({ "parent": "p", "topLevel": true }), &empty).is_err());
+    }
+
+    /// A typo'd pool name must be a 400, not a silently tokenless clone.
+    ///
+    /// `claude::pick_group_account` returns `None` for an unknown pool, which cascades into
+    /// `resolve_assignment` returning `None` and `jobs::run_clone` skipping the account step
+    /// entirely — a running clone with no token and nothing in the log. The boundary check is
+    /// the only place this can still fail usefully.
+    #[tokio::test]
+    async fn clone_rejects_an_unknown_account_pool() {
+        let app = test_app();
+        *app.cfg.write().unwrap() = wire::AppConfig {
+            clone_groups: vec![wire::CloneGroup { name: "pooled".into(), accounts: vec![] }],
+            codex_groups: vec![wire::CloneGroup { name: "gpt".into(), accounts: vec![] }],
+            ..app.config()
+        };
+        let create = |body: serde_json::Value| {
+            clone(State(app.clone()), HeaderMap::new(), Json(body))
+        };
+
+        // A configured pool is accepted (reaches the op, i.e. past validation).
+        let ok = create(json!({
+            "image": "tmpl:latest", "hostname": "w-ok", "claudeAccount": "group:pooled",
+        }))
+        .await;
+        assert!(ok.is_ok(), "a configured pool must pass validation");
+
+        // A typo is a 400 naming what IS configured, per provider.
+        let err = create(json!({
+            "image": "tmpl:latest", "hostname": "w-bad", "claudeAccount": "group:pooed",
+        }))
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("pooed") && err.1.contains("pooled"), "unhelpful: {}", err.1);
+
+        // The two providers have independent pool lists — a Claude pool is not a Codex pool.
+        let err = create(json!({
+            "image": "tmpl:latest", "hostname": "w-x", "codexAccount": "group:pooled",
+        }))
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // Non-pool selections are untouched: an email may legitimately not be imported yet.
+        // Distinct hostnames — a repeat would trip the duplicate-name check, not the pool check.
+        for (i, sel) in ["auto", "none", "nobody@example.com"].iter().enumerate() {
+            let r = create(json!({
+                "image": "tmpl:latest",
+                "hostname": format!("w-sel-{i}"),
+                "claudeAccount": sel,
+            }))
+            .await;
+            assert!(r.is_ok(), "selection {sel:?} must not be rejected");
+        }
     }
 
     /// The preset default is step 3 of the chain — weaker than an explicit request and weaker
