@@ -100,7 +100,7 @@ pub fn read_text(inline: Option<&String>, file: Option<&PathBuf>) -> std::io::Re
 /// `rmng clone <verb>` — everything that acts on the fleet unit.
 #[derive(Subcommand, Debug)]
 pub enum CloneCmd {
-    /// List clones with live CPU, RAM, token totals, activity, and account-group assignment
+    /// List clones with live CPU, RAM, activity, and each provider's bound account
     Ls,
     /// Create a clone under an exact hostname (no ticket, no derived name)
     Create {
@@ -616,14 +616,11 @@ mod tests {
 
     #[test]
     fn clone_create_mutually_exclusive_flags() {
-        // --parent ⊕ --top-level, --preset ⊕ --no-preset. There is no --no-group: every clone
-        // binds a group, so "bind none" isn't expressible.
+        // --parent ⊕ --top-level, --preset ⊕ --no-preset. Opting out of an account needs no
+        // flag of its own: `--claude-account none` / `--codex-account none` says it, per
+        // provider, in the same vocabulary every other account value uses.
         assert!(Cli::try_parse_from([
             "rmng", "clone", "create", "w-x", "--from", "i", "--parent", "p", "--top-level",
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "rmng", "clone", "create", "w-x", "--from", "i", "--no-group",
         ])
         .is_err());
         assert!(Cli::try_parse_from([

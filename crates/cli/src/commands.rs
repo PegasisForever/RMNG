@@ -205,9 +205,9 @@ pub async fn clone_create(
     json: bool,
 ) -> Result<u8> {
     // `--no-preset` maps to the `none` sentinel the server treats as "no preset" (and, for a
-    // sub clone, opt out of inheriting the parent's). Omitted ⇒ inherit. There is no group
-    // equivalent: every clone binds a group, so omitting `--group` falls through the
-    // parent → preset-default → first-configured chain instead.
+    // sub clone, opt out of inheriting the parent's). Omitted ⇒ inherit. The account flags need
+    // no such pair: `--claude-account none` already expresses "no account", and omitting them
+    // falls through the request → parent → preset-default chain.
     let preset = if no_preset { Some("none") } else { preset };
     let op = client
         .clone_create(
@@ -645,7 +645,7 @@ fn validate_ssh_host<'a>(st: &'a ControlState, host: &str) -> Result<&'a wire::R
 
 /// True when this `rmng` is running INSIDE a clone. Every clone carries its per-clone router
 /// bearer in `RMNG_PROXY_KEY` (`provision::router_env_vars`); an operator laptop does not. We
-/// reuse that same identity signal the group-proxy already trusts — no server round-trip or
+/// reuse that same identity signal the server already trusts — no server round-trip or
 /// peer-IP needed — to decide clone→clone (direct) vs operator→clone (bastion) SSH.
 fn running_inside_clone() -> bool {
     std::env::var("RMNG_PROXY_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false)

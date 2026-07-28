@@ -269,7 +269,7 @@ fn codex_config_toml(headless: bool) -> String {
 /// demand to learn the `rmng` fleet CLI. Same delivery model as the global prompt / MCP config.
 const RMNG_CLI_SKILL_MD: &str = r#"---
 name: rmng-cli
-description: Use when you need to manage the RMNG clone fleet from inside a clone — list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, or manage clone-source images and account groups. Covers the `rmng` command-line tool.
+description: Use when you need to manage the RMNG clone fleet from inside a clone — list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, or manage clone-source images and agent accounts. Covers the `rmng` command-line tool.
 ---
 
 # Managing the fleet with `rmng`
@@ -297,9 +297,9 @@ or GUI. The kind can't be changed after creation.
 
 ## Inspect the fleet
 
-- `rmng clone ls` — list clones with live CPU, RAM, token totals, status, and account group.
+- `rmng clone ls` — list clones with live CPU, RAM, status, and each provider's bound account.
   Sub clones are indented under their parent. `--json` gives one object per clone with `stats`
-  and `tokens` nested.
+  nested.
 - `rmng op ls` — list recent operations (clone / delete / archive / pull / commit / update).
 - `rmng op wait <op-id> [--timeout <secs>]` — block until an operation reaches a terminal state.
 
@@ -347,30 +347,34 @@ references) and share the flags in "Common create flags" below.
 - `--wait` (with `--timeout <secs>`, default 600) — block until the clone is fully created,
   streaming progress. **Without it the command returns as soon as the operation starts**, so
   use `--wait` whenever the next step needs the clone to exist.
-- `--group <name>` — account-group OVERRIDE. Every clone binds exactly one group; omitting
-  this walks parent → the preset's default → the first configured group. There is no way to
-  bind no group.
+- `--claude-account <sel>` / `--codex-account <sel>` — the account for each provider,
+  independently. A selection is an email (pin it), `auto` (the server picks), `none` (no
+  token at all), or `group:<pool>` (bind to a named pool and let the rotator balance it).
+  Omitting one walks parent → the preset's default → `auto`.
 - `--headless` — no desktop (see "Headed vs headless" above). Default is headed.
 - `--parent <clone>` — nest under a specific top-level clone. `--top-level` forces a
   top-level clone instead.
 
 **Run from inside a clone, a new clone auto-nests as a sub clone under you AND inherits your
-account group and env preset by default** — a helper you spin up joins the same pool/preset
-with no flags. `--top-level` skips both.
+account selections and env preset by default** — a helper you spin up shares your accounts and
+preset with no flags. What it inherits is the *selection*, not the account you happen to be
+running: if you are on `auto`, so is it, and it gets its own pick. `--top-level` skips both.
 
 ## Retire clones
 
 - `rmng clone rm <clone> [-y]` — destroy a clone (prompts unless `-y`; also removes its sub clones).
   Non-interactive callers MUST pass `-y`.
 - `rmng clone archive <clone>` / `rmng clone restore <clone>` — stop-and-retain, then bring back.
-- `rmng clone bind <clone> <group>` — rebind a clone's account group. Every clone binds one,
-  so a binding can be changed but never cleared.
+- `rmng account swap <clone> <sel> [--codex]` — change a clone's account for one provider.
+  Takes the same selection forms as the create flags. The token is written into the clone's
+  credential file immediately; nothing restarts.
 
 ## Images & accounts
 
 - `rmng image ls` — list clone-source images. `rmng image pull [ref]`,
   `rmng image commit <clone> --as <name>`, `rmng image rm <ref>`.
-- `rmng account ls [--provider claude|codex|gemini]` — list imported accounts + usage windows.
+- `rmng account ls [--provider claude|codex]` — list imported accounts + usage windows.
+- `rmng account rm <email> [--codex]` — delete an imported account, moving any clones off it.
 
 ## Tips
 
@@ -1057,11 +1061,6 @@ async fn ensure_payload_current(app: &App, clone_id: &str) -> Result<bool> {
 }
 
 async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
-    // Every clone binds a valid account group. Repair blank/dangling bindings before reading
-    // the host list — this is what catches a group deleted out from under a live clone, and a
-    // hand-edited state.json picked up by the watcher. A no-op (no write, no SSE) in the
-    // steady state, which is every pass but the rare repair.
-
     let hosts: Vec<_> = app
         .store
         .get()

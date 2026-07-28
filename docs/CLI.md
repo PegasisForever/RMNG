@@ -1,7 +1,7 @@
 # `rmng` CLI reference — fleet management over the web port
 
 The `rmng` binary ([crates/cli](../crates/cli/README.md), package `rmng-cli`) is the fleet
-management surface: clones, images, account groups and imported accounts, and operations, all over
+management surface: clones, images, imported accounts and their pools, and operations, all over
 the control-server's **port-2 web API** (via [control-client](../crates/control-client/README.md)).
 It also carries the **operator/fleet desktop control** (`rmng desktop`, folded in from the
 retired global MCP) and a docker-exec-style **`rmng clone exec`** — both reach clones through the
