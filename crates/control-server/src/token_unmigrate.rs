@@ -287,6 +287,112 @@ fn write_stamp(path: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
+/// Repoint every clone's account binding, from the RAW `state.json`, onto the restored model.
+///
+/// Under the group proxy a clone carried ONE `group: "<pool>"`; the restored model has a
+/// selection per provider. That key no longer exists on `RmngClone`, so serde drops it at load
+/// and the clone ends up with `claude_selection: None` — which matches NEITHER rotation path:
+/// `rotate_pool` only walks clones with a `claude_group`, and `auto_pool_clones` requires
+/// `claude_selection == Some("auto")`. `push_stale_tokens` then skips it too (no email). The
+/// clone would sit there, running, with no credentials and nothing logged.
+///
+/// So each clone is given `group:<pool>` for a provider whose pool survived the migration, and
+/// plain `auto` otherwise — either way it lands in a pool the rotator actually walks.
+fn heal_clone_bindings(app: &App, claude_pools: &[wire::CloneGroup], codex_pools: &[wire::CloneGroup]) {
+    #[derive(Deserialize, Default)]
+    struct RawHost {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        group: String,
+    }
+    #[derive(Deserialize, Default)]
+    struct RawState {
+        #[serde(default)]
+        hosts: Vec<RawHost>,
+    }
+    let cfg = app.config();
+    let path = crate::config::state_path(&cfg);
+    let raw: RawState = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let was: std::collections::HashMap<String, String> =
+        raw.hosts.into_iter().filter(|h| !h.id.is_empty()).map(|h| (h.id, h.group)).collect();
+
+    let mut bound = 0usize;
+    let mut autos = 0usize;
+    app.store.mutate(|s| {
+        for h in s.hosts.iter_mut() {
+            if !h.managed || h.claude_selection.is_some() || h.codex_selection.is_some() {
+                continue; // already on the restored model — never clobber a real selection
+            }
+            let pool = was.get(&h.id).map(String::as_str).unwrap_or("");
+            let pick = |pools: &[wire::CloneGroup]| -> String {
+                if !pool.is_empty() && pools.iter().any(|g| g.name == pool) {
+                    format!("group:{pool}")
+                } else {
+                    "auto".to_string()
+                }
+            };
+            let claude = pick(claude_pools);
+            let codex = pick(codex_pools);
+            if claude.starts_with("group:") || codex.starts_with("group:") {
+                bound += 1;
+            } else {
+                autos += 1;
+            }
+            if claude.starts_with("group:") {
+                h.claude_group = Some(pool.to_string());
+            }
+            if codex.starts_with("group:") {
+                h.codex_group = Some(pool.to_string());
+            }
+            h.claude_selection = Some(claude);
+            h.codex_selection = Some(codex);
+        }
+    });
+    if bound + autos > 0 {
+        tracing::info!(
+            target: "token_unmigrate",
+            "repointed {} clone(s) at their former pool and {} at `auto` — a clone left with no \
+             selection matches neither rotation path and would never be given a token",
+            bound, autos,
+        );
+    }
+}
+
+/// Each preset's `group` from the RAW `./config.json`.
+///
+/// `Preset.group` was removed with the group-proxy model, so the live `AppConfig` no longer
+/// deserializes it — by the time this migration runs, `app.config()` has already dropped it.
+/// Reading the file directly is the only way to see what a preset was bound to, and it must
+/// happen before the first config save rewrites the file without it.
+fn read_raw_preset_groups() -> std::collections::HashMap<String, String> {
+    #[derive(Deserialize, Default)]
+    struct RawPreset {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        group: String,
+    }
+    #[derive(Deserialize, Default)]
+    struct RawCfg {
+        #[serde(default)]
+        presets: Vec<RawPreset>,
+    }
+    let path = crate::config::config_path();
+    let raw: RawCfg = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    raw.presets
+        .into_iter()
+        .filter(|p| !p.name.is_empty())
+        .map(|p| (p.name, p.group))
+        .collect()
+}
+
 /// Group the recovered accounts of one provider into the old `CloneGroup` list shape: one
 /// entry per source group directory, holding the emails found in it, sorted for a stable
 /// `config.json`.
@@ -410,10 +516,44 @@ pub fn unmigrate_group_proxy_tokens(app: &App) {
     let mut cfg = app.config();
     cfg.clone_groups = clone_groups;
     cfg.codex_groups = codex_groups;
+    // Carry each preset's pool binding across. The group-proxy era had ONE provider-agnostic
+    // `Preset.group`; the restored model has one default per provider, so a preset that pointed
+    // at `Personal` now defaults BOTH providers to `group:Personal` — the closest thing to what
+    // it meant, and only where that pool actually survived the migration.
+    //
+    // Read from the RAW config: `Preset.group` no longer exists as a field, so serde has already
+    // dropped it from `app.config()` by the time we get here. Without this, every preset on an
+    // upgraded deployment silently loses its binding and its clones fall through to `auto`.
+    let raw_preset_pools = read_raw_preset_groups();
+    let mut carried = 0usize;
+    for preset in cfg.presets.iter_mut() {
+        let Some(pool) = raw_preset_pools.get(&preset.name).filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let sel = format!("group:{pool}");
+        if preset.claude_account.is_empty() && cfg.clone_groups.iter().any(|g| &g.name == pool) {
+            preset.claude_account = sel.clone();
+            carried += 1;
+        }
+        if preset.codex_account.is_empty() && cfg.codex_groups.iter().any(|g| &g.name == pool) {
+            preset.codex_account = sel;
+            carried += 1;
+        }
+    }
     if let Err(e) = crate::config::save(&cfg) {
         tracing::error!(target: "token_unmigrate", "saving config with restored groups failed: {e:#}; will retry next boot");
         return;
     }
+    if carried > 0 {
+        tracing::info!(
+            target: "token_unmigrate",
+            "carried {carried} preset pool default(s) across (one per provider whose pool survived)",
+        );
+    }
+
+    // Clone rows carry the same dead `group` key; heal them against the pools that survived.
+    heal_clone_bindings(app, &cfg.clone_groups, &cfg.codex_groups);
+
     let group_names: Vec<String> = cfg
         .clone_groups
         .iter()
@@ -548,6 +688,47 @@ mod tests {
         assert_eq!(claude[0].email, "a@b.com");
         assert_eq!(claude[0].group, "alpha");
         assert_eq!(out.iter().filter(|r| r.kind == "codex").count(), 1);
+    }
+
+    /// A preset's pool binding must survive the migration.
+    ///
+    /// Modelled on real production data (CT 105): four presets, every one carrying a `group`,
+    /// and 41 clones bound to those pools. `Preset.group` no longer exists as a field, so serde
+    /// drops it before the migration sees `app.config()` — reading the raw file is the only way
+    /// to recover it, and without that every preset on an upgraded deployment silently loses its
+    /// binding.
+    ///
+    /// This pins the pure mapping the migration applies; `read_raw_preset_groups` itself is a
+    /// thin file read.
+    #[test]
+    fn preset_pool_binding_maps_to_both_providers() {
+        // (raw group, claude pools that survived, codex pools that survived) → what a preset gets.
+        let apply = |pool: &str, claude_pools: &[&str], codex_pools: &[&str]| -> (String, String) {
+            let mut claude = String::new();
+            let mut codex = String::new();
+            let sel = format!("group:{pool}");
+            if claude_pools.contains(&pool) {
+                claude = sel.clone();
+            }
+            if codex_pools.contains(&pool) {
+                codex = sel;
+            }
+            (claude, codex)
+        };
+
+        // The common case: the pool holds both providers' accounts, so both default to it.
+        assert_eq!(
+            apply("Personal", &["Personal", "Medi"], &["Personal"]),
+            ("group:Personal".into(), "group:Personal".into())
+        );
+        // A pool with only Claude accounts binds only the Claude side — pointing Codex at a pool
+        // with no Codex credentials in it would be a dangling selection.
+        assert_eq!(
+            apply("Medi", &["Personal", "Medi"], &["Personal"]),
+            ("group:Medi".into(), String::new())
+        );
+        // A pool that did not survive the migration at all binds neither.
+        assert_eq!(apply("Gone", &["Personal"], &["Personal"]), (String::new(), String::new()));
     }
 
     #[test]
