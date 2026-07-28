@@ -914,9 +914,21 @@ if [ -f "$etc" ] && cmp -s "$tmp" "$etc"; then
   exit 0
 fi
 install -m 0644 -o root -g root "$tmp" "$etc"
-"#
+# The caller keys the agent-wrapper restart off this exact line: /etc/environment is read by
+# PAM at session start, so a process already running keeps the environment it was launched
+# with FOREVER. Writing the file is therefore only half the job — see `ENV_CHANGED_MARKER`.
+echo "{marker}"
+"#,
+        marker = ENV_CHANGED_MARKER,
     )
 }
+
+/// Printed by [`etc_environment_sync_script`] only when it actually rewrote `/etc/environment`
+/// (it exits 0 silently when the content already matched). The reconciler keys the
+/// agent-wrapper restart off this, so the restart happens on a real change and not on every
+/// 30 s pass — restarting unconditionally would interrupt an in-flight chat turn twice a
+/// minute, forever.
+const ENV_CHANGED_MARKER: &str = "rmng: /etc/environment updated";
 
 fn preset_for_clone<'a>(cfg: &'a wire::AppConfig, host: &wire::RmngClone) -> Option<&'a wire::Preset> {
     if let Some(name) = host.preset_name.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -954,6 +966,34 @@ fn preset_for_clone<'a>(cfg: &'a wire::AppConfig, host: &wire::RmngClone) -> Opt
         }
     }
     None
+}
+
+/// Like [`exec_ok`], but reports whether the script printed `marker` on stdout. Used for the
+/// `/etc/environment` sync, which is the only reconcile step whose *follow-up* (restarting
+/// the agent-wrapper so it picks the new env up) must be conditional on it having changed
+/// something.
+async fn exec_ok_marked(
+    app: &App,
+    clone_id: &str,
+    script: &str,
+    label: &str,
+    marker: &str,
+) -> Result<bool> {
+    let mut seen = false;
+    let code = app
+        .docker
+        .exec_script(clone_id, script, &[], &[], |stream, line| {
+            if stream == "stdout" && line.contains(marker) {
+                seen = true;
+            }
+            tracing::debug!(target: "clone_reconcile", "{clone_id} {label} {stream}: {line}");
+        })
+        .await
+        .with_context(|| format!("{clone_id}: {label}"))?;
+    if code != 0 {
+        bail!("{clone_id}: {label} exited {code}");
+    }
+    Ok(seen)
 }
 
 async fn exec_ok(app: &App, clone_id: &str, script: &str, label: &str) -> Result<()> {
@@ -1290,9 +1330,36 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         }
         let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
         let env_script = etc_environment_sync_script(&desired_env);
-        match exec_ok(app, id, &env_script, "sync /etc/environment").await {
-            Ok(()) => {
+        match exec_ok_marked(
+            app,
+            id,
+            &env_script,
+            "sync /etc/environment",
+            ENV_CHANGED_MARKER,
+        )
+        .await
+        {
+            Ok(changed) => {
                 warned.remove(&format!("{id}:etc-env"));
+                // Writing /etc/environment does NOT reach the processes already running: PAM
+                // reads it at session start, so the long-lived agent-wrapper keeps whatever it
+                // was launched with. It fronts the chat panel, so on a clone that predates an
+                // env change (the group-proxy split moved ANTHROPIC_BASE_URL) chat would talk
+                // to the old endpoint until something restarted it by hand. Restart it here —
+                // only on a real change, so an in-flight turn isn't interrupted every pass.
+                if changed {
+                    tracing::info!(target: "clone_reconcile", "clone {id}: /etc/environment changed — restarting agent-wrapper to pick it up");
+                    if let Err(e) = exec_ok(
+                        app,
+                        id,
+                        restart_agent_wrapper_script(),
+                        "restart agent-wrapper (env change)",
+                    )
+                    .await
+                    {
+                        tracing::warn!(target: "clone_reconcile", "clone {id}: agent-wrapper restart after env change failed: {e:#}");
+                    }
+                }
             }
             Err(e) => {
                 if warned.insert(format!("{id}:etc-env")) {
@@ -1988,6 +2055,60 @@ mod tests {
         assert!(script.contains("cmp -s \"$tmp\" \"$etc\""));
         assert!(script.contains("install -m 0644"));
         assert!(script.contains("rm -f \"$legacy\""));
+    }
+
+    /// The agent-wrapper restart is gated on this script PRINTING the marker, and a wrapper
+    /// that never restarts keeps a stale `ANTHROPIC_BASE_URL` forever (the bug this fixes)
+    /// while one that restarts every pass interrupts chat twice a minute. Both failure modes
+    /// live in shell, not Rust, so run the real script against a real file rather than
+    /// asserting on its text.
+    #[test]
+    fn env_sync_prints_the_marker_only_when_it_actually_rewrites() {
+        let dir = std::env::temp_dir().join(format!("rmng-envsync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let etc = dir.join("environment");
+
+        // Run the script with `$etc` redirected at our temp file (and the legacy path parked
+        // somewhere that does not exist), so no root/container is needed.
+        let run = |desired: &str| -> (String, bool) {
+            let script = etc_environment_sync_script(desired)
+                .replace("etc=/etc/environment", &format!("etc={}", etc.display()))
+                .replace(
+                    "legacy=/home/rmng/.config/environment.d/30-rmng-preset.conf",
+                    &format!("legacy={}/nonexistent-legacy", dir.display()),
+                )
+                .replace("install -m 0644 -o root -g root", "install -m 0644")
+                .replace("rmdir /home/rmng/.config/environment.d", "rmdir /nonexistent");
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("run env sync script");
+            assert!(out.status.success(), "script failed: {}", String::from_utf8_lossy(&out.stderr));
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let printed = stdout.contains(ENV_CHANGED_MARKER);
+            (stdout, printed)
+        };
+
+        // First write: the file did not exist, so this is a change.
+        let (_, printed) = run("ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\n");
+        assert!(printed, "first write must announce the change");
+        assert!(
+            std::fs::read_to_string(&etc).unwrap().contains("rmng-cliproxy:9010"),
+            "the new value must land on disk"
+        );
+
+        // Identical desired env: no rewrite, so NO marker — this is what keeps the reconciler
+        // from restarting the agent-wrapper on every 30 s pass.
+        let (_, printed) = run("ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\n");
+        assert!(!printed, "an unchanged env must not announce a change");
+
+        // A real change (the group-proxy split moving the URL) announces again.
+        let (_, printed) = run("ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\nEXTRA=1\n");
+        assert!(printed, "a changed env must announce it");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

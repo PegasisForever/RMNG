@@ -109,7 +109,12 @@ pub fn router(app: App) -> Router {
         .route("/api/groupproxy/restart", post(groupproxy_restart))
         // Internal, admin-secret-authenticated: the out-of-process `/cc` proxy's token-delta
         // intake. Registered BEFORE the SPA fallback below.
-        .route("/internal/tokens", post(internal_tokens));
+        .route("/internal/tokens", post(internal_tokens))
+        // Tombstone for the `/cc` router that used to live here. Without it these paths reach
+        // the SPA fallback and an agent POST gets `200 text/html` (or a bare 405) — an opaque
+        // parse error rather than a diagnosis. See [`cc_moved`].
+        .route("/cc", axum::routing::any(cc_moved))
+        .route("/cc/*rest", axum::routing::any(cc_moved));
 
     // Frontend from the filesystem: a non-empty `static_dir` overrides (dev hot-reload
     // without a rebuild); otherwise the assets search path resolves it (the image's
@@ -1761,6 +1766,45 @@ async fn chat_abort(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `ANY /cc` + `/cc/*rest` — the group-proxy router moved to the `rmng-cliproxy` sidecar.
+///
+/// This exists for one migration window: a clone created before the split holds
+/// `ANTHROPIC_BASE_URL=http://rmng-control:9000/cc`, and any agent process ALREADY RUNNING at
+/// upgrade time keeps that value until it restarts (PAM reads `/etc/environment` at session
+/// start, not continuously). Without this route those requests fall through to the SPA
+/// fallback and come back as `200 text/html` on a GET or a bare bodyless `405` on a POST —
+/// which surfaces inside the agent as an unintelligible parse/API error.
+///
+/// So answer in the shape an agent client can actually read: `503` with an
+/// Anthropic-style JSON error body naming the new endpoint, plus a `Location` header for
+/// anything following redirects manually. 503 rather than 410 is deliberate — it is the one
+/// status every agent SDK already treats as retryable, and the condition IS transient: the
+/// reconciler restarts the wrapper within ~30 s, after which the retry lands on the sidecar.
+async fn cc_moved() -> Response {
+    let body = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": format!(
+                "the RMNG group proxy moved out of the control-server: use \
+                 http://{}:{}/cc instead of this host. This clone's environment is stale; the \
+                 reconciler refreshes it and restarts the agent within ~30s — retry.",
+                crate::groupproxy::CONTAINER,
+                crate::groupproxy::PORT,
+            ),
+        },
+    });
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::LOCATION, crate::groupproxy::cc_base_url()),
+            (header::RETRY_AFTER, "30".to_string()),
+        ],
+        Json(body),
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 struct ChatScheduleReq {
     text: String,
@@ -3286,5 +3330,37 @@ mod playbook_tests {
             compose_global_prompt(&cfg_global("A"), Some(&preset_global("C"))),
             "A\n\nC"
         );
+    }
+
+    // --- the /cc tombstone ---------------------------------------------------------------
+
+    /// A pre-split clone's still-running agent POSTs to the old `/cc` path. The whole point of
+    /// the tombstone is that it must NOT look like a page: an agent SDK parsing `200 text/html`
+    /// (the SPA fallback) reports an unintelligible error instead of a retryable one.
+    #[tokio::test]
+    async fn cc_tombstone_answers_json_not_the_spa_fallback() {
+        let resp = cc_moved().await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let ctype = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(ctype.contains("application/json"), "content-type was {ctype:?}");
+        // Retryable + points at where it moved, so a manual follower can get there.
+        assert_eq!(
+            resp.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()),
+            Some(crate::groupproxy::cc_base_url().as_str())
+        );
+        assert!(resp.headers().contains_key(header::RETRY_AFTER));
+
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).expect("a JSON error body");
+        assert_eq!(v["type"], "error");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        // Names the new host so the message alone is enough to diagnose it.
+        assert!(msg.contains(crate::groupproxy::CONTAINER), "message was {msg:?}");
     }
 }

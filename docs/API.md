@@ -431,6 +431,15 @@ The reverse direction is `POST /internal/tokens` **on the control-server**, same
 proxy coalesces per-clone token-usage deltas and POSTs them in batches, buffering in memory
 (bounded) while the control-server is restarting so accounting survives an upgrade.
 
+`ANY /cc` and `/cc/*` **on the control-server** are a migration tombstone. A clone created
+before the split holds the old `http://rmng-control:9000/cc`, and an agent process already
+running when the server upgraded keeps that value until it restarts (`/etc/environment` is read
+at session start). These paths answer `503` with an Anthropic-shaped JSON error naming the new
+endpoint, plus `Location` and `Retry-After: 30` — without them the request reaches the SPA
+fallback and returns `200 text/html`, which an agent reports as an unintelligible parse error
+instead of a retryable one. The clone reconciler restarts `agent-wrapper` on any env change, so
+this path stops being hit within ~30 s of an upgrade.
+
 ### `GET /api/groupproxy` → `GroupProxyStatus`
 The sidecar's container name, whether it is running, its image + `org.opencontainers.image.revision`,
 and `behind` — true when it is running a different image than the control-server. Never 500s; a

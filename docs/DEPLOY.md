@@ -161,6 +161,28 @@ That restart *does* drop every in-flight agent request, so run it while clones a
 - Dev mode (control-server on the host, not a container): no sidecar is ensured. Run
   `rmng-control-server group-proxy` yourself alongside the server for clone inference.
 
+### Upgrading a fleet created before the split
+
+A clone created before the group proxy existed has `ANTHROPIC_BASE_URL=http://rmng-control:9000/cc`
+baked into `/etc/environment`. The clone reconciler rewrites that (plus the Codex and OpenCode
+provider configs) to `http://rmng-cliproxy:9010/cc` within one ~30 s pass, with **no clone
+recreate or reboot**.
+
+But writing the file is only half of it: `/etc/environment` is read by PAM at *session start*,
+so any agent process that was **already running** keeps the old value for as long as it lives.
+That matters most for `agent-wrapper`, the long-lived server behind the chat panel. So the
+reconciler restarts `agent-wrapper` whenever it actually changes the env — only on a real
+change, since restarting every pass would interrupt an in-flight chat turn twice a minute.
+
+Until that restart lands (~30 s), a stale process still dials the control-server's `/cc`. That
+path is a **tombstone**: it answers `503` with an Anthropic-shaped JSON error naming the new
+endpoint, plus `Location` and `Retry-After: 30`. Without it those requests hit the SPA fallback
+and come back as `200 text/html` (or a bodyless `405`), which surfaces inside an agent as an
+unintelligible parse error rather than a retryable one.
+
+Net effect for an operator: upgrade, and clones converge on their own inside a minute. A chat
+turn in flight at that moment may see one retryable error.
+
 ## Shared build cache & Docker Hub mirror
 
 The control-server automatically runs two shared infra containers on the `rmng` bridge
