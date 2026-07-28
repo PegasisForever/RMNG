@@ -237,9 +237,17 @@ and no kickoff first message. The account selections, `agentInstructions`, and
 *selections* and preset unless the request names them — the selection, not the resolved account,
 so a parent on `auto` that landed on some email passes on `auto` and the child gets its own pick.
 Every clone also receives Codex parity files: `~/.codex/AGENTS.md` with the same
-disposable-sandbox guidance as Claude's shared `CLAUDE.md`, and `~/.codex/config.toml` with the
+disposable-sandbox guidance as Claude's shared `CLAUDE.md`, and the managed MCP tables **merged
+into** `~/.codex/config.toml` (never overwriting it — see the note below) with the
 local desktop MCP and the Linear MCP. Codex authenticates from `~/.codex/auth.json`, which the
 server writes — there is no provider block in that config.
+
+**RMNG only owns the MCP tables in `~/.codex/config.toml`.** That file is the operator's:
+`model`, `approval_policy`, `sandbox_*`, `[profiles.*]`, and any `[mcp_servers.*]` of their own
+are read and rewritten by nothing. The reconciler replaces exactly the `[mcp_servers.desktop]`
+and `[mcp_servers.linear]` tables it manages and appends them, leaving every other line intact —
+the same courtesy `~/.claude.json` already got (jq-merged, because Claude Code accumulates
+project state there). A hand-edit to any other setting survives every reconcile pass.
 
 > There is no `/api/clone/redeploy` endpoint any more. Clone binaries (`clone-daemon`,
 > `agent-wrapper`, the `rmng` CLI) are installed by the control-server at create time, before

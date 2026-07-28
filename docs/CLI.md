@@ -27,7 +27,7 @@ this binary on already-running managed clones after a control-server update.
 Codex itself is template-installed under the clone user, and the control-server retries a
 missing standalone Codex CLI install at clone creation and from the clone reconciler for old
 running clones. RMNG gives Codex parity with Claude's shared clone context by managing
-`~/.codex/AGENTS.md` and `~/.codex/config.toml`: Codex gets the same disposable-sandbox
+`~/.codex/AGENTS.md` and the MCP tables in `~/.codex/config.toml`: Codex gets the same disposable-sandbox
 guidance, the local desktop daemon MCP (`desktop`), and Linear (`linear`, using
 `LINEAR_API_KEY`). Codex authenticates from `~/.codex/auth.json`, which the control-server
 writes with the short-lived access token of the account the clone is assigned. The clone

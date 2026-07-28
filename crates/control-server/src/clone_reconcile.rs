@@ -242,20 +242,64 @@ const RETIRED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
 ];
 
-/// The managed Codex config: the shared MCP tables, and nothing else.
+/// Merge the managed MCP tables into a clone's `~/.codex/config.toml`, preserving everything
+/// else in the file.
 ///
-/// The group-proxy era added a `[model_providers.rmng]` block pointing Codex at the `/cc/v1`
-/// OpenAI-compatible surface and keyed by `RMNG_PROXY_KEY`. That surface is gone — Codex
-/// authenticates from `~/.codex/auth.json`, which the server writes directly (see
-/// [`crate::codex::apply_clone_token`]) — so no provider block is emitted and Codex uses its own
-/// default model against its own endpoint.
-fn codex_config_toml(headless: bool) -> String {
-    let mut body =
-        String::from("# Managed by RMNG. Re-created by the RMNG clone reconciler.\n\n");
-    // The managed MCP tables (single source of truth: `managed_mcp`). `desktop` (clone-daemon
-    // :9004) is dropped on headless clones; `linear` auths from the env at runtime.
-    body.push_str(&codex_mcp_toml(headless));
-    body
+/// This used to overwrite the file wholesale. It must not: `config.toml` is where a Codex user
+/// puts their own settings (`model`, `approval_policy`, `sandbox_mode`, their own
+/// `[mcp_servers.*]`), and a rewrite every reconcile pass reverted any hand-edit within ~30 s
+/// with no warning. `~/.claude.json` already got the careful treatment (a jq merge, because it
+/// is state-bearing); this is the same courtesy for the file Codex owns.
+///
+/// TOML has no jq, so the merge is a table-aware awk pass: it copies every line through, drops
+/// exactly the `[mcp_servers.<managed>]` tables (from the header to the next table header or
+/// EOF), and appends the freshly rendered ones. Nothing outside those tables is read or
+/// rewritten — including a user's own `[mcp_servers.foo]`, which is not in the managed set and
+/// so is copied verbatim.
+///
+/// Dropping-then-appending (rather than editing in place) is what makes a headed→headless flip
+/// work: `desktop` is simply not in the appended set, and its old table was already removed.
+pub(crate) fn codex_mcp_merge_script(headless: bool) -> String {
+    let managed: Vec<&str> = managed_mcp().iter().map(|m| m.name).collect();
+    // `mcp_servers.desktop|mcp_servers.linear` — the tables this pass owns. Built from the
+    // managed set, not the ACTIVE one, so a server dropped by the headless filter is still
+    // recognised and removed rather than left orphaned.
+    let owned = managed
+        .iter()
+        .map(|n| format!("mcp_servers.{n}"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let desired = codex_mcp_toml(headless);
+    let desired_b64 = B64.encode(&desired);
+    format!(
+        r#"set -e
+f=/home/rmng/.codex/config.toml
+install -d -o rmng -g rmng -m700 /home/rmng/.codex
+[ -f "$f" ] || : > "$f"
+desired="$(mktemp)"
+tmp="$(mktemp)"
+trap 'rm -f "$desired" "$tmp"' EXIT
+base64 -d > "$desired" <<'RMNG_CODEX_MCP'
+{desired_b64}
+RMNG_CODEX_MCP
+# Copy every line EXCEPT the managed [mcp_servers.*] tables. `skip` turns on at an owned table
+# header and off at the next header of any kind, so a user's own tables and all top-level keys
+# pass through untouched.
+awk -v owned='^\[({owned})\]$' '
+  /^[[:space:]]*\[/ {{ skip = ($0 ~ owned) }}
+  !skip {{ print }}
+' "$f" > "$tmp"
+# Collapse the blank lines the removal may have left at EOF, then append the managed tables.
+awk 'BEGIN {{ blank = 0 }}
+     /^[[:space:]]*$/ {{ blank++; next }}
+     {{ while (blank-- > 0) print ""; blank = 0; print }}
+' "$tmp" > "$f"
+if [ -s "$f" ]; then printf '\n' >> "$f"; fi
+cat "$desired" >> "$f"
+chown rmng:rmng "$f"
+chmod 600 "$f"
+"#
+    )
 }
 
 /// The `rmng-cli` agent skill — single source of truth (hardcoded here). Written into every
@@ -415,13 +459,6 @@ pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<T
         // The global agent prompt (a+c), one identical body per agent's rules location.
         guidance("home/rmng/.claude/CLAUDE.md"),
         guidance("home/rmng/.codex/AGENTS.md"),
-        TarEntry {
-            path: "home/rmng/.codex/config.toml".to_string(),
-            data: codex_config_toml(headless).into_bytes(),
-            mode: 0o600,
-            uid: CLONE_UID,
-            gid: CLONE_GID,
-        },
         // The neutral MCP descriptor the node-agent (agent-wrapper) reads (single source of
         // truth: `managed_mcp`). Headless-filtered here so the wrapper needs no headless logic.
         TarEntry {
@@ -934,6 +971,51 @@ async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<
     Ok(true)
 }
 
+fn codex_mcp_stamp_path() -> &'static str {
+    "etc/rmng/codex-mcp"
+}
+
+/// Desired stamp value — changes with the headless bit (and the `v1` shape tag, bumped if the
+/// managed server set changes), so the merge re-runs exactly when the desired tables differ.
+fn codex_mcp_desired(headless: bool) -> String {
+    format!("v1 headless={headless}")
+}
+
+fn codex_mcp_stamp_entry_for(headless: bool) -> TarEntry {
+    TarEntry {
+        path: codex_mcp_stamp_path().to_string(),
+        data: format!("{}\n", codex_mcp_desired(headless)).into_bytes(),
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+    }
+}
+
+/// Keep Codex's `~/.codex/config.toml` MCP tables in sync (desktop headed-only, linear always),
+/// merging rather than overwriting so the operator's own settings in that file survive.
+async fn ensure_codex_mcp(app: &App, clone_id: &str, headless: bool) -> Result<bool> {
+    let desired = codex_mcp_desired(headless);
+    if read_stamp(app, clone_id, codex_mcp_stamp_path(), "codex mcp")
+        .await?
+        .as_deref()
+        == Some(desired.as_str())
+    {
+        return Ok(false);
+    }
+    exec_ok(
+        app,
+        clone_id,
+        &codex_mcp_merge_script(headless),
+        "merge ~/.codex/config.toml MCP",
+    )
+    .await?;
+    app.docker
+        .upload_tar(clone_id, vec![codex_mcp_stamp_entry_for(headless)])
+        .await
+        .with_context(|| format!("{clone_id}: writing codex mcp stamp"))?;
+    Ok(true)
+}
+
 async fn ensure_codex_cli(app: &App, clone_id: &str) -> Result<()> {
     let code = app
         .docker
@@ -1182,6 +1264,28 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
+        // Codex's `~/.codex/config.toml` MCP tables. A MERGE, not a rewrite: everything else in
+        // that file is the operator's (model, approval_policy, sandbox, their own MCP servers).
+        match ensure_codex_mcp(app, id, h.headless).await {
+            Ok(true) => {
+                warned.remove(&format!("{id}:codex-mcp"));
+                tracing::info!(
+                    target: "clone_reconcile",
+                    "clone {id}: merged ~/.codex/config.toml MCP servers (headless={})",
+                    h.headless
+                );
+            }
+            Ok(false) => {
+                warned.remove(&format!("{id}:codex-mcp"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:codex-mcp")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.codex/config.toml MCP merge failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.codex/config.toml MCP merge still failing: {e:#}");
+                }
+            }
+        }
 
         match ensure_payload_current(app, id).await {
             Ok(true) => {
@@ -1284,6 +1388,95 @@ mod tests {
     ///
     /// This test greps the emitted scripts rather than asserting a function is absent, so it
     /// also catches the deletion being reintroduced somewhere else in the file.
+    /// The Codex MCP merge must leave everything that is not a managed table alone.
+    ///
+    /// `~/.codex/config.toml` is the operator's file: `model`, `approval_policy`,
+    /// `sandbox_*`, `[profiles.*]`, and their own `[mcp_servers.*]` all live there. It used to
+    /// be rewritten wholesale every reconcile pass, silently reverting any hand-edit within
+    /// ~30 s. The failure modes are all in shell, not Rust, so this runs the REAL generated
+    /// script against a real file rather than asserting on its text.
+    #[test]
+    fn codex_mcp_merge_preserves_user_settings() {
+        let dir = std::env::temp_dir().join(format!("rmng-codexmcp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let codex = dir.join("codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let cfg = codex.join("config.toml");
+
+        // A hand-customized file: settings before AND after the managed tables, a user's own
+        // MCP server, and a table whose name merely starts the same way.
+        let original = "# my own settings\n\
+             model = \"gpt-5.6-terra\"\n\
+             model_reasoning_effort = \"high\"\n\
+             approval_policy = \"never\"\n\
+             \n\
+             [sandbox_workspace_write]\n\
+             network_access = true\n\
+             \n\
+             [mcp_servers.desktop]\n\
+             url = \"http://127.0.0.1:9004\"\n\
+             \n\
+             [mcp_servers.my_own]\n\
+             url = \"http://localhost:7777\"\n\
+             \n\
+             [profiles.fast]\n\
+             model = \"gpt-5.5\"\n";
+        std::fs::write(&cfg, original).unwrap();
+
+        let run = |headless: bool| {
+            let script = codex_mcp_merge_script(headless)
+                .replace("/home/rmng/.codex", codex.to_str().unwrap())
+                .replace("chown rmng:rmng", "true")
+                .replace("install -d -o rmng -g rmng -m700", "mkdir -p");
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("run codex merge script");
+            assert!(out.status.success(), "script failed: {}", String::from_utf8_lossy(&out.stderr));
+            std::fs::read_to_string(&cfg).unwrap()
+        };
+
+        let body = run(false);
+        // Every operator-owned line survives, wherever it sat relative to the managed tables.
+        for keep in [
+            "# my own settings",
+            "model = \"gpt-5.6-terra\"",
+            "model_reasoning_effort = \"high\"",
+            "approval_policy = \"never\"",
+            "[sandbox_workspace_write]",
+            "network_access = true",
+            "[mcp_servers.my_own]",
+            "url = \"http://localhost:7777\"",
+            "[profiles.fast]",
+        ] {
+            assert!(body.contains(keep), "merge dropped {keep:?}:\n{body}");
+        }
+        // The managed tables are present exactly once — not duplicated by the re-append.
+        assert_eq!(body.matches("[mcp_servers.desktop]").count(), 1, "{body}");
+        assert_eq!(body.matches("[mcp_servers.linear]").count(), 1, "{body}");
+        assert!(body.contains("bearer_token_env_var = \"LINEAR_API_KEY\""));
+
+        // Idempotent: a converged clone must not churn the file every pass.
+        assert_eq!(run(false), body, "second identical pass rewrote the file");
+
+        // A headed→headless flip REMOVES `desktop` (no daemon there) and keeps everything else.
+        let hl = run(true);
+        assert!(!hl.contains("[mcp_servers.desktop]"), "headless kept a dead endpoint:\n{hl}");
+        assert!(!hl.contains("127.0.0.1:9004"));
+        assert!(hl.contains("[mcp_servers.linear]"));
+        assert!(hl.contains("[mcp_servers.my_own]"), "headless dropped the user's own server");
+        assert!(hl.contains("model_reasoning_effort = \"high\""));
+
+        // A clone with no config.toml at all gets a valid one rather than an error.
+        std::fs::remove_file(&cfg).unwrap();
+        let fresh = run(false);
+        assert!(fresh.contains("[mcp_servers.linear]"));
+        assert!(fresh.contains("[mcp_servers.desktop]"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn no_reconcile_script_removes_provider_credentials() {
         let scripts: Vec<(&str, String)> = vec![
@@ -1330,21 +1523,22 @@ mod tests {
         let agents_body = String::from_utf8(agents.data.clone()).unwrap();
         assert!(agents_body.contains("SENTINEL-A+C"));
 
-        let config = entries
-            .iter()
-            .find(|e| e.path == "home/rmng/.codex/config.toml")
-            .expect("missing Codex config.toml");
-        assert_eq!(config.mode, 0o600);
-        assert_eq!((config.uid, config.gid), (1000, 1000));
-        let config_body = String::from_utf8(config.data.clone()).unwrap();
-        assert!(config_body.contains("[mcp_servers.desktop]"));
-        assert!(config_body.contains("url = \"http://127.0.0.1:9004\""));
-        assert!(config_body.contains("[mcp_servers.linear]"));
-        assert!(config_body.contains("url = \"https://mcp.linear.app/mcp\""));
-        assert!(config_body.contains("bearer_token_env_var = \"LINEAR_API_KEY\""));
-        // With no cc base, no rmng provider is emitted — so no `base_url` leaks into the config.
-        // (The managed-file header prose does mention "control-server", so don't assert on that.)
-        assert!(!config_body.contains("base_url"));
+        // `~/.codex/config.toml` is deliberately NOT in this set: it is merged in place by
+        // `codex_mcp_merge_script` so the operator's own settings survive, not shipped as a tar
+        // entry that would overwrite the file. Shipping it here again would silently reintroduce
+        // the clobber.
+        assert!(
+            !entries.iter().any(|e| e.path == "home/rmng/.codex/config.toml"),
+            "config.toml must be merged, never overwritten by the parity tar"
+        );
+        let managed = codex_mcp_toml(false);
+        assert!(managed.contains("[mcp_servers.desktop]"));
+        assert!(managed.contains("url = \"http://127.0.0.1:9004\""));
+        assert!(managed.contains("[mcp_servers.linear]"));
+        assert!(managed.contains("url = \"https://mcp.linear.app/mcp\""));
+        assert!(managed.contains("bearer_token_env_var = \"LINEAR_API_KEY\""));
+        // No provider block: Codex authenticates from ~/.codex/auth.json, not a base_url.
+        assert!(!managed.contains("base_url"));
     }
 
 
@@ -1376,31 +1570,21 @@ mod tests {
     fn agent_configs_omit_desktop_mcp_when_headless() {
         // Headless clones have no desktop (the clone-daemon on :9004 is deleted), so the shared
         // `desktop` MCP must disappear from every generated agent config while `linear` stays.
-        let hl = codex_parity_entries(true, "guide");
-        let codex = String::from_utf8(
-            hl.iter()
-                .find(|e| e.path == "home/rmng/.codex/config.toml")
-                .unwrap()
-                .data
-                .clone(),
-        )
-        .unwrap();
+        let codex = codex_mcp_toml(true);
         assert!(!codex.contains("[mcp_servers.desktop]"));
         assert!(!codex.contains("127.0.0.1:9004"));
         assert!(codex.contains("[mcp_servers.linear]"));
 
         // Headed keeps desktop.
-        let headed = codex_parity_entries(false, "guide");
-        let codex_headed = String::from_utf8(
-            headed
-                .iter()
-                .find(|e| e.path == "home/rmng/.codex/config.toml")
-                .unwrap()
-                .data
-                .clone(),
-        )
-        .unwrap();
+        let codex_headed = codex_mcp_toml(false);
+        assert!(codex_headed.contains("[mcp_servers.desktop]"));
         assert!(codex_headed.contains("127.0.0.1:9004"));
+
+        // The node-agent descriptor and the Claude jq program agree with it.
+        assert!(claude_mcp_jq_program(true).contains("del(.mcpServers.desktop)"));
+        let desc_hl: serde_json::Value = serde_json::from_str(&mcp_descriptor_json(true)).unwrap();
+        assert_eq!(desc_hl.as_array().unwrap().len(), 1);
+        assert_eq!(desc_hl[0]["name"], "linear");
     }
 
     #[test]
@@ -1458,10 +1642,12 @@ mod tests {
     fn codex_parity_stamp_hash_changes_when_config_changes() {
         let original =
             codex_parity_stamp_entry_for(&codex_parity_entries(false, "guide"));
+        // Any content change in the set must move the hash; AGENTS.md stands in for the file
+        // that used to be edited here (config.toml, now merged in place rather than shipped).
         let mut changed = codex_parity_entries(false, "guide");
         changed
             .iter_mut()
-            .find(|e| e.path == "home/rmng/.codex/config.toml")
+            .find(|e| e.path == "home/rmng/.codex/AGENTS.md")
             .unwrap()
             .data
             .extend_from_slice(b"\n# changed\n");
