@@ -148,10 +148,6 @@ Consequences worth knowing before you deploy:
 - **The server sees no model traffic**, so it counts no tokens. The `working`/`idle` dot comes
   from the agent-wrapper's activity stream instead (see [API.md](API.md#monitorstate) — an
   agent you start by hand inside a clone, with no wrapper, reads as `idle`).
-- **OpenCode ships unauthenticated.** It gets the managed MCP set and nothing else: unlike Claude
-  Code and Codex it has no RMNG-managed credential file to fall back on, so an operator who wants
-  to use it supplies their own provider config in the clone. That is a real capability loss
-  against the retired routed model, not an oversight.
 - **`RMNG_PROXY_KEY` survives under that name**, but it is no longer an inference credential — it
   is the clone's **identity** token, used to auto-detect the calling clone when it creates a sub
   clone and to choose direct clone↔clone SSH. Renaming it would need every existing clone's
@@ -186,8 +182,8 @@ operator action and no re-login** — on first boot the new server does three th
    consumed, so a failure part-way just retries on the next boot.
 3. **Lets the clones converge on the next reconcile pass (~30 s)**, with no recreate and no reboot:
    the reconciler strips the retired env keys (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
-   `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) from `/etc/environment` and rewrites the Codex and
-   OpenCode configs without their routed-provider blocks. Because `/etc/environment` is read by PAM
+   `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) from `/etc/environment` and rewrites the Codex
+   config without its routed-provider block. Because `/etc/environment` is read by PAM
    at *session start*, a process already running keeps the old values for as long as it lives — so
    the reconciler restarts `agent-wrapper` whenever it actually changes the env, and only on a real
    change, since restarting every pass would interrupt an in-flight chat turn twice a minute.

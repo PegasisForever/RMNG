@@ -633,7 +633,7 @@ export function SettingsPanel({
             <Section
               title="Global agent prompt (all presets)"
               effect="immediate"
-              hint="General engineering guidance written to every agent's native rules file (Claude CLAUDE.md, Codex/OpenCode AGENTS.md, and read by the node-agent). Applies to all presets; edits sync into existing clones. Keep desktop/Cursor ticket procedure OUT of this — that belongs in the node-agent prompt below (the inner Cursor Claude Code reads this file and would recurse)."
+              hint="General engineering guidance written to every agent's native rules file (Claude CLAUDE.md, Codex AGENTS.md, and read by the node-agent). Applies to all presets; edits sync into existing clones. Keep desktop/Cursor ticket procedure OUT of this — that belongs in the node-agent prompt below (the inner Cursor Claude Code reads this file and would recurse)."
             >
               <textarea
                 value={globalPrompt}
@@ -649,7 +649,7 @@ export function SettingsPanel({
             <Section
               title="Node-agent additional prompt (all presets)"
               effect="immediate"
-              hint="Extra system-prompt append for the node-agent ONLY (the desktop agent's operating notes + ticket procedure). Not given to Claude/Codex/OpenCode. Applies to newly created clones (existing clones keep what they were created with)."
+              hint="Extra system-prompt append for the node-agent ONLY (the desktop agent's operating notes + ticket procedure). Not given to Claude/Codex. Applies to newly created clones (existing clones keep what they were created with)."
             >
               <textarea
                 value={agentPlaybook}

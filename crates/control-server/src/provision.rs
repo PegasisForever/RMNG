@@ -709,7 +709,7 @@ async fn clone_container_after_create(
     }
 
     // Interactive Claude Code reads MCP servers from ~/.claude.json (state-bearing → jq merge, not
-    // a tar entry). Give it the same desktop+linear set as Codex/OpenCode/the agent-wrapper; the
+    // a tar entry). Give it the same desktop+linear set as Codex and the agent-wrapper; the
     // desktop server is removed on headless clones. Stamp it so the reconciler skips re-running
     // this within its first 30s pass. Best-effort — the reconciler retries on failure.
     on_progress("inject", "configuring ~/.claude.json MCP servers");

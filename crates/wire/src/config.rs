@@ -420,7 +420,7 @@ pub struct AppConfig {
     #[serde(default = "default_agent_playbook")]
     pub agent_playbook: String,
     /// The global agent prompt every coding agent reads as its native operating memory
-    /// (written to CLAUDE.md / `~/.codex/AGENTS.md` / `~/.config/opencode/AGENTS.md`, and read
+    /// (written to CLAUDE.md / `~/.codex/AGENTS.md`, and read
     /// by the node-agent via `settingSources:["user"]`). Seeded with the shipped default; edited
     /// in Settings. Kept in sync into existing clones by the reconciler. (Layer **a**: global
     /// prompt, all agents, all presets.) Keep desktop/Cursor procedure OUT of this — that belongs

@@ -26,7 +26,7 @@ const CLONE_GID: u64 = 1000;
 //
 // The `desktop` + `linear` set every clone agent gets, defined ONCE here and rendered into
 // each agent's own format by the emitters below (Claude `~/.claude.json` jq-merge, Codex
-// `config.toml`, OpenCode `opencode.json`, and the neutral `~/.config/rmng/mcp.json` the
+// `config.toml` and the neutral `~/.config/rmng/mcp.json` the
 // node-agent reads). Change a URL / add a server here and all agents pick it up.
 
 /// One managed MCP server. All fields are static — the list is compile-time constant.
@@ -42,7 +42,7 @@ struct ManagedMcp {
     /// env at runtime (each emitter renders the env reference in its own syntax).
     bearer_env: Option<&'static str>,
     /// node-agent (Claude Agent SDK) hint: keep this server's tools in context every turn.
-    /// Ignored by the file-based agents (Claude CLI / Codex / OpenCode).
+    /// Ignored by the file-based agents (Claude CLI / Codex).
     always_load: bool,
 }
 
@@ -85,21 +85,6 @@ fn codex_mcp_toml(headless: bool) -> String {
         s.push('\n');
     }
     s
-}
-
-/// OpenCode `mcp` map (opencode.json). Each server `{type:"remote", url, enabled, headers?}`;
-/// linear's bearer uses OpenCode's `{env:VAR}` interpolation.
-fn opencode_mcp_map(headless: bool) -> serde_json::Map<String, serde_json::Value> {
-    let mut mcp = serde_json::Map::new();
-    for m in active_mcp(headless) {
-        let mut obj = serde_json::json!({ "type": "remote", "url": m.url, "enabled": true });
-        if let Some(env) = m.bearer_env {
-            obj["headers"] =
-                serde_json::json!({ "Authorization": format!("Bearer {{env:{env}}}") });
-        }
-        mcp.insert(m.name.to_string(), obj);
-    }
-    mcp
 }
 
 /// The jq program body that reconciles `~/.claude.json`'s `.mcpServers` to the managed set:
@@ -278,49 +263,9 @@ fn codex_config_toml(headless: bool) -> String {
     body
 }
 
-/// The managed OpenCode config: the shared two-MCP set (`desktop` + `linear`) every agent gets,
-/// plus — when the control host resolves and the model list is non-empty — a single
-/// OpenAI-compatible provider named `rmng` pointing at the group-proxy router's /cc/v1 surface,
-/// keyed by RMNG_PROXY_KEY, listing the resolved GPT models only (no Anthropic provider), so
-/// OpenCode's picker never shows a Claude model. Always returns a config (the MCP section is
-/// unconditional); the provider block is simply omitted when it can't be resolved this pass (an
-/// empty model list would be a broken provider), leaving OpenCode with its own default model.
-///
-/// MCP schema per https://opencode.ai/docs/mcp-servers: top-level `mcp`, each server
-/// `{type:"remote", url, enabled, headers?}`; `headers` support `{env:VAR}` interpolation. The
-/// `desktop` computer-use server (clone-daemon on :9004) is omitted on headless clones — that
-/// port is deleted with the desktop, so listing it would only add a dead endpoint.
-///
-/// Provider schema per https://opencode.ai/docs/providers:
-///   - `npm = "@ai-sdk/openai-compatible"` is the custom OpenAI-compatible provider; it POSTs
-///     `{baseURL}/chat/completions`, so `options.baseURL` ends in /v1 (the /cc router forwards
-///     the suffix to the instance).
-///   - `options.apiKey` accepts the `{env:VAR}` interpolation form (resolved from the clone env).
-///   - the `models` map keys are the ids sent verbatim in the request `model` field.
-///   - the top-level `model` sets the default as `"<provider>/<id>"`.
-/// The global managed path is ~/.config/opencode/opencode.json. `gpt_models` is the group's live
-/// (blacklist-filtered) `/v1/models` GPT set, or [`FALLBACK_GPT_MODELS`] when that can't be read.
-fn opencode_config_json(headless: bool) -> String {
-    // The managed MCP map (single source of truth: `managed_mcp`). `permission: {"*":"allow"}`
-    // runs OpenCode fully autonomously (no approval prompts), matching how the other clone agents
-    // run — Claude Code / node-agent use bypassPermissions, and the clone is a disposable sandbox.
-    //
-    // No `provider` block: the group-proxy era pointed OpenCode at the `/cc/v1` OpenAI-compatible
-    // surface keyed by `RMNG_PROXY_KEY`, and that surface no longer exists. Unlike Claude Code and
-    // Codex, OpenCode has no RMNG-managed credential file to fall back on, so it is left
-    // unconfigured — the operator supplies their own provider if they want to use it. This
-    // matches OpenCode's state before the group proxy existed.
-    let cfg = serde_json::json!({
-        "$schema": "https://opencode.ai/config.json",
-        "mcp": opencode_mcp_map(headless),
-        "permission": { "*": "allow" },
-    });
-    serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into())
-}
-
 /// The `rmng-cli` agent skill — single source of truth (hardcoded here). Written into every
 /// clone at `~/.claude/skills/rmng-cli/SKILL.md` (Claude Code + the inner Cursor Claude Code)
-/// and `~/.agents/skills/rmng-cli/SKILL.md` (Codex / OpenCode), so any agent can load it on
+/// and `~/.agents/skills/rmng-cli/SKILL.md` (Codex), so any agent can load it on
 /// demand to learn the `rmng` fleet CLI. Same delivery model as the global prompt / MCP config.
 const RMNG_CLI_SKILL_MD: &str = r#"---
 name: rmng-cli
@@ -455,11 +400,10 @@ fn rmng_cli_skill_entries() -> Vec<TarEntry> {
 
 /// The per-clone agent config bundle: the shared **global agent prompt** (layers a+c, passed in
 /// as `global_prompt`) written to every agent's native rules file — Claude Code's
-/// `~/.claude/CLAUDE.md`, Codex's `~/.codex/AGENTS.md`, OpenCode's `~/.config/opencode/AGENTS.md`
-/// — plus the generated Codex + OpenCode configs and the neutral MCP descriptor the node-agent
-/// reads. All identical body across the three rules files (`opencode.ai/docs/rules`,
-/// codex/claude equivalents), so a single source drives every agent's operating memory. The
-/// content-hash stamp on this set means a Settings edit to layer a/c re-applies on the next pass.
+/// `~/.claude/CLAUDE.md` and Codex's `~/.codex/AGENTS.md` — plus the generated Codex config and
+/// the neutral MCP descriptor the node-agent reads. Identical body in both rules files, so a
+/// single source drives every agent's operating memory. The content-hash stamp on this set means
+/// a Settings edit to layer a/c re-applies on the next pass.
 pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<TarEntry> {
     let guidance = |path: &str| TarEntry {
         path: path.to_string(),
@@ -472,18 +416,9 @@ pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<T
         // The global agent prompt (a+c), one identical body per agent's rules location.
         guidance("home/rmng/.claude/CLAUDE.md"),
         guidance("home/rmng/.codex/AGENTS.md"),
-        guidance("home/rmng/.config/opencode/AGENTS.md"),
         TarEntry {
             path: "home/rmng/.codex/config.toml".to_string(),
             data: codex_config_toml(headless).into_bytes(),
-            mode: 0o600,
-            uid: CLONE_UID,
-            gid: CLONE_GID,
-        },
-        // OpenCode's global config: the shared MCP set. Always written.
-        TarEntry {
-            path: "home/rmng/.config/opencode/opencode.json".to_string(),
-            data: opencode_config_json(headless).into_bytes(),
             mode: 0o600,
             uid: CLONE_UID,
             gid: CLONE_GID,
@@ -498,7 +433,7 @@ pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<T
             gid: CLONE_GID,
         },
     ];
-    // The `rmng-cli` skill, at both skill locations (Claude/Cursor + Codex/OpenCode).
+    // The `rmng-cli` skill, at both skill locations (Claude/Cursor + Codex).
     let mut entries = entries;
     entries.extend(rmng_cli_skill_entries());
     entries
@@ -569,7 +504,7 @@ pub(crate) fn claude_mcp_stamp_entry_for(headless: bool) -> TarEntry {
 pub(crate) fn codex_prepare_script() -> &'static str {
     r#"set -e
 install -d -o rmng -g rmng -m700 /home/rmng/.codex
-install -d -o rmng -g rmng -m755 /home/rmng/.config /home/rmng/.config/opencode /home/rmng/.config/rmng /home/rmng/.claude
+install -d -o rmng -g rmng -m755 /home/rmng/.config /home/rmng/.config/rmng /home/rmng/.claude
 install -d -o rmng -g rmng -m755 /home/rmng/.claude/skills/rmng-cli /home/rmng/.agents/skills/rmng-cli
 mkdir -p /etc/rmng
 "#
@@ -1415,12 +1350,8 @@ mod tests {
     fn codex_parity_entries_install_global_guidance_and_linear_mcp() {
         let prompt = "# House rules\n\nBe excellent. SENTINEL-A+C.\n";
         let entries = codex_parity_entries(false, prompt);
-        // The SAME global prompt body lands in all three agents' native rules files.
-        for path in [
-            "home/rmng/.claude/CLAUDE.md",
-            "home/rmng/.codex/AGENTS.md",
-            "home/rmng/.config/opencode/AGENTS.md",
-        ] {
+        // The SAME global prompt body lands in both agents' native rules files.
+        for path in ["home/rmng/.claude/CLAUDE.md", "home/rmng/.codex/AGENTS.md"] {
             let e = entries.iter().find(|e| e.path == path).unwrap_or_else(|| panic!("missing {path}"));
             assert_eq!(e.mode, 0o644);
             assert_eq!((e.uid, e.gid), (1000, 1000));
@@ -1498,29 +1429,18 @@ mod tests {
         assert!(!codex.contains("127.0.0.1:9004"));
         assert!(codex.contains("[mcp_servers.linear]"));
 
-        let oc = String::from_utf8(
-            hl.iter()
-                .find(|e| e.path == "home/rmng/.config/opencode/opencode.json")
-                .unwrap()
-                .data
-                .clone(),
-        )
-        .unwrap();
-        assert!(!oc.contains("127.0.0.1:9004"));
-        assert!(oc.contains("mcp.linear.app"));
-
-        // Headed keeps desktop in both.
+        // Headed keeps desktop.
         let headed = codex_parity_entries(false, "guide");
-        let oc_headed = String::from_utf8(
+        let codex_headed = String::from_utf8(
             headed
                 .iter()
-                .find(|e| e.path == "home/rmng/.config/opencode/opencode.json")
+                .find(|e| e.path == "home/rmng/.codex/config.toml")
                 .unwrap()
                 .data
                 .clone(),
         )
         .unwrap();
-        assert!(oc_headed.contains("127.0.0.1:9004"));
+        assert!(codex_headed.contains("127.0.0.1:9004"));
     }
 
     #[test]
@@ -1551,10 +1471,6 @@ mod tests {
         assert!(codex.contains("[mcp_servers.linear]"));
         assert!(codex.contains("bearer_token_env_var = \"LINEAR_API_KEY\""));
 
-        let oc = serde_json::Value::Object(opencode_mcp_map(false));
-        assert_eq!(oc["desktop"]["url"], "http://127.0.0.1:9004");
-        assert_eq!(oc["linear"]["headers"]["Authorization"], "Bearer {env:LINEAR_API_KEY}");
-
         let jq = claude_mcp_jq_program(false);
         assert!(jq.contains(r#".mcpServers.desktop = {"type":"http","url":"http://127.0.0.1:9004"}"#));
         assert!(jq.contains(r#""Authorization":"Bearer ${LINEAR_API_KEY}""#));
@@ -1571,40 +1487,12 @@ mod tests {
 
         // Headless: desktop is filtered out of every emitter; linear stays.
         assert!(!codex_mcp_toml(true).contains("desktop"));
-        assert!(!opencode_mcp_map(true).contains_key("desktop"));
         assert!(claude_mcp_jq_program(true).contains("del(.mcpServers.desktop)"));
         let desc_hl: serde_json::Value = serde_json::from_str(&mcp_descriptor_json(true)).unwrap();
         assert_eq!(desc_hl.as_array().unwrap().len(), 1);
         assert_eq!(desc_hl[0]["name"], "linear");
     }
 
-    /// OpenCode gets the shared MCP set and nothing more. Its group-proxy provider block is
-    /// gone with the `/cc/v1` surface it pointed at, and — unlike Claude Code and Codex — there
-    /// is no RMNG-managed credential file to fall back on, so it ships unconfigured.
-    #[test]
-    fn opencode_config_is_mcp_only_with_no_provider() {
-        let json = opencode_config_json(false);
-        assert!(!json.contains("\"provider\""), "no provider block: {json}");
-        assert!(!json.contains("@ai-sdk/openai-compatible"));
-        assert!(!json.contains("RMNG_PROXY_KEY"), "the identity key is not an inference credential");
-        assert!(!json.contains("\"model\""), "no default model without a provider to serve it");
-        // The shared MCP set + full autonomy still ship.
-        assert!(json.contains("\"mcp\""));
-        assert!(json.contains("127.0.0.1:9004"));
-        assert!(json.contains("mcp.linear.app"));
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["permission"]["*"], "allow");
-        // Headless drops the desktop MCP but keeps linear.
-        let hl = opencode_config_json(true);
-        assert!(!hl.contains("127.0.0.1:9004"));
-        assert!(hl.contains("mcp.linear.app"));
-        // The parity entries always carry the opencode file.
-        assert!(
-            codex_parity_entries(false, "guide")
-                .iter()
-                .any(|e| e.path == "home/rmng/.config/opencode/opencode.json")
-        );
-    }
 
     #[test]
     fn codex_parity_stamp_hash_changes_when_config_changes() {

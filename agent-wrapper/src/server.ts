@@ -1,5 +1,5 @@
 // Small HTTP wrapper around the Claude Agent SDK, run inside each RDP container
-// (one process per host) on :4096 — the slot opencode used to occupy.
+// (one process per host) on :4096.
 //
 // It holds ONE long-lived streaming-input session (created lazily on the first
 // prompt and kept alive for the process lifetime). Streaming input lets an agent start a

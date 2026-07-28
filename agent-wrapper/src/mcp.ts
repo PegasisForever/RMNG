@@ -1,6 +1,6 @@
 // Maps the control-server's neutral MCP descriptor (~/.config/rmng/mcp.json — the single
 // source of truth, already headless-filtered) to the Claude Agent SDK's `mcpServers` shape.
-// The other agents (Claude CLI / Codex / OpenCode) get the same set rendered into their own
+// The other agents (Claude CLI / Codex) get the same set rendered into their own
 // config files by the control-server; this is the node-agent's consumer of that source.
 
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
