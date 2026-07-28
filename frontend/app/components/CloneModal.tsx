@@ -4,8 +4,8 @@ import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { ImagePicker, rememberCloneImage } from "~/components/ImagePicker";
 import { OperationProgress } from "~/components/OperationProgress";
 import { getConfig, type ClonePayload } from "~/lib/api";
-import type { Clone, Operation } from "~/lib/types";
-import type { Group } from "~/lib/wire/Group";
+import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
+import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import { useModalEscape } from "~/lib/useModalEscape";
@@ -87,6 +87,7 @@ export function CloneModal({
   imagesLoading,
   operations,
   parentCandidate,
+  accounts,
   onClose,
   onClone,
 }: {
@@ -98,6 +99,8 @@ export function CloneModal({
   /** The currently selected clone, offered as a sub-clone parent. Null = nothing selected,
    *  or the selection can't be a parent (unmanaged, or already a sub clone). */
   parentCandidate: Clone | null;
+  /** Imported accounts (both providers), so the two pickers can label each with its usage. */
+  accounts: ClaudeUsage[];
   onClose: () => void;
   /** Starts the clone and resolves with the driving Operation. The dialog stays open,
    *  showing its progress, until the operation settles. */
@@ -115,9 +118,11 @@ export function CloneModal({
   const [claudeInstructions, setClaudeInstructions] = useState("");
   // Account-group OVERRIDE. "" = follow the resolved preset's default (the server resolves
   // it). A non-empty value pins the clone to that pool regardless of preset.
-  const [groupOverride, setGroupOverride] = useState("");
+  const [claudeAccount, setClaudeAccount] = useState("auto");
+  const [codexAccount, setCodexAccount] = useState("auto");
   // Account groups (from config), for the picker options.
-  const [groups, setGroups] = useState<Group[]>([]);
+  const [groups, setGroups] = useState<CloneGroup[]>([]);
+  const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
   // Presets (from config). Only the no-ticket tab picks one by hand.
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
   const [plainPreset, setPlainPreset] = useState("");
@@ -136,7 +141,8 @@ export function CloneModal({
     getConfig()
       .then((c) => {
         setPresets(c.presets);
-        setGroups(c.groups);
+        setGroups(c.cloneGroups);
+        setCodexGroups(c.codexGroups);
       })
       .catch(() => {
         // Config unreachable — just no preset/group options.
@@ -176,12 +182,6 @@ export function CloneModal({
     team,
     ticketPrefix: parsed?.prefix,
   });
-
-  // What the group control shows: the override if the operator set one, else the resolved
-  // preset's group. Blank until a preset resolves — on the ticket tabs that's "nothing typed
-  // yet", which is exactly what the empty dropdown should convey.
-  const presetGroup = groups.find((g) => g.name === effectivePreset?.group)?.name ?? "";
-  const shownGroup = groupOverride || presetGroup;
 
   // Both ticket modes need a Linear API key, but not the same one — mirror the server so the
   // dialog blocks exactly the requests it would reject. `create` opens the issue with the
@@ -252,7 +252,8 @@ export function CloneModal({
     // A blank override means "let the server resolve it" (preset default → first group),
     // so it's omitted rather than sent as an empty name.
     const common = {
-      group: groupOverride || undefined,
+      claudeAccount: claudeAccount || undefined,
+      codexAccount: codexAccount || undefined,
       headless: headless || undefined,
       parent: asSubClone && parentCandidate ? parentCandidate.id : undefined,
     };
@@ -502,20 +503,27 @@ export function CloneModal({
             </p>
           ) : null}
 
-          {groups.length > 0 ? (
-            <label className={`mt-3 ${label}`}>
-              Account group override
-              <AccountGroupSelect
-                groups={groups}
-                value={shownGroup}
-                blankLabel={
-                  mode === "plain" ? "Preset default" : "Follows the ticket’s preset"
-                }
-                onChange={setGroupOverride}
-                className={field}
-              />
-            </label>
-          ) : null}
+          <label className={`mt-3 ${label}`}>
+            Claude account
+            <AccountGroupSelect
+              groups={groups}
+              accounts={accounts.filter((a) => a.provider !== "codex")}
+              value={claudeAccount}
+              onChange={setClaudeAccount}
+              className={field}
+            />
+          </label>
+
+          <label className={`mt-3 ${label}`}>
+            Codex account
+            <AccountGroupSelect
+              groups={codexGroups}
+              accounts={accounts.filter((a) => a.provider === "codex")}
+              value={codexAccount}
+              onChange={setCodexAccount}
+              className={field}
+            />
+          </label>
 
           {linearKeyMissing ? (
             <p className="mt-3 text-[11px] text-red-600 dark:text-red-400">

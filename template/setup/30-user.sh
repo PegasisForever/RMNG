@@ -193,7 +193,7 @@ chmod 644 "$CLAUDE_DIR/CLAUDE.md"
 
 # Shared user Codex instructions + MCP config. Codex reads global guidance from
 # ~/.codex/AGENTS.md and MCP servers from ~/.codex/config.toml. The control-server
-# rewrites these files at clone creation/reconciliation with clone-specific CLIProxy routing;
+# rewrites these files at clone creation/reconciliation with clone-specific settings;
 # the template carries only static guidance and desktop/Linear MCP defaults.
 log "shared user Codex AGENTS.md + MCP config"
 CODEX_DIR="/home/$USERNAME/.codex"

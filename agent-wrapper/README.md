@@ -25,7 +25,7 @@ The session id is in memory only: a CoW clone boots a fresh wrapper and starts a
 | `LINEAR_API_KEY` | unset | Linear hosted MCP identity, injected from the selected preset; empty skips it |
 | `AGENT_INSTRUCTIONS_PATH` | `~/.config/rmng/agent-instructions.md` | editable agent playbook injected by the control-server; present and non-empty overrides the baked-in default |
 
-The wrapper always registers the clone-local desktop MCP (`http://127.0.0.1:9004`). It optionally registers the hosted Linear MCP. It does not report clone status: the control server owns liveness and activity through Docker and passive CLIProxy traffic.
+The wrapper always registers the clone-local desktop MCP (`http://127.0.0.1:9004`). It optionally registers the hosted Linear MCP. It does not report clone status directly: the control server owns liveness through Docker, and reads activity off this wrapper's `/events` `busy`/`activity` frames.
 
 ## Run / deploy
 

@@ -40,17 +40,20 @@ export interface Clone {
   archived?: boolean;
   /** The clone-source image reference this clone was cloned from (`pegasis0/rmng-template:latest`). */
   source?: string;
-  /**
-   * Group-proxy binding: the account pool (one CLIProxyAPI instance) this clone's
-   * agents route through, via the control-server's `/cc` router. This is the sole
-   * account binding — CLIProxyAPI owns intra-group account selection + refresh.
-   * Server-only; the Rust client ignores it.
-   *
-   * Always present — the server repoints blank/dangling bindings at load and on every
-   * reconciler pass — but can read `""` in the window before that runs, or on a row
-   * written by an older build.
-   */
-  group: string;
+  /** Email of the imported Claude account whose access token the server has installed into
+   *  this clone's `~/.claude/.credentials.json`. Absent when no account is assigned. */
+  claudeAccountEmail?: string;
+  /** Name of the Claude account pool this clone is balanced within (sticky — it moves only
+   *  when its account exhausts). Absent when pinned to one fixed account. */
+  claudeGroup?: string;
+  /** The operator's Claude selection verbatim: `auto`, `none`, `group:<pool>`, or an email.
+   *  Distinguishes an auto-managed clone from one pinned or deliberately tokenless —
+   *  `claudeAccountEmail` alone cannot tell those apart. */
+  claudeSelection?: string;
+  /** The Codex twins of the three above. Independent — a clone can hold both providers. */
+  codexAccountEmail?: string;
+  codexGroup?: string;
+  codexSelection?: string;
   /** Linear workspace name this clone's ticket belongs to (selects the card color). */
   linearWorkspace?: string;
   /** Linear ticket identifier, e.g. "WE-142". */
@@ -143,7 +146,7 @@ export interface ClaudeUsage {
   id: string;
   email: string;
   /** Which provider this account belongs to (default treated as "claude"). */
-  provider?: "claude" | "codex" | "antigravity";
+  provider?: "claude" | "codex";
   /** True for the account claude-swap had active at import time. */
   active: boolean;
   /** True if this account can be picked when creating a clone — every imported
@@ -170,25 +173,14 @@ export interface ClaudeUsage {
   resetCredits?: bigint | null;
 }
 
-/**
- * Per-group usage view: one account pool (a CLIProxyAPI instance) plus the accounts
- * authenticated into its `auth-dir`, each with its 5h/7d/fable windows. The by-group
- * replacement for the old flat `claudeAccounts` list — the same email can appear under
- * several groups (independent token sets per instance), so account ids are group-scoped
- * (`<group>|<email>`). Display-only.
- */
-export interface GroupUsage {
-  name: string;
-  accounts: ClaudeUsage[];
-}
-
 export interface ControlState {
   selected: string | null;
   monitors: MonitorSpec[];
   hosts: Clone[];
   operations: Operation[];
-  /** Per-group usage view (no tokens). Refreshed by the by-group usage poller. */
-  usageGroups: GroupUsage[];
+  /** Per-account usage view (no tokens). Despite the name it carries BOTH providers' rows,
+   *  tagged by `ClaudeUsage.provider`. Refreshed by the two account pollers. */
+  claudeAccounts: ClaudeUsage[];
   /** Name of the currently active layout preset. */
   activeLayout: string;
   /** Layout preset names in config order — powers the sidebar switcher. */
@@ -201,7 +193,7 @@ export function emptyState(): ControlState {
     monitors: [],
     hosts: [],
     operations: [],
-    usageGroups: [],
+    claudeAccounts: [],
     activeLayout: "",
     layoutPresetNames: [],
   };

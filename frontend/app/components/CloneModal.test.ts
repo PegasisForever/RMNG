@@ -49,9 +49,9 @@ test("a pruned FAILED op stays failed rather than reading as done", () => {
 // --- preset resolution (mirrors the server, per tab) ---------------------------------
 
 const presets: PresetRedacted[] = [
-  { name: "work", labels: ["WE", "DEV"], linearKeySet: true, group: "a", vars: [], agentPlaybook: "", globalPrompt: "" },
-  { name: "side", labels: ["AW"], linearKeySet: false, group: "b", vars: [], agentPlaybook: "", globalPrompt: "" },
-  { name: "bare", labels: [], linearKeySet: false, group: "a", vars: [], agentPlaybook: "", globalPrompt: "" },
+  { name: "work", labels: ["WE", "DEV"], linearKeySet: true, vars: [], agentPlaybook: "", globalPrompt: "" },
+  { name: "side", labels: ["AW"], linearKeySet: false, vars: [], agentPlaybook: "", globalPrompt: "" },
+  { name: "bare", labels: [], linearKeySet: false, vars: [], agentPlaybook: "", globalPrompt: "" },
 ];
 
 test("the no-ticket tab uses the hand-picked preset", () => {
@@ -69,8 +69,8 @@ test("the existing-ticket tab auto-selects by the ticket prefix, case-insensitiv
 });
 
 test("nothing resolves until there is something to resolve from", () => {
-  // Both ticket tabs read undefined before input, which is what leaves the group control
-  // blank rather than showing a group the clone might not get.
+  // Both ticket tabs read undefined before input, which is what leaves the resolved-preset
+  // line blank rather than naming a preset the clone might not get.
   expect(resolvePreset("existing", presets, {})).toBeUndefined();
   expect(resolvePreset("create", presets, {})).toBeUndefined();
 });

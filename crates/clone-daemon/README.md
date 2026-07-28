@@ -7,7 +7,7 @@
 3. Serves the clone-local desktop automation MCP on `:9004` (`RMNG_DAEMON_MCP_PORT`).
 4. Bridges rich clipboard data and client-drawn cursor metadata.
 
-The control server derives clone lifecycle from Docker liveness and passive CLIProxy token traffic; the daemon's only management surface is its clone-local desktop MCP.
+The control server derives clone lifecycle from Docker liveness and the agent-wrapper's activity frames; the daemon's only management surface is its clone-local desktop MCP.
 
 ## Modules
 

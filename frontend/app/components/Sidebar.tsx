@@ -23,9 +23,8 @@ import { type CSSProperties, type ReactNode, useState } from "react";
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
 import { SidebarClone } from "~/components/SidebarClone";
-import type { GroupUsage, Clone, Operation } from "~/lib/types";
+import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
-import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 
@@ -128,16 +127,14 @@ function SortableCloneGroup({
 export interface SidebarProps {
   /** Off-canvas drawer state (< lg); the panel is static + always visible ≥ lg. */
   open?: boolean;
-  /** Account pools + their usage (configured groups merged with `ControlState.usageGroups`). */
-  usageGroups: GroupUsage[];
+  /** Per-account usage rows (both providers), from `ControlState.claudeAccounts`. */
+  accounts: ClaudeUsage[];
   /** Clones in display order — already reconciled + reordered by the container. */
   hosts: Clone[];
   /** Live per-clone CPU/RAM map (the volatile `stats` SSE event). */
   stats: Record<string, ContainerStats>;
   /** Live CT 105-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
   lxcStats: LxcStats | null;
-  /** Live per-clone new-token totals (the `tokens` SSE event). */
-  tokens: Record<string, CloneTokenUsage>;
   /** Live per-clone forward-runtime map (the `forwards` SSE event), fanned out to each
    *  clone row's compact forwards chips. */
   forwards?: Record<string, ForwardRuntime[]>;
@@ -160,12 +157,8 @@ export interface SidebarProps {
 
   onOpenSettings: () => void;
   onOpenClone: () => void;
-  /** Create a new account group. */
-  onCreateGroup: () => void;
-  /** Add an account to a group (opens the OAuth login flow). */
-  onAddAccount: (group: string) => void;
-  /** Delete an account group. */
-  onDeleteGroup: (group: string) => void;
+  /** Import an account from a clone that is already signed in (opens the import modal). */
+  onImportAccount: () => void;
   /** Trigger an immediate usage refresh (the panel's refresh button). */
   onRefresh: () => void | Promise<void>;
   onSelectClone: (clone: Clone) => void;
@@ -190,11 +183,10 @@ export interface SidebarProps {
  *  Off-canvas drawer < lg, static ≥ lg. */
 export function Sidebar({
   open = false,
-  usageGroups,
+  accounts,
   hosts,
   stats,
   lxcStats,
-  tokens,
   forwards = {},
   operations,
   selectedId,
@@ -205,9 +197,7 @@ export function Sidebar({
   onActivateLayout,
   onOpenSettings,
   onOpenClone,
-  onCreateGroup,
-  onAddAccount,
-  onDeleteGroup,
+  onImportAccount,
   onRefresh,
   onSelectClone,
   onDeleteClone,
@@ -269,7 +259,6 @@ export function Sidebar({
       key={clone.id}
       clone={clone}
       stats={stats[clone.id]}
-      tokenUsage={tokens[clone.id]}
       forwardRuntime={forwards[clone.id]}
       sshPublicHost={sshPublicHost}
       bastionPort={bastionPort}
@@ -342,10 +331,8 @@ export function Sidebar({
       ) : null}
 
       <ClaudeAccountsPanel
-        groups={usageGroups}
-        onCreateGroup={onCreateGroup}
-        onAddAccount={onAddAccount}
-        onDeleteGroup={onDeleteGroup}
+        accounts={accounts}
+        onImport={onImportAccount}
         onRefresh={onRefresh}
       />
 
@@ -424,7 +411,6 @@ export function Sidebar({
               <SidebarClone
                 key={clone.id}
                 clone={clone}
-                tokenUsage={tokens[clone.id]}
                 selected={selectedId === clone.id}
                 op={opForClone(clone.id)}
                 onSelect={() => onSelectClone(clone)}

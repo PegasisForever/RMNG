@@ -29,8 +29,9 @@ missing standalone Codex CLI install at clone creation and from the clone reconc
 running clones. RMNG gives Codex parity with Claude's shared clone context by managing
 `~/.codex/AGENTS.md` and `~/.codex/config.toml`: Codex gets the same disposable-sandbox
 guidance, the local desktop daemon MCP (`desktop`), and Linear (`linear`, using
-`LINEAR_API_KEY`). Its model requests route through the control-server's clone-specific
-CLIProxyAPI endpoint. The clone reconciler refreshes those files on old running clones.
+`LINEAR_API_KEY`). Codex authenticates from `~/.codex/auth.json`, which the control-server
+writes with the short-lived access token of the account the clone is assigned. The clone
+reconciler refreshes those files on old running clones.
 
 ## Server resolution
 
@@ -50,8 +51,8 @@ $RMNG_CONTROL_URL` hint.
 
 | Command (with `--json`) | Emits |
 |---|---|
-| `clone ls` | `{ selected, clones: [Clone + {stats, tokens}], operations }` (CLI shape — includes the metrics the table shows) |
-| `clone select`, `clone bind` | small status object (`{selected}` / the `{ok, group}` reply) |
+| `clone ls` | `{ selected, clones: [Clone + {stats}], operations }` (CLI shape — includes the metrics the table shows) |
+| `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
 | `clone create`, `clone create-from-ticket`, `clone create-with-new-ticket`, `clone create-plain`, `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
 | `op wait` | the terminal `Operation` |
@@ -78,10 +79,11 @@ is always a positional **clone id** (the first column of `rmng clone ls`).
 
 ### `rmng clone ls`
 Clones table: `ID` (a `*` suffix marks the selected clone), `IP` (the current Docker bridge
-address when available), `IMAGE` (source reference), `PRESET`, `GROUP` (its CLIProxyAPI account
-pool), live `CPU` and `RAM`, cumulative `TOK-IN` / `TOK-OUT`, and lifecycle `STATUS`. Sub clones
-are indented under their parent. CPU/RAM are volatile snapshots for sampled active managed clones.
-`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats, tokens}],
+address when available), `IMAGE` (source reference), `PRESET`, `CLAUDE` and `CODEX` (the account
+each provider is running — the resolved email, falling back to the selection when none is
+assigned yet), live `CPU` and `RAM`, and lifecycle `STATUS`. Sub clones are indented under their
+parent. CPU/RAM are volatile snapshots for sampled active managed clones.
+`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats}],
 operations }` — so the metrics the table shows are available to a machine reader too.
 
 ### Creating clones — four verbs
@@ -92,16 +94,17 @@ clone-creating verb is prefixed `create-` so the action is unmistakable — the 
 (`ticket WE-142`) read like it acted *on* the ticket. Each prints the started op id (follow
 with `rmng op wait <op-id>`), or blocks with `--wait`.
 
-**Common flags** (all four): `--from <IMAGE>` (required), `--group <G>`, `--headless`,
-`--parent <C>` | `--top-level`, `--wait` `[--timeout <N>]`.
+**Common flags** (all four): `--from <IMAGE>` (required), `--claude-account <A>`,
+`--codex-account <A>`, `--headless`, `--parent <C>` | `--top-level`, `--wait` `[--timeout <N>]`.
 
-**Every clone binds an account group** — there is no `--no-group`. `--group` is an *override*;
-omitting it falls through the chain: the parent's group (inside a clone) → the preset's default
-group → the first configured group. An unknown `--group` name is a `400`.
+**Account selections** take the same forms as `account swap`: an email, `auto`, `none`, or
+`group:<pool>`. Omitting them means `auto` — a new clone gets an account rather than none.
 
 **Run from inside a clone, a new clone auto-nests as a sub clone under the caller AND inherits
-the caller's account group + env preset by default.** `--parent <clone>` nests under a specific
-top-level clone; `--top-level` forces a top-level clone, skipping inheritance.
+the caller's account selections + env preset by default.** What is inherited is the *selection*,
+not the resolved account: a parent on `auto` that landed on some email passes on `auto`, so the
+child gets its own pick instead of being pinned to its parent's. `--parent <clone>` nests under a
+specific top-level clone; `--top-level` forces a top-level clone, skipping inheritance.
 
 #### `rmng clone create <HOSTNAME> [--preset <P>|--no-preset]`
 Exact hostname (a DNS label; `400` if taken), no ticket, no derived display name.
@@ -161,12 +164,6 @@ offline clones are refused. `--json` → `{ command, mode }`.
 Run one non-interactive command inside a clone (docker-exec style); forwards piped stdin and
 passes through the command's exit code. `--json` emits one object with the captured streams.
 
-### `rmng clone bind <CLONE> <GROUP>`
-Rebind a clone to one provider-agnostic account group (`POST /api/hosts/:id/group`). Pure routing
-change; account onboarding/refresh stays frontend/API. The group is **required** — every clone
-binds one, so a binding can be changed but never cleared (there is no `--none`). An unknown or
-missing name is a `400`.
-
 ### `rmng clone select <CLONE>` / `rmng clone select --none`
 Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears it. **Operator-only
 — it does not change which clone your other commands target.** Unknown id errors (exit 1).
@@ -178,10 +175,21 @@ Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears i
 - `image commit <CLONE> --as <NAME> [--wait]` — commit a running clone to `<name>:latest`.
 - `image rm <reference>` — remove a clone-source image (`409` while clones use it).
 
-### `rmng account ls [--provider claude|codex|gemini]`
-Read-only listing of imported accounts and usage windows: `GROUP EMAIL PROVIDER ASSIGNABLE 5H
-5H-RESETS 7D FABLE ERROR`. All providers by default; `--provider` filters to one. Gemini
-(Antigravity) can be a presence-only row (its upstream exposes no pollable quota).
+### `rmng account ls [--provider claude|codex]`
+Read-only listing of imported accounts and usage windows: `EMAIL PROVIDER ASSIGNABLE 5H
+5H-RESETS 7D FABLE ERROR`. Both providers by default; `--provider` filters to one.
+
+### `rmng account swap <CLONE> <ACCOUNT> [--codex]`
+Hot-swap a clone's account for one provider (`POST /api/{claude,codex}/swap`). `<ACCOUNT>` is a
+selection verbatim: an email (pin it), `auto` (the server picks and may re-pick), `none` (install
+no token — the clone boots provably tokenless), or `group:<pool>` (bind it to a named pool and
+let the rotator balance it). The token is written into the clone's credential file immediately;
+nothing restarts, because the agents re-read those files per request.
+
+### `rmng account rm <ACCOUNT> [--codex]`
+Delete an imported account by email. Refused (`400`) while any clone is explicitly **pinned** to
+it — that pin is an operator decision, not a rotation, so it is never silently undone. Clones on
+`auto` or a pool are moved to another account first; the reply's `moved` lists them.
 
 ### `rmng op ls`
 The current `operations[]`: in-flight + recently-finished clone/delete/archive/restore/pull/

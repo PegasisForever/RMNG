@@ -1,7 +1,7 @@
 //! Late-boot sequencing for the control-server.
 //!
 //! GStreamer plugin scanning opens private pipes. Any child spawned while that
-//! scan is in flight (cliproxy / smbd / sshd) can inherit a write end and prevent
+//! scan is in flight (smbd / sshd) can inherit a write end and prevent
 //! EOF, hanging `media::init` forever and leaving ports 9000/9001/9005 unbound.
 //! This helper encodes the required order: finish media init, then spawn
 //! background supervisors, then start media listeners.

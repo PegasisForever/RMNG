@@ -611,7 +611,7 @@ async fn clone_exec(
 /// Precedence: a `topLevel` body flag → `None`; an explicit `parent` body id → validated as a
 /// top-level managed clone; otherwise auto-detect the calling clone from its per-clone router
 /// key header (`X-RMNG-Proxy-Key`, the same bearer the `/cc` proxy trusts, mapped by
-/// [`crate::cliproxy::InstanceManager::clone_for_token`]) and nest under it only when the caller
+/// [`crate::clonekey::CloneKeys::clone_for_token`]) and nest under it only when the caller
 /// is itself top-level — nesting is one level deep, so a request from a sub clone (or from
 /// outside the fleet with no key) yields a top-level clone. `topLevel` + `parent` is an error.
 fn resolve_parent(
@@ -2040,7 +2040,6 @@ mod tests {
         assert!(images[0].in_use_by.is_empty());
     }
 
-    // --- normalize_login_status: CLIProxyAPI v7 get-auth-status → {state, error?} ---
 
 
 
@@ -2620,7 +2619,6 @@ not a var line
         assert_eq!(got, doc);
     }
 
-    // The `/cc` router's own tests moved to `groupproxy.rs` along with the router itself.
     // What stays here is the control-server half of the boundary: the internal token-delta
     // intake's auth.
 

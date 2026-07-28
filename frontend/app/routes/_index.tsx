@@ -4,7 +4,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { ChangeAccountModal } from "~/components/ChangeAccountModal";
 import { CloneModal } from "~/components/CloneModal";
 import { CommitImageModal } from "~/components/CommitImageModal";
-import { GroupLoginModal } from "~/components/GroupLoginModal";
+import { ImportAccountModal } from "~/components/ImportAccountModal";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
@@ -15,36 +15,34 @@ import {
   archiveClone,
   duplicateClone,
   commitImage,
-  createGroup,
-  deleteGroup,
-  deleteGroupAccount,
+  deleteClaudeAccount,
+  deleteCodexAccount,
   deleteClone,
   deleteImage,
   getConfig,
-  getGroupProxyStatus,
   getUpdateStatus,
   listImages,
   pullTemplate,
   putConfig,
   putForwards,
-  refreshUsage,
+  refreshClaudeUsage,
+  refreshCodexUsage,
   reorder,
-  restartGroupProxy,
   restartServer,
-  setCloneGroup,
+  swapClaudeAccount,
+  swapCodexAccount,
   testConfig,
   unarchiveClone,
   updateServer,
 } from "~/lib/api";
-import { type ClaudeUsage, type ControlState, type GroupUsage, type Clone, emptyState } from "~/lib/types";
+import { type ClaudeUsage, type ControlState, type Clone, emptyState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { LxcStats } from "~/lib/wire/LxcStats";
-import type { Group } from "~/lib/wire/Group";
+import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
-import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 
 import type { Route } from "./+types/_index";
 
@@ -89,7 +87,6 @@ function useLiveState(initial: ControlState) {
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
   const [lxcStats, setLxcStats] = useState<LxcStats | null>(null);
   const [forwards, setForwards] = useState<Record<string, ForwardRuntime[]>>({});
-  const [tokens, setTokens] = useState<Record<string, CloneTokenUsage>>({});
   useEffect(() => {
     let es: EventSource | null = null;
     let lastActivity = Date.now();
@@ -135,14 +132,6 @@ function useLiveState(initial: ControlState) {
           // ignore malformed frame
         }
       });
-      es.addEventListener("tokens", (e) => {
-        lastActivity = Date.now();
-        try {
-          setTokens(JSON.parse((e as MessageEvent).data));
-        } catch {
-          // ignore malformed frame
-        }
-      });
       // Heartbeat carries no payload — it exists only to keep `lastActivity` fresh so the
       // watchdog can distinguish a wedged socket from an idle-but-healthy one.
       es.addEventListener("ping", () => {
@@ -182,13 +171,13 @@ function useLiveState(initial: ControlState) {
       es?.close();
     };
   }, []);
-  return { state, stats, lxcStats, forwards, tokens };
+  return { state, stats, lxcStats, forwards };
 }
 
 export default function Home({ loaderData }: Route.ComponentProps) {
   // The live SSE state powers both the wizard (template-provision progress) and the
   // dashboard, so it lives here at the gate. `stats` is the volatile per-clone usage map.
-  const { state, stats, lxcStats, forwards, tokens } = useLiveState(loaderData);
+  const { state, stats, lxcStats, forwards } = useLiveState(loaderData);
   // First-run gate: hold the config (null while loading). Render a minimal centered
   // "Loading…" until it resolves so the dashboard never flashes before the wizard
   // decision; render the wizard INSTEAD of the dashboard while setup isn't complete.
@@ -219,10 +208,10 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       stats={stats}
       lxcStats={lxcStats}
       forwards={forwards}
-      tokens={tokens}
       sshPublicHost={cfg.ssh?.publicHost ?? ""}
       bastionPort={cfg.listen.bastion}
-      groups={cfg.groups}
+      cloneGroups={cfg.cloneGroups}
+      codexGroups={cfg.codexGroups}
       onConfigChange={setCfg}
     />
   );
@@ -233,26 +222,27 @@ function Dashboard({
   stats,
   lxcStats,
   forwards,
-  tokens,
   sshPublicHost,
   bastionPort,
-  groups,
+  cloneGroups,
+  codexGroups,
   onConfigChange,
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
   lxcStats: LxcStats | null;
   forwards: Record<string, ForwardRuntime[]>;
-  tokens: Record<string, CloneTokenUsage>;
   /** `ssh.publicHost` (config) — threaded down to each sidebar row's copied SSH
    *  command; empty ⇒ falls back to `window.location.hostname`. */
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied SSH commands jump through. */
   bastionPort: number;
-  /** Configured account groups (from `config.groups`); the authoritative group list for
-   *  the by-group panels + pickers. */
-  groups: Group[];
-  /** Update the gate's config after a group create/delete (returns the fresh redacted config). */
+  /** Configured Claude account pools (from `config.cloneGroups`) — the authoritative list
+   *  for the account pickers. */
+  cloneGroups: CloneGroup[];
+  /** Configured Codex account pools (from `config.codexGroups`). */
+  codexGroups: CloneGroup[];
+  /** Update the gate's config after an account/pool edit (returns the fresh redacted config). */
   onConfigChange: (cfg: AppConfigRedacted) => void;
 }) {
   // OS notification whenever a clone transitions out of `working` (idle/offline) while
@@ -268,7 +258,7 @@ function Dashboard({
   const [changeClone, setChangeClone] = useState<Clone | null>(null);
   const [changing, setChanging] = useState(false);
   // The group an "add account" OAuth login is in flight for (null = modal closed).
-  const [loginGroup, setLoginGroup] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [forwardClone, setForwardClone] = useState<Clone | null>(null);
   const [forwarding, setForwarding] = useState(false);
   const [forwardError, setForwardError] = useState<string | null>(null);
@@ -332,46 +322,28 @@ function Dashboard({
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
 
-  // The by-group display list: every configured group (authoritative, instant on
-  // create/delete), carrying its live usage accounts from `usageGroups` where present.
-  // The usage poll lags group creation (up to its interval), so an empty group shows up
-  // immediately with no accounts until the next poll fills them in.
-  const usageByName = new Map((state.usageGroups ?? []).map((g) => [g.name, g]));
-  const displayGroups: GroupUsage[] = groups.map(
-    (g) => usageByName.get(g.name) ?? { name: g.name, accounts: [] },
-  );
+  // Imported accounts, split per provider. `claudeAccounts` carries BOTH providers' rows
+  // tagged by `provider`; a row written before that field existed has none, which means
+  // Claude — so the Claude side matches on "not codex" rather than on "is claude".
+  const accounts = state.claudeAccounts ?? [];
+  const claudeAccounts = accounts.filter((a) => a.provider !== "codex");
+  const codexAccounts = accounts.filter((a) => a.provider === "codex");
 
-  // The auth-dir credential file name CLIProxyAPI stores per account (used by the delete
-  // endpoint): `claude-<email>.json` / `codex-<email>.json` / `antigravity-<email>.json`.
-  const authFileName = (a: ClaudeUsage) => {
-    const prefix =
-      a.provider === "codex" ? "codex" : a.provider === "antigravity" ? "antigravity" : "claude";
-    return `${prefix}-${a.email}.json`;
-  };
+  const onDeleteAccount = (email: string) =>
+    run(deleteClaudeAccount(email).then(() => refreshClaudeUsage()));
+  const onDeleteCodexAccount = (email: string) =>
+    run(deleteCodexAccount(email).then(() => refreshCodexUsage()));
 
-  const onCreateGroup = (name?: string) => {
-    const n = (name ?? window.prompt("New group name (A–Z, 0–9, . _ -)") ?? "").trim();
-    if (!n) return;
-    createGroup(n)
-      .then((cfg) => {
-        setError(null);
-        onConfigChange(cfg);
-      })
-      .catch((e: Error) => setError(e.message));
-  };
-
-  // Confirm-free — both call sites (sidebar panel, settings group manager) confirm first.
-  const onDeleteGroup = (name: string) => {
-    deleteGroup(name)
-      .then((cfg) => {
-        setError(null);
-        onConfigChange(cfg);
-      })
-      .catch((e: Error) => setError(e.message));
-  };
-
-  const onDeleteGroupAccount = (group: string, account: ClaudeUsage) =>
-    run(deleteGroupAccount(group, authFileName(account)));
+  // Hot-swap a clone's account for one provider. `auto` / `none` / `group:<pool>` / an email
+  // all go through the same endpoint; the server installs the token into the clone's
+  // credential file immediately, with no restart.
+  const onSwapAccounts = (cloneId: string, claude: string, codex: string) =>
+    run(
+      Promise.all([
+        swapClaudeAccount(cloneId, claude),
+        swapCodexAccount(cloneId, codex),
+      ]),
+    );
 
   // Drag-reorder: optimistically adopt the new order (smooth UI), then persist —
   // the SSE frame confirms after the server writes it.
@@ -449,11 +421,10 @@ function Dashboard({
             Presentational — every server call is a callback wired up here. */}
         <Sidebar
           open={sidebarOpen}
-          usageGroups={displayGroups}
+          accounts={accounts}
           hosts={orderedClones}
           stats={stats}
           lxcStats={lxcStats}
-          tokens={tokens}
           forwards={forwards}
           operations={state.operations}
           selectedId={state.selected}
@@ -464,10 +435,10 @@ function Dashboard({
           onActivateLayout={(name) => run(activateLayout(name))}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenClone={() => setCloneOpen(true)}
-          onCreateGroup={() => onCreateGroup()}
-          onAddAccount={(group) => setLoginGroup(group)}
-          onDeleteGroup={onDeleteGroup}
-          onRefresh={() => refreshUsage()}
+          onImportAccount={() => setImportOpen(true)}
+          onRefresh={() => {
+            void Promise.all([refreshClaudeUsage(), refreshCodexUsage()]);
+          }}
           onSelectClone={(clone) => {
             run(activate(clone.id));
             setSidebarOpen(false);
@@ -560,6 +531,7 @@ function Dashboard({
           imagesLoading={imagesLoading}
           operations={state.operations}
           parentCandidate={subCloneParent}
+          accounts={accounts}
           onClose={() => setCloneOpen(false)}
           // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
           // progress, and closes when the op settles. So this just starts it and hands the
@@ -570,8 +542,7 @@ function Dashboard({
 
       {settingsOpen ? (
         <SettingsPanel
-          groups={groups}
-          usageGroups={state.usageGroups ?? []}
+          accounts={accounts}
           onClose={() => setSettingsOpen(false)}
           getConfig={getConfig}
           putConfig={putConfig}
@@ -580,8 +551,6 @@ function Dashboard({
           updateServer={updateServer}
           operations={state.operations}
           restartServer={restartServer}
-          getGroupProxyStatus={getGroupProxyStatus}
-          restartGroupProxy={restartGroupProxy}
           images={images}
           imagesLoading={imagesLoading}
           pullBusy={state.operations.some(
@@ -589,10 +558,9 @@ function Dashboard({
           )}
           onPullTemplate={(reference) => run(pullTemplate(reference))}
           onDeleteImage={(reference) => run(deleteImage(reference))}
-          onCreateGroup={(name) => onCreateGroup(name)}
-          onDeleteGroup={onDeleteGroup}
-          onAddAccount={(group) => setLoginGroup(group)}
-          onDeleteAccount={onDeleteGroupAccount}
+          onImportAccount={() => setImportOpen(true)}
+          onDeleteAccount={onDeleteAccount}
+          onDeleteCodexAccount={onDeleteCodexAccount}
         />
       ) : null}
 
@@ -614,14 +582,17 @@ function Dashboard({
         />
       ) : null}
 
-      {loginGroup ? (
-        <GroupLoginModal
-          group={loginGroup}
-          onClose={() => setLoginGroup(null)}
-          onDone={() => {
-            // The credential lands in the group's auth-dir immediately; it surfaces in the
-            // usage panel at the next by-group usage poll (streamed over /events).
+      {importOpen ? (
+        <ImportAccountModal
+          clones={state.hosts}
+          onClose={() => setImportOpen(false)}
+          onImported={() => {
+            setImportOpen(false);
+            // The account is in the server's store immediately; its usage windows fill in on
+            // the next poll, which these kick off rather than waiting out the interval.
             setError(null);
+            run(refreshClaudeUsage());
+            run(refreshCodexUsage());
           }}
         />
       ) : null}
@@ -629,11 +600,16 @@ function Dashboard({
       {changeClone ? (
         <ChangeAccountModal
           clone={changeClone}
+          accounts={claudeAccounts}
+          codexAccounts={codexAccounts}
           busy={changing}
           onClose={() => setChangeClone(null)}
-          onSubmit={(group) => {
+          onSubmit={(claude, codex) => {
             setChanging(true);
-            setCloneGroup(changeClone.id, group)
+            Promise.all([
+              swapClaudeAccount(changeClone.id, claude),
+              swapCodexAccount(changeClone.id, codex),
+            ])
               .then(() => {
                 setError(null);
                 setChangeClone(null);

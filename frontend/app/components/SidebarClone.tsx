@@ -2,12 +2,12 @@ import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/
 import { ArrowRight, ChevronDown, ChevronRight, Ellipsis, Terminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import chatgptLogo from "../assets/chatgpt.svg";
+import claudeLogo from "../assets/claude.svg";
 import { copyText } from "~/lib/clipboard";
-import { formatTokenCount } from "~/lib/format";
 import { buildSshCommand } from "~/lib/ssh";
 import type { Clone, Operation } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
-import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { ForwardState } from "~/lib/wire/ForwardState";
 import type { PortForward } from "~/lib/wire/PortForward";
@@ -55,37 +55,49 @@ function MetricSlot({ metric }: { metric: Metric }) {
   );
 }
 
-/** The clone's account-group binding: a badge carrying the group name, taking the remaining
- *  width and truncating so the usage figures + ⋯ menu stay on the same row. Provider-agnostic —
- *  a group is one pool of Claude and/or GPT accounts; CLIProxyAPI owns intra-group selection.
- *  When `fable` is set, a small "fable" label sits next to the group name to flag that this
- *  clone was served by the Fable model in the last 5 minutes.
+/** The clone's account binding for one provider: a badge carrying the account it is running,
+ *  taking the remaining width and truncating so the usage figures + ⋯ menu stay on the same row.
  *
- *  Every clone binds a group, so the blank branch is a transient state only — a row written
- *  before the binding was mandatory, in the window before the server's normalizer repoints it. */
-function GroupTag({ group, fable }: { group?: string; fable?: boolean }) {
+ *  `email` is the account actually installed; `selection` is the operator's intent verbatim
+ *  (`auto` / `none` / `group:<pool>` / a pinned email). Both are shown because they answer
+ *  different questions: an `auto` clone landed on some concrete account, and only the selection
+ *  says whether it may be hot-swapped out from under you. A clone with neither is tokenless. */
+function AccountTag({
+  logo,
+  provider,
+  email,
+  selection,
+}: {
+  logo: string;
+  provider: string;
+  email?: string;
+  selection?: string;
+}) {
+  const pool = selection?.startsWith("group:") ? selection.slice("group:".length) : undefined;
+  const mode = pool ? `pool ${pool}` : selection === "auto" ? "auto" : undefined;
+  const title = email
+    ? `${provider}: ${email}${mode ? ` (${mode})` : " (pinned)"}`
+    : selection === "none"
+      ? `${provider}: no account (deliberately tokenless)`
+      : `${provider}: no account assigned`;
   return (
     <span
       className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
-      title={group ? `account group: ${group}` : "no account group yet — no inference"}
+      title={title}
     >
-      {group ? (
-        // `min-w-0` (not `max-w-full`) so the name truncates before the fable label, keeping
+      <img src={logo} alt="" className="h-3 w-3 shrink-0 opacity-70" />
+      {email ? (
+        // `min-w-0` (not `max-w-full`) so the email truncates before the mode label, keeping
         // the label visible right beside it rather than being pushed off the row.
         <span className="-ml-0.5 min-w-0 truncate rounded bg-slate-200 px-1 text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">
-          {group}
+          {email}
         </span>
       ) : (
-        <span className="italic text-slate-300 dark:text-slate-600">no group</span>
-      )}
-      {fable ? (
-        <span
-          className="shrink-0 text-[11px] text-violet-600 dark:text-violet-400"
-          title="served by the Fable model in the last 5 minutes"
-        >
-          fable
+        <span className="italic text-slate-300 dark:text-slate-600">
+          {selection === "none" ? "no token" : "unassigned"}
         </span>
-      ) : null}
+      )}
+      {mode ? <span className="shrink-0 text-[9px] opacity-70">{mode}</span> : null}
     </span>
   );
 }
@@ -136,7 +148,6 @@ export interface SidebarCloneProps {
    *  Absent for a stopped/unmanaged clone or before the first sample — renders nothing. */
   stats?: ContainerStats;
   /** Cache-excluded input/output totals for this managed clone from the `tokens` SSE event. */
-  tokenUsage?: CloneTokenUsage;
   selected: boolean;
   /** A running operation targeting this clone (delete, or a clone finishing its
    *  post-add `wait-swap` step), if any. */
@@ -331,7 +342,6 @@ function OverflowMenu({
 export function SidebarClone({
   clone,
   stats,
-  tokenUsage,
   selected,
   op,
   onSelect,
@@ -362,7 +372,6 @@ export function SidebarClone({
     ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, clone.id)
     : undefined;
   const status = clone.archived ? undefined : STATUS_DOT[clone.monitorState ?? "idle"];
-  const group = clone.group || undefined;
   const usage = clone.archived ? null : formatCloneUsage(stats);
   const cpuMetric = usage
     ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of total host capacity)" }
@@ -374,22 +383,8 @@ export function SidebarClone({
         title: "RAM + swap; includes tmpfs/shared memory and excludes reclaimable file cache",
       }
     : undefined;
-  const inputTokenMetric = managed
-    ? {
-        label: "↓",
-        value: formatTokenCount(tokenUsage?.newInputTokens ?? 0),
-        title: "newly processed model input tokens; cache reads are excluded",
-      }
-    : undefined;
-  const outputTokenMetric = managed
-    ? {
-        label: "↑",
-        value: formatTokenCount(tokenUsage?.outputTokens ?? 0),
-        title: "newly generated model output tokens",
-      }
-    : undefined;
-  // All managed clones retain their token slots even before their first observed request.
-  const showBindingLine = !!group || !!cpuMetric || !!inputTokenMetric;
+  // Managed clones always show the binding line: an unassigned account is itself worth seeing.
+  const showBindingLine = managed || !!cpuMetric;
   // Drag is owned by the enclosing SortableCloneGroup; a row is draggable only when it received
   // drag listeners (top-level active rows). Children/archived rows get none and stay static.
   const draggable = !!dragListeners;
@@ -436,9 +431,18 @@ export function SidebarClone({
             </div>
           ) : showBindingLine ? (
             <div className="flex min-w-0 flex-1 items-center gap-2 text-[10px]">
-              <GroupTag group={group} fable={managed ? tokenUsage?.fableActive : undefined} />
-              {inputTokenMetric ? <MetricSlot metric={inputTokenMetric} /> : null}
-              {outputTokenMetric ? <MetricSlot metric={outputTokenMetric} /> : null}
+              <AccountTag
+                logo={claudeLogo}
+                provider="Claude"
+                email={clone.claudeAccountEmail}
+                selection={clone.claudeSelection}
+              />
+              <AccountTag
+                logo={chatgptLogo}
+                provider="Codex"
+                email={clone.codexAccountEmail}
+                selection={clone.codexSelection}
+              />
               {cpuMetric ? <MetricSlot metric={cpuMetric} /> : null}
               {memMetric ? <MetricSlot metric={memMetric} /> : null}
             </div>

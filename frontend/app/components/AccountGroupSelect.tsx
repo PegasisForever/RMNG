@@ -1,40 +1,54 @@
-// An account-group picker shared by the clone modal, the per-clone change control, and
-// the preset editor. Under the group-proxy model a clone binds exactly one pool (a
-// CLIProxyAPI instance) and always has one — the server guarantees at least one group
-// exists (`config::normalize_groups` seeds "Default"), so there is no "none" option.
-// CLIProxyAPI owns intra-group account selection + failover — the operator only picks
-// the pool.
-import type { Group } from "~/lib/wire/Group";
+// A Claude-account picker shared by the clone modal and the per-clone change control.
+// Value is one of: "auto" (rotate across all imported accounts), "none" (install no
+// token), an account email, or "group:<name>" (binds the clone to a named pool). The
+// server rotates "auto" and group clones; a pinned email is left fixed.
+import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import type { ClaudeUsage } from "~/lib/types";
+
+/** "me@pegasis.site — 5h 12% · 7d 40%" (usage suffix only when known). */
+export function accountLabel(a: ClaudeUsage): string {
+  const bits: string[] = [];
+  if (a.fiveHour) bits.push(`5h ${a.fiveHour.pct}%`);
+  if (a.sevenDay) bits.push(`7d ${a.sevenDay.pct}%`);
+  return bits.length ? `${a.email} — ${bits.join(" · ")}` : a.email;
+}
 
 export function AccountGroupSelect({
   groups,
+  accounts,
   value,
   onChange,
   className,
-  blankLabel,
 }: {
-  /** Available account groups (from `config.groups`); never empty in practice. */
-  groups: Group[];
-  /** The selected group name. */
+  groups: CloneGroup[];
+  /** Assignable accounts (imported Claude accounts). */
+  accounts: ClaudeUsage[];
   value: string;
   onChange: (value: string) => void;
   className?: string;
-  /**
-   * Adds a leading `""` option with this label. Only for the clone dialog, where the
-   * control is an *override*: blank means "let the server resolve it from the preset",
-   * which is a different thing from the retired "None" (bind no group at all — no longer
-   * expressible, since every clone binds one).
-   */
-  blankLabel?: string;
 }) {
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)} className={className}>
-      {blankLabel !== undefined ? <option value="">{blankLabel}</option> : null}
-      {groups.map((g) => (
-        <option key={g.name} value={g.name}>
-          {g.name}
-        </option>
-      ))}
+      <option value="auto">Auto (all accounts)</option>
+      <option value="none">None (no token)</option>
+      {groups.length > 0 ? (
+        <optgroup label="Groups">
+          {groups.map((g) => (
+            <option key={`group:${g.name}`} value={`group:${g.name}`}>
+              Group: {g.name} ({g.accounts.length})
+            </option>
+          ))}
+        </optgroup>
+      ) : null}
+      {accounts.length > 0 ? (
+        <optgroup label="Accounts">
+          {accounts.map((a) => (
+            <option key={a.id} value={a.email}>
+              {accountLabel(a)}
+            </option>
+          ))}
+        </optgroup>
+      ) : null}
     </select>
   );
 }

@@ -1,35 +1,14 @@
-import {
-  closestCenter,
-  DndContext,
-  type DragEndEvent,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from "@dnd-kit/core";
-import {
-  arrayMove,
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import { ChevronDown, ChevronRight, GripVertical, Plus, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import type { ClaudeUsage, GroupUsage, Operation } from "~/lib/types";
+import type { ClaudeUsage, Operation } from "~/lib/types";
 import { OperationProgress } from "~/components/OperationProgress";
-import { ordered, useAccountOrder } from "~/lib/accountOrder";
 import { useModalEscape } from "~/lib/useModalEscape";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
-import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
-import type { GroupProxyStatus } from "~/lib/wire/GroupProxyStatus";
-import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { ImagesSection } from "~/components/ImagesSection";
 import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
 
@@ -121,11 +100,10 @@ function Secret({
 }
 
 export interface SettingsPanelProps {
-  /** Configured account groups (authoritative names; updates immediately on create/delete). */
-  groups: Group[];
-  /** Live per-group usage view (from `ControlState.usageGroups`) — the authenticated
-   *  accounts in each group, streamed over SSE. */
-  usageGroups: GroupUsage[];
+  /** Live per-account usage (from `ControlState.claudeAccounts`). Despite the field name
+   *  it carries BOTH providers' rows tagged by `provider`; the two account/group sections
+   *  below split it by that tag. Used here only for the emails. */
+  accounts: ClaudeUsage[];
   onClose: () => void;
   // --- injected server calls (no API logic lives in this component, so it's
   //     renderable in isolation — e.g. Storybook — with mocked data) ---
@@ -146,12 +124,6 @@ export interface SettingsPanelProps {
   operations: Operation[];
   /** Restart the control-server container in place (applies changed startup settings). */
   restartServer: () => Promise<{ ok: boolean }>;
-  /** Read the `rmng-cliproxy` sidecar's status (running / image / behind the control-server). */
-  getGroupProxyStatus: () => Promise<GroupProxyStatus>;
-  /** Recreate the group-proxy sidecar on the control-server's current image. Interrupts every
-   *  in-flight agent request in the fleet, so this is a deliberate operator action, never a
-   *  side effect of the control-server update above. */
-  restartGroupProxy: () => Promise<GroupProxyStatus>;
   // --- clone-source images (moved here from the sidebar) ---
   images: ImageInfo[];
   imagesLoading: boolean;
@@ -159,313 +131,64 @@ export interface SettingsPanelProps {
   pullBusy: boolean;
   onPullTemplate: (reference: string) => void;
   onDeleteImage: (reference: string) => void;
-  /** Create an account group by name (spawns its CLIProxyAPI instance). */
-  onCreateGroup: (name: string) => void;
-  /** Delete an account group. */
-  onDeleteGroup: (name: string) => void;
-  /** Add an account to a group (opens the OAuth login flow). */
-  onAddAccount: (group: string) => void;
-  /** Remove an authenticated account from a group. */
-  onDeleteAccount: (group: string, account: ClaudeUsage) => void;
+  /** Delete an imported Claude account by email (removes its stored token; reassigns clones). */
+  onDeleteAccount: (email: string) => void;
+  /** Delete an imported Codex account by email. */
+  onDeleteCodexAccount: (email: string) => void;
+  /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
+   *  control-server harvests the tokens off a clone that's already signed in. */
+  onImportAccount: () => void;
 }
 
-// Cosmetic drag-to-reorder for group cards and account rows is a client-only display
-// preference (localStorage), NEVER sent to the server. It lives in a shared reactive store
-// so the left sidebar's usage panel reflects the same order — see `~/lib/accountOrder`.
-
-/** The reorder DnD sensors — a pointer sensor with a 5px activation distance (so a click
- *  on a button isn't read as a drag) plus a keyboard sensor for accessible reordering.
- *  Mirrors `Sidebar`. */
-function useReorderSensors() {
-  return useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
-}
-
-/** One draggable account row within a group. The `GripVertical` handle is the ONLY element
- *  carrying the sortable listeners, so the delete button stays clickable and dragging a row
- *  reorders just the accounts (never grabbing the parent group). */
-function SortableAccountRow({
-  account,
-  groupName,
-  onDeleteAccount,
+/** Imported accounts as a removable list. Each row is one email + a trash button; the
+ *  delete is confirmed (it removes the stored token) and delegated to `onDelete`. */
+function AccountList({
+  emails,
+  onDelete,
 }: {
-  account: ClaudeUsage;
-  groupName: string;
-  onDeleteAccount: (group: string, account: ClaudeUsage) => void;
+  emails: string[];
+  onDelete: (email: string) => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: account.id,
-  });
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    position: "relative",
-    zIndex: isDragging ? 50 : undefined,
-  };
-  return (
-    <li
-      ref={setNodeRef}
-      style={style}
-      className={`flex items-center gap-2 rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200 ${
-        isDragging ? "bg-white shadow-md ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600" : ""
-      }`}
-    >
-      <button
-        type="button"
-        {...attributes}
-        {...listeners}
-        aria-label={`reorder ${account.email} in ${groupName}`}
-        className="shrink-0 cursor-grab touch-none rounded p-0.5 text-slate-300 hover:text-slate-500 active:cursor-grabbing dark:text-slate-600 dark:hover:text-slate-400"
-      >
-        <GripVertical className="h-3.5 w-3.5" />
-      </button>
-      <span className="min-w-0 flex-1 truncate">
-        <span className="mr-1.5 rounded bg-slate-100 px-1 text-[10px] font-semibold uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-          {account.provider === "codex"
-            ? "codex"
-            : account.provider === "antigravity"
-              ? "gemini"
-              : "claude"}
-        </span>
-        {account.email}
-      </span>
-      <button
-        type="button"
-        title="remove account from group"
-        aria-label={`remove ${account.email} from ${groupName}`}
-        onClick={() => {
-          if (
-            window.confirm(
-              `Remove ${account.email} from "${groupName}"?\n\nDeletes its credential from this group's proxy. Re-adding needs a fresh OAuth login.`,
-            )
-          )
-            onDeleteAccount(groupName, account);
-        }}
-        className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-      >
-        <Trash2 className="h-4 w-4" />
-      </button>
-    </li>
-  );
-}
-
-/** One draggable group card. Its `GripVertical` handle is the ONLY element carrying the
- *  group-sortable listeners, so "Add account"/delete stay clickable and dragging an account
- *  row inside doesn't also grab the card. Contains a NESTED `DndContext` + `SortableContext`
- *  so the account rows reorder independently within this group. `accounts` arrives already
- *  ordered by the parent's saved account order. */
-function SortableGroupBlock({
-  group,
-  accounts,
-  onAddAccount,
-  onDeleteGroup,
-  onDeleteAccount,
-  onAccountDragEnd,
-}: {
-  group: Group;
-  accounts: ClaudeUsage[];
-  onAddAccount: (group: string) => void;
-  onDeleteGroup: (name: string) => void;
-  onDeleteAccount: (group: string, account: ClaudeUsage) => void;
-  onAccountDragEnd: (groupName: string, orderedIds: string[], event: DragEndEvent) => void;
-}) {
-  const sensors = useReorderSensors();
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: group.name,
-  });
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    position: "relative",
-    zIndex: isDragging ? 50 : undefined,
-  };
-  const accountIds = accounts.map((a) => a.id);
-
-  return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      className={`rounded border border-slate-200 dark:border-slate-700 p-3 ${
-        isDragging ? "bg-white shadow-lg ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600" : ""
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          {...attributes}
-          {...listeners}
-          aria-label={`reorder group ${group.name}`}
-          className="shrink-0 cursor-grab touch-none rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 active:cursor-grabbing dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-        >
-          <GripVertical className="h-4 w-4" />
-        </button>
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-700 dark:text-slate-200">
-          {group.name}
-        </span>
-        <button
-          type="button"
-          onClick={() => onAddAccount(group.name)}
-          className="inline-flex items-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-        >
-          <Plus className="size-3.5" /> Add account
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            if (
-              window.confirm(
-                `Delete group "${group.name}"?\n\nStops its proxy instance. Clones bound to it lose inference until reassigned; the on-disk credentials are left in place.`,
-              )
-            )
-              onDeleteGroup(group.name);
-          }}
-          title="delete group"
-          aria-label={`delete group ${group.name}`}
-          className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-        >
-          <Trash2 className="h-4 w-4" />
-        </button>
-      </div>
-      {accounts.length === 0 ? (
-        <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
-          No accounts yet — use “Add account” to log one in.
-        </p>
-      ) : (
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={(event) => onAccountDragEnd(group.name, accountIds, event)}
-        >
-          <SortableContext items={accountIds} strategy={verticalListSortingStrategy}>
-            <ul className="mt-2 space-y-1.5">
-              {accounts.map((a) => (
-                <SortableAccountRow
-                  key={a.id}
-                  account={a}
-                  groupName={group.name}
-                  onDeleteAccount={onDeleteAccount}
-                />
-              ))}
-            </ul>
-          </SortableContext>
-        </DndContext>
-      )}
-    </div>
-  );
-}
-
-/** The account-group manager: create/delete pools, add accounts via OAuth, and remove
- *  authenticated accounts. Each group is one CLIProxyAPI instance; membership is derived
- *  from the instance's auth-dir (live via `usageGroups`), not stored config.
- *
- *  Group cards and the account rows within each group are drag-reorderable. That order is
- *  a purely cosmetic client-side preference (localStorage) — a group is an unordered pool,
- *  so order is NEVER sent to the server. */
-function GroupManager({
-  groups,
-  usageGroups,
-  onCreateGroup,
-  onDeleteGroup,
-  onAddAccount,
-  onDeleteAccount,
-}: {
-  groups: Group[];
-  usageGroups: GroupUsage[];
-  onCreateGroup: (name: string) => void;
-  onDeleteGroup: (name: string) => void;
-  onAddAccount: (group: string) => void;
-  onDeleteAccount: (group: string, account: ClaudeUsage) => void;
-}) {
-  const [newName, setNewName] = useState("");
-  const usageByName = new Map(usageGroups.map((g) => [g.name, g]));
-
-  // Shared cosmetic ordering (drag to reorder). The sidebar reads the same store, so a
-  // reorder here reflects there live — persistence + notification happen in the store.
-  const sensors = useReorderSensors();
-  const { groupOrder, acctOrder, setGroupOrder, setAcctOrder } = useAccountOrder();
-
-  const orderedGroups = ordered(groups, groupOrder, (g) => g.name);
-
-  const create = () => {
-    const name = newName.trim();
-    if (!name) return;
-    onCreateGroup(name);
-    setNewName("");
-  };
-
-  function onGroupDragEnd(event: DragEndEvent) {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const names = orderedGroups.map((g) => g.name);
-    const oldIndex = names.indexOf(String(active.id));
-    const newIndex = names.indexOf(String(over.id));
-    if (oldIndex < 0 || newIndex < 0) return;
-    setGroupOrder(arrayMove(names, oldIndex, newIndex));
+  if (emails.length === 0) {
+    return (
+      <p className="text-xs text-slate-400 dark:text-slate-500">
+        None imported yet — import one from a clone that's already signed in.
+      </p>
+    );
   }
-
-  function onAccountDragEnd(groupName: string, orderedIds: string[], event: DragEndEvent) {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const oldIndex = orderedIds.indexOf(String(active.id));
-    const newIndex = orderedIds.indexOf(String(over.id));
-    if (oldIndex < 0 || newIndex < 0) return;
-    setAcctOrder((prev) => ({ ...prev, [groupName]: arrayMove(orderedIds, oldIndex, newIndex) }));
-  }
-
   return (
-    <div className="space-y-3">
-      {groups.length === 0 ? (
-        <p className="text-xs text-slate-400 dark:text-slate-500">No groups.</p>
-      ) : null}
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onGroupDragEnd}>
-        <SortableContext
-          items={orderedGroups.map((g) => g.name)}
-          strategy={verticalListSortingStrategy}
+    <ul className="space-y-1.5">
+      {emails.map((email) => (
+        <li
+          key={email}
+          className="flex items-center justify-between rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200"
         >
-          <div className="space-y-3">
-            {orderedGroups.map((g) => (
-              <SortableGroupBlock
-                key={g.name}
-                group={g}
-                accounts={ordered(usageByName.get(g.name)?.accounts ?? [], acctOrder[g.name] ?? [], (a) => a.id)}
-                onAddAccount={onAddAccount}
-                onDeleteGroup={onDeleteGroup}
-                onDeleteAccount={onDeleteAccount}
-                onAccountDragEnd={onAccountDragEnd}
-              />
-            ))}
-          </div>
-        </SortableContext>
-      </DndContext>
-      <div className="flex items-center gap-2">
-        <input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") create();
-          }}
-          placeholder="new group name (A–Z, 0–9, . _ -)"
-          spellCheck={false}
-          className={input}
-        />
-        <button
-          type="button"
-          onClick={create}
-          disabled={!newName.trim()}
-          className="shrink-0 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40"
-        >
-          + Add group
-        </button>
-      </div>
-    </div>
+          <span className="truncate">{email}</span>
+          <button
+            type="button"
+            title="delete account"
+            aria-label={`delete ${email}`}
+            onClick={() => {
+              if (
+                window.confirm(
+                  `Delete ${email}?\n\nThis removes its stored token (re-adding needs a fresh import). Clones running it are reassigned to another account; a clone pinned to it must be reassigned first.`,
+                )
+              ) {
+                onDelete(email);
+              }
+            }}
+            className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }
 
 export function SettingsPanel({
-  groups,
-  usageGroups,
+  accounts,
   onClose,
   getConfig,
   putConfig,
@@ -474,18 +197,20 @@ export function SettingsPanel({
   updateServer,
   operations,
   restartServer,
-  getGroupProxyStatus,
-  restartGroupProxy,
   images,
   imagesLoading,
   pullBusy,
   onPullTemplate,
   onDeleteImage,
-  onCreateGroup,
-  onDeleteGroup,
-  onAddAccount,
   onDeleteAccount,
+  onDeleteCodexAccount,
+  onImportAccount,
 }: SettingsPanelProps) {
+  // The account pool each provider's group editor draws from. `claudeAccounts` carries both
+  // providers' rows; `provider` was added later, so rows that predate it (absent/null) are
+  // Claude — anything else must be tagged explicitly.
+  const accountEmails = accounts.filter((a) => (a.provider ?? "claude") === "claude").map((a) => a.email);
+  const codexAccountEmails = accounts.filter((a) => a.provider === "codex").map((a) => a.email);
   const [cfg, setCfg] = useState<AppConfigRedacted | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -541,38 +266,6 @@ export function SettingsPanel({
     }
   }
 
-  // The group-proxy sidecar (`rmng-cliproxy`): it owns the `/cc` router + every account
-  // group's CLIProxyAPI process, and the control-server update above deliberately leaves it
-  // alone — recreating it drops every in-flight agent turn. So it can legitimately sit on an
-  // older image, and this section exists to make that visible and roll it forward on purpose.
-  const [proxyStatus, setProxyStatus] = useState<GroupProxyStatus | null>(null);
-  const [proxyMsg, setProxyMsg] = useState<string | null>(null);
-  const [proxyBusy, setProxyBusy] = useState(false);
-
-  useEffect(() => {
-    getGroupProxyStatus().then(setProxyStatus).catch((e) => setProxyMsg(`✗ ${(e as Error).message}`));
-  }, [getGroupProxyStatus]);
-
-  async function doRestartProxy() {
-    if (
-      !confirm(
-        "Restart the group proxy now?\n\nThis recreates the rmng-cliproxy container on the control-server's current image. Every in-flight agent request in every clone is dropped — do this while clones are idle.",
-      )
-    )
-      return;
-    setProxyBusy(true);
-    setProxyMsg("restarting the group proxy…");
-    try {
-      const s = await restartGroupProxy();
-      setProxyStatus(s);
-      setProxyMsg(s.running ? "restarted on the current image" : `⚠ ${s.detail}`);
-    } catch (e) {
-      setProxyMsg(`✗ ${(e as Error).message}`);
-    } finally {
-      setProxyBusy(false);
-    }
-  }
-
   // Editable form state. Secrets (preset linearKey) start blank = "unchanged".
   const [layoutPresets, setLayoutPresets] = useState<{ name: string; monitors: Mon[] }[]>([]);
   // Presets: labels edited as a comma-separated string; linearKey is write-only
@@ -583,8 +276,6 @@ export function SettingsPanel({
       labels: string;
       linearKey: string;
       keySet: boolean;
-      /** Default account group for clones of this preset. */
-      group: string;
       vars: { key: string; value: string }[];
       agentPlaybook: string;
       globalPrompt: string;
@@ -599,12 +290,17 @@ export function SettingsPanel({
     pollSecs: 600,
     pinnedEmail: "",
   });
+  // Account pools, one list per provider (config `cloneGroups` / `codexGroups`). A group is
+  // just a name + member emails; membership lives in config and is saved through the same
+  // `PUT /api/config` as everything else on this panel, not a dedicated endpoint.
+  const [claudeGroups, setClaudeGroups] = useState<{ name: string; accounts: string[] }[]>([]);
   const [codex, setCodex] = useState({
     pollSecs: 600,
     pinnedEmail: "",
     usagePolling: true,
     autoReset: false,
   });
+  const [codexGroups, setCodexGroups] = useState<{ name: string; accounts: string[] }[]>([]);
   const [listen, setListen] = useState({
     web: 9000,
     video: 9001,
@@ -642,11 +338,15 @@ export function SettingsPanel({
       pollSecs: Number(c.claude.pollSecs),
       pinnedEmail: c.claude.pinnedEmail ?? "",
     });
+    // Copy the member arrays — the editors below mutate them immutably, but sharing the
+    // server payload's arrays would leave `cfg` and the form aliased.
+    setClaudeGroups(c.cloneGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })));
     setCodex({
       ...c.codex,
       pollSecs: Number(c.codex.pollSecs),
       pinnedEmail: c.codex.pinnedEmail ?? "",
     });
+    setCodexGroups(c.codexGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })));
     setListen({ ...c.listen });
     setAgentPort(c.agentPort);
     setDataDir(c.dataDir);
@@ -665,7 +365,6 @@ export function SettingsPanel({
         labels: p.labels.join(", "),
         linearKey: "",
         keySet: p.linearKeySet,
-        group: p.group,
         vars: p.vars.map((v) => ({ ...v })),
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
@@ -682,22 +381,21 @@ export function SettingsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Escape closes. Stacked: the group-login modal opens ON TOP of this panel (z-60 over
-  // z-50), and without the stack one Escape would close both — losing the panel as
-  // collateral for dismissing the dialog above it.
+  // Escape closes. Stacked: the import modal opens ON TOP of this panel (z-60 over z-50),
+  // and without the stack one Escape would close both — losing the panel as collateral for
+  // dismissing the dialog above it.
   useModalEscape(onClose);
 
   // Preset editors.
   const addPreset = () =>
     setPresets((ps) => [
       ...ps,
-      // A preset always binds a group; seed the first one (the server guarantees ≥ 1).
-      { name: "", labels: "", linearKey: "", keySet: false, group: groups[0]?.name ?? "", vars: [{ key: "", value: "" }], agentPlaybook: "", globalPrompt: "" },
+      { name: "", labels: "", linearKey: "", keySet: false, vars: [{ key: "", value: "" }], agentPlaybook: "", globalPrompt: "" },
     ]);
   const rmPreset = (i: number) => setPresets((ps) => ps.filter((_, j) => j !== i));
   const setPresetField = (
     i: number,
-    field: "name" | "labels" | "linearKey" | "group" | "agentPlaybook" | "globalPrompt",
+    field: "name" | "labels" | "linearKey" | "agentPlaybook" | "globalPrompt",
     v: string,
   ) =>
     setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, [field]: v } : p)));
@@ -723,6 +421,44 @@ export function SettingsPanel({
     setLayoutPresets((ps) => ps.map((p, j) => (j === i ? { ...p, name } : p)));
   const setLayoutPresetMonitors = (i: number, mons: Mon[]) =>
     setLayoutPresets((ps) => ps.map((p, j) => (j === i ? { ...p, monitors: mons } : p)));
+
+  // Claude group editors (a group = a name + a set of member account emails).
+  const addGroup = () => setClaudeGroups((gs) => [...gs, { name: "", accounts: [] }]);
+  const rmGroup = (i: number) => setClaudeGroups((gs) => gs.filter((_, j) => j !== i));
+  const setGroupName = (i: number, name: string) =>
+    setClaudeGroups((gs) => gs.map((g, j) => (j === i ? { ...g, name } : g)));
+  const toggleGroupAccount = (i: number, email: string) =>
+    setClaudeGroups((gs) =>
+      gs.map((g, j) =>
+        j === i
+          ? {
+              ...g,
+              accounts: g.accounts.includes(email)
+                ? g.accounts.filter((e) => e !== email)
+                : [...g.accounts, email],
+            }
+          : g,
+      ),
+    );
+
+  // Codex group editors.
+  const addCodexGroup = () => setCodexGroups((gs) => [...gs, { name: "", accounts: [] }]);
+  const rmCodexGroup = (i: number) => setCodexGroups((gs) => gs.filter((_, j) => j !== i));
+  const setCodexGroupName = (i: number, name: string) =>
+    setCodexGroups((gs) => gs.map((g, j) => (j === i ? { ...g, name } : g)));
+  const toggleCodexGroupAccount = (i: number, email: string) =>
+    setCodexGroups((gs) =>
+      gs.map((g, j) =>
+        j === i
+          ? {
+              ...g,
+              accounts: g.accounts.includes(email)
+                ? g.accounts.filter((e) => e !== email)
+                : [...g.accounts, email],
+            }
+          : g,
+      ),
+    );
 
   async function save() {
     setSaving(true);
@@ -752,7 +488,16 @@ export function SettingsPanel({
           ...(cfg?.setupComplete ? {} : { subnet }),
         },
         claude: { ...claude, pinnedEmail: claude.pinnedEmail || null },
+        // Half-typed groups (blank name) are dropped rather than saved as unnamed pools, and
+        // members are deduped — the checkbox editor can't produce a duplicate, but a
+        // hand-edited config can, and a repeated email would skew group selection.
+        cloneGroups: claudeGroups
+          .filter((g) => g.name.trim())
+          .map((g) => ({ name: g.name.trim(), accounts: [...new Set(g.accounts)] })),
         codex: { ...codex, pinnedEmail: codex.pinnedEmail || null },
+        codexGroups: codexGroups
+          .filter((g) => g.name.trim())
+          .map((g) => ({ name: g.name.trim(), accounts: [...new Set(g.accounts)] })),
         listen,
         agentPort,
         dataDir,
@@ -768,7 +513,6 @@ export function SettingsPanel({
             name: p.name.trim(),
             labels: p.labels.split(",").map((s) => s.trim()).filter(Boolean),
             linearKey: p.linearKey, // "" = keep the stored key
-            group: p.group, // "" / deleted group ⇒ server repoints at the first group
             vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
             agentPlaybook: p.agentPlaybook,
             globalPrompt: p.globalPrompt,
@@ -921,7 +665,7 @@ export function SettingsPanel({
             <Section
               title="Presets"
               effect="immediate"
-              hint="A preset = Linear API key + the ticket-id prefixes (Linear team keys, e.g. DEV) that auto-select it + a default account group + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by the ticket's team prefix (DEV-196 → DEV); other clones require an explicit pick. The group applies to new clones of this preset unless the clone dialog overrides it."
+              hint="A preset = Linear API key + the ticket-id prefixes (Linear team keys, e.g. DEV) that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by the ticket's team prefix (DEV-196 → DEV); other clones require an explicit pick."
             >
               <div className="space-y-3">
                 {presets.length === 0 ? <p className="text-xs text-slate-400 dark:text-slate-500">No presets.</p> : null}
@@ -958,16 +702,6 @@ export function SettingsPanel({
                         value={p.linearKey}
                         onChange={(v) => setPresetField(i, "linearKey", v)}
                       />
-                    </div>
-                    <div className="mt-1.5">
-                      <Field label="Account group (default for clones of this preset)">
-                        <AccountGroupSelect
-                          groups={groups}
-                          value={p.group}
-                          onChange={(v) => setPresetField(i, "group", v)}
-                          className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
-                        />
-                      </Field>
                     </div>
                     <div className="mt-2 space-y-1.5">
                       {p.vars.map((v, k) => (
@@ -1082,50 +816,6 @@ export function SettingsPanel({
                   {serverMsg ? <p className="text-xs text-slate-500 dark:text-slate-400">{serverMsg}</p> : null}
                 </div>
                 {updateOp ? <OperationProgress op={updateOp} /> : null}
-              </div>
-            </Section>
-
-            {/* Group proxy — the rmng-cliproxy sidecar that routes every clone's model
-                traffic. Separate from the control-server on purpose: updating the server
-                leaves this running so agent turns aren't interrupted, which means it can be
-                behind and only the operator rolls it forward. */}
-            <Section
-              title="Group proxy"
-              hint="Routes every clone's model traffic to its account group. Updating the control-server deliberately leaves this running, so it can be behind — restart it when clones are idle."
-            >
-              <div className="space-y-2">
-                <div className="text-xs text-slate-500 dark:text-slate-400">
-                  <code>{proxyStatus?.container ?? "rmng-cliproxy"}</code>
-                  {proxyStatus?.image ? <> · image <code>{proxyStatus.image}</code></> : null}
-                  {proxyStatus?.revision ? <> · <code>{proxyStatus.revision}</code></> : null}
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={doRestartProxy}
-                    disabled={proxyBusy}
-                    className="rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
-                  >
-                    Restart group proxy
-                  </button>
-                  {proxyStatus ? (
-                    <span
-                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                        !proxyStatus.running
-                          ? "bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-400"
-                          : proxyStatus.behind
-                            ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400"
-                            : "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400"
-                      }`}
-                    >
-                      {!proxyStatus.running ? "not running" : proxyStatus.behind ? "behind" : "up to date"}
-                    </span>
-                  ) : null}
-                  {proxyMsg ? <p className="text-xs text-slate-500 dark:text-slate-400">{proxyMsg}</p> : null}
-                </div>
-                {proxyStatus?.detail ? (
-                  <p className="text-xs text-slate-400 dark:text-slate-500">{proxyStatus.detail}</p>
-                ) : null}
               </div>
             </Section>
 
@@ -1272,22 +962,82 @@ export function SettingsPanel({
               </div>
             </Section>
 
-            {/* Account groups — the group-proxy manager. Each group is one CLIProxyAPI
-                instance (a provider-agnostic pool). Accounts enter via OAuth login; the
-                authed list is live from `usageGroups`. */}
+            {/* Imported Claude accounts — the pool clones/groups draw from; deletable here.
+                There's no in-browser login: the control-server harvests an account's tokens
+                off a clone that's already signed in, hence "Import account" rather than "Add". */}
             <Section
-              title="Account groups"
+              title="Claude accounts"
               effect="immediate"
-              hint="Each group is one proxy instance (a pool of Claude and/or GPT accounts). A clone binds one group; the instance owns account selection, per-model quota failover, and OAuth refresh. Add accounts by logging them in; membership lives in the instance, not config."
+              hint="Imported accounts available to clones and groups. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
             >
-              <GroupManager
-                groups={groups}
-                usageGroups={usageGroups}
-                onCreateGroup={onCreateGroup}
-                onDeleteGroup={onDeleteGroup}
-                onAddAccount={onAddAccount}
-                onDeleteAccount={onDeleteAccount}
-              />
+              <div className="space-y-2">
+                <AccountList emails={accountEmails} onDelete={onDeleteAccount} />
+                <button
+                  type="button"
+                  onClick={onImportAccount}
+                  className="inline-flex items-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  <Plus className="size-3.5" /> Import account
+                </button>
+              </div>
+            </Section>
+
+            {/* Claude groups (named account pools; sticky — a clone moves only when its
+                account exhausts). Saved with the rest of the form via PUT /api/config. */}
+            <Section
+              title="Claude groups"
+              effect="immediate"
+              hint="A pool of accounts. A clone bound to a group keeps its account (preserving its prompt cache) until that account is exhausted (80% 5h or 95% 7d), then moves to the least-used member."
+            >
+              <div className="space-y-3">
+                {claudeGroups.length === 0 ? (
+                  <p className="text-xs text-slate-400 dark:text-slate-500">No groups.</p>
+                ) : null}
+                {claudeGroups.map((g, i) => (
+                  <div key={i} className="rounded border border-slate-200 dark:border-slate-700 p-3">
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={g.name}
+                        onChange={(e) => setGroupName(i, e.target.value)}
+                        placeholder="group name"
+                        className={input}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => rmGroup(i)}
+                        className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    {accountEmails.length === 0 ? (
+                      <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
+                        Import some accounts first to add them to a group.
+                      </p>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+                        {accountEmails.map((email) => (
+                          <label key={email} className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={g.accounts.includes(email)}
+                              onChange={() => toggleGroupAccount(i, email)}
+                            />
+                            {email}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={addGroup}
+                  className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  + Add group
+                </button>
+              </div>
             </Section>
 
             {/* Codex. */}
@@ -1325,6 +1075,76 @@ export function SettingsPanel({
                   Auto-use Codex reset credits (when every account is &gt;95% weekly and none
                   reset within 24h, spend one banked reset to bring an account back)
                 </label>
+              </div>
+            </Section>
+
+            {/* Imported Codex accounts — deletable here (twin of the Claude accounts list).
+                Importing is provider-picked inside the same modal, so there's no separate
+                entry point here. */}
+            <Section
+              title="Codex accounts"
+              effect="immediate"
+              hint="Imported Codex accounts. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
+            >
+              <AccountList emails={codexAccountEmails} onDelete={onDeleteCodexAccount} />
+            </Section>
+
+            {/* Codex groups (named account pools) — the Codex twin of the Claude groups above.
+                Kept as a separate list because the two providers' pools are independent: a
+                clone binds one of each. */}
+            <Section
+              title="Codex groups"
+              effect="immediate"
+              hint="A pool of Codex accounts. A clone bound to a group keeps its account until that account passes 95% of its weekly (7d) limit, then moves to the least-used member."
+            >
+              <div className="space-y-3">
+                {codexGroups.length === 0 ? (
+                  <p className="text-xs text-slate-400 dark:text-slate-500">No groups.</p>
+                ) : null}
+                {codexGroups.map((g, i) => (
+                  <div key={i} className="rounded border border-slate-200 dark:border-slate-700 p-3">
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={g.name}
+                        onChange={(e) => setCodexGroupName(i, e.target.value)}
+                        placeholder="group name"
+                        className={input}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => rmCodexGroup(i)}
+                        className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    {codexAccountEmails.length === 0 ? (
+                      <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">
+                        Import some Codex accounts first to add them to a group.
+                      </p>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+                        {codexAccountEmails.map((email) => (
+                          <label key={email} className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={g.accounts.includes(email)}
+                              onChange={() => toggleCodexGroupAccount(i, email)}
+                            />
+                            {email}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={addCodexGroup}
+                  className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  + Add group
+                </button>
               </div>
             </Section>
 

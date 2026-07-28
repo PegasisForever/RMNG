@@ -11,24 +11,24 @@ import {
   importClaudeAccount,
   importCodexAccount,
 } from "~/lib/api";
-import type { Host } from "~/lib/types";
+import type { Clone } from "~/lib/types";
 
 const input =
   "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500";
 
 export function ImportAccountModal({
-  hosts,
+  clones,
   onClose,
   onImported,
 }: {
-  hosts: Host[];
+  clones: Clone[];
   onClose: () => void;
   onImported: (email: string) => void;
 }) {
-  // Only managed containers (clones) can be imported from.
-  const clones = hosts.filter((h) => h.managed);
+  // Only managed containers can be imported from.
+  const managed = clones.filter((h) => h.managed);
   const [provider, setProvider] = useState<"claude" | "codex">("claude");
-  const [hostId, setHostId] = useState(() => clones[0]?.id ?? "");
+  const [hostId, setHostId] = useState(() => managed[0]?.id ?? "");
   const [info, setInfo] = useState<{ email: string; plan: string | null } | null>(null);
   const [checking, setChecking] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -107,7 +107,7 @@ export function ImportAccountModal({
           ))}
         </div>
 
-        {clones.length === 0 ? (
+        {managed.length === 0 ? (
           <p className="mt-4 rounded-md border border-dashed border-slate-300 p-3 text-center text-xs text-slate-400 dark:border-slate-600 dark:text-slate-500">
             No clones available to import from.
           </p>
@@ -120,7 +120,7 @@ export function ImportAccountModal({
                 onChange={(e) => setHostId(e.target.value)}
                 className={input}
               >
-                {clones.map((h) => (
+                {managed.map((h) => (
                   <option key={h.id} value={h.id}>
                     {h.displayName ? `${h.displayName} (${h.id})` : h.id}
                   </option>

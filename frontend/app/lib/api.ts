@@ -7,7 +7,6 @@ import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { Operation } from "~/lib/types";
 import type { SetupEnv } from "~/lib/wire/SetupEnv";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
-import type { GroupProxyStatus } from "~/lib/wire/GroupProxyStatus";
 
 // Client-side API wrappers. Each POSTs JSON; the server mutates state and
 // broadcasts, so the caller doesn't need the response beyond error handling —
@@ -110,75 +109,57 @@ export const updateServer = () => postJson("/api/server/update", {}) as Promise<
  *  disconnects and reconnects. */
 export const restartServer = () => postJson("/api/server/restart", {}) as Promise<{ ok: boolean }>;
 
-/** The `rmng-cliproxy` sidecar's status: running, on which image, and whether that image is
- *  behind the control-server's. A control-server update deliberately does NOT roll it forward
- *  (that would kill in-flight agent turns), so `behind` is the normal post-update state. */
-export const getGroupProxyStatus = () =>
-  getJson("/api/groupproxy") as Promise<GroupProxyStatus>;
-/** Recreate the group-proxy sidecar on the control-server's current image. Interrupts every
- *  in-flight agent request in the fleet — the operator runs this when clones are idle. */
-export const restartGroupProxy = () =>
-  postJson("/api/groupproxy/restart", {}) as Promise<GroupProxyStatus>;
-
-// --- account groups (CLIProxyAPI pools) ------------------------------------
-// A group is a provider-agnostic account pool = one CLIProxyAPI instance. Accounts
-// enter a group by completing that instance's OAuth login (start → complete → poll).
-// Usage per group is display-only and streams in `ControlState.usageGroups`.
-
-/** OAuth provider for a group login. */
-export type LoginProvider = "anthropic" | "codex" | "antigravity";
-
-/** Create an account group (spawns its CLIProxyAPI instance). Returns the redacted config. */
-export const createGroup = (name: string) =>
-  postJson("/api/groups", { name }) as Promise<AppConfigRedacted>;
-/** Delete an account group (stops its instance; the on-disk auth-dir is left in place). */
-export const deleteGroup = (name: string) =>
-  delJson(`/api/groups/${encodeURIComponent(name)}`) as Promise<AppConfigRedacted>;
-/** Begin an OAuth login into a group's instance. Returns the URL the operator opens
- *  (it redirects to a `localhost` callback on the operator's machine) plus the `state`
- *  token used to poll/complete. */
-export const startGroupLogin = (group: string, provider: LoginProvider) =>
-  postJson(`/api/groups/${encodeURIComponent(group)}/accounts/login/start`, { provider }) as Promise<{
-    status?: string;
-    url: string;
-    state: string;
+/** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */
+export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
+/** Confirm a clone is signed in to Claude Code via claude.ai; returns its identity. */
+export const checkClaudeImport = (clone: string) =>
+  postJson("/api/claude/import/check", { host: clone }) as Promise<{
+    email: string;
+    orgName: string | null;
+    subscriptionType: string | null;
   }>;
-/** Finish an OAuth login by handing back the pasted redirect URL (or an explicit
- *  code+state). The credential lands in the group instance's auth-dir. */
-export const completeGroupLogin = (
-  group: string,
-  body: { provider: LoginProvider; redirectUrl?: string; code?: string; state?: string },
-) =>
-  postJson(`/api/groups/${encodeURIComponent(group)}/accounts/login/complete`, body) as Promise<{
-    status?: string;
-  } & Record<string, unknown>>;
-/** Poll an in-flight login. The control server normalizes CLIProxyAPI's `get-auth-status`
- *  to a small stable shape: `pending` while the instance exchanges the code, `done` once the
- *  credential lands in the group's auth-dir, `error` (with a message) on a failed/expired
- *  session. */
-export const groupLoginStatus = (group: string, state: string) =>
-  getJson(
-    `/api/groups/${encodeURIComponent(group)}/accounts/login/status?state=${encodeURIComponent(state)}`,
-  ) as Promise<{ state: "pending" | "done" | "error"; error?: string }>;
-/** Remove an authenticated account from a group by its auth-dir credential file name
- *  (`claude-<email>.json` / `codex-<email>.json` / `antigravity-<email>.json`). */
-export const deleteGroupAccount = (group: string, file: string) =>
-  postJson(`/api/groups/${encodeURIComponent(group)}/accounts/delete`, { file });
-
-/** Trigger an immediate server-side usage poll (the manual refresh button, and auto-fired
- *  after an account is added). The refreshed `usageGroups` arrive over SSE within ~a second. */
-export const refreshUsage = (): Promise<void> =>
-  postJson("/api/usage/refresh", {}).then(() => undefined);
-
-/** Bind a clone to an account group (or clear it with `null`). Replaces the old
- *  per-provider account swap — one group backs all of a clone's agents. */
-/** Rebind a clone's account group. Every clone binds one, so a name is required — the
- *  server 400s on a missing or unknown group. */
-export const setCloneGroup = (cloneId: string, group: string) =>
-  postJson(`/api/hosts/${encodeURIComponent(cloneId)}/group`, { group }) as Promise<{
+/** Import a Claude account from a signed-in clone: the server harvests the clone's
+ *  OAuth pair (and owns its refresh lifecycle), then clears the clone's credentials file. */
+export const importClaudeAccount = (clone: string) =>
+  postJson("/api/claude/import", { host: clone }) as Promise<{ email: string; cleared: boolean }>;
+/** Change a clone's Claude account/group. `account` is "auto", "none", an email, or
+ *  "group:<name>". `account` in the reply is null when set to "none". */
+export const swapClaudeAccount = (clone: string, account: string) =>
+  postJson("/api/claude/swap", { host: clone, account }) as Promise<{
     ok: boolean;
-    group: string;
+    account: string | null;
+    group: string | null;
+    selection: string;
   }>;
+
+/** Delete an imported Claude account by email. Rejects (400) if a clone is pinned to it;
+ *  auto/group clones are moved off first. `moved` lists the host ids that were reassigned. */
+export const deleteClaudeAccount = (account: string) =>
+  postJson("/api/claude/delete", { account }) as Promise<{ ok: boolean; moved: string[] }>;
+
+export const refreshCodexUsage = () => postJson("/api/codex/refresh", {});
+
+export const checkCodexImport = (clone: string) =>
+  postJson("/api/codex/import/check", { host: clone }) as Promise<{
+    email: string;
+    plan: string | null;
+    accountId: string;
+  }>;
+
+export const importCodexAccount = (clone: string) =>
+  postJson("/api/codex/import", { host: clone }) as Promise<{ email: string; cleared: boolean }>;
+
+export const swapCodexAccount = (clone: string, account: string) =>
+  postJson("/api/codex/swap", { host: clone, account }) as Promise<{
+    ok: boolean;
+    account: string | null;
+    group: string | null;
+    selection: string;
+  }>;
+
+/** Delete an imported Codex account by email (the Codex twin of `deleteClaudeAccount`). */
+export const deleteCodexAccount = (account: string) =>
+  postJson("/api/codex/delete", { account }) as Promise<{ ok: boolean; moved: string[] }>;
 
 // --- Settings / config (redacted read · partial write · validate) ----------
 // Config errors come back as plain text (not the {error} JSON shape), so PUT

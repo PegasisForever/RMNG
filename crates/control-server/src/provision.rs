@@ -1348,13 +1348,13 @@ mod tests {
                 value: "custom".into(),
             },
             EnvVar {
-                key: "ANTHROPIC_BASE_URL".into(),
-                value: "http://rmng-cliproxy:9010/cc".into(),
+                key: "RMNG_CONTROL_URL".into(),
+                value: "http://rmng-control:9000".into(),
             },
         ];
         let body = clone_etc_environment_conf(&vars);
         assert!(body.contains("XDG_SESSION_DESKTOP=gnome\n"));
-        assert!(body.contains("ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\n"));
+        assert!(body.contains("RMNG_CONTROL_URL=http://rmng-control:9000\n"));
         assert!(body.contains("XDG_CURRENT_DESKTOP=custom\n"));
         assert_eq!(body.matches("XDG_CURRENT_DESKTOP=").count(), 1);
     }

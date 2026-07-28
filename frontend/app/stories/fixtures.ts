@@ -3,11 +3,10 @@
 // fixture + these callbacks". Kept in one place so the Sidebar / SidebarClone /
 // Settings stories stay consistent.
 
-import type { ClaudeUsage, GroupUsage, Clone, Operation } from "~/lib/types";
+import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
-import type { CloneTokenUsage } from "~/lib/wire/CloneTokenUsage";
-import type { Group } from "~/lib/wire/Group";
+import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
@@ -15,7 +14,7 @@ const GiB = 1024 ** 3;
 
 // --- clones (each covers a distinct visual state) ---------------------------
 
-/** A managed clone actively working, bound to the "pooled" account group, on a ticket. */
+/** A managed clone actively working, pinned to one Claude account, on a ticket. */
 export const cloneWorking: Clone = {
   id: "pega-we-142",
   host: "10.99.0.11",
@@ -24,7 +23,8 @@ export const cloneWorking: Clone = {
   password: "",
   managed: true,
   source: "pegasis0/rmng-template:latest",
-  group: "pooled",
+  claudeAccountEmail: "alex@example.com",
+  claudeSelection: "alex@example.com",
   linearWorkspace: "we",
   linearTicket: "WE-142",
   linearLabel: "frontend",
@@ -32,7 +32,7 @@ export const cloneWorking: Clone = {
   monitorState: "working",
 };
 
-/** Idle, bound to the "pooled" group, with an unread dot (dropped from working). */
+/** Idle, balanced within the "pooled" Claude pool, with an unread dot (dropped from working). */
 export const cloneIdle: Clone = {
   id: "pega-dev-88",
   host: "10.99.0.12",
@@ -41,7 +41,9 @@ export const cloneIdle: Clone = {
   password: "",
   managed: true,
   source: "pegasis0/rmng-template:latest",
-  group: "pooled",
+  claudeAccountEmail: "sam@example.com",
+  claudeGroup: "pooled",
+  claudeSelection: "group:pooled",
   linearWorkspace: "dev",
   linearTicket: "DEV-88",
   displayName: "Wire up the pull-template wizard",
@@ -49,7 +51,7 @@ export const cloneIdle: Clone = {
   unread: true,
 };
 
-/** Offline (wrapper unreachable), bound to the "team" group. */
+/** Offline (wrapper unreachable), Claude on auto — the server picked the account. */
 export const cloneOffline: Clone = {
   id: "pega-hh-7",
   host: "10.99.0.13",
@@ -57,12 +59,13 @@ export const cloneOffline: Clone = {
   username: "pega",
   password: "",
   managed: true,
-  group: "team",
+  claudeAccountEmail: "alex@example.com",
+  claudeSelection: "auto",
   displayName: "Database migration spike",
   monitorState: "idle",
 };
 
-/** A managed scratch box on the default group (every clone binds one). */
+/** A managed scratch box deliberately left tokenless (no account installed). */
 export const cloneNoToken: Clone = {
   id: "scratch-box",
   host: "10.99.0.20",
@@ -70,25 +73,24 @@ export const cloneNoToken: Clone = {
   username: "pega",
   password: "",
   managed: true,
-  group: "Default",
+  claudeSelection: "none",
   monitorState: "idle",
 };
 
-/** A plain unmanaged row (no container) — only deletable, no commit/account actions. */
+/** A plain unmanaged row (no container) — only deletable, no commit/account actions.
+ *  Carries no account fields at all: an unmanaged clone never binds one. */
 export const cloneUnmanaged: Clone = {
   id: "legacy-desktop",
   host: "192.168.1.50",
   port: 3389,
   username: "admin",
   password: "",
-  // Deliberately blank: the one fixture covering the transient pre-normalize state, so the
-  // sidebar is exercised against a row whose group hasn't been filled in yet.
-  group: "",
   monitorState: "idle",
 };
 
-/** A managed clone bound to the "team" group. Exercises the two-line sidebar layout
- *  (binding line + a metric-only line, CPU on the first / MEM on the second). */
+/** A managed clone holding BOTH providers: a pinned Claude account and a pooled Codex one.
+ *  Exercises the two-line sidebar layout (one binding line per provider, CPU on the first /
+ *  MEM on the second). */
 export const cloneDualProvider: Clone = {
   id: "pega-dual-9",
   host: "10.99.0.14",
@@ -97,7 +99,11 @@ export const cloneDualProvider: Clone = {
   password: "",
   managed: true,
   source: "pegasis0/rmng-template:latest",
-  group: "team",
+  claudeAccountEmail: "alex@example.com",
+  claudeSelection: "alex@example.com",
+  codexAccountEmail: "alex@openai.com",
+  codexGroup: "team",
+  codexSelection: "group:team",
   linearWorkspace: "we",
   linearTicket: "WE-207",
   displayName: "Port the encoder path to the new VA surface pool",
@@ -114,7 +120,9 @@ export const cloneSubClone: Clone = {
   password: "",
   managed: true,
   source: "pegasis0/rmng-template:latest",
-  group: "pooled",
+  claudeAccountEmail: "sam@example.com",
+  claudeGroup: "pooled",
+  claudeSelection: "group:pooled",
   parent: cloneWorking.id,
   displayName: "helper: run the e2e suite",
   monitorState: "working",
@@ -163,98 +171,54 @@ export const stats: Record<string, ContainerStats> = {
   },
 };
 
-// --- clone token totals (the volatile `tokens` SSE map) ---------------------
-
-export const tokens: Record<string, CloneTokenUsage> = {
-  [cloneWorking.id]: {
-    newInputTokens: 128_400n,
-    outputTokens: 22_800n,
-    requestCount: 4n,
-    // Recently served by Fable → the sidebar shows the "fable" chip next to its group badge.
-    fableActive: true,
-  },
-  [cloneIdle.id]: {
-    newInputTokens: 54_600n,
-    outputTokens: 7_500n,
-    requestCount: 2n,
-    fableActive: false,
-  },
-  [cloneOffline.id]: {
-    newInputTokens: 20_000n,
-    outputTokens: 3_100n,
-    requestCount: 1n,
-    fableActive: false,
-  },
-  [cloneDualProvider.id]: {
-    newInputTokens: 948_000n,
-    outputTokens: 41_000n,
-    requestCount: 7n,
-    fableActive: false,
-  },
-};
-
-// --- account groups + their usage (display-only) ---------------------------
-// Under the group-proxy model, usage is grouped by pool. Account ids are group-scoped
-// (`<group>|<email>`) since the same email can be authed into several groups.
+// --- per-account usage (display-only) --------------------------------------
+// One flat list carrying BOTH providers' rows, tagged by `provider` — the shape of
+// `ControlState.claudeAccounts`. Account ids are per-provider, not pool-scoped.
 
 const usage = (
-  group: string,
   a: Omit<ClaudeUsage, "id" | "active"> & Partial<Pick<ClaudeUsage, "active">>,
 ): ClaudeUsage => ({
-  id: `${group}|${a.provider ?? "claude"}|${a.email}`,
+  id: `${a.provider ?? "claude"}|${a.email}`,
   active: a.active ?? true,
   ...a,
 });
 
-export const usageGroups: GroupUsage[] = [
-  {
-    name: "pooled",
-    accounts: [
-      usage("pooled", {
-        email: "alex@example.com",
-        provider: "claude",
-        assignable: true,
-        lastUpdated: 1_700_000_000_000,
-        fiveHour: { pct: 42, resetsAt: null },
-        sevenDay: { pct: 61, resetsAt: null },
-        fable: { pct: 8, resetsAt: null },
-      }),
-      usage("pooled", {
-        email: "sam@example.com",
-        provider: "claude",
-        active: false,
-        assignable: true,
-        lastUpdated: 1_700_000_000_000,
-        fiveHour: { pct: 88, resetsAt: null },
-        sevenDay: { pct: 73, resetsAt: null },
-      }),
-    ],
-  },
-  {
-    name: "team",
-    accounts: [
-      usage("team", {
-        email: "alex@openai.com",
-        provider: "codex",
-        assignable: false,
-        lastUpdated: 1_700_000_000_000,
-        // Codex exposes only a weekly (7d) limit now — the 5h window was removed upstream.
-        sevenDay: { pct: 40, resetsAt: null },
-        resetCredits: 3n,
-      }),
-      usage("team", {
-        email: "alex@gmail.com",
-        provider: "antigravity",
-        assignable: true,
-        lastUpdated: 1_700_000_000_000,
-        // Antigravity (Gemini) exposes no pollable quota — a display-only presence row (no bars).
-      }),
-    ],
-  },
+export const claudeAccounts: ClaudeUsage[] = [
+  usage({
+    email: "alex@example.com",
+    provider: "claude",
+    assignable: true,
+    lastUpdated: 1_700_000_000_000,
+    fiveHour: { pct: 42, resetsAt: null },
+    sevenDay: { pct: 61, resetsAt: null },
+    fable: { pct: 8, resetsAt: null },
+  }),
+  usage({
+    email: "sam@example.com",
+    provider: "claude",
+    active: false,
+    assignable: true,
+    lastUpdated: 1_700_000_000_000,
+    fiveHour: { pct: 88, resetsAt: null },
+    sevenDay: { pct: 73, resetsAt: null },
+  }),
+  usage({
+    email: "alex@openai.com",
+    provider: "codex",
+    assignable: false,
+    lastUpdated: 1_700_000_000_000,
+    // Codex exposes only a weekly (7d) limit now — the 5h window was removed upstream.
+    sevenDay: { pct: 40, resetsAt: null },
+    resetCredits: 3n,
+  }),
 ];
 
-/** The configured account groups (names only) — the authoritative list for pickers. */
-export const groups: Group[] = [{ name: "pooled" }, { name: "team" }];
+/** The configured account pools, per provider — the authoritative list for pickers. */
+export const cloneGroups: CloneGroup[] = [
+  { name: "pooled", accounts: ["alex@example.com", "sam@example.com"] },
+  { name: "solo", accounts: ["alex@example.com"] },
+];
+export const codexGroups: CloneGroup[] = [{ name: "team", accounts: ["alex@openai.com"] }];
 
 // --- clone-source images ----------------------------------------------------
 
@@ -345,13 +309,13 @@ export const appConfig: AppConfigRedacted = {
     pinnedEmail: "alex@example.com",
   },
   codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
-  groups: [{ name: "pooled" }, { name: "team" }],
+  cloneGroups,
+  codexGroups,
   presets: [
     {
       name: "webapp",
       labels: ["frontend", "webapp"],
       linearKeySet: true,
-      group: "pooled",
       vars: [{ key: "NODE_ENV", value: "development" }],
       agentPlaybook: "",
       globalPrompt: "",

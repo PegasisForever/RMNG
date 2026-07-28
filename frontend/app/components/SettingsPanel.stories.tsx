@@ -3,7 +3,7 @@ import { fn } from "storybook/test";
 
 import { SettingsPanel } from "./SettingsPanel";
 import type { Operation } from "~/lib/types";
-import { appConfig, groups, images, usageGroups } from "~/stories/fixtures";
+import { appConfig, claudeAccounts, images } from "~/stories/fixtures";
 
 // Mocked server calls — the component never imports the real API, so a story just
 // injects these. `fn(impl)` both runs the implementation and records the call in the
@@ -24,19 +24,6 @@ const getUpdateStatus = () =>
     error: null,
   }));
 
-// The group-proxy sidecar sitting on an older image than the control-server — the normal
-// state right after a control-server update, since updating deliberately leaves the proxy
-// running so agent turns aren't interrupted.
-const getGroupProxyStatus = () =>
-  fn(async () => ({
-    container: "rmng-cliproxy",
-    running: true,
-    image: "9f8e7d6c5b4a",
-    revision: "0f0e0d0",
-    behind: true,
-    detail: "running an older image than the control-server — restart it when clones are idle",
-  }));
-
 // A self-update op mid-flight, so the inline progress bar under the Update button renders.
 const updateOp: Operation = {
   id: "op_update_1",
@@ -55,8 +42,8 @@ const meta = {
   component: SettingsPanel,
   parameters: { layout: "fullscreen" },
   args: {
-    groups,
-    usageGroups,
+    // The flat both-provider list the panel splits into its Claude / Codex account sections.
+    accounts: claudeAccounts,
     onClose: fn(),
     getConfig: getConfig(),
     putConfig: putConfig(),
@@ -66,24 +53,14 @@ const meta = {
     // No op in flight in the default story; `UpdateInProgress` supplies one.
     operations: [],
     restartServer: fn(async () => ({ ok: true })),
-    getGroupProxyStatus: getGroupProxyStatus(),
-    restartGroupProxy: fn(async () => ({
-      container: "rmng-cliproxy",
-      running: true,
-      image: "1a2b3c4d5e6f",
-      revision: "a1b2c3d",
-      behind: false,
-      detail: "running the current image",
-    })),
     images,
     imagesLoading: false,
     pullBusy: false,
     onPullTemplate: fn(),
     onDeleteImage: fn(),
-    onCreateGroup: fn(),
-    onDeleteGroup: fn(),
-    onAddAccount: fn(),
     onDeleteAccount: fn(),
+    onDeleteCodexAccount: fn(),
+    onImportAccount: fn(),
   },
 } satisfies Meta<typeof SettingsPanel>;
 
@@ -103,9 +80,13 @@ export const PreSetup: Story = {
   args: { getConfig: fn(async () => ({ ...appConfig, setupComplete: false })) },
 };
 
-/** No account groups configured yet — the manager shows the empty state. */
-export const NoGroups: Story = {
-  args: { groups: [], usageGroups: [] },
+/** Nothing imported and no groups configured — both account lists and both group editors
+ *  show their empty states (and the group editors prompt to import accounts first). */
+export const NoAccounts: Story = {
+  args: {
+    accounts: [],
+    getConfig: fn(async () => ({ ...appConfig, cloneGroups: [], codexGroups: [] })),
+  },
 };
 
 /** A self-update in flight: its progress renders inline under the Update button, so the

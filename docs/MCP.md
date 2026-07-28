@@ -2,7 +2,7 @@
 
 RMNG exposes one MCP server: each clone daemon serves **JSON-RPC 2.0 over HTTP POST** at `/` on `:9004` (`RMNG_DAEMON_MCP_PORT`). It owns the clone's live Mutter desktop session.
 
-Clone lifecycle state is owned directly by the control server from Docker liveness and passive CLIProxy token activity. Fleet and operator desktop control use the [`rmng` CLI](CLI.md), which proxies desktop calls through the web API.
+Clone lifecycle state is owned directly by the control server from Docker liveness and the agent-wrapper's activity frames. Fleet and operator desktop control use the [`rmng` CLI](CLI.md), which proxies desktop calls through the web API.
 
 | Server | Where | Default port | Scope | Source |
 |---|---|---:|---|---|
