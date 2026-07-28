@@ -21,6 +21,7 @@ import {
   deleteClone,
   deleteImage,
   getConfig,
+  getGroupProxyStatus,
   getUpdateStatus,
   listImages,
   pullTemplate,
@@ -28,6 +29,7 @@ import {
   putForwards,
   refreshUsage,
   reorder,
+  restartGroupProxy,
   restartServer,
   setCloneGroup,
   testConfig,
@@ -578,6 +580,8 @@ function Dashboard({
           updateServer={updateServer}
           operations={state.operations}
           restartServer={restartServer}
+          getGroupProxyStatus={getGroupProxyStatus}
+          restartGroupProxy={restartGroupProxy}
           images={images}
           imagesLoading={imagesLoading}
           pullBusy={state.operations.some(

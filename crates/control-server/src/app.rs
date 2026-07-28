@@ -16,11 +16,11 @@ pub struct App {
     /// Live config (mutable via `/api/config` in Phase 2; read per use elsewhere).
     pub cfg: Arc<RwLock<AppConfig>>,
     pub http: reqwest::Client,
-    /// Transparent CLIProxyAPI transport. Redirects stay client-visible rather than being
-    /// followed by the control server, preserving the upstream method and response exactly.
-    pub proxy_http: reqwest::Client,
-    /// Group-proxy supervisor: per-group CLIProxyAPI instance lifecycle, per-clone router
-    /// keys, and management helpers (see [`crate::cliproxy`]).
+    /// Group-proxy state: per-group CLIProxyAPI instance identities, per-clone router keys, and
+    /// the shared admin secret (see [`crate::cliproxy`]). The control-server is this file's sole
+    /// WRITER; the `rmng-cliproxy` sidecar opens it read-only. The transparent proxy transport
+    /// that used to sit beside this lives in that sidecar now — no agent traffic passes through
+    /// this process.
     pub cliproxy: Arc<CliProxyManager>,
     /// Per-clone chat fan-out + in-flight state.
     pub chat: Arc<ChatState>,
@@ -66,11 +66,6 @@ impl App {
                 .user_agent("rmng-control-server")
                 .build()
                 .expect("reqwest client"),
-            proxy_http: reqwest::Client::builder()
-                .user_agent("rmng-control-server")
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("transparent proxy client"),
             cliproxy,
             chat: Arc::new(ChatState::default()),
             media: Arc::new(crate::mediaplane::MediaHandle::default()),

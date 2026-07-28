@@ -328,6 +328,35 @@ pub struct UpdateStatus {
     pub error: Option<String>,
 }
 
+/// The `rmng-cliproxy` sidecar's status, served by `GET /api/groupproxy`.
+///
+/// That container owns the `/cc` router + every per-group CLIProxyAPI process, and a
+/// control-server update deliberately does NOT roll it forward — recreating it would drop every
+/// in-flight agent turn in the fleet, which is precisely the interruption the split removes. So
+/// the operator needs the drift to be *visible*: `behind` is true whenever it is running a
+/// different image than the control-server, and `POST /api/groupproxy/restart` is the deliberate
+/// roll-forward. `detail` is always populated (including for a down daemon), so the UI renders
+/// something useful in every state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct GroupProxyStatus {
+    /// The container/DNS name (`rmng-cliproxy`).
+    pub container: String,
+    pub running: bool,
+    /// Short image id it is running, when it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// `org.opencontainers.image.revision` of that image, when the image carries one (a plain
+    /// `docker build` leaves it empty — a dev build).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// It is running a different image than the control-server.
+    pub behind: bool,
+    /// Human-readable state for the Settings panel.
+    pub detail: String,
+}
+
 /// 0–100 utilization for a rolling usage window + when it resets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -477,6 +506,26 @@ pub struct ChatMessage {
     pub role: ChatRole,
     pub text: String,
     pub ts: i64,
+}
+
+/// A user message the operator queued for later delivery to a clone's agent.
+///
+/// Stored apart from the `Chat` itself (`data/schedules/<id>.json`): a scheduled message
+/// is not part of the conversation until it actually fires, at which point it enters the
+/// chat as an ordinary `ChatMessage` and disappears from here. Keeping the two files
+/// separate means a delivery never has to rewrite the transcript and vice-versa.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct ScheduledMessage {
+    pub id: String,
+    pub text: String,
+    /// When to deliver it, epoch milliseconds (UTC). The UI collects a *local* wall-clock
+    /// time and converts; the server only ever compares absolute instants, so a client in
+    /// another timezone (or a DST shift between now and then) can't move the delivery.
+    pub at: i64,
+    /// When the operator queued it, epoch milliseconds. Purely informational.
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]

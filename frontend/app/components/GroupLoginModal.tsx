@@ -13,6 +13,7 @@ import {
   startGroupLogin,
   type LoginProvider,
 } from "~/lib/api";
+import { useModalEscape } from "~/lib/useModalEscape";
 
 const input =
   "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500";
@@ -48,6 +49,11 @@ export function GroupLoginModal({
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current);
   }, []);
+
+  // Escape closes regardless of focus — a document-level listener since the backdrop
+  // click no longer does (see below). Stacked so a modal opened on top of this one owns
+  // Escape instead of both closing at once.
+  useModalEscape(onClose);
 
   async function start() {
     setBusy(true);
@@ -120,17 +126,9 @@ export function GroupLoginModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
-        }}
-      >
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40 p-4">
+      {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
+      <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           Add account to <span className="text-emerald-700 dark:text-emerald-400">{group}</span>
         </h3>

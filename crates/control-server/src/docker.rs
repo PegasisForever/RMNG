@@ -898,6 +898,231 @@ impl DockerCtl {
         Ok(())
     }
 
+    // --- group-proxy sidecar ------------------------------------------------------------
+
+    /// Ensure the `rmng-cliproxy` sidecar exists and is running: the container that owns the
+    /// `/cc` router and every per-group CLIProxyAPI process (see [`crate::groupproxy`]).
+    ///
+    /// **Deliberately unlike [`Self::ensure_build_infra`]: this NEVER recreates on image
+    /// drift.** After a control-server update the sidecar keeps serving on the image it was
+    /// created with, which is the entire point of the split — recreating it would kill every
+    /// in-flight agent turn in the fleet, the exact interruption this feature removes. The
+    /// operator rolls it forward deliberately (`POST /api/groupproxy/restart` →
+    /// [`Self::recreate_group_proxy`]) when clones are idle, and
+    /// [`Self::group_proxy_status`] surfaces the drift so they can see it is behind.
+    ///
+    /// Create-if-absent / start-if-stopped only. `restart: unless-stopped` brings it back
+    /// after a host reboot. MUST run after `ensure_network` (it attaches to [`NETWORK`]).
+    pub async fn ensure_group_proxy(&self, cfg: &wire::AppConfig, self_id: &str) -> Result<()> {
+        match self
+            .daemon()?
+            .inspect_container(
+                crate::groupproxy::CONTAINER,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(info) => {
+                if info.state.as_ref().and_then(|s| s.running).unwrap_or(false) {
+                    return Ok(()); // present + running: leave it ALONE, whatever image it has
+                }
+                self.start_container(crate::groupproxy::CONTAINER).await?;
+                tracing::info!(target: "docker", "started the existing {} sidecar", crate::groupproxy::CONTAINER);
+                return Ok(());
+            }
+            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {} // absent
+            Err(e) => {
+                return Err(anyhow!(
+                    "inspecting the {} container: {e}",
+                    crate::groupproxy::CONTAINER
+                ));
+            }
+        }
+        self.create_group_proxy(cfg, self_id).await
+    }
+
+    /// The operator's deliberate roll-forward: stop + remove + recreate `rmng-cliproxy` on the
+    /// control-server's CURRENT image. Drops every in-flight agent request in the fleet, which
+    /// is why nothing calls this automatically. Resolves the control-server's own container id
+    /// itself so the caller (`web.rs`) doesn't have to.
+    pub async fn recreate_group_proxy(&self, cfg: &wire::AppConfig) -> Result<()> {
+        let self_id = self.env().await.self_container.ok_or_else(|| {
+            anyhow!("not running as a container (dev mode) — no group-proxy sidecar to restart")
+        })?;
+        self.stop_container(crate::groupproxy::CONTAINER).await.ok();
+        self.remove_container(crate::groupproxy::CONTAINER).await.ok();
+        self.create_group_proxy(cfg, &self_id).await
+    }
+
+    /// Create + start `rmng-cliproxy` from the control-server's own running image, running
+    /// `rmng-control-server group-proxy`.
+    ///
+    /// The image is our own container's image ID (not `docker.serverImage`): the sidecar must
+    /// run the binary the operator is actually running, including a locally built dev image
+    /// that was never pushed to a registry.
+    ///
+    /// Mounts are discovered from the control-server's own inspect rather than hardcoded, so
+    /// the `/data` volume name follows the deployment (compose's `rmng-data`, a bind, whatever)
+    /// — the same technique [`Self::launch_upgrade_helper`] uses. It joins [`NETWORK`] under
+    /// the [`crate::groupproxy::CONTAINER`] alias so the URL baked into every clone resolves,
+    /// and publishes NOTHING: the router is bridge-internal and the CLIProxyAPI instances stay
+    /// on this container's loopback, preserving the "never published" invariant.
+    async fn create_group_proxy(&self, cfg: &wire::AppConfig, self_id: &str) -> Result<()> {
+        let name = crate::groupproxy::CONTAINER;
+        let me = self.inspect_self(self_id).await?;
+        let image = me
+            .image
+            .clone()
+            .ok_or_else(|| anyhow!("self inspect has no image id"))?;
+
+        // Same /data source we have (named volume or bind), so the sidecar reads the same
+        // config.json, state.json, cliproxy-instances.json, and the per-group auth-dirs.
+        let mut mounts: Vec<Mount> = Vec::new();
+        for m in me.mounts.clone().unwrap_or_default() {
+            if m.destination.as_deref() != Some("/data") {
+                continue;
+            }
+            let is_vol = m.name.is_some();
+            mounts.push(Mount {
+                target: Some("/data".to_string()),
+                source: m.name.clone().or(m.source.clone()),
+                typ: Some(if is_vol { MountTypeEnum::VOLUME } else { MountTypeEnum::BIND }),
+                ..Default::default()
+            });
+        }
+        if mounts.is_empty() {
+            bail!(
+                "no /data mount discovered on the control-server container ({self_id}); the \
+                 {name} sidecar cannot run without the shared data volume"
+            );
+        }
+
+        let host_config = HostConfig {
+            mounts: Some(mounts),
+            restart_policy: Some(RestartPolicy {
+                name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                ..Default::default()
+            }),
+            // Same rationale as the self-upgrade helper: this container needs no privilege, but
+            // RMNG's nested-Docker-in-LXC hosts deny loading the docker-default AppArmor
+            // profile, which leaves an unprivileged container stuck in `Created`. No-op on
+            // hosts without AppArmor.
+            security_opt: Some(vec!["apparmor=unconfined".to_string()]),
+            ..Default::default()
+        };
+        let body = ContainerCreateBody {
+            image: Some(image.clone()),
+            entrypoint: Some(vec![
+                "/usr/local/bin/rmng-control-server".to_string(),
+                "group-proxy".to_string(),
+            ]),
+            cmd: Some(Vec::new()),
+            // Logging default only — same no-env-settings invariant as the main container.
+            env: Some(vec!["RUST_LOG=info,tower_http=warn".to_string()]),
+            working_dir: Some("/data".to_string()),
+            // `rmng.infra=1`, NOT `rmng.managed`: infra is excluded from clone sweeps and the
+            // boot reconcile's "unknown managed container" warning.
+            labels: Some(HashMap::from([(LABEL_INFRA.to_string(), "1".to_string())])),
+            host_config: Some(host_config),
+            networking_config: Some(NetworkingConfig {
+                endpoints_config: Some(HashMap::from([(
+                    NETWORK.to_string(),
+                    EndpointSettings {
+                        aliases: Some(vec![name.to_string()]),
+                        ..Default::default()
+                    },
+                )])),
+            }),
+            ..Default::default()
+        };
+        let opts = CreateContainerOptionsBuilder::new().name(name).build();
+        let docker = self.daemon()?;
+        let id = docker
+            .create_container(Some(opts), body)
+            .await
+            .with_context(|| format!("creating the {name} sidecar"))?
+            .id;
+        self.start_container(&id).await?;
+        tracing::info!(
+            target: "docker",
+            "{name} sidecar running on {} ({} group(s), router on :{})",
+            short_id(&image),
+            cfg.groups.len(),
+            crate::groupproxy::PORT
+        );
+        Ok(())
+    }
+
+    /// The sidecar's status for `GET /api/groupproxy` + the Settings panel: is it running, on
+    /// which image, and is that image behind the control-server's own. Never errors — a down
+    /// daemon or an absent container reads as `running: false` with the reason in `detail`, so
+    /// the panel always renders.
+    pub async fn group_proxy_status(&self) -> wire::GroupProxyStatus {
+        let name = crate::groupproxy::CONTAINER;
+        let mut status = wire::GroupProxyStatus {
+            container: name.to_string(),
+            running: false,
+            image: None,
+            revision: None,
+            behind: false,
+            detail: String::new(),
+        };
+        let docker = match self.daemon() {
+            Ok(d) => d,
+            Err(e) => {
+                status.detail = format!("Docker daemon unreachable: {e:#}");
+                return status;
+            }
+        };
+        let info = match docker
+            .inspect_container(name, None::<bollard::query_parameters::InspectContainerOptions>)
+            .await
+        {
+            Ok(info) => info,
+            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {
+                status.detail =
+                    "not created yet — it is ensured at boot once setup is complete".into();
+                return status;
+            }
+            Err(e) => {
+                status.detail = format!("inspect failed: {e}");
+                return status;
+            }
+        };
+        status.running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
+        let image_id = info.image.clone();
+        status.image = image_id.as_deref().map(short_id);
+        if let Some(id) = &image_id {
+            if let Ok(img) = docker.inspect_image(id).await {
+                status.revision = img
+                    .config
+                    .and_then(|c| c.labels)
+                    .and_then(|l| l.get("org.opencontainers.image.revision").cloned())
+                    .filter(|s| !s.is_empty());
+            }
+        }
+        // "Behind" == running a different image than the control-server is. That is the normal,
+        // intended state right after a control-server update: the operator rolls the sidecar
+        // forward when clones are idle.
+        if let Some(self_id) = self.env().await.self_container {
+            if let Ok(me) = self.inspect_self(&self_id).await {
+                status.behind = matches!(
+                    (me.image.as_deref(), image_id.as_deref()),
+                    (Some(mine), Some(theirs)) if mine != theirs
+                );
+            }
+        }
+        status.detail = match (status.running, status.behind) {
+            (false, _) => "created but not running".into(),
+            (true, true) => {
+                "running an older image than the control-server — restart it when clones are idle"
+                    .into()
+            }
+            (true, false) => "running the current image".into(),
+        };
+        status
+    }
+
     /// Ensure one infra container matches `spec`: create-if-absent (dropping `spec.files` in
     /// before start), start-if-stopped, recreate-if-image-drifted. Best-effort image pull
     /// first. Cache volumes are external (survive the recreate).

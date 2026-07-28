@@ -121,6 +121,46 @@ clone, not entered here. Secrets are write-only and redacted on read. The one-ti
 [SCRIPTS.md](SCRIPTS.md) for the in-container guest scripts and [API.md](API.md) for every
 endpoint.
 
+## The group proxy (`rmng-cliproxy`)
+
+Every clone's model traffic goes to a **separate long-lived container**, not to the
+control-server:
+
+```
+clone agent → http://rmng-cliproxy:9010/cc → 127.0.0.1:<9100+> CLIProxyAPI (per account group)
+```
+
+`rmng-cliproxy` runs the **same image as the control-server**, started as
+`rmng-control-server group-proxy`. It owns both hops: the `/cc` router that maps a clone's
+per-clone bearer key to its account group, and the per-group CLIProxyAPI processes themselves
+(one per group, bound to loopback *inside that container* — never published, never reachable
+from a clone). It joins the `rmng` bridge under the `rmng-cliproxy` DNS alias, mounts the same
+`/data` volume as the control-server, is labeled `rmng.infra=1`, and runs
+`restart: unless-stopped`.
+
+**This exists so a control-server update does not interrupt agent work.** Both hops used to
+live in the control-server process, so recreating that container killed every in-flight agent
+turn in the fleet. Now the control-server is out of the inference data path entirely: you can
+update or restart it while clones are mid-turn.
+
+**The proxy is therefore NOT rolled forward by a control-server update.** The server ensures it
+create-if-absent / start-if-stopped and nothing else — if it is already running it is left
+alone even when its image differs. Settings → **Group proxy** shows its running image, a
+`behind` badge when it differs from the control-server's, and a **Restart group proxy** button.
+That restart *does* drop every in-flight agent request, so run it while clones are idle.
+
+**Operator notes**
+- The proxy reads `config.json` (groups), `data/state.json` (clone → group binding), and
+  `data/cliproxy-instances.json` (ports, keys, the shared admin secret) off the shared volume,
+  and never writes any of them — the control-server is the sole writer.
+- The CLIProxyAPI management APIs and each group's `/v1/models` catalog are only reachable
+  through the proxy's `/admin/*` surface, authenticated by a shared secret in
+  `data/cliproxy-instances.json`. A clone's per-clone bearer key cannot reach it.
+- Token accounting survives a control-server restart: the proxy buffers per-clone usage deltas
+  in memory (bounded) and POSTs them to the control-server's `/internal/tokens` when it is back.
+- Dev mode (control-server on the host, not a container): no sidecar is ensured. Run
+  `rmng-control-server group-proxy` yourself alongside the server for clone inference.
+
 ## Shared build cache & Docker Hub mirror
 
 The control-server automatically runs two shared infra containers on the `rmng` bridge
@@ -256,7 +296,7 @@ Active agent work is interrupted only when the payload or generated configuratio
 background reconciler after a control-server update. The reconciler also attempts a missing
 standalone Codex CLI install on old clones and retries on later ticks if the download fails.
 The config gives Codex the local desktop MCP (`http://127.0.0.1:9004`) and Linear MCP using
-`LINEAR_API_KEY`; its model requests use the clone-specific CLIProxyAPI route. Existing Codex
+`LINEAR_API_KEY`; its model requests go through the group proxy's `/cc/v1` route. Existing Codex
 sessions may need a new Codex run to reload instructions/config, but the files are updated
 automatically.
 
@@ -509,7 +549,9 @@ the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no 
   lazily at wizard finish and before each clone. Addressing is Docker's embedded DNS, not
   static IPs: every clone resolves by its container name (== clone id), and the
   control-server attaches itself under the `rmng-control` alias (so recreating its container
-  never strands clone-specific CLIProxyAPI routing). Clone IPs are plain Docker IPAM — nothing
+  never strands the `RMNG_CONTROL_URL` baked into clones). The group proxy attaches under the
+  `rmng-cliproxy` alias the same way — that is the address every clone's `ANTHROPIC_BASE_URL`
+  points at. Clone IPs are plain Docker IPAM — nothing
   allocates or stores them. If an `rmng` network already exists with a **different** subnet,
   `ensure_network` errors — delete it with `docker network rm rmng` and re-run setup.
 - **Clone media socket**: clone-daemon ships dmabuf frames to the control-server over a

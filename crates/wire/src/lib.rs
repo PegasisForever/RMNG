@@ -32,9 +32,10 @@ pub use config::{
 };
 pub use control::{
     Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, CloneTokenUsage,
-    CodexResetMark, ContainerStats, ControlState, GroupUsage, RmngClone, LayoutPreset, LxcStats,
+    CodexResetMark, ContainerStats, ControlState, GroupProxyStatus, GroupUsage, RmngClone,
+    LayoutPreset, LxcStats,
     MonitorSpec, MonitorState, Operation, OperationKind, OperationStatus, PortForward, Provider,
-    UpdateStatus,
+    ScheduledMessage, UpdateStatus,
 };
 pub use exec::{ExecRequest, ExecResult};
 pub use mcp::McpCallRequest;

@@ -2,19 +2,17 @@
 //! delete surface; the rest (Linear/Claude/chat/config/…) lands as those modules
 //! are ported.
 
-use std::collections::HashSet;
 use std::convert::Infallible;
 use std::path::Path;
 use std::time::Duration;
 
 use axum::{
     Json, Router,
-    body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path as AxPath, Request, State},
-    http::{HeaderMap, HeaderName, StatusCode, header},
+    extract::{DefaultBodyLimit, Multipart, Path as AxPath, State},
+    http::{HeaderMap, StatusCode, header},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
-    routing::{any, get, post, put},
+    routing::{get, post, put},
 };
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -73,6 +71,11 @@ pub fn router(app: App) -> Router {
         .route("/api/chat/:id", get(chat_get).post(chat_send))
         .route("/api/chat/:id/events", get(chat_events))
         .route("/api/chat/:id/abort", post(chat_abort))
+        .route("/api/chat/:id/schedule", post(chat_schedule))
+        .route(
+            "/api/chat/:id/schedule/:sid",
+            axum::routing::delete(chat_schedule_cancel),
+        )
         .route("/api/hosts/:id/forwards", put(forwards_put))
         .route("/api/hosts/:id/group", post(clone_group))
         .route("/api/hosts/:id/archive", post(archive))
@@ -99,9 +102,14 @@ pub fn router(app: App) -> Router {
             post(group_account_delete),
         )
         .route("/api/usage/refresh", post(usage_refresh))
-        // Group-proxy request router: reverse-proxy a clone's agent traffic to its group's
-        // CLIProxyAPI instance. ANY method; registered BEFORE the SPA fallback below.
-        .route("/cc/*rest", any(cc_proxy));
+        // The `rmng-cliproxy` sidecar's status + the operator's deliberate roll-forward. The
+        // `/cc` router itself no longer lives here — it moved into that container so a
+        // control-server update can't interrupt in-flight agent work (see `groupproxy.rs`).
+        .route("/api/groupproxy", get(groupproxy_get))
+        .route("/api/groupproxy/restart", post(groupproxy_restart))
+        // Internal, admin-secret-authenticated: the out-of-process `/cc` proxy's token-delta
+        // intake. Registered BEFORE the SPA fallback below.
+        .route("/internal/tokens", post(internal_tokens));
 
     // Frontend from the filesystem: a non-empty `static_dir` overrides (dev hot-reload
     // without a rebuild); otherwise the assets search path resolves it (the image's
@@ -1753,225 +1761,135 @@ async fn chat_abort(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// --- group-proxy request router (/cc) --------------------------------------
-
-/// Headers we never forward verbatim in either direction: framing/connection headers are
-/// recomputed per hop. `Connection` can nominate additional hop-by-hop headers, so collect its
-/// comma-separated tokens in addition to the RFC-defined set. `authorization` is handled
-/// separately by the router (dropped inbound, replaced with the instance's inbound key).
-fn hop_by_hop_headers(headers: &axum::http::HeaderMap) -> HashSet<HeaderName> {
-    let mut names = [
-        header::HOST,
-        header::CONNECTION,
-        header::CONTENT_LENGTH,
-        header::TRANSFER_ENCODING,
-        HeaderName::from_static("keep-alive"),
-        header::TE,
-        header::TRAILER,
-        header::UPGRADE,
-        HeaderName::from_static("proxy-authenticate"),
-        HeaderName::from_static("proxy-authorization"),
-        HeaderName::from_static("proxy-connection"),
-    ]
-    .into_iter()
-    .collect::<HashSet<_>>();
-    for value in headers.get_all(header::CONNECTION) {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for name in value
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-        {
-            if let Ok(name) = HeaderName::from_bytes(name.as_bytes()) {
-                names.insert(name);
-            }
-        }
-    }
-    names
+#[derive(Deserialize)]
+struct ChatScheduleReq {
+    text: String,
+    /// Delivery time, epoch milliseconds.
+    at: i64,
 }
 
-/// `ANY /cc/*rest` — reverse-proxy a clone's agent traffic (Claude Code, Codex, OpenCode)
-/// to its bound group's CLIProxyAPI instance on loopback. See the group-proxy plan
-/// (`docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`).
-///
-/// 1. `Authorization: Bearer <per-clone key>` → clone id (unknown/missing → 401).
-/// 2. clone id → `clone.group` (none → 409 "clone has no group").
-/// 3. group → instance loopback port + inbound key (missing/booting → 503; the agent retries).
-/// 4. Forward the method + `*rest` path + query to `http://127.0.0.1:<port>/<rest>`, copying
-///    every non-hop-by-hop header except `Authorization`, SETTING `Authorization: Bearer
-///    <inbound_key>` and `X-Session-ID: <host_id>` (per-clone session stickiness), STREAMING
-///    both request and response bodies so SSE (`text/event-stream`) is never buffered.
-async fn cc_proxy(State(app): State<App>, req: Request) -> Response {
-    let deny = |code: StatusCode, msg: &str| (code, msg.to_string()).into_response();
-
-    // 1. Per-clone bearer key → clone id.
-    let token = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            v.strip_prefix("Bearer ")
-                .or_else(|| v.strip_prefix("bearer "))
-        })
-        .map(str::trim)
-        .filter(|t| !t.is_empty());
-    let Some(host_id) = token.and_then(|t| app.cliproxy.clone_for_token(t)) else {
-        return deny(
-            StatusCode::UNAUTHORIZED,
-            "unknown or missing router bearer key",
-        );
-    };
-
-    // 2. Clone → active group binding.
-    let host = app.store.get().hosts.into_iter().find(|h| h.id == host_id);
-    let Some(host) = host else {
-        return deny(StatusCode::UNAUTHORIZED, "unknown clone");
-    };
+/// `POST /api/chat/:id/schedule` — queue a message for later delivery. The pending queue
+/// rides the existing `/events` frame, so there is nothing to poll after this returns.
+async fn chat_schedule(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+    Json(req): Json<ChatScheduleReq>,
+) -> Result<(StatusCode, Json<wire::ScheduledMessage>), (StatusCode, String)> {
+    let host = clone_by_id(&app, &id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown clone '{id}'")))?;
+    // Archived clones reject scheduling for the same reason they reject sending: the queue
+    // would just sit there. Being *busy*, by contrast, is fine — that's the point of scheduling.
     if host.archived {
-        return deny(
+        return Err((
             StatusCode::CONFLICT,
-            "clone is archived; unarchive it before using inference",
-        );
+            format!("clone '{id}' is archived; unarchive it first"),
+        ));
     }
-    // Blank is unreachable once `normalize_clone_groups` has run (boot + every reconciler
-    // pass), but a hand-edited state.json can be blank for the window before the watcher
-    // reloads it — 409 rather than routing to an instance that doesn't exist.
-    let group = host.group;
-    if group.is_empty() {
-        return deny(
-            StatusCode::CONFLICT,
-            "clone has no group (bind one in Settings before running an agent)",
-        );
-    }
-    // Capture before the upstream request can wait on headers. Archive/unarchive advances the
-    // epoch, so a response from this request cannot be attributed to a later lifecycle.
-    let capture_epoch = app.tokens.capture_epoch(&host_id);
+    let msg = crate::chat::schedule_message(&app, &host.id, &req.text, req.at)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok((StatusCode::CREATED, Json(msg)))
+}
 
-    // 3. Group → loopback instance.
-    let (Some(port), Some(inbound_key)) = (
-        app.cliproxy.port_for(&group),
-        app.cliproxy.inbound_key_for(&group),
-    ) else {
-        return deny(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "group instance unavailable (still starting) — retry",
-        );
-    };
-
-    // 4. Build + forward the streamed request.
-    let (parts, body) = req.into_parts();
-    let path = parts.uri.path();
-    let rest = path
-        .strip_prefix("/cc")
-        .filter(|s| !s.is_empty())
-        .unwrap_or("/")
-        .to_string();
-    let query = parts
-        .uri
-        .query()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
-    let url = format!("http://127.0.0.1:{port}{rest}{query}");
-
-    let request_hop_headers = hop_by_hop_headers(&parts.headers);
-    let mut headers = reqwest::header::HeaderMap::new();
-    for (k, v) in parts.headers.iter() {
-        if request_hop_headers.contains(k) || k == header::AUTHORIZATION {
-            continue;
-        }
-        headers.insert(k.clone(), v.clone());
+/// `DELETE /api/chat/:id/schedule/:sid` — cancel a pending scheduled message.
+async fn chat_schedule_cancel(
+    State(app): State<App>,
+    AxPath((id, sid)): AxPath<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if !crate::files::is_safe_id(&id) {
+        return Err((StatusCode::BAD_REQUEST, format!("invalid clone id '{id}'")));
     }
-    if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {inbound_key}")) {
-        headers.insert(reqwest::header::AUTHORIZATION, val);
+    if !crate::chat::cancel_schedule(&app, &id, &sid) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no pending scheduled message '{sid}'"),
+        ));
     }
-    if let Ok(val) = reqwest::header::HeaderValue::from_str(&host_id) {
-        headers.insert(HeaderName::from_static("x-session-id"), val);
-    }
+    Ok(StatusCode::NO_CONTENT)
+}
 
-    let upstream_body = reqwest::Body::wrap_stream(body.into_data_stream());
-    let resp = match app
-        .proxy_http
-        .request(parts.method, &url)
-        .headers(headers)
-        .body(upstream_body)
-        .send()
+// --- group-proxy container: lifecycle + the internal token-delta intake ------
+
+/// `GET /api/groupproxy` — the `rmng-cliproxy` sidecar's status: is it running, on which
+/// image/revision, and is that image behind the control-server's own. Feeds the Settings
+/// panel's group-proxy section, whose whole purpose is making "the proxy is behind" visible —
+/// a control-server update deliberately does NOT roll the sidecar forward (that would kill the
+/// in-flight agent turns this split exists to protect), so the operator needs to see the drift.
+async fn groupproxy_get(State(app): State<App>) -> Json<wire::GroupProxyStatus> {
+    Json(app.docker.group_proxy_status().await)
+}
+
+/// `POST /api/groupproxy/restart` — recreate the `rmng-cliproxy` container on the
+/// control-server's CURRENT image. This is the operator's deliberate roll-forward: it drops
+/// every in-flight agent request in the fleet, which is exactly why it is a button and not a
+/// side effect of the control-server update. Returns the sidecar's post-restart status.
+async fn groupproxy_restart(
+    State(app): State<App>,
+) -> Result<Json<wire::GroupProxyStatus>, (StatusCode, String)> {
+    // Mint the shared secret first if it's somehow absent, so the recreated container comes up
+    // with a working admin channel rather than 401ing the control-server until the next
+    // `apply_now`.
+    let _ = app.cliproxy.ensure_admin_secret();
+    app.docker
+        .recreate_group_proxy(&app.config())
         .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(target: "router", "clone {host_id} → group {group} {url}: {e}");
-            return deny(StatusCode::BAD_GATEWAY, "group instance request failed");
-        }
-    };
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    Ok(Json(app.docker.group_proxy_status().await))
+}
 
-    tracing::debug!(target: "router", "clone {host_id} → group {group} {rest} → {}", resp.status());
-
-    // 5. Stream the response back (status + headers + body), unbuffered. When the response is
-    // successful, uncompressed, and a supported client-facing route, attach a local observer to
-    // cloned chunks. It never mutates body bytes/errors or response headers, and it does no I/O.
-    let status = resp.status();
-    let streaming = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
-    let encoded = resp
-        .headers()
-        .get(header::CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| !value.eq_ignore_ascii_case("identity"));
-    let mut observer = if status.is_success() && !encoded {
-        capture_epoch.and_then(|epoch| {
-            app.tokens
-                .observer(app.store.clone(), host_id.clone(), epoch, &rest, streaming)
-        })
-    } else {
-        None
-    };
-    let response_hop_headers = hop_by_hop_headers(resp.headers());
-    let mut builder = Response::builder().status(status);
-    for (k, v) in resp.headers().iter() {
-        if response_hop_headers.contains(k) {
-            continue;
-        }
-        builder = builder.header(k.clone(), v.clone());
+/// `POST /internal/tokens` — the group-proxy container's token-delta intake, authenticated by
+/// the shared admin secret (see [`crate::groupproxy`]). The `/cc` proxy now runs out of process,
+/// so its [`crate::tokens::ResponseObserver`] can't touch `clone-tokens.json` directly: two
+/// writers would corrupt it. Instead it coalesces increments and POSTs them here in batches,
+/// buffering across a control-server restart.
+///
+/// Each delta carries the clone's token lifecycle epoch, re-validated here by
+/// [`crate::tokens::TokenBus`] — a delta from a response that began before an archive/unarchive
+/// is dropped exactly as an in-process stale observer was. A bad/missing secret is a 401, which
+/// the sender treats as permanent and drops (rather than pinning its buffer forever).
+async fn internal_tokens(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(deltas): Json<Vec<crate::tokens::TokenDelta>>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let presented = headers
+        .get(crate::groupproxy::ADMIN_HEADER)
+        .and_then(|v| v.to_str().ok());
+    if !crate::groupproxy::admin_authorized(app.cliproxy.admin_secret().as_deref(), presented) {
+        return Err((StatusCode::UNAUTHORIZED, "admin key required".into()));
     }
-    let stream = resp.bytes_stream().map(move |chunk| {
-        if let (Some(observer), Ok(bytes)) = (observer.as_mut(), &chunk) {
-            observer.feed(bytes);
-        }
-        chunk
-    });
-    builder.body(Body::from_stream(stream)).unwrap_or_else(|e| {
-        tracing::error!(target: "router", "building proxied response: {e}");
-        StatusCode::BAD_GATEWAY.into_response()
-    })
+    for delta in &deltas {
+        app.tokens.apply_remote_delta(&app.store, delta);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- group-proxy CRUD + onboarding -----------------------------------------
 
-/// GET a group instance's management API (`{base}{path_and_query}`) with the plaintext
-/// `X-Management-Key`, returning its JSON. 503 when the group has no instance meta yet; 502
-/// on a dial/parse failure or a non-2xx from the instance.
-/// Send a management request, retrying on a *connection* error for up to ~20s. A freshly
-/// created group's CLIProxyAPI instance takes a couple seconds to spawn + bind (the supervisor
-/// reconciles on a short interval), so the first onboarding call right after `POST /api/groups`
-/// would otherwise hit connection-refused and surface a gateway error; this waits it out. Only
-/// connect errors are retried — a real HTTP response (even non-2xx) returns immediately.
+/// Send a group-instance management request through the group-proxy container's admin-forward
+/// surface (`/admin/:group/mgmt/*`, [`crate::groupproxy::admin_mgmt_url`]), authenticated with
+/// the shared admin secret; the sidecar attaches the instance's own `X-Management-Key` on the
+/// far side. The instances bind loopback inside that container, so this indirection is the only
+/// route to them now.
+///
+/// Retries on a *connection* error for up to ~20 s. Two things can be briefly absent: a freshly
+/// created group's CLIProxyAPI instance (the supervisor reconciles on a short interval), and the
+/// `rmng-cliproxy` container itself right after an operator-triggered roll-forward. Both would
+/// otherwise surface the first onboarding call after `POST /api/groups` as a gateway error; this
+/// waits them out. Only connect errors are retried — a real HTTP response (even non-2xx) returns
+/// immediately.
 async fn mgmt_send_retry(
-    http: &reqwest::Client,
+    app: &App,
     method: reqwest::Method,
     url: &str,
-    secret: &str,
     body: Option<&serde_json::Value>,
 ) -> Result<reqwest::Response, (StatusCode, String)> {
+    let secret = app.cliproxy.ensure_admin_secret();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        let mut rb = http
+        let mut rb = app
+            .http
             .request(method.clone(), url)
-            .header("X-Management-Key", secret);
+            .header(crate::groupproxy::ADMIN_HEADER, &secret);
         if let Some(b) = body {
             rb = rb.json(b);
         }
@@ -1980,7 +1898,7 @@ async fn mgmt_send_retry(
             Err(e) if e.is_connect() && std::time::Instant::now() < deadline => {
                 tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             }
-            Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("group instance: {e}"))),
+            Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("group proxy: {e}"))),
         }
     }
 }
@@ -1990,15 +1908,10 @@ async fn mgmt_get_json(
     group: &str,
     path_and_query: &str,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    let (base, secret) = app.cliproxy.management(group).ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "group instance unavailable".into(),
-    ))?;
     let resp = mgmt_send_retry(
-        &app.http,
+        app,
         reqwest::Method::GET,
-        &format!("{base}{path_and_query}"),
-        &secret,
+        &crate::groupproxy::admin_mgmt_url(group, path_and_query),
         None,
     )
     .await?;
@@ -2171,10 +2084,6 @@ async fn group_login_complete(
     AxPath(name): AxPath<String>,
     Json(req): Json<LoginCompleteReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (base, secret) = app.cliproxy.management(&name).ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "group instance unavailable".into(),
-    ))?;
     let body = if let Some(redirect) = req.redirect_url.as_deref().filter(|s| !s.is_empty()) {
         json!({ "provider": req.provider, "redirect_url": redirect })
     } else if let (Some(code), Some(state)) = (
@@ -2189,10 +2098,9 @@ async fn group_login_complete(
         ));
     };
     let resp = mgmt_send_retry(
-        &app.http,
+        &app,
         reqwest::Method::POST,
-        &format!("{base}/oauth-callback"),
-        &secret,
+        &crate::groupproxy::admin_mgmt_url(&name, "/oauth-callback"),
         Some(&body),
     )
     .await?;
@@ -2216,15 +2124,13 @@ async fn group_account_delete(
     if file.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "file is required".into()));
     }
-    let (base, secret) = app.cliproxy.management(&name).ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "group instance unavailable".into(),
-    ))?;
     let resp = mgmt_send_retry(
-        &app.http,
+        &app,
         reqwest::Method::DELETE,
-        &format!("{base}/auth-files?name={}", urlencode(file)),
-        &secret,
+        &crate::groupproxy::admin_mgmt_url(
+            &name,
+            &format!("/auth-files?name={}", urlencode(file)),
+        ),
         None,
     )
     .await?;
@@ -2258,6 +2164,7 @@ fn urlencode(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::docker::ManagedContainer;
+    use axum::http::HeaderName;
     use wire::ImageInfo;
 
     fn image(reference: &str) -> ImageInfo {
@@ -3056,107 +2963,107 @@ not a var line
         assert_eq!(got, doc);
     }
 
-    // --- group-proxy router (/cc) token → clone → group → port resolution ---
+    // The `/cc` router's own tests moved to `groupproxy.rs` along with the router itself.
+    // What stays here is the control-server half of the boundary: the internal token-delta
+    // intake's auth.
 
-    fn cc_request(auth: Option<&str>) -> Request {
-        let mut b = axum::http::Request::builder()
-            .method("POST")
-            .uri("/cc/v1/messages");
-        if let Some(a) = auth {
-            b = b.header("authorization", a);
-        }
-        b.body(Body::empty()).unwrap()
-    }
-
+    /// The token-delta intake must reject anything that isn't the shared admin secret — it
+    /// mutates durable per-clone accounting, and the group-proxy is the only legitimate caller.
     #[tokio::test]
-    async fn cc_proxy_missing_or_unknown_bearer_is_401() {
+    async fn internal_tokens_rejects_a_wrong_or_missing_admin_key() {
         let app = test_app();
-        // No Authorization header.
-        assert_eq!(
-            cc_proxy(State(app.clone()), cc_request(None))
-                .await
-                .status(),
-            StatusCode::UNAUTHORIZED
+        let secret = app.cliproxy.ensure_admin_secret();
+        let delta = crate::tokens::TokenDelta {
+            host_id: "h1".into(),
+            epoch: 1,
+            input: 5,
+            ..Default::default()
+        };
+
+        let err = internal_tokens(State(app.clone()), HeaderMap::new(), Json(vec![delta.clone()]))
+            .await
+            .expect_err("no admin key must be rejected");
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+        let mut wrong = HeaderMap::new();
+        wrong.insert(
+            HeaderName::from_static(crate::groupproxy::ADMIN_HEADER),
+            "nope".parse().unwrap(),
         );
-        // A bearer that maps to no clone.
+        let err = internal_tokens(State(app.clone()), wrong, Json(vec![delta.clone()]))
+            .await
+            .expect_err("a wrong admin key must be rejected");
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+
+        // The real secret is accepted. (The delta names a clone with no token record, so it is
+        // dropped by the epoch guard — this asserts the auth gate, not the accounting.)
+        let mut ok = HeaderMap::new();
+        ok.insert(
+            HeaderName::from_static(crate::groupproxy::ADMIN_HEADER),
+            secret.parse().unwrap(),
+        );
         assert_eq!(
-            cc_proxy(State(app), cc_request(Some("Bearer nope")))
-                .await
-                .status(),
-            StatusCode::UNAUTHORIZED
+            internal_tokens(State(app), ok, Json(vec![delta])).await.unwrap(),
+            StatusCode::NO_CONTENT
         );
     }
 
+    /// A delta that arrives over the boundary must land on the same durable totals the
+    /// in-process observer used to write — and a delta stamped with a stale lifecycle epoch
+    /// must be dropped, exactly as `TokenBus::record` dropped a stale in-process observer.
     #[tokio::test]
-    async fn cc_proxy_clone_without_group_is_409() {
+    async fn internal_tokens_applies_current_epoch_and_drops_stale() {
         let app = test_app();
-        let key = app.cliproxy.mint_router_key("h1");
+        let secret = app.cliproxy.ensure_admin_secret();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static(crate::groupproxy::ADMIN_HEADER),
+            secret.parse().unwrap(),
+        );
         app.store.mutate(|s| {
             s.hosts.push(wire::RmngClone {
                 id: "h1".into(),
                 host: "h1".into(),
                 managed: true,
                 ..Default::default()
-            });
+            })
         });
-        let resp = cc_proxy(State(app), cc_request(Some(&format!("Bearer {key}")))).await;
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
-    }
+        app.tokens.register_clone("h1");
+        let epoch = app.tokens.capture_epoch("h1").expect("an active clone has an epoch");
 
-    #[tokio::test]
-    async fn cc_proxy_group_without_instance_is_503() {
-        let app = test_app();
-        let key = app.cliproxy.mint_router_key("h1");
-        app.store.mutate(|s| {
-            s.hosts.push(wire::RmngClone {
-                id: "h1".into(),
-                host: "h1".into(),
-                managed: true,
-                group: "ghost".into(), // never provisioned → no port
+        internal_tokens(
+            State(app.clone()),
+            headers.clone(),
+            Json(vec![crate::tokens::TokenDelta {
+                host_id: "h1".into(),
+                epoch,
+                input: 7,
+                output: 3,
+                count_request: true,
                 ..Default::default()
-            });
-        });
-        let resp = cc_proxy(State(app), cc_request(Some(&format!("Bearer {key}")))).await;
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
+            }]),
+        )
+        .await
+        .unwrap();
+        assert!(app.tokens.last_token_at("h1").is_some(), "the delta was applied");
 
-    #[tokio::test]
-    async fn cc_proxy_resolves_group_then_dials_instance() {
-        let app = test_app();
-        let key = app.cliproxy.mint_router_key("h1");
-        // Provision the group's instance meta (allocates a stable loopback port).
-        app.cfg
-            .write()
-            .unwrap()
-            .groups
-            .push(wire::Group { name: "g".into() });
-        crate::cliproxy::apply_now(&app);
-        app.store.mutate(|s| {
-            s.hosts.push(wire::RmngClone {
-                id: "h1".into(),
-                host: "h1".into(),
-                managed: true,
-                group: "g".into(),
+        // Archive/unarchive advances the epoch; the pre-transition epoch must no longer apply.
+        app.tokens.set_archived("h1", true);
+        app.tokens.set_archived("h1", false);
+        let before = app.tokens.last_token_at("h1");
+        internal_tokens(
+            State(app.clone()),
+            headers,
+            Json(vec![crate::tokens::TokenDelta {
+                host_id: "h1".into(),
+                epoch,
+                input: 1_000_000,
                 ..Default::default()
-            });
-        });
-        // Resolution passes token→clone→group→port; the loopback instance isn't running in a
-        // unit test, so the forward fails → 502. Proves the whole resolution chain wired up.
-        let resp = cc_proxy(State(app), cc_request(Some(&format!("Bearer {key}")))).await;
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    }
-
-    #[test]
-    fn hop_by_hop_matches_framing_headers_only() {
-        let hop = hop_by_hop_headers(&axum::http::HeaderMap::new());
-        assert!(hop.contains(&header::HOST));
-        assert!(hop.contains(&header::CONNECTION));
-        assert!(hop.contains(&header::CONTENT_LENGTH));
-        assert!(hop.contains(&header::TRANSFER_ENCODING));
-        // Content-type + authorization are NOT framing headers (authorization is handled
-        // separately by the router; content-type must survive for text/event-stream).
-        assert!(!hop.contains(&header::CONTENT_TYPE));
-        assert!(!hop.contains(&header::AUTHORIZATION));
+            }]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.tokens.last_token_at("h1"), before, "a stale epoch changes nothing");
     }
 
     #[test]

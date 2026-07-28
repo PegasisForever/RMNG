@@ -19,6 +19,7 @@ mod config;
 mod docker;
 mod files;
 mod forward;
+mod groupproxy;
 mod homes;
 mod jobs;
 mod linear;
@@ -63,6 +64,14 @@ async fn main() -> Result<()> {
             .cloned()
             .unwrap_or_else(|| update::HANDOFF_PATH.to_string());
         update::self_upgrade_main(&handoff).await; // diverges
+    }
+
+    // Group-proxy sidecar mode (the long-lived `rmng-cliproxy` container, created by
+    // `docker::ensure_group_proxy` from this same image). It owns the `/cc` router AND the
+    // per-group CLIProxyAPI processes, so a control-server update never interrupts an agent
+    // mid-turn — see `groupproxy.rs`. Diverges, exactly like `self-upgrade`.
+    if argv.get(1).map(String::as_str) == Some("group-proxy") {
+        groupproxy::main().await; // diverges
     }
 
     let cfg = config::load()?;
@@ -135,6 +144,53 @@ async fn main() -> Result<()> {
                 Err(_) => {
                     tracing::warn!("build-infra ensure timed out after 120s (retries next boot)")
                 }
+            }
+        }
+    }
+
+    // The group-proxy sidecar (`rmng-cliproxy`): the container that owns the `/cc` router and
+    // every per-group CLIProxyAPI process. Ensured here — after `self_setup` (which gave us our
+    // container id and the `rmng` network) — and create-if-absent / start-if-stopped ONLY: if it
+    // is already running we leave it alone even when its image differs from ours, because
+    // recreating it would kill every in-flight agent turn in the fleet. That is exactly what
+    // this split exists to prevent; the operator rolls it forward from Settings
+    // (`POST /api/groupproxy/restart`) when clones are idle. See `groupproxy.rs`.
+    //
+    // `apply_now` runs FIRST so every configured group's port/secrets and the shared admin
+    // secret are on the /data volume before the sidecar reads them (it opens that file
+    // read-only and never allocates). Non-fatal + bounded, same posture as build-infra: a
+    // failure here costs inference until the next boot or a manual restart, but must not stop
+    // the server (the operator fixes it from the very UI this boot brings up).
+    {
+        let cfg = app.config();
+        if cfg.setup_complete {
+            cliproxy::apply_now(&app);
+            match app.docker.env().await.self_container {
+                Some(self_id) => {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        app.docker.ensure_group_proxy(&cfg, &self_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::error!(
+                            "group-proxy sidecar ensure failed: {e:#} — clone inference is down \
+                             until it is running (retry from Settings → Group proxy)"
+                        ),
+                        Err(_) => tracing::error!(
+                            "group-proxy sidecar ensure timed out after 60s — clone inference \
+                             may be down (retry from Settings → Group proxy)"
+                        ),
+                    }
+                }
+                // Dev mode: no self-container to copy mounts from, so there is no sidecar to
+                // ensure. Run `rmng-control-server group-proxy` by hand alongside the server.
+                None => tracing::info!(
+                    "dev mode (not a container): skipping the {} sidecar — run \
+                     `rmng-control-server group-proxy` separately for clone inference",
+                    groupproxy::CONTAINER
+                ),
             }
         }
     }
@@ -232,10 +288,16 @@ async fn main() -> Result<()> {
             tokio::spawn(homes::run(app_for_bg.clone()));
             tokio::spawn(shm::run(app_for_bg.clone()));
             tokio::spawn(buildinfra::run(app_for_bg.clone()));
+            // Scheduled chat delivery: fires operator-queued messages once their time passes.
+            // Disk-backed, so anything that came due during a restart goes out on the first tick.
+            tokio::spawn(chat::run_scheduler(app_for_bg.clone()));
             tokio::spawn(smb::run(app_for_bg.clone()));
             tokio::spawn(ssh::run(app_for_bg.clone()));
-            // Group-proxy supervisor: one CLIProxyAPI instance per account group.
-            tokio::spawn(cliproxy::run(app_for_bg.clone()));
+            // NOTE: the per-group CLIProxyAPI supervisor + the `/cc` router do NOT run here
+            // anymore — they live in the `rmng-cliproxy` sidecar container (ensured above),
+            // so recreating this container never interrupts an agent mid-turn. See
+            // `groupproxy.rs`. What stays here is the usage poller below, which reads the
+            // shared auth-dirs off the /data volume directly (no instance dial).
             // By-group usage poller: reads each instance's auth-dir tokens and publishes
             // `ControlState.usage_groups` (the old flat claude_accounts pollers stay running).
             tokio::spawn(cliproxy::run_usage_poller(app_for_bg.clone()));

@@ -164,9 +164,15 @@ pub(crate) fn base_session_env_vars() -> Vec<EnvVar> {
     .collect()
 }
 
-/// The clone-facing control-server environment every clone needs. The control host is
-/// `docker.control_host()` — the `rmng-control` DNS alias on the rmng bridge (the gateway IP in
-/// dev mode; see `docker.rs`). It provides only the CLIProxyAPI router endpoint.
+/// The clone-facing control-plane environment every clone needs. It carries TWO independent
+/// endpoints, and keeping them distinct is the point:
+///
+///   - `ANTHROPIC_BASE_URL` → the **group-proxy sidecar** (`rmng-cliproxy:9010/cc`), a fixed
+///     bridge address that does not depend on the control-server existing. That is what makes
+///     a control-server update non-disruptive: agent traffic never touches this process.
+///   - `RMNG_CONTROL_URL` → the **control-server** (`docker.control_host()` — the `rmng-control`
+///     DNS alias, or the gateway IP in dev mode). The fleet CLI is meant to fail while the
+///     control-server is restarting; inference is not.
 pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
     let cfg = app.config();
     let ev = |key: &str, value: String| EnvVar {
@@ -174,37 +180,36 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
         value,
     };
     let mut vars = Vec::new();
+
+    // Group-proxy router: every clone's agents reach the `rmng-cliproxy` sidecar's `/cc`
+    // reverse proxy at a constant URL; the router maps the clone's per-clone bearer key → its
+    // group instance. Claude Code appends `/v1/messages` + `/v1/models` to ANTHROPIC_BASE_URL;
+    // the gateway-discovery flag lets its picker learn the instance's `/v1/models` catalog.
+    // The per-clone bearer (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY) is added separately by
+    // `router_env_vars` (it's per-clone, not shared). Unlike RMNG_CONTROL_URL below this needs
+    // no host resolution — the sidecar's DNS alias on the rmng bridge is a constant.
+    vars.push(ev("ANTHROPIC_BASE_URL", crate::groupproxy::cc_base_url()));
+    vars.push(ev(
+        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+        "1".to_string(),
+    ));
+
     match app.docker.control_host().await {
         Ok(control) => {
-            // Group-proxy router: every clone's agents reach the control-server's `/cc`
-            // reverse proxy at a constant URL; the router maps the clone's per-clone bearer
-            // key → its group instance. Claude Code appends `/v1/messages` + `/v1/models`
-            // to ANTHROPIC_BASE_URL; the gateway-discovery flag lets its picker learn the
-            // instance's `/v1/models` catalog. The per-clone bearer (ANTHROPIC_AUTH_TOKEN /
-            // RMNG_PROXY_KEY) is added separately by `router_env_vars` (it's per-clone, not
-            // shared). See `docs/superpowers/specs/2026-07-19-cliproxy-group-proxy-plan.md`.
-            vars.push(ev(
-                "ANTHROPIC_BASE_URL",
-                format!("http://{control}:{}/cc", cfg.listen.web),
-            ));
-            vars.push(ev(
-                "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-                "1".to_string(),
-            ));
             // The fleet `rmng` CLI's control-server base URL, so a clone can run `rmng …`
             // without `--server` — a bare `rmng clone ls`/`rmng clone ssh`/`rmng clone create …`
             // (the latter spawning a sub clone) just works. The CLI resolves `--server` >
             // `$RMNG_CONTROL_URL` > `http://localhost:9000`; inside a clone `localhost:9000`
-            // is unreachable, so this points it at the same `rmng-control` route the agents
-            // already use (the router URL above).
+            // is unreachable, so this points it at the `rmng-control` alias.
             vars.push(ev(
                 "RMNG_CONTROL_URL",
                 format!("http://{control}:{}", cfg.listen.web),
             ));
         }
         Err(e) => tracing::warn!(
-            "control_env_vars: could not resolve the control-server host ({e}); \
-             clone inference routing will be unavailable until the next reconcile"
+            "control_env_vars: could not resolve the control-server host ({e}); the in-clone \
+             `rmng` CLI will need an explicit --server until the next reconcile (inference is \
+             unaffected — it routes to the group-proxy sidecar)"
         ),
     }
     vars
@@ -232,22 +237,15 @@ pub(crate) fn router_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
 }
 
 /// The clone-facing base URL of the group-proxy router's OpenAI-compatible surface
-/// (`http://{control}:{web}/cc/v1`) — what the generated Codex + OpenCode provider configs
-/// point their `base_url`/`baseURL` at. Derived from the same control-host resolution
-/// `control_env_vars` uses; `None` (with a warning) when the control host can't be resolved,
-/// so the config generators fall back to their old behavior instead of baking a broken URL.
-pub(crate) async fn cc_base_url(app: &App) -> Option<String> {
-    let cfg = app.config();
-    match app.docker.control_host().await {
-        Ok(control) => Some(format!("http://{control}:{}/cc/v1", cfg.listen.web)),
-        Err(e) => {
-            tracing::warn!(
-                "cc_base_url: could not resolve the control-server host ({e}); Codex/OpenCode \
-                 provider configs will omit the RMNG group-proxy provider this pass"
-            );
-            None
-        }
-    }
+/// (`http://rmng-cliproxy:9010/cc/v1`) — what the generated Codex + OpenCode provider configs
+/// point their `base_url`/`baseURL` at. The same fixed sidecar address `control_env_vars` bakes
+/// into `ANTHROPIC_BASE_URL`.
+///
+/// Still `Option` — the generators branch on it and the callers thread it as such — but since
+/// the split it is a constant that cannot fail to resolve: the sidecar's DNS alias on the rmng
+/// bridge doesn't depend on the control-server's own container being discoverable.
+pub(crate) async fn cc_base_url(_app: &App) -> Option<String> {
+    Some(crate::groupproxy::cc_v1_base_url())
 }
 
 /// The preset's env plus its Linear key as `LINEAR_API_KEY` (auths the clone's
@@ -1380,12 +1378,12 @@ mod tests {
             },
             EnvVar {
                 key: "ANTHROPIC_BASE_URL".into(),
-                value: "http://rmng-control:9000/cc".into(),
+                value: "http://rmng-cliproxy:9010/cc".into(),
             },
         ];
         let body = clone_etc_environment_conf(&vars);
         assert!(body.contains("XDG_SESSION_DESKTOP=gnome\n"));
-        assert!(body.contains("ANTHROPIC_BASE_URL=http://rmng-control:9000/cc\n"));
+        assert!(body.contains("ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\n"));
         assert!(body.contains("XDG_CURRENT_DESKTOP=custom\n"));
         assert_eq!(body.matches("XDG_CURRENT_DESKTOP=").count(), 1);
     }

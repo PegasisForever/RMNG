@@ -808,6 +808,8 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
     let dd = app.config().data_dir;
     crate::files::delete_notes(&dd, &host_id);
     crate::chat::delete_chat(&dd, &host_id);
+    // Anything the operator queued for a clone that no longer exists can never be delivered.
+    crate::chat::delete_schedules(&dd, &host_id);
 }
 
 /// Stop a managed clone without removing its container, volumes, or per-clone files.

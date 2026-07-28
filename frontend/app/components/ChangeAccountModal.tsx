@@ -8,6 +8,7 @@ import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { getConfig } from "~/lib/api";
 import type { Clone } from "~/lib/types";
 import type { Group } from "~/lib/wire/Group";
+import { useModalEscape } from "~/lib/useModalEscape";
 
 /**
  * The clone's current binding as a picker value, falling back to the first configured group.
@@ -48,18 +49,15 @@ export function ChangeAccountModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Escape closes regardless of focus — a document-level listener since the backdrop
+  // click no longer does (see below). Stacked so a modal opened on top of this one owns
+  // Escape instead of both closing at once.
+  useModalEscape(onClose);
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
-        }}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
+      {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
+      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           Account group ·{" "}
           <span className="text-emerald-700 dark:text-emerald-400">{clone.displayName ?? clone.id}</span>

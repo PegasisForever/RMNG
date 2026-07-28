@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use wire::{Chat, ChatMessage, ChatRole, RmngClone};
+use wire::{Chat, ChatMessage, ChatRole, RmngClone, ScheduledMessage};
 
 use crate::app::App;
 use crate::files::is_safe_id;
@@ -30,6 +30,11 @@ pub struct ChatState {
     busy: Mutex<HashSet<String>>,
     activity: Mutex<HashMap<String, String>>,
     listeners: Mutex<HashSet<String>>,
+    /// Serialises the read-modify-write of `data/schedules/<id>.json`. The HTTP handlers and
+    /// the scheduler tick both mutate those files, and a lost update there means a message the
+    /// operator queued silently never fires (or fires twice). One process-wide lock is plenty:
+    /// the critical sections are a few-KB file rewrite.
+    schedule_io: Mutex<()>,
 }
 
 fn now_ms() -> i64 {
@@ -78,6 +83,151 @@ pub fn delete_chat(data_dir: &str, id: &str) {
     }
 }
 
+// --- scheduled-message storage ---------------------------------------------
+//
+// Queued-but-not-yet-delivered messages live in `data/schedules/<id>.json` (same atomic
+// temp+rename write as the chat itself). Disk is the source of truth rather than an
+// in-memory timer wheel, so a restart loses nothing: the scheduler simply re-reads the
+// files on its next tick and anything that came due while the server was down fires then
+// (late, but delivered — see `due_messages`).
+
+/// How long past its `at` a message may keep waiting for a busy/offline clone before the
+/// scheduler gives up on it. Without a bound, a clone that is wedged mid-turn (or was
+/// deleted while the server was down) would accumulate an ever-retrying backlog that fires
+/// as a surprise burst hours later. We drop instead of firing late-and-unbounded, and log
+/// loudly — a message the operator timed for "in 20 minutes" is rarely still wanted a day
+/// later, and a silent forever-queue is worse than a visible drop.
+const SCHEDULE_GRACE: i64 = 60 * 60 * 1000;
+
+fn schedule_path(data_dir: &str, id: &str) -> Option<std::path::PathBuf> {
+    is_safe_id(id)
+        .then(|| std::path::Path::new(data_dir).join("schedules").join(format!("{id}.json")))
+}
+
+pub fn load_schedules(data_dir: &str, id: &str) -> Vec<ScheduledMessage> {
+    let mut list: Vec<ScheduledMessage> = schedule_path(data_dir, id)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    list.sort_by_key(|m| m.at);
+    list
+}
+
+fn save_schedules(data_dir: &str, id: &str, list: &[ScheduledMessage]) {
+    let Some(path) = schedule_path(data_dir, id) else { return };
+    // An empty queue is the common steady state; removing the file keeps `data/schedules/`
+    // from filling with `[]` stubs for every clone that ever scheduled anything once.
+    if list.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    if let Ok(mut body) = serde_json::to_string_pretty(list) {
+        body.push('\n');
+        if std::fs::write(&tmp, body).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+pub fn delete_schedules(data_dir: &str, id: &str) {
+    if let Some(p) = schedule_path(data_dir, id) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// Validate an operator-supplied `(text, at)` into a `ScheduledMessage` relative to `now`.
+///
+/// Pure so the rules are testable without a filesystem: non-empty trimmed text, and a
+/// delivery time strictly in the future. `now` is threaded in rather than read from the
+/// clock for the same reason.
+fn build_scheduled(text: &str, at: i64, now: i64) -> Result<ScheduledMessage, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("empty message".into());
+    }
+    if at <= now {
+        return Err("scheduled time must be in the future".into());
+    }
+    Ok(ScheduledMessage { id: short_id(), text: text.to_string(), at, created_at: now })
+}
+
+/// Queue a message for later delivery to `host_id`. Rejects past times and blank text.
+pub fn schedule_message(app: &App, host_id: &str, text: &str, at: i64) -> Result<ScheduledMessage, String> {
+    let mut msg = build_scheduled(text, at, now_ms())?;
+    let data_dir = app.config().data_dir;
+    {
+        let _guard = app.chat.schedule_io.lock().unwrap();
+        let mut list = load_schedules(&data_dir, host_id);
+        // `short_id` is a truncated nanosecond clock; two schedules created in the same tick
+        // would otherwise share an id and the cancel button would remove the wrong one.
+        while list.iter().any(|m| m.id == msg.id) {
+            msg.id = format!("{}{:x}", msg.id, list.len());
+        }
+        list.push(msg.clone());
+        save_schedules(&data_dir, host_id, &list);
+    }
+    broadcast(app, host_id);
+    Ok(msg)
+}
+
+/// Cancel a pending scheduled message. `false` when no such id is queued (already fired,
+/// or already cancelled from another tab).
+pub fn cancel_schedule(app: &App, host_id: &str, sid: &str) -> bool {
+    let data_dir = app.config().data_dir;
+    let removed = {
+        let _guard = app.chat.schedule_io.lock().unwrap();
+        let mut list = load_schedules(&data_dir, host_id);
+        let before = list.len();
+        list.retain(|m| m.id != sid);
+        let removed = list.len() != before;
+        if removed {
+            save_schedules(&data_dir, host_id, &list);
+        }
+        removed
+    };
+    if removed {
+        broadcast(app, host_id);
+    }
+    removed
+}
+
+/// The transcript bubble left behind when a scheduled message expires undelivered.
+///
+/// Lateness is rendered in whole hours rather than a wall-clock date: the workspace carries
+/// no date library, and "6h late" is the fact the operator needs anyway — the frontend
+/// already renders absolute times in their own locale. The original text is quoted in full
+/// so it can be copied back into the composer and re-sent.
+fn expired_notice(m: &ScheduledMessage, now: i64) -> String {
+    let hours = (now - m.at) / 3_600_000;
+    format!(
+        "⚠ A scheduled message was never delivered — this clone stayed unavailable for {hours}h \
+         past the time you picked, so it was dropped rather than sent arbitrarily late. \
+         It was NOT sent:\n\n{}",
+        m.text
+    )
+}
+
+/// Split a queue into `(due, expired)` at `now`: messages whose time has passed and are
+/// still inside the grace window, and those so far past it that the scheduler should drop
+/// them. Pure — this is the piece the scheduler's correctness hinges on, so it is tested
+/// directly rather than through the tick loop.
+fn due_messages(list: &[ScheduledMessage], now: i64) -> (Vec<ScheduledMessage>, Vec<ScheduledMessage>) {
+    let mut due = Vec::new();
+    let mut expired = Vec::new();
+    for m in list.iter().filter(|m| m.at <= now) {
+        if now - m.at > SCHEDULE_GRACE {
+            expired.push(m.clone());
+        } else {
+            due.push(m.clone());
+        }
+    }
+    (due, expired)
+}
+
 // --- chat bus --------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -86,15 +236,20 @@ struct ChatSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     activity: Option<String>,
     messages: Vec<ChatMessage>,
+    /// Pending scheduled messages, soonest first. Riding the existing chat frame keeps the
+    /// queue live across tabs (a cancel in one is reflected in the other) with no second stream.
+    scheduled: Vec<ScheduledMessage>,
 }
 
-/// The `{ busy, activity, messages }` snapshot as JSON — the chat history plus the
+/// The `{ busy, activity, messages, scheduled }` snapshot as JSON — the chat history plus the
 /// clone agent's live working state. Used by the SSE bus and the fleet MCP `read_chat`.
 pub fn snapshot_json(app: &App, host_id: &str) -> String {
+    let data_dir = app.config().data_dir;
     let snap = ChatSnapshot {
         busy: app.chat.busy.lock().unwrap().contains(host_id),
         activity: app.chat.activity.lock().unwrap().get(host_id).cloned(),
-        messages: load_chat(&app.config().data_dir, host_id).messages,
+        messages: load_chat(&data_dir, host_id).messages,
+        scheduled: load_schedules(&data_dir, host_id),
     };
     serde_json::to_string(&snap).unwrap_or_else(|_| "{}".into())
 }
@@ -372,6 +527,107 @@ pub fn ensure_autonomous_listener(app: &App, host: &RmngClone) {
     });
 }
 
+// --- scheduled-message delivery loop ---------------------------------------
+
+const SCHEDULE_TICK: Duration = Duration::from_secs(10);
+
+/// Deliver scheduled messages as they come due.
+///
+/// Ticking a short interval against the on-disk queues (rather than arming a timer per
+/// message) is what makes this survive a restart for free: whatever is on disk at boot is
+/// simply evaluated on the first tick, so a message that came due while the server was down
+/// fires immediately instead of being lost with the process. The 10s granularity is far
+/// finer than the human-scale intent behind "send this at 3pm".
+pub async fn run_scheduler(app: App) {
+    loop {
+        tick_schedules(&app);
+        tokio::time::sleep(SCHEDULE_TICK).await;
+    }
+}
+
+/// One sweep: for every clone with a queue, fire what is due and prune what can never fire.
+///
+/// Three ways a due message does *not* get delivered:
+/// - **the clone is mid-turn** — left queued and retried next tick; scheduling *while* busy is
+///   an explicitly supported case, so dropping here would defeat the feature. Bounded by
+///   `SCHEDULE_GRACE` so a permanently wedged clone can't queue forever.
+/// - **the clone is archived** — same treatment: archiving is reversible, so the message waits
+///   (within the grace window) for an unarchive rather than vanishing.
+/// - **the clone no longer exists** — unrecoverable; dropped with a warning.
+fn tick_schedules(app: &App) {
+    let data_dir = app.config().data_dir;
+    let dir = std::path::Path::new(&data_dir).join("schedules");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".json").map(str::to_string)
+        })
+        .filter(|id| is_safe_id(id))
+        .collect();
+
+    for id in ids {
+        let hosts = app.store.get().hosts;
+        let host = hosts.iter().find(|h| h.id == id).cloned();
+        let now = now_ms();
+        let (due, expired) = due_messages(&load_schedules(&data_dir, &id), now);
+        if due.is_empty() && expired.is_empty() {
+            continue;
+        }
+        for m in &expired {
+            tracing::warn!(
+                "scheduled message {} for clone {id} expired undelivered ({}m late): {:?}",
+                m.id,
+                (now - m.at) / 60_000,
+                m.text.chars().take(80).collect::<String>()
+            );
+            // A server log is invisible to the operator who queued this and walked away, and
+            // silently swallowing their message is the one outcome scheduling must not have.
+            // Leave a marker in the transcript itself so the drop is discoverable where they
+            // will actually look. Only for expiry — an unknown clone has no transcript to
+            // write to (and is handled below).
+            if host.is_some() {
+                push_message(app, &id, ChatRole::Assistant, expired_notice(m, now));
+            }
+        }
+        let mut fired: Vec<String> = expired.iter().map(|m| m.id.clone()).collect();
+
+        match host {
+            None => {
+                tracing::warn!("dropping {} scheduled message(s) for unknown clone {id}", due.len());
+                fired.extend(due.iter().map(|m| m.id.clone()));
+            }
+            Some(host) if host.archived => {
+                tracing::debug!("clone {id} is archived; {} scheduled message(s) wait", due.len());
+            }
+            Some(host) => {
+                // One per tick: `send_chat` refuses while a turn is in flight, so the rest of
+                // the queue is naturally retried on later ticks in `at` order.
+                if let Some(m) = due.first() {
+                    match send_chat(app, &host, &m.text) {
+                        Ok(()) => fired.push(m.id.clone()),
+                        Err(e) => {
+                            tracing::debug!("scheduled message {} for {id} deferred: {e}", m.id)
+                        }
+                    }
+                }
+            }
+        }
+
+        if fired.is_empty() {
+            continue;
+        }
+        {
+            let _guard = app.chat.schedule_io.lock().unwrap();
+            let mut list = load_schedules(&data_dir, &id);
+            list.retain(|m| !fired.contains(&m.id));
+            save_schedules(&data_dir, &id, &list);
+        }
+        broadcast(app, &id);
+    }
+}
+
 async fn run_autonomous_listener(app: &App, host: &RmngClone) -> Result<(), ()> {
     let base = base_url(app, host).await;
     let resp = app
@@ -405,4 +661,156 @@ async fn run_autonomous_listener(app: &App, host: &RmngClone) -> Result<(), ()> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(id: &str, at: i64) -> ScheduledMessage {
+        ScheduledMessage { id: id.into(), text: "hi".into(), at, created_at: 0 }
+    }
+
+    #[test]
+    fn build_scheduled_rejects_past_and_blank() {
+        let now = 1_000_000i64;
+        assert!(build_scheduled("hello", now + 60_000, now).is_ok());
+        // Exactly now is already too late — the tick that would fire it may have just run.
+        let past = build_scheduled("hello", now, now).unwrap_err();
+        assert!(past.contains("future"), "msg: {past}");
+        assert!(build_scheduled("hello", now - 1, now).is_err());
+        assert!(build_scheduled("   \n ", now + 60_000, now).is_err());
+        // Text is stored trimmed, and the queue time is what the caller asked for.
+        let ok = build_scheduled("  spaced  ", now + 5, now).unwrap();
+        assert_eq!(ok.text, "spaced");
+        assert_eq!(ok.at, now + 5);
+        assert_eq!(ok.created_at, now);
+    }
+
+    #[test]
+    fn due_messages_splits_at_now_and_grace() {
+        let now = 10_000_000i64;
+        let list = vec![
+            msg("future", now + 1),
+            msg("exactly-now", now),
+            msg("late", now - 60_000),
+            msg("expired", now - SCHEDULE_GRACE - 1),
+        ];
+        let (due, expired) = due_messages(&list, now);
+        let due_ids: Vec<&str> = due.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(due_ids, vec!["exactly-now", "late"]);
+        assert_eq!(expired.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["expired"]);
+        // A message right on the grace boundary is still deliverable.
+        let (due, expired) = due_messages(&[msg("edge", now - SCHEDULE_GRACE)], now);
+        assert_eq!(due.len(), 1);
+        assert!(expired.is_empty());
+    }
+
+    #[test]
+    fn schedule_round_trips_through_disk_and_snapshot() {
+        let app = App::test_app();
+        let dd = app.config().data_dir;
+        let now = now_ms();
+        let a = schedule_message(&app, "c1", "later", now + 3_600_000).unwrap();
+        let b = schedule_message(&app, "c1", "sooner", now + 60_000).unwrap();
+        assert_ne!(a.id, b.id);
+
+        // Reloaded from disk (not from memory) and ordered soonest-first.
+        let loaded = load_schedules(&dd, "c1");
+        assert_eq!(loaded.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec![&b.id, &a.id]);
+        assert_eq!(loaded[0].text, "sooner");
+        assert_eq!(loaded[1].at, now + 3_600_000);
+
+        // ...and it reaches the SSE frame the frontend reads, camelCased.
+        let snap: serde_json::Value = serde_json::from_str(&snapshot_json(&app, "c1")).unwrap();
+        assert_eq!(snap["scheduled"].as_array().unwrap().len(), 2);
+        assert_eq!(snap["scheduled"][0]["text"], "sooner");
+        assert!(snap["scheduled"][0]["createdAt"].is_i64(), "createdAt must be camelCase");
+
+        assert!(cancel_schedule(&app, "c1", &b.id));
+        assert!(!cancel_schedule(&app, "c1", &b.id), "second cancel is a no-op");
+        assert_eq!(load_schedules(&dd, "c1").iter().map(|m| m.id.clone()).collect::<Vec<_>>(), vec![a.id.clone()]);
+
+        // Emptying the queue removes the file rather than leaving an `[]` stub.
+        assert!(cancel_schedule(&app, "c1", &a.id));
+        assert!(load_schedules(&dd, "c1").is_empty());
+        assert!(!schedule_path(&dd, "c1").unwrap().exists());
+    }
+
+    #[test]
+    fn schedule_rejects_unsafe_clone_id() {
+        let app = App::test_app();
+        // A traversal id has no valid path, so nothing is written and nothing loads back.
+        let _ = schedule_message(&app, "../evil", "x", now_ms() + 60_000);
+        assert!(load_schedules(&app.config().data_dir, "../evil").is_empty());
+        assert!(schedule_path(&app.config().data_dir, "../evil").is_none());
+    }
+
+    #[tokio::test]
+    async fn tick_drops_schedules_for_unknown_clones_but_keeps_archived_ones() {
+        let app = App::test_app();
+        let dd = app.config().data_dir;
+        app.store.mutate(|s| {
+            s.hosts.push(RmngClone {
+                id: "sleeping".into(),
+                host: "sleeping".into(),
+                managed: true,
+                archived: true,
+                ..Default::default()
+            });
+        });
+        // Both are due, but only the one whose clone still exists survives the sweep.
+        schedule_message(&app, "ghost", "gone", now_ms() + 1_000).unwrap();
+        schedule_message(&app, "sleeping", "wait", now_ms() + 1_000).unwrap();
+        for id in ["ghost", "sleeping"] {
+            let mut list = load_schedules(&dd, id);
+            list[0].at = now_ms() - 5_000;
+            save_schedules(&dd, id, &list);
+        }
+
+        tick_schedules(&app);
+        assert!(load_schedules(&dd, "ghost").is_empty(), "unknown clone → dropped");
+        assert_eq!(load_schedules(&dd, "sleeping").len(), 1, "archived clone → still queued");
+    }
+
+    #[tokio::test]
+    async fn expired_message_leaves_a_notice_in_the_transcript() {
+        let app = App::test_app();
+        let dd = app.config().data_dir;
+        app.store.mutate(|s| {
+            s.hosts.push(RmngClone { id: "wedged".into(), host: "wedged".into(), ..Default::default() });
+        });
+        schedule_message(&app, "wedged", "deploy the thing", now_ms() + 1_000).unwrap();
+        // Push it well past the grace window, as a clone that was down all day would be.
+        let mut list = load_schedules(&dd, "wedged");
+        list[0].at = now_ms() - SCHEDULE_GRACE - 6 * 3_600_000;
+        save_schedules(&dd, "wedged", &list);
+
+        tick_schedules(&app);
+
+        assert!(load_schedules(&dd, "wedged").is_empty(), "expired message is dropped");
+        // ...but the operator finds out where they'd actually look, with their text intact.
+        let msgs = load_chat(&dd, "wedged").messages;
+        let notice = msgs.last().expect("an expiry notice must be written to the transcript");
+        assert_eq!(notice.role, ChatRole::Assistant);
+        assert!(notice.text.contains("deploy the thing"), "quotes the undelivered text: {}", notice.text);
+        assert!(notice.text.contains("NOT sent"), "says plainly it did not go: {}", notice.text);
+    }
+
+    #[tokio::test]
+    async fn tick_leaves_due_message_queued_while_the_clone_is_busy() {
+        let app = App::test_app();
+        let dd = app.config().data_dir;
+        app.store.mutate(|s| {
+            s.hosts.push(RmngClone { id: "worker".into(), host: "worker".into(), ..Default::default() });
+        });
+        schedule_message(&app, "worker", "queued", now_ms() + 1_000).unwrap();
+        let mut list = load_schedules(&dd, "worker");
+        list[0].at = now_ms() - 5_000;
+        save_schedules(&dd, "worker", &list);
+
+        app.chat.busy.lock().unwrap().insert("worker".into());
+        tick_schedules(&app);
+        assert_eq!(load_schedules(&dd, "worker").len(), 1, "busy clone must not lose the message");
+    }
 }

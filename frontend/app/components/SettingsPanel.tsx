@@ -21,12 +21,14 @@ import { useEffect, useState } from "react";
 import type { ClaudeUsage, GroupUsage, Operation } from "~/lib/types";
 import { OperationProgress } from "~/components/OperationProgress";
 import { ordered, useAccountOrder } from "~/lib/accountOrder";
+import { useModalEscape } from "~/lib/useModalEscape";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { Group } from "~/lib/wire/Group";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
+import type { GroupProxyStatus } from "~/lib/wire/GroupProxyStatus";
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { ImagesSection } from "~/components/ImagesSection";
 import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
@@ -144,6 +146,12 @@ export interface SettingsPanelProps {
   operations: Operation[];
   /** Restart the control-server container in place (applies changed startup settings). */
   restartServer: () => Promise<{ ok: boolean }>;
+  /** Read the `rmng-cliproxy` sidecar's status (running / image / behind the control-server). */
+  getGroupProxyStatus: () => Promise<GroupProxyStatus>;
+  /** Recreate the group-proxy sidecar on the control-server's current image. Interrupts every
+   *  in-flight agent request in the fleet, so this is a deliberate operator action, never a
+   *  side effect of the control-server update above. */
+  restartGroupProxy: () => Promise<GroupProxyStatus>;
   // --- clone-source images (moved here from the sidebar) ---
   images: ImageInfo[];
   imagesLoading: boolean;
@@ -466,6 +474,8 @@ export function SettingsPanel({
   updateServer,
   operations,
   restartServer,
+  getGroupProxyStatus,
+  restartGroupProxy,
   images,
   imagesLoading,
   pullBusy,
@@ -528,6 +538,38 @@ export function SettingsPanel({
       await restartServer();
     } catch (e) {
       setServerMsg(`✗ ${(e as Error).message}`);
+    }
+  }
+
+  // The group-proxy sidecar (`rmng-cliproxy`): it owns the `/cc` router + every account
+  // group's CLIProxyAPI process, and the control-server update above deliberately leaves it
+  // alone — recreating it drops every in-flight agent turn. So it can legitimately sit on an
+  // older image, and this section exists to make that visible and roll it forward on purpose.
+  const [proxyStatus, setProxyStatus] = useState<GroupProxyStatus | null>(null);
+  const [proxyMsg, setProxyMsg] = useState<string | null>(null);
+  const [proxyBusy, setProxyBusy] = useState(false);
+
+  useEffect(() => {
+    getGroupProxyStatus().then(setProxyStatus).catch((e) => setProxyMsg(`✗ ${(e as Error).message}`));
+  }, [getGroupProxyStatus]);
+
+  async function doRestartProxy() {
+    if (
+      !confirm(
+        "Restart the group proxy now?\n\nThis recreates the rmng-cliproxy container on the control-server's current image. Every in-flight agent request in every clone is dropped — do this while clones are idle.",
+      )
+    )
+      return;
+    setProxyBusy(true);
+    setProxyMsg("restarting the group proxy…");
+    try {
+      const s = await restartGroupProxy();
+      setProxyStatus(s);
+      setProxyMsg(s.running ? "restarted on the current image" : `⚠ ${s.detail}`);
+    } catch (e) {
+      setProxyMsg(`✗ ${(e as Error).message}`);
+    } finally {
+      setProxyBusy(false);
     }
   }
 
@@ -640,13 +682,10 @@ export function SettingsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Escape closes — its own effect so it can track the latest `onClose` without
-  // re-triggering the config fetch above.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Escape closes. Stacked: the group-login modal opens ON TOP of this panel (z-60 over
+  // z-50), and without the stack one Escape would close both — losing the panel as
+  // collateral for dismissing the dialog above it.
+  useModalEscape(onClose);
 
   // Preset editors.
   const addPreset = () =>
@@ -758,14 +797,10 @@ export function SettingsPanel({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
+      {/* Backdrop is inert — clicking it must not close the panel, only the ✕/Cancel
+          buttons and Escape (handled above) do. */}
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl">
         {/* Scrollable body. The footer lives outside this so it stays flush to the
             panel's bottom edge instead of floating above the scroll container's padding. */}
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
@@ -1047,6 +1082,50 @@ export function SettingsPanel({
                   {serverMsg ? <p className="text-xs text-slate-500 dark:text-slate-400">{serverMsg}</p> : null}
                 </div>
                 {updateOp ? <OperationProgress op={updateOp} /> : null}
+              </div>
+            </Section>
+
+            {/* Group proxy — the rmng-cliproxy sidecar that routes every clone's model
+                traffic. Separate from the control-server on purpose: updating the server
+                leaves this running so agent turns aren't interrupted, which means it can be
+                behind and only the operator rolls it forward. */}
+            <Section
+              title="Group proxy"
+              hint="Routes every clone's model traffic to its account group. Updating the control-server deliberately leaves this running, so it can be behind — restart it when clones are idle."
+            >
+              <div className="space-y-2">
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  <code>{proxyStatus?.container ?? "rmng-cliproxy"}</code>
+                  {proxyStatus?.image ? <> · image <code>{proxyStatus.image}</code></> : null}
+                  {proxyStatus?.revision ? <> · <code>{proxyStatus.revision}</code></> : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={doRestartProxy}
+                    disabled={proxyBusy}
+                    className="rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    Restart group proxy
+                  </button>
+                  {proxyStatus ? (
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                        !proxyStatus.running
+                          ? "bg-rose-100 dark:bg-rose-900/40 text-rose-700 dark:text-rose-400"
+                          : proxyStatus.behind
+                            ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400"
+                            : "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400"
+                      }`}
+                    >
+                      {!proxyStatus.running ? "not running" : proxyStatus.behind ? "behind" : "up to date"}
+                    </span>
+                  ) : null}
+                  {proxyMsg ? <p className="text-xs text-slate-500 dark:text-slate-400">{proxyMsg}</p> : null}
+                </div>
+                {proxyStatus?.detail ? (
+                  <p className="text-xs text-slate-400 dark:text-slate-500">{proxyStatus.detail}</p>
+                ) : null}
               </div>
             </Section>
 

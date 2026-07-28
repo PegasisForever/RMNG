@@ -1603,10 +1603,10 @@ mod tests {
         // With a cc base but no models, Codex omits the provider and OpenCode omits its provider
         // block — an empty list must never yield a provider with no default model. OpenCode still
         // writes the MCP section (that's unconditional).
-        let toml = codex_config_toml(Some("http://rmng-control:9000/cc/v1"), &[], false);
+        let toml = codex_config_toml(Some("http://rmng-cliproxy:9010/cc/v1"), &[], false);
         assert!(!toml.contains("model_provider"));
         assert!(!toml.contains("model_providers.rmng"));
-        let oc = opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &[], false);
+        let oc = opencode_config_json(Some("http://rmng-cliproxy:9010/cc/v1"), &[], false);
         assert!(!oc.contains("\"provider\""));
         assert!(!oc.contains("@ai-sdk/openai-compatible"));
         assert!(oc.contains("\"mcp\""));
@@ -1699,10 +1699,10 @@ mod tests {
     #[test]
     fn codex_config_adds_active_rmng_provider_when_cc_base_present() {
         let models = fallback_gpt_models();
-        let toml = codex_config_toml(Some("http://rmng-control:9000/cc/v1"), &models, false);
+        let toml = codex_config_toml(Some("http://rmng-cliproxy:9010/cc/v1"), &models, false);
         assert!(toml.contains("model_provider = \"rmng\""));
         assert!(toml.contains("[model_providers.rmng]"));
-        assert!(toml.contains("base_url = \"http://rmng-control:9000/cc/v1\""));
+        assert!(toml.contains("base_url = \"http://rmng-cliproxy:9010/cc/v1\""));
         assert!(toml.contains("wire_api = \"responses\""));
         assert!(toml.contains("env_key = \"RMNG_PROXY_KEY\""));
         // HTTP+SSE only: the Responses-API WebSocket transport is explicitly disabled.
@@ -1860,9 +1860,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&none_base).unwrap();
         assert_eq!(v["permission"]["*"], "allow");
 
-        let json = opencode_config_json(Some("http://rmng-control:9000/cc/v1"), &models, false);
+        let json = opencode_config_json(Some("http://rmng-cliproxy:9010/cc/v1"), &models, false);
         assert!(json.contains("\"npm\": \"@ai-sdk/openai-compatible\""));
-        assert!(json.contains("\"baseURL\": \"http://rmng-control:9000/cc/v1\""));
+        assert!(json.contains("\"baseURL\": \"http://rmng-cliproxy:9010/cc/v1\""));
         assert!(json.contains("{env:RMNG_PROXY_KEY}"));
         assert!(json.contains("gpt-5.6-terra"));
         // Default model is set as "<provider>/<id>" pointing at the GPT default.
@@ -1878,7 +1878,7 @@ mod tests {
         assert!(!lower.contains("claude"));
         // The parity entries always carry the opencode file now (MCP section is unconditional),
         // with or without a cc base.
-        for cc in [Some("http://rmng-control:9000/cc/v1"), None] {
+        for cc in [Some("http://rmng-cliproxy:9010/cc/v1"), None] {
             let entries = codex_parity_entries(cc, &models, false, "guide");
             assert!(
                 entries
@@ -1979,7 +1979,7 @@ mod tests {
     #[test]
     fn etc_environment_sync_uses_desired_env_and_removes_legacy_environment_d() {
         let script = etc_environment_sync_script(
-            "ANTHROPIC_BASE_URL=http://rmng-control:9000/cc\nLINEAR_API_KEY=secret\n",
+            "ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\nLINEAR_API_KEY=secret\n",
         );
         assert!(script.contains("base64 -d"));
         assert!(script.contains("/etc/environment"));

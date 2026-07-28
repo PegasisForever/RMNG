@@ -21,9 +21,11 @@
 #                    (bun build --compile).
 #   2. rust-build  — rustup stable; dev deps; cargo build --release clone-daemon + rmng-cli
 #                    + control-server.
-#   3. go-build    — cliproxy-sidecar: one CLIProxyAPI (v7) instance per account group; the
-#                    control-server spawns/supervises these (see cliproxy.rs). Independent of
-#                    1/2, so BuildKit runs all three in parallel.
+#   3. go-build    — cliproxy-sidecar: one CLIProxyAPI (v7) instance per account group. These
+#                    are spawned/supervised by the `rmng-cliproxy` container — this same image
+#                    run as `rmng-control-server group-proxy` (see groupproxy.rs), NOT by the
+#                    control-server process. Independent of 1/2, so BuildKit runs all three in
+#                    parallel.
 #   4. runtime     — ubuntu:26.04, runtime libs + samba (smbd serves clone homes over SMB)
 #                    + /usr/local/bin/cliproxy-sidecar + /usr/local/share/rmng payloads
 #                    (2 binaries + static/), a local rmng uid-1000 user for the share,
@@ -172,7 +174,10 @@ LABEL org.opencontainers.image.revision="$GIT_SHA" \
 
 COPY --from=rust-build /out/rmng-control-server /usr/local/bin/rmng-control-server
 
-# Per-group inference proxy (one process spawned per account group by cliproxy.rs).
+# Per-group inference proxy. One process is spawned per account group by the supervisor in
+# cliproxy.rs, which runs inside the `rmng-cliproxy` sidecar container — this same image under
+# the `group-proxy` subcommand. That container is why this binary ships here and not in a
+# separate image: the sidecar reuses the control-server image wholesale.
 COPY --from=go-build   /out/cliproxy-sidecar    /usr/local/bin/cliproxy-sidecar
 
 # Payloads + frontend on the image filesystem, stored PLAIN (assets.rs / web.rs read
@@ -187,7 +192,9 @@ COPY --from=bun-build   /src/frontend/build/client      /usr/local/share/rmng/st
 
 # CWD-relative config.json + data/ land in the /data volume (config.rs uses relative paths).
 WORKDIR /data
-# 9000 web/API, 9001 video, 9005 forward, 445 SMB (clone homes).
+# 9000 web/API, 9001 video, 9005 forward, 445 SMB (clone homes). NOT listed: 9010, the
+# `/cc` router the `rmng-cliproxy` sidecar (this same image, `group-proxy` subcommand) serves
+# — it is bridge-internal by design and never published to the host.
 EXPOSE 9000 9001 9005 445
 # Logging default only (not a setting — no config lives in env, per the no-env invariant).
 ENV RUST_LOG=info,tower_http=warn,clip=debug

@@ -7,6 +7,7 @@ import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { Operation } from "~/lib/types";
 import type { SetupEnv } from "~/lib/wire/SetupEnv";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
+import type { GroupProxyStatus } from "~/lib/wire/GroupProxyStatus";
 
 // Client-side API wrappers. Each POSTs JSON; the server mutates state and
 // broadcasts, so the caller doesn't need the response beyond error handling —
@@ -108,6 +109,16 @@ export const updateServer = () => postJson("/api/server/update", {}) as Promise<
 /** Restart the control-server in place to apply changed startup settings. The UI briefly
  *  disconnects and reconnects. */
 export const restartServer = () => postJson("/api/server/restart", {}) as Promise<{ ok: boolean }>;
+
+/** The `rmng-cliproxy` sidecar's status: running, on which image, and whether that image is
+ *  behind the control-server's. A control-server update deliberately does NOT roll it forward
+ *  (that would kill in-flight agent turns), so `behind` is the normal post-update state. */
+export const getGroupProxyStatus = () =>
+  getJson("/api/groupproxy") as Promise<GroupProxyStatus>;
+/** Recreate the group-proxy sidecar on the control-server's current image. Interrupts every
+ *  in-flight agent request in the fleet — the operator runs this when clones are idle. */
+export const restartGroupProxy = () =>
+  postJson("/api/groupproxy/restart", {}) as Promise<GroupProxyStatus>;
 
 // --- account groups (CLIProxyAPI pools) ------------------------------------
 // A group is a provider-agnostic account pool = one CLIProxyAPI instance. Accounts

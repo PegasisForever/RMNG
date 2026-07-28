@@ -4,13 +4,22 @@
 //!
 //! Each account group (`wire::Group`) is backed by ONE CLIProxyAPI process — the
 //! `cliproxy-sidecar` binary the runtime image ships — bound to loopback on its own port,
-//! with its own `data/cliproxy/<group>/{config.yaml, auth/}`. The control-server:
-//!   - generates each instance's `config.yaml` and spawns/supervises the sidecar (this
-//!     module, dynamic: instances come and go as groups are created/deleted),
-//!   - routes each clone's agent traffic to its group's instance (`web.rs` `/cc` router,
-//!     authenticated by a per-clone bearer key minted here),
-//!   - drives OAuth onboarding + reads usage tokens via the instance's management API /
-//!     `auth-dir`.
+//! with its own `data/cliproxy/<group>/{config.yaml, auth/}`.
+//!
+//! **Process split (see [`crate::groupproxy`]).** The supervisor + the `/cc` router used to
+//! run inside the control-server, which meant every control-server upgrade killed every
+//! in-flight agent request in the fleet. They now live in a separate long-lived container
+//! (`rmng-cliproxy`) running this same image under the `group-proxy` subcommand. That splits
+//! the ownership of this module in two:
+//!   - **group-proxy container**: spawns/supervises the sidecars ([`run`]), routes clone
+//!     traffic to them, and forwards admin traffic to their loopback management APIs. It
+//!     opens [`CliProxyManager`] READ-ONLY ([`CliProxyManager::load_read_only`]) so two
+//!     processes never race on `data/cliproxy-instances.json`.
+//!   - **control-server**: sole writer of `data/cliproxy-instances.json` — it allocates each
+//!     group's port + secrets ([`apply_now`]), mints per-clone router keys, mints the shared
+//!     admin secret, polls per-group usage from the shared `auth-dir`s, and reaches the
+//!     instances only through the group-proxy's admin surface ([`group_catalog`],
+//!     `web.rs::mgmt_send_retry`).
 //!
 //! CLIProxyAPI owns token refresh + intra-group account selection (session-affinity +
 //! per-model quota failover); rmng owns only lifecycle, routing, and display. The plaintext
@@ -23,12 +32,13 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
+use wire::AppConfig;
 
 use crate::app::App;
 
@@ -86,8 +96,10 @@ struct InstanceMeta {
     mgmt_secret: String,
 }
 
-/// On-disk state (`data/cliproxy-instances.json`, `0600`): instance identities + per-clone
-/// router keys. Never enters `state.json`/`/events` — it holds secrets.
+/// On-disk state (`data/cliproxy-instances.json`, `0600`): instance identities, per-clone
+/// router keys, and the shared control-server ↔ group-proxy admin secret. Never enters
+/// `state.json`/`/events` — it holds secrets. The control-server is the ONLY writer; the
+/// group-proxy container opens the same file read-only and reloads it on a short cadence.
 #[derive(Default, Serialize, Deserialize)]
 struct InstancesFile {
     #[serde(default)]
@@ -95,6 +107,13 @@ struct InstancesFile {
     /// `host_id` → per-clone router bearer key (the clone's `ANTHROPIC_AUTH_TOKEN`).
     #[serde(default)]
     router_keys: HashMap<String, String>,
+    /// The shared secret authenticating the control-server ↔ group-proxy admin channel (the
+    /// group-proxy's `/admin/*` forward surface and the control-server's token-delta intake).
+    /// Lives here rather than in `config.json` because it is a minted secret, and `config.json`
+    /// round-trips through the Settings UI. Absent in files written before the process split;
+    /// [`CliProxyManager::ensure_admin_secret`] mints one on first use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admin_secret: Option<String>,
 }
 
 struct Inner {
@@ -102,29 +121,104 @@ struct Inner {
     /// key → host_id reverse index for router request auth.
     token_index: HashMap<String, String>,
     data_dir: String,
+    /// True in the group-proxy container. The control-server is the sole writer of
+    /// `cliproxy-instances.json`; a second writer would clobber a concurrently-minted router
+    /// key or admin secret (the file is rewritten whole). Read-only managers therefore never
+    /// persist and never allocate — they pick changes up via [`CliProxyManager::reload`].
+    read_only: bool,
 }
 
-/// Shared supervisor + key state hung off `App`.
+/// Shared supervisor + key state hung off `App` (control-server) or off the group-proxy's own
+/// context ([`SupervisorCtx`]).
 pub struct CliProxyManager {
     inner: Mutex<Inner>,
     /// Wakes the by-group usage poller for an immediate poll (account added / manual refresh).
     usage_poke: Arc<tokio::sync::Notify>,
 }
 
+/// The inputs the per-group supervisor + the router need, decoupled from [`App`] so the
+/// group-proxy container — which has no Docker client, media plane, or state store — can run
+/// them. Both entrypoints compile the same [`run`]/[`supervise_group`] code; only this context
+/// differs.
+#[derive(Clone)]
+pub struct SupervisorCtx {
+    pub cliproxy: Arc<CliProxyManager>,
+    /// Live view of `config.json`, refreshed from the shared `/data` volume by the group-proxy's
+    /// own watcher (see [`crate::groupproxy`]).
+    pub cfg: Arc<RwLock<AppConfig>>,
+}
+
+impl SupervisorCtx {
+    fn data_dir(&self) -> String {
+        self.cfg.read().unwrap().data_dir.clone()
+    }
+    fn groups(&self) -> Vec<wire::Group> {
+        self.cfg.read().unwrap().groups.clone()
+    }
+}
+
 impl CliProxyManager {
-    /// Load persisted instance meta + router keys from `data/cliproxy-instances.json`.
+    /// Load persisted instance meta + router keys from `data/cliproxy-instances.json`, as the
+    /// file's sole WRITER (the control-server).
     pub fn load(data_dir: &str) -> Self {
-        let path = PathBuf::from(data_dir).join("cliproxy-instances.json");
-        let file: InstancesFile = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        Self::open(data_dir, false)
+    }
+
+    /// Same file, opened read-only for the group-proxy container: never persists, never
+    /// allocates a port/secret, and re-reads the file via [`Self::reload`] so control-server
+    /// writes (a new group's meta, a new clone's router key) are picked up within a second.
+    pub fn load_read_only(data_dir: &str) -> Self {
+        Self::open(data_dir, true)
+    }
+
+    fn open(data_dir: &str, read_only: bool) -> Self {
+        let file = Self::read_file(data_dir);
         let token_index =
             file.router_keys.iter().map(|(host, key)| (key.clone(), host.clone())).collect();
         Self {
-            inner: Mutex::new(Inner { file, token_index, data_dir: data_dir.to_string() }),
+            inner: Mutex::new(Inner {
+                file,
+                token_index,
+                data_dir: data_dir.to_string(),
+                read_only,
+            }),
             usage_poke: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    /// Parse the instances file, or `None` when it is absent/unreadable/malformed. Distinguished
+    /// from "empty" so [`Self::reload`] can hold the previous contents rather than blanking every
+    /// key on a transient miss.
+    fn read_file_opt(data_dir: &str) -> Option<InstancesFile> {
+        std::fs::read(Self::state_path(data_dir))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+    }
+
+    fn read_file(data_dir: &str) -> InstancesFile {
+        Self::read_file_opt(data_dir).unwrap_or_default()
+    }
+
+    /// Re-read `cliproxy-instances.json` from the shared volume and swap it in wholesale.
+    /// Only meaningful for a read-only manager (the writer's in-memory copy is authoritative).
+    /// Cheap enough to call on a 1 s cadence: the file is a few KB and only grows with the
+    /// clone count.
+    ///
+    /// A failed read/parse KEEPS the previous contents. The control-server writes atomically
+    /// (temp + rename), so this shouldn't happen — but blanking every router key and the admin
+    /// secret would 401 the whole fleet for a tick, and "keep serving what we last knew" is the
+    /// strictly better failure mode for a file we don't own.
+    pub fn reload(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.read_only {
+            return;
+        }
+        let Some(file) = Self::read_file_opt(&inner.data_dir) else {
+            return;
+        };
+        inner.token_index =
+            file.router_keys.iter().map(|(host, key)| (key.clone(), host.clone())).collect();
+        inner.file = file;
     }
 
     /// Wake the by-group usage poller for an immediate poll — called right after an account is
@@ -139,12 +233,44 @@ impl CliProxyManager {
         self.usage_poke.clone()
     }
 
-    fn state_path(data_dir: &str) -> PathBuf {
+    pub(crate) fn state_path(data_dir: &str) -> PathBuf {
         PathBuf::from(data_dir).join("cliproxy-instances.json")
     }
 
-    /// Atomic `0600` persist of `Inner.file`. Best-effort (logs on failure).
+    /// The shared control-server ↔ group-proxy admin secret, minting + persisting one on first
+    /// use. Called by the control-server before it launches / talks to the group-proxy
+    /// container, so the secret exists on disk by the time the sidecar container reads it.
+    ///
+    /// This secret gates BOTH directions of the internal channel: the group-proxy's
+    /// `/admin/*` management-forward surface (which a clone must never reach — a clone only
+    /// holds a per-clone router bearer) and the control-server's `/internal/tokens` delta
+    /// intake. One secret rather than two because both ends are the same trust domain and a
+    /// second one would just double the rotation surface.
+    pub fn ensure_admin_secret(&self) -> String {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(secret) = inner.file.admin_secret.clone() {
+            return secret;
+        }
+        let secret = random_token();
+        inner.file.admin_secret = Some(secret.clone());
+        Self::persist(&inner);
+        secret
+    }
+
+    /// The admin secret if one has been minted, WITHOUT minting (the read-only group-proxy
+    /// side, which cannot write the file). `None` until the control-server has run
+    /// [`Self::ensure_admin_secret`] — the group-proxy then refuses every `/admin/*` request
+    /// rather than falling open.
+    pub fn admin_secret(&self) -> Option<String> {
+        self.inner.lock().unwrap().file.admin_secret.clone()
+    }
+
+    /// Atomic `0600` persist of `Inner.file`. Best-effort (logs on failure). A no-op for a
+    /// read-only manager — the group-proxy container must never write this file.
     fn persist(inner: &Inner) {
+        if inner.read_only {
+            return;
+        }
         let path = Self::state_path(&inner.data_dir);
         let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
         let json = match serde_json::to_vec_pretty(&inner.file) {
@@ -167,10 +293,15 @@ impl CliProxyManager {
     }
 
     /// Ensure a group has a stable port + secrets, allocating + persisting on first use.
-    fn ensure_meta(&self, group: &str) -> InstanceMeta {
+    /// On a read-only manager this only reads — the group-proxy waits for the control-server
+    /// to allocate rather than minting a second, conflicting identity for the same group.
+    fn ensure_meta(&self, group: &str) -> Option<InstanceMeta> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(meta) = inner.file.instances.get(group) {
-            return meta.clone();
+            return Some(meta.clone());
+        }
+        if inner.read_only {
+            return None;
         }
         let used: std::collections::HashSet<u16> =
             inner.file.instances.values().map(|m| m.port).collect();
@@ -182,11 +313,19 @@ impl CliProxyManager {
         };
         inner.file.instances.insert(group.to_string(), meta.clone());
         Self::persist(&inner);
-        meta
+        Some(meta)
     }
 
     fn meta(&self, group: &str) -> Option<InstanceMeta> {
         self.inner.lock().unwrap().file.instances.get(group).cloned()
+    }
+
+    /// Allocate + persist a group's identity, as the supervisor's first reconcile pass would.
+    /// Test-only surface for sibling modules ([`crate::groupproxy`]'s router tests), which need
+    /// a provisioned group without spawning a real sidecar.
+    #[cfg(test)]
+    pub(crate) fn ensure_meta_for_test(&self, group: &str) {
+        let _ = self.ensure_meta(group);
     }
 
     /// Loopback port for a group's instance, if one has been provisioned. `None` while a
@@ -200,8 +339,11 @@ impl CliProxyManager {
         self.meta(group).map(|m| m.inbound_key)
     }
 
-    /// `(base management URL, plaintext X-Management-Key)` for a group's instance — used by
-    /// the onboarding endpoints + usage poller. E.g. `http://127.0.0.1:9100/v0/management`.
+    /// `(base management URL, plaintext X-Management-Key)` for a group's instance, as dialed
+    /// from INSIDE the group-proxy container. E.g. `http://127.0.0.1:9100/v0/management`.
+    /// The control-server can no longer reach this (the instances are loopback-only in another
+    /// container) and goes through the admin-forward surface instead — see
+    /// [`crate::groupproxy::admin_mgmt_url`].
     pub fn management(&self, group: &str) -> Option<(String, String)> {
         self.meta(group)
             .map(|m| (format!("http://{BIND_HOST}:{}/v0/management", m.port), m.mgmt_secret))
@@ -378,9 +520,20 @@ async fn log_lines<R: AsyncRead + Unpin>(reader: R, group: String) {
 /// Supervise ONE group's instance forever (until the task is aborted when the group is
 /// deleted). Regenerates `config.yaml` before each (re)spawn, drains logs, waits for exit,
 /// and respawns with capped backoff. Mirrors `ssh::run` for a single dynamic child.
-async fn supervise_group(app: App, group: String) {
-    let data_dir = app.config().data_dir.clone();
-    let meta = app.cliproxy.ensure_meta(&group);
+///
+/// Runs in the group-proxy container. `ensure_meta` is read-only there, so a group whose meta
+/// the control-server hasn't allocated yet simply retries on the reconcile cadence instead of
+/// minting a conflicting port/secret pair.
+async fn supervise_group(ctx: SupervisorCtx, group: String) {
+    let data_dir = ctx.data_dir();
+    let Some(meta) = ctx.cliproxy.ensure_meta(&group) else {
+        tracing::debug!(
+            target: "cliproxy",
+            "[{group}] no instance meta yet (the control-server allocates it) — retrying"
+        );
+        tokio::time::sleep(RECONCILE_INTERVAL).await;
+        return;
+    };
     let mut failures: u32 = 0;
     let mut spawn_err_logged = false;
     loop {
@@ -431,13 +584,15 @@ async fn supervise_group(app: App, group: String) {
 
 /// Top-level supervisor: reconcile the running per-group tasks against `config.groups` every
 /// tick. New groups get a spawned `supervise_group`; removed groups have their task aborted
-/// (which drops the Child → SIGKILL via `kill_on_drop`). Spawned early in `main.rs`.
-pub async fn run(app: App) {
+/// (which drops the Child → SIGKILL via `kill_on_drop`). Spawned by the group-proxy container's
+/// entrypoint ([`crate::groupproxy::main`]), NOT by the control-server — moving it out of the
+/// control-server process is the whole point of the split (a control-server upgrade must not
+/// take the inference path with it).
+pub async fn run(ctx: SupervisorCtx) {
     let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
     loop {
-        let desired: Vec<String> = app
-            .config()
-            .groups
+        let desired: Vec<String> = ctx
+            .groups()
             .iter()
             .map(|g| g.name.clone())
             .filter(|n| {
@@ -450,36 +605,48 @@ pub async fn run(app: App) {
             })
             .collect();
 
-        // Stop instances for groups that no longer exist (or whose task died).
-        let stale: Vec<String> = tasks
-            .keys()
-            .filter(|g| !desired.contains(g) || tasks.get(*g).is_some_and(|h| h.is_finished()))
-            .cloned()
+        // Stop instances for groups that no longer exist, and reap tasks that returned. A
+        // supervisor returns in exactly one case: the group has no instance meta yet, because
+        // the control-server hasn't allocated it (we're read-only on that file). Reaping it
+        // here lets the `or_insert_with` below respawn it on the next tick, which is the retry.
+        let stale: Vec<(String, bool)> = tasks
+            .iter()
+            .filter(|(g, h)| !desired.contains(g) || h.is_finished())
+            .map(|(g, _)| (g.clone(), desired.contains(g)))
             .collect();
-        for g in stale {
+        for (g, still_wanted) in stale {
             if let Some(handle) = tasks.remove(&g) {
                 handle.abort();
-                tracing::info!(target: "cliproxy", "[{g}] instance stopped (group removed)");
+                if still_wanted {
+                    tracing::debug!(target: "cliproxy", "[{g}] supervisor returned — respawning next tick");
+                } else {
+                    tracing::info!(target: "cliproxy", "[{g}] instance stopped (group removed)");
+                }
             }
         }
 
         // Start instances for new groups.
         for g in desired {
-            tasks.entry(g.clone()).or_insert_with(|| tokio::spawn(supervise_group(app.clone(), g)));
+            let ctx = ctx.clone();
+            tasks.entry(g.clone()).or_insert_with(|| tokio::spawn(supervise_group(ctx, g)));
         }
 
         tokio::time::sleep(RECONCILE_INTERVAL).await;
     }
 }
 
-/// Immediate reconcile hint after a `groups` config change. The reconcile loop already picks
-/// changes up within `RECONCILE_INTERVAL`; group create/delete just ensures/forgets meta so
-/// the port/keys are stable before the next tick. (Kept as a no-op-friendly hook mirroring
-/// `ssh::apply_now`; the actual spawn/teardown happens in `run`.)
+/// Immediate reconcile hint after a `groups` config change, run in the CONTROL-SERVER. It
+/// allocates + persists each configured group's port and secrets so they are on the shared
+/// volume before the group-proxy container's next reconcile tick reads them (the group-proxy
+/// is read-only on that file and never allocates). The actual spawn/teardown happens in
+/// [`run`], over in the sidecar container.
 pub fn apply_now(app: &App) {
     for g in app.config().groups.iter().filter(|g| safe_group(&g.name)) {
         let _ = app.cliproxy.ensure_meta(&g.name);
     }
+    // The admin secret gates the control-server's own management-forward calls into the
+    // group-proxy, so mint it on the same beat as the per-group identities.
+    let _ = app.cliproxy.ensure_admin_secret();
 }
 
 // --- by-group usage poller -------------------------------------------------------------
@@ -725,28 +892,30 @@ fn gpt_ids_from_models_json(body: &str) -> Vec<String> {
 }
 
 /// The FULL live model catalog (both `claude-` and gpt/codex ids) a group's CLIProxyAPI instance
-/// advertises: GET its loopback `/v1/models` and return every id (see [`ids_from_models_json`]).
+/// advertises: GET its `/v1/models` and return every id (see [`ids_from_models_json`]).
 /// Because the catalog is already blacklist-filtered by `oauth-excluded-models`, this is exactly
 /// the set a group serves — new models appear here automatically and only the operator blacklist
 /// removes them. The reconciler derives BOTH the OpenCode/Codex GPT list (the non-`claude-` ids)
 /// and Claude Code's default model (`clone_reconcile::default_claude_model`) from this one fetch,
 /// so a group is queried at most once per reconcile pass.
 ///
-/// Returns `vec![]` on any miss — no instance/port/key yet, the instance is still starting, a
-/// timeout, a non-2xx, or an empty catalog — and the caller falls back to
+/// The instances bind loopback INSIDE the group-proxy container, so this goes through that
+/// container's admin catalog surface (`GET /admin/:group/v1/models`, authenticated with the
+/// shared admin secret) rather than dialing `127.0.0.1:<port>` directly.
+///
+/// Returns `vec![]` on any miss — no instance/port/key yet, the group-proxy container still
+/// starting, a timeout, a non-2xx, or an empty catalog — and the caller falls back to
 /// `clone_reconcile::FALLBACK_GPT_MODELS` (Codex/OpenCode) / `FALLBACK_CLAUDE_MODEL` (Claude Code).
 pub(crate) async fn group_catalog(app: &App, group: &str) -> Vec<String> {
-    let (Some(port), Some(key)) =
-        (app.cliproxy.port_for(group), app.cliproxy.inbound_key_for(group))
-    else {
+    let Some(secret) = app.cliproxy.admin_secret() else {
         return Vec::new();
     };
-    let url = format!("http://{BIND_HOST}:{port}/v1/models");
+    let url = crate::groupproxy::admin_catalog_url(group);
     let body = async {
         let resp = app
             .http
             .get(&url)
-            .header("Authorization", format!("Bearer {key}"))
+            .header(crate::groupproxy::ADMIN_HEADER, &secret)
             .timeout(Duration::from_secs(4))
             .send()
             .await
@@ -796,12 +965,64 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cliproxy-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mgr = CliProxyManager::load(&dir.to_string_lossy());
-        let a1 = mgr.ensure_meta("a").port;
-        let b = mgr.ensure_meta("b").port;
-        let a2 = mgr.ensure_meta("a").port;
+        let a1 = mgr.ensure_meta("a").unwrap().port;
+        let b = mgr.ensure_meta("b").unwrap().port;
+        let a2 = mgr.ensure_meta("a").unwrap().port;
         assert_eq!(a1, a2, "same group keeps its port");
         assert_ne!(a1, b, "distinct groups get distinct ports");
         assert!(a1 >= PORT_BASE && b >= PORT_BASE);
+    }
+
+    /// The group-proxy container opens the instances file READ-ONLY: it must never allocate a
+    /// group identity (the control-server owns that, and two allocators would hand the same
+    /// group two different ports/secrets) and never write the file (whole-file rewrites would
+    /// clobber a concurrently-minted router key). It DOES pick up the writer's changes on
+    /// `reload`.
+    #[test]
+    fn read_only_manager_never_allocates_and_reloads_writer_changes() {
+        let dir = std::env::temp_dir().join(format!("cliproxy-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_dir = dir.to_string_lossy().into_owned();
+
+        let ro = CliProxyManager::load_read_only(&data_dir);
+        assert!(ro.ensure_meta("g").is_none(), "read-only must not allocate");
+        assert!(ro.admin_secret().is_none(), "read-only must not mint the admin secret");
+        assert!(
+            !CliProxyManager::state_path(&data_dir).exists(),
+            "read-only must not create the instances file"
+        );
+
+        // The writer allocates; the reader sees it only after a reload.
+        let rw = CliProxyManager::load(&data_dir);
+        let port = rw.ensure_meta("g").unwrap().port;
+        let secret = rw.ensure_admin_secret();
+        let key = rw.mint_router_key("h1");
+        assert_eq!(ro.port_for("g"), None, "stale until reload");
+        ro.reload();
+        assert_eq!(ro.port_for("g"), Some(port));
+        assert_eq!(ro.admin_secret().as_deref(), Some(secret.as_str()));
+        assert_eq!(ro.clone_for_token(&key).as_deref(), Some("h1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The admin secret is minted once and then stable across process restarts — a rotation on
+    /// every boot would break every in-flight group-proxy ↔ control-server call.
+    #[test]
+    fn admin_secret_is_minted_once_and_persists() {
+        let dir = std::env::temp_dir().join(format!("cliproxy-admin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_dir = dir.to_string_lossy().into_owned();
+        let first = CliProxyManager::load(&data_dir).ensure_admin_secret();
+        assert!(!first.is_empty());
+        assert_eq!(
+            CliProxyManager::load(&data_dir).ensure_admin_secret(),
+            first,
+            "a reloaded manager must reuse the persisted secret"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -18,13 +18,31 @@ control-server payload at all. Full references: [API](../../docs/API.md) ·
 | **4 — forward** | 9005 | framed TCP over TCP | the viewer's port-forward data plane: one TCP connection per accepted local socket, spliced to the clone |
 | **SMB** | 445 | SMB (smbd) | the `clones` share (fixed cred `rmng`/`rmng`) browses each running clone's `/home/rmng` at `smb://<host>/clones` |
 
+Plus one port this binary serves **in a different process**: `9010`, the group proxy's `/cc`
+router (see below). It is bridge-internal and never published to the host.
+
+## The `rmng-cliproxy` sidecar (`groupproxy`)
+
+The same image, run as `rmng-control-server group-proxy` in its own long-lived container. It
+owns the `/cc` router **and** the per-group CLIProxyAPI processes, so clone model traffic never
+enters this process — which is what makes updating the control-server safe while clones are
+mid-turn. The control-server ensures it create-if-absent / start-if-stopped and deliberately
+never recreates it on image drift; `POST /api/groupproxy/restart` (Settings → Group proxy) is
+the operator's explicit roll-forward. Inputs come off the shared `/data` volume (read-only:
+the control-server is the sole writer), management/catalog calls come back through its
+`/admin/*` surface, and token deltas ride `POST /internal/tokens` with a bounded retry buffer
+so accounting survives a control-server restart. See the module header in `src/groupproxy.rs`
+and [DEPLOY.md](../../docs/DEPLOY.md#the-group-proxy-rmng-cliproxy).
+
 ## Modules
 
 `app` (shared state holder) · `state` (in-memory `ControlState` + atomic `state.json` persist
 + file-watch + SSE bus) · `config` (load/merge/redact `config.json` at 0600) · `web` (port 2
-routes + SSE + SPA + the desktop/exec proxy endpoints for `rmng desktop`/`rmng exec`, plus the
-passive CLIProxyAPI response observer) · `tokens` (durable per-clone new-token counters + live
-SSE bus) · `mediaplane` (port 1: clone-socket ingest → `media` encode → viewer; input routing;
+routes + SSE + SPA + the desktop/exec proxy endpoints for `rmng desktop`/`rmng exec`) ·
+`cliproxy` (per-group CLIProxyAPI instance identities + per-clone router keys) · `groupproxy`
+(the `rmng-cliproxy` sidecar: the `/cc` router, the instance supervisor, and the admin-forward
+surface — see below) · `tokens` (durable per-clone new-token counters + live
+SSE bus + the passive CLIProxyAPI response observer) · `mediaplane` (port 1: clone-socket ingest → `media` encode → viewer; input routing;
 clipboard broker) · `forward` (port-forward data plane: viewer TCP spliced to the clone) ·
 `docker` (bollard primitives against the local daemon) · `provision` (clone/pull/commit/delete
 flows over those primitives) · `jobs` (the clone/delete/pull/commit Operation machine) · `linear`

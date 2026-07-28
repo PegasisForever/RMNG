@@ -54,7 +54,8 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET | `/api/server/version` | Check the running image and remote update status | 200 `UpdateStatus` |
 | POST | `/api/server/update` | Update the control-server image | 200 `Operation` |
 | POST | `/api/server/restart` | Restart the control server | 200 `{ok}` |
-| ANY | `/cc/*` | Route clone model traffic to its account group's CLIProxyAPI instance | proxied provider response |
+| GET | `/api/groupproxy` | Group-proxy sidecar status (running / image / behind) | 200 `GroupProxyStatus` |
+| POST | `/api/groupproxy/restart` | Roll the group-proxy sidecar onto the current image | 200 `GroupProxyStatus` |
 | GET | `/*` | SPA fallback (embedded frontend) | 200 asset / `index.html` |
 
 Error statuses: `400` validation, `404` unknown id/file, `409` chat busy / image still in
@@ -259,9 +260,9 @@ Restart a retained archived clone. Returns an `unarchive` `Operation`; the prior
 cumulative token totals are retained.
 
 ### `POST /api/hosts/:id/group` — body `{ "group": string }`
-Set the sole provider-agnostic account group for a managed clone. The `/cc` proxy maps the clone
-to this group's CLIProxyAPI instance, which performs provider-specific account selection and
-refresh.
+Set the sole provider-agnostic account group for a managed clone. The group proxy's `/cc` router
+maps the clone to this group's CLIProxyAPI instance, which performs provider-specific account
+selection and refresh.
 
 The name is **required**: every clone binds a group, so a binding can be changed but never
 cleared. A `null`/blank/absent name is a `400`, as is an unknown one. The server also guarantees
@@ -371,10 +372,15 @@ and collapses the environment report (daemon reachable, sock mount, render node)
 
 ## Account groups and provider credentials
 
-A clone has one optional `Clone.group` binding. The `/cc` router resolves that clone to the
-matching CLIProxyAPI instance; that group owns provider-specific OAuth, account selection, and
-refresh. Claude, Codex, and Gemini via Antigravity are credentials **inside** an account group,
+A clone has one optional `Clone.group` binding. The group proxy's `/cc` router resolves that clone
+to the matching CLIProxyAPI instance; that group owns provider-specific OAuth, account selection,
+and refresh. Claude, Codex, and Gemini via Antigravity are credentials **inside** an account group,
 not separate clone bindings.
+
+The endpoints below are thin proxies: the control-server forwards each one to the group proxy's
+`/admin/:group/mgmt/*` surface (authenticated with a shared secret), and the proxy attaches that
+instance's own management key. The instances themselves bind loopback inside the proxy container
+and are not reachable from anywhere else.
 
 | Endpoint | Body | Returns | Does |
 |---|---|---|---|
@@ -389,6 +395,52 @@ not separate clone bindings.
 
 `usageGroups` in `ControlState` reports group membership and usage. Gemini/Antigravity is a
 presence-only row when its upstream does not expose pollable quota.
+
+---
+
+## The group proxy (`rmng-cliproxy`)
+
+Clone model traffic does **not** go through the control-server. It goes to a separate long-lived
+container running the same image as `rmng-control-server group-proxy`, which owns the `/cc`
+router *and* the per-group CLIProxyAPI processes. That is what makes a control-server update
+non-disruptive to in-flight agent turns. See [DEPLOY.md](DEPLOY.md#the-group-proxy-rmng-cliproxy).
+
+**Clone-facing surface** (on the `rmng` bridge, never published to the host):
+
+| URL | Used by |
+|---|---|
+| `http://rmng-cliproxy:9010/cc` | `ANTHROPIC_BASE_URL` (Claude Code) |
+| `http://rmng-cliproxy:9010/cc/v1` | the generated Codex + OpenCode provider `base_url`/`baseURL` |
+
+Authenticated by the clone's per-clone bearer key (`ANTHROPIC_AUTH_TOKEN` / `RMNG_PROXY_KEY`).
+`401` unknown/missing key, `409` clone archived or unbound, `503` the group's instance is still
+starting (retry), `502` the instance failed the request. Everything else is the provider's own
+response, streamed unbuffered.
+
+**Control-server-facing surface**, authenticated by a shared admin secret in
+`data/cliproxy-instances.json` (header `X-RMNG-Admin-Key`) — a clone's per-clone bearer cannot
+reach it:
+
+| Endpoint | Does |
+|---|---|
+| `ANY /admin/:group/mgmt/*` | Forward to that group instance's management API with its own key (drives every `/api/groups/…` endpoint above) |
+| `GET /admin/:group/v1/models` | Forward that group's live model catalog (shapes each clone's Codex/OpenCode model list + Claude Code's default model) |
+| `GET /health` | Unauthenticated liveness |
+
+The reverse direction is `POST /internal/tokens` **on the control-server**, same shared secret: the
+proxy coalesces per-clone token-usage deltas and POSTs them in batches, buffering in memory
+(bounded) while the control-server is restarting so accounting survives an upgrade.
+
+### `GET /api/groupproxy` → `GroupProxyStatus`
+The sidecar's container name, whether it is running, its image + `org.opencontainers.image.revision`,
+and `behind` — true when it is running a different image than the control-server. Never 500s; a
+down daemon or an absent container reads as `running: false` with the reason in `detail`.
+
+### `POST /api/groupproxy/restart` → `GroupProxyStatus`
+Recreate the sidecar on the control-server's current image. **This drops every in-flight agent
+request in the fleet** — a control-server update deliberately does not do it, so this is the
+operator's explicit roll-forward, to be run while clones are idle. `502` if the daemon call fails;
+`502` in dev mode (no self-container to copy mounts from).
 
 ---
 

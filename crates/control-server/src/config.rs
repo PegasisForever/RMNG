@@ -45,6 +45,23 @@ pub fn load() -> Result<AppConfig> {
     Ok(cfg)
 }
 
+/// Parse `./config.json` WITHOUT the legacy-migration / default-group rewrites [`load`] can
+/// perform. For the `rmng-cliproxy` sidecar (see [`crate::groupproxy`]), which shares the
+/// `/data` volume with the control-server and must never be a second writer of any file in it:
+/// the control-server has already normalized this file at its own boot, and a concurrent
+/// `save` from two processes could interleave.
+///
+/// A missing file yields defaults, matching [`load`]; a malformed one is a hard error, so the
+/// caller keeps the config it already had rather than silently reverting to defaults.
+pub fn load_read_only() -> Result<AppConfig> {
+    let path = config_path();
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AppConfig::default()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
 /// Fold legacy config fields into the current shape; true = the file must be
 /// rewritten. Legacy `envPresets` (env-only presets, pre Linear unification) seed
 /// `presets` (no labels/key — the operator adds those in Settings). Legacy `linear`

@@ -6,6 +6,8 @@
 // credentials into the image; the server logs a warning line — surfaced here too.
 import { useState } from "react";
 
+import { useModalEscape } from "~/lib/useModalEscape";
+
 /** Mirror of the server's `is_dns_label`. */
 function isDnsLabel(s: string): boolean {
   return s.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(s);
@@ -31,18 +33,15 @@ export function CommitImageModal({
     onCommit(trimmed);
   }
 
+  // Escape closes regardless of focus — a document-level listener since the backdrop
+  // click no longer does (see below). Stacked so a modal opened on top of this one owns
+  // Escape instead of both closing at once.
+  useModalEscape(onClose);
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
-        }}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
+      {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
+      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           Commit <span className="text-emerald-700 dark:text-emerald-400">{cloneId}</span> to an image
         </h3>

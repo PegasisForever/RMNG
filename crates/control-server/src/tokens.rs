@@ -4,6 +4,20 @@
 //! request/response bodies, proxy credentials, account identity, or cache buckets. Live totals
 //! ride a dedicated SSE bus rather than `ControlState`, because activity changes too often for
 //! `state.json` persistence.
+//!
+//! **Process split.** The `/cc` proxy that feeds this now runs in the separate `rmng-cliproxy`
+//! container (see [`crate::groupproxy`]), so the observer and the durable store no longer share
+//! a process. Two processes must not both write `clone-tokens.json`, so ownership is split:
+//!   - [`ResponseObserver`] (parsing + high-water accounting) runs wherever the proxy runs and
+//!     talks to an abstract [`UsageSink`];
+//!   - [`TokenBus`] — persistence, the SSE projection, and the `capture_epoch` lifecycle guard —
+//!     stays owned solely by the control-server, which applies deltas arriving over the internal
+//!     HTTP channel via [`LocalSink`].
+//!
+//! The epoch guard crosses the boundary as DATA, not as an RPC: the group-proxy reads the same
+//! `clone-tokens.json` from the shared `/data` volume and takes each clone's active lifecycle
+//! epoch from it ([`read_lifecycle_epochs`]). A delta carrying a stale epoch is rejected by
+//! [`TokenBus::record`] exactly as an in-process stale observer was.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -266,6 +280,12 @@ impl TokenBus {
 
     /// The generation a response must carry to be allowed to update a clone. `None` means the
     /// clone has no active managed token record, so no observer should be constructed.
+    ///
+    /// The `/cc` proxy moved out of process, so its caller is now
+    /// [`read_lifecycle_epochs`] reading the same fact off the shared `clone-tokens.json`.
+    /// This stays as the canonical in-process definition that file-backed read must match, and
+    /// as the fixture the boundary tests pin against.
+    #[allow(dead_code)] // canonical epoch definition; exercised by the boundary tests
     pub fn capture_epoch(&self, host_id: &str) -> Option<u64> {
         let inner = self.inner.lock().unwrap();
         let lifecycle = inner.file.lifecycle.get(host_id)?;
@@ -390,31 +410,32 @@ impl TokenBus {
         }
     }
 
-    pub fn observer(
+    /// Apply ONE delta that arrived from the out-of-process `/cc` proxy (the group-proxy
+    /// container's `POST /internal/tokens`). Identical semantics to the in-process observer
+    /// path: a stale/archived epoch is silently dropped by [`Self::record`], and a delta that
+    /// counted as activity also promotes the clone to `Working`. Kept here rather than in
+    /// `web.rs` so `record`/`record_fable`/`mark_working_if_current` stay private to this module.
+    pub fn apply_remote_delta(
         self: &Arc<Self>,
-        store: Arc<crate::state::StateStore>,
-        host_id: String,
-        epoch: u64,
-        request_path: &str,
-        streaming: bool,
-    ) -> Option<ResponseObserver> {
-        let kind = ResponseKind::for_path(request_path)?;
-        Some(ResponseObserver {
-            bus: self.clone(),
-            store,
-            host_id,
-            epoch,
-            kind,
-            streaming,
-            disabled: false,
-            buffer: Vec::new(),
-            data_lines: Vec::new(),
-            sse_data_len: 0,
-            high_water: UsageTotals::default(),
-            counted_request: false,
-            working_marked: false,
-            fable_marked: false,
-        })
+        store: &Arc<crate::state::StateStore>,
+        delta: &TokenDelta,
+    ) {
+        if delta.fable {
+            self.record_fable(&delta.host_id, delta.epoch);
+        }
+        let activity = self.record(
+            &delta.host_id,
+            delta.epoch,
+            UsageDelta {
+                input: delta.input,
+                output: delta.output,
+                count_request: delta.count_request,
+            },
+            delta.output_activity,
+        );
+        if activity {
+            self.mark_working_if_current(store, &delta.host_id, delta.epoch);
+        }
     }
 
     /// Set the volatile lifecycle state only while the originating response epoch remains active.
@@ -597,6 +618,82 @@ struct UsageDelta {
     count_request: bool,
 }
 
+// --- the observer → bus boundary -------------------------------------------------------
+
+/// One accounting increment for a clone, as emitted by a [`ResponseObserver`]. Additive by
+/// construction (the observer already reduced provider high-water totals to deltas), which is
+/// what lets the remote sink coalesce a burst of stream events into a single POST and lets a
+/// retried POST be applied without special-casing.
+///
+/// Carries `epoch` — the clone's token lifecycle generation, captured before the upstream
+/// request — so a delta produced by a response that started before an archive/unarchive is
+/// rejected on arrival, exactly as an in-process stale observer was.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenDelta {
+    pub host_id: String,
+    pub epoch: u64,
+    #[serde(default)]
+    pub input: u64,
+    #[serde(default)]
+    pub output: u64,
+    /// Count this as one completed request (set on the first usage object of a response).
+    #[serde(default)]
+    pub count_request: bool,
+    /// A recognized output delta proving the stream is alive before any usage arrives.
+    #[serde(default)]
+    pub output_activity: bool,
+    /// This response was served by the Fable model (stamps the sidebar's recency badge).
+    #[serde(default)]
+    pub fable: bool,
+}
+
+impl TokenDelta {
+    fn for_clone(host_id: &str, epoch: u64) -> Self {
+        Self { host_id: host_id.to_string(), epoch, ..Default::default() }
+    }
+
+    /// Fold `other` into `self`. Only valid for deltas of the same `(host_id, epoch)` — the
+    /// coalescer keys its map on exactly that pair.
+    pub fn merge(&mut self, other: &TokenDelta) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.count_request |= other.count_request;
+        self.output_activity |= other.output_activity;
+        self.fable |= other.fable;
+    }
+}
+
+/// Where a [`ResponseObserver`]'s increments go. In the control-server that is the local
+/// [`TokenBus`] ([`LocalSink`]); in the group-proxy container it is a buffered HTTP forwarder
+/// back to the control-server (`groupproxy::RemoteSink`).
+pub trait UsageSink: Send + Sync {
+    fn submit(&self, delta: TokenDelta);
+}
+
+/// Every ACTIVE clone's current token-lifecycle epoch, read straight from
+/// `<data_dir>/clone-tokens.json`. This is how the epoch guard crosses the process boundary:
+/// the group-proxy container has no [`TokenBus`], so instead of an RPC per request it reads the
+/// same file the control-server persists (poll cadence in [`crate::groupproxy`]) and stamps each
+/// delta with the epoch it saw. The control-server re-validates on arrival, so a stale read here
+/// costs at most a dropped delta — never a misattributed one.
+///
+/// Archived clones and clones with no usage record are omitted, which is exactly
+/// [`TokenBus::capture_epoch`]'s `None` — the proxy then attaches no observer at all.
+pub fn read_lifecycle_epochs(data_dir: &str) -> HashMap<String, u64> {
+    let Ok(bytes) = std::fs::read(TokenBus::state_path(data_dir)) else {
+        return HashMap::new();
+    };
+    let Ok(file) = serde_json::from_slice::<TokenFile>(&bytes) else {
+        return HashMap::new();
+    };
+    file.lifecycle
+        .iter()
+        .filter(|(id, lifecycle)| lifecycle.active && file.records.contains_key(*id))
+        .map(|(id, lifecycle)| (id.clone(), lifecycle.epoch))
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 enum ResponseKind {
     Anthropic,
@@ -646,9 +743,13 @@ impl ResponseKind {
 
 /// Passive, bounded response observer. `feed` is deliberately synchronous and swallow-only so
 /// malformed accounting data can never influence what the proxy delivers to the clone.
+///
+/// Sink-agnostic since the process split: it emits [`TokenDelta`]s into a [`UsageSink`], which
+/// is the local [`TokenBus`] in the control-server and a buffered HTTP forwarder in the
+/// group-proxy container. All the parsing, high-water, and per-response latching below is
+/// identical in both.
 pub struct ResponseObserver {
-    bus: Arc<TokenBus>,
-    store: Arc<crate::state::StateStore>,
+    sink: Arc<dyn UsageSink>,
     host_id: String,
     epoch: u64,
     kind: ResponseKind,
@@ -659,13 +760,39 @@ pub struct ResponseObserver {
     sse_data_len: usize,
     high_water: UsageTotals,
     counted_request: bool,
-    working_marked: bool,
     /// Set once this response has been attributed to Fable, so a long stream stamps the clock
     /// a single time rather than on every event carrying the model id.
     fable_marked: bool,
 }
 
 impl ResponseObserver {
+    /// Build an observer for a response, or `None` when the request path isn't one whose
+    /// bodies carry usage (`/v1/messages`, `/v1/chat/completions`, …; token-count preflights
+    /// are deliberately excluded). Shared by both entrypoints.
+    pub fn new(
+        sink: Arc<dyn UsageSink>,
+        host_id: String,
+        epoch: u64,
+        request_path: &str,
+        streaming: bool,
+    ) -> Option<Self> {
+        let kind = ResponseKind::for_path(request_path)?;
+        Some(Self {
+            sink,
+            host_id,
+            epoch,
+            kind,
+            streaming,
+            disabled: false,
+            buffer: Vec::new(),
+            data_lines: Vec::new(),
+            sse_data_len: 0,
+            high_water: UsageTotals::default(),
+            counted_request: false,
+            fable_marked: false,
+        })
+    }
+
     pub fn feed(&mut self, chunk: &[u8]) {
         if self.disabled {
             return;
@@ -764,13 +891,10 @@ impl ResponseObserver {
         };
         self.note_model(&value);
         self.account_usage(&value);
-        if !self.disabled
-            && recognized_output_delta(&value)
-            && self
-                .bus
-                .record(&self.host_id, self.epoch, UsageDelta::default(), true)
-        {
-            self.mark_working_once();
+        if !self.disabled && recognized_output_delta(&value) {
+            let mut delta = TokenDelta::for_clone(&self.host_id, self.epoch);
+            delta.output_activity = true;
+            self.sink.submit(delta);
         }
     }
 
@@ -784,18 +908,11 @@ impl ResponseObserver {
         self.high_water.output = self.high_water.output.max(usage.output);
         let count_request = !self.counted_request;
         self.counted_request = true;
-        if self.bus.record(
-            &self.host_id,
-            self.epoch,
-            UsageDelta {
-                input,
-                output,
-                count_request,
-            },
-            false,
-        ) {
-            self.mark_working_once();
-        }
+        let mut delta = TokenDelta::for_clone(&self.host_id, self.epoch);
+        delta.input = input;
+        delta.output = output;
+        delta.count_request = count_request;
+        self.sink.submit(delta);
     }
 
     /// Stamp Fable activity the first time this response reveals the Fable model. The model id
@@ -806,23 +923,9 @@ impl ResponseObserver {
             return;
         }
         self.fable_marked = true;
-        self.bus.record_fable(&self.host_id, self.epoch);
-    }
-
-    fn mark_working_once(&mut self) {
-        if self.working_marked {
-            return;
-        }
-        self.working_marked = true;
-        let bus = self.bus.clone();
-        let store = self.store.clone();
-        let host_id = self.host_id.clone();
-        let epoch = self.epoch;
-        // State persistence is intentionally detached from the transparent proxy stream. Token
-        // bytes reach the clone without waiting for a `state.json` write.
-        tokio::spawn(async move {
-            bus.mark_working_if_current(&store, &host_id, epoch);
-        });
+        let mut delta = TokenDelta::for_clone(&self.host_id, self.epoch);
+        delta.fable = true;
+        self.sink.submit(delta);
     }
 }
 
@@ -1120,34 +1223,84 @@ mod tests {
         )));
     }
 
+    /// A sink that just records everything submitted, so observer behavior can be asserted
+    /// without a TokenBus/StateStore behind it.
+    #[derive(Default)]
+    struct CapturingSink(Mutex<Vec<TokenDelta>>);
+
+    impl UsageSink for CapturingSink {
+        fn submit(&self, delta: TokenDelta) {
+            self.0.lock().unwrap().push(delta);
+        }
+    }
+
     #[test]
     fn high_water_usage_never_double_counts() {
-        let root = std::env::temp_dir().join("rmng-token-test");
-        let mut observer = ResponseObserver {
-            bus: Arc::new(TokenBus::load(&root.to_string_lossy())),
-            store: Arc::new(
-                crate::state::StateStore::load(root.join("state.json"))
-                    .expect("test state store"),
-            ),
-            host_id: "missing".into(),
-            epoch: 1,
-            kind: ResponseKind::Anthropic,
-            streaming: true,
-            disabled: false,
-            buffer: Vec::new(),
-            data_lines: Vec::new(),
-            sse_data_len: 0,
-            high_water: UsageTotals::default(),
-            counted_request: false,
-            working_marked: false,
-            fable_marked: false,
-        };
+        let sink = Arc::new(CapturingSink::default());
+        let mut observer = ResponseObserver::new(
+            sink.clone(),
+            "missing".into(),
+            1,
+            "/v1/messages",
+            true,
+        )
+        .expect("/v1/messages is an accountable route");
         observer.account_usage(&parse(r#"{"usage":{"input_tokens":9,"output_tokens":2}}"#));
         observer.account_usage(&parse(r#"{"usage":{"input_tokens":9,"output_tokens":5}}"#));
         assert_eq!(
             (observer.high_water.input, observer.high_water.output),
             (9, 5)
         );
+        // The emitted deltas are the *increments*, not the provider's cumulative totals: the
+        // second usage object contributes only the 3 new output tokens.
+        let deltas = sink.0.lock().unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!((deltas[0].input, deltas[0].output), (9, 2));
+        assert_eq!((deltas[1].input, deltas[1].output), (0, 3));
+        assert!(deltas[0].count_request, "the first usage object counts the request");
+        assert!(!deltas[1].count_request, "…and only the first");
+    }
+
+    /// Deltas are additive, so a coalescing sink can fold a burst into one payload without
+    /// changing the totals the control-server applies.
+    #[test]
+    fn token_deltas_merge_additively() {
+        let mut a = TokenDelta { host_id: "h".into(), epoch: 3, input: 5, output: 1, ..Default::default() };
+        a.merge(&TokenDelta {
+            host_id: "h".into(),
+            epoch: 3,
+            input: 2,
+            output: 4,
+            count_request: true,
+            output_activity: true,
+            fable: true,
+        });
+        assert_eq!((a.input, a.output), (7, 5));
+        assert!(a.count_request && a.output_activity && a.fable, "flags are sticky under merge");
+        assert_eq!((a.host_id.as_str(), a.epoch), ("h", 3));
+    }
+
+    /// The epoch guard crossing the process boundary: the group-proxy reads active lifecycle
+    /// epochs straight out of `clone-tokens.json`. Archived clones must be absent (an absent
+    /// entry is what makes the proxy attach no observer at all).
+    #[test]
+    fn lifecycle_epochs_read_back_active_clones_only() {
+        let dir = std::env::temp_dir().join(format!("rmng-token-epochs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_dir = dir.to_string_lossy().into_owned();
+
+        let bus = Arc::new(TokenBus::load(&data_dir));
+        bus.register_clone("live");
+        bus.register_clone("gone");
+        bus.set_archived("gone", true);
+        bus.persist_if_dirty();
+
+        let epochs = read_lifecycle_epochs(&data_dir);
+        assert_eq!(epochs.get("live"), bus.capture_epoch("live").as_ref());
+        assert!(!epochs.contains_key("gone"), "archived clones carry no usable epoch");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

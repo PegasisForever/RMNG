@@ -24,6 +24,19 @@ const getUpdateStatus = () =>
     error: null,
   }));
 
+// The group-proxy sidecar sitting on an older image than the control-server — the normal
+// state right after a control-server update, since updating deliberately leaves the proxy
+// running so agent turns aren't interrupted.
+const getGroupProxyStatus = () =>
+  fn(async () => ({
+    container: "rmng-cliproxy",
+    running: true,
+    image: "9f8e7d6c5b4a",
+    revision: "0f0e0d0",
+    behind: true,
+    detail: "running an older image than the control-server — restart it when clones are idle",
+  }));
+
 // A self-update op mid-flight, so the inline progress bar under the Update button renders.
 const updateOp: Operation = {
   id: "op_update_1",
@@ -53,6 +66,15 @@ const meta = {
     // No op in flight in the default story; `UpdateInProgress` supplies one.
     operations: [],
     restartServer: fn(async () => ({ ok: true })),
+    getGroupProxyStatus: getGroupProxyStatus(),
+    restartGroupProxy: fn(async () => ({
+      container: "rmng-cliproxy",
+      running: true,
+      image: "1a2b3c4d5e6f",
+      revision: "a1b2c3d",
+      behind: false,
+      detail: "running the current image",
+    })),
     images,
     imagesLoading: false,
     pullBusy: false,
