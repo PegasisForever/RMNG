@@ -49,9 +49,9 @@ test("a pruned FAILED op stays failed rather than reading as done", () => {
 // --- preset resolution (mirrors the server, per tab) ---------------------------------
 
 const presets: PresetRedacted[] = [
-  { name: "work", labels: ["WE", "DEV"], linearKeySet: true, vars: [], agentPlaybook: "", globalPrompt: "" },
-  { name: "side", labels: ["AW"], linearKeySet: false, vars: [], agentPlaybook: "", globalPrompt: "" },
-  { name: "bare", labels: [], linearKeySet: false, vars: [], agentPlaybook: "", globalPrompt: "" },
+  { name: "work", labels: ["WE", "DEV"], linearKeySet: true, claudeAccount: "group:pooled", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "" },
+  { name: "side", labels: ["AW"], linearKeySet: false, claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "" },
+  { name: "bare", labels: [], linearKeySet: false, claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "" },
 ];
 
 test("the no-ticket tab uses the hand-picked preset", () => {

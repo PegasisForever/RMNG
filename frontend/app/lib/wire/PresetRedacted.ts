@@ -5,4 +5,9 @@ import type { EnvVar } from "./EnvVar";
  * A preset as shown to the browser: everything but the Linear key, which is
  * replaced by a "is set" flag (write-only secret).
  */
-export type PresetRedacted = { name: string, labels: Array<string>, linearKeySet: boolean, vars: Array<EnvVar>, agentPlaybook: string, globalPrompt: string, };
+export type PresetRedacted = { name: string, labels: Array<string>, linearKeySet: boolean, 
+/**
+ * Default account selections ([`Preset::claude_account`] / [`Preset::codex_account`]) —
+ * not secrets, shown verbatim.
+ */
+claudeAccount: string, codexAccount: string, vars: Array<EnvVar>, agentPlaybook: string, globalPrompt: string, };

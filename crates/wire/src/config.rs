@@ -123,6 +123,19 @@ pub struct Preset {
     /// Linear personal API key (**secret**; injected into clones as `LINEAR_API_KEY`).
     #[serde(default)]
     pub linear_key: String,
+    /// Default Claude account for clones of this preset — an account *selection* in the usual
+    /// form: an email, `auto`, `none`, or `group:<pool>`. Deliberately the same string every
+    /// other account field takes, so a preset can pin a specific account, point at a pool, or
+    /// opt out of a token entirely, with no preset-only concept to learn.
+    ///
+    /// Empty = "no opinion", which is NOT the same as `auto`: it lets the resolution chain fall
+    /// through to the next step (see `web::effective_accounts_preset`), whereas an explicit
+    /// `auto` is a real choice that stops the chain.
+    #[serde(default)]
+    pub claude_account: String,
+    /// Default Codex account, same forms. Independent of `claude_account`.
+    #[serde(default)]
+    pub codex_account: String,
     #[serde(default)]
     pub vars: Vec<EnvVar>,
     /// Optional per-preset text appended (after `"\n\n"`) to the global agent playbook for
@@ -143,6 +156,8 @@ impl Preset {
             name: self.name.clone(),
             labels: self.labels.clone(),
             linear_key_set: !self.linear_key.is_empty(),
+            claude_account: self.claude_account.clone(),
+            codex_account: self.codex_account.clone(),
             vars: self.vars.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
@@ -159,6 +174,10 @@ pub struct PresetRedacted {
     pub name: String,
     pub labels: Vec<String>,
     pub linear_key_set: bool,
+    /// Default account selections ([`Preset::claude_account`] / [`Preset::codex_account`]) —
+    /// not secrets, shown verbatim.
+    pub claude_account: String,
+    pub codex_account: String,
     pub vars: Vec<EnvVar>,
     pub agent_playbook: String,
     pub global_prompt: String,
@@ -790,6 +809,8 @@ mod tests {
                     name: "med".into(),
                     labels: vec!["Backend".into()],
                     linear_key: "lin_api_secret".into(),
+                    claude_account: "group:pooled".into(),
+                    codex_account: String::new(),
                     vars: vec![EnvVar {
                         key: "A".into(),
                         value: "1".into(),
@@ -812,6 +833,9 @@ mod tests {
         assert!(r.presets[0].linear_key_set && r.presets[0].name == "med");
         assert_eq!(r.presets[0].labels, vec!["Backend"]); // labels/vars pass through
         assert_eq!(r.presets[0].vars.len(), 1);
+        // Account defaults are not secrets — they pass through the redaction verbatim.
+        assert_eq!(r.presets[0].claude_account, "group:pooled");
+        assert_eq!(r.presets[0].codex_account, "");
         assert!(!r.presets[1].linear_key_set);
         // Non-secret fields pass through verbatim; the Docker backend has no secret.
         assert_eq!(r.clone_socket, "/srv/rmng-sock/clones.sock");

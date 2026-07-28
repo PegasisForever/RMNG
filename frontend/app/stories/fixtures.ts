@@ -316,6 +316,9 @@ export const appConfig: AppConfigRedacted = {
       name: "webapp",
       labels: ["frontend", "webapp"],
       linearKeySet: true,
+      // A preset that defaults its clones to a pool; Codex left with no default.
+      claudeAccount: "group:pooled",
+      codexAccount: "",
       vars: [{ key: "NODE_ENV", value: "development" }],
       agentPlaybook: "",
       globalPrompt: "",

@@ -19,6 +19,7 @@ export function AccountGroupSelect({
   value,
   onChange,
   className,
+  blankLabel,
 }: {
   groups: CloneGroup[];
   /** Assignable accounts (imported Claude accounts). */
@@ -26,9 +27,15 @@ export function AccountGroupSelect({
   value: string;
   onChange: (value: string) => void;
   className?: string;
+  /** When set, adds a leading empty option with this label — for callers where "no value" is a
+   *  meaningful state distinct from `auto`. A preset's default is the case: blank means "no
+   *  opinion, let the clone decide", whereas `auto` is a real choice a sub clone would inherit.
+   *  Omitted ⇒ no empty option, so the control always holds a concrete selection. */
+  blankLabel?: string;
 }) {
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)} className={className}>
+      {blankLabel ? <option value="">{blankLabel}</option> : null}
       <option value="auto">Auto (all accounts)</option>
       <option value="none">None (no token)</option>
       {groups.length > 0 ? (

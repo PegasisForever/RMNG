@@ -70,6 +70,9 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                     name: name.to_string(),
                     labels: Vec::new(),
                     linear_key: String::new(),
+                    // Blank = no opinion; a legacy env-only preset never had an account default.
+                    claude_account: String::new(),
+                    codex_account: String::new(),
                     vars,
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
@@ -903,10 +906,22 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // Default account selections. Unlike `linearKey` a blank does NOT keep the stored value:
+        // blank is a meaningful state here ("no opinion — fall through to the next resolution
+        // step"), so the editor must be able to clear one back to it.
+        let account = |key: &str| {
+            r.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
         out.push(wire::Preset {
             name,
             labels,
             linear_key,
+            claude_account: account("claudeAccount"),
+            codex_account: account("codexAccount"),
             vars,
             agent_playbook,
             global_prompt,

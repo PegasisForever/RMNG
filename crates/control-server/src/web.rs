@@ -674,19 +674,6 @@ fn effective_accounts_preset<'a>(
     explicit: Option<&'a wire::Preset>,
     presets: &'a [wire::Preset],
 ) -> (Option<String>, Option<String>, Option<&'a wire::Preset>) {
-    // A clone's *selection* is what's inherited, not the resolved account: the parent may be on
-    // `auto` and have landed on a specific email, and a sub clone asking for `auto` should get
-    // its own pick rather than being pinned to whatever its parent happens to be running.
-    let claude = if claude_specified {
-        claude_account
-    } else {
-        parent.and_then(|h| h.claude_selection.clone()).filter(|s| !s.is_empty())
-    };
-    let codex = if codex_specified {
-        codex_account
-    } else {
-        parent.and_then(|h| h.codex_selection.clone()).filter(|s| !s.is_empty())
-    };
     let preset = if preset_specified {
         explicit
     } else {
@@ -694,7 +681,64 @@ fn effective_accounts_preset<'a>(
             .and_then(|h| h.preset_name.as_deref())
             .and_then(|name| presets.iter().find(|p| p.name == name))
     };
+    // Per provider, strongest first:
+    //   1. an explicit selection on the request,
+    //   2. the parent clone's selection (sub clone),
+    //   3. the effective preset's default,
+    //   4. nothing — which the account layer reads as `auto`.
+    //
+    // What is inherited at step 2 is the *selection*, not the resolved account: the parent may be
+    // on `auto` and have landed on a specific email, and a sub clone asking for `auto` should get
+    // its own pick rather than being pinned to whatever its parent happens to be running.
+    //
+    // A BLANK preset default is skipped rather than treated as a choice, which is what lets the
+    // chain reach step 4 — an explicit `none` on a preset is a real decision (boot tokenless) and
+    // must not be confused with having no opinion.
+    let claude = if claude_specified {
+        claude_account
+    } else {
+        parent
+            .and_then(|h| h.claude_selection.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                preset
+                    .map(|p| p.claude_account.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+    };
+    let codex = if codex_specified {
+        codex_account
+    } else {
+        parent
+            .and_then(|h| h.codex_selection.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                preset
+                    .map(|p| p.codex_account.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+    };
     (claude, codex, preset)
+}
+
+/// One provider's account selection for the plain / ticket create modes, which have no parent to
+/// inherit from: an explicit request value, else the resolved preset's default, else `None`
+/// (read as `auto` downstream).
+///
+/// Split out so all three create modes agree on the preset step — hostname mode reaches it
+/// through [`effective_accounts_preset`]'s longer chain, and these two would otherwise silently
+/// ignore a preset's default.
+fn account_or_preset_default(
+    requested: Option<&String>,
+    preset: Option<&wire::Preset>,
+    pick: impl Fn(&wire::Preset) -> &str,
+) -> Option<String> {
+    if let Some(a) = requested {
+        return Some(a.clone());
+    }
+    preset
+        .map(|p| pick(p).trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// `POST /api/clone` — start a clone from a source image. Body is one of:
@@ -855,8 +899,16 @@ async fn clone(
                 display_name: Some(display),
                 ..Default::default()
             }),
-            claude_account: claude_account.clone(),
-            codex_account: codex_account.clone(),
+            claude_account: account_or_preset_default(
+                claude_account.as_ref(),
+                explicit,
+                |p| &p.claude_account,
+            ),
+            codex_account: account_or_preset_default(
+                codex_account.as_ref(),
+                explicit,
+                |p| &p.codex_account,
+            ),
             first_message: Some(message).filter(|m| !m.is_empty()),
             agent_instructions,
             claude_instructions,
@@ -893,10 +945,14 @@ async fn clone(
         source_image: image,
         new_hostname: hostname,
         linear: Some(meta),
-        // Ticket mode's preset may have been label-auto-selected, so its default group is
+        // Ticket mode's preset may have been label-auto-selected, so its account defaults are
         // only knowable here, after `resolve_issue`.
-        claude_account: claude_account.clone(),
-        codex_account: codex_account.clone(),
+        claude_account: account_or_preset_default(claude_account.as_ref(), Some(&preset), |p| {
+            &p.claude_account
+        }),
+        codex_account: account_or_preset_default(codex_account.as_ref(), Some(&preset), |p| {
+            &p.codex_account
+        }),
         first_message: None,
         agent_instructions,
         claude_instructions,
@@ -2247,6 +2303,106 @@ mod tests {
         }
         // `parent` + `topLevel` together is an error.
         assert!(resolve_parent(&app, &json!({ "parent": "p", "topLevel": true }), &empty).is_err());
+    }
+
+    /// The preset default is step 3 of the chain — weaker than an explicit request and weaker
+    /// than a parent's inherited selection, stronger than nothing.
+    #[test]
+    fn preset_account_default_fills_the_gap_but_never_outranks() {
+        let presets = vec![wire::Preset {
+            name: "backend".into(),
+            claude_account: "group:pooled".into(),
+            codex_account: "gpt@team.com".into(),
+            ..Default::default()
+        }];
+        let p = Some(&presets[0]);
+
+        // No request, no parent → the preset decides, per provider.
+        let (c, x, _) = effective_accounts_preset(None, false, None, false, None, true, p, &presets);
+        assert_eq!(c.as_deref(), Some("group:pooled"));
+        assert_eq!(x.as_deref(), Some("gpt@team.com"));
+
+        // An explicit request outranks it — including an explicit `none`, which is a real
+        // choice (boot tokenless) and must not fall through to the preset.
+        let (c, x, _) = effective_accounts_preset(
+            None,
+            true,
+            Some("me@x.com".into()),
+            true,
+            None,
+            true,
+            p,
+            &presets,
+        );
+        assert_eq!(c.as_deref(), Some("me@x.com"));
+        assert_eq!(x, None, "an explicit clear must not be back-filled by the preset");
+
+        // A parent's selection outranks it too (sub clones follow their parent, not the preset).
+        let parent = wire::RmngClone {
+            id: "p".into(),
+            claude_selection: Some("auto".into()),
+            ..Default::default()
+        };
+        let (c, x, _) =
+            effective_accounts_preset(Some(&parent), false, None, false, None, true, p, &presets);
+        assert_eq!(c.as_deref(), Some("auto"), "the parent wins over the preset");
+        // ...but only for the provider the parent actually had. Codex still falls to the preset.
+        assert_eq!(x.as_deref(), Some("gpt@team.com"));
+    }
+
+    /// A BLANK preset default means "no opinion" and must fall through, NOT be treated as an
+    /// empty selection. Confusing the two would silently bind every clone of an unconfigured
+    /// preset to an empty string instead of letting the account layer pick.
+    #[test]
+    fn a_blank_preset_default_is_no_opinion() {
+        let presets = vec![wire::Preset { name: "bare".into(), ..Default::default() }];
+        let (c, x, _) = effective_accounts_preset(
+            None,
+            false,
+            None,
+            false,
+            None,
+            true,
+            Some(&presets[0]),
+            &presets,
+        );
+        assert_eq!(c, None);
+        assert_eq!(x, None);
+        // Whitespace is not an opinion either.
+        let ws = vec![wire::Preset {
+            name: "ws".into(),
+            claude_account: "   ".into(),
+            ..Default::default()
+        }];
+        let (c, _, _) =
+            effective_accounts_preset(None, false, None, false, None, true, Some(&ws[0]), &ws);
+        assert_eq!(c, None);
+    }
+
+    /// The plain / ticket create modes have no parent, so they use the shorter helper — which
+    /// must agree with the chain above on the two rules that matter.
+    #[test]
+    fn account_or_preset_default_matches_the_chain() {
+        let preset = wire::Preset {
+            name: "p".into(),
+            claude_account: "group:pooled".into(),
+            ..Default::default()
+        };
+        let req = "me@x.com".to_string();
+        // Request wins.
+        assert_eq!(
+            account_or_preset_default(Some(&req), Some(&preset), |p| &p.claude_account).as_deref(),
+            Some("me@x.com")
+        );
+        // Absent request → the preset's default.
+        assert_eq!(
+            account_or_preset_default(None, Some(&preset), |p| &p.claude_account).as_deref(),
+            Some("group:pooled")
+        );
+        // Blank preset default, and no preset at all, both fall through.
+        let bare = wire::Preset { name: "bare".into(), ..Default::default() };
+        assert_eq!(account_or_preset_default(None, Some(&bare), |p| &p.claude_account), None);
+        assert_eq!(account_or_preset_default(None, None, |p| &p.claude_account), None);
     }
 
     #[test]

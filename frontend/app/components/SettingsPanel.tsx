@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import { OperationProgress } from "~/components/OperationProgress";
 import { useModalEscape } from "~/lib/useModalEscape";
@@ -276,6 +277,8 @@ export function SettingsPanel({
       labels: string;
       linearKey: string;
       keySet: boolean;
+      claudeAccount: string;
+      codexAccount: string;
       vars: { key: string; value: string }[];
       agentPlaybook: string;
       globalPrompt: string;
@@ -365,6 +368,8 @@ export function SettingsPanel({
         labels: p.labels.join(", "),
         linearKey: "",
         keySet: p.linearKeySet,
+        claudeAccount: p.claudeAccount,
+        codexAccount: p.codexAccount,
         vars: p.vars.map((v) => ({ ...v })),
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
@@ -390,12 +395,30 @@ export function SettingsPanel({
   const addPreset = () =>
     setPresets((ps) => [
       ...ps,
-      { name: "", labels: "", linearKey: "", keySet: false, vars: [{ key: "", value: "" }], agentPlaybook: "", globalPrompt: "" },
+      {
+        name: "",
+        labels: "",
+        linearKey: "",
+        keySet: false,
+        // Blank = no default; a new preset takes no opinion until the operator gives it one.
+        claudeAccount: "",
+        codexAccount: "",
+        vars: [{ key: "", value: "" }],
+        agentPlaybook: "",
+        globalPrompt: "",
+      },
     ]);
   const rmPreset = (i: number) => setPresets((ps) => ps.filter((_, j) => j !== i));
   const setPresetField = (
     i: number,
-    field: "name" | "labels" | "linearKey" | "agentPlaybook" | "globalPrompt",
+    field:
+      | "name"
+      | "labels"
+      | "linearKey"
+      | "claudeAccount"
+      | "codexAccount"
+      | "agentPlaybook"
+      | "globalPrompt",
     v: string,
   ) =>
     setPresets((ps) => ps.map((p, j) => (j === i ? { ...p, [field]: v } : p)));
@@ -513,6 +536,10 @@ export function SettingsPanel({
             name: p.name.trim(),
             labels: p.labels.split(",").map((s) => s.trim()).filter(Boolean),
             linearKey: p.linearKey, // "" = keep the stored key
+            // Unlike linearKey a blank here is MEANINGFUL ("no default — let the clone decide"),
+            // so it is sent as-is rather than treated as "keep stored".
+            claudeAccount: p.claudeAccount,
+            codexAccount: p.codexAccount,
             vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
             agentPlaybook: p.agentPlaybook,
             globalPrompt: p.globalPrompt,
@@ -701,6 +728,27 @@ export function SettingsPanel({
                         set={p.keySet}
                         value={p.linearKey}
                         onChange={(v) => setPresetField(i, "linearKey", v)}
+                      />
+                    </div>
+                    {/* Default account per provider. Blank is "no default" — a clone of this
+                        preset then falls through to `auto`, which is NOT the same as pinning
+                        it to auto here (an explicit choice a sub clone would inherit). */}
+                    <div className="mt-1.5 flex gap-2">
+                      <AccountGroupSelect
+                        groups={claudeGroups}
+                        accounts={accounts.filter((a) => (a.provider ?? "claude") === "claude")}
+                        value={p.claudeAccount}
+                        blankLabel="Claude: no default"
+                        onChange={(v) => setPresetField(i, "claudeAccount", v)}
+                        className="w-1/2 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
+                      />
+                      <AccountGroupSelect
+                        groups={codexGroups}
+                        accounts={accounts.filter((a) => a.provider === "codex")}
+                        value={p.codexAccount}
+                        blankLabel="Codex: no default"
+                        onChange={(v) => setPresetField(i, "codexAccount", v)}
+                        className="w-1/2 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
                       />
                     </div>
                     <div className="mt-2 space-y-1.5">
