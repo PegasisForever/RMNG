@@ -76,6 +76,26 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
             .map(|h| {
                 let mut o = serde_json::to_value(h).unwrap_or_else(|_| serde_json::json!({}));
                 o["stats"] = serde_json::to_value(stats.get(&h.id)).unwrap_or(Value::Null);
+                // A derived per-provider view of the six flat account fields. They ARE all
+                // present on the object already (serde), but answering "what account is this
+                // clone on?" from them takes three-way logic per provider — `email` is null
+                // while a selection is still `auto` and unresolved, and `pool` is null unless
+                // the selection names one. Collapsing that here means a consumer reads one
+                // place instead of reimplementing the precedence, and `selection` stays
+                // available for the distinction that actually matters: `auto` (may be swapped
+                // under you) vs a pinned email vs `none` (deliberately tokenless).
+                o["accounts"] = serde_json::json!({
+                    "claude": {
+                        "selection": h.claude_selection,
+                        "email": h.claude_account_email,
+                        "pool": h.claude_group,
+                    },
+                    "codex": {
+                        "selection": h.codex_selection,
+                        "email": h.codex_account_email,
+                        "pool": h.codex_group,
+                    },
+                });
                 o
             })
             .collect();

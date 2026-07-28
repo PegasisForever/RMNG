@@ -51,7 +51,7 @@ $RMNG_CONTROL_URL` hint.
 
 | Command (with `--json`) | Emits |
 |---|---|
-| `clone ls` | `{ selected, clones: [Clone + {stats}], operations }` (CLI shape — includes the metrics the table shows) |
+| `clone ls` | `{ selected, clones: [Clone + {stats, accounts}], operations }` (CLI shape — includes the metrics the table shows) |
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
 | `clone create`, `clone create-from-ticket`, `clone create-with-new-ticket`, `clone create-plain`, `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
@@ -83,8 +83,26 @@ address when available), `IMAGE` (source reference), `PRESET`, `CLAUDE` and `COD
 each provider is running — the resolved email, falling back to the selection when none is
 assigned yet), live `CPU` and `RAM`, and lifecycle `STATUS`. Sub clones are indented under their
 parent. CPU/RAM are volatile snapshots for sampled active managed clones.
-`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats}],
+`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats, accounts}],
 operations }` — so the metrics the table shows are available to a machine reader too.
+
+Each clone also carries a derived `accounts` object, one entry per provider:
+
+```json
+"accounts": {
+  "claude": { "selection": "auto", "email": "me@example.com", "pool": null },
+  "codex":  { "selection": "group:gpt", "email": null, "pool": "gpt" }
+}
+```
+
+`selection` is the operator's intent verbatim (`auto` / `none` / `group:<pool>` / an email),
+`email` is the account actually installed, and `pool` is set only when the selection names one.
+All three can be null: a clone that has never been assigned has no selection, and `email` stays
+null while an `auto` selection is still unresolved. **Read `selection`, not `email`, to decide
+whether a clone may be swapped out from under you** — an `auto` clone with a resolved email can
+still move at the next rotation, whereas a pinned one cannot. The same six fields are also
+present flat on the clone object (`claudeSelection`, `claudeAccountEmail`, `claudeGroup`, and
+the Codex twins); `accounts` is a convenience view over them, not extra data.
 
 ### Creating clones — four verbs
 
@@ -178,6 +196,12 @@ Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears i
 ### `rmng account ls [--provider claude|codex]`
 Read-only listing of imported accounts and usage windows: `EMAIL PROVIDER ASSIGNABLE 5H
 5H-RESETS 7D FABLE ERROR`. Both providers by default; `--provider` filters to one.
+
+`--json` emits a flat `ClaudeUsage[]` (both providers in one array, tagged by `provider`; a row
+written before that field existed has none, which means Claude). Each row's `id` is
+`<email>|<orgUuid>` for Claude and `codex:<accountId>` for Codex — **treat it as opaque**: it is
+scoped to the server's account store, so an account re-imported after a delete may not keep its
+previous id. Key off `email` + `provider` if you need a stable identity across imports.
 
 ### `rmng account swap <CLONE> <ACCOUNT> [--codex]`
 Hot-swap a clone's account for one provider (`POST /api/{claude,codex}/swap`). `<ACCOUNT>` is a

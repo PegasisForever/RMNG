@@ -721,6 +721,53 @@ fn effective_accounts_preset<'a>(
     (claude, codex, preset)
 }
 
+/// Repoint any clone bound to a pool that this config save deleted, per provider.
+///
+/// A clone's pool binding is `claude_group` + a `claude_selection` of `group:<name>`. When the
+/// pool is gone, both are meaningless: the rotator skips unknown groups, so the clone is frozen
+/// on its last account forever. `auto` is the honest replacement — the clone keeps working and
+/// rejoins normal rotation across every imported account — and it is what the operator would
+/// get had they never named a pool.
+///
+/// Deliberately NOT a reconciler pass: doing it here means it happens the instant the pool is
+/// deleted, and only for pools that actually disappeared in THIS save. A periodic sweep would
+/// also "heal" a clone whose pool is merely absent because config failed to load.
+fn heal_dangling_pool_bindings(app: &App, old: &wire::AppConfig, merged: &wire::AppConfig) {
+    let gone = |before: &[wire::CloneGroup], after: &[wire::CloneGroup]| -> Vec<String> {
+        before
+            .iter()
+            .filter(|b| !after.iter().any(|a| a.name == b.name))
+            .map(|b| b.name.clone())
+            .collect()
+    };
+    let claude_gone = gone(&old.clone_groups, &merged.clone_groups);
+    let codex_gone = gone(&old.codex_groups, &merged.codex_groups);
+    if claude_gone.is_empty() && codex_gone.is_empty() {
+        return;
+    }
+    let mut healed: Vec<(String, &'static str, String)> = Vec::new();
+    app.store.mutate(|s| {
+        for h in s.hosts.iter_mut() {
+            if let Some(g) = h.claude_group.clone().filter(|g| claude_gone.contains(g)) {
+                h.claude_group = None;
+                h.claude_selection = Some("auto".to_string());
+                healed.push((h.id.clone(), "claude", g));
+            }
+            if let Some(g) = h.codex_group.clone().filter(|g| codex_gone.contains(g)) {
+                h.codex_group = None;
+                h.codex_selection = Some("auto".to_string());
+                healed.push((h.id.clone(), "codex", g));
+            }
+        }
+    });
+    for (clone, provider, pool) in healed {
+        tracing::info!(
+            "clone {clone}: {provider} pool {pool:?} was deleted — repointed at `auto` so it \
+             keeps rotating instead of freezing on its current account"
+        );
+    }
+}
+
 /// One provider's account selection for the plain / ticket create modes, which have no parent to
 /// inherit from: an explicit request value, else the resolved preset's default, else `None`
 /// (read as `auto` downstream).
@@ -1457,6 +1504,12 @@ async fn config_put(
     let merged = config::merge_update(&old, incoming)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     config::save(&merged).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Account pools are replaced wholesale by this endpoint, so an omitted pool is a deletion —
+    // and a clone still naming it would be stranded: `claude::rotate_once` skips a group it
+    // cannot find (`continue`), so that clone freezes on whatever account it last held and is
+    // never rebalanced again, with nothing logged. Repoint those clones at `auto` here, while we
+    // can still see WHICH pools went away.
+    heal_dangling_pool_bindings(&app, &old, &merged);
     let restart_required = config::restart_required(&old, &merged);
     // Keep the DockerCtl's cached subnet in lockstep with the just-saved config BEFORE the
     // lazy `rmng` bridge is materialized (the wizard-finish flip below, and the first clone).
@@ -2329,6 +2382,77 @@ mod tests {
         }
         // `parent` + `topLevel` together is an error.
         assert!(resolve_parent(&app, &json!({ "parent": "p", "topLevel": true }), &empty).is_err());
+    }
+
+    /// Deleting a pool must not strand the clones bound to it.
+    ///
+    /// Pools are replaced wholesale by `PUT /api/config`, so an omitted pool is a deletion.
+    /// `claude::rotate_once` skips a group it cannot find, so a clone left naming a deleted pool
+    /// is never rebalanced again — it freezes on its last account, silently, forever.
+    #[test]
+    fn deleting_a_pool_repoints_its_clones_at_auto() {
+        let app = test_app();
+        let pool = |n: &str| wire::CloneGroup { name: n.into(), accounts: vec![] };
+        let old = wire::AppConfig {
+            clone_groups: vec![pool("keep"), pool("doomed")],
+            codex_groups: vec![pool("gpt")],
+            ..Default::default()
+        };
+        app.store.mutate(|s| {
+            s.hosts = vec![
+                wire::RmngClone {
+                    id: "bound".into(),
+                    claude_group: Some("doomed".into()),
+                    claude_selection: Some("group:doomed".into()),
+                    ..Default::default()
+                },
+                wire::RmngClone {
+                    id: "survivor".into(),
+                    claude_group: Some("keep".into()),
+                    claude_selection: Some("group:keep".into()),
+                    ..Default::default()
+                },
+                wire::RmngClone {
+                    id: "pinned".into(),
+                    claude_selection: Some("me@x.com".into()),
+                    claude_account_email: Some("me@x.com".into()),
+                    ..Default::default()
+                },
+                wire::RmngClone {
+                    id: "codex-bound".into(),
+                    codex_group: Some("gpt".into()),
+                    codex_selection: Some("group:gpt".into()),
+                    ..Default::default()
+                },
+            ];
+        });
+
+        // Drop `doomed` (Claude) and `gpt` (Codex); keep `keep`.
+        let merged = wire::AppConfig {
+            clone_groups: vec![pool("keep")],
+            codex_groups: vec![],
+            ..Default::default()
+        };
+        heal_dangling_pool_bindings(&app, &old, &merged);
+
+        let by_id = |id: &str| app.store.get().hosts.into_iter().find(|h| h.id == id).unwrap();
+        // The stranded clone keeps working, on `auto`, and no longer names a pool that is gone.
+        let bound = by_id("bound");
+        assert_eq!(bound.claude_selection.as_deref(), Some("auto"));
+        assert_eq!(bound.claude_group, None);
+        // A clone on a surviving pool is untouched — healing must be scoped to what was deleted.
+        let survivor = by_id("survivor");
+        assert_eq!(survivor.claude_selection.as_deref(), Some("group:keep"));
+        assert_eq!(survivor.claude_group.as_deref(), Some("keep"));
+        // A pinned clone is not a pool clone; an explicit pin is the operator's choice to keep.
+        let pinned = by_id("pinned");
+        assert_eq!(pinned.claude_selection.as_deref(), Some("me@x.com"));
+        // Providers heal independently.
+        let cx = by_id("codex-bound");
+        assert_eq!(cx.codex_selection.as_deref(), Some("auto"));
+        assert_eq!(cx.codex_group, None);
+        // ...and the Claude side of that same clone was never bound, so it stays unset.
+        assert_eq!(cx.claude_selection, None);
     }
 
     /// A typo'd pool name must be a 400, not a silently tokenless clone.
