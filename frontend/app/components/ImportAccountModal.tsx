@@ -12,6 +12,7 @@ import {
   importCodexAccount,
 } from "~/lib/api";
 import type { Clone } from "~/lib/types";
+import { useModalEscape } from "~/lib/useModalEscape";
 
 const input =
   "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500";
@@ -57,6 +58,16 @@ export function ImportAccountModal({
 
   const canImport = !!info && !importing;
 
+  // Escape closes regardless of focus — a document-level listener since the backdrop click no
+  // longer does (see below), and since nothing here autofocuses: on open the focus is still on
+  // the button that launched this, so a React `onKeyDown` on the panel would never fire.
+  //
+  // Stacking matters here specifically: this dialog can be opened FROM the settings panel,
+  // which is itself Escape-closable. The stack is LIFO, so whichever modal mounted last owns
+  // Escape — this one, since it mounts on top. Its z-60 must stay above the panel's z-50 to
+  // match, or Escape would dismiss the dialog you can't see.
+  useModalEscape(onClose);
+
   function submit() {
     if (!canImport) return;
     setImporting(true);
@@ -71,17 +82,9 @@ export function ImportAccountModal({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
-        }}
-      >
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/30 p-4">
+      {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
+      <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           {provider === "codex" ? "Import Codex account" : "Import Claude account"}
         </h3>

@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { getConfig } from "~/lib/api";
+import { useModalEscape } from "~/lib/useModalEscape";
 import type { ClaudeUsage, Clone } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
@@ -62,18 +63,16 @@ export function ChangeAccountModal({
   // reflects both providers only when both are actually changeable here.
   const showCodex = codexAccounts.length > 0 || codexGroups.length > 0;
 
+  // Escape closes regardless of focus — a document-level listener since the backdrop click no
+  // longer does (see below), and since nothing here autofocuses: on open the focus is still on
+  // the ⋯-menu item that launched this, so a React `onKeyDown` on the panel would never fire.
+  // Stacked so a modal opened on top of this one owns Escape instead of both closing at once.
+  useModalEscape(onClose);
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onClose();
-        }}
-      >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
+      {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
+      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           {showCodex ? "Accounts" : "Claude account"} · <span className="text-emerald-700 dark:text-emerald-400">{clone.displayName ?? clone.id}</span>
         </h3>

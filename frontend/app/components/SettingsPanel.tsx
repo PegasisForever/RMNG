@@ -1,7 +1,25 @@
-import { ChevronDown, ChevronRight, Plus, Trash2, X } from "lucide-react";
+import {
+  closestCenter,
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { ChevronDown, ChevronRight, GripVertical, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
+import { ordered, useAccountOrder } from "~/lib/accountOrder";
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import { OperationProgress } from "~/components/OperationProgress";
 import { useModalEscape } from "~/lib/useModalEscape";
@@ -141,50 +159,118 @@ export interface SettingsPanelProps {
   onImportAccount: () => void;
 }
 
-/** Imported accounts as a removable list. Each row is one email + a trash button; the
- *  delete is confirmed (it removes the stored token) and delegated to `onDelete`. */
-function AccountList({
-  emails,
+/** The drag sensors used by the account lists. `distance: 5` keeps a plain click on the grip
+ *  from starting a drag, and the keyboard sensor makes the reorder reachable without a
+ *  pointer (Space/Enter to grab, arrows to move) — matching the sidebar's clone list. */
+function useReorderSensors() {
+  return useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+}
+
+/** One draggable imported-account row. The `GripVertical` handle is the ONLY element carrying
+ *  the sortable listeners, so the delete button stays clickable. */
+function SortableAccountRow({
+  account,
   onDelete,
 }: {
-  emails: string[];
+  account: ClaudeUsage;
   onDelete: (email: string) => void;
 }) {
-  if (emails.length === 0) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: account.id,
+  });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    // `position: relative` so the raised z-index lifts the dragged row above its siblings.
+    position: "relative",
+    zIndex: isDragging ? 50 : undefined,
+  };
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className={`flex items-center gap-2 rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200 ${
+        isDragging ? "bg-white shadow-md ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600" : ""
+      }`}
+    >
+      <button
+        type="button"
+        {...attributes}
+        {...listeners}
+        aria-label={`reorder ${account.email}`}
+        className="shrink-0 cursor-grab touch-none rounded p-0.5 text-slate-300 hover:text-slate-500 active:cursor-grabbing dark:text-slate-600 dark:hover:text-slate-400"
+      >
+        <GripVertical className="h-3.5 w-3.5" />
+      </button>
+      <span className="min-w-0 flex-1 truncate">{account.email}</span>
+      <button
+        type="button"
+        title="delete account"
+        aria-label={`delete ${account.email}`}
+        onClick={() => {
+          if (
+            window.confirm(
+              `Delete ${account.email}?\n\nThis removes its stored token (re-adding needs a fresh import). Clones running it are reassigned to another account; a clone pinned to it must be reassigned first.`,
+            )
+          ) {
+            onDelete(account.email);
+          }
+        }}
+        className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+    </li>
+  );
+}
+
+/** Imported accounts as a drag-reorderable, removable list. Each row is one email + a grip +
+ *  a trash button; the delete is confirmed (it removes the stored token) and delegated to
+ *  `onDelete`. `accounts` arrives already ordered by the caller's saved order.
+ *
+ *  The order is a purely cosmetic client-side preference (localStorage) — the pool is
+ *  unordered as far as the server is concerned, so it is NEVER sent with the config patch.
+ *  The sidebar's usage panel reads the same store, so a reorder here shows up there live. */
+function AccountList({
+  accounts,
+  onDelete,
+  onReorder,
+}: {
+  accounts: ClaudeUsage[];
+  onDelete: (email: string) => void;
+  onReorder: (orderedIds: string[]) => void;
+}) {
+  const sensors = useReorderSensors();
+  const ids = accounts.map((a) => a.id);
+
+  if (accounts.length === 0) {
     return (
       <p className="text-xs text-slate-400 dark:text-slate-500">
         None imported yet — import one from a clone that's already signed in.
       </p>
     );
   }
+  function onDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIndex = ids.indexOf(String(active.id));
+    const newIndex = ids.indexOf(String(over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+    onReorder(arrayMove(ids, oldIndex, newIndex));
+  }
   return (
-    <ul className="space-y-1.5">
-      {emails.map((email) => (
-        <li
-          key={email}
-          className="flex items-center justify-between rounded border border-slate-200 dark:border-slate-700 px-2.5 py-1.5 text-sm text-slate-700 dark:text-slate-200"
-        >
-          <span className="truncate">{email}</span>
-          <button
-            type="button"
-            title="delete account"
-            aria-label={`delete ${email}`}
-            onClick={() => {
-              if (
-                window.confirm(
-                  `Delete ${email}?\n\nThis removes its stored token (re-adding needs a fresh import). Clones running it are reassigned to another account; a clone pinned to it must be reassigned first.`,
-                )
-              ) {
-                onDelete(email);
-              }
-            }}
-            className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
-        </li>
-      ))}
-    </ul>
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+      <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+        <ul className="space-y-1.5">
+          {accounts.map((a) => (
+            <SortableAccountRow key={a.id} account={a} onDelete={onDelete} />
+          ))}
+        </ul>
+      </SortableContext>
+    </DndContext>
   );
 }
 
@@ -210,8 +296,23 @@ export function SettingsPanel({
   // The account pool each provider's group editor draws from. `claudeAccounts` carries both
   // providers' rows; `provider` was added later, so rows that predate it (absent/null) are
   // Claude — anything else must be tagged explicitly.
-  const accountEmails = accounts.filter((a) => (a.provider ?? "claude") === "claude").map((a) => a.email);
-  const codexAccountEmails = accounts.filter((a) => a.provider === "codex").map((a) => a.email);
+  // Shared cosmetic ordering (drag to reorder). The sidebar's usage panel reads the same
+  // store, so a reorder here reflects there live — persistence + notification happen in the
+  // store. Bucketed per provider because that is the granularity the operator can drag at:
+  // the two lists below are separate, and the two pools are independent.
+  const { acctOrder, setAcctOrder } = useAccountOrder();
+  const claudeAccountRows = ordered(
+    accounts.filter((a) => (a.provider ?? "claude") === "claude"),
+    acctOrder.claude ?? [],
+    (a) => a.id,
+  );
+  const codexAccountRows = ordered(
+    accounts.filter((a) => a.provider === "codex"),
+    acctOrder.codex ?? [],
+    (a) => a.id,
+  );
+  const accountEmails = claudeAccountRows.map((a) => a.email);
+  const codexAccountEmails = codexAccountRows.map((a) => a.email);
   const [cfg, setCfg] = useState<AppConfigRedacted | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -388,7 +489,8 @@ export function SettingsPanel({
 
   // Escape closes. Stacked: the import modal opens ON TOP of this panel (z-60 over z-50),
   // and without the stack one Escape would close both — losing the panel as collateral for
-  // dismissing the dialog above it.
+  // dismissing the dialog above it. The stack is LIFO, so the import modal (mounted later)
+  // owns Escape while it is up; this panel takes it back when the dialog unmounts.
   useModalEscape(onClose);
 
   // Preset editors.
@@ -1019,7 +1121,11 @@ export function SettingsPanel({
               hint="Imported accounts available to clones and groups. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
             >
               <div className="space-y-2">
-                <AccountList emails={accountEmails} onDelete={onDeleteAccount} />
+                <AccountList
+                  accounts={claudeAccountRows}
+                  onDelete={onDeleteAccount}
+                  onReorder={(ids) => setAcctOrder((prev) => ({ ...prev, claude: ids }))}
+                />
                 <button
                   type="button"
                   onClick={onImportAccount}
@@ -1134,7 +1240,11 @@ export function SettingsPanel({
               effect="immediate"
               hint="Imported Codex accounts. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
             >
-              <AccountList emails={codexAccountEmails} onDelete={onDeleteCodexAccount} />
+              <AccountList
+                accounts={codexAccountRows}
+                onDelete={onDeleteCodexAccount}
+                onReorder={(ids) => setAcctOrder((prev) => ({ ...prev, codex: ids }))}
+              />
             </Section>
 
             {/* Codex groups (named account pools) — the Codex twin of the Claude groups above.

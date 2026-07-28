@@ -85,7 +85,14 @@ function AccountTag({
       className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
       title={title}
     >
-      <img src={logo} alt="" className="h-3 w-3 shrink-0 opacity-70" />
+      {/* The ChatGPT mark ships with no `fill`, so it paints black and vanishes on a dark
+          background — invert it there. `claude.svg` carries its own fill and must NOT be
+          inverted, hence keying off the asset rather than putting the class on both tags. */}
+      <img
+        src={logo}
+        alt=""
+        className={`h-3 w-3 shrink-0 opacity-70 ${logo === chatgptLogo ? "dark:invert" : ""}`}
+      />
       {email ? (
         // `min-w-0` (not `max-w-full`) so the email truncates before the mode label, keeping
         // the label visible right beside it rather than being pushed off the row.

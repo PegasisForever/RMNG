@@ -9,6 +9,8 @@ import { useEffect, useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
+import { orderedWithinBuckets, useAccountOrder } from "~/lib/accountOrder";
+import { resetTooltip } from "~/lib/format";
 import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow } from "~/lib/types";
 
 const FIVE_H_MS = 5 * 60 * 60 * 1000;
@@ -61,8 +63,14 @@ function Bar({
   if (!win) return null;
   const pct = Math.min(100, Math.max(0, win.pct));
   const pace = now != null ? pacePct(win.resetsAt, windowMs, now) : null;
+  // Concrete reset time in the viewer's local zone. Gated on the client clock (`now`, null
+  // until the effect runs) for the same reason as the pace marker: the string is rendered in
+  // the BROWSER's time zone, which the prerender has no way to know, so computing it during
+  // the first render would guarantee a hydration mismatch. Do not "simplify" this to
+  // `resetTooltip(win.resetsAt, Date.now())`.
+  const resetTitle = now != null ? resetTooltip(win.resetsAt, now) : null;
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5" title={resetTitle ?? undefined}>
       <span className="w-8 shrink-0 text-[10px] font-medium text-slate-500 dark:text-slate-400">{label}</span>
       <div className="relative h-1.5 flex-1 overflow-hidden rounded-sm bg-slate-200 dark:bg-slate-700">
         <div className={`h-full ${barColor(pct)}`} style={{ width: `${Math.max(1, pct)}%` }} />
@@ -90,7 +98,12 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
         <img
           src={a.provider === "codex" ? chatgptLogo : claudeLogo}
           alt={a.provider === "codex" ? "ChatGPT" : "Claude"}
-          className="h-4 w-4 shrink-0 rounded-[3px] object-contain"
+          // The ChatGPT mark ships with no `fill`, so it paints black and vanishes on a dark
+          // background — invert it there. `claude.svg` carries its own fill, so inverting it
+          // too would only wreck a logo that already reads fine.
+          className={`h-4 w-4 shrink-0 rounded-[3px] object-contain ${
+            a.provider === "codex" ? "dark:invert" : ""
+          }`}
         />
         <span className="min-w-0 flex-1 truncate text-[11px] text-slate-700 dark:text-slate-200">
           {a.email}
@@ -140,6 +153,15 @@ export function ClaudeAccountsPanel({
   onImport: () => void | Promise<void>;
 }) {
   const now = useNow();
+  // The cosmetic order the operator dragged out in Settings. Reading the same store (rather
+  // than taking a prop) is what keeps the two views in step: a drag there re-renders here.
+  const { acctOrder } = useAccountOrder();
+  const rows = orderedWithinBuckets(
+    accounts,
+    (a) => a.provider ?? "claude",
+    (a) => a.id,
+    acctOrder,
+  );
   const [busy, setBusy] = useState(false);
   const wrap = (fn: () => void | Promise<void>) => async () => {
     setBusy(true);
@@ -189,7 +211,7 @@ export function ClaudeAccountsPanel({
         </button>
       ) : (
         <div className="mt-0.5 divide-y divide-slate-200/70 dark:divide-slate-700/70">
-          {accounts.map((a) => (
+          {rows.map((a) => (
             <Row key={a.id} a={a} now={now} />
           ))}
         </div>
