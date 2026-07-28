@@ -114,74 +114,92 @@ The wizard walks four things:
 4. **Finish** — latches `setupComplete: true`, which is where the lazy `rmng` bridge network
    is first materialized (`.1` gateway, `.2` control-server, `.10+` clone pool).
 
-Afterward, use **Settings** to create presets (Linear key + labels + env vars), Claude
-settings, monitor defaults, and the ports. Claude accounts are imported from a signed-in
-clone, not entered here. Secrets are write-only and redacted on read. The one-time fields
+Afterward, use **Settings** to create presets (Linear key + labels + env vars), Claude and Codex
+settings and account pools, monitor defaults, and the ports. Accounts themselves are imported from
+a signed-in clone, not entered here. Secrets are write-only and redacted on read. The one-time fields
 (`dataDir`, `cloneSocket`, `docker.subnet`) lock once the wizard latches. See
 [SCRIPTS.md](SCRIPTS.md) for the in-container guest scripts and [API.md](API.md) for every
 endpoint.
 
-## The group proxy (`rmng-cliproxy`)
+## Clone inference: credentials, not a route
 
-Every clone's model traffic goes to a **separate long-lived container**, not to the
-control-server:
+There is **no inference proxy**. Every clone's agent dials Anthropic / OpenAI directly and
+authenticates from a credential file the control-server writes into the clone:
 
 ```
-clone agent → http://rmng-cliproxy:9010/cc → 127.0.0.1:<9100+> CLIProxyAPI (per account group)
+clone agent → api.anthropic.com  (~/.claude/.credentials.json)
+clone agent → chatgpt.com        (~/.codex/auth.json)
 ```
 
-`rmng-cliproxy` runs the **same image as the control-server**, started as
-`rmng-control-server group-proxy`. It owns both hops: the `/cc` router that maps a clone's
-per-clone bearer key to its account group, and the per-group CLIProxyAPI processes themselves
-(one per group, bound to loopback *inside that container* — never published, never reachable
-from a clone). It joins the `rmng` bridge under the `rmng-cliproxy` DNS alias, mounts the same
-`/data` volume as the control-server, is labeled `rmng.infra=1`, and runs
-`restart: unless-stopped`.
+The control-server holds each imported account's full OAuth pair (access + single-use refresh
+token) in `data/claude-accounts.json` / `data/codex-accounts.json` (`0600`) and injects **only the
+current short-lived access token**, with an **empty refresh token** and a far-future expiry. Both
+halves of that are load-bearing: a refresh token in the clone would let its CLI rotate — and so
+invalidate — the token the server owns, and a real expiry would make the CLI decide the token is
+dead and give up instead of using whatever was last installed. The server re-pushes to every clone
+on an account whenever a refresh rotates its token. Agents re-read those files per request, so a
+push is a **hot swap**: no clone restart, no interrupted turn.
 
-**This exists so a control-server update does not interrupt agent work.** Both hops used to
-live in the control-server process, so recreating that container killed every in-flight agent
-turn in the fleet. Now the control-server is out of the inference data path entirely: you can
-update or restart it while clones are mid-turn.
+Consequences worth knowing before you deploy:
 
-**The proxy is therefore NOT rolled forward by a control-server update.** The server ensures it
-create-if-absent / start-if-stopped and nothing else — if it is already running it is left
-alone even when its image differs. Settings → **Group proxy** shows its running image, a
-`behind` badge when it differs from the control-server's, and a **Restart group proxy** button.
-That restart *does* drop every in-flight agent request, so run it while clones are idle.
+- **A control-server restart or update never interrupts agent work**, because the server was
+  never in the inference data path. It only has to be up to *rotate* a token, and a token is
+  good for the better part of an hour.
+- **The server sees no model traffic**, so it counts no tokens. The `working`/`idle` dot comes
+  from the agent-wrapper's activity stream instead (see [API.md](API.md#monitorstate) — an
+  agent you start by hand inside a clone, with no wrapper, reads as `idle`).
+- **OpenCode ships unauthenticated.** It gets the managed MCP set and nothing else: unlike Claude
+  Code and Codex it has no RMNG-managed credential file to fall back on, so an operator who wants
+  to use it supplies their own provider config in the clone. That is a real capability loss
+  against the retired routed model, not an oversight.
+- **`RMNG_PROXY_KEY` survives under that name**, but it is no longer an inference credential — it
+  is the clone's **identity** token, used to auto-detect the calling clone when it creates a sub
+  clone and to choose direct clone↔clone SSH. Renaming it would need every existing clone's
+  `/etc/environment` rewritten, and any clone that hadn't reconciled yet would silently lose both
+  features. The keys likewise still live in their original `data/` file for the same reason:
+  pointing at a fresh path would mint new keys and invalidate every clone's identity at once.
 
-**Operator notes**
-- The proxy reads `config.json` (groups), `data/state.json` (clone → group binding), and
-  `data/cliproxy-instances.json` (ports, keys, the shared admin secret) off the shared volume,
-  and never writes any of them — the control-server is the sole writer.
-- The CLIProxyAPI management APIs and each group's `/v1/models` catalog are only reachable
-  through the proxy's `/admin/*` surface, authenticated by a shared secret in
-  `data/cliproxy-instances.json`. A clone's per-clone bearer key cannot reach it.
-- Token accounting survives a control-server restart: the proxy buffers per-clone usage deltas
-  in memory (bounded) and POSTs them to the control-server's `/internal/tokens` when it is back.
-- Dev mode (control-server on the host, not a container): no sidecar is ensured. Run
-  `rmng-control-server group-proxy` yourself alongside the server for clone inference.
+Accounts are imported **from a clone that is already signed in** (Settings → the account panels,
+or `rmng account`), which is also when the server takes ownership: it copies the OAuth pair out
+and deletes the clone's own credential file. Named **pools** (`cloneGroups` / `codexGroups` in
+`config.json`) are edited in Settings and balanced by a 10-minute sticky rotator. Full endpoint
+reference: [API.md](API.md#accounts-claude--codex).
 
-### Upgrading a fleet created before the split
+### Upgrading a fleet that ran the retired inference sidecar
 
-A clone created before the group proxy existed has `ANTHROPIC_BASE_URL=http://rmng-control:9000/cc`
-baked into `/etc/environment`. The clone reconciler rewrites that (plus the Codex and OpenCode
-provider configs) to `http://rmng-cliproxy:9010/cc` within one ~30 s pass, with **no clone
-recreate or reboot**.
+An older deployment routed all clone model traffic through a sidecar container that owned the
+accounts. Upgrading past that needs **no operator action and no re-login** — on first boot the new
+server does three things in this order:
 
-But writing the file is only half of it: `/etc/environment` is read by PAM at *session start*,
-so any agent process that was **already running** keeps the old value for as long as it lives.
-That matters most for `agent-wrapper`, the long-lived server behind the chat panel. So the
-reconciler restarts `agent-wrapper` whenever it actually changes the env — only on a real
-change, since restarting every pass would interrupt an in-flight chat turn twice a minute.
+1. **Removes the retired sidecar** (stop + remove; absent is a no-op, so this is harmless on a
+   deployment that never had one). It goes first, and that ordering is load-bearing: while the
+   sidecar runs it keeps its per-account processes alive, and those refresh OAuth tokens on their
+   own schedule. Refresh tokens are single-use, so a rotation landing *after* the migration copied
+   a credential would invalidate the copy — leaving a store of dead tokens and forcing exactly the
+   fleet-wide re-login this avoids.
+2. **Carries the credentials back** into `data/claude-accounts.json` / `data/codex-accounts.json`
+   (`0600`), rebuilding the `cloneGroups` / `codexGroups` pools from the per-pool directories each
+   account was found in. One-shot and stamp-gated by `data/.token-unmigration-done` — deliberately
+   a *different* stamp from the forward migration's `.token-migration-done`, which may still be
+   sitting there and means the opposite thing. The old credential files are only read, never
+   consumed, so a failure part-way just retries on the next boot.
+3. **Lets the clones converge on the next reconcile pass (~30 s)**, with no recreate and no reboot:
+   the reconciler strips the retired env keys (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+   `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) from `/etc/environment` and rewrites the Codex and
+   OpenCode configs without their routed-provider blocks. Because `/etc/environment` is read by PAM
+   at *session start*, a process already running keeps the old values for as long as it lives — so
+   the reconciler restarts `agent-wrapper` whenever it actually changes the env, and only on a real
+   change, since restarting every pass would interrupt an in-flight chat turn twice a minute.
 
-Until that restart lands (~30 s), a stale process still dials the control-server's `/cc`. That
-path is a **tombstone**: it answers `503` with an Anthropic-shaped JSON error naming the new
-endpoint, plus `Location` and `Retry-After: 30`. Without it those requests hit the SPA fallback
-and come back as `200 text/html` (or a bodyless `405`), which surfaces inside an agent as an
-unintelligible parse error rather than a retryable one.
+Two things do not survive. **Gemini logins are not carried across**: that provider only ever
+existed through the sidecar and has no credential-injection path, so its files are left untouched
+on disk and reported as a count in the log rather than silently discarded — re-add those accounts
+under Claude or Codex if you need them. And an account enrolled in several pools lands in exactly
+**one** store entry (first pool in sorted order wins), because a single-use refresh token held in
+two places would have the two copies invalidate each other.
 
-Net effect for an operator: upgrade, and clones converge on their own inside a minute. A chat
-turn in flight at that moment may see one retryable error.
+**No template rebuild is needed.** This ships as a control-server image only — pull it, recreate
+the container, and the fleet converges on its own inside a minute.
 
 ## Shared build cache & Docker Hub mirror
 
@@ -227,8 +245,8 @@ is any image labeled `rmng.image=1`, identified by its own `repo:tag` (e.g.
   `pegasis0/rmng-template:latest` from the image list) plus a task mode (Linear ticket / new
   ticket / plain). The clone joins the `rmng` bridge (addressed by container name — Docker DNS;
   its IP is plain Docker IPAM) with fixed `rmng`/`rmng` credentials, its `/etc/environment`
-  preset env, and a
-  Claude account.
+  preset env, and the Claude and/or Codex account its selections resolve to (defaulting to
+  `auto` for both, so a new clone gets an account rather than none).
 - **Commit a clone to a new image**: `POST /api/images/commit {host, name}` — freezes the
   running clone and commits it to `<name>:latest` (the name is the full repo; `rmng.created-from`
   records lineage). On-disk credentials in the clone's home are baked into the image (logged as
@@ -318,7 +336,8 @@ Active agent work is interrupted only when the payload or generated configuratio
 background reconciler after a control-server update. The reconciler also attempts a missing
 standalone Codex CLI install on old clones and retries on later ticks if the download fails.
 The config gives Codex the local desktop MCP (`http://127.0.0.1:9004`) and Linear MCP using
-`LINEAR_API_KEY`; its model requests go through the group proxy's `/cc/v1` route. Existing Codex
+`LINEAR_API_KEY` — and nothing else: it carries no model-provider block, because Codex talks to
+its own endpoint authenticated from the `~/.codex/auth.json` the server writes. Existing Codex
 sessions may need a new Codex run to reload instructions/config, but the files are updated
 automatically.
 
@@ -571,9 +590,9 @@ the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no 
   lazily at wizard finish and before each clone. Addressing is Docker's embedded DNS, not
   static IPs: every clone resolves by its container name (== clone id), and the
   control-server attaches itself under the `rmng-control` alias (so recreating its container
-  never strands the `RMNG_CONTROL_URL` baked into clones). The group proxy attaches under the
-  `rmng-cliproxy` alias the same way — that is the address every clone's `ANTHROPIC_BASE_URL`
-  points at. Clone IPs are plain Docker IPAM — nothing
+  never strands the `RMNG_CONTROL_URL` baked into clones). The bridge carries no inference
+  traffic — agents reach their providers over the clone's normal outbound route, so nothing on
+  it needs to resolve. Clone IPs are plain Docker IPAM — nothing
   allocates or stores them. If an `rmng` network already exists with a **different** subnet,
   `ensure_network` errors — delete it with `docker network rm rmng` and re-run setup.
 - **Clone media socket**: clone-daemon ships dmabuf frames to the control-server over a
@@ -609,8 +628,12 @@ inherits it (there's no per-install control-server payload any more; see
   — pushes `ServerMsg::SetMonitors` to every connected clone-daemon, which live-swaps to a
   fresh Mutter session with the new monitors (make-before-break — no GNOME restart, no app
   loss).
-- **Hot-swap a Claude account**: `POST /api/claude/swap {host, account}` — writes the clone's
-  `~/.claude/.credentials.json` live via `docker exec`.
+- **Hot-swap an account**: `POST /api/claude/swap {host, account}` (or `/api/codex/swap`) —
+  writes the clone's `~/.claude/.credentials.json` / `~/.codex/auth.json` live via `docker exec`.
+  No restart: the agents re-read those files per request.
+- **Import an account** off a clone that is already signed in: `POST /api/claude/import {host}`
+  (or `/api/codex/import`). The server takes ownership of the OAuth pair and clears the clone's
+  copy.
 - **Delete**: `POST /api/delete {id}` (stops + removes the container and its
   `rmng-dind-<id>` volume; an unmanaged row is just unregistered).
 

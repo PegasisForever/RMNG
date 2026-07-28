@@ -18,36 +18,29 @@ control-server payload at all. Full references: [API](../../docs/API.md) ·
 | **4 — forward** | 9005 | framed TCP over TCP | the viewer's port-forward data plane: one TCP connection per accepted local socket, spliced to the clone |
 | **SMB** | 445 | SMB (smbd) | the `clones` share (fixed cred `rmng`/`rmng`) browses each running clone's `/home/rmng` at `smb://<host>/clones` |
 
-Plus one port this binary serves **in a different process**: `9010`, the group proxy's `/cc`
-router (see below). It is bridge-internal and never published to the host.
-
-## The `rmng-cliproxy` sidecar (`groupproxy`)
-
-The same image, run as `rmng-control-server group-proxy` in its own long-lived container. It
-owns the `/cc` router **and** the per-group CLIProxyAPI processes, so clone model traffic never
-enters this process — which is what makes updating the control-server safe while clones are
-mid-turn. The control-server ensures it create-if-absent / start-if-stopped and deliberately
-never recreates it on image drift; `POST /api/groupproxy/restart` (Settings → Group proxy) is
-the operator's explicit roll-forward. Inputs come off the shared `/data` volume (read-only:
-the control-server is the sole writer), management/catalog calls come back through its
-`/admin/*` surface, and token deltas ride `POST /internal/tokens` with a bounded retry buffer
-so accounting survives a control-server restart. See the module header in `src/groupproxy.rs`
-and [DEPLOY.md](../../docs/DEPLOY.md#the-group-proxy-rmng-cliproxy).
+**No clone model traffic passes through this process.** Agents dial their providers directly and
+authenticate from credential files this server writes into each clone (see
+[Accounts](#accounts-claude--codex)) — which is what makes updating or restarting the
+control-server safe while clones are mid-turn.
 
 ## Modules
 
 `app` (shared state holder) · `state` (in-memory `ControlState` + atomic `state.json` persist
 + file-watch + SSE bus) · `config` (load/merge/redact `config.json` at 0600) · `web` (port 2
 routes + SSE + SPA + the desktop/exec proxy endpoints for `rmng desktop`/`rmng exec`) ·
-`cliproxy` (per-group CLIProxyAPI instance identities + per-clone router keys) · `groupproxy`
-(the `rmng-cliproxy` sidecar: the `/cc` router, the instance supervisor, and the admin-forward
-surface — see below) · `tokens` (durable per-clone new-token counters + live
-SSE bus + the passive CLIProxyAPI response observer) · `mediaplane` (port 1: clone-socket ingest → `media` encode → viewer; input routing;
+`clonekey` (per-clone identity bearers, `RMNG_PROXY_KEY`) · `mediaplane` (port 1: clone-socket
+ingest → `media` encode → viewer; input routing;
 clipboard broker) · `forward` (port-forward data plane: viewer TCP spliced to the clone) ·
 `docker` (bollard primitives against the local daemon) · `provision` (clone/pull/commit/delete
-flows over those primitives) · `jobs` (the clone/delete/pull/commit Operation machine) · `linear`
-· `claude` (usage poll + token refresh/push + assign/swap) · `chat` (agent-wrapper proxy +
-per-clone SSE) · `monitor` (Docker maintenance and token-activity lifecycle writer) · `homes`
+flows over those primitives) · `clone_reconcile` (the 30 s live-migration pass over running
+clones: payloads, sshd, `/etc/environment`, the generated agent configs) · `jobs` (the
+clone/delete/pull/commit Operation machine) · `linear`
+· `claude` / `codex` (the two account stores: usage poll + OAuth refresh + token push +
+assign/swap/rotate) · `clone_ops` (what those two share: the guest-script exec path, JWT decode,
+provider-scoped view replacement) · `token_unmigrate` (the one-shot startup migration off the
+retired routed model) · `chat` (agent-wrapper proxy +
+per-clone SSE + the activity stream behind working/idle) · `monitor` (Docker maintenance,
+CPU/RAM sampling, the activity bus and lifecycle writer) · `homes`
 (clone-home symlinks under `data/hosts/`) · `smb` (smbd supervisor + read-write `clones` share
 over `data/hosts`) · `files` (notes/uploads) · `assets` (on-disk clone-daemon/agent-wrapper
 payloads + the served frontend).
@@ -82,15 +75,27 @@ The full desktop-automation surface lives in the **clone-daemon** (`:9004`), not
 in-clone agent calls it directly on localhost and the `rmng desktop` CLI proxies to it via the
 web API. Every tool + args: [MCP.md](../../docs/MCP.md).
 
-## Claude account assignment & swap (`claude`)
+<a id="accounts-claude--codex"></a>
+## Accounts (`claude` / `codex`)
 
-Each account has **two credentials**: a **refresh token** (+ cached short-lived access token)
-used server-side **only** to read 5h/7d usage (429 backoff), never sent to a clone; and a
-**long-lived token** that actually runs Claude Code. Delivery writes the clone's
-`~/.claude/.credentials.json` (long-lived token, refresh **emptied** so the SDK never rotates
-it) — read at request time, so a **running** clone hot-swaps with no restart. **Auto-assign**
-at clone time by usage+load score; **hot-swap** from the UI / `/api/claude/swap` /
-`rmng clone bind`.
+**Single-token model, server-owned.** An account is just its OAuth pair (access + single-use
+refresh token) in a 0600 store — `claude-accounts.json` / `codex-accounts.json` — and this
+process owns the entire refresh lifecycle: nothing that can refresh ever leaves it. A clone is
+authed by writing **only the current access token** into `~/.claude/.credentials.json` /
+`~/.codex/auth.json`, with an **empty refresh token** and a far-future expiry, so the clone's CLI
+can neither rotate (and thereby invalidate) the server's token nor decide it has expired. Every
+refresh that rotates a token fans it back out to that account's clones (`push_stale_tokens`).
+Both files are read per request → a **running** clone hot-swaps with no restart.
+
+**Importing** harvests the pair from a clone already signed in via claude.ai / ChatGPT, then
+deletes the clone's own credential file. **Selection** is the operator's intent verbatim — an
+email, `auto`, `none`, or `group:<pool>` — kept on the clone alongside the resolved account, so
+an auto-managed clone stays distinguishable from a pinned one. Pools live in `config.json`
+(`cloneGroups`/`codexGroups`) and are edited wholesale through `PUT /api/config`; a 10-min sticky
+rotator moves a clone only when its account falls out of eligibility, since a switch cold-starts
+the clone's prompt cache. The two modules are near-symmetric; what they share
+(`docker exec` guest-script runner, JWT decode, provider-scoped view replacement into
+`ControlState.claudeAccounts`) lives in `clone_ops`.
 
 ## Orchestration (`docker`, `provision`, `jobs`)
 
@@ -103,8 +108,9 @@ Clone sources are **images** (`rmng.image=1`, identified by their own `repo:tag`
 ahead of time (`template/Dockerfile`, not by this crate — see
 [DEPLOY.md#publishing-the-template](../../docs/DEPLOY.md#publishing-the-template)),
 `pull_template` pulls it (no local retag — it keeps its own `repo:tag`), clones are `docker run`
-off an image, and any clone commits to a new image. In-container guest scripts (`claude-import.sh`)
-run over `docker exec bash -s`. See [DEPLOY.md](../../docs/DEPLOY.md) and
+off an image, and any clone commits to a new image. In-container guest scripts
+(`claude-import.sh`, `codex-import.sh` — one per provider, same `status`/`read`/`apply`/`clear`
+verbs) run over `docker exec bash -s`. See [DEPLOY.md](../../docs/DEPLOY.md) and
 [SCRIPTS.md](../../docs/SCRIPTS.md).
 
 ## Clone binaries — create-time injection
@@ -130,8 +136,9 @@ browsing.
 
 ## Dependencies
 
-`axum`/`tokio`/`tower-http` (port 2 + static files), `reqwest` (CLIProxyAPI, Linear, Claude,
-agent-wrapper, the daemon-MCP proxy — plain HTTP, no rustls/native-tls), `bollard` +
+`axum`/`tokio`/`tower-http` (port 2 + static files), `reqwest` (the Anthropic + OpenAI OAuth/usage
+endpoints, Linear, agent-wrapper, the daemon-MCP proxy — `rustls-tls`, since the provider calls
+are HTTPS), `bollard` +
 `tar` (Docker orchestration over the unix socket), `notify` (file watch), `serde_json`,
 `wire`, `media`.
 
@@ -139,6 +146,8 @@ agent-wrapper, the daemon-MCP proxy — plain HTTP, no rustls/native-tls), `boll
 
 `cargo test -p control-server` (run where GStreamer links — the crate pulls in `media`): the
 subnet/IP allocator + image-reference canonicalization + step→percentage tables (`provision`/`docker`),
-account scoring, config defaults/merge/redaction + one-time/restart-required categories,
-passive CLIProxyAPI usage normalization, durable token accounting, Docker lifecycle transitions,
-and `in_use_by` accounting.
+account scoring / assignment / rotation for both providers, the injected credential-file shapes
+(access token in, refresh token emptied), provider usage-window parsing, the reverse token
+migration (parse, dedupe, 0600 stores), per-clone identity keys, the `/etc/environment` sync's
+retired-key stripping, config defaults/merge/redaction + one-time/restart-required categories,
+Docker lifecycle transitions, and `in_use_by` accounting.

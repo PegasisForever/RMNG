@@ -18,17 +18,15 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 
 | Method | Path | Purpose | Success |
 |---|---|---|---|
-| GET | `/events` | Global state SSE plus named `stats`, `lxcStats`, `forwards`, and safe accumulated `tokens` events | 200 SSE `ControlState` |
+| GET | `/events` | Global state SSE plus named `stats`, `lxcStats`, and `forwards` events | 200 SSE `ControlState` |
 | GET | `/api/state` | Single-shot persisted `ControlState` snapshot | 200 `ControlState` |
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
-| GET | `/api/tokens` | One-shot cumulative `CloneTokenUsage` map (same shape as SSE `tokens`) | 200 `{hostId: CloneTokenUsage}` |
 | POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
 | POST | `/api/reorder` | Reorder the clone list | 200 `ControlState` |
 | POST | `/api/clone` | Start a clone from an image (Linear ticket / new ticket / plain / raw hostname) | 200 `{ok, op}` |
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
-| POST | `/api/hosts/:id/group` | Rebind a clone's provider-agnostic account group (required; can't be cleared) | 200 `{ok,group}` |
 | PUT | `/api/hosts/:id/forwards` | Replace a clone's port-forward rules | 200 `ControlState` |
 | POST | `/api/layout/activate` | Make a layout preset active and live-apply it to all running clones | 200 `{ok,applied,errors}` |
 | GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
@@ -41,21 +39,18 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET/PUT | `/api/config` | Read redacted config or merge a partial update | 200 `AppConfigRedacted` / `{config,restartRequired,networkWarning?}` |
 | POST | `/api/config/test` | Test a setting (currently `"docker"`) | 200 `{ok,message}` |
 | GET | `/api/setup/env` | Setup wizard environment preflight rows | 200 `SetupEnv` |
-| POST | `/api/groups` | Create an account group | 200 config |
-| DELETE | `/api/groups/:name` | Stop and remove an account group | 200 config |
-| POST | `/api/groups/:name/accounts/login/start` | Start provider OAuth enrollment | 200 login state |
-| GET | `/api/groups/:name/accounts/login/status` | Poll provider OAuth enrollment | 200 login state |
-| POST | `/api/groups/:name/accounts/login/complete` | Submit OAuth redirect and finish enrollment | 200 login state |
-| POST | `/api/groups/:name/accounts/delete` | Remove one group credential file | 200 `{ok}` |
-| POST | `/api/usage/refresh` | Refresh polled account usage | 200 `{ok}` |
+| POST | `/api/{claude,codex}/import/check` | Report the account a clone is signed in to, before importing | 200 identity |
+| POST | `/api/{claude,codex}/import` | Take ownership of a signed-in clone's OAuth pair | 200 `{ok,email,cleared}` |
+| POST | `/api/{claude,codex}/refresh` | Force one usage poll (+ rotation pass) now | 200 `{ok,rateLimited,rotated}` |
+| POST | `/api/{claude,codex}/swap` | Change a clone's account selection, hot | 200 `{ok,account,group,selection}` |
+| POST | `/api/{claude,codex}/delete` | Remove an imported account by email | 200 `{ok,moved}` |
+| POST | `/api/{claude,codex}/rotate` | Run one pool-rotation pass immediately | 200 `{ok}` |
 | GET/POST | `/api/chat/:id` | Fetch chat snapshot or send a message to the clone's agent | 200 / 202 |
 | GET | `/api/chat/:id/events` | Per-clone chat SSE | 200 SSE `ChatSnapshot` |
 | POST | `/api/chat/:id/abort` | Abort the in-flight agent turn | 204 |
 | GET | `/api/server/version` | Check the running image and remote update status | 200 `UpdateStatus` |
 | POST | `/api/server/update` | Update the control-server image | 200 `Operation` |
 | POST | `/api/server/restart` | Restart the control server | 200 `{ok}` |
-| GET | `/api/groupproxy` | Group-proxy sidecar status (running / image / behind) | 200 `GroupProxyStatus` |
-| POST | `/api/groupproxy/restart` | Roll the group-proxy sidecar onto the current image | 200 `GroupProxyStatus` |
 | GET | `/*` | SPA fallback (embedded frontend) | 200 asset / `index.html` |
 
 Error statuses: `400` validation, `404` unknown id/file, `409` chat busy / image still in
@@ -86,12 +81,21 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 | `layoutPresetNames` | `string[]` | names of all layout presets, in config order — drives the sidebar's segmented preset buttons |
 | `hosts` | `Clone[]` | all registered clones (managed + unmanaged) |
 | `operations` | `Operation[]` | in-flight + recent clone/delete/archive/unarchive/pull/commit/update jobs |
-| `usageGroups` | `GroupUsage[]` | imported provider credentials and their usage, grouped by account pool |
+| `claudeAccounts` | `ClaudeUsage[]` | every imported account's token-free usage view — **both** providers in one flat list, tagged by `provider` |
+| `codexResetMarks` | `CodexResetMark[]` | which Codex accounts have already spent a rate-limit reset this 7d window (cooldown bookkeeping) |
+
+Despite its name `claudeAccounts` is provider-agnostic: the Claude and Codex pollers each
+replace only their own rows (`clone_ops::replace_provider_views`), so a reader filters on
+`provider` rather than assuming a list is one provider's. A row written before that field
+existed has none, which means Claude. `ClaudeUsage` carries no tokens — only `email`, `active`,
+the `fiveHour`/`sevenDay` windows, Claude's model-scoped `fable` window, `spend`, and Codex's
+`resetCredits`.
 
 `Clone` carries connection info (`id`, `host`, `port`, `username`, …), the `managed` flag
 (true = a Docker container named after the clone id backs it; false = a plain unmanaged
 row), `archived` (a retained, intentionally stopped managed clone), the `source` image
-reference, the provider-agnostic account-pool `group`, Linear metadata (`linearWorkspace`,
+reference, the six account-binding fields (`claudeAccountEmail`/`claudeGroup`/`claudeSelection`
+and the Codex twins — see [Accounts](#accounts-claude--codex)), Linear metadata (`linearWorkspace`,
 `linearTicket`, `linearBranch`, …), the server-owned `monitorState` (`working`/`idle`/`offline`),
 `unread` transition marker, and `forwards` (`PortForward[]` — the clone's persisted port-forward
 rules; live status rides the `forwards` SSE event below, never `ControlState`).
@@ -116,17 +120,6 @@ not serialization, so an idle fleet doesn't wake subscribers). Deliberately kept
 `ControlState`/`state.json`: these numbers move every tick, and every `ControlState` mutation
 persists the file, so folding stats in would rewrite it on every poll.
 
-### `tokens` event and `GET /api/tokens`
-The same `/events` connection multiplexes a third, named SSE event: `tokens`, a
-`{ <hostId>: CloneTokenUsage }` map. `GET /api/tokens` returns the exact latest map without
-opening an SSE connection. It is the accumulated client-facing CLIProxyAPI usage for managed
-clones: `newInputTokens` excludes cache-read tokens, `outputTokens` includes generated output,
-and `requestCount` is the number of responses with newly observed token use. A new subscriber
-receives the latest map immediately, then a push only when a record changes. The control-server
-persists the aggregate counters privately in `clone-tokens.json`; the map does not carry request
-data, account identity, cache buckets, or last-activity timestamps. The dashboard and `rmng clone ls`
-show cache-excluded input and generated-output totals.
-
 ### `lxcStats` event
 The same connection also sends a named `lxcStats` event for the complete CT 105 LXC that hosts
 RMNG, independent of the clone-only `stats` map. Its `LxcStats` payload has `cpuPct`, `memUsed`,
@@ -146,6 +139,25 @@ opens/closes its local listeners. A new subscriber gets the current snapshot imm
 one push per status change. It rides its own SSE-only bus (`crate::forward::ForwardBus`), so —
 like `stats` — it never enters `ControlState`/`state.json`. The *desired* rules themselves are
 persisted on `Clone.forwards` and edited via `PUT /api/hosts/:id/forwards`.
+
+<a id="monitorstate"></a>
+### `Clone.monitorState` — where `working` vs `idle` comes from
+Docker liveness supplies `offline`. The split between the other two is read off the
+agent-wrapper's `/events` SSE stream, which the control-server already holds open for every
+running managed clone ([chat.rs](../crates/control-server/src/chat.rs)
+`run_autonomous_listener`), so it costs no extra connection and no clone-side change. A
+`{busy: true}` frame (a turn starting) and every `activity` line (streamed throughout it) stamp
+a volatile per-clone timestamp ([monitor.rs](../crates/control-server/src/monitor.rs)
+`ActivityBus`); a clone quiet for 5 minutes reads `idle`. `{busy: false}` is deliberately **not**
+stamped — it marks work *ending*, and counting it as activity would pin a finished clone at
+`working` for another whole window; the `activity` lines are stamped so a turn longer than the
+window doesn't slide to `idle` mid-work.
+
+Reading the wrapper's stream rather than `ChatSnapshot.busy` is what makes autonomous background
+work count, not just operator-solicited turns. **Known gap:** an agent a user starts *by hand*
+inside a clone — a bare `claude`/`codex` in a terminal, with no wrapper in front of it — emits no
+frames, so that clone reads `idle` for as long as it runs. The map is never persisted: after a
+server restart every clone reads `idle` until it next works, which is the right cold default.
 
 ---
 
@@ -185,10 +197,13 @@ Body (one of four modes + optional account/instructions):
                                     //   the web dialog derives it from the chosen team key.
                                     //   Hostname mode: OPTIONAL (fleet workers usually
                                     //   need none; a named preset still applies its env).
-  "group": "pooled",                // provider-agnostic account pool. Every clone binds one, so
-                                    //   omitting this falls through: parent's group (sub clone)
-                                    //   → the preset's default group → the first configured
-                                    //   group. An unknown name is a 400.
+  "claudeAccount": "a@b.com",       // Claude account SELECTION, verbatim: an email, "auto",
+                                    //   "none", or "group:<pool>". Absent ⇒ inherited from the
+                                    //   parent clone's selection (sub clone), else "auto".
+                                    //   Resolved at assign time, so an unknown email degrades
+                                    //   to the best-scored account with a warning, not a 400.
+  "codexAccount": "a@b.com",        // the Codex twin, same forms. Independent — a clone can
+                                    //   hold one, both, or neither.
   "agentInstructions": "...",       // extra context for the agent-wrapper
   "claudeInstructions": "...",      // extra instructions for Claude Code
   "parent": "<clone-id>",           // nest as a sub clone under this clone (must be a managed
@@ -217,12 +232,14 @@ plain title, with a numeric suffix on collision). Returns `{ "ok": true, "op": O
 
 **Hostname mode** (what `rmng clone create` sends): the caller owns the exact hostname — a DNS
 label, uniqueness enforced (`400` on a taken name) — with no ticket, no derived display name,
-and no kickoff first message. `group`, `agentInstructions`, and `claudeInstructions` still apply.
-A non-empty group must exist in config; it is the sole clone inference binding. Every clone also
-receives Codex parity files:
-`~/.codex/AGENTS.md` with the same disposable-sandbox guidance as Claude's shared
-`CLAUDE.md`, and `~/.codex/config.toml` with the local desktop MCP, CLIProxyAPI routing, and
-Linear MCP.
+and no kickoff first message. The account selections, `agentInstructions`, and
+`claudeInstructions` still apply. A sub clone created in this mode inherits its parent's account
+*selections* and preset unless the request names them — the selection, not the resolved account,
+so a parent on `auto` that landed on some email passes on `auto` and the child gets its own pick.
+Every clone also receives Codex parity files: `~/.codex/AGENTS.md` with the same
+disposable-sandbox guidance as Claude's shared `CLAUDE.md`, and `~/.codex/config.toml` with the
+local desktop MCP and the Linear MCP. Codex authenticates from `~/.codex/auth.json`, which the
+server writes — there is no provider block in that config.
 
 > There is no `/api/clone/redeploy` endpoint any more. Clone binaries (`clone-daemon`,
 > `agent-wrapper`, the `rmng` CLI) are installed by the control-server at create time, before
@@ -256,19 +273,8 @@ Returns an `archive` `Operation`. Unknown, unmanaged, already-archived, or concu
 clones return `400`.
 
 ### `POST /api/hosts/:id/unarchive`
-Restart a retained archived clone. Returns an `unarchive` `Operation`; the prior group binding and
-cumulative token totals are retained.
-
-### `POST /api/hosts/:id/group` — body `{ "group": string }`
-Set the sole provider-agnostic account group for a managed clone. The group proxy's `/cc` router
-maps the clone to this group's CLIProxyAPI instance, which performs provider-specific account
-selection and refresh.
-
-The name is **required**: every clone binds a group, so a binding can be changed but never
-cleared. A `null`/blank/absent name is a `400`, as is an unknown one. The server also guarantees
-at least one group exists and repoints any clone whose group is blank or dangling (at boot and on
-every reconciler pass), so a group deleted out from under a live clone lands it on the first
-configured group rather than leaving it without inference.
+Restart a retained archived clone. Returns an `unarchive` `Operation`; the clone's account
+selections are retained, and the reconcile pass re-pushes its tokens once it is up.
 
 ---
 
@@ -345,10 +351,12 @@ Serve an uploaded image by its generated `<16-hex>.<ext>` name, with the right C
 The full config with the only secret (preset Linear keys) replaced by `linearKeySet: bool`.
 Everything else is returned verbatim — ports, `layoutPresets`/`activeLayout`, the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
-socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`, and
+socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`,
 `agentPlaybook` (the editable agent playbook seeded with the shipped default and injected into new
 clones — non-secret; a preset's optional `agentPlaybook` append rides along in each `presets` row),
-and claude poll config. See [PROTOCOL.md](PROTOCOL.md#config-schema) for the schema.
+the Claude/Codex poll config, and the two account pools `cloneGroups`/`codexGroups` (names +
+member emails only — no credentials, so they pass through unredacted). See
+[PROTOCOL.md](PROTOCOL.md#config-schema) for the schema.
 
 ### `PUT /api/config` (partial merge) → `{ config, restartRequired, networkWarning? }`
 Deep-merge a partial config over the stored one, persist to disk at `0600`, apply live.
@@ -359,7 +367,9 @@ bound the old path at startup) even though it is a one-time field (see below). A
 flip (`setupComplete` false → true) materializes the lazy `rmng` network here; a failure is
 non-fatal and echoed as `networkWarning`. Merge rules: an **empty string keeps** the stored
 value; a non-empty string replaces it; `presets` rows merge by name (blank `linearKey` keeps
-the stored one). `docker.subnet` is validated as an IPv4 `/16`–`/24` CIDR. One-time fields
+the stored one); `cloneGroups`/`codexGroups` are replaced **wholesale** (the pool editor always
+posts the full list, so an omitted pool is a deletion and `[]` clears them — the two providers'
+lists are independent). `docker.subnet` is validated as an IPv4 `/16`–`/24` CIDR. One-time fields
 (`dataDir`, `cloneSocket`, `docker.subnet`) are locked once `setupComplete` latches (which
 itself is a one-way latch).
 
@@ -370,86 +380,73 @@ and collapses the environment report (daemon reachable, sock mount, render node)
 
 ---
 
-## Account groups and provider credentials
+<a id="accounts-claude--codex"></a>
+## Accounts (Claude + Codex)
 
-A clone has one optional `Clone.group` binding. The group proxy's `/cc` router resolves that clone
-to the matching CLIProxyAPI instance; that group owns provider-specific OAuth, account selection,
-and refresh. Claude, Codex, and Gemini via Antigravity are credentials **inside** an account group,
-not separate clone bindings.
+Clone model traffic never touches the control-server: each agent dials its provider directly and
+authenticates from a credential file on disk. What the server owns is the **credential**, not the
+route. Each imported account's full OAuth pair (access + single-use refresh token) lives only in
+`data/claude-accounts.json` / `data/codex-accounts.json` (`0600`), and a clone receives **only the
+current short-lived access token**, written into `~/.claude/.credentials.json` /
+`~/.codex/auth.json` with an **empty refresh token** and a far-future expiry. That shape is
+deliberate: with no refresh token the clone's CLI can never rotate — and thereby invalidate — the
+token the server owns, and with a far-future expiry it never decides the token is dead and gives
+up. The server re-pushes a fresh token to every clone on the account whenever a refresh rotates it
+([claude.rs](../crates/control-server/src/claude.rs) `push_stale_tokens`). Both agents re-read
+their credential file per request, so every push is a **hot swap** — no restart, no interrupted
+turn.
 
-The endpoints below are thin proxies: the control-server forwards each one to the group proxy's
-`/admin/:group/mgmt/*` surface (authenticated with a shared secret), and the proxy attaches that
-instance's own management key. The instances themselves bind loopback inside the proxy container
-and are not reachable from anywhere else.
+A clone's binding is six optional fields on its `Clone` row, three per provider and fully
+independent (one clone can run both, one, or neither):
+
+| Field | Holds |
+|---|---|
+| `claudeSelection` / `codexSelection` | the operator's intent **verbatim**: an email, `auto`, `none`, or `group:<pool>` |
+| `claudeAccountEmail` / `codexAccountEmail` | the account currently resolved from that selection — whose token is installed right now |
+| `claudeGroup` / `codexGroup` | the pool the clone is being balanced within, when the selection is `group:<pool>` |
+
+The selection is kept apart from the resolved account because the two answer different questions:
+`claudeAccountEmail` alone can't distinguish an auto-managed clone (the server may hot-swap it) from
+one pinned to that exact account, and a sub clone inherits the *selection* so a parent on `auto`
+doesn't pin its children to whatever it happens to be running.
+
+**Account pools are config, not endpoints.** They are the two `cloneGroups` / `codexGroups` lists
+(each `{name, accounts: [email]}`), edited **wholesale** through `PUT /api/config` like any other
+setting — the editor always sends the full list, so a plain array replace is the merge rule and an
+empty array clears the pools. There are no dedicated group endpoints. A clone bound to a pool
+sticks to its account (preserving its Anthropic prompt cache — an account switch cold-starts it)
+until that account is exhausted or leaves the pool; the 10-minute rotator then moves it to the
+least-loaded member.
+
+### The twelve account endpoints
+
+Symmetric across the two providers — `{claude,codex}` below is a literal path segment, and the two
+sets differ only in which store and credential file they touch.
 
 | Endpoint | Body | Returns | Does |
 |---|---|---|---|
-| `POST /api/groups` | `{name}` | redacted config | Create a group and its CLIProxyAPI instance |
-| `DELETE /api/groups/:name` | — | redacted config | Stop and remove a group (on-disk credentials are retained) |
-| `POST /api/groups/:name/accounts/login/start` | `{provider}` | login state | Begin OAuth enrollment; provider is `anthropic`, `codex`, or `antigravity` |
-| `GET /api/groups/:name/accounts/login/status` | `?state=` | login state | Poll OAuth enrollment status |
-| `POST /api/groups/:name/accounts/login/complete` | redirect payload | login state | Complete OAuth enrollment |
-| `POST /api/groups/:name/accounts/delete` | `{file}` | `{ok}` | Delete one provider credential file from a group |
-| `POST /api/usage/refresh` | — | `{ok}` | Refresh provider usage where the upstream exposes it |
-| `POST /api/hosts/:id/group` | `{group:name}` | `{ok,group}` | Change a managed clone's sole group binding without restarting it |
+| `POST /api/claude/import/check` | `{host}` | `{ok, email, orgName, subscriptionType}` | Confirm a clone is signed in to Claude Code via claude.ai and report whose account it is, before importing |
+| `POST /api/codex/import/check` | `{host}` | `{ok, email, plan, accountId}` | The Codex twin (rejects an API-key login — a ChatGPT subscription is required) |
+| `POST /api/{claude,codex}/import` | `{host}` | `{ok, email, cleared}` | Read the OAuth pair off the signed-in clone, store it, then **delete the clone's credential file** so its CLI can't rotate the refresh token the server now owns. `cleared` reports whether that delete succeeded (best-effort — the account is already stored). Kicks an immediate usage poll |
+| `POST /api/{claude,codex}/refresh` | — | `{ok, rateLimited, rotated}` | Force one usage poll now, then a rotation pass. `rateLimited` is true if any account hit a 429 |
+| `POST /api/{claude,codex}/swap` | `{host, account}` | `{ok, account, group, selection}` | Change a clone's selection. `account` is the verbatim selection; the reply echoes the resolved account + pool + normalized selection |
+| `POST /api/{claude,codex}/delete` | `{account}` | `{ok, moved}` | Remove an imported account by email. `moved` is the ids of clones reassigned off it |
+| `POST /api/{claude,codex}/rotate` | — | `{ok}` | Run one pool-rotation pass immediately (it otherwise runs every 10 min). Ops/testing |
 
-`usageGroups` in `ControlState` reports group membership and usage. Gemini/Antigravity is a
-presence-only row when its upstream does not expose pollable quota.
+**Swap** resolves the selection and acts immediately: `none` deletes the clone's credential file
+(leaving it tokenless), a pool picks a member — stickily, keeping the incumbent account when it is
+already an eligible member of the target pool — and an email or `auto` resolves a single account,
+whose token is pushed before the row is updated. `400` for an unknown or unmanaged host, or when
+the provider has no imported accounts at all; `502` when the push to the clone fails.
 
----
+**Delete** refuses with `400` while any clone is **pinned** to that account (the message lists
+them) — pinned meaning its selection *is* that email, which nothing but an operator edit can
+change. Clones merely *running* it via `auto`/a pool are not blockers: they are reassigned by the
+rotation pass the delete triggers, and any that can't be placed (the account was a pool's only
+member) have the dangling reference cleared rather than being left pointed at a deleted account.
 
-## The group proxy (`rmng-cliproxy`)
-
-Clone model traffic does **not** go through the control-server. It goes to a separate long-lived
-container running the same image as `rmng-control-server group-proxy`, which owns the `/cc`
-router *and* the per-group CLIProxyAPI processes. That is what makes a control-server update
-non-disruptive to in-flight agent turns. See [DEPLOY.md](DEPLOY.md#the-group-proxy-rmng-cliproxy).
-
-**Clone-facing surface** (on the `rmng` bridge, never published to the host):
-
-| URL | Used by |
-|---|---|
-| `http://rmng-cliproxy:9010/cc` | `ANTHROPIC_BASE_URL` (Claude Code) |
-| `http://rmng-cliproxy:9010/cc/v1` | the generated Codex + OpenCode provider `base_url`/`baseURL` |
-
-Authenticated by the clone's per-clone bearer key (`ANTHROPIC_AUTH_TOKEN` / `RMNG_PROXY_KEY`).
-`401` unknown/missing key, `409` clone archived or unbound, `503` the group's instance is still
-starting (retry), `502` the instance failed the request. Everything else is the provider's own
-response, streamed unbuffered.
-
-**Control-server-facing surface**, authenticated by a shared admin secret in
-`data/cliproxy-instances.json` (header `X-RMNG-Admin-Key`) — a clone's per-clone bearer cannot
-reach it:
-
-| Endpoint | Does |
-|---|---|
-| `ANY /admin/:group/mgmt/*` | Forward to that group instance's management API with its own key (drives every `/api/groups/…` endpoint above) |
-| `GET /admin/:group/v1/models` | Forward that group's live model catalog (shapes each clone's Codex/OpenCode model list + Claude Code's default model) |
-| `GET /health` | Unauthenticated liveness |
-
-The reverse direction is `POST /internal/tokens` **on the control-server**, same shared secret: the
-proxy coalesces per-clone token-usage deltas and POSTs them in batches, buffering in memory
-(bounded) while the control-server is restarting so accounting survives an upgrade.
-
-`ANY /cc` and `/cc/*` **on the control-server** are a migration tombstone. A clone created
-before the split holds the old `http://rmng-control:9000/cc`, and an agent process already
-running when the server upgraded keeps that value until it restarts (`/etc/environment` is read
-at session start). These paths answer `503` with an Anthropic-shaped JSON error naming the new
-endpoint, plus `Location` and `Retry-After: 30` — without them the request reaches the SPA
-fallback and returns `200 text/html`, which an agent reports as an unintelligible parse error
-instead of a retryable one. The clone reconciler restarts `agent-wrapper` on any env change, so
-this path stops being hit within ~30 s of an upgrade.
-
-### `GET /api/groupproxy` → `GroupProxyStatus`
-The sidecar's container name, whether it is running, its image + `org.opencontainers.image.revision`,
-and `behind` — true when it is running a different image than the control-server. Never 500s; a
-down daemon or an absent container reads as `running: false` with the reason in `detail`.
-
-### `POST /api/groupproxy/restart` → `GroupProxyStatus`
-Recreate the sidecar on the control-server's current image. **This drops every in-flight agent
-request in the fleet** — a control-server update deliberately does not do it, so this is the
-operator's explicit roll-forward, to be run while clones are idle. `502` if the daemon call fails;
-`502` in dev mode (no self-container to copy mounts from).
+Errors from `import/check`, `import`, `delete`, and `rotate` are `{error}` JSON bodies (what the
+frontend's `postJson` reads); `swap` returns a plain string, like the clone-lifecycle routes.
 
 ---
 
