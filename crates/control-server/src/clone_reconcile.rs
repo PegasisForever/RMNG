@@ -288,6 +288,31 @@ fn default_claude_model(catalog: &[String], gpt_fallback: Option<&str>) -> Optio
         .or_else(|| gpt_fallback.map(str::to_string))
 }
 
+/// A grouped clone's `ANTHROPIC_MODEL` line, resolved from its group's full live catalog.
+///
+/// Shared by BOTH env-writing paths so they agree byte-for-byte: the create path
+/// (`jobs::run_clone`) and the per-clone resync below. Keeping one definition is what stops a
+/// fresh clone from being born without the var and then having the reconciler add it up to
+/// `RECONCILE_INTERVAL` later — a visible ~30 s window in which the clone's Claude Code ran on
+/// its built-in default instead of the group's.
+///
+/// An unreadable catalog (no accounts yet, instance still starting) yields
+/// [`FALLBACK_CLAUDE_MODEL`] rather than nothing, so the var is always present; the resync
+/// upgrades it once the group answers.
+pub(crate) fn claude_model_env_var(catalog: &[String]) -> wire::EnvVar {
+    let catalog_gpt: Vec<String> = catalog
+        .iter()
+        .filter(|id| !id.starts_with("claude-"))
+        .cloned()
+        .collect();
+    let value = default_claude_model(catalog, default_gpt_model(&catalog_gpt))
+        .unwrap_or_else(|| FALLBACK_CLAUDE_MODEL.to_string());
+    wire::EnvVar {
+        key: "ANTHROPIC_MODEL".into(),
+        value,
+    }
+}
+
 fn codex_config_toml(cc_base_url: Option<&str>, gpt_models: &[String], headless: bool) -> String {
     let mut body =
         String::from("# Managed by RMNG. Re-created by the RMNG clone reconciler.\n\n");
@@ -1257,13 +1282,11 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         // (GPT-only group), else the Opus fallback before the first catalog read. Only grouped
         // clones get it — a clone with no group keeps Claude Code's built-in default. Codex and
         // OpenCode are unaffected (they default to `gpt-5.6-terra` via `default_gpt_model`).
+        //
+        // The create path seeds this same var from the same helper, so a fresh clone already has
+        // it and this pass is a no-op content-compare rather than a 30 s-late rewrite.
         if group.is_some() {
-            let claude_model = default_claude_model(&catalog, default_gpt_model(&catalog_gpt))
-                .unwrap_or_else(|| FALLBACK_CLAUDE_MODEL.to_string());
-            desired_env.push(wire::EnvVar {
-                key: "ANTHROPIC_MODEL".into(),
-                value: claude_model,
-            });
+            desired_env.push(claude_model_env_var(&catalog));
         }
         let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
         let env_script = etc_environment_sync_script(&desired_env);
@@ -1491,6 +1514,88 @@ mod tests {
         // FALLBACK_CLAUDE_MODEL (the `opus[1m]` alias).
         assert_eq!(default_claude_model(&[], None), None);
         assert_eq!(FALLBACK_CLAUDE_MODEL, "opus[1m]");
+    }
+
+    /// `ANTHROPIC_MODEL` is always resolvable, including before a group's catalog can be read.
+    ///
+    /// Regression: the create path used to omit this var entirely and leave it to the reconciler,
+    /// so a fresh clone went up to one `RECONCILE_INTERVAL` (30 s) without a default model. The
+    /// create path now seeds it through this helper — which must therefore never yield "no var",
+    /// even when the group answers with nothing.
+    #[test]
+    fn claude_model_env_var_is_always_present_even_with_an_unreadable_catalog() {
+        let empty = claude_model_env_var(&[]);
+        assert_eq!(empty.key, "ANTHROPIC_MODEL");
+        assert_eq!(empty.value, FALLBACK_CLAUDE_MODEL);
+
+        // A live catalog resolves to the same value the reconciler would have written.
+        let served = vec!["claude-opus-4-8".to_string(), "gpt-5.6-terra".to_string()];
+        assert_eq!(claude_model_env_var(&served).value, "opus[1m]");
+
+        // GPT-only group: still a concrete, working default rather than an absent var.
+        let gpt_only = vec!["gpt-5.5".to_string(), "gpt-5.6-terra".to_string()];
+        assert_eq!(claude_model_env_var(&gpt_only).value, "gpt-5.6-terra");
+    }
+
+    /// The create path must seed `ANTHROPIC_MODEL` itself.
+    ///
+    /// Regression (the bug this fixes): the create path composed the clone's env WITHOUT this
+    /// var and left it to the per-clone resync, so a freshly-created clone's `/etc/environment`
+    /// was missing it for up to one `RECONCILE_INTERVAL`. Measured on CT 101: every other var
+    /// landed at t=3.6 s, `ANTHROPIC_MODEL` at t=35.4 s.
+    ///
+    /// This asserts on `compose_clone_env` — the function the create path actually calls — so
+    /// deleting the seeding fails the test. Asserting only on the pure model helper does not:
+    /// that stays green with the create path unwired, which is exactly the bug.
+    #[test]
+    fn the_create_path_env_already_carries_the_group_model() {
+        let control = vec![wire::EnvVar {
+            key: "RMNG_CONTROL_URL".into(),
+            value: "http://rmng-control:9000".into(),
+        }];
+        let router = vec![wire::EnvVar {
+            key: "RMNG_PROXY_KEY".into(),
+            value: "k".into(),
+        }];
+        let catalog = vec!["claude-opus-4-8".to_string()];
+
+        let env =
+            crate::provision::compose_clone_env(control.clone(), router.clone(), &[], "default", &catalog);
+        let rendered = crate::provision::clone_etc_environment_conf(&env);
+        assert!(
+            rendered.contains("ANTHROPIC_MODEL=opus[1m]\n"),
+            "create-path env must already carry the group model; got:\n{rendered}"
+        );
+
+        // Even before the group's catalog can be read, the var ships (with the fallback) rather
+        // than being absent until the first resync.
+        let cold = crate::provision::compose_clone_env(control.clone(), router.clone(), &[], "default", &[]);
+        let cold_rendered = crate::provision::clone_etc_environment_conf(&cold);
+        assert!(cold_rendered.contains(&format!("ANTHROPIC_MODEL={FALLBACK_CLAUDE_MODEL}\n")));
+
+        // An ungrouped clone keeps Claude Code's built-in default — no var at all.
+        let ungrouped = crate::provision::compose_clone_env(control, router, &[], "  ", &catalog);
+        assert!(!ungrouped.iter().any(|v| v.key == "ANTHROPIC_MODEL"));
+    }
+
+    /// The create path and the resync must write `ANTHROPIC_MODEL` with the SAME precedence, or
+    /// they would fight: one writes preset-wins, the other group-wins, and the value would flip
+    /// every reconcile pass. Both compose `[control…, router…, preset…, ANTHROPIC_MODEL]`, so the
+    /// group value lands last and wins in both.
+    #[test]
+    fn the_group_model_outranks_a_preset_var_on_both_env_paths() {
+        let preset = vec![wire::EnvVar {
+            key: "ANTHROPIC_MODEL".into(),
+            value: "preset-pinned".into(),
+        }];
+        let catalog = vec!["claude-opus-4-8".to_string()];
+
+        let env = crate::provision::compose_clone_env(Vec::new(), Vec::new(), &preset, "default", &catalog);
+        let rendered = crate::provision::clone_etc_environment_conf(&env);
+        assert!(rendered.contains("ANTHROPIC_MODEL=opus[1m]\n"));
+        assert!(!rendered.contains("preset-pinned"));
+        // `etc_environment_conf` keeps the last duplicate only — one line, not two.
+        assert_eq!(rendered.matches("ANTHROPIC_MODEL=").count(), 1);
     }
 
     #[test]

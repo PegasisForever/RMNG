@@ -263,6 +263,37 @@ pub(crate) fn preset_env_vars(p: &wire::Preset) -> Vec<EnvVar> {
     vars
 }
 
+/// The full var list a NEW clone's `/etc/environment` is built from, in precedence order
+/// (last duplicate key wins, per [`etc_environment_conf`]).
+///
+/// Pure so the ordering is testable without Docker. It must stay identical to the order the
+/// per-clone resync composes in `clone_reconcile::reconcile_once` — control, router, preset,
+/// then the group's `ANTHROPIC_MODEL` — because the two paths write the SAME file. If they
+/// disagreed on precedence the value would flip on every reconcile pass.
+///
+/// `catalog` is the group's live `/v1/models` set (empty when it can't be read yet); `group` is
+/// blank for an ungrouped clone, which then keeps Claude Code's built-in default.
+pub(crate) fn compose_clone_env(
+    control: Vec<EnvVar>,
+    router: Vec<EnvVar>,
+    preset: &[EnvVar],
+    group: &str,
+    catalog: &[String],
+) -> Vec<EnvVar> {
+    let mut env = control;
+    env.extend(router);
+    env.extend(preset.iter().cloned());
+    // Seeded HERE rather than left to the reconciler: every other var above reaches the clone in
+    // the create path's one `upload_tar` (~3 s), but `ANTHROPIC_MODEL` used to be added only by
+    // the per-clone resync — so a fresh clone spent up to a full `RECONCILE_INTERVAL` (measured:
+    // 30 s) with no default model, running Claude Code on its built-in one instead of the
+    // group's. The resync still owns keeping it current, and now finds it already correct.
+    if !group.trim().is_empty() {
+        env.push(crate::clone_reconcile::claude_model_env_var(catalog));
+    }
+    env
+}
+
 /// `/etc/environment` body: `KEY=VALUE` lines, skipping empty keys. Last duplicate key wins,
 /// which lets preset/control values override the base desktop session defaults.
 pub(crate) fn etc_environment_conf(vars: &[EnvVar]) -> String {

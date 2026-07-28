@@ -348,15 +348,26 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
 async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     let progress = op_progress(&app, &op_id, OperationKind::Clone);
 
-    // The clone→control-server + inference URLs (auto-detected) go into the clone's session
-    // env first; the operator's chosen preset follows (so a preset key can still override).
-    let mut env = control_env_vars(&app).await;
-    // Per-clone group-proxy router key (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY), minted +
-    // persisted server-side and mapped back to this clone id by the `/cc` router. Additive:
-    // it lives alongside the existing token push; a clone with no group just gets a 409 from
-    // the router until one is bound. Never serialized onto `RmngClone`/state.
-    env.extend(crate::provision::router_env_vars(&app, &spec.new_hostname));
-    env.extend(spec.env.iter().cloned());
+    // The clone's full session env, composed in the same precedence order the per-clone resync
+    // uses (`provision::compose_clone_env`): control URLs, the per-clone group-proxy router key
+    // (ANTHROPIC_AUTH_TOKEN / RMNG_PROXY_KEY — minted server-side, never serialized onto
+    // `RmngClone`/state), the operator's preset, then the group's Claude default model.
+    //
+    // The group catalog is fetched here so `ANTHROPIC_MODEL` ships in the create path's single
+    // `upload_tar` instead of arriving a reconcile tick later; an unreadable catalog still yields
+    // the Opus fallback, so the var is never missing.
+    let catalog = if spec.group.trim().is_empty() {
+        Vec::new()
+    } else {
+        crate::cliproxy::group_catalog(&app, &spec.group).await
+    };
+    let env = crate::provision::compose_clone_env(
+        control_env_vars(&app).await,
+        crate::provision::router_env_vars(&app, &spec.new_hostname),
+        &spec.env,
+        &spec.group,
+        &catalog,
+    );
     // `image_ref` is the CANONICAL reference of the image actually used (the caller may have
     // passed an id form — MCP/raw API); `RmngClone.source` must record the reference so the
     // commit flow can stamp lineage. The backing container's name is the clone id — that's
