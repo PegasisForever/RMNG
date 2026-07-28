@@ -165,18 +165,19 @@ and deletes the clone's own credential file. Named **pools** (`cloneGroups` / `c
 `config.json`) are edited in Settings and balanced by a 10-minute sticky rotator. Full endpoint
 reference: [API.md](API.md#accounts-claude--codex).
 
-### Upgrading a fleet that ran the retired inference sidecar
+### Upgrading a fleet that ran the retired `rmng-cliproxy` sidecar
 
-An older deployment routed all clone model traffic through a sidecar container that owned the
-accounts. Upgrading past that needs **no operator action and no re-login** — on first boot the new
-server does three things in this order:
+An older deployment routed all clone model traffic through an `rmng-cliproxy` container (one
+CLIProxyAPI instance per account pool) that owned the accounts. Upgrading past that needs **no
+operator action and no re-login** — on first boot the new server does three things in this order:
 
-1. **Removes the retired sidecar** (stop + remove; absent is a no-op, so this is harmless on a
-   deployment that never had one). It goes first, and that ordering is load-bearing: while the
-   sidecar runs it keeps its per-account processes alive, and those refresh OAuth tokens on their
-   own schedule. Refresh tokens are single-use, so a rotation landing *after* the migration copied
-   a credential would invalidate the copy — leaving a store of dead tokens and forcing exactly the
-   fleet-wide re-login this avoids.
+1. **Removes the retired sidecar** — `docker rm -f rmng-cliproxy`, in effect; absent is a no-op,
+   so this is harmless on a deployment that never had one. Verify with
+   `docker ps -a --filter name=rmng-cliproxy`, which should come back empty. It goes first, and
+   that ordering is load-bearing: while the sidecar runs it keeps its per-account processes alive,
+   and those refresh OAuth tokens on their own schedule. Refresh tokens are single-use, so a
+   rotation landing *after* the migration copied a credential would invalidate the copy — leaving
+   a store of dead tokens and forcing exactly the fleet-wide re-login this avoids.
 2. **Carries the credentials back** into `data/claude-accounts.json` / `data/codex-accounts.json`
    (`0600`), rebuilding the `cloneGroups` / `codexGroups` pools from the per-pool directories each
    account was found in. One-shot and stamp-gated by `data/.token-unmigration-done` — deliberately
@@ -191,12 +192,12 @@ server does three things in this order:
    the reconciler restarts `agent-wrapper` whenever it actually changes the env, and only on a real
    change, since restarting every pass would interrupt an in-flight chat turn twice a minute.
 
-Two things do not survive. **Gemini logins are not carried across**: that provider only ever
-existed through the sidecar and has no credential-injection path, so its files are left untouched
-on disk and reported as a count in the log rather than silently discarded — re-add those accounts
-under Claude or Codex if you need them. And an account enrolled in several pools lands in exactly
-**one** store entry (first pool in sorted order wins), because a single-use refresh token held in
-two places would have the two copies invalidate each other.
+Two things do not survive. **Gemini logins (Antigravity) are not carried across**: that provider
+only ever existed through the sidecar and has no credential-injection path, so its files are left
+untouched on disk and reported as a count in the log rather than silently discarded — re-add
+those accounts under Claude or Codex if you need them. And an account enrolled in several pools
+lands in exactly **one** store entry (first pool in sorted order wins), because a single-use
+refresh token held in two places would have the two copies invalidate each other.
 
 **No template rebuild is needed.** This ships as a control-server image only — pull it, recreate
 the container, and the fleet converges on its own inside a minute.
