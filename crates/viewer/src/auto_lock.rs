@@ -25,6 +25,32 @@ pub const ENGAGE_MS: u64 = 180;
 /// Release after the remote cursor stays visible this long.
 pub const RELEASE_MS: u64 = 300;
 
+/// What the GTK tick should do with the actual pointer lock this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockAction {
+    Engage,
+    Release,
+    Nothing,
+}
+
+/// Reconcile the debounced desire ([`AutoLock::want`]) with reality.
+///
+/// `has_target` is "some video window is currently the active window" — the surface the lock
+/// would be attached to. **Wanting the lock with no target is a RELEASE condition, not a
+/// no-op:** on Wayland mutter deactivates a pointer constraint when its surface loses focus, but
+/// `CGAssociateMouseAndMouseCursorPosition(false)` on macOS is process-global and outlives our
+/// focus, so leaving it held freezes the host cursor inside whatever app the operator switched
+/// to. Releasing on blur and re-engaging on focus reproduces the compositor's behaviour on both
+/// platforms.
+pub fn lock_action(want: bool, has_target: bool, engaged: bool) -> LockAction {
+    match (want, has_target, engaged) {
+        // Idempotent per surface in both backends; also re-targets if focus moved windows.
+        (true, true, _) => LockAction::Engage,
+        (_, _, true) => LockAction::Release,
+        _ => LockAction::Nothing,
+    }
+}
+
 pub struct AutoLock {
     /// Latched remote-cursor visibility (from the last shape-bearing update).
     remote_hidden: bool,
@@ -175,6 +201,35 @@ mod tests {
         let _ = al.want(at(2000 + RELEASE_MS));
         al.on_remote_cursor(true, at(4000));
         assert!(al.want(at(4000 + ENGAGE_MS)));
+    }
+
+    /// The merge's regression: auto-lock wants the lock, the operator alt-tabbed away, so there
+    /// is no active video window to target. The old reconciler skipped both branches and left
+    /// the lock held — on macOS that freezes the host cursor process-wide.
+    #[test]
+    fn no_target_while_engaged_releases() {
+        assert_eq!(lock_action(true, false, true), LockAction::Release);
+    }
+
+    #[test]
+    fn no_target_and_not_engaged_does_nothing() {
+        assert_eq!(lock_action(true, false, false), LockAction::Nothing);
+    }
+
+    #[test]
+    fn wanted_with_a_target_engages_and_is_idempotent() {
+        assert_eq!(lock_action(true, true, false), LockAction::Engage);
+        // Re-engaging is how the Wayland twin re-targets after focus moves windows; the
+        // implementation is idempotent per surface, so ask for it either way.
+        assert_eq!(lock_action(true, true, true), LockAction::Engage);
+    }
+
+    #[test]
+    fn unwanted_releases_only_when_engaged() {
+        assert_eq!(lock_action(false, true, true), LockAction::Release);
+        assert_eq!(lock_action(false, false, true), LockAction::Release);
+        assert_eq!(lock_action(false, true, false), LockAction::Nothing);
+        assert_eq!(lock_action(false, false, false), LockAction::Nothing);
     }
 
     #[test]

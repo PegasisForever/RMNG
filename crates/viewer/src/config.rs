@@ -18,14 +18,47 @@ pub const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:9001";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub server_addr: String,
+    /// macOS only: swap Cmd and Control on the wire, so Mac muscle memory (Cmd+C, Cmd+T) reaches
+    /// the remote GNOME session as Ctrl. `serde(default)` so a config.json written before this
+    /// field existed still loads. Ignored on Linux.
+    #[serde(default = "default_cmd_is_ctrl")]
+    pub cmd_is_ctrl: bool,
+}
+
+fn default_cmd_is_ctrl() -> bool {
+    true
 }
 
 impl Default for Config {
     fn default() -> Self {
         // Seed from RMNG_VIDEO if present (legacy override), else the default.
         let server_addr = std::env::var("RMNG_VIDEO").unwrap_or_else(|_| DEFAULT_SERVER_ADDR.to_string());
-        Config { server_addr }
+        Config { server_addr, cmd_is_ctrl: default_cmd_is_ctrl() }
     }
+}
+
+/// Parse an `RMNG_CMD_IS_CTRL` value. `None` means "no opinion" (unset or blank) — the caller
+/// falls through to the persisted config rather than treating absence as "off".
+///
+/// The `allow(dead_code)` covers non-macOS builds: only the macOS keyboard monitor consults this
+/// setting, so on Linux both functions are reachable from tests only. The parser itself is
+/// platform-neutral, so its tests run everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn parse_cmd_is_ctrl_env(v: Option<&str>) -> Option<bool> {
+    let s = v?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    Some(!matches!(s.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+}
+
+/// The effective Cmd↔Ctrl setting: `RMNG_CMD_IS_CTRL` wins, else the persisted config, which
+/// defaults to enabled. Called only from the macOS keyboard monitor's install (hence the
+/// non-macOS `allow(dead_code)`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn cmd_is_ctrl() -> bool {
+    parse_cmd_is_ctrl_env(std::env::var("RMNG_CMD_IS_CTRL").ok().as_deref())
+        .unwrap_or_else(|| load().cmd_is_ctrl)
 }
 
 pub fn config_path() -> PathBuf {
@@ -56,4 +89,43 @@ pub fn save(config: &Config) -> Result<()> {
     }
     let text = serde_json::to_string_pretty(config).context("serialize config")?;
     std::fs::write(&path, text).with_context(|| format!("write {path:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_override_parses_truthy_and_falsy() {
+        assert_eq!(parse_cmd_is_ctrl_env(Some("0")), Some(false));
+        assert_eq!(parse_cmd_is_ctrl_env(Some("false")), Some(false));
+        assert_eq!(parse_cmd_is_ctrl_env(Some("FALSE")), Some(false));
+        assert_eq!(parse_cmd_is_ctrl_env(Some("no")), Some(false));
+        assert_eq!(parse_cmd_is_ctrl_env(Some("off")), Some(false));
+        assert_eq!(parse_cmd_is_ctrl_env(Some("1")), Some(true));
+        assert_eq!(parse_cmd_is_ctrl_env(Some("true")), Some(true));
+    }
+
+    /// Unset or blank means "no opinion" — fall through to the persisted config rather than
+    /// silently disabling the swap.
+    #[test]
+    fn env_override_absent_or_blank_has_no_opinion() {
+        assert_eq!(parse_cmd_is_ctrl_env(None), None);
+        assert_eq!(parse_cmd_is_ctrl_env(Some("")), None);
+        assert_eq!(parse_cmd_is_ctrl_env(Some("   ")), None);
+    }
+
+    /// A config.json written before this field existed must still load, with the swap on.
+    #[test]
+    fn legacy_config_without_the_field_still_loads_with_swap_on() {
+        let c: Config = serde_json::from_str(r#"{"server_addr":"10.0.0.100:9001"}"#)
+            .expect("legacy config must deserialize");
+        assert_eq!(c.server_addr, "10.0.0.100:9001");
+        assert!(c.cmd_is_ctrl, "the swap defaults on");
+    }
+
+    #[test]
+    fn default_config_has_the_swap_on() {
+        assert!(Config { server_addr: DEFAULT_SERVER_ADDR.to_string(), cmd_is_ctrl: true }.cmd_is_ctrl);
+    }
 }
