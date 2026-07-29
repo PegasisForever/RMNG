@@ -145,6 +145,53 @@ pub(crate) const CLONE_FLEET_KEY_TAR: &str = "home/rmng/.config/rmng/ssh/fleet_e
 /// first contact (host keys are persisted per clone id).
 const CLONE_SSH_CONFIG: &str = "Host *\n    StrictHostKeyChecking accept-new\n    User rmng\n    IdentityFile /home/rmng/.config/rmng/ssh/fleet_ed25519\n";
 
+/// Delimiters around the fleet block inside `~rmng/.ssh/config`. Everything between them is
+/// ours to rewrite; everything outside is the user's and is preserved verbatim.
+pub const SSH_CONFIG_BEGIN: &str = "# BEGIN rmng managed block — edits here are overwritten";
+pub const SSH_CONFIG_END: &str = "# END rmng managed block";
+
+/// Splice the fleet block into a clone's existing `~/.ssh/config`, preserving the user's own
+/// entries. Replaces the region between [`SSH_CONFIG_BEGIN`]/[`SSH_CONFIG_END`] in place (so a
+/// user's `Host` stanzas keep their position relative to ours — `ssh` takes the FIRST match for
+/// any keyword, so moving our `Host *` above a user stanza would silently change which
+/// `User`/`IdentityFile` wins).
+///
+/// Why this exists: the block is re-pushed on every operator key change and on every
+/// control-server restart (the `pushed` dedup map in [`run`] is in-memory), so a whole-file
+/// write does not lose the user's edits once — it loses them repeatedly, with nothing logged.
+///
+/// Three input shapes, all covered by tests:
+/// - **has markers** → the managed region is replaced, the rest is untouched.
+/// - **no markers, non-empty** (a clone provisioned before this change, or a hand-written
+///   config) → the managed block is PREPENDED and the existing text kept below. Any verbatim
+///   copy of the old unmarked block is dropped, so upgrading doesn't leave a stale duplicate
+///   `Host *` above the user's stanzas.
+/// - **absent/empty** → just the managed block.
+///
+/// Pure — unit-tested.
+pub fn merge_ssh_config(existing: &str, managed: &str) -> String {
+    let managed_block =
+        format!("{SSH_CONFIG_BEGIN}\n{}\n{SSH_CONFIG_END}\n", managed.trim_end_matches('\n'));
+
+    if let (Some(start), Some(end)) = (existing.find(SSH_CONFIG_BEGIN), existing.find(SSH_CONFIG_END))
+        && start < end
+    {
+        // Consume the end marker's own line so we don't leave its tail behind.
+        let after = existing[end + SSH_CONFIG_END.len()..].trim_start_matches(|c| c != '\n');
+        let after = after.strip_prefix('\n').unwrap_or(after);
+        return format!("{}{managed_block}{after}", &existing[..start]);
+    }
+
+    // Unmarked. Strip a verbatim copy of the legacy block (what pre-marker clones already have)
+    // so the upgrade is idempotent rather than duplicating a competing `Host *`.
+    let rest = existing.replace(CLONE_SSH_CONFIG, "");
+    let rest = rest.trim_start_matches('\n');
+    if rest.trim().is_empty() {
+        return managed_block;
+    }
+    format!("{managed_block}\n{rest}")
+}
+
 /// Generate an ed25519 host key at `key_path` (+ `.pub`) if it doesn't already exist.
 /// Idempotent: an existing key is left byte-for-byte untouched (so identity is stable).
 /// Parent dirs are created 0700.
@@ -171,6 +218,34 @@ pub fn ensure_hostkey(key_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read a clone's current `~rmng/.ssh/config` so [`clone_ssh_tar_entries`] can splice into it
+/// rather than clobber it. A missing file, an unreadable one, or an exec failure all yield an
+/// empty string — the merge then just writes the managed block, which is the correct fresh-clone
+/// result. Never fails the caller: losing SSH entirely is worse than losing a user's customization.
+pub async fn read_clone_ssh_config(docker: &crate::docker::DockerCtl, clone_id: &str) -> String {
+    let mut out = String::new();
+    let script = "cat /home/rmng/.ssh/config 2>/dev/null || true\n";
+    match docker
+        .exec_script(clone_id, script, &[], &[], |stream, line| {
+            if stream == "out" {
+                out.push_str(line);
+                out.push('\n');
+            }
+        })
+        .await
+    {
+        Ok(0) => out,
+        Ok(code) => {
+            tracing::warn!(target: "ssh", "{clone_id}: reading ~/.ssh/config exited {code}; treating as empty");
+            String::new()
+        }
+        Err(e) => {
+            tracing::warn!(target: "ssh", "{clone_id}: reading ~/.ssh/config failed: {e:#}; treating as empty");
+            String::new()
+        }
+    }
+}
+
 /// The tar entries that provision SSH into one clone:
 /// - `~rmng/.ssh/authorized_keys` (operator keys + the shared fleet pubkey; clone-user, 0600),
 /// - the shared fleet keypair at [`CLONE_FLEET_KEY_TAR`](.pub) — deliberately OUTSIDE `~/.ssh`
@@ -181,10 +256,17 @@ pub fn ensure_hostkey(key_path: &Path) -> Result<()> {
 /// Generates+persists the per-clone host key and the shared fleet key on first call. The
 /// `~rmng/.ssh` dir is pre-created 700 by the template; the fleet key's `.config/rmng/ssh` dir
 /// is created by the reconciler's `ssh_prepare_script` (and auto-created by the docker upload).
+///
+/// `existing_ssh_config` is the clone's current `~/.ssh/config` (see [`read_clone_ssh_config`]);
+/// it is spliced via [`merge_ssh_config`] so a user's own `Host` stanzas survive. Pass `""` for a
+/// clone that has none. `authorized_keys` is deliberately NOT merged — the control server owns
+/// the trust set, and honouring keys added inside a clone would let a compromised clone widen
+/// its own access.
 pub fn clone_ssh_tar_entries(
     data_dir: &str,
     clone_id: &str,
     keys: &[String],
+    existing_ssh_config: &str,
 ) -> Result<Vec<TarEntry>> {
     let key_path = clone_hostkey_path(data_dir, clone_id);
     ensure_hostkey(&key_path)?;
@@ -229,7 +311,7 @@ pub fn clone_ssh_tar_entries(
         },
         TarEntry {
             path: "home/rmng/.ssh/config".into(),
-            data: CLONE_SSH_CONFIG.as_bytes().to_vec(),
+            data: merge_ssh_config(existing_ssh_config, CLONE_SSH_CONFIG).into_bytes(),
             mode: 0o600,
             uid: 1000,
             gid: 1000,
@@ -340,7 +422,12 @@ async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<Str
         if !app.docker.is_running(&host.id).await.unwrap_or(false) {
             continue; // stopped clones get keys at next provision/boot
         }
-        match clone_ssh_tar_entries(data_dir, &host.id, &cfg.ssh.authorized_keys) {
+        // Read the clone's current config so the fleet block is spliced in, not written over.
+        // This push runs on every operator key change AND on every control-server restart (the
+        // `pushed` map below is in-memory), so a clobber here would eat the user's edits again
+        // and again rather than just once.
+        let existing = read_clone_ssh_config(&app.docker, &host.id).await;
+        match clone_ssh_tar_entries(data_dir, &host.id, &cfg.ssh.authorized_keys, &existing) {
             // Push the ~/.ssh material live (authorized_keys + shared fleet key + config);
             // the clone's own host key is provision-time only (changing it under a running
             // sshd would need a restart), so filter to the home/ files.
@@ -581,7 +668,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rmng-ssh-tar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let entries =
-            clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()]).unwrap();
+            clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()], "").unwrap();
 
         // authorized_keys = operator key + the generated fleet pubkey.
         let ak = entries.iter().find(|e| e.path == "home/rmng/.ssh/authorized_keys").expect("authorized_keys entry");
@@ -620,6 +707,21 @@ mod tests {
             "ssh config points IdentityFile at the relocated fleet key:\n{cfg_text}"
         );
 
+        // The ENTRY (not just the pure merge helper) must splice rather than clobber — this is
+        // the byte payload that actually lands in the clone, and the whole point of the change.
+        let entries = clone_ssh_tar_entries(
+            dir.to_str().unwrap(),
+            "clone-a",
+            &["ssh-ed25519 AAAA a".into()],
+            "Host myserver\n    HostName 1.2.3.4\n",
+        )
+        .unwrap();
+        let cfg = entries.iter().find(|e| e.path == "home/rmng/.ssh/config").expect("ssh config entry");
+        let cfg_text = String::from_utf8(cfg.data.clone()).unwrap();
+        assert!(cfg_text.contains("Host myserver"), "user stanza preserved in the tar entry:\n{cfg_text}");
+        assert!(cfg_text.contains("    HostName 1.2.3.4"), "user stanza intact in the tar entry:\n{cfg_text}");
+        assert!(cfg_text.contains(SSH_CONFIG_BEGIN), "managed block is delimited:\n{cfg_text}");
+
         // The clone's own sshd host key is still root-owned.
         let hk = entries.iter().find(|e| e.path == "etc/ssh/ssh_host_ed25519_key").expect("host key entry");
         assert_eq!(hk.mode, 0o600);
@@ -627,6 +729,63 @@ mod tests {
         assert!(entries.iter().any(|e| e.path == "etc/ssh/ssh_host_ed25519_key.pub" && e.mode == 0o644));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_ssh_config_preserves_user_stanzas_across_repeated_pushes() {
+        // Fresh clone: nothing there yet ⇒ just the managed block, delimited.
+        let fresh = merge_ssh_config("", CLONE_SSH_CONFIG);
+        assert!(fresh.starts_with(SSH_CONFIG_BEGIN), "block is marked:\n{fresh}");
+        assert!(fresh.trim_end().ends_with(SSH_CONFIG_END), "block is closed:\n{fresh}");
+        assert!(fresh.contains("IdentityFile /home/rmng/.config/rmng/ssh/fleet_ed25519"));
+
+        // User adds their own stanza below our block.
+        let customized = format!("{fresh}\nHost myserver\n    HostName 1.2.3.4\n    User alice\n");
+
+        // The push that used to clobber it. The user's stanza must survive verbatim...
+        let after = merge_ssh_config(&customized, CLONE_SSH_CONFIG);
+        assert!(after.contains("Host myserver"), "user stanza survived:\n{after}");
+        assert!(after.contains("    HostName 1.2.3.4"), "user stanza intact:\n{after}");
+        assert!(after.contains("    User alice"), "user stanza intact:\n{after}");
+        // ...and ours must still be there, exactly once (no accumulating duplicates).
+        assert_eq!(after.matches(SSH_CONFIG_BEGIN).count(), 1, "one managed block:\n{after}");
+        assert_eq!(after.matches("Host *").count(), 1, "no duplicate Host *:\n{after}");
+
+        // Idempotent: the reconciler + every restart re-push, so N pushes must equal one.
+        let twice = merge_ssh_config(&after, CLONE_SSH_CONFIG);
+        assert_eq!(twice, after, "repeated pushes must converge");
+
+        // A changed managed block replaces only the managed region.
+        let rotated = merge_ssh_config(&after, "Host *\n    User rmng\n    IdentityFile /new/key\n");
+        assert!(rotated.contains("IdentityFile /new/key"), "managed region updated:\n{rotated}");
+        assert!(!rotated.contains("fleet_ed25519"), "old managed content gone:\n{rotated}");
+        assert!(rotated.contains("Host myserver"), "user stanza still survives:\n{rotated}");
+    }
+
+    #[test]
+    fn merge_ssh_config_upgrades_an_unmarked_legacy_config() {
+        // A clone provisioned before markers existed: the legacy block, plus user edits below.
+        let legacy = format!("{CLONE_SSH_CONFIG}\n# mine\nHost myserver\n    HostName 1.2.3.4\n");
+        let out = merge_ssh_config(&legacy, CLONE_SSH_CONFIG);
+
+        assert!(out.contains("Host myserver"), "user stanza kept on upgrade:\n{out}");
+        assert!(out.contains("# mine"), "user comment kept on upgrade:\n{out}");
+        // The old unmarked copy must not linger as a second, competing `Host *` — ssh takes the
+        // FIRST match per keyword, so a stale duplicate would silently shadow the managed one.
+        assert_eq!(out.matches("Host *").count(), 1, "legacy block absorbed, not duplicated:\n{out}");
+        assert_eq!(out.matches(SSH_CONFIG_BEGIN).count(), 1, "exactly one managed block:\n{out}");
+        // And the upgrade converges too.
+        assert_eq!(merge_ssh_config(&out, CLONE_SSH_CONFIG), out, "upgrade is idempotent");
+
+        // A hand-written config with no trace of ours: prepended, user content fully kept.
+        let handwritten = "Host bastion\n    HostName 10.0.0.1\n";
+        let out = merge_ssh_config(handwritten, CLONE_SSH_CONFIG);
+        assert!(out.starts_with(SSH_CONFIG_BEGIN), "managed block goes first:\n{out}");
+        assert!(out.contains("Host bastion"), "hand-written config kept:\n{out}");
+        assert!(out.contains("    HostName 10.0.0.1"), "hand-written config intact:\n{out}");
+
+        // Whitespace-only is treated as empty (no stray blank lines accumulating).
+        assert_eq!(merge_ssh_config("\n\n  \n", CLONE_SSH_CONFIG), merge_ssh_config("", CLONE_SSH_CONFIG));
     }
 
     #[test]

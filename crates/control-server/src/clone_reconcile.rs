@@ -1027,10 +1027,13 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
         .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
         .unwrap_or_default();
     exec_ok(app, clone_id, &ssh_prepare_script(&fleet_body), "prepare ssh dirs").await?;
+    // After `ssh_prepare_script` (which creates ~/.ssh) so the read sees the real state.
+    let existing_ssh_config = crate::ssh::read_clone_ssh_config(&app.docker, clone_id).await;
     let entries = crate::ssh::clone_ssh_tar_entries(
         &app.config().data_dir,
         clone_id,
         &app.config().ssh.authorized_keys,
+        &existing_ssh_config,
     )?;
     app.docker
         .upload_tar(clone_id, entries)

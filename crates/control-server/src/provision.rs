@@ -666,7 +666,15 @@ async fn clone_container_after_create(
     // no host keys, so these land with the right owner/perms. Best-effort: a keygen failure
     // must not fail the whole clone — log and continue (SSH just won't work until the next
     // reconcile push).
-    match crate::ssh::clone_ssh_tar_entries(&cfg.data_dir, hostname, &cfg.ssh.authorized_keys) {
+    // A clone created from a committed image inherits whatever `~/.ssh/config` that image had,
+    // including a user's own `Host` stanzas — so splice rather than overwrite here too.
+    let existing_ssh_config = crate::ssh::read_clone_ssh_config(docker, container).await;
+    match crate::ssh::clone_ssh_tar_entries(
+        &cfg.data_dir,
+        hostname,
+        &cfg.ssh.authorized_keys,
+        &existing_ssh_config,
+    ) {
         Ok(mut ssh_entries) => {
             ssh_entries.push(crate::clone_reconcile::ssh_stamp_entry());
             entries.append(&mut ssh_entries);
@@ -1286,6 +1294,7 @@ mod tests {
             dir.to_str().unwrap(),
             "c1",
             &["ssh-ed25519 A a".into()],
+            "",
         )
         .unwrap();
         assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys"
@@ -1299,6 +1308,19 @@ mod tests {
             "the fleet private key must never be provisioned into ~/.ssh"
         );
         assert!(e.iter().any(|t| t.path == crate::ssh::CLONE_FLEET_KEY_TAR));
+        // The create path reads the clone's existing ~/.ssh/config and passes it through, so a
+        // config baked into the SOURCE IMAGE (a user's own `Host` stanzas, committed with it)
+        // survives provisioning instead of being reset on every clone made from that image.
+        let e = crate::ssh::clone_ssh_tar_entries(
+            dir.to_str().unwrap(),
+            "c1",
+            &["ssh-ed25519 A a".into()],
+            "Host baked\n    HostName 10.9.9.9\n",
+        )
+        .unwrap();
+        let cfg = e.iter().find(|t| t.path == "home/rmng/.ssh/config").expect("ssh config entry");
+        let cfg_text = String::from_utf8(cfg.data.clone()).unwrap();
+        assert!(cfg_text.contains("Host baked"), "image-baked user config survives:\n{cfg_text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
