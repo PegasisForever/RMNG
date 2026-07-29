@@ -413,6 +413,20 @@ one public key list, installed on both the bastion and every clone.
    **immediately** on save (an explicit apply is triggered by the config write) — no clone
    restart needed.
 
+`authorized_keys` is the **only** file under a clone's `~/.ssh` the server writes, and it is
+written whole — the server owns the inbound trust set, so a key added by hand inside a clone is
+replaced on the next push. Everything else in `~/.ssh` (`config`, `known_hosts`, and any client
+keys you create) is yours and is never read or modified.
+
+That means **clone→clone SSH is not pre-authenticated**. The server used to provision a shared
+client key plus a `Host *` block for it, which was removed: `Host *` applied clone-local
+`User`/`IdentityFile` defaults to *every* destination — `ssh github.com` from a clone
+authenticated as `rmng` offering the fleet key — and a user's own `Host` stanza written below the
+block silently lost its `User` to OpenSSH's first-match rule. To reach one clone from another, add
+your own key to **Settings → SSH Access** (it lands in every clone's `authorized_keys`) and use it
+via an agent or your own `~/.ssh/config`. `rmng clone ssh <clone>` still prints the right
+one-liner; supplying the identity is now yours.
+
 **Connecting:**
 
 - **From a clone's row in the UI**: click **Copy SSH command**, then paste into a terminal and

@@ -672,8 +672,15 @@ fn running_inside_clone() -> bool {
 }
 
 /// The direct one-liner used clone→clone: no bastion jump — clones share the `rmng` Docker
-/// bridge and reach each other by internal IP / Docker-DNS id. `accept-new` trusts the
-/// target's stable host key on first contact (the clone's `~/.ssh/config` sets the same).
+/// bridge and reach each other by internal IP / Docker-DNS id. `accept-new` trusts the target's
+/// stable host key on first contact, and the `rmng@` user is spelled out here rather than assumed
+/// from config.
+///
+/// This prints a command; it does not make it work. The server no longer provisions a shared
+/// client identity (see `control-server`'s `ssh::clone_ssh_tar_entries`), so unless the user has
+/// set up their own key — added to the target's `authorized_keys` via the operator key list, or
+/// loaded in an agent — this will prompt or be refused. That is deliberate: the old shared key
+/// came with a `Host *` block that hijacked `User`/`IdentityFile` for every destination.
 pub fn build_direct_ssh_command(target: &str) -> String {
     format!("ssh -o StrictHostKeyChecking=accept-new rmng@{target}")
 }

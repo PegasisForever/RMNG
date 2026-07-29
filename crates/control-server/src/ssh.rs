@@ -98,99 +98,6 @@ pub fn clone_hostkey_path(data_dir: &str, clone_id: &str) -> PathBuf {
     Path::new(data_dir).join("ssh/clones").join(clone_id).join("ssh_host_ed25519_key")
 }
 
-/// The persisted SHARED fleet keypair path. One identity, provisioned into every clone's
-/// `~/.ssh`, so any clone can SSH into any sibling with no manual setup — the public half is
-/// folded into each clone's `authorized_keys` ([`clone_authorized_keys`]). Stable across
-/// control-server restarts (generated once, then reused).
-pub fn fleet_key_path(data_dir: &str) -> PathBuf {
-    Path::new(data_dir).join("ssh/fleet/id_ed25519")
-}
-
-/// The shared fleet public-key line, generating the keypair on first call (idempotent).
-/// Trimmed to a single line. Used both to append to clones' `authorized_keys` and to seed the
-/// push-gate hash so a first-time key generation propagates. Public so the clone reconciler can
-/// match a clone's stale `~/.ssh/id_ed25519` against the fleet key during migration.
-pub fn fleet_public_key(data_dir: &str) -> Result<String> {
-    let key_path = fleet_key_path(data_dir);
-    ensure_hostkey(&key_path)?;
-    let pub_bytes = std::fs::read(key_path.with_extension("pub"))
-        .with_context(|| format!("reading fleet pubkey at {}", key_path.display()))?;
-    Ok(String::from_utf8_lossy(&pub_bytes).trim().to_string())
-}
-
-/// Operator authorized keys plus the shared fleet public key — the full set every CLONE
-/// accepts. The bastion stays operator-only (it never sees the fleet key), so clone↔clone
-/// SSH is enabled without widening the operator's door. Order: operator keys first, fleet key
-/// last; [`render_authorized_keys`] trims + dedups at render.
-pub fn clone_authorized_keys(operator_keys: &[String], fleet_pub: &str) -> Vec<String> {
-    let mut keys = operator_keys.to_vec();
-    let fleet_pub = fleet_pub.trim();
-    if !fleet_pub.is_empty() {
-        keys.push(fleet_pub.to_string());
-    }
-    keys
-}
-
-/// The shared fleet client key is provisioned OUTSIDE `~/.ssh` (here) on purpose. GNOME's
-/// `gcr-ssh-agent` auto-adopts every private key it finds in `~/.ssh` into the login keyring,
-/// and a stale keyring record for that key makes the agent crash during `ssh`'s session-bind —
-/// which wedges ALL ssh/git inside the clone (the agent can no longer sign any key). Keeping the
-/// fleet key here, referenced from `~/.ssh/config`'s `IdentityFile`, preserves prompt-free
-/// `ssh <clone-id>` while the keyring never sees it. Path is tar-root-relative (no leading `/`).
-pub(crate) const CLONE_FLEET_KEY_TAR: &str = "home/rmng/.config/rmng/ssh/fleet_ed25519";
-
-/// Dropped at `~rmng/.ssh/config` in every clone so a bare `ssh <clone-id>` from inside a
-/// clone is prompt-free: the fleet key (`/home/rmng/.config/rmng/ssh/fleet_ed25519`, kept out
-/// of `~/.ssh`) is a default identity, and `accept-new` trusts a sibling's stable host key on
-/// first contact (host keys are persisted per clone id).
-const CLONE_SSH_CONFIG: &str = "Host *\n    StrictHostKeyChecking accept-new\n    User rmng\n    IdentityFile /home/rmng/.config/rmng/ssh/fleet_ed25519\n";
-
-/// Delimiters around the fleet block inside `~rmng/.ssh/config`. Everything between them is
-/// ours to rewrite; everything outside is the user's and is preserved verbatim.
-pub const SSH_CONFIG_BEGIN: &str = "# BEGIN rmng managed block — edits here are overwritten";
-pub const SSH_CONFIG_END: &str = "# END rmng managed block";
-
-/// Write the fleet block into a clone's `~/.ssh/config` as a delimited managed region, so the
-/// user's own entries around it stay theirs.
-///
-/// Why this exists: the block is re-pushed on every operator key change and on every
-/// control-server restart (the `pushed` dedup map in [`run`] is in-memory), so the old whole-file
-/// write did not lose a user's edits once — it lost them repeatedly, with nothing logged.
-///
-/// Exactly two cases:
-///
-/// - **markers present** → the managed region is replaced WHERE IT ALREADY SITS, and every byte
-///   outside it is kept verbatim. This is the steady state, so from the first marked write
-///   onward a user's edits are never touched again.
-/// - **no markers** → the file is replaced outright with just the managed block. A one-time
-///   reset per clone: today's clones are already being clobbered on every push, so resetting
-///   once and then never again is strictly better than the status quo.
-///
-/// Replacing in place, rather than moving the block to the top or bottom, is the part that
-/// matters for correctness. `ssh` uses the FIRST value it obtains for each keyword, so a
-/// `Host *` sitting above a user's specific stanza silently overrides that stanza's
-/// `User`/`IdentityFile`. Verified with `ssh -G` on a clone: with `Host mine { User alice }`
-/// above our block, `ssh -G mine` resolves `user alice`; moving our block on top of it makes the
-/// same file resolve `user rmng`. Because a marked block is only ever swapped in place, wherever
-/// the user positions their stanzas relative to it keeps holding.
-///
-/// Pure — unit-tested.
-pub fn merge_ssh_config(existing: &str, managed: &str) -> String {
-    let managed_block =
-        format!("{SSH_CONFIG_BEGIN}\n{}\n{SSH_CONFIG_END}\n", managed.trim_end_matches('\n'));
-
-    if let (Some(start), Some(end)) = (existing.find(SSH_CONFIG_BEGIN), existing.find(SSH_CONFIG_END))
-        && start < end
-    {
-        // Consume the end marker's own line so we don't leave its tail behind.
-        let after = existing[end + SSH_CONFIG_END.len()..].trim_start_matches(|c| c != '\n');
-        let after = after.strip_prefix('\n').unwrap_or(after);
-        return format!("{}{managed_block}{after}", &existing[..start]);
-    }
-
-    managed_block
-}
-
 /// Generate an ed25519 host key at `key_path` (+ `.pub`) if it doesn't already exist.
 /// Idempotent: an existing key is left byte-for-byte untouched (so identity is stable).
 /// Parent dirs are created 0700.
@@ -217,57 +124,29 @@ pub fn ensure_hostkey(key_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read a clone's current `~rmng/.ssh/config` so [`clone_ssh_tar_entries`] can splice into it
-/// rather than clobber it. A missing file, an unreadable one, or an exec failure all yield an
-/// empty string — the merge then just writes the managed block, which is the correct fresh-clone
-/// result. Never fails the caller: losing SSH entirely is worse than losing a user's customization.
-pub async fn read_clone_ssh_config(docker: &crate::docker::DockerCtl, clone_id: &str) -> String {
-    let mut out = String::new();
-    let script = "cat /home/rmng/.ssh/config 2>/dev/null || true\n";
-    match docker
-        .exec_script(clone_id, script, &[], &[], |stream, line| {
-            if stream == "out" {
-                out.push_str(line);
-                out.push('\n');
-            }
-        })
-        .await
-    {
-        Ok(0) => out,
-        Ok(code) => {
-            tracing::warn!(target: "ssh", "{clone_id}: reading ~/.ssh/config exited {code}; treating as empty");
-            String::new()
-        }
-        Err(e) => {
-            tracing::warn!(target: "ssh", "{clone_id}: reading ~/.ssh/config failed: {e:#}; treating as empty");
-            String::new()
-        }
-    }
-}
-
 /// The tar entries that provision SSH into one clone:
-/// - `~rmng/.ssh/authorized_keys` (operator keys + the shared fleet pubkey; clone-user, 0600),
-/// - the shared fleet keypair at [`CLONE_FLEET_KEY_TAR`](.pub) — deliberately OUTSIDE `~/.ssh`
-///   (see that const: gcr-ssh-agent crashes on `~/.ssh` keys) — so this clone can dial siblings,
-/// - `~rmng/.ssh/config` (`accept-new`, default user, `IdentityFile` → the fleet key) for a
-///   prompt-free `ssh <clone-id>`,
+/// - `~rmng/.ssh/authorized_keys` (the operator's keys; clone-user, 0600),
 /// - the clone's own stable sshd host key + public half (root, 0600 / 0644).
-/// Generates+persists the per-clone host key and the shared fleet key on first call. The
-/// `~rmng/.ssh` dir is pre-created 700 by the template; the fleet key's `.config/rmng/ssh` dir
-/// is created by the reconciler's `ssh_prepare_script` (and auto-created by the docker upload).
 ///
-/// `existing_ssh_config` is the clone's current `~/.ssh/config` (see [`read_clone_ssh_config`]);
-/// [`merge_ssh_config`] swaps only the marked managed block, so once a clone has one, a user's
-/// own `Host` stanzas are never touched again. A config with no marked block is reset to just
-/// that block — once. Pass `""` for a clone that has none.
+/// Generates+persists the per-clone host key on first call. The `~rmng/.ssh` dir is pre-created
+/// 700 by the template.
 ///
-/// `authorized_keys` is deliberately NOT merged — the control server owns the trust set, and
-/// honouring keys added inside a clone would let a compromised clone widen its own access.
+/// `authorized_keys` is the ONLY thing under `~/.ssh` this server manages, and it is written
+/// whole, not merged: the control server owns the inbound trust set, and honouring keys added
+/// inside a clone would let a compromised clone widen its own access. Everything else in `~/.ssh`
+/// — `config`, `known_hosts`, and any client keys the user creates — belongs to the user and is
+/// never read or written here.
+///
+/// No client identity is provisioned, by design. A shared fleet key plus a `Host *` block used to
+/// live here so `ssh <clone-id>` was prompt-free between clones; it was removed because `Host *`
+/// applied clone-local `User`/`IdentityFile` defaults to EVERY destination, including external
+/// ones — `ssh github.com` authenticated as `rmng` offering the fleet key, and a user's own
+/// `Host` stanza placed below the block silently lost its `User` to first-match. Clone→clone SSH
+/// is now the user's to set up, with `~/.ssh` entirely theirs to do it in.
 pub fn clone_ssh_tar_entries(
     data_dir: &str,
     clone_id: &str,
     keys: &[String],
-    existing_ssh_config: &str,
 ) -> Result<Vec<TarEntry>> {
     let key_path = clone_hostkey_path(data_dir, clone_id);
     ensure_hostkey(&key_path)?;
@@ -276,43 +155,10 @@ pub fn clone_ssh_tar_entries(
     let pub_bytes = std::fs::read(key_path.with_extension("pub"))
         .with_context(|| format!("reading clone host pubkey for {clone_id}"))?;
 
-    // Shared fleet identity (generated once, persisted): its private half + a small ssh
-    // client config go into this clone's ~/.ssh; its public half is folded into the clone's
-    // authorized_keys so every clone accepts every other.
-    let fleet_path = fleet_key_path(data_dir);
-    ensure_hostkey(&fleet_path)?;
-    let fleet_priv = std::fs::read(&fleet_path)
-        .with_context(|| format!("reading fleet key {}", fleet_path.display()))?;
-    let fleet_pub_bytes = std::fs::read(fleet_path.with_extension("pub"))
-        .with_context(|| "reading fleet pubkey".to_string())?;
-    let fleet_pub = String::from_utf8_lossy(&fleet_pub_bytes).trim().to_string();
-    let authorized = clone_authorized_keys(keys, &fleet_pub);
-
     Ok(vec![
         TarEntry {
             path: "home/rmng/.ssh/authorized_keys".into(),
-            data: render_authorized_keys(&authorized).into_bytes(),
-            mode: 0o600,
-            uid: 1000,
-            gid: 1000,
-        },
-        TarEntry {
-            path: CLONE_FLEET_KEY_TAR.into(),
-            data: fleet_priv,
-            mode: 0o600,
-            uid: 1000,
-            gid: 1000,
-        },
-        TarEntry {
-            path: format!("{CLONE_FLEET_KEY_TAR}.pub"),
-            data: fleet_pub_bytes,
-            mode: 0o644,
-            uid: 1000,
-            gid: 1000,
-        },
-        TarEntry {
-            path: "home/rmng/.ssh/config".into(),
-            data: merge_ssh_config(existing_ssh_config, CLONE_SSH_CONFIG).into_bytes(),
+            data: render_authorized_keys(keys).into_bytes(),
             mode: 0o600,
             uid: 1000,
             gid: 1000,
@@ -406,10 +252,7 @@ fn render_bastion_files(app: &App, data_dir: &str) -> bool {
 /// real change or a newly-seen clone. Best-effort per clone.
 async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<String, u64>) {
     let cfg = app.config();
-    // Gate on the EFFECTIVE clone key set (operator keys + fleet pubkey) so a first-time
-    // fleet-key generation triggers a push even when the operator keys are unchanged.
-    let fleet_pub = fleet_public_key(data_dir).unwrap_or_default();
-    let hash = keys_hash(&clone_authorized_keys(&cfg.ssh.authorized_keys, &fleet_pub));
+    let hash = keys_hash(&cfg.ssh.authorized_keys);
     for host in app
         .store
         .get()
@@ -423,15 +266,10 @@ async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<Str
         if !app.docker.is_running(&host.id).await.unwrap_or(false) {
             continue; // stopped clones get keys at next provision/boot
         }
-        // Read the clone's current config so the fleet block is spliced in, not written over.
-        // This push runs on every operator key change AND on every control-server restart (the
-        // `pushed` map below is in-memory), so a clobber here would eat the user's edits again
-        // and again rather than just once.
-        let existing = read_clone_ssh_config(&app.docker, &host.id).await;
-        match clone_ssh_tar_entries(data_dir, &host.id, &cfg.ssh.authorized_keys, &existing) {
-            // Push the ~/.ssh material live (authorized_keys + shared fleet key + config);
-            // the clone's own host key is provision-time only (changing it under a running
-            // sshd would need a restart), so filter to the home/ files.
+        match clone_ssh_tar_entries(data_dir, &host.id, &cfg.ssh.authorized_keys) {
+            // Push only `authorized_keys` live; the clone's own host key is provision-time only
+            // (changing it under a running sshd would need a restart), so filter to the home/
+            // files. Nothing else under ~/.ssh is ours to write.
             Ok(entries) => {
                 let ak: Vec<_> =
                     entries.into_iter().filter(|e| e.path.starts_with("home/")).collect();
@@ -669,164 +507,48 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rmng-ssh-tar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let entries =
-            clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()], "").unwrap();
+            clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()]).unwrap();
 
-        // authorized_keys = operator key + the generated fleet pubkey.
+        // authorized_keys = exactly the operator keys. No fleet pubkey is folded in any more.
         let ak = entries.iter().find(|e| e.path == "home/rmng/.ssh/authorized_keys").expect("authorized_keys entry");
         assert_eq!(ak.mode, 0o600);
         assert_eq!((ak.uid, ak.gid), (1000, 1000));
-        let fleet_pub =
-            std::fs::read_to_string(fleet_key_path(dir.to_str().unwrap()).with_extension("pub")).unwrap();
-        let fleet_pub = fleet_pub.trim();
         let ak_text = String::from_utf8(ak.data.clone()).unwrap();
-        assert!(ak_text.contains("ssh-ed25519 AAAA a"), "operator key present:\n{ak_text}");
-        assert!(ak_text.contains(fleet_pub), "fleet pubkey folded in:\n{ak_text}");
+        assert_eq!(ak_text, "ssh-ed25519 AAAA a\n", "authorized_keys is the operator set verbatim");
 
-        // Shared fleet keypair lives OUTSIDE ~/.ssh (gcr-ssh-agent crash avoidance), clone-user owned.
-        let id = entries
+        // The ONLY files under ~/.ssh we write is authorized_keys. `config` in particular must not
+        // be emitted: a managed `Host *` block there applied clone-local `User`/`IdentityFile` to
+        // every destination including external ones, and silently shadowed a user's own stanza.
+        let home: Vec<&str> = entries
             .iter()
-            .find(|e| e.path == "home/rmng/.config/rmng/ssh/fleet_ed25519")
-            .expect("fleet private key entry");
-        assert_eq!(id.mode, 0o600);
-        assert_eq!((id.uid, id.gid), (1000, 1000));
-        assert!(!id.data.is_empty(), "fleet private key material present");
-        assert!(entries.iter().any(|e| e.path == "home/rmng/.config/rmng/ssh/fleet_ed25519.pub"
-            && e.mode == 0o644
-            && (e.uid, e.gid) == (1000, 1000)));
-        // No private key must land in ~/.ssh (that is exactly what poisons gcr-ssh-agent).
+            .map(|e| e.path.as_str())
+            .filter(|p| p.starts_with("home/"))
+            .collect();
+        assert_eq!(home, vec!["home/rmng/.ssh/authorized_keys"], "only authorized_keys under home/");
+
+        // No client identity is provisioned anywhere — neither in ~/.ssh (where gcr-ssh-agent
+        // would adopt and crash on it) nor at the old out-of-tree fleet path.
+        for stale in [
+            "home/rmng/.ssh/id_ed25519",
+            "home/rmng/.ssh/config",
+            "home/rmng/.config/rmng/ssh/fleet_ed25519",
+            "home/rmng/.config/rmng/ssh/fleet_ed25519.pub",
+        ] {
+            assert!(!entries.iter().any(|e| e.path == stale), "{stale} must not be provisioned");
+        }
+        // And no key material is generated on disk for it either.
         assert!(
-            !entries.iter().any(|e| e.path == "home/rmng/.ssh/id_ed25519"),
-            "fleet key must NOT be written into ~/.ssh"
-        );
-        let cfg = entries.iter().find(|e| e.path == "home/rmng/.ssh/config").expect("ssh config entry");
-        assert_eq!(cfg.mode, 0o600);
-        assert_eq!((cfg.uid, cfg.gid), (1000, 1000));
-        let cfg_text = String::from_utf8(cfg.data.clone()).unwrap();
-        assert!(cfg_text.contains("StrictHostKeyChecking accept-new"));
-        assert!(
-            cfg_text.contains("IdentityFile /home/rmng/.config/rmng/ssh/fleet_ed25519"),
-            "ssh config points IdentityFile at the relocated fleet key:\n{cfg_text}"
+            !dir.join("ssh/fleet").exists(),
+            "no shared fleet keypair should be generated under the data dir"
         );
 
-        // The ENTRY (not just the pure merge helper) must leave a marked config alone — this is
-        // the byte payload that actually lands in the clone, and the whole point of the change.
-        let marked = format!(
-            "{SSH_CONFIG_BEGIN}\n{}\n{SSH_CONFIG_END}\n\nHost myserver\n    HostName 1.2.3.4\n",
-            CLONE_SSH_CONFIG.trim_end()
-        );
-        let entries =
-            clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()], &marked)
-                .unwrap();
-        let cfg = entries.iter().find(|e| e.path == "home/rmng/.ssh/config").expect("ssh config entry");
-        let cfg_text = String::from_utf8(cfg.data.clone()).unwrap();
-        assert_eq!(cfg_text, marked, "a marked config must ride through the entry untouched");
-        assert!(cfg_text.contains("Host myserver"), "user stanza preserved in the tar entry:\n{cfg_text}");
-
-        // The clone's own sshd host key is still root-owned.
+        // The clone's own sshd HOST key is still provisioned (that is inbound, not a client id).
         let hk = entries.iter().find(|e| e.path == "etc/ssh/ssh_host_ed25519_key").expect("host key entry");
         assert_eq!(hk.mode, 0o600);
         assert_eq!((hk.uid, hk.gid), (0, 0));
         assert!(entries.iter().any(|e| e.path == "etc/ssh/ssh_host_ed25519_key.pub" && e.mode == 0o644));
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn merge_ssh_config_never_touches_user_edits_once_marked() {
-        // Fresh clone: nothing there yet ⇒ just the managed block, delimited.
-        let fresh = merge_ssh_config("", CLONE_SSH_CONFIG);
-        assert!(fresh.starts_with(SSH_CONFIG_BEGIN), "block is marked:\n{fresh}");
-        assert!(fresh.trim_end().ends_with(SSH_CONFIG_END), "block is closed:\n{fresh}");
-        assert!(fresh.contains("IdentityFile /home/rmng/.config/rmng/ssh/fleet_ed25519"));
-
-        // User adds their own stanza below our block.
-        let customized = format!("{fresh}\nHost myserver\n    HostName 1.2.3.4\n    User alice\n");
-
-        // The push that used to clobber it. The user's stanza must survive verbatim...
-        let after = merge_ssh_config(&customized, CLONE_SSH_CONFIG);
-        assert!(after.contains("Host myserver"), "user stanza survived:\n{after}");
-        assert!(after.contains("    HostName 1.2.3.4"), "user stanza intact:\n{after}");
-        assert!(after.contains("    User alice"), "user stanza intact:\n{after}");
-        // ...and ours must still be there, exactly once (no accumulating duplicates).
-        assert_eq!(after.matches(SSH_CONFIG_BEGIN).count(), 1, "one managed block:\n{after}");
-        assert_eq!(after.matches("Host *").count(), 1, "no duplicate Host *:\n{after}");
-        // Nothing moved: an unchanged managed block means a byte-identical file.
-        assert_eq!(after, customized, "a no-op push must not even reformat");
-
-        // Idempotent: the reconciler + every restart re-push, so N pushes must equal one.
-        assert_eq!(merge_ssh_config(&after, CLONE_SSH_CONFIG), after, "repeated pushes converge");
-
-        // A changed managed block replaces only the managed region.
-        let rotated = merge_ssh_config(&after, "Host *\n    User rmng\n    IdentityFile /new/key\n");
-        assert!(rotated.contains("IdentityFile /new/key"), "managed region updated:\n{rotated}");
-        assert!(!rotated.contains("fleet_ed25519"), "old managed content gone:\n{rotated}");
-        assert!(rotated.contains("Host myserver"), "user stanza still survives:\n{rotated}");
-    }
-
-    #[test]
-    fn merge_ssh_config_replaces_the_managed_block_in_place_not_at_the_top() {
-        // Position is semantics: ssh takes the FIRST value per keyword, so a user who puts their
-        // stanza ABOVE our `Host *` is choosing to override it. Verified with `ssh -G` on a live
-        // clone — that ordering resolves `user alice`, the reverse resolves `user rmng`. So a
-        // push must swap the block where it stands and never hoist it to the top.
-        let user_first = format!(
-            "Host mine\n    User alice\n\n{SSH_CONFIG_BEGIN}\n{}\n{SSH_CONFIG_END}\n",
-            CLONE_SSH_CONFIG.trim_end()
-        );
-        let out = merge_ssh_config(&user_first, CLONE_SSH_CONFIG);
-        assert!(out.starts_with("Host mine"), "user stanza stays FIRST (it wins in ssh):\n{out}");
-        assert_eq!(out, user_first, "in-place swap, byte-identical:\n{out}");
-        // Rotating the managed content must still not reorder anything.
-        let rotated = merge_ssh_config(&out, "Host *\n    IdentityFile /new/key\n");
-        assert!(rotated.starts_with("Host mine"), "user stanza still first after a rotate:\n{rotated}");
-        assert!(rotated.contains("/new/key"), "managed content did update:\n{rotated}");
-    }
-
-    #[test]
-    fn merge_ssh_config_resets_an_unmarked_config_exactly_once() {
-        // No markers ⇒ one-time reset to just the managed block. These clones are being clobbered
-        // on EVERY push today, so a single reset that then stops is strictly an improvement.
-        let legacy = format!("{CLONE_SSH_CONFIG}\n# mine\nHost myserver\n    HostName 1.2.3.4\n");
-        let reset = merge_ssh_config(&legacy, CLONE_SSH_CONFIG);
-        assert_eq!(reset, merge_ssh_config("", CLONE_SSH_CONFIG), "unmarked ⇒ managed block only");
-        assert_eq!(reset.matches("Host *").count(), 1, "no duplicate Host *:\n{reset}");
-
-        // ...and from then on it is marked, so the NEXT edit is safe. That "exactly once" is the
-        // whole contract: reset, then hands off forever.
-        let then_edited = format!("{reset}\nHost myserver\n    HostName 1.2.3.4\n");
-        assert_eq!(
-            merge_ssh_config(&then_edited, CLONE_SSH_CONFIG),
-            then_edited,
-            "the edit after the reset must survive untouched"
-        );
-
-        // A hand-written config with no trace of ours resets the same way (no special-casing).
-        assert_eq!(
-            merge_ssh_config("Host bastion\n    HostName 10.0.0.1\n", CLONE_SSH_CONFIG),
-            reset
-        );
-        // Whitespace-only is just the empty case.
-        assert_eq!(merge_ssh_config("\n\n  \n", CLONE_SSH_CONFIG), reset);
-        // A half-written marker pair (BEGIN only, or reversed) is NOT a valid block ⇒ reset.
-        assert_eq!(merge_ssh_config(&format!("{SSH_CONFIG_BEGIN}\nHost x\n"), CLONE_SSH_CONFIG), reset);
-        assert_eq!(
-            merge_ssh_config(&format!("{SSH_CONFIG_END}\nHost x\n{SSH_CONFIG_BEGIN}\n"), CLONE_SSH_CONFIG),
-            reset
-        );
-    }
-
-    #[test]
-    fn clone_authorized_keys_appends_fleet_pubkey() {
-        let out = clone_authorized_keys(&["ssh-ed25519 OP op".into()], "  ssh-ed25519 FLEET fleet  ");
-        assert_eq!(out, vec!["ssh-ed25519 OP op".to_string(), "ssh-ed25519 FLEET fleet".to_string()]);
-        // No operator keys ⇒ just the fleet key; empty fleet ⇒ operator keys only.
-        assert_eq!(clone_authorized_keys(&[], "ssh-ed25519 FLEET fleet"), vec!["ssh-ed25519 FLEET fleet".to_string()]);
-        assert_eq!(clone_authorized_keys(&["ssh-ed25519 OP op".into()], "  "), vec!["ssh-ed25519 OP op".to_string()]);
-    }
-
-    #[test]
-    fn fleet_key_path_is_under_data_dir() {
-        assert_eq!(fleet_key_path("/data").to_str().unwrap(), "/data/ssh/fleet/id_ed25519");
     }
 
     #[test]

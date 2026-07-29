@@ -666,16 +666,9 @@ async fn clone_container_after_create(
     // no host keys, so these land with the right owner/perms. Best-effort: a keygen failure
     // must not fail the whole clone — log and continue (SSH just won't work until the next
     // reconcile push).
-    // A clone created from a committed image inherits that image's `~/.ssh/config`. If it already
-    // carries a marked managed block (committed from a clone that had one), only the block is
-    // swapped and the user's `Host` stanzas ride along; an unmarked one is reset, once.
-    let existing_ssh_config = crate::ssh::read_clone_ssh_config(docker, container).await;
-    match crate::ssh::clone_ssh_tar_entries(
-        &cfg.data_dir,
-        hostname,
-        &cfg.ssh.authorized_keys,
-        &existing_ssh_config,
-    ) {
+    // `authorized_keys` is the only `~/.ssh` file provisioned; a config baked into the source
+    // image stays exactly as the image left it (the server no longer reads or writes it).
+    match crate::ssh::clone_ssh_tar_entries(&cfg.data_dir, hostname, &cfg.ssh.authorized_keys) {
         Ok(mut ssh_entries) => {
             ssh_entries.push(crate::clone_reconcile::ssh_stamp_entry());
             entries.append(&mut ssh_entries);
@@ -685,37 +678,6 @@ async fn clone_container_after_create(
 
     on_progress("inject", "injecting machine-id + preset env + PATH rc");
     docker.upload_tar(container, entries).await?;
-
-    // Run the same `~/.ssh/id_ed25519` migration the reconciler does. A clone created from a
-    // SOURCE IMAGE committed while the old layout was live inherits the poisoned fleet key baked
-    // into that image — and because the block above already stamped the current
-    // `SSH_STAMP_VERSION`, `ensure_ssh_ready` short-circuits on every later reconcile and would
-    // never clean it up. gcr-ssh-agent then adopts the key and crashes on it, wedging ALL ssh/git
-    // in the clone (a bare `git pull` fails to sign with the user's own key) from birth.
-    //
-    // Ordering: after the `upload_tar` above, so the fleet key is present at its new location
-    // before the old copy is removed — the script's guard compares the two pubkeys and only
-    // deletes on an exact match, so it is a safe no-op if that upload was skipped.
-    let fleet_body = crate::ssh::fleet_public_key(&cfg.data_dir)
-        .ok()
-        .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
-        .unwrap_or_default();
-    if !fleet_body.is_empty() {
-        on_progress("inject", "migrating any image-baked ~/.ssh fleet key");
-        let script = crate::clone_reconcile::ssh_prepare_script(&fleet_body);
-        // Best-effort, exactly like the ssh material above: a clone that boots with the poisoned
-        // key is degraded, not dead, and the operator can still reach it to fix it by hand.
-        match docker
-            .exec_script(container, &script, &[], &[], |_stream, line| {
-                tracing::debug!(target: "provision", "ssh-migrate: {line}");
-            })
-            .await
-        {
-            Ok(0) => {}
-            Ok(code) => tracing::warn!("clone {hostname}: ssh key migration exited {code} (non-fatal)"),
-            Err(e) => tracing::warn!("clone {hostname}: ssh key migration failed: {e:#} (non-fatal)"),
-        }
-    }
 
     // Interactive Claude Code reads MCP servers from ~/.claude.json (state-bearing → jq merge, not
     // a tar entry). Give it the same desktop+linear set as Codex and the agent-wrapper; the
@@ -1291,64 +1253,44 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("rmng-prov-ssh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let e = crate::ssh::clone_ssh_tar_entries(
-            dir.to_str().unwrap(),
-            "c1",
-            &["ssh-ed25519 A a".into()],
-            "",
-        )
-        .unwrap();
+        let e =
+            crate::ssh::clone_ssh_tar_entries(dir.to_str().unwrap(), "c1", &["ssh-ed25519 A a".into()])
+                .unwrap();
         assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys"
             && t.mode == 0o600
             && t.uid == 1000));
-        // No PRIVATE key may land in ~/.ssh: gcr-ssh-agent adopts anything it finds there into the
-        // login keyring and then crashes on it, wedging all ssh/git in the clone. The fleet key
-        // belongs at CLONE_FLEET_KEY_TAR, outside ~/.ssh.
-        assert!(
-            !e.iter().any(|t| t.path == "home/rmng/.ssh/id_ed25519"),
-            "the fleet private key must never be provisioned into ~/.ssh"
+        // The create path provisions exactly ONE file under ~/.ssh. It must not write `config`
+        // (a managed `Host *` there leaked clone-local User/IdentityFile onto every destination),
+        // and no PRIVATE key may land in ~/.ssh — gcr-ssh-agent adopts anything it finds there
+        // into the login keyring and then crashes on it, wedging all ssh/git in the clone.
+        let home: Vec<&str> =
+            e.iter().map(|t| t.path.as_str()).filter(|p| p.starts_with("home/")).collect();
+        assert_eq!(
+            home,
+            vec!["home/rmng/.ssh/authorized_keys"],
+            "authorized_keys is the only ~/.ssh file the create path writes"
         );
-        assert!(e.iter().any(|t| t.path == crate::ssh::CLONE_FLEET_KEY_TAR));
-        // The create path reads the clone's existing ~/.ssh/config and passes it through, so a
-        // MARKED config baked into the SOURCE IMAGE (committed from a clone that already had the
-        // managed block, user stanzas and all) survives provisioning rather than being reset on
-        // every clone made from that image.
-        let baked = format!(
-            "{}\n{}\n{}\n\nHost baked\n    HostName 10.9.9.9\n",
-            crate::ssh::SSH_CONFIG_BEGIN,
-            "Host *\n    User rmng",
-            crate::ssh::SSH_CONFIG_END
-        );
-        let e = crate::ssh::clone_ssh_tar_entries(
-            dir.to_str().unwrap(),
-            "c1",
-            &["ssh-ed25519 A a".into()],
-            &baked,
-        )
-        .unwrap();
-        let cfg = e.iter().find(|t| t.path == "home/rmng/.ssh/config").expect("ssh config entry");
-        let cfg_text = String::from_utf8(cfg.data.clone()).unwrap();
-        assert!(cfg_text.contains("Host baked"), "image-baked user config survives:\n{cfg_text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The create path stamps the ssh-ready version itself, which makes `ensure_ssh_ready`
-    /// short-circuit on every later reconcile. So the create path must ALSO run the migration —
-    /// otherwise a clone made from a source image that has the poisoned `~/.ssh/id_ed25519` baked
-    /// in (any image committed while the old layout was live) stays wedged forever.
+    /// A clone's `~/.ssh/config` (and any client key in there) is the USER's. The create path must
+    /// not read it, write it, or run a migration over it — a source image that carries one keeps it
+    /// verbatim. Guards the source so the removed fleet-key logic cannot quietly come back.
     #[test]
-    fn create_path_runs_the_ssh_key_migration() {
+    fn create_path_never_touches_the_clone_ssh_config() {
         let src = include_str!("provision.rs");
-        let idx = src
-            .find("docker.upload_tar(container, entries)")
-            .expect("the create-path tar upload");
-        let after = &src[idx..];
-        let mig = after
-            .find("ssh_prepare_script")
-            .expect("create path must run the ~/.ssh fleet-key migration after the tar upload");
-        // It must come before the clone is reported ready.
-        let ready = after.find("wait-ready").unwrap_or(usize::MAX);
-        assert!(mig < ready, "the migration must run before the clone is reported ready");
+        let body = &src[..src.find("mod tests").unwrap_or(src.len())];
+        for banned in [
+            "read_clone_ssh_config",
+            "merge_ssh_config",
+            "fleet_public_key",
+            "ssh_prepare_script",
+        ] {
+            assert!(
+                !body.contains(banned),
+                "{banned} must not be called from the create path any more"
+            );
+        }
     }
 
     #[test]

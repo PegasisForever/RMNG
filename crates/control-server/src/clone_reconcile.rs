@@ -186,10 +186,16 @@ pub(crate) fn payload_stamp_entry_for(entries: &[TarEntry]) -> TarEntry {
     payload_stamp_entry(&desired_payload_hash(entries))
 }
 
-/// Current SSH-provisioning schema version. Bumped from the original `ok` when the fleet key
-/// moved out of `~/.ssh` (gcr-ssh-agent crash fix + migration): an older clone stamped `ok`
-/// no longer matches, so `ensure_ssh_ready` re-runs and applies the relocation + cleanup.
-const SSH_STAMP_VERSION: &str = "v2";
+/// Current SSH-provisioning schema version. History: `ok` originally; `v2` when the shared fleet
+/// key moved out of `~/.ssh`; `v3` now that the fleet key and the managed `~/.ssh/config` block
+/// are gone entirely and `authorized_keys` is the only file provisioned.
+///
+/// The bump matters for `v2` clones specifically: they were provisioned with the fleet pubkey
+/// folded into their `authorized_keys`, so re-running `ensure_ssh_ready` is what rewrites that
+/// file WITHOUT it — otherwise every clone would keep accepting the retired fleet identity
+/// indefinitely. Their now-orphaned `~/.ssh/config` and any leftover key files are left alone
+/// on purpose: they are the user's to keep or delete.
+const SSH_STAMP_VERSION: &str = "v3";
 
 pub(crate) fn ssh_stamp_entry() -> TarEntry {
     TarEntry {
@@ -577,44 +583,23 @@ fi
 "#
 }
 
-/// Prepare a clone's filesystem for the SSH material upload, and run the one-time fleet-key
-/// migration. `fleet_body` is the base64 body (field 2) of the shared fleet public key; when
-/// non-empty it gates the migration so we only ever delete the *fleet* key, never a user's own.
+/// Prepare a clone's filesystem for the `authorized_keys` upload: just the two directories the
+/// tar entries land in. Creating `~/.ssh` 700 root-owned-by-rmng matters because sshd's
+/// `StrictModes` refuses a group/world-writable one.
 ///
-/// Migration: older clones carried the shared fleet key at `~/.ssh/id_ed25519`. GNOME's
-/// `gcr-ssh-agent` auto-adopts any `~/.ssh` private key into the login keyring and then crashes
-/// on it during `ssh`'s session-bind, wedging ALL ssh/git in the clone (the agent can't sign any
-/// key). Now that the key is provisioned outside `~/.ssh` (see [`crate::ssh::CLONE_FLEET_KEY_TAR`]),
-/// delete the poisoned copy — only when it exactly matches the fleet key — and kick
-/// `gcr-ssh-agent` so it respawns clean (it is socket-activated; a fresh spawn re-scans `~/.ssh`,
-/// now without the key). Idempotent: on an already-migrated clone the `id_ed25519` file is gone,
-/// so the guarded block is a no-op.
-///
-/// This also runs on the **create** path (`provision.rs`), not just the reconcile one: a clone
-/// created FROM a source image that was committed while the old layout was live inherits the
-/// poisoned key baked into that image, and the create path stamps [`SSH_STAMP_VERSION`] itself —
-/// which would otherwise make `ensure_ssh_ready` short-circuit forever and leave the clone wedged
-/// from birth.
-pub(crate) fn ssh_prepare_script(fleet_body: &str) -> String {
-    let mut s = String::from(
+/// This deliberately touches NOTHING else under `~/.ssh`. It used to also delete
+/// `~/.ssh/id_ed25519` when that file matched the shared fleet key — part of relocating that key
+/// out of `~/.ssh` to stop GNOME's `gcr-ssh-agent` crashing on it. Both the fleet key and that
+/// migration are gone: the server no longer provisions any client identity, so there is no
+/// rmng-owned private key in `~/.ssh` to clean up, and a user's own keys there are none of our
+/// business. (A clone still carrying the old `~/.ssh/id_ed25519` keeps it — it is the user's file
+/// now, and the fleet pubkey is no longer in any `authorized_keys`, so it authenticates nothing.)
+pub(crate) fn ssh_prepare_script() -> String {
+    String::from(
         "set -e\n\
          install -d -o rmng -g rmng -m700 /home/rmng/.ssh\n\
-         mkdir -p /home/rmng/.config/rmng/ssh\n\
-         chown rmng:rmng /home/rmng/.config /home/rmng/.config/rmng /home/rmng/.config/rmng/ssh 2>/dev/null || true\n\
-         chmod 700 /home/rmng/.config/rmng/ssh\n\
          mkdir -p /etc/ssh\n",
-    );
-    if !fleet_body.is_empty() {
-        s.push_str(&format!(
-            "if [ -f /home/rmng/.ssh/id_ed25519.pub ] && \
-[ \"$(awk '{{print $2}}' /home/rmng/.ssh/id_ed25519.pub 2>/dev/null)\" = \"{fleet_body}\" ]; then\n\
-  rm -f /home/rmng/.ssh/id_ed25519 /home/rmng/.ssh/id_ed25519.pub\n\
-  pkill -u 1000 -f /usr/libexec/gcr-ssh-agent 2>/dev/null || true\n\
-  echo 'rmng-migrate: removed poisoned ~/.ssh/id_ed25519 (fleet key relocated out of ~/.ssh)'\n\
-fi\n"
-        ));
-    }
-    s
+    )
 }
 
 fn ssh_bootstrap_script() -> &'static str {
@@ -1021,19 +1006,11 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
     {
         return Ok(());
     }
-    // Base64 body of the fleet pubkey — gates the ~/.ssh/id_ed25519 migration to the fleet key only.
-    let fleet_body = crate::ssh::fleet_public_key(&app.config().data_dir)
-        .ok()
-        .and_then(|line| line.split_whitespace().nth(1).map(str::to_string))
-        .unwrap_or_default();
-    exec_ok(app, clone_id, &ssh_prepare_script(&fleet_body), "prepare ssh dirs").await?;
-    // After `ssh_prepare_script` (which creates ~/.ssh) so the read sees the real state.
-    let existing_ssh_config = crate::ssh::read_clone_ssh_config(&app.docker, clone_id).await;
+    exec_ok(app, clone_id, &ssh_prepare_script(), "prepare ssh dirs").await?;
     let entries = crate::ssh::clone_ssh_tar_entries(
         &app.config().data_dir,
         clone_id,
         &app.config().ssh.authorized_keys,
-        &existing_ssh_config,
     )?;
     app.docker
         .upload_tar(clone_id, entries)
@@ -1504,28 +1481,35 @@ mod tests {
     fn ssh_stamp_entry_marks_success_with_root_owned_file() {
         let entry = ssh_stamp_entry();
         assert_eq!(entry.path, "etc/rmng/ssh-ready");
-        assert_eq!(entry.data, b"v2\n");
+        assert_eq!(entry.data, b"v3\n");
         assert_eq!(entry.mode, 0o644);
         assert_eq!((entry.uid, entry.gid), (0, 0));
     }
 
+    /// The prepare script creates the dirs the `authorized_keys` upload needs and NOTHING else.
+    /// It must never delete or rewrite a file under `~/.ssh`: those are the user's now, including
+    /// `id_ed25519` (which this script used to remove when it matched the retired fleet key) and
+    /// `config`.
     #[test]
-    fn ssh_prepare_script_creates_fleet_dir_and_migrates_poisoned_key() {
-        let s = ssh_prepare_script("AAAAC3NzaC1lZDI1NTE5AAAAFLEETBODY");
-        // Creates the out-of-~/.ssh fleet key dir.
-        assert!(s.contains("mkdir -p /home/rmng/.config/rmng/ssh"));
-        // Migration: guarded on the exact fleet pubkey body, removes the poisoned key + kicks gcr.
-        assert!(s.contains("AAAAC3NzaC1lZDI1NTE5AAAAFLEETBODY"));
-        assert!(s.contains("rm -f /home/rmng/.ssh/id_ed25519 /home/rmng/.ssh/id_ed25519.pub"));
-        assert!(s.contains("pkill -u 1000 -f /usr/libexec/gcr-ssh-agent"));
+    fn ssh_prepare_script_only_creates_dirs() {
+        let s = ssh_prepare_script();
+        assert!(s.contains("install -d -o rmng -g rmng -m700 /home/rmng/.ssh"), "{s}");
+        assert!(s.contains("mkdir -p /etc/ssh"), "{s}");
+        // No destructive verb anywhere, and no reference to a user-owned file.
+        for banned in ["rm -f", "rm ", "pkill", "id_ed25519", "/home/rmng/.ssh/config", "fleet"] {
+            assert!(!s.contains(banned), "prepare script must not mention {banned:?}:\n{s}");
+        }
     }
 
+    /// `authorized_keys` is the only `~/.ssh` file the reconciler provisions — the fleet key and
+    /// the managed `~/.ssh/config` block are gone. Guards the source so they cannot creep back.
     #[test]
-    fn ssh_prepare_script_without_fleet_body_skips_migration() {
-        // No fleet key resolved ⇒ never touch ~/.ssh/id_ed25519 (can't verify it's the fleet key).
-        let s = ssh_prepare_script("");
-        assert!(s.contains("mkdir -p /home/rmng/.config/rmng/ssh"));
-        assert!(!s.contains("rm -f /home/rmng/.ssh/id_ed25519"));
+    fn reconciler_never_touches_the_clone_ssh_config() {
+        let src = include_str!("clone_reconcile.rs");
+        let body = &src[..src.find("mod tests").unwrap_or(src.len())];
+        for banned in ["read_clone_ssh_config", "merge_ssh_config", "fleet_public_key"] {
+            assert!(!body.contains(banned), "{banned} must no longer be used by the reconciler");
+        }
     }
 
     /// The agent-wrapper must have the retired inference vars cleared at the UNIT level.
