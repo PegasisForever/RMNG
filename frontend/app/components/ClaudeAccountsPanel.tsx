@@ -101,7 +101,7 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
           // The ChatGPT mark ships with no `fill`, so it paints black and vanishes on a dark
           // background — invert it there. `claude.svg` carries its own fill, so inverting it
           // too would only wreck a logo that already reads fine.
-          className={`h-4 w-4 shrink-0 rounded-[3px] object-contain ${
+          className={`h-3 w-3 shrink-0 rounded-[3px] object-contain ${
             a.provider === "codex" ? "dark:invert" : ""
           }`}
         />
