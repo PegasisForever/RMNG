@@ -60,6 +60,51 @@ const DEDUP_CAPACITY: usize = 256;
 /// a huge retained log) cannot stall the scan loop. The remainder is picked up next tick.
 const MAX_READ_PER_FILE: u64 = 8 * 1024 * 1024;
 
+/// How far ahead of our own clock a log timestamp may sit and still be believed.
+///
+/// The timestamp is written by the CLONE, which is a sandbox someone (or some agent) has root
+/// in. [`crate::monitor::ActivityBus::mark`] is monotonic-max and `is_inactive` subtracts with
+/// `saturating_sub` on `i64` — which saturates at the type bound, not at zero — so a single
+/// record dated 2099 yields a permanently negative "age" and pins the clone at `working`
+/// forever, with no way back short of deleting it from the fleet. Records beyond this bound are
+/// dropped rather than clamped to now: clamping would still light the badge off a garbage line.
+/// The allowance covers ordinary clock skew between a clone and the host.
+const FUTURE_SKEW_TOLERANCE_MS: i64 = 2 * 60 * 1000;
+
+/// Largest per-response token figure treated as real.
+///
+/// Nothing legitimate approaches this — the largest context windows in service are ~2M tokens.
+/// A line above it is a corrupt or hostile record, and since the totals are cumulative and
+/// persisted, folding one in would poison a clone's figure permanently. Pairs with the
+/// `saturating_add`s below: release builds have `overflow-checks` off, so unguarded `+` on a
+/// crafted `u64::MAX` would silently wrap to an attacker-chosen total.
+const MAX_PLAUSIBLE_TOKENS: u64 = 50_000_000;
+
+/// Most log files to consider per clone per pass.
+///
+/// `collect_jsonl` bounds walk *depth*, which stops it wandering out of the known tree shapes,
+/// but nothing bounds *breadth*: a clone can create millions of `.jsonl` files, and each one
+/// costs a `metadata` syscall every tick plus a permanent `PathBuf` in the cursor map. Real
+/// homes hold tens of session files.
+const MAX_FILES_PER_CLONE: usize = 512;
+
+/// How long one clone's filesystem walk may take before the pass abandons it.
+///
+/// Clone containers run privileged with `fusermount` available, so a clone can mount a FUSE
+/// filesystem under `~/.claude/projects/` that simply never answers. Reads through
+/// `/proc/<pid>/root` into it then block in uninterruptible sleep forever. Without this the
+/// serial per-clone loop never reaches the next clone and the whole fleet's scanning stops —
+/// silently, since nothing else logs.
+const CLONE_SCAN_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Consecutive timeouts after which a clone is skipped entirely.
+///
+/// A timeout does NOT cancel a blocked syscall — the worker thread behind it is gone for good.
+/// So the timeout alone converts "the fleet stops scanning" into "we leak a thread every tick",
+/// which is worse over time. Quarantining after a few strikes bounds the damage at a handful of
+/// threads per hostile clone, permanently.
+const MAX_SCAN_TIMEOUTS: u32 = 3;
+
 /// A byte cursor into one log file.
 ///
 /// `inode` and `len` together detect the two ways a cursor can go stale: the file was replaced
@@ -106,6 +151,9 @@ struct CloneScan {
     cursors: HashMap<PathBuf, Cursor>,
     dedup: Dedup,
     last_fable_ms: Option<i64>,
+    /// Consecutive scan timeouts. At [`MAX_SCAN_TIMEOUTS`] this clone is skipped for good —
+    /// see that constant for why a timeout alone is not enough.
+    timeouts: u32,
     /// False until this clone's first pass has completed.
     ///
     /// On first sight every existing log file is cursored at its current end WITHOUT being
@@ -128,6 +176,9 @@ struct Delta {
 }
 
 impl Delta {
+    /// Whether this pass observed nothing at all. Used by the tests to assert that a line was
+    /// skipped entirely — production code compares the resulting totals instead.
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         *self == Delta::default()
     }
@@ -167,14 +218,35 @@ struct ClaudeMessage {
     usage: Option<ClaudeUsageRec>,
 }
 
+/// A token count as it appears in a log.
+///
+/// `Option<u64>` rather than `#[serde(default)] u64` on purpose. These fields sit inside a
+/// nested struct, so serde failing on ONE of them fails the whole line, and the caller's
+/// `let Ok(rec) = … else { return }` then drops a real response silently. `null` — which
+/// `#[serde(default)]` does *not* accept for a bare `u64` — is a shape these CLIs really do
+/// emit. Being tolerant per field turns "lose the entire record" into "treat one field as
+/// absent".
+type TokenField = Option<u64>;
+
+/// A log-supplied token count, floored at 0 and rejected outright if implausible.
+///
+/// See [`MAX_PLAUSIBLE_TOKENS`]: the totals are cumulative and persisted, so a single crafted
+/// or corrupt record would otherwise poison a clone's figure for good.
+fn token(v: TokenField) -> u64 {
+    match v {
+        Some(n) if n <= MAX_PLAUSIBLE_TOKENS => n,
+        _ => 0,
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ClaudeUsageRec {
     #[serde(default)]
-    input_tokens: u64,
+    input_tokens: TokenField,
     #[serde(default)]
-    output_tokens: u64,
+    output_tokens: TokenField,
     #[serde(default)]
-    cache_creation_input_tokens: u64,
+    cache_creation_input_tokens: TokenField,
     // `cache_read_input_tokens` is deliberately NOT deserialized: it is excluded from the
     // count, and naming it here would invite someone to add it in.
 }
@@ -209,13 +281,13 @@ struct CodexInfo {
 #[derive(Debug, Default, Deserialize)]
 struct CodexUsageRec {
     #[serde(default)]
-    input_tokens: u64,
+    input_tokens: TokenField,
     #[serde(default)]
-    cached_input_tokens: u64,
+    cached_input_tokens: TokenField,
     #[serde(default)]
-    output_tokens: u64,
+    output_tokens: TokenField,
     #[serde(default)]
-    reasoning_output_tokens: u64,
+    reasoning_output_tokens: TokenField,
 }
 
 // --- parsing --------------------------------------------------------------------------------
@@ -261,8 +333,14 @@ fn fold_claude_line(line: &str, dedup: &mut Dedup, delta: &mut Delta) {
         }
     }
     let ts = rec.timestamp.as_deref().and_then(parse_ts_ms);
-    delta.input_tokens += usage.input_tokens + usage.cache_creation_input_tokens;
-    delta.output_tokens += usage.output_tokens;
+    // Saturating throughout: release builds have `overflow-checks` off, so a crafted
+    // `u64::MAX` would wrap a plain `+` to an attacker-chosen total rather than erroring.
+    // (In a debug build the same input would panic — killing the scanner, which is worse.)
+    delta.input_tokens = delta
+        .input_tokens
+        .saturating_add(token(usage.input_tokens))
+        .saturating_add(token(usage.cache_creation_input_tokens));
+    delta.output_tokens = delta.output_tokens.saturating_add(token(usage.output_tokens));
     delta.observe(ts);
     if is_fable(&model) {
         delta.observe_fable(ts);
@@ -283,8 +361,13 @@ fn fold_codex_line(line: &str, delta: &mut Delta) {
     // Cached input is the analogue of Claude's cache reads — excluded for the same reason.
     // `saturating_sub` because the two fields come from different accounting paths and a
     // future format change must not underflow into a nonsense total.
-    delta.input_tokens += usage.input_tokens.saturating_sub(usage.cached_input_tokens);
-    delta.output_tokens += usage.output_tokens + usage.reasoning_output_tokens;
+    delta.input_tokens = delta
+        .input_tokens
+        .saturating_add(token(usage.input_tokens).saturating_sub(token(usage.cached_input_tokens)));
+    delta.output_tokens = delta
+        .output_tokens
+        .saturating_add(token(usage.output_tokens))
+        .saturating_add(token(usage.reasoning_output_tokens));
     delta.observe(rec.timestamp.as_deref().and_then(parse_ts_ms));
 }
 
@@ -311,6 +394,14 @@ fn scan_file(
 ) -> Option<Cursor> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).ok()?;
+    // Regular files only. `metadata` follows symlinks, and a clone can point one of these paths
+    // at a FIFO or a device node; opening a FIFO with no writer blocks forever, inside the
+    // serial scan loop. (Today those also report `st_size == 0` and would exit at the
+    // `start >= len` check below — but that is a coincidence of how they stat, not a guarantee,
+    // and it should not be the only thing standing between a clone and a wedged scanner.)
+    if !meta.is_file() {
+        return None;
+    }
     let inode = meta.ino();
     let len = meta.len();
     // A replaced or truncated file restarts from 0; anything else resumes where we stopped.
@@ -333,6 +424,26 @@ fn scan_file(
     buf.truncate(read);
     // Consume only up to the last newline: everything after it is an incomplete line.
     let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else {
+        // No newline anywhere in the window — two very different situations:
+        //
+        //  * the window was NOT capped, so this is simply a partial line still being written.
+        //    Leave the cursor put and read it whole next pass. (The real logs' longest observed
+        //    line is ~7 KB, three orders of magnitude inside the cap.)
+        //
+        //  * the window WAS capped, so there is no line terminator within `MAX_READ_PER_FILE`.
+        //    Leaving the cursor put would then re-read the same 8 MB — and re-allocate the same
+        //    8 MB buffer — every single tick, forever, never making progress and never counting
+        //    anything. Skip the oversized region instead. Only a hostile or corrupt file gets
+        //    here, so dropping its content is the right trade.
+        if want >= MAX_READ_PER_FILE {
+            tracing::warn!(
+                target: "agentlog",
+                "no line break in {} bytes of {} — skipping the region",
+                want,
+                path.display()
+            );
+            return Some(Cursor { inode, offset: start + want });
+        }
         return Some(Cursor { inode, offset: start });
     };
     let consumed = last_nl + 1;
@@ -349,38 +460,66 @@ fn scan_file(
     Some(Cursor { inode, offset: start + consumed as u64 })
 }
 
-/// Every `*.jsonl` under `root`, recursing to `depth` more levels.
+/// Every `*.jsonl` under `root`, recursing to `depth` more levels, up to `budget` files.
 ///
-/// Bounded rather than unlimited: the two trees have known shapes
-/// (`projects/<slug>/<uuid>.jsonl` and `sessions/YYYY/MM/DD/rollout-*.jsonl`), and a clone's
-/// home is operator-writable — an unbounded walk there is an invitation to wander into a
-/// checkout of someone's dataset.
-fn collect_jsonl(root: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+/// Bounded in BOTH dimensions, because a clone's home is writable by someone with root inside
+/// the sandbox. Depth keeps the walk inside the two known tree shapes
+/// (`projects/<slug>/<uuid>.jsonl`, `sessions/YYYY/MM/DD/rollout-*.jsonl`) rather than wandering
+/// into a checkout of someone's dataset. Breadth matters just as much and is easier to miss:
+/// without it, a clone that creates millions of `.jsonl` files costs a `metadata` syscall each
+/// per tick and a permanent `PathBuf` in the cursor map. `budget` is decremented across the
+/// whole walk, siblings and subdirectories alike, so the total is capped rather than the total
+/// per directory.
+///
+/// Symlinks are followed only in the sense that `entry.file_type()` reports the LINK's type, so
+/// a symlinked directory is not descended into. Escaping the clone is separately impossible:
+/// `/proc/<pid>/root` resolves paths with chroot-like semantics, so an absolute link inside the
+/// clone lands inside the clone and `..` cannot climb past its root.
+fn collect_jsonl(root: &Path, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
+    if *budget == 0 {
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(root) else { return };
     for entry in rd.flatten() {
+        if *budget == 0 {
+            return;
+        }
         let path = entry.path();
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_dir() {
             if depth > 0 {
-                collect_jsonl(&path, depth - 1, out);
+                collect_jsonl(&path, depth - 1, budget, out);
             }
-        } else if path.extension().is_some_and(|e| e == "jsonl") {
+        } else if ft.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
+            *budget -= 1;
             out.push(path);
         }
     }
 }
 
 /// The log files to scan for one clone home, paired with the parser each needs.
+///
+/// The two providers share one [`MAX_FILES_PER_CLONE`] budget. Claude is walked first, so a
+/// clone spamming files under `.claude/projects` could starve its own Codex scan — acceptable,
+/// since only a clone attacking itself gets there, and a real home holds tens of files.
 fn log_files(home: &Path) -> Vec<(PathBuf, Flavor)> {
     let mut out = Vec::new();
+    let mut budget = MAX_FILES_PER_CLONE;
     let mut claude = Vec::new();
     // `projects/<cwd-slug>/<session-uuid>.jsonl` — one level of slug directory.
-    collect_jsonl(&home.join(".claude/projects"), 1, &mut claude);
+    collect_jsonl(&home.join(".claude/projects"), 1, &mut budget, &mut claude);
     out.extend(claude.into_iter().map(|p| (p, Flavor::Claude)));
     let mut codex = Vec::new();
     // `sessions/YYYY/MM/DD/rollout-*.jsonl` — three levels of date directory.
-    collect_jsonl(&home.join(".codex/sessions"), 3, &mut codex);
+    collect_jsonl(&home.join(".codex/sessions"), 3, &mut budget, &mut codex);
     out.extend(codex.into_iter().map(|p| (p, Flavor::Codex)));
+    if budget == 0 {
+        tracing::warn!(
+            target: "agentlog",
+            "{} hit the {MAX_FILES_PER_CLONE}-file scan budget; some logs are not being counted",
+            home.display()
+        );
+    }
     out
 }
 
@@ -423,33 +562,106 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
     let known_ids: HashSet<String> = all.iter().map(|h| h.id.clone()).collect();
     let scanning_ids: HashSet<String> = hosts.iter().map(|h| h.id.clone()).collect();
 
+    // An empty fleet is never a reason to garbage-collect totals. `state.rs::read_from_disk`
+    // falls back to `ControlState::default()` on ANY parse error — so a momentarily invalid
+    // `state.json` (an operator mid-hand-edit) would otherwise make every clone look deleted
+    // and wipe every figure, permanently and unrecoverably: the source logs get pruned, so
+    // there is nothing to rebuild from. Bail instead; a genuinely empty fleet has nothing to
+    // do here anyway.
+    if all.is_empty() {
+        return;
+    }
+
     let now = crate::clone_ops::now_ms();
     let mut updates: HashMap<String, CloneTokens> = HashMap::new();
     let existing = app.store.get().clone_tokens;
 
+    // The newest timestamp we are willing to believe from a clone-written log. See
+    // `FUTURE_SKEW_TOLERANCE_MS`: past this, one crafted record pins a clone at `working`
+    // permanently.
+    let believable_until = now.saturating_add(FUTURE_SKEW_TOLERANCE_MS);
+
     for host in &hosts {
         let home = root.join(&host.id);
-        // The link is absent while a clone is stopped or still booting: its counter simply
-        // holds at the persisted value rather than regressing.
-        if !home.exists() {
+        let scan = scans.remove(&host.id).unwrap_or_default();
+        if scan.timeouts >= MAX_SCAN_TIMEOUTS {
+            // Quarantined (see `MAX_SCAN_TIMEOUTS`). Keep the entry so it stays quarantined,
+            // and keep the clone's persisted total — it is simply frozen from here.
+            scans.insert(host.id.clone(), scan);
             continue;
         }
-        let scan = scans.entry(host.id.clone()).or_default();
-        let delta = tokio::task::block_in_place(|| scan_clone(&home, scan));
-        if let Some(ts) = delta.last_fable_ms {
+        // Read before the scan moves into the closure: on timeout the `CloneScan` is stranded
+        // on the leaked thread, so the strike count has to survive out here.
+        let prev_timeouts = scan.timeouts;
+
+        // The whole walk — including the `home.exists()` probe, which is itself a blocking
+        // `stat` on a path a clone controls — runs on a blocking thread under a timeout. A
+        // timeout cannot cancel a syscall stuck in uninterruptible sleep, so the thread and the
+        // `CloneScan` that went with it are forfeit; what this buys is that the REST of the
+        // fleet still gets scanned, instead of one wedged clone silently stopping everything.
+        let outcome = tokio::time::timeout(
+            CLONE_SCAN_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                let mut scan = scan;
+                if !home.exists() {
+                    // Absent while a clone is stopped or still booting: hold the persisted
+                    // value rather than regressing it.
+                    return (scan, None);
+                }
+                let delta = scan_clone(&home, &mut scan);
+                (scan, Some(delta))
+            }),
+        )
+        .await;
+
+        let (mut scan, delta) = match outcome {
+            Ok(Ok((scan, Some(delta)))) => (scan, delta),
+            Ok(Ok((scan, None))) => {
+                scans.insert(host.id.clone(), scan);
+                continue;
+            }
+            Ok(Err(e)) => {
+                // The blocking task panicked. Its `CloneScan` is gone, so the clone re-seeds
+                // next pass — an undercount, never a double-count.
+                tracing::warn!(target: "agentlog", "scan of {} panicked: {e}", host.id);
+                continue;
+            }
+            Err(_) => {
+                let fresh = CloneScan { timeouts: prev_timeouts + 1, ..Default::default() };
+                if fresh.timeouts >= MAX_SCAN_TIMEOUTS {
+                    tracing::error!(
+                        target: "agentlog",
+                        "clone {} timed out {} times; quarantining it from log scanning \
+                         (a hung filesystem under its home?)",
+                        host.id,
+                        fresh.timeouts
+                    );
+                } else {
+                    tracing::warn!(target: "agentlog", "scan of {} timed out", host.id);
+                }
+                scans.insert(host.id.clone(), fresh);
+                continue;
+            }
+        };
+        scan.timeouts = 0;
+
+        // Reject rather than clamp a future timestamp: clamping to now would still light the
+        // dot (and the Fable badge) off a garbage record, which is the thing being defended
+        // against.
+        if let Some(ts) = delta.last_fable_ms.filter(|ts| *ts <= believable_until) {
             scan.last_fable_ms = Some(scan.last_fable_ms.map_or(ts, |cur| cur.max(ts)));
         }
         // Activity: the same bus the agent-wrapper SSE path feeds. Whichever observes work
         // first wins; this one additionally covers agents RMNG did not launch.
-        if let Some(ts) = delta.last_activity_ms {
+        if let Some(ts) = delta.last_activity_ms.filter(|ts| *ts <= believable_until) {
             app.activity.mark(&host.id, ts);
         }
         let fable_active =
             scan.last_fable_ms.is_some_and(|at| now.saturating_sub(at) < FABLE_ACTIVE_MS);
         let prev = existing.get(&host.id).copied().unwrap_or_default();
         let next = CloneTokens {
-            input_tokens: prev.input_tokens + delta.input_tokens,
-            output_tokens: prev.output_tokens + delta.output_tokens,
+            input_tokens: prev.input_tokens.saturating_add(delta.input_tokens),
+            output_tokens: prev.output_tokens.saturating_add(delta.output_tokens),
             fable_active,
         };
         // Republish only a genuine change, so an idle fleet never writes state.json or wakes
@@ -458,6 +670,7 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
         if next != prev {
             updates.insert(host.id.clone(), next);
         }
+        scans.insert(host.id.clone(), scan);
     }
 
     // Cursors and dedup rings only make sense for a clone we are still scanning; an archived
@@ -483,6 +696,12 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
 }
 
 /// Background loop: scan every clone's agent logs on [`SCAN_INTERVAL`].
+///
+/// A panic in one pass must not end the loop. This task is `tokio::spawn`ed with nothing
+/// watching it, so an unwind here would stop token counting and hand-run-agent activity
+/// detection for the whole fleet, permanently and with no signal beyond a single line in the
+/// log. Each pass is therefore caught: the scan state is rebuilt on the next tick (a small
+/// undercount, never a double-count, since every clone simply re-seeds).
 pub async fn run_scanner(app: App) {
     tracing::info!(
         "agent-log scanner started (tokens + activity, every {}s)",
@@ -490,7 +709,20 @@ pub async fn run_scanner(app: App) {
     );
     let mut scans: HashMap<String, CloneScan> = HashMap::new();
     loop {
-        scan_once(&app, &mut scans).await;
+        let taken = std::mem::take(&mut scans);
+        match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+            let mut scans = taken;
+            scan_once(&app, &mut scans).await;
+            scans
+        }))
+        .await
+        {
+            Ok(next) => scans = next,
+            Err(_) => tracing::error!(
+                target: "agentlog",
+                "scan pass panicked; continuing with fresh scan state"
+            ),
+        }
         tokio::time::sleep(SCAN_INTERVAL).await;
     }
 }
@@ -822,6 +1054,172 @@ mod tests {
         let mut scans = HashMap::new();
         scan_once(&app, &mut scans).await;
         assert_eq!(app.store.get().clone_tokens.get("boot").map(|t| t.input_tokens), Some(42));
+    }
+
+    // --- hardening against a hostile / buggy clone ------------------------------------------
+    //
+    // The clone's home is writable by someone with root inside the sandbox, so every one of
+    // these inputs is reachable by an operator or an agent that wants to be difficult.
+
+    #[test]
+    fn implausible_and_overflowing_token_counts_cannot_poison_a_total() {
+        // Release builds run with `overflow-checks` off, so an unguarded `+` on u64::MAX would
+        // silently wrap the persisted all-time figure to an attacker-chosen value.
+        let (d, _) = fold_claude(&[claude_line("r1", "claude-opus-5", u64::MAX, 0, 0, u64::MAX)]);
+        assert_eq!(d.input_tokens, 0, "an absurd count contributes nothing rather than wrapping");
+        assert_eq!(d.output_tokens, 0);
+        // Activity IS still stamped: a turn with an unbelievable token count is still a turn,
+        // and the timestamp is validated separately (see the future-timestamp test).
+        assert!(d.last_activity_ms.is_some());
+
+        // The boundary itself is accepted; one past it is not.
+        let (ok, _) = fold_claude(&[claude_line("r2", "claude-opus-5", MAX_PLAUSIBLE_TOKENS, 0, 0, 1)]);
+        assert_eq!(ok.input_tokens, MAX_PLAUSIBLE_TOKENS);
+        let (over, _) =
+            fold_claude(&[claude_line("r3", "claude-opus-5", MAX_PLAUSIBLE_TOKENS + 1, 0, 0, 1)]);
+        assert_eq!(over.input_tokens, 0, "one past the cap is dropped, not wrapped");
+    }
+
+    #[test]
+    fn a_malformed_sibling_field_does_not_void_the_whole_record() {
+        // `null` is a shape the real CLIs emit, and a bare `#[serde(default)] u64` rejects it —
+        // which would fail the entire line and silently lose a real response.
+        let mut dedup = Dedup::default();
+        let mut delta = Delta::default();
+        fold_claude_line(
+            r#"{"timestamp":"2026-07-29T13:10:25.021Z","requestId":"r1","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_creation_input_tokens":null,"output_tokens":4}}}"#,
+            &mut dedup,
+            &mut delta,
+        );
+        assert_eq!(delta.input_tokens, 10, "the good fields still count");
+        assert_eq!(delta.output_tokens, 4);
+    }
+
+    #[test]
+    fn an_oversized_line_is_skipped_instead_of_re_read_forever() {
+        // A file with no newline within MAX_READ_PER_FILE would otherwise leave the cursor
+        // parked, re-reading (and re-allocating) the same 8 MB every tick, forever, counting
+        // nothing.
+        let dir = tmpdir("nonewline");
+        let path = dir.join("s.jsonl");
+        // Junk past the cap, then a real record, so we can prove the scan both escapes the
+        // oversized region AND resumes counting afterwards.
+        let mut body = vec![b'x'; (MAX_READ_PER_FILE + 16) as usize];
+        body.push(b'\n');
+        body.extend_from_slice(claude_line("after", "claude-opus-5", 33, 0, 0, 3).as_bytes());
+        body.push(b'\n');
+        std::fs::write(&path, body).unwrap();
+
+        let mut dedup = Dedup::default();
+        let mut d = Delta::default();
+        let c1 = scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d, true).unwrap();
+        assert_eq!(c1.offset, MAX_READ_PER_FILE, "the capped region is skipped past");
+        assert_eq!(d.input_tokens, 0, "nothing countable was in it");
+
+        // Next pass clears the remaining junk and reaches the real line behind it.
+        let c2 = scan_file(&path, Some(c1), Flavor::Claude, &mut dedup, &mut d, true).unwrap();
+        assert!(c2.offset > c1.offset, "the scan keeps making progress");
+        assert_eq!(d.input_tokens, 33, "and counts the record that followed the junk");
+    }
+
+    #[test]
+    fn a_short_partial_line_is_still_held_rather_than_skipped() {
+        // The counterpart to the test above: an UNCAPPED window with no newline is a genuine
+        // mid-append, and must not be skipped.
+        let dir = tmpdir("shortpartial");
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, b"{\"partial\":").unwrap();
+        let mut dedup = Dedup::default();
+        let mut d = Delta::default();
+        let c = scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d, true).unwrap();
+        assert_eq!(c.offset, 0, "the cursor waits for the line to be completed");
+    }
+
+    #[test]
+    fn non_regular_files_are_refused() {
+        // A clone can point a log path at a FIFO; opening one with no writer blocks forever,
+        // inside the serial scan loop.
+        let dir = tmpdir("fifo");
+        let path = dir.join("s.jsonl");
+        nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
+
+        let mut dedup = Dedup::default();
+        let mut d = Delta::default();
+        assert!(
+            scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d, true).is_none(),
+            "a FIFO must be refused before it can be opened"
+        );
+    }
+
+    #[test]
+    fn the_file_walk_is_bounded_in_breadth_as_well_as_depth() {
+        let dir = tmpdir("breadth");
+        let proj = dir.join(".claude/projects/slug");
+        std::fs::create_dir_all(&proj).unwrap();
+        for i in 0..(MAX_FILES_PER_CLONE + 50) {
+            std::fs::write(proj.join(format!("s{i}.jsonl")), "").unwrap();
+        }
+        assert_eq!(
+            log_files(&dir).len(),
+            MAX_FILES_PER_CLONE,
+            "a clone cannot make the walk unbounded by creating files"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_future_timestamp_cannot_pin_a_clone_at_working() {
+        // `ActivityBus::mark` is monotonic-max and `is_inactive` subtracts with a saturating
+        // i64 op, so a single record dated 2099 would make the clone read `working` forever.
+        let app = app_with(&[("evil", false)], &[]);
+        let dir = crate::homes::hosts_root(&app.config().data_dir);
+        let home = dir.join("evil");
+        let proj = home.join(".claude/projects/-home-rmng");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("a.jsonl"),
+            format!("{}\n", claude_line("seed", "claude-opus-5", 1, 0, 0, 1)),
+        )
+        .unwrap();
+
+        let mut scans = HashMap::new();
+        scan_once(&app, &mut scans).await; // seeds
+        std::fs::write(
+            proj.join("b.jsonl"),
+            r#"{"timestamp":"2099-01-01T00:00:00Z","requestId":"evil","message":{"model":"claude-opus-5","usage":{"input_tokens":5,"output_tokens":1}}}"#
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+        scan_once(&app, &mut scans).await;
+
+        let now = crate::clone_ops::now_ms();
+        assert!(
+            app.activity.is_inactive("evil", now),
+            "a far-future timestamp must be rejected, not believed"
+        );
+        // The tokens on that record still count — only the CLOCK is untrusted.
+        assert_eq!(app.store.get().clone_tokens.get("evil").map(|t| t.input_tokens), Some(5));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_state_never_garbage_collects_the_totals() {
+        // `read_from_disk` falls back to an empty state on ANY parse error, which would make
+        // every clone look deleted. These figures cannot be rebuilt (the logs get pruned).
+        let app = App::test_app();
+        app.store.mutate(|s| {
+            s.hosts = vec![];
+            s.clone_tokens =
+                [("ghost".to_string(), CloneTokens { input_tokens: 9, output_tokens: 9, fable_active: false })]
+                    .into_iter()
+                    .collect();
+        });
+        let mut scans = HashMap::new();
+        scan_once(&app, &mut scans).await;
+        assert_eq!(
+            app.store.get().clone_tokens.get("ghost").map(|t| t.input_tokens),
+            Some(9),
+            "an empty fleet is not a reason to wipe every total"
+        );
     }
 
     #[test]

@@ -91,10 +91,16 @@ impl StateStore {
 
     /// Re-read from disk; broadcast only if the content genuinely changed (so our
     /// own atomic writes, which reserialize identically, are ignored).
+    ///
+    /// The read happens **inside** the write lock. Reading first and then taking the lock
+    /// leaves a window in which a `mutate` lands between the two: its change is then
+    /// overwritten in memory by the older snapshot, and the next `mutate` writes that
+    /// regression back to disk. The window is small but the loss is silent, and this runs on
+    /// every filesystem event on the data dir.
     fn reload_if_changed(&self) {
+        let mut inner = self.inner.write().unwrap();
         let disk = read_from_disk(&self.path);
         let disk_file = to_file(&disk);
-        let mut inner = self.inner.write().unwrap();
         if disk_file == inner.serialized_file {
             return;
         }
@@ -178,6 +184,33 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    /// The watcher's "did someone edit this by hand?" gate is a STRING compare between what we
+    /// last wrote and a reserialization of what we read back. Any map field whose iteration
+    /// order is not stable across a parse round-trip silently breaks it: every one of our own
+    /// writes then looks like an external edit, so the server broadcasts a redundant full state
+    /// to every client and re-installs a disk snapshot out of band.
+    ///
+    /// `clone_tokens` is the only map in `ControlState`, and it is a `BTreeMap` for exactly this
+    /// reason. Swap it to a `HashMap` and this fails from two entries upward.
+    #[test]
+    fn serialization_is_stable_across_a_parse_round_trip() {
+        let mut state = ControlState::default();
+        for i in 0..8 {
+            state.clone_tokens.insert(
+                format!("clone-{i}"),
+                wire::CloneTokens { input_tokens: i, output_tokens: i, fable_active: false },
+            );
+        }
+        let written = to_file(&state);
+        let parsed: ControlState = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            to_file(&parsed),
+            written,
+            "reserializing a parsed state must be byte-identical, or reload_if_changed \
+             treats every one of our own writes as an external edit"
+        );
     }
 
     #[test]

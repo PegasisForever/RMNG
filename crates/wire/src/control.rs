@@ -466,8 +466,17 @@ pub struct ControlState {
     /// All-time per-clone token totals, keyed by clone id. Unlike the volatile CPU/RAM
     /// stats map (which rides its own SSE bus precisely because it changes every tick),
     /// this is persisted: it is cumulative, and the logs it is derived from get pruned.
+    ///
+    /// **`BTreeMap`, not `HashMap`, and that is load-bearing.** This is the only map in
+    /// `ControlState`, and `state.rs`'s file watcher decides whether an on-disk change came
+    /// from outside by *string-comparing* a reserialization against what it last wrote. A
+    /// `HashMap` reserializes in a different key order after a round-trip through the parser,
+    /// so with two or more entries that compare never matches: every one of our own writes
+    /// would look like a hand-edit, triggering a redundant full-state SSE broadcast and a
+    /// racy out-of-band state replacement. `BTreeMap`'s ordered output keeps the gate honest.
+    /// The JSON shape is identical either way, so no consumer can tell the difference.
     #[serde(default)]
-    pub clone_tokens: std::collections::HashMap<String, CloneTokens>,
+    pub clone_tokens: std::collections::BTreeMap<String, CloneTokens>,
 }
 
 impl ControlState {
