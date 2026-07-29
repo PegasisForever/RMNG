@@ -42,21 +42,29 @@ export function formatCloneUsage(
   return { cpu, mem };
 }
 
-/** A usage metric (CPU or MEM): a label + a fixed-width tabular value, so the CPU and MEM
- *  figures line up next to each other on the group/usage row. */
-function MetricSlot({ metric }: { metric: Metric }) {
+/** A usage metric (CPU or MEM): a label + a fixed-width tabular value.
+ *
+ *  CPU and MEM live on separate rows now, so the fixed value width is what keeps their digits in
+ *  one vertical column. `metric` is `undefined` for a clone with no live sample (stopped,
+ *  archived, unmanaged); the slot still renders, empty, so the row above never sits at a
+ *  different width from the row below. */
+function MetricSlot({ metric }: { metric?: Metric }) {
   return (
-    <span className="flex shrink-0 items-baseline gap-1 tabular-nums" title={metric.title}>
-      <span className="font-medium text-slate-400 dark:text-slate-500">{metric.label}</span>
+    <span
+      className="flex shrink-0 items-baseline gap-1 tabular-nums"
+      title={metric?.title}
+      aria-hidden={metric ? undefined : true}
+    >
+      <span className="font-medium text-slate-400 dark:text-slate-500">{metric?.label ?? ""}</span>
       <span className="w-8 text-right font-semibold text-slate-700 dark:text-slate-200">
-        {metric.value}
+        {metric?.value ?? ""}
       </span>
     </span>
   );
 }
 
 /** The clone's account binding for one provider: a badge carrying the account it is running,
- *  taking the remaining width and truncating so the usage figures + ⋯ menu stay on the same row.
+ *  taking the remaining width of its row and truncating so the metric slot beside it stays put.
  *
  *  `email` is the account actually installed; `selection` is the operator's intent verbatim
  *  (`auto` / `none` / `group:<pool>` / a pinned email). Both are shown because they answer
@@ -423,9 +431,14 @@ export function SidebarClone({
       }`}
     >
       <div className="min-w-0 flex-1">
-        {/* Top row: the clone's account group on the left, its live CPU + MEM figures
-            right-aligned, and the ⋯ menu — all on one line. While busy, the op step
-            replaces the group/usage content. */}
+        {/* Two stacked rows above the title — Claude + CPU, then Codex + MEM — with the ⋯ menu
+            spanning both. Each provider gets a full line, so an email that used to truncate at a
+            few characters is now readable, and CPU/MEM sit in the same fixed slot on each row so
+            the digits line up vertically. While busy, the op step replaces both rows.
+
+            `items-center` is what makes the ⋯ button span the pair: it is a flex sibling of the
+            two-row column, so it centres against the column's full height rather than sitting on
+            the Claude row. */}
         <div className="mb-0 flex items-center gap-1">
           {busy ? (
             <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -437,21 +450,28 @@ export function SidebarClone({
               </span>
             </div>
           ) : showBindingLine ? (
-            <div className="flex min-w-0 flex-1 items-center gap-2 text-[10px]">
-              <AccountTag
-                logo={claudeLogo}
-                provider="Claude"
-                email={clone.claudeAccountEmail}
-                selection={clone.claudeSelection}
-              />
-              <AccountTag
-                logo={chatgptLogo}
-                provider="Codex"
-                email={clone.codexAccountEmail}
-                selection={clone.codexSelection}
-              />
-              {cpuMetric ? <MetricSlot metric={cpuMetric} /> : null}
-              {memMetric ? <MetricSlot metric={memMetric} /> : null}
+            // Both rows always render for a managed clone, placeholder text included, so card
+            // height is identical across the list and the sidebar doesn't jump as clones change
+            // state. `min-w-0` on the column is what lets the tags inside actually truncate.
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-[10px]">
+              <div className="flex min-w-0 items-center gap-2">
+                <AccountTag
+                  logo={claudeLogo}
+                  provider="Claude"
+                  email={clone.claudeAccountEmail}
+                  selection={clone.claudeSelection}
+                />
+                <MetricSlot metric={cpuMetric} />
+              </div>
+              <div className="flex min-w-0 items-center gap-2">
+                <AccountTag
+                  logo={chatgptLogo}
+                  provider="Codex"
+                  email={clone.codexAccountEmail}
+                  selection={clone.codexSelection}
+                />
+                <MetricSlot metric={memMetric} />
+              </div>
             </div>
           ) : (
             <div className="min-w-0 flex-1" />
