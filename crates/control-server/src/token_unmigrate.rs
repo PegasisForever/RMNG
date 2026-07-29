@@ -30,7 +30,7 @@
 //! the auth-dir and reported as a count, so the operator knows those logins were left behind
 //! rather than silently discarded.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -240,28 +240,54 @@ fn scan_auth_dirs(data_dir: &Path) -> Vec<Recovered> {
     out
 }
 
-/// Keep the FIRST occurrence of each `(kind, email)` and drop the rest, warning per drop.
+/// Keep exactly ONE entry per `(kind, email)` — the freshest — and drop the rest, warning per drop.
 ///
 /// This is the load-bearing safety rule: a refresh token is single-use, so the same account
 /// appearing in two groups' auth-dirs must not produce two store entries — two independent
 /// refreshes of one token invalidate each other and log the operator out of the account.
+///
+/// **Freshest, not first.** Each group ran its own sidecar rotating its own copy independently,
+/// so the copies are genuinely different tokens with different ages — verified on CT 105, where
+/// one Codex account appeared in three pools with three distinct refresh tokens and refresh dates
+/// spanning five days. A first-in-sorted-order rule is deterministic (which is what matters for
+/// the single-use guarantee) but picks alphabetically, and on that box it picked `Default` — the
+/// oldest of the three. Ordering by `expires_at`, which is derived from each file's own
+/// `last_refresh`, keeps determinism and picks the copy most likely to still refresh cleanly.
+/// The group name breaks an exact tie so the result stays stable.
 fn dedupe(recovered: Vec<Recovered>) -> Vec<Recovered> {
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut out = Vec::new();
+    let mut best: Vec<Recovered> = Vec::new();
+    let mut dropped: Vec<Recovered> = Vec::new();
     for rec in recovered {
-        let key = (rec.kind.clone(), rec.email.clone());
-        if seen.insert(key) {
-            out.push(rec);
-        } else {
-            tracing::warn!(
-                target: "token_unmigrate",
-                "{} account {} appears in more than one group (also {}); keeping the first \
-                 occurrence only — a single-use refresh token must live in exactly one store",
-                rec.kind, rec.email, rec.group,
-            );
+        match best
+            .iter()
+            .position(|r| r.kind == rec.kind && r.email == rec.email)
+        {
+            None => best.push(rec),
+            Some(i) => {
+                // Strictly-greater keeps the earlier (sorted) group on an exact tie.
+                if (rec.expires_at, &rec.group) > (best[i].expires_at, &best[i].group) {
+                    dropped.push(std::mem::replace(&mut best[i], rec));
+                } else {
+                    dropped.push(rec);
+                }
+            }
         }
     }
-    out
+    for rec in dropped {
+        let kept = best
+            .iter()
+            .find(|r| r.kind == rec.kind && r.email == rec.email)
+            .map(|r| r.group.as_str())
+            .unwrap_or("?");
+        tracing::warn!(
+            target: "token_unmigrate",
+            "{} account {} appears in more than one group; keeping the freshest copy (from {}) \
+             and dropping the one from {} — a single-use refresh token must live in exactly one \
+             store",
+            rec.kind, rec.email, kept, rec.group,
+        );
+    }
+    best
 }
 
 // --- writing ----------------------------------------------------------------------------
@@ -701,7 +727,7 @@ mod tests {
     /// The load-bearing guard: one refresh token, one store entry. Two entries would let two
     /// refreshes race and invalidate each other, logging the operator out of the account.
     #[test]
-    fn dedupe_keeps_the_first_occurrence_per_provider_and_email() {
+    fn dedupe_keeps_exactly_one_row_per_provider_and_email() {
         let out = dedupe(vec![
             rec("claude", "a@b.com", "alpha"),
             rec("claude", "a@b.com", "beta"), // same account, second group → dropped
@@ -709,12 +735,48 @@ mod tests {
             rec("claude", "c@d.com", "beta"),
         ]);
         assert_eq!(out.len(), 3);
-        let claude: Vec<_> = out.iter().filter(|r| r.kind == "claude").collect();
-        assert_eq!(claude.len(), 2);
-        // The surviving a@b.com row is the one from the first group, in sorted group order.
-        assert_eq!(claude[0].email, "a@b.com");
-        assert_eq!(claude[0].group, "alpha");
+        assert_eq!(out.iter().filter(|r| r.kind == "claude").count(), 2);
         assert_eq!(out.iter().filter(|r| r.kind == "codex").count(), 1);
+    }
+
+    /// When one account survives in several pools, keep the FRESHEST copy.
+    ///
+    /// Each pool ran its own sidecar rotating its own copy, so these are genuinely different
+    /// tokens of different ages. Verified on CT 105: one Codex account in three pools, three
+    /// distinct refresh tokens, refresh dates five days apart — and alphabetical order picked
+    /// `Default`, the oldest. Determinism is what the single-use guarantee needs; freshness is
+    /// what makes the surviving token likely to still work.
+    #[test]
+    fn dedupe_prefers_the_freshest_copy_not_the_alphabetically_first() {
+        let aged = |group: &str, expires_at: i64| Recovered {
+            expires_at,
+            ..rec("codex", "dup@b.com", group)
+        };
+        // CT 105's real shape: Default sorts first but refreshed 5 days before the others.
+        let out = dedupe(vec![
+            aged("Default", 1_785_000_000_000),
+            aged("Medi", 1_785_432_000_000),
+            aged("Personal", 1_785_432_000_000),
+        ]);
+        assert_eq!(out.len(), 1, "a single-use token must land in exactly one store");
+        assert_eq!(out[0].expires_at, 1_785_432_000_000, "the stalest copy must not win");
+        // An exact tie falls back to group order, so the result is still deterministic.
+        assert_eq!(out[0].group, "Personal");
+    }
+
+    /// Order of discovery must not change the outcome — otherwise readdir order could decide
+    /// which single-use token survives.
+    #[test]
+    fn dedupe_is_order_independent() {
+        let aged = |group: &str, expires_at: i64| Recovered {
+            expires_at,
+            ..rec("claude", "dup@b.com", group)
+        };
+        let forward = dedupe(vec![aged("a", 10), aged("b", 30), aged("c", 20)]);
+        let reverse = dedupe(vec![aged("c", 20), aged("b", 30), aged("a", 10)]);
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].group, "b");
+        assert_eq!(forward[0].group, reverse[0].group);
     }
 
     /// The pool snapshot must be read from disk BEFORE anything rewrites `state.json`.

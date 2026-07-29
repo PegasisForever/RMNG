@@ -506,8 +506,14 @@ fn log_files(home: &Path) -> Vec<(PathBuf, Flavor)> {
     let mut out = Vec::new();
     let mut budget = MAX_FILES_PER_CLONE;
     let mut claude = Vec::new();
-    // `projects/<cwd-slug>/<session-uuid>.jsonl` — one level of slug directory.
-    collect_jsonl(&home.join(".claude/projects"), 1, &mut budget, &mut claude);
+    // `projects/<cwd-slug>/<session-uuid>.jsonl`, plus
+    // `projects/<cwd-slug>/<session-uuid>/subagents/agent-*.jsonl` — hence 3, not 1.
+    //
+    // Subagent transcripts are real API turns with real usage records, and on a
+    // subagent-heavy clone they are the overwhelming majority of the traffic: measured on a
+    // production clone, 1,943 of 1,974 transcripts (98%) sat at that deeper level. A depth-1
+    // walk saw 31 of them and the clone's token total understated by two orders of magnitude.
+    collect_jsonl(&home.join(".claude/projects"), 3, &mut budget, &mut claude);
     out.extend(claude.into_iter().map(|p| (p, Flavor::Claude)));
     let mut codex = Vec::new();
     // `sessions/YYYY/MM/DD/rollout-*.jsonl` — three levels of date directory.
@@ -984,10 +990,18 @@ mod tests {
     #[test]
     fn walk_depth_is_bounded_to_the_known_tree_shapes() {
         let dir = tmpdir("depth");
-        // Claude: projects/<slug>/<uuid>.jsonl is in range; one level deeper is not.
-        let deep = dir.join(".claude/projects/slug/nested/deeper");
-        std::fs::create_dir_all(&deep).unwrap();
+        // Claude, main session: projects/<slug>/<uuid>.jsonl
+        std::fs::create_dir_all(dir.join(".claude/projects/slug")).unwrap();
         std::fs::write(dir.join(".claude/projects/slug/ok.jsonl"), "").unwrap();
+        // Claude, SUBAGENT: projects/<slug>/<uuid>/subagents/agent-*.jsonl — these are real API
+        // turns with real usage, and on a subagent-heavy clone they are ~98% of all transcripts.
+        // A shallower walk silently understated those clones' totals by two orders of magnitude.
+        let sub = dir.join(".claude/projects/slug/session-uuid/subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("agent-abc.jsonl"), "").unwrap();
+        // One level past the real shape stays out of range — the bound still has to bound.
+        let deep = dir.join(".claude/projects/slug/session-uuid/subagents/nested");
+        std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(deep.join("too-deep.jsonl"), "").unwrap();
         // Codex: sessions/YYYY/MM/DD/rollout-*.jsonl.
         let day = dir.join(".codex/sessions/2026/07/29");
@@ -997,8 +1011,9 @@ mod tests {
         let found = log_files(&dir);
         let names: Vec<String> =
             found.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert!(names.contains(&"ok.jsonl".to_string()));
-        assert!(names.contains(&"rollout-x.jsonl".to_string()));
+        assert!(names.contains(&"ok.jsonl".to_string()), "main session transcript");
+        assert!(names.contains(&"agent-abc.jsonl".to_string()), "subagent transcripts must count");
+        assert!(names.contains(&"rollout-x.jsonl".to_string()), "codex rollout");
         assert!(!names.contains(&"too-deep.jsonl".to_string()), "the walk must stay bounded");
     }
 

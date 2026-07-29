@@ -680,6 +680,17 @@ fn agent_wrapper_env_dropin_script() -> String {
         .iter()
         .map(|k| format!("Environment={k}=\n"))
         .collect::<String>();
+    // The user manager caches `/etc/environment` at ITS startup, via the
+    // `environment.d` → `/etc/environment` symlink and systemd's environment-generator. Rewriting
+    // the file does not touch that cache, and neither does the drop-in above — which reaches only
+    // `agent-wrapper.service`.
+    //
+    // That cache is not inert: `web::desktop_session_env` harvests
+    // `systemctl --user show-environment` and seeds it into every `rmng exec` and every termplane
+    // tmux terminal. So without this, the reconciler cleans `/etc/environment` while the exec path
+    // keeps re-injecting the dead endpoint into every new shell — forever, since the cache clears
+    // only on container restart. Measured on CT 105 before the fix: 33 of 35 clones dirty.
+    let unset_args = RETIRED_ENV_KEYS.join(" ");
     format!(
         r#"set -e
 d=/home/rmng/.config/systemd/user/agent-wrapper.service.d
@@ -692,6 +703,10 @@ cat > "$d/10-rmng-retired-env.conf" <<'RMNG_DROPIN'
 chown rmng:rmng "$d/10-rmng-retired-env.conf"
 chmod 644 "$d/10-rmng-retired-env.conf"
 runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
+# Drop the retired keys from the user manager's own cached environment block, so
+# `show-environment` (and everything seeded from it) stops handing out a dead endpoint.
+# Best-effort: a clone whose user manager is not up yet gets it on the next pass.
+runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user unset-environment {unset_args} || true
 runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart agent-wrapper.service
 "#
     )
@@ -703,8 +718,13 @@ fn wrapper_env_stamp_path() -> &'static str {
 
 /// Stamp value — bumped by editing [`RETIRED_ENV_KEYS`], so the drop-in is rewritten exactly
 /// when its content would differ.
+///
+/// `v2` adds the `systemctl --user unset-environment` step. The version prefix is what forces
+/// clones already stamped `v1` to re-run: the key list alone is unchanged, so without the bump
+/// every clone that had reconciled once would keep its stale manager environment forever — the
+/// exact shape of the bug this step fixes.
 fn wrapper_env_desired() -> String {
-    format!("v1 {}", RETIRED_ENV_KEYS.join(","))
+    format!("v2 {}", RETIRED_ENV_KEYS.join(","))
 }
 
 /// Apply the drop-in once per clone, stamped.
@@ -1535,6 +1555,40 @@ mod tests {
         let reload = script.find("daemon-reload").expect("no daemon-reload");
         let restart = script.find("restart agent-wrapper").expect("no restart");
         assert!(reload < restart, "daemon-reload must precede the restart");
+
+        // The drop-in fixes only agent-wrapper.service. The user MANAGER caches
+        // /etc/environment at its own startup, and `web::desktop_session_env` harvests that cache
+        // into every `rmng exec` and tmux terminal — so without an explicit unset, the reconciler
+        // cleans the file while the exec path keeps handing out the dead endpoint, forever.
+        // Measured on CT 105: 33 of 35 clones carried it.
+        let unset = script.find("unset-environment").expect("manager env is never cleared");
+        for key in RETIRED_ENV_KEYS {
+            assert!(
+                script[unset..].contains(key),
+                "retired key {key} not unset from the user manager env:\n{script}"
+            );
+        }
+        assert!(
+            !script[unset..].contains("RMNG_PROXY_KEY"),
+            "the identity key must survive the manager-env unset"
+        );
+    }
+
+    /// The stamp gates the drop-in per clone, so its VERSION is what makes an already-stamped
+    /// clone re-run a changed script. Editing the script without bumping the version silently
+    /// skips every clone that has reconciled before — which is precisely the fleet you are
+    /// trying to fix.
+    #[test]
+    fn wrapper_env_stamp_version_tracks_the_script() {
+        let desired = wrapper_env_desired();
+        assert!(
+            desired.starts_with("v2 "),
+            "bump this test with the stamp; v1 predates the manager-env unset: {desired}"
+        );
+        // The key list rides along, so adding a retired key also re-stamps.
+        for key in RETIRED_ENV_KEYS {
+            assert!(desired.contains(key), "stamp does not cover {key}: {desired}");
+        }
     }
 
     /// NOTHING the reconciler runs may delete a clone's provider credential files.
