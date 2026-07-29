@@ -660,12 +660,12 @@ fi
 "#
 }
 
-/// Restart the agent-wrapper, first ensuring a drop-in clears the retired inference vars from
-/// its environment.
+/// Write the systemd drop-in that clears the retired inference vars from the agent-wrapper's
+/// environment, then restart it.
 ///
-/// [`RETIRED_ENV_KEYS`] rewrites `/etc/environment`, which is enough for anything that goes
-/// through a PAM login (an SSH session, a fresh GUI login). It is NOT enough for the
-/// agent-wrapper: the same vars were also baked into the CONTAINER's `Config.Env` at create time
+/// [`RETIRED_ENV_KEYS`] rewrites `/etc/environment`, which is enough for anything behind a PAM
+/// login (an SSH session, a fresh GUI login). It is NOT enough for the agent-wrapper: the same
+/// vars were also baked into the CONTAINER's `Config.Env` at create time
 /// (`docker::CreateSpec::env`), Docker environment is immutable without recreating the container,
 /// and systemd inherits it from PID 1. So the wrapper kept dialling the dead `/cc` router and
 /// every chat turn failed with `API Error: 405` — while a shell in the same clone worked fine,
@@ -675,11 +675,7 @@ fi
 /// inherited one, and Claude Code treats an empty `ANTHROPIC_BASE_URL` as unset, falling back to
 /// the credentials file the server injects. `UnsetEnvironment=` would be cleaner but is systemd
 /// ≥ 248 and applies after `Environment=`, so this form is both older-safe and unambiguous.
-///
-/// Written every pass (cheap, idempotent) rather than stamped: the drop-in is what makes the
-/// restart below meaningful, and a clone that somehow lost it must not stay broken until some
-/// other stamp changes.
-fn restart_agent_wrapper_script() -> String {
+fn agent_wrapper_env_dropin_script() -> String {
     let unsets = RETIRED_ENV_KEYS
         .iter()
         .map(|k| format!("Environment={k}=\n"))
@@ -699,6 +695,61 @@ runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-re
 runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart agent-wrapper.service
 "#
     )
+}
+
+fn wrapper_env_stamp_path() -> &'static str {
+    "etc/rmng/wrapper-env"
+}
+
+/// Stamp value — bumped by editing [`RETIRED_ENV_KEYS`], so the drop-in is rewritten exactly
+/// when its content would differ.
+fn wrapper_env_desired() -> String {
+    format!("v1 {}", RETIRED_ENV_KEYS.join(","))
+}
+
+/// Apply the drop-in once per clone, stamped.
+///
+/// Deliberately NOT gated on `/etc/environment` having changed. That gate is right for the
+/// restart-to-pick-up-new-values case, but the baked container env is a SEPARATE problem: on a
+/// clone whose `/etc/environment` is already correct — every clone that has reconciled once —
+/// the gate never fires and the drop-in would never be written. That is exactly what happened on
+/// the first CT 106 migration.
+async fn ensure_wrapper_env_dropin(app: &App, clone_id: &str) -> Result<bool> {
+    let desired = wrapper_env_desired();
+    if read_stamp(app, clone_id, wrapper_env_stamp_path(), "wrapper env")
+        .await?
+        .as_deref()
+        == Some(desired.as_str())
+    {
+        return Ok(false);
+    }
+    exec_ok(
+        app,
+        clone_id,
+        &agent_wrapper_env_dropin_script(),
+        "clear retired vars from agent-wrapper",
+    )
+    .await?;
+    app.docker
+        .upload_tar(
+            clone_id,
+            vec![TarEntry {
+                path: wrapper_env_stamp_path().to_string(),
+                data: format!("{desired}\n").into_bytes(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+            }],
+        )
+        .await
+        .with_context(|| format!("{clone_id}: writing wrapper env stamp"))?;
+    Ok(true)
+}
+
+fn restart_agent_wrapper_script() -> &'static str {
+    r#"set -e
+runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart agent-wrapper.service
+"#
 }
 
 fn rmng_cli_shadow_cleanup_script() -> &'static str {
@@ -1125,7 +1176,7 @@ async fn ensure_payload_current(app: &App, clone_id: &str) -> Result<bool> {
     exec_ok(
         app,
         clone_id,
-        &restart_agent_wrapper_script(),
+        restart_agent_wrapper_script(),
         "restart agent-wrapper",
     )
     .await?;
@@ -1192,6 +1243,30 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         // content-compare rather than a 30 s-late rewrite.
         desired_env.push(claude_model_env_var());
         let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
+        // Clear the retired inference vars from the agent-wrapper's unit environment. Stamped
+        // and independent of the env-change gate below: the vars this removes come from the
+        // container's baked Docker Env, not from /etc/environment, so a clone whose file is
+        // already correct still needs it.
+        match ensure_wrapper_env_dropin(app, id).await {
+            Ok(true) => {
+                warned.remove(&format!("{id}:wrapper-env"));
+                tracing::info!(
+                    target: "clone_reconcile",
+                    "clone {id}: cleared retired inference vars from the agent-wrapper unit"
+                );
+            }
+            Ok(false) => {
+                warned.remove(&format!("{id}:wrapper-env"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:wrapper-env")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: agent-wrapper env drop-in failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: agent-wrapper env drop-in still failing: {e:#}");
+                }
+            }
+        }
+
         let env_script = etc_environment_sync_script(&desired_env);
         match exec_ok_marked(
             app,
@@ -1215,7 +1290,7 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                     if let Err(e) = exec_ok(
                         app,
                         id,
-                        &restart_agent_wrapper_script(),
+                        restart_agent_wrapper_script(),
                         "restart agent-wrapper (env change)",
                     )
                     .await
@@ -1439,7 +1514,7 @@ mod tests {
     /// shell into the same clone worked, because PAM sessions read the (already fixed) file.
     #[test]
     fn wrapper_restart_clears_the_baked_inference_vars() {
-        let script = restart_agent_wrapper_script();
+        let script = agent_wrapper_env_dropin_script();
         // A drop-in, not an edit of the template-owned unit — so this reaches existing clones
         // without a template rebuild and cannot be clobbered by one.
         assert!(script.contains("agent-wrapper.service.d"), "{script}");
