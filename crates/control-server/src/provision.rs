@@ -666,8 +666,9 @@ async fn clone_container_after_create(
     // no host keys, so these land with the right owner/perms. Best-effort: a keygen failure
     // must not fail the whole clone — log and continue (SSH just won't work until the next
     // reconcile push).
-    // A clone created from a committed image inherits whatever `~/.ssh/config` that image had,
-    // including a user's own `Host` stanzas — so splice rather than overwrite here too.
+    // A clone created from a committed image inherits that image's `~/.ssh/config`. If it already
+    // carries a marked managed block (committed from a clone that had one), only the block is
+    // swapped and the user's `Host` stanzas ride along; an unmarked one is reset, once.
     let existing_ssh_config = crate::ssh::read_clone_ssh_config(docker, container).await;
     match crate::ssh::clone_ssh_tar_entries(
         &cfg.data_dir,
@@ -1309,13 +1310,20 @@ mod tests {
         );
         assert!(e.iter().any(|t| t.path == crate::ssh::CLONE_FLEET_KEY_TAR));
         // The create path reads the clone's existing ~/.ssh/config and passes it through, so a
-        // config baked into the SOURCE IMAGE (a user's own `Host` stanzas, committed with it)
-        // survives provisioning instead of being reset on every clone made from that image.
+        // MARKED config baked into the SOURCE IMAGE (committed from a clone that already had the
+        // managed block, user stanzas and all) survives provisioning rather than being reset on
+        // every clone made from that image.
+        let baked = format!(
+            "{}\n{}\n{}\n\nHost baked\n    HostName 10.9.9.9\n",
+            crate::ssh::SSH_CONFIG_BEGIN,
+            "Host *\n    User rmng",
+            crate::ssh::SSH_CONFIG_END
+        );
         let e = crate::ssh::clone_ssh_tar_entries(
             dir.to_str().unwrap(),
             "c1",
             &["ssh-ed25519 A a".into()],
-            "Host baked\n    HostName 10.9.9.9\n",
+            &baked,
         )
         .unwrap();
         let cfg = e.iter().find(|t| t.path == "home/rmng/.ssh/config").expect("ssh config entry");

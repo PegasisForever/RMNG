@@ -150,23 +150,29 @@ const CLONE_SSH_CONFIG: &str = "Host *\n    StrictHostKeyChecking accept-new\n  
 pub const SSH_CONFIG_BEGIN: &str = "# BEGIN rmng managed block — edits here are overwritten";
 pub const SSH_CONFIG_END: &str = "# END rmng managed block";
 
-/// Splice the fleet block into a clone's existing `~/.ssh/config`, preserving the user's own
-/// entries. Replaces the region between [`SSH_CONFIG_BEGIN`]/[`SSH_CONFIG_END`] in place (so a
-/// user's `Host` stanzas keep their position relative to ours — `ssh` takes the FIRST match for
-/// any keyword, so moving our `Host *` above a user stanza would silently change which
-/// `User`/`IdentityFile` wins).
+/// Write the fleet block into a clone's `~/.ssh/config` as a delimited managed region, so the
+/// user's own entries around it stay theirs.
 ///
 /// Why this exists: the block is re-pushed on every operator key change and on every
-/// control-server restart (the `pushed` dedup map in [`run`] is in-memory), so a whole-file
-/// write does not lose the user's edits once — it loses them repeatedly, with nothing logged.
+/// control-server restart (the `pushed` dedup map in [`run`] is in-memory), so the old whole-file
+/// write did not lose a user's edits once — it lost them repeatedly, with nothing logged.
 ///
-/// Three input shapes, all covered by tests:
-/// - **has markers** → the managed region is replaced, the rest is untouched.
-/// - **no markers, non-empty** (a clone provisioned before this change, or a hand-written
-///   config) → the managed block is PREPENDED and the existing text kept below. Any verbatim
-///   copy of the old unmarked block is dropped, so upgrading doesn't leave a stale duplicate
-///   `Host *` above the user's stanzas.
-/// - **absent/empty** → just the managed block.
+/// Exactly two cases:
+///
+/// - **markers present** → the managed region is replaced WHERE IT ALREADY SITS, and every byte
+///   outside it is kept verbatim. This is the steady state, so from the first marked write
+///   onward a user's edits are never touched again.
+/// - **no markers** → the file is replaced outright with just the managed block. A one-time
+///   reset per clone: today's clones are already being clobbered on every push, so resetting
+///   once and then never again is strictly better than the status quo.
+///
+/// Replacing in place, rather than moving the block to the top or bottom, is the part that
+/// matters for correctness. `ssh` uses the FIRST value it obtains for each keyword, so a
+/// `Host *` sitting above a user's specific stanza silently overrides that stanza's
+/// `User`/`IdentityFile`. Verified with `ssh -G` on a clone: with `Host mine { User alice }`
+/// above our block, `ssh -G mine` resolves `user alice`; moving our block on top of it makes the
+/// same file resolve `user rmng`. Because a marked block is only ever swapped in place, wherever
+/// the user positions their stanzas relative to it keeps holding.
 ///
 /// Pure — unit-tested.
 pub fn merge_ssh_config(existing: &str, managed: &str) -> String {
@@ -182,14 +188,7 @@ pub fn merge_ssh_config(existing: &str, managed: &str) -> String {
         return format!("{}{managed_block}{after}", &existing[..start]);
     }
 
-    // Unmarked. Strip a verbatim copy of the legacy block (what pre-marker clones already have)
-    // so the upgrade is idempotent rather than duplicating a competing `Host *`.
-    let rest = existing.replace(CLONE_SSH_CONFIG, "");
-    let rest = rest.trim_start_matches('\n');
-    if rest.trim().is_empty() {
-        return managed_block;
-    }
-    format!("{managed_block}\n{rest}")
+    managed_block
 }
 
 /// Generate an ed25519 host key at `key_path` (+ `.pub`) if it doesn't already exist.
@@ -258,10 +257,12 @@ pub async fn read_clone_ssh_config(docker: &crate::docker::DockerCtl, clone_id: 
 /// is created by the reconciler's `ssh_prepare_script` (and auto-created by the docker upload).
 ///
 /// `existing_ssh_config` is the clone's current `~/.ssh/config` (see [`read_clone_ssh_config`]);
-/// it is spliced via [`merge_ssh_config`] so a user's own `Host` stanzas survive. Pass `""` for a
-/// clone that has none. `authorized_keys` is deliberately NOT merged — the control server owns
-/// the trust set, and honouring keys added inside a clone would let a compromised clone widen
-/// its own access.
+/// [`merge_ssh_config`] swaps only the marked managed block, so once a clone has one, a user's
+/// own `Host` stanzas are never touched again. A config with no marked block is reset to just
+/// that block — once. Pass `""` for a clone that has none.
+///
+/// `authorized_keys` is deliberately NOT merged — the control server owns the trust set, and
+/// honouring keys added inside a clone would let a compromised clone widen its own access.
 pub fn clone_ssh_tar_entries(
     data_dir: &str,
     clone_id: &str,
@@ -707,20 +708,19 @@ mod tests {
             "ssh config points IdentityFile at the relocated fleet key:\n{cfg_text}"
         );
 
-        // The ENTRY (not just the pure merge helper) must splice rather than clobber — this is
+        // The ENTRY (not just the pure merge helper) must leave a marked config alone — this is
         // the byte payload that actually lands in the clone, and the whole point of the change.
-        let entries = clone_ssh_tar_entries(
-            dir.to_str().unwrap(),
-            "clone-a",
-            &["ssh-ed25519 AAAA a".into()],
-            "Host myserver\n    HostName 1.2.3.4\n",
-        )
-        .unwrap();
+        let marked = format!(
+            "{SSH_CONFIG_BEGIN}\n{}\n{SSH_CONFIG_END}\n\nHost myserver\n    HostName 1.2.3.4\n",
+            CLONE_SSH_CONFIG.trim_end()
+        );
+        let entries =
+            clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()], &marked)
+                .unwrap();
         let cfg = entries.iter().find(|e| e.path == "home/rmng/.ssh/config").expect("ssh config entry");
         let cfg_text = String::from_utf8(cfg.data.clone()).unwrap();
+        assert_eq!(cfg_text, marked, "a marked config must ride through the entry untouched");
         assert!(cfg_text.contains("Host myserver"), "user stanza preserved in the tar entry:\n{cfg_text}");
-        assert!(cfg_text.contains("    HostName 1.2.3.4"), "user stanza intact in the tar entry:\n{cfg_text}");
-        assert!(cfg_text.contains(SSH_CONFIG_BEGIN), "managed block is delimited:\n{cfg_text}");
 
         // The clone's own sshd host key is still root-owned.
         let hk = entries.iter().find(|e| e.path == "etc/ssh/ssh_host_ed25519_key").expect("host key entry");
@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_ssh_config_preserves_user_stanzas_across_repeated_pushes() {
+    fn merge_ssh_config_never_touches_user_edits_once_marked() {
         // Fresh clone: nothing there yet ⇒ just the managed block, delimited.
         let fresh = merge_ssh_config("", CLONE_SSH_CONFIG);
         assert!(fresh.starts_with(SSH_CONFIG_BEGIN), "block is marked:\n{fresh}");
@@ -750,10 +750,11 @@ mod tests {
         // ...and ours must still be there, exactly once (no accumulating duplicates).
         assert_eq!(after.matches(SSH_CONFIG_BEGIN).count(), 1, "one managed block:\n{after}");
         assert_eq!(after.matches("Host *").count(), 1, "no duplicate Host *:\n{after}");
+        // Nothing moved: an unchanged managed block means a byte-identical file.
+        assert_eq!(after, customized, "a no-op push must not even reformat");
 
         // Idempotent: the reconciler + every restart re-push, so N pushes must equal one.
-        let twice = merge_ssh_config(&after, CLONE_SSH_CONFIG);
-        assert_eq!(twice, after, "repeated pushes must converge");
+        assert_eq!(merge_ssh_config(&after, CLONE_SSH_CONFIG), after, "repeated pushes converge");
 
         // A changed managed block replaces only the managed region.
         let rotated = merge_ssh_config(&after, "Host *\n    User rmng\n    IdentityFile /new/key\n");
@@ -763,29 +764,55 @@ mod tests {
     }
 
     #[test]
-    fn merge_ssh_config_upgrades_an_unmarked_legacy_config() {
-        // A clone provisioned before markers existed: the legacy block, plus user edits below.
+    fn merge_ssh_config_replaces_the_managed_block_in_place_not_at_the_top() {
+        // Position is semantics: ssh takes the FIRST value per keyword, so a user who puts their
+        // stanza ABOVE our `Host *` is choosing to override it. Verified with `ssh -G` on a live
+        // clone — that ordering resolves `user alice`, the reverse resolves `user rmng`. So a
+        // push must swap the block where it stands and never hoist it to the top.
+        let user_first = format!(
+            "Host mine\n    User alice\n\n{SSH_CONFIG_BEGIN}\n{}\n{SSH_CONFIG_END}\n",
+            CLONE_SSH_CONFIG.trim_end()
+        );
+        let out = merge_ssh_config(&user_first, CLONE_SSH_CONFIG);
+        assert!(out.starts_with("Host mine"), "user stanza stays FIRST (it wins in ssh):\n{out}");
+        assert_eq!(out, user_first, "in-place swap, byte-identical:\n{out}");
+        // Rotating the managed content must still not reorder anything.
+        let rotated = merge_ssh_config(&out, "Host *\n    IdentityFile /new/key\n");
+        assert!(rotated.starts_with("Host mine"), "user stanza still first after a rotate:\n{rotated}");
+        assert!(rotated.contains("/new/key"), "managed content did update:\n{rotated}");
+    }
+
+    #[test]
+    fn merge_ssh_config_resets_an_unmarked_config_exactly_once() {
+        // No markers ⇒ one-time reset to just the managed block. These clones are being clobbered
+        // on EVERY push today, so a single reset that then stops is strictly an improvement.
         let legacy = format!("{CLONE_SSH_CONFIG}\n# mine\nHost myserver\n    HostName 1.2.3.4\n");
-        let out = merge_ssh_config(&legacy, CLONE_SSH_CONFIG);
+        let reset = merge_ssh_config(&legacy, CLONE_SSH_CONFIG);
+        assert_eq!(reset, merge_ssh_config("", CLONE_SSH_CONFIG), "unmarked ⇒ managed block only");
+        assert_eq!(reset.matches("Host *").count(), 1, "no duplicate Host *:\n{reset}");
 
-        assert!(out.contains("Host myserver"), "user stanza kept on upgrade:\n{out}");
-        assert!(out.contains("# mine"), "user comment kept on upgrade:\n{out}");
-        // The old unmarked copy must not linger as a second, competing `Host *` — ssh takes the
-        // FIRST match per keyword, so a stale duplicate would silently shadow the managed one.
-        assert_eq!(out.matches("Host *").count(), 1, "legacy block absorbed, not duplicated:\n{out}");
-        assert_eq!(out.matches(SSH_CONFIG_BEGIN).count(), 1, "exactly one managed block:\n{out}");
-        // And the upgrade converges too.
-        assert_eq!(merge_ssh_config(&out, CLONE_SSH_CONFIG), out, "upgrade is idempotent");
+        // ...and from then on it is marked, so the NEXT edit is safe. That "exactly once" is the
+        // whole contract: reset, then hands off forever.
+        let then_edited = format!("{reset}\nHost myserver\n    HostName 1.2.3.4\n");
+        assert_eq!(
+            merge_ssh_config(&then_edited, CLONE_SSH_CONFIG),
+            then_edited,
+            "the edit after the reset must survive untouched"
+        );
 
-        // A hand-written config with no trace of ours: prepended, user content fully kept.
-        let handwritten = "Host bastion\n    HostName 10.0.0.1\n";
-        let out = merge_ssh_config(handwritten, CLONE_SSH_CONFIG);
-        assert!(out.starts_with(SSH_CONFIG_BEGIN), "managed block goes first:\n{out}");
-        assert!(out.contains("Host bastion"), "hand-written config kept:\n{out}");
-        assert!(out.contains("    HostName 10.0.0.1"), "hand-written config intact:\n{out}");
-
-        // Whitespace-only is treated as empty (no stray blank lines accumulating).
-        assert_eq!(merge_ssh_config("\n\n  \n", CLONE_SSH_CONFIG), merge_ssh_config("", CLONE_SSH_CONFIG));
+        // A hand-written config with no trace of ours resets the same way (no special-casing).
+        assert_eq!(
+            merge_ssh_config("Host bastion\n    HostName 10.0.0.1\n", CLONE_SSH_CONFIG),
+            reset
+        );
+        // Whitespace-only is just the empty case.
+        assert_eq!(merge_ssh_config("\n\n  \n", CLONE_SSH_CONFIG), reset);
+        // A half-written marker pair (BEGIN only, or reversed) is NOT a valid block ⇒ reset.
+        assert_eq!(merge_ssh_config(&format!("{SSH_CONFIG_BEGIN}\nHost x\n"), CLONE_SSH_CONFIG), reset);
+        assert_eq!(
+            merge_ssh_config(&format!("{SSH_CONFIG_END}\nHost x\n{SSH_CONFIG_BEGIN}\n"), CLONE_SSH_CONFIG),
+            reset
+        );
     }
 
     #[test]
