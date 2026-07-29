@@ -44,20 +44,33 @@ export function formatCloneUsage(
   return { cpu, mem };
 }
 
-/** A usage metric (CPU or MEM): a label + a fixed-width tabular value.
+/** A usage metric (↑/↓ tokens, CPU, or MEM): a label + a fixed-width tabular value.
  *
- *  CPU and MEM live on separate rows now, so the fixed value width is what keeps their digits in
- *  one vertical column. `metric` is `undefined` for a clone with no live sample (stopped,
- *  archived, unmanaged); the slot still renders, empty, so the row above never sits at a
- *  different width from the row below. */
-function MetricSlot({ metric }: { metric?: Metric }) {
+ *  Each metric occupies one column across the card's two rows, so BOTH parts are fixed-width —
+ *  that is the only thing keeping a column's two entries in vertical line. The value width does
+ *  it for the digits. `labelWidth` does it for the label, and is needed because the account tag
+ *  to the left is `flex-1`: any difference in a slot's total width is absorbed there and shows
+ *  up as the whole slot sliding sideways.
+ *
+ *  With plain text labels that never bites — `CPU` and `MEM` are both three uppercase glyphs, so
+ *  they measure the same. The arrows do NOT: `↑` and `↓` come out of a fallback font with
+ *  per-glyph advance widths, which shifted the ↓ row a few px against the ↑ row.
+ *
+ *  `metric` is `undefined` for a clone with no sample (stopped, archived, unmanaged, or not yet
+ *  scanned); the slot still renders, empty, so the row above never sits at a different width
+ *  from the row below. */
+function MetricSlot({ metric, labelWidth = "w-6" }: { metric?: Metric; labelWidth?: string }) {
   return (
     <span
       className="flex shrink-0 items-baseline gap-1 tabular-nums"
       title={metric?.title}
       aria-hidden={metric ? undefined : true}
     >
-      <span className="font-medium text-slate-400 dark:text-slate-500">{metric?.label ?? ""}</span>
+      <span
+        className={`${labelWidth} shrink-0 text-right font-medium text-slate-400 dark:text-slate-500`}
+      >
+        {metric?.label ?? ""}
+      </span>
       <span className="w-8 text-right font-semibold text-slate-700 dark:text-slate-200">
         {metric?.value ?? ""}
       </span>
@@ -516,7 +529,9 @@ export function SidebarClone({
                   selection={clone.claudeSelection}
                   fable={tokens?.fableActive}
                 />
-                <MetricSlot metric={inMetric} />
+                {/* The arrow labels are one glyph, so they get their own narrow width rather
+                    than the three-character one CPU/MEM need. */}
+                <MetricSlot metric={inMetric} labelWidth="w-2" />
                 <MetricSlot metric={cpuMetric} />
               </div>
               <div className="flex min-w-0 items-center gap-2">
@@ -526,7 +541,7 @@ export function SidebarClone({
                   email={clone.codexAccountEmail}
                   selection={clone.codexSelection}
                 />
-                <MetricSlot metric={outMetric} />
+                <MetricSlot metric={outMetric} labelWidth="w-2" />
                 <MetricSlot metric={memMetric} />
               </div>
             </div>
