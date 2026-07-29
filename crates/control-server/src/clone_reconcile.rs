@@ -660,10 +660,45 @@ fi
 "#
 }
 
-fn restart_agent_wrapper_script() -> &'static str {
-    r#"set -e
+/// Restart the agent-wrapper, first ensuring a drop-in clears the retired inference vars from
+/// its environment.
+///
+/// [`RETIRED_ENV_KEYS`] rewrites `/etc/environment`, which is enough for anything that goes
+/// through a PAM login (an SSH session, a fresh GUI login). It is NOT enough for the
+/// agent-wrapper: the same vars were also baked into the CONTAINER's `Config.Env` at create time
+/// (`docker::CreateSpec::env`), Docker environment is immutable without recreating the container,
+/// and systemd inherits it from PID 1. So the wrapper kept dialling the dead `/cc` router and
+/// every chat turn failed with `API Error: 405` — while a shell in the same clone worked fine,
+/// which is exactly the sort of split that wastes an afternoon.
+///
+/// `Environment=KEY=` (empty, no value) is the fix: a unit-level assignment overrides the
+/// inherited one, and Claude Code treats an empty `ANTHROPIC_BASE_URL` as unset, falling back to
+/// the credentials file the server injects. `UnsetEnvironment=` would be cleaner but is systemd
+/// ≥ 248 and applies after `Environment=`, so this form is both older-safe and unambiguous.
+///
+/// Written every pass (cheap, idempotent) rather than stamped: the drop-in is what makes the
+/// restart below meaningful, and a clone that somehow lost it must not stay broken until some
+/// other stamp changes.
+fn restart_agent_wrapper_script() -> String {
+    let unsets = RETIRED_ENV_KEYS
+        .iter()
+        .map(|k| format!("Environment={k}=\n"))
+        .collect::<String>();
+    format!(
+        r#"set -e
+d=/home/rmng/.config/systemd/user/agent-wrapper.service.d
+install -d -o rmng -g rmng -m755 "$d"
+cat > "$d/10-rmng-retired-env.conf" <<'RMNG_DROPIN'
+# Managed by RMNG. Clears inference vars baked into the container's Docker Env by an older
+# control-server; those cannot be removed by rewriting /etc/environment.
+[Service]
+{unsets}RMNG_DROPIN
+chown rmng:rmng "$d/10-rmng-retired-env.conf"
+chmod 644 "$d/10-rmng-retired-env.conf"
+runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
 runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart agent-wrapper.service
 "#
+    )
 }
 
 fn rmng_cli_shadow_cleanup_script() -> &'static str {
@@ -1090,7 +1125,7 @@ async fn ensure_payload_current(app: &App, clone_id: &str) -> Result<bool> {
     exec_ok(
         app,
         clone_id,
-        restart_agent_wrapper_script(),
+        &restart_agent_wrapper_script(),
         "restart agent-wrapper",
     )
     .await?;
@@ -1180,7 +1215,7 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                     if let Err(e) = exec_ok(
                         app,
                         id,
-                        restart_agent_wrapper_script(),
+                        &restart_agent_wrapper_script(),
                         "restart agent-wrapper (env change)",
                     )
                     .await
@@ -1393,6 +1428,38 @@ mod tests {
         let s = ssh_prepare_script("");
         assert!(s.contains("mkdir -p /home/rmng/.config/rmng/ssh"));
         assert!(!s.contains("rm -f /home/rmng/.ssh/id_ed25519"));
+    }
+
+    /// The agent-wrapper must have the retired inference vars cleared at the UNIT level.
+    ///
+    /// Rewriting `/etc/environment` is not enough for it: the same vars were baked into the
+    /// container's Docker `Config.Env` at create time, that is immutable without recreating the
+    /// container, and systemd inherits it from PID 1. On the first real migration this left the
+    /// wrapper dialling the dead `/cc` router — every chat turn `API Error: 405` — while an SSH
+    /// shell into the same clone worked, because PAM sessions read the (already fixed) file.
+    #[test]
+    fn wrapper_restart_clears_the_baked_inference_vars() {
+        let script = restart_agent_wrapper_script();
+        // A drop-in, not an edit of the template-owned unit — so this reaches existing clones
+        // without a template rebuild and cannot be clobbered by one.
+        assert!(script.contains("agent-wrapper.service.d"), "{script}");
+        assert!(script.contains("[Service]"));
+        // Every retired key is assigned empty at the unit level, which overrides the inherited
+        // container env. Claude Code treats an empty base URL as unset and falls back to the
+        // credentials file the server injects.
+        for key in RETIRED_ENV_KEYS {
+            assert!(
+                script.contains(&format!("Environment={key}=\n")),
+                "retired key {key} not cleared for the wrapper:\n{script}"
+            );
+        }
+        // `RMNG_PROXY_KEY` is the clone's identity and must NOT be cleared — the baked copy is
+        // stale, but the unit inherits the current one from /etc/environment via the session.
+        assert!(!script.contains("Environment=RMNG_PROXY_KEY="), "identity key was cleared");
+        // daemon-reload before restart, or the drop-in would not take effect until next boot.
+        let reload = script.find("daemon-reload").expect("no daemon-reload");
+        let restart = script.find("restart agent-wrapper").expect("no restart");
+        assert!(reload < restart, "daemon-reload must precede the restart");
     }
 
     /// NOTHING the reconciler runs may delete a clone's provider credential files.

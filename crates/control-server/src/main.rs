@@ -67,6 +67,11 @@ async fn main() -> Result<()> {
     let store = Arc::new(state::StateStore::load(config::state_path(&cfg))?);
     state::spawn_watcher(store.clone());
 
+    // Snapshot each clone's retired `group` binding BEFORE anything mutates the state store.
+    // `RmngClone` has no such field any more, so the first `store.mutate` below persists
+    // `state.json` without it and the binding is unrecoverable — see `read_raw_clone_pools`.
+    let pools_before = token_unmigrate::read_raw_clone_pools(&cfg);
+
     let app = app::App::new(store, cfg);
 
     // Seed ControlState with the config's active layout + preset names so the sidebar
@@ -201,7 +206,7 @@ async fn main() -> Result<()> {
     // re-login of every account, exactly what this migration exists to avoid.
     app.docker.remove_retired_group_proxy().await;
     if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        token_unmigrate::unmigrate_group_proxy_tokens(&app)
+        token_unmigrate::unmigrate_group_proxy_tokens(&app, &pools_before)
     })) {
         tracing::error!("group-proxy token reverse-migration panicked (booting anyway): {e:?}");
     }

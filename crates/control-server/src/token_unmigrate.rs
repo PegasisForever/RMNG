@@ -298,7 +298,17 @@ fn write_stamp(path: &Path) -> std::io::Result<()> {
 ///
 /// So each clone is given `group:<pool>` for a provider whose pool survived the migration, and
 /// plain `auto` otherwise — either way it lands in a pool the rotator actually walks.
-fn heal_clone_bindings(app: &App, claude_pools: &[wire::CloneGroup], codex_pools: &[wire::CloneGroup]) {
+pub type PoolSnapshot = std::collections::HashMap<String, String>;
+
+/// Each clone's `group` from the RAW `state.json`, as it was on disk at process start.
+///
+/// **Must be called before anything mutates the state store.** `RmngClone.group` no longer
+/// exists, so the first `store.mutate` — `web::mirror_layout_to_state`, which runs early in
+/// `main` — persists `state.json` WITHOUT it, and the binding is gone from disk before the
+/// migration ever looks. That is not hypothetical: it is what happened on the first real
+/// migration, where every clone fell back to `auto` instead of its former pool. Harmless where
+/// there is one pool; wrong wherever pools hold different accounts.
+pub fn read_raw_clone_pools(cfg: &wire::AppConfig) -> PoolSnapshot {
     #[derive(Deserialize, Default)]
     struct RawHost {
         #[serde(default)]
@@ -311,14 +321,20 @@ fn heal_clone_bindings(app: &App, claude_pools: &[wire::CloneGroup], codex_pools
         #[serde(default)]
         hosts: Vec<RawHost>,
     }
-    let cfg = app.config();
-    let path = crate::config::state_path(&cfg);
+    let path = crate::config::state_path(cfg);
     let raw: RawState = std::fs::read(&path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    let was: std::collections::HashMap<String, String> =
-        raw.hosts.into_iter().filter(|h| !h.id.is_empty()).map(|h| (h.id, h.group)).collect();
+    raw.hosts.into_iter().filter(|h| !h.id.is_empty()).map(|h| (h.id, h.group)).collect()
+}
+
+fn heal_clone_bindings(
+    app: &App,
+    was: &PoolSnapshot,
+    claude_pools: &[wire::CloneGroup],
+    codex_pools: &[wire::CloneGroup],
+) {
 
     let mut bound = 0usize;
     let mut autos = 0usize;
@@ -419,7 +435,10 @@ fn rebuild_groups(recovered: &[Recovered], kind: &str) -> Vec<wire::CloneGroup> 
 /// token stores. Best-effort: every failure is logged, none blocks boot. Call once at startup,
 /// AFTER config load and BEFORE the account pollers are spawned, so the stores exist by the
 /// time the first poll reads them.
-pub fn unmigrate_group_proxy_tokens(app: &App) {
+///
+/// `pools_before` must come from [`read_raw_clone_pools`] called BEFORE any state mutation —
+/// see that function for why reading it here would be too late.
+pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
     let data_dir = app.config().data_dir.clone();
     let data_path = PathBuf::from(&data_dir);
     let stamp = data_path.join(STAMP);
@@ -560,7 +579,7 @@ pub fn unmigrate_group_proxy_tokens(app: &App) {
     app.codex.reload_from_disk();
 
     // Clone rows carry the same dead `group` key; heal them against the pools that survived.
-    heal_clone_bindings(app, &cfg.clone_groups, &cfg.codex_groups);
+    heal_clone_bindings(app, pools_before, &cfg.clone_groups, &cfg.codex_groups);
 
     let group_names: Vec<String> = cfg
         .clone_groups
@@ -696,6 +715,56 @@ mod tests {
         assert_eq!(claude[0].email, "a@b.com");
         assert_eq!(claude[0].group, "alpha");
         assert_eq!(out.iter().filter(|r| r.kind == "codex").count(), 1);
+    }
+
+    /// The pool snapshot must be read from disk BEFORE anything rewrites `state.json`.
+    ///
+    /// This is a regression test for a real production miss: `web::mirror_layout_to_state` runs
+    /// early in `main` and persists the state store, and since `RmngClone` no longer has a
+    /// `group` field, that write drops it. By the time the migration looked, every clone read as
+    /// unbound and fell back to `auto` — logged as "repointed 0 clone(s) at their former pool".
+    /// Harmless on a single-pool deployment; wrong wherever pools hold different accounts.
+    #[test]
+    fn raw_pool_snapshot_reads_the_pre_migration_state_file() {
+        let dir = std::env::temp_dir().join(format!("rmng-poolsnap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = wire::AppConfig {
+            data_dir: dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let path = crate::config::state_path(&cfg);
+
+        // A `state.json` as the group-proxy era wrote it: `group` per clone, no account fields.
+        std::fs::write(
+            &path,
+            r#"{"hosts":[
+                {"id":"a","host":"a","managed":true,"group":"Personal"},
+                {"id":"b","host":"b","managed":true,"group":"Medi"},
+                {"id":"c","host":"c","managed":true}
+            ]}"#,
+        )
+        .unwrap();
+        let before = read_raw_clone_pools(&cfg);
+        assert_eq!(before.get("a").map(String::as_str), Some("Personal"));
+        assert_eq!(before.get("b").map(String::as_str), Some("Medi"));
+        assert_eq!(before.get("c").map(String::as_str), Some(""), "no group is empty, not absent");
+
+        // Now simulate what the early state-store write does: the same file, minus `group`.
+        std::fs::write(
+            &path,
+            r#"{"hosts":[
+                {"id":"a","host":"a","managed":true},
+                {"id":"b","host":"b","managed":true}
+            ]}"#,
+        )
+        .unwrap();
+        let after = read_raw_clone_pools(&cfg);
+        assert_eq!(after.get("a").map(String::as_str), Some(""), "the binding is gone from disk");
+        // Which is exactly why the snapshot must be taken first — it still holds the truth.
+        assert_eq!(before.get("a").map(String::as_str), Some("Personal"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A preset's pool binding must survive the migration.
