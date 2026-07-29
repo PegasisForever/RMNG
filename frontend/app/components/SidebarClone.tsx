@@ -1,5 +1,5 @@
 import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
-import { ArrowRight, ChevronDown, ChevronRight, Ellipsis, Terminal } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronRight, EllipsisVertical, Terminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.svg";
@@ -63,13 +63,16 @@ function MetricSlot({ metric }: { metric?: Metric }) {
   );
 }
 
-/** The clone's account binding for one provider: a badge carrying the account it is running,
- *  taking the remaining width of its row and truncating so the metric slot beside it stays put.
+/** The clone's account binding for one provider: `[logo] [group badge] [account in use]`.
  *
  *  `email` is the account actually installed; `selection` is the operator's intent verbatim
  *  (`auto` / `none` / `group:<pool>` / a pinned email). Both are shown because they answer
  *  different questions: an `auto` clone landed on some concrete account, and only the selection
- *  says whether it may be hot-swapped out from under you. A clone with neither is tokenless. */
+ *  says whether it may be hot-swapped out from under you. A clone with neither is tokenless.
+ *
+ *  Only the group badge carries a background — it is the *rule*, a fixed short token that reads
+ *  as a chip. The account is the *result*, variable-length and the thing you actually scan for,
+ *  so it stays plain text and takes the remaining width, truncating before the metric slot. */
 function AccountTag({
   logo,
   provider,
@@ -82,6 +85,9 @@ function AccountTag({
   selection?: string;
 }) {
   const pool = selection?.startsWith("group:") ? selection.slice("group:".length) : undefined;
+  // A pinned selection has no badge: the selection *is* the email already beside it, so a chip
+  // would just repeat it. Absent both, the clone is tokenless and only the placeholder shows.
+  const badge = pool ?? (selection === "auto" ? "auto" : undefined);
   const mode = pool ? `pool ${pool}` : selection === "auto" ? "auto" : undefined;
   const title = email
     ? `${provider}: ${email}${mode ? ` (${mode})` : " (pinned)"}`
@@ -101,18 +107,20 @@ function AccountTag({
         alt=""
         className={`h-3 w-3 shrink-0 opacity-70 ${logo === chatgptLogo ? "dark:invert" : ""}`}
       />
+      {badge ? (
+        <span className="shrink-0 rounded bg-slate-200 px-1 text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+          {badge}
+        </span>
+      ) : null}
       {email ? (
-        // `min-w-0` (not `max-w-full`) so the email truncates before the mode label, keeping
-        // the label visible right beside it rather than being pushed off the row.
-        <span className="-ml-0.5 min-w-0 truncate rounded bg-slate-200 px-1 text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+        <span className="min-w-0 truncate text-[10px] font-medium text-slate-600 dark:text-slate-300">
           {email}
         </span>
       ) : (
-        <span className="italic text-slate-300 dark:text-slate-600">
+        <span className="truncate italic text-slate-300 dark:text-slate-600">
           {selection === "none" ? "no token" : "unassigned"}
         </span>
       )}
-      {mode ? <span className="shrink-0 text-[9px] opacity-70">{mode}</span> : null}
     </span>
   );
 }
@@ -238,7 +246,7 @@ function CopySshMenuItem({ command, onDone }: { command: string; onDone: () => v
   );
 }
 
-/** The per-clone overflow menu (⋯) — collapses the commit / change-account / delete
+/** The per-clone overflow menu (⋮) — collapses the commit / change-account / delete
  *  actions. Unmanaged rows (no container) only get Remove. Every trigger/item stops
  *  propagation so opening or invoking an action never selects or drags the row. */
 function OverflowMenu({
@@ -324,7 +332,7 @@ function OverflowMenu({
           open ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300" : ""
         }`}
       >
-        <Ellipsis className="size-4" />
+        <EllipsisVertical className="size-4" />
       </button>
       {open ? (
         <div
@@ -431,12 +439,12 @@ export function SidebarClone({
       }`}
     >
       <div className="min-w-0 flex-1">
-        {/* Two stacked rows above the title — Claude + CPU, then Codex + MEM — with the ⋯ menu
+        {/* Two stacked rows above the title — Claude + CPU, then Codex + MEM — with the ⋮ menu
             spanning both. Each provider gets a full line, so an email that used to truncate at a
             few characters is now readable, and CPU/MEM sit in the same fixed slot on each row so
             the digits line up vertically. While busy, the op step replaces both rows.
 
-            `items-center` is what makes the ⋯ button span the pair: it is a flex sibling of the
+            `items-center` is what makes the ⋮ button span the pair: it is a flex sibling of the
             two-row column, so it centres against the column's full height rather than sitting on
             the Claude row. */}
         <div className="mb-0 flex items-center gap-1">
@@ -493,9 +501,12 @@ export function SidebarClone({
 
         {/* Title: unread "!" mark + ticket badge inlined with the title, so a wrapped title
             flows back to the left edge on the next line (the badge doesn't indent it).
-            Hidden while busy — the op step shows in the top block instead. */}
+            Hidden while busy — the op step shows in the top block instead.
+
+            The top margin lives here rather than on the block above, because that block also
+            holds the busy-state title — a bottom margin there would leave dead space under it. */}
         {!busy ? (
-          <p className="break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
+          <p className="mt-1.5 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
             {clone.unread && !selected ? (
               <span
                 className="mr-1 inline-flex size-3 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white"
