@@ -1377,17 +1377,8 @@ impl DockerCtl {
                 ..Default::default()
             },
         ];
-        if !spec.sock_source.trim().is_empty() {
-            mounts.push(Mount {
-                target: Some(SOCK_DIR.to_string()),
-                source: Some(spec.sock_source.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                bind_options: Some(MountBindOptions {
-                    propagation: Some(MountBindOptionsPropagationEnum::RSHARED),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
+        if let Some(sock) = clone_sock_mount(&spec.sock_source) {
+            mounts.push(sock);
         }
         // lxcfs (optional): when the host has it installed (probed by `self_setup`), bind
         // its cgroup-aware /proc files over the clone's so `free`/`nproc`/htop reflect the
@@ -2283,6 +2274,39 @@ fn is_update_available(current_digest: Option<&str>, remote_digest: &str) -> boo
     }
 }
 
+/// A clone's bind of the shared media-socket directory, or `None` when no source is
+/// configured (dev/test). Pure so the read-only guarantee below is unit-testable.
+///
+/// **READ-ONLY on purpose.** A clone's daemon only ever `connect()`s to `clones.sock`, which
+/// works fine on a read-only bind — but *binding* a unix socket first requires UNLINKING the
+/// path, and that is denied with `EROFS` here.
+///
+/// Without this, any clone with a control-server inside it (a dev clone, an agent running the
+/// repo's own binary) silently steals the fleet's media socket: its bind unlinks the live path
+/// and re-creates it, orphaning the real server's listener onto an inode nothing can reach.
+/// Clones already connected keep working, so nothing looks wrong until one restarts — and then
+/// it can never reconnect. That is exactly how the CT 105 fleet lost video.
+///
+/// [`media::sock::Listener::bind`] takes an `flock` to stop well-behaved binders racing each
+/// other; this mount is the other half, stopping the ill-behaved ones — which is the case that
+/// actually bit us, since the offending server never consulted our lock at all.
+fn clone_sock_mount(sock_source: &str) -> Option<Mount> {
+    if sock_source.trim().is_empty() {
+        return None;
+    }
+    Some(Mount {
+        target: Some(SOCK_DIR.to_string()),
+        source: Some(sock_source.to_string()),
+        typ: Some(MountTypeEnum::BIND),
+        read_only: Some(true),
+        bind_options: Some(MountBindOptions {
+            propagation: Some(MountBindOptionsPropagationEnum::RSHARED),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
 /// The lxcfs `/proc` binds for a clone's `HostConfig`, given the cached probe verdict
 /// (`lxcfs_ok`). Pure (no I/O) so it's unit-testable and safe: it emits binds ONLY when
 /// the probe confirmed lxcfs is present, which is the single guard against the
@@ -2464,6 +2488,39 @@ mod tests {
             "rmng-control alias must survive projection, got {:?}",
             net.aliases
         );
+    }
+
+    // --- clone media-socket mount -----------------------------------------------------
+
+    /// A clone's `/srv/rmng-sock` bind MUST be read-only.
+    ///
+    /// Regression: it was read-write, so a control-server running inside a clone could unlink
+    /// the fleet's live `clones.sock` and bind its own in place — orphaning the real server's
+    /// listener onto an unreachable inode and breaking video for every clone that reconnected
+    /// afterwards. Read-only still permits `connect()` (verified against a real read-only bind
+    /// mount: connect succeeds, unlink fails with EROFS), which is all a clone daemon needs.
+    #[test]
+    fn a_clones_media_socket_mount_is_read_only() {
+        let mount = clone_sock_mount("/var/lib/docker/volumes/rmng-sock/_data")
+            .expect("a configured source yields a mount");
+        assert_eq!(
+            mount.read_only,
+            Some(true),
+            "clone sock mount must be read-only or a clone can steal the fleet's media socket"
+        );
+        assert_eq!(mount.target.as_deref(), Some(SOCK_DIR));
+        assert_eq!(
+            mount.source.as_deref(),
+            Some("/var/lib/docker/volumes/rmng-sock/_data")
+        );
+        assert_eq!(mount.typ, Some(MountTypeEnum::BIND));
+    }
+
+    /// No configured source (dev/test) ⇒ no mount at all, rather than a bind of "".
+    #[test]
+    fn no_sock_source_yields_no_mount() {
+        assert!(clone_sock_mount("").is_none());
+        assert!(clone_sock_mount("   ").is_none());
     }
 
     // --- client construction ----------------------------------------------------------
