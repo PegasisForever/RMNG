@@ -5,8 +5,10 @@ import { useEffect, useRef, useState } from "react";
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
 import { copyText } from "~/lib/clipboard";
+import { formatTokenCount } from "~/lib/format";
 import { buildSshCommand } from "~/lib/ssh";
 import type { Clone, Operation } from "~/lib/types";
+import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { ForwardState } from "~/lib/wire/ForwardState";
@@ -72,17 +74,23 @@ function MetricSlot({ metric }: { metric?: Metric }) {
  *
  *  Only the group badge carries a background — it is the *rule*, a fixed short token that reads
  *  as a chip. The account is the *result*, variable-length and the thing you actually scan for,
- *  so it stays plain text and takes the remaining width, truncating before the metric slot. */
+ *  so it stays plain text and takes the remaining width, truncating before the metric slot.
+ *
+ *  `fable` lights a second chip when the clone's most recent response came from the Fable model
+ *  within the last few minutes. Server-derived (see `wire::CloneTokens.fableActive`) and it
+ *  decays on its own, so this only ever renders what is currently true. */
 function AccountTag({
   logo,
   provider,
   email,
   selection,
+  fable = false,
 }: {
   logo: string;
   provider: string;
   email?: string;
   selection?: string;
+  fable?: boolean;
 }) {
   const pool = selection?.startsWith("group:") ? selection.slice("group:".length) : undefined;
   // A pinned selection has no badge: the selection *is* the email already beside it, so a chip
@@ -121,6 +129,17 @@ function AccountTag({
           {selection === "none" ? "no token" : "unassigned"}
         </span>
       )}
+      {/* Placed after the email so it stays visible when a long address truncates: it is
+          transient news about right now, whereas the address is stable and re-readable on
+          hover. `shrink-0` keeps the truncation pressure on the email rather than the chip. */}
+      {fable ? (
+        <span
+          title="recently served by the Fable model"
+          className="shrink-0 rounded bg-amber-100 px-1 text-[9px] font-semibold text-amber-700 dark:bg-amber-900 dark:text-amber-300"
+        >
+          fable
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -170,7 +189,11 @@ export interface SidebarCloneProps {
   /** Live CPU/RAM usage for this clone's container, pushed over the `stats` SSE event.
    *  Absent for a stopped/unmanaged clone or before the first sample — renders nothing. */
   stats?: ContainerStats;
-  /** Cache-excluded input/output totals for this managed clone from the `tokens` SSE event. */
+  /** All-time token totals for this clone, summed across Claude and Codex, read from the
+   *  agents' own session logs. Part of `ControlState` (persisted) rather than a volatile
+   *  bus, so it arrives with the ordinary state snapshot. Absent until the clone's first
+   *  scan produces a number. */
+  tokens?: CloneTokens;
   selected: boolean;
   /** A running operation targeting this clone (delete, or a clone finishing its
    *  post-add `wait-swap` step), if any. */
@@ -365,6 +388,7 @@ function OverflowMenu({
 export function SidebarClone({
   clone,
   stats,
+  tokens,
   selected,
   op,
   onSelect,
@@ -404,6 +428,24 @@ export function SidebarClone({
         label: "MEM",
         value: usage.mem,
         title: "RAM + swap; includes tmpfs/shared memory and excludes reclaimable file cache",
+      }
+    : undefined;
+  // All-time token totals, summed across both providers. Unlike CPU/MEM these survive the
+  // clone going quiet, so they render for an archived clone too — the work already happened.
+  // A clone with no scan yet has no slot at all rather than a misleading "0".
+  const inMetric = tokens
+    ? {
+        label: "↑",
+        value: formatTokenCount(tokens.inputTokens),
+        title:
+          "all-time input tokens (Claude + Codex); newly processed only — cache reads excluded",
+      }
+    : undefined;
+  const outMetric = tokens
+    ? {
+        label: "↓",
+        value: formatTokenCount(tokens.outputTokens),
+        title: "all-time output tokens (Claude + Codex), including Codex reasoning tokens",
       }
     : undefined;
   // Managed clones always show the binding line: an unassigned account is itself worth seeing.
@@ -462,13 +504,19 @@ export function SidebarClone({
             // height is identical across the list and the sidebar doesn't jump as clones change
             // state. `min-w-0` on the column is what lets the tags inside actually truncate.
             <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-[10px]">
+              {/* Each row: account … tokens … CPU-or-MEM. The token figures are a whole-clone
+                  total (both providers summed), so they deliberately do NOT line up with the
+                  provider named at the left of their own row — ↑ simply rides the first line
+                  and ↓ the second, because those are the two lines that exist. */}
               <div className="flex min-w-0 items-center gap-2">
                 <AccountTag
                   logo={claudeLogo}
                   provider="Claude"
                   email={clone.claudeAccountEmail}
                   selection={clone.claudeSelection}
+                  fable={tokens?.fableActive}
                 />
+                <MetricSlot metric={inMetric} />
                 <MetricSlot metric={cpuMetric} />
               </div>
               <div className="flex min-w-0 items-center gap-2">
@@ -478,6 +526,7 @@ export function SidebarClone({
                   email={clone.codexAccountEmail}
                   selection={clone.codexSelection}
                 />
+                <MetricSlot metric={outMetric} />
                 <MetricSlot metric={memMetric} />
               </div>
             </div>

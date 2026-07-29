@@ -7,6 +7,7 @@ import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
@@ -168,6 +169,35 @@ export const stats: Record<string, ContainerStats> = {
     cpuPct: 18,
     memUsed: BigInt(Math.round(3.2 * GiB)),
     memLimit: BigInt(40 * GiB),
+  },
+};
+
+// --- per-clone token totals ------------------------------------------------
+// `ControlState.cloneTokens`: all-time input/output summed across both providers, plus the
+// transient "this clone just used Fable" flag. Deliberately spans several orders of
+// magnitude so the compact formatter's thresholds (k / M) are exercised on screen.
+
+export const cloneTokens: Record<string, CloneTokens> = {
+  [cloneWorking.id]: {
+    inputTokens: BigInt(24_100_000),
+    outputTokens: BigInt(890_000),
+    fableActive: true,
+  },
+  [cloneIdle.id]: {
+    inputTokens: BigInt(6_000_000),
+    outputTokens: BigInt(210_000),
+    fableActive: false,
+  },
+  [cloneDualProvider.id]: {
+    inputTokens: BigInt(1_240_000),
+    outputTokens: BigInt(96_400),
+    fableActive: false,
+  },
+  // A clone that has barely run: sub-1k figures render as plain integers.
+  [cloneNoToken.id]: {
+    inputTokens: BigInt(812),
+    outputTokens: BigInt(47),
+    fableActive: false,
   },
 };
 

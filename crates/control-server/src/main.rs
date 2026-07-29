@@ -3,6 +3,7 @@
 //! One tokio service binding the video plane, web API + SSE + static frontend, port-forward
 //! data plane (9005), and SSH bastion; `smbd` serves retained clone homes on port 445.
 
+mod agentlog;
 mod app;
 mod assets;
 mod boot;
@@ -231,6 +232,10 @@ async fn main() -> Result<()> {
             tokio::spawn(monitor::run(app_for_bg.clone()));
             tokio::spawn(clone_reconcile::run(app_for_bg.clone()));
             tokio::spawn(homes::run(app_for_bg.clone()));
+            // Reads each clone's agent session logs through the symlinks `homes` maintains —
+            // hence spawned after it. Supplies per-clone token totals and the activity signal
+            // for agents RMNG did not launch (a human running `claude` over SSH).
+            tokio::spawn(agentlog::run_scanner(app_for_bg.clone()));
             tokio::spawn(shm::run(app_for_bg.clone()));
             tokio::spawn(buildinfra::run(app_for_bg.clone()));
             // Scheduled chat delivery: fires operator-queued messages once their time passes.

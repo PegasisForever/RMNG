@@ -13,6 +13,7 @@ import {
   cloneOffline,
   cloneUnmanaged,
   cloneWorking,
+  cloneTokens,
   stats,
 } from "~/stories/fixtures";
 
@@ -51,20 +52,28 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Managed clone actively working, pinned account, live CPU/RAM. */
+/** Managed clone actively working, pinned account, live CPU/RAM, and a lit fable badge. */
 export const Working: Story = {
-  args: { clone: cloneWorking, stats: stats[cloneWorking.id] },
+  args: {
+    clone: cloneWorking,
+    stats: stats[cloneWorking.id],
+    tokens: cloneTokens[cloneWorking.id],
+  },
 };
 
 /** Idle, balanced within a Claude group, unread dot. */
 export const Idle: Story = {
-  args: { clone: cloneIdle, stats: stats[cloneIdle.id] },
+  args: { clone: cloneIdle, stats: stats[cloneIdle.id], tokens: cloneTokens[cloneIdle.id] },
 };
 
-/** Both providers: a pinned Claude account on line 1 and a Codex group on line 2, with
- *  CPU on the Claude line and MEM on the Codex line, and the ⋯ spanning both. */
+/** Both providers: a pinned Claude account on line 1 and a Codex group on line 2. Each row
+ *  carries the clone's total (↑ then ↓) plus CPU or MEM, with the ⋮ spanning both. */
 export const DualProvider: Story = {
-  args: { clone: cloneDualProvider, stats: stats[cloneDualProvider.id] },
+  args: {
+    clone: cloneDualProvider,
+    stats: stats[cloneDualProvider.id],
+    tokens: cloneTokens[cloneDualProvider.id],
+  },
 };
 
 /** Offline (wrapper unreachable), Claude on auto. */
@@ -72,9 +81,14 @@ export const Offline: Story = {
   args: { clone: cloneOffline },
 };
 
-/** Managed scratch box with no Claude token installed. */
+/** Managed scratch box with no Claude token installed. Its sub-1k totals render as plain
+ *  integers rather than being rounded to `0.8k`. */
 export const NoToken: Story = {
-  args: { clone: cloneNoToken, stats: stats[cloneNoToken.id] },
+  args: {
+    clone: cloneNoToken,
+    stats: stats[cloneNoToken.id],
+    tokens: cloneTokens[cloneNoToken.id],
+  },
 };
 
 /** Plain unmanaged row — delete only (no commit / account actions). */
@@ -82,14 +96,19 @@ export const Unmanaged: Story = {
   args: { clone: cloneUnmanaged },
 };
 
-/** Retained clone: no live runtime actions or usage, but it remains selectable. */
+/** Retained clone: no live CPU/RAM, but its token totals stay — the work already happened. */
 export const Archived: Story = {
-  args: { clone: { ...cloneIdle, archived: true } },
+  args: { clone: { ...cloneIdle, archived: true }, tokens: cloneTokens[cloneIdle.id] },
 };
 
 /** The selected (active) row. */
 export const Selected: Story = {
-  args: { clone: cloneWorking, stats: stats[cloneWorking.id], selected: true },
+  args: {
+    clone: cloneWorking,
+    stats: stats[cloneWorking.id],
+    tokens: cloneTokens[cloneWorking.id],
+    selected: true,
+  },
 };
 
 /** A row with a running op targeting it (delete in progress) — busy state. */

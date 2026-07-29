@@ -424,6 +424,7 @@ function Dashboard({
           accounts={accounts}
           hosts={orderedClones}
           stats={stats}
+          cloneTokens={state.cloneTokens}
           lxcStats={lxcStats}
           forwards={forwards}
           operations={state.operations}

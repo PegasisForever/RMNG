@@ -7,6 +7,7 @@
 // invisibly. In-progress clones are kept OUT of `hosts` until they are fully
 // provisioned, so the client never tries to connect to a half-built container.
 
+import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { PortForward } from "~/lib/wire/PortForward";
 
 export interface MonitorSpec {
@@ -185,6 +186,10 @@ export interface ControlState {
   activeLayout: string;
   /** Layout preset names in config order — powers the sidebar switcher. */
   layoutPresetNames: string[];
+  /** All-time per-clone token totals, keyed by clone id. Persisted server-side (the agent
+   *  logs it is derived from get pruned), so it arrives with the ordinary state snapshot
+   *  rather than on a volatile bus like `stats`. */
+  cloneTokens: Record<string, CloneTokens>;
 }
 
 export function emptyState(): ControlState {
@@ -196,6 +201,7 @@ export function emptyState(): ControlState {
     claudeAccounts: [],
     activeLayout: "",
     layoutPresetNames: [],
+    cloneTokens: {},
   };
 }
 

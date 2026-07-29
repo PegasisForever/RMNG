@@ -83,6 +83,7 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 | `operations` | `Operation[]` | in-flight + recent clone/delete/archive/unarchive/pull/commit/update jobs |
 | `claudeAccounts` | `ClaudeUsage[]` | every imported account's token-free usage view — **both** providers in one flat list, tagged by `provider` |
 | `codexResetMarks` | `CodexResetMark[]` | which Codex accounts have already spent a rate-limit reset this 7d window (cooldown bookkeeping) |
+| `cloneTokens` | `{ [cloneId]: CloneTokens }` | all-time per-clone token totals + the transient Fable flag — see [below](#clonetokens) |
 
 Despite its name `claudeAccounts` is provider-agnostic: the Claude and Codex pollers each
 replace only their own rows (`clone_ops::replace_provider_views`), so a reader filters on
@@ -140,6 +141,38 @@ one push per status change. It rides its own SSE-only bus (`crate::forward::Forw
 like `stats` — it never enters `ControlState`/`state.json`. The *desired* rules themselves are
 persisted on `Clone.forwards` and edited via `PUT /api/hosts/:id/forwards`.
 
+<a id="clonetokens"></a>
+### `cloneTokens` — per-clone token accounting
+`{ inputTokens, outputTokens, fableActive }` per clone id, accumulated by
+[agentlog.rs](../crates/control-server/src/agentlog.rs) from the agent CLIs' own session
+transcripts: `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` and
+`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Every agent writes these regardless of who
+launched it, which is why a hand-run `claude` is counted too.
+
+The server reads them with **no `docker exec`**: [homes.rs](../crates/control-server/src/homes.rs)
+already symlinks `<data_dir>/hosts/<clone-id>` → `/proc/<pid>/root/home/rmng` for every running
+managed clone, so a 15 s timer does plain file reads, consuming only the bytes appended since the
+last pass.
+
+Three properties worth knowing before reading the numbers:
+
+- **Both providers are summed.** One `↑`/`↓` pair per clone, Claude + Codex together. It answers
+  *which clone is expensive*, not *what did this account spend* — for the latter use the
+  per-account `fiveHour`/`sevenDay` windows on `claudeAccounts`.
+- **Cache reads are excluded** from `inputTokens`; cache *creation* is included. One sampled
+  response carried 210,735 cache-read tokens against a single real input token, so counting reads
+  would drown the figure. Codex's `cachedInputTokens` is netted out for the same reason, and its
+  reasoning tokens are added to output.
+- **Cumulative since the clone's first scan, and persisted.** Both CLIs prune old sessions, so a
+  figure re-derived from surviving logs would silently shrink over time. A clone's first pass
+  adopts its existing logs *without* counting them (an arbitrary retained window is not a
+  meaningful starting total), and the count climbs from zero with real traffic. Archiving a clone
+  retains its total; deleting one drops it.
+
+`fableActive` is a derived recency flag (5 min, matching the activity window), re-projected each
+scan so it decays on its own. Claude-only — Codex records its model in `turn_context` rather than
+in the usage event, and Fable is a Claude family regardless.
+
 <a id="monitorstate"></a>
 ### `Clone.monitorState` — where `working` vs `idle` comes from
 Docker liveness supplies `offline`. The split between the other two is read off the
@@ -154,10 +187,18 @@ stamped — it marks work *ending*, and counting it as activity would pin a fini
 window doesn't slide to `idle` mid-work.
 
 Reading the wrapper's stream rather than `ChatSnapshot.busy` is what makes autonomous background
-work count, not just operator-solicited turns. **Known gap:** an agent a user starts *by hand*
-inside a clone — a bare `claude`/`codex` in a terminal, with no wrapper in front of it — emits no
-frames, so that clone reads `idle` for as long as it runs. The map is never persisted: after a
-server restart every clone reads `idle` until it next works, which is the right cold default.
+work count, not just operator-solicited turns.
+
+A **second, independent input** stamps the same `ActivityBus`: the agent CLIs' own session logs,
+polled by [agentlog.rs](../crates/control-server/src/agentlog.rs) (see
+[`cloneTokens`](#clonetokens)). This is what covers an agent a user starts *by hand* inside a
+clone — a bare `claude`/`codex` in a terminal, with no wrapper in front of it. Those emit no SSE
+frames, but they do write their transcript, and it is appended *during* the turn rather than
+flushed at exit. The two sources are complementary, not redundant: SSE is instant, the log poll
+is up to 15 s behind but sees everything. Whichever observes work first wins.
+
+The map is never persisted: after a server restart every clone reads `idle` until it next works,
+which is the right cold default.
 
 ---
 

@@ -401,6 +401,37 @@ pub struct CodexResetMark {
     pub redeem_request_id: String,
 }
 
+/// All-time token totals for one clone, summed across both providers.
+///
+/// Accumulated from the agent CLIs' own session logs — the JSONL transcripts under
+/// `~/.claude/projects` and `~/.codex/sessions` — which every agent writes regardless of
+/// whether RMNG or a human at a shell launched it. Cumulative
+/// since the clone was first scanned and persisted in `state.json`, because both CLIs prune
+/// old session files — a figure re-derived from whatever logs still exist would silently
+/// shrink as history ages out.
+///
+/// Counts the *clone*, not the account: hot-swapping a clone's account leaves the total
+/// climbing across the swap. It answers "which clone is expensive", not "what did this
+/// account spend" — the per-account 5h/7d windows in [`ClaudeUsage`] answer the latter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct CloneTokens {
+    /// Newly processed input tokens. Cache *reads* are excluded — one sampled response had
+    /// 210,735 cache-read tokens against 1 real input token, so including them would swamp
+    /// the figure. Cache *creation* is included: those tokens really were processed.
+    pub input_tokens: u64,
+    /// Newly generated output tokens, including Codex reasoning tokens (its client-facing
+    /// `output_tokens` does not already include them).
+    pub output_tokens: u64,
+    /// True when this clone's most recent Claude response came from the Fable model family
+    /// within the last few minutes. Derived server-side from a private timestamp (never
+    /// sent) and re-projected each scan so it decays back to false; drives the sidebar
+    /// badge beside the Claude account.
+    #[serde(default)]
+    pub fable_active: bool,
+}
+
 /// The top-level state broadcast over `/events` and persisted to `state.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]
@@ -432,6 +463,11 @@ pub struct ControlState {
     /// account per week, so it belongs in `state.json` (unlike per-tick stats).
     #[serde(default)]
     pub codex_reset_marks: Vec<CodexResetMark>,
+    /// All-time per-clone token totals, keyed by clone id. Unlike the volatile CPU/RAM
+    /// stats map (which rides its own SSE bus precisely because it changes every tick),
+    /// this is persisted: it is cumulative, and the logs it is derived from get pruned.
+    #[serde(default)]
+    pub clone_tokens: std::collections::HashMap<String, CloneTokens>,
 }
 
 impl ControlState {

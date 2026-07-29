@@ -24,6 +24,7 @@ import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
 import { SidebarClone } from "~/components/SidebarClone";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
+import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { LxcStats } from "~/lib/wire/LxcStats";
@@ -133,6 +134,9 @@ export interface SidebarProps {
   hosts: Clone[];
   /** Live per-clone CPU/RAM map (the volatile `stats` SSE event). */
   stats: Record<string, ContainerStats>;
+  /** All-time per-clone token totals from `ControlState.cloneTokens`. Unlike `stats` this
+   *  is persisted state, not a volatile bus — it rides the ordinary state snapshot. */
+  cloneTokens?: Record<string, CloneTokens>;
   /** Live CT 105-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
   lxcStats: LxcStats | null;
   /** Live per-clone forward-runtime map (the `forwards` SSE event), fanned out to each
@@ -186,6 +190,7 @@ export function Sidebar({
   accounts,
   hosts,
   stats,
+  cloneTokens = {},
   lxcStats,
   forwards = {},
   operations,
@@ -259,6 +264,7 @@ export function Sidebar({
       key={clone.id}
       clone={clone}
       stats={stats[clone.id]}
+      tokens={cloneTokens[clone.id]}
       forwardRuntime={forwards[clone.id]}
       sshPublicHost={sshPublicHost}
       bastionPort={bastionPort}
@@ -411,6 +417,9 @@ export function Sidebar({
               <SidebarClone
                 key={clone.id}
                 clone={clone}
+                // Tokens, unlike CPU/MEM, outlive the clone going quiet — an archived clone
+                // still spent what it spent, so its total stays on the row.
+                tokens={cloneTokens[clone.id]}
                 selected={selectedId === clone.id}
                 op={opForClone(clone.id)}
                 onSelect={() => onSelectClone(clone)}

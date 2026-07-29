@@ -3,7 +3,14 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { Sidebar } from "./Sidebar";
-import { claudeAccounts, cloneOperation, hosts, lxcStats, stats } from "~/stories/fixtures";
+import {
+  claudeAccounts,
+  cloneOperation,
+  cloneTokens,
+  hosts,
+  lxcStats,
+  stats,
+} from "~/stories/fixtures";
 
 const meta = {
   title: "Sidebar/Sidebar",
@@ -22,6 +29,7 @@ const meta = {
     accounts: claudeAccounts,
     hosts,
     stats,
+    cloneTokens,
     lxcStats,
     operations: [],
     selectedId: hosts[0].id,
