@@ -345,6 +345,42 @@ fn pick_stat(
     }
 }
 
+/// Turn a parent clone's `idle` back into `working` while any of its sub clones is working.
+///
+/// Activity is observed per clone, from that clone's own proxy traffic and its own agent logs. A
+/// parent that handed work to a sub clone and is waiting on the result produces none of either,
+/// so on its own signals it reads idle while the work it started is plainly still running. That
+/// is wrong twice over: the sidebar greys out a row whose group is busy, and the idle transition
+/// fires an unread badge for output nobody has finished producing. A parent now goes idle only
+/// once everything under it has.
+///
+/// Three rules the callers depend on:
+///
+/// * `offline` is never lifted. That state is about the container, and a stopped parent is
+///   stopped whatever its sub clones are doing.
+/// * A sub clone this tick could not reach is absent from `next`, so its stored `monitor_state`
+///   decides. That is the state the operator is still being shown, and a failed liveness probe is
+///   not evidence the sub clone stopped working.
+/// * Parentage is one level deep by construction ([`RmngClone::parent`]), so one pass carries
+///   everything. There is no grandchild whose state would need a second round.
+fn lift_sub_clone_activity(next: &mut HashMap<String, MonitorState>, clones: &[RmngClone]) {
+    let busy_parents: HashSet<&str> = clones
+        .iter()
+        .filter(|clone| {
+            next.get(&clone.id).copied().or(clone.monitor_state) == Some(MonitorState::Working)
+        })
+        .filter_map(|clone| clone.parent.as_deref())
+        .collect();
+    if busy_parents.is_empty() {
+        return;
+    }
+    for (id, state) in next.iter_mut() {
+        if *state == MonitorState::Idle && busy_parents.contains(id.as_str()) {
+            *state = MonitorState::Working;
+        }
+    }
+}
+
 /// Whether a `working → not-working` transition should raise the unread badge + browser
 /// notification for a clone. Suppressed when the clone is currently selected (the operator is
 /// already looking at it), or — for an **idle** slide specifically — when the operator has
@@ -472,6 +508,7 @@ async fn poll_once(
         .collect();
     let active_ids: HashSet<String> = active_clones.iter().map(|host| host.id.clone()).collect();
     next.retain(|id, _| active_ids.contains(id));
+    lift_sub_clone_activity(&mut next, &active_clones);
     stats_map.retain(|id, _| active_ids.contains(id));
     ip_updates.retain(|id, _| active_ids.contains(id));
     // Bound the CPU-sample map to the live fleet, so archived and deleted clones cannot
@@ -616,6 +653,84 @@ mod tests {
         // The reset sample is retained, so the next tick rates normally from it.
         let pct = cpu_pct(&mut previous, 6_401_000, start + Duration::from_secs(8)).unwrap();
         assert!((pct - 10.0).abs() < 1e-9, "expected 10%, got {pct}");
+    }
+
+    /// A clone row as the lifter sees it: id, parent, and the state already stored on it.
+    fn clone_row(id: &str, parent: Option<&str>, stored: Option<MonitorState>) -> RmngClone {
+        RmngClone {
+            id: id.to_string(),
+            managed: true,
+            parent: parent.map(str::to_string),
+            monitor_state: stored,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_parent_stays_working_while_a_sub_clone_works() {
+        // The parent's own signals are quiet: it dispatched the work and is waiting on it.
+        let clones = [
+            clone_row("parent", None, None),
+            clone_row("sub-a", Some("parent"), None),
+            clone_row("sub-b", Some("parent"), None),
+        ];
+        let mut next = HashMap::from([
+            ("parent".to_string(), MonitorState::Idle),
+            ("sub-a".to_string(), MonitorState::Working),
+            ("sub-b".to_string(), MonitorState::Idle),
+        ]);
+        lift_sub_clone_activity(&mut next, &clones);
+        assert_eq!(next["parent"], MonitorState::Working);
+        assert_eq!(next["sub-b"], MonitorState::Idle, "a sibling is not lifted");
+    }
+
+    #[test]
+    fn a_parent_goes_idle_once_every_sub_clone_is_idle() {
+        let clones =
+            [clone_row("parent", None, None), clone_row("sub-a", Some("parent"), None)];
+        let mut next = HashMap::from([
+            ("parent".to_string(), MonitorState::Idle),
+            ("sub-a".to_string(), MonitorState::Idle),
+        ]);
+        lift_sub_clone_activity(&mut next, &clones);
+        assert_eq!(next["parent"], MonitorState::Idle);
+    }
+
+    #[test]
+    fn an_offline_parent_is_not_lifted_by_a_working_sub_clone() {
+        // Offline is about the container, and the row must not claim a stopped clone is working.
+        let clones =
+            [clone_row("parent", None, None), clone_row("sub-a", Some("parent"), None)];
+        let mut next = HashMap::from([
+            ("parent".to_string(), MonitorState::Offline),
+            ("sub-a".to_string(), MonitorState::Working),
+        ]);
+        lift_sub_clone_activity(&mut next, &clones);
+        assert_eq!(next["parent"], MonitorState::Offline);
+    }
+
+    #[test]
+    fn an_unreachable_sub_clone_holds_its_parent_by_its_stored_state() {
+        // A failed liveness probe leaves the sub clone out of this tick's map. It is still shown
+        // as working, so it still holds its parent working.
+        let clones = [
+            clone_row("parent", None, None),
+            clone_row("sub-a", Some("parent"), Some(MonitorState::Working)),
+        ];
+        let mut next = HashMap::from([("parent".to_string(), MonitorState::Idle)]);
+        lift_sub_clone_activity(&mut next, &clones);
+        assert_eq!(next["parent"], MonitorState::Working);
+    }
+
+    #[test]
+    fn a_top_level_clones_state_is_untouched() {
+        let clones = [clone_row("solo", None, None), clone_row("other", None, None)];
+        let mut next = HashMap::from([
+            ("solo".to_string(), MonitorState::Idle),
+            ("other".to_string(), MonitorState::Working),
+        ]);
+        lift_sub_clone_activity(&mut next, &clones);
+        assert_eq!(next["solo"], MonitorState::Idle);
     }
 
     #[test]

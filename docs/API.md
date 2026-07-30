@@ -145,9 +145,16 @@ persisted on `Clone.forwards` and edited via `PUT /api/hosts/:id/forwards`.
 ### `cloneTokens` — per-clone token accounting
 `{ inputTokens, outputTokens, fableActive }` per clone id, accumulated by
 [agentlog.rs](../crates/control-server/src/agentlog.rs) from the agent CLIs' own session
-transcripts: `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` and
+transcripts: `~/.claude/projects/<cwd-slug>/<uuid>.jsonl`,
+`~/.claude/projects/<cwd-slug>/<uuid>/subagents/agent-*.jsonl`, and
 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Every agent writes these regardless of who
 launched it, which is why a hand-run `claude` is counted too.
+
+**Subagents are the bulk of a busy clone's traffic**, not a footnote: 1,943 of one production
+clone's 1,974 Claude transcripts are subagent logs. A subagent spawned by a subagent writes into
+that same flat `subagents/` directory, so every generation lands one walk deep. Each provider gets
+its own file budget, and a clone holding more logs than the budget has its most recently modified
+files read, so the sessions actually being written are never the ones dropped.
 
 The server reads them with **no `docker exec`**: [homes.rs](../crates/control-server/src/homes.rs)
 already symlinks `<data_dir>/hosts/<clone-id>` → `/proc/<pid>/root/home/rmng` for every running
@@ -163,6 +170,12 @@ Three properties worth knowing before reading the numbers:
   response carried 210,735 cache-read tokens against a single real input token, so counting reads
   would drown the figure. Codex's `cachedInputTokens` is netted out for the same reason, and its
   reasoning tokens are added to output.
+- **Responses are counted, not lines.** Claude writes one line per content block (a `thinking`
+  line, a `text` line, one per `tool_use`), and every one of them repeats its response's whole
+  `usage` object, with `output_tokens` climbing to the real figure only on the last. The scanner
+  keys on `message.id` and credits each response its running maximum, so a response contributes
+  once however many lines carry it. Summing lines instead inflated input by 2.4x on main sessions
+  and 3.0x on subagent logs.
 - **Cumulative since the clone's first scan, and persisted.** Both CLIs prune old sessions, so a
   figure re-derived from surviving logs would silently shrink over time. A clone's first pass
   adopts its existing logs *without* counting them (an arbitrary retained window is not a
@@ -199,6 +212,15 @@ is up to 15 s behind but sees everything. Whichever observes work first wins.
 
 The map is never persisted: after a server restart every clone reads `idle` until it next works,
 which is the right cold default.
+
+**A parent clone is only `idle` when its sub clones are too.** Activity is observed per clone, so
+a parent that handed work to a sub clone and is waiting on it produces no frames and no log lines
+of its own, and would read `idle` while the work it started is still running. After each tick's
+states are computed, a working sub clone lifts its parent's `idle` back to `working`
+([monitor.rs](../crates/control-server/src/monitor.rs) `lift_sub_clone_activity`). `offline` is
+never lifted, since that state is about the container. A sub clone the tick could not reach keeps
+holding its parent by the state it is still displayed with. Parentage is one level deep
+(`Clone.parent`), so a single pass carries everything.
 
 ---
 
