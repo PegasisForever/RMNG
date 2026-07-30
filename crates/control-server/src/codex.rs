@@ -30,6 +30,10 @@ const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Refresh an access token this far before its expiry (must exceed the worst-case
 /// poll gap). Matches claude's lead.
 const REFRESH_LEAD_MS: i64 = 2 * 60 * 60 * 1000;
+/// Per-account offset added on top of [`REFRESH_LEAD_MS`] so accounts imported together
+/// do not all come due in the same second. Matches claude's spread; see the reasoning on
+/// `claude::REFRESH_SPREAD_MS`.
+const REFRESH_SPREAD_MS: i64 = 90 * 60 * 1000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGGER: Duration = Duration::from_millis(400);
 
@@ -347,8 +351,25 @@ pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportR
 
 // --- token refresh + push -------------------------------------------------
 
-fn is_expired(expires_at: i64) -> bool {
-    now_ms() + REFRESH_LEAD_MS >= expires_at
+/// FNV-1a over `s`, kept identical to Claude's so refresh phases are stable across
+/// restarts (`DefaultHasher` is not stable across Rust releases).
+fn stable_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// How long before expiry `email`'s token is refreshed: the shared floor plus that
+/// account's own offset within [`REFRESH_SPREAD_MS`].
+fn refresh_lead_ms(email: &str) -> i64 {
+    REFRESH_LEAD_MS + (stable_hash(email) % REFRESH_SPREAD_MS as u64) as i64
+}
+
+fn is_expired(email: &str, expires_at: i64) -> bool {
+    now_ms() + refresh_lead_ms(email) >= expires_at
 }
 
 /// Set `acct.expires_at` from its access-token JWT `exp` claim; if the token isn't a
@@ -412,7 +433,7 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredCodexAc
         .codex
         .get_by_email(email)
         .with_context(|| format!("no imported Codex account for '{email}'"))?;
-    if !is_expired(acct.expires_at) {
+    if !is_expired(&acct.email, acct.expires_at) {
         return Ok((acct, false));
     }
     refresh_account(&app.http, &mut acct).await?;
@@ -476,20 +497,31 @@ pub async fn push_account_to_clone(app: &App, host_id: &str, email: &str) -> Res
         .insert(host_id.to_string(), acct.access_token.clone());
     if rotated {
         let app = app.clone();
-        tokio::spawn(async move { push_stale_tokens(&app).await });
+        let email = email.to_string();
+        tokio::spawn(async move { push_stale_tokens_for(&app, Some(&email)).await });
     }
     Ok(())
 }
 
-/// Reconcile pass: every clone assigned a Codex account gets that account's current
-/// access token, unless the last successful push already delivered it. Mirrors
-/// `claude::push_stale_tokens`, reading `RmngClone.codex_account_email`.
+/// Fleet-wide reconcile pass: see [`push_stale_tokens_for`]. Runs at the end of every
+/// poll to retry failed pushes and catch out-of-band reassignments.
 pub async fn push_stale_tokens(app: &App) {
+    push_stale_tokens_for(app, None).await;
+}
+
+/// Give every clone assigned a Codex account that account's current access token, unless
+/// the last successful push already delivered it. With `only` set, visit just that
+/// account's clones. Mirrors `claude::push_stale_tokens_for` (which carries the reasoning
+/// on scope), reading `RmngClone.codex_account_email`.
+pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     let mut first = true;
     for host in app.store.get().hosts {
         let Some(email) = host.codex_account_email.as_deref() else {
             continue;
         };
+        if !only.is_none_or(|want| want == email) {
+            continue;
+        }
         if !host.managed {
             continue;
         }
@@ -1384,7 +1416,12 @@ async fn poll_inner(app: &App) -> Result<bool> {
             tokio::time::sleep(STAGGER).await;
         }
         let outcome = async {
-            let (fresh, _) = fresh_access_token(app, &acct.email).await?;
+            let (fresh, rotated) = fresh_access_token(app, &acct.email).await?;
+            if rotated {
+                // Deliver before the usage fetch: this account's clones are holding the
+                // token the refresh above just replaced.
+                push_stale_tokens_for(app, Some(&acct.email)).await;
+            }
             if !usage_polling {
                 // Refresh + push still happen; skip the usage fetch, publish a base view.
                 let mut b = codex_base(acct);
@@ -1554,6 +1591,19 @@ pub async fn run_poller(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parity with `claude::jittered_lead_never_drops_below_the_floor`: the offset only
+    /// ever adds lead, and it is derived from the email so a batch of accounts imported
+    /// together stops coming due in the same second.
+    #[test]
+    fn jittered_lead_adds_to_the_floor_and_varies_by_email() {
+        for email in ["a@one.test", "b@one.test", "c@two.test"] {
+            let lead = refresh_lead_ms(email);
+            assert!(lead >= REFRESH_LEAD_MS);
+            assert!(lead < REFRESH_LEAD_MS + REFRESH_SPREAD_MS);
+        }
+        assert_ne!(refresh_lead_ms("a@one.test"), refresh_lead_ms("b@one.test"));
+    }
 
     fn jwt_with(payload: &str) -> String {
         let b64 = B64.encode(payload.as_bytes());

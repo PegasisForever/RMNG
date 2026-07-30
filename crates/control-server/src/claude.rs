@@ -6,7 +6,7 @@
 //! leaves it. A clone is authed by writing **only the current access token** into
 //! its `~/.claude/.credentials.json` (empty refresh token, far-future expiry, so
 //! Claude Code just uses whatever we last installed; see [`apply_clone_token`]).
-//! Whenever a refresh rotates an account's access token, [`push_stale_tokens`]
+//! Whenever a refresh rotates an account's access token, [`push_stale_tokens_for`]
 //! fans the new token out to every clone assigned to that account. The poller
 //! publishes a token-free `ClaudeUsage` view onto `ControlState.claudeAccounts`.
 //! Clones select an account via `"auto"` (rotated across all imported accounts by
@@ -48,6 +48,14 @@ const USER_AGENT: &str = "claude-swap/1.0";
 /// Anthropic issues 8-hour access tokens (`expires_in: 28800`), so a 2-hour lead
 /// refreshes every 6 hours and leaves four back-to-back 30-minute backoffs of room.
 const REFRESH_LEAD_MS: i64 = 2 * 60 * 60 * 1000;
+/// Width of the per-account offset added on top of [`REFRESH_LEAD_MS`].
+///
+/// Accounts imported in one sitting expire in the same second, so without an offset a
+/// single refresh event rewrites every clone's credentials at once — the widest possible
+/// window in which clones run on a token the server has already replaced. The offset only
+/// ever *adds* lead, so no account is refreshed later than the 2-hour floor, and one cycle
+/// spreads the expiries for good: a refreshed token expires 8 hours after its own refresh.
+const REFRESH_SPREAD_MS: i64 = 90 * 60 * 1000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGGER: Duration = Duration::from_millis(400);
 
@@ -372,8 +380,25 @@ pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportR
 
 // --- token refresh + usage fetch ------------------------------------------
 
-fn is_expired(expires_at: i64) -> bool {
-    now_ms() + REFRESH_LEAD_MS >= expires_at
+/// FNV-1a over `s`. Hand-rolled because an account's refresh phase has to survive a
+/// server restart, and `DefaultHasher` is explicitly not stable across Rust releases.
+fn stable_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// How long before expiry `email`'s token is refreshed: the shared floor plus that
+/// account's own offset within [`REFRESH_SPREAD_MS`].
+fn refresh_lead_ms(email: &str) -> i64 {
+    REFRESH_LEAD_MS + (stable_hash(email) % REFRESH_SPREAD_MS as u64) as i64
+}
+
+fn is_expired(email: &str, expires_at: i64) -> bool {
+    now_ms() + refresh_lead_ms(email) >= expires_at
 }
 
 #[derive(Deserialize)]
@@ -419,7 +444,7 @@ async fn refresh_account(http: &reqwest::Client, acct: &mut StoredClaudeAccount)
 }
 
 /// `email`'s current access token, refreshed (and persisted) first if within
-/// [`REFRESH_LEAD_MS`] of expiry. Returns `(token, rotated)`. All refreshes run
+/// [`refresh_lead_ms`] of expiry. Returns `(token, rotated)`. All refreshes run
 /// under the store's refresh gate, so concurrent callers can't burn the same
 /// single-use refresh token; the account is re-read under the gate so a refresh
 /// another caller just finished is observed instead of repeated.
@@ -429,7 +454,7 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(String, bool)
         .claude
         .get_by_email(email)
         .with_context(|| format!("no imported Claude account for '{email}'"))?;
-    if !is_expired(acct.expires_at) {
+    if !is_expired(&acct.email, acct.expires_at) {
         return Ok((acct.access_token, false));
     }
     refresh_account(&app.http, &mut acct).await?;
@@ -617,7 +642,13 @@ async fn poll_inner(app: &App) -> Result<bool> {
             tokio::time::sleep(STAGGER).await;
         }
         let outcome = async {
-            let (token, _) = fresh_access_token(app, &acct.email).await?;
+            let (token, rotated) = fresh_access_token(app, &acct.email).await?;
+            if rotated {
+                // Before the usage fetch, not after the whole pass: this account's clones
+                // are holding the token the refresh above just replaced, and the fetch can
+                // burn 10s (or a 429) per remaining account before the pass ends.
+                push_stale_tokens_for(app, Some(&acct.email)).await;
+            }
             let raw = fetch_usage(&app.http, &token).await?;
             Ok::<_, anyhow::Error>(to_usage(acct, raw))
         }
@@ -664,7 +695,8 @@ async fn poll_inner(app: &App) -> Result<bool> {
         cfg.claude.pinned_email.as_deref(),
     );
 
-    // Fan out any tokens this poll rotated (and retry earlier failed pushes).
+    // Rotations were fanned out per account as they happened; this sweep only retries
+    // pushes that failed and catches clones reassigned during the pass.
     push_stale_tokens(app).await;
 
     Ok(any429)
@@ -1431,23 +1463,45 @@ pub async fn push_account_to_clone(app: &App, host_id: &str, email: &str) -> Res
         .insert(host_id.to_string(), token);
     if rotated {
         let app = app.clone();
-        tokio::spawn(async move { push_stale_tokens(&app).await });
+        let email = email.to_string();
+        tokio::spawn(async move { push_stale_tokens_for(&app, Some(&email)).await });
     }
     Ok(())
 }
 
-/// Reconcile pass: every clone assigned an account gets that account's current access
-/// token, unless the last successful push already delivered exactly that token. Runs
-/// at the end of every poll (where refreshes happen, so a rotation is pushed in the
-/// same pass) and after out-of-band rotations; a failed push (clone stopped /
-/// unreachable) stays stale and is retried next pass. The pushed map is in-memory, so
-/// the first pass after a server restart re-pushes every assigned clone.
+/// Whether a clone assigned `host_email` is in scope for a push restricted to `only`.
+fn in_push_scope(host_email: &str, only: Option<&str>) -> bool {
+    only.is_none_or(|want| want == host_email)
+}
+
+/// Fleet-wide reconcile pass: see [`push_stale_tokens_for`].
+///
+/// Runs at the end of every poll to retry pushes that failed (clone stopped or
+/// unreachable) and to catch clones whose assignment changed out of band. The pushed
+/// map is in-memory, so the first pass after a server restart re-pushes every clone.
 pub async fn push_stale_tokens(app: &App) {
+    push_stale_tokens_for(app, None).await;
+}
+
+/// Give every clone assigned an account that account's current access token, unless
+/// the last successful push already delivered exactly that token. With `only` set,
+/// visit just that account's clones.
+///
+/// Scope matters because the pass is serial: one `docker exec` per clone, measured at
+/// roughly 11 seconds each, so a 35-clone fleet takes over 6 minutes end to end. A
+/// refresh rotates exactly one account's token, and until the push lands that
+/// account's clones are running on a token the server has already replaced. Pushing
+/// only the rotated account's clones, immediately after the refresh, keeps that window
+/// proportional to the accounts affected rather than to the size of the fleet.
+pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     let mut first = true;
     for host in app.store.get().hosts {
         let Some(email) = host.claude_account_email.as_deref() else {
             continue;
         };
+        if !in_push_scope(email, only) {
+            continue;
+        }
         if !host.managed {
             continue;
         }
@@ -1646,6 +1700,83 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["claudeAiOauth"]["accessToken"], "sk-ant-oat01-XYZ");
         assert_eq!(v["claudeAiOauth"]["refreshToken"], "");
+    }
+
+    /// Ten emails standing in for a batch of accounts imported in one sitting.
+    const FLEET: [&str; 10] = [
+        "a@one.test",
+        "b@one.test",
+        "c@one.test",
+        "d@two.test",
+        "e@two.test",
+        "f@two.test",
+        "g@three.test",
+        "h@three.test",
+        "i@three.test",
+        "j@three.test",
+    ];
+
+    /// The offset may only ever ADD lead. An account refreshed later than the floor
+    /// would lose the safety margin the floor exists to guarantee.
+    #[test]
+    fn jittered_lead_never_drops_below_the_floor() {
+        for email in FLEET {
+            let lead = refresh_lead_ms(email);
+            assert!(
+                lead >= REFRESH_LEAD_MS,
+                "{email}: lead {lead} is under the floor"
+            );
+            assert!(
+                lead < REFRESH_LEAD_MS + REFRESH_SPREAD_MS,
+                "{email}: lead {lead} exceeds floor + spread"
+            );
+        }
+    }
+
+    /// A restart must not re-phase an account, or its expiry would drift each time.
+    #[test]
+    fn jittered_lead_is_stable_for_one_email() {
+        for email in FLEET {
+            assert_eq!(refresh_lead_ms(email), refresh_lead_ms(email));
+        }
+        // ...and is actually derived from the email, not a constant.
+        assert_ne!(refresh_lead_ms("a@one.test"), refresh_lead_ms("b@one.test"));
+    }
+
+    /// The point of the offset: accounts that expire in the same second must not come
+    /// due in the same second. Ten emails over six 15-minute buckets.
+    #[test]
+    fn jitter_spreads_a_batch_of_accounts_across_the_window() {
+        let buckets: std::collections::HashSet<i64> = FLEET
+            .iter()
+            .map(|e| refresh_lead_ms(e) / (15 * 60 * 1000))
+            .collect();
+        assert!(
+            buckets.len() >= 4,
+            "10 accounts landed in only {} of 6 buckets",
+            buckets.len()
+        );
+    }
+
+    #[test]
+    fn expiry_check_uses_the_accounts_own_lead() {
+        let email = "a@one.test";
+        let lead = refresh_lead_ms(email);
+        let now = now_ms();
+        // Inside this account's lead ⇒ due for refresh.
+        assert!(is_expired(email, now + lead - 60_000));
+        // Outside it ⇒ not yet, even though it is inside another account's longer lead.
+        assert!(!is_expired(email, now + lead + 5 * 60_000));
+    }
+
+    /// An unfiltered pass visits every clone; a filtered one visits only the rotated
+    /// account's, which is what keeps a refresh from rewriting the whole fleet.
+    #[test]
+    fn push_scope_admits_all_hosts_only_when_unfiltered() {
+        assert!(in_push_scope("a@one.test", None));
+        assert!(in_push_scope("b@one.test", None));
+        assert!(in_push_scope("a@one.test", Some("a@one.test")));
+        assert!(!in_push_scope("b@one.test", Some("a@one.test")));
     }
 
     #[test]
