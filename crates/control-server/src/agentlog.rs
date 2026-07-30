@@ -20,9 +20,11 @@
 //! - The logs are appended **during** a turn, not flushed at exit (observed a file grow
 //!   11135 → 11249 → 17183 bytes while the turn ran). Activity detection depends on this;
 //!   a flush-at-exit format would light the dot exactly when the work finished.
-//! - A single API response can be logged **twice** — same `message.id` and `requestId`,
-//!   different line `uuid`, 14s apart. Summing lines naively double-counts it. Hence
-//!   [`Dedup`].
+//! - One API response is written as **several lines** — one per content block, plus the
+//!   occasional outright duplicate 14s later — and each line repeats the response's whole
+//!   `usage` object, with `output_tokens` climbing as the response is written. Summing lines
+//!   inflates input 2.4x on a main session and 3.0x on subagent logs. Hence [`Ledger`], which
+//!   credits each response once and follows its running maximum.
 //! - Claude records the model on every assistant line; Codex records it in `turn_context`,
 //!   not in the usage event. So the Fable badge keys off the Claude log only (Fable is a
 //!   Claude model family anyway).
@@ -49,12 +51,14 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(15);
 /// in both places.
 const FABLE_ACTIVE_MS: i64 = 5 * 60 * 1000;
 
-/// How many recent `requestId`s to remember per clone for duplicate suppression.
+/// How many recent responses to remember per clone, for counting each of them once.
 ///
-/// The duplicate pair observed on CT 120 sat 2 records apart. 256 is three orders of magnitude
-/// of headroom while staying trivially small in memory, and bounds the set so a long-lived
-/// clone cannot grow it without limit.
-const DEDUP_CAPACITY: usize = 256;
+/// One response is written as several lines, and the run of lines for a single response is
+/// contiguous within a file — the widest observed run is 4. The capacity has to cover far more
+/// than one run only because a run can straddle a pass boundary while other files are scanned in
+/// between. 1024 is ~100 KB per clone and bounds the map so a long-lived clone cannot grow it
+/// without limit.
+const LEDGER_CAPACITY: usize = 1024;
 
 /// Cap on bytes read from one file in one pass, so a pathological append (or a first sight of
 /// a huge retained log) cannot stall the scan loop. The remainder is picked up next tick.
@@ -80,13 +84,25 @@ const FUTURE_SKEW_TOLERANCE_MS: i64 = 2 * 60 * 1000;
 /// crafted `u64::MAX` would silently wrap to an attacker-chosen total.
 const MAX_PLAUSIBLE_TOKENS: u64 = 50_000_000;
 
-/// Most log files to consider per clone per pass.
+/// Most log files read per provider per clone per pass.
 ///
-/// `collect_jsonl` bounds walk *depth*, which stops it wandering out of the known tree shapes,
-/// but nothing bounds *breadth*: a clone can create millions of `.jsonl` files, and each one
-/// costs a `metadata` syscall every tick plus a permanent `PathBuf` in the cursor map. Real
-/// homes hold tens of session files.
-const MAX_FILES_PER_CLONE: usize = 512;
+/// Sized against the real fleet, not a guess: the busiest clone on CT 105 holds 1,977 Claude
+/// transcripts, 1,943 of them subagent logs. The previous 512 covered none of that — the walk
+/// stopped a quarter of the way in, and since it stopped in readdir order rather than at the
+/// oldest files, the sessions actually being written were as likely to be outside the cut as
+/// inside it. That clone counted zero tokens and never lit its activity dot.
+///
+/// A file already read to its end costs one `metadata` call per tick and nothing else, so the
+/// cap is really a bound on syscalls, not on work. 8192 is four times the busiest real clone.
+const MAX_SCAN_FILES_PER_PROVIDER: usize = 8192;
+
+/// Hard stop on how many paths one provider's walk will enumerate.
+///
+/// [`MAX_SCAN_FILES_PER_PROVIDER`] alone cannot be the walk's stopping point: choosing the newest
+/// files means seeing all of them first. This is the backstop that keeps "see all of them" finite
+/// for a clone that creates millions of `.jsonl` files, which it can, being root in its own
+/// sandbox. Paths past it are dropped with a warning.
+const MAX_ENUM_FILES_PER_PROVIDER: usize = 32_768;
 
 /// How long one clone's filesystem walk may take before the pass abandons it.
 ///
@@ -117,39 +133,65 @@ struct Cursor {
     offset: u64,
 }
 
-/// Bounded FIFO of recently-seen request ids, for suppressing the duplicate-response records
-/// Claude Code sometimes writes.
+/// What has already been booked for one response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Booked {
+    input: u64,
+    output: u64,
+}
+
+/// Bounded FIFO of recently-seen responses and the tokens already counted for each.
+///
+/// Claude does not write one line per response. It writes one line per content block — a
+/// `thinking` line, a `text` line, then a line per `tool_use` — and every one of them repeats
+/// the whole `usage` object of the response they belong to. Summing lines therefore multiplies a
+/// response by its block count. Measured over this machine's own transcripts: input inflated
+/// 2.4x on main sessions and 3.0x on subagent logs.
+///
+/// The repeated `usage` is not identical across those lines. Input and cache-creation are, but
+/// `output_tokens` climbs as the response is written (5, 5, 5, 334 in one sampled group), so the
+/// last line carries the real figure. Hence a ledger of running maxima rather than a set of ids:
+/// each line contributes only what it adds over what its response has already been credited.
 #[derive(Debug, Default)]
-struct Dedup {
-    seen: HashSet<String>,
+struct Ledger {
+    booked: HashMap<String, Booked>,
     order: VecDeque<String>,
 }
 
-impl Dedup {
-    /// Record `id`, returning true if it is new. An id already present is a duplicate of a
-    /// response we have already counted.
-    fn insert(&mut self, id: &str) -> bool {
-        if !self.seen.insert(id.to_string()) {
-            return false;
+impl Ledger {
+    /// Credit response `id` with per-response totals `input` and `output`, returning the part of
+    /// them that is new. A response seen for the first time is credited in full.
+    fn credit(&mut self, id: &str, input: u64, output: u64) -> Booked {
+        if let Some(prev) = self.booked.get_mut(id) {
+            // `saturating_sub`, because a later line may report a *smaller* figure than one
+            // already booked — a duplicate of an earlier partial. That is not a negative credit.
+            let new = Booked {
+                input: input.saturating_sub(prev.input),
+                output: output.saturating_sub(prev.output),
+            };
+            prev.input = prev.input.max(input);
+            prev.output = prev.output.max(output);
+            return new;
         }
+        self.booked.insert(id.to_string(), Booked { input, output });
         self.order.push_back(id.to_string());
-        if self.order.len() > DEDUP_CAPACITY {
+        if self.order.len() > LEDGER_CAPACITY {
             if let Some(old) = self.order.pop_front() {
-                self.seen.remove(&old);
+                self.booked.remove(&old);
             }
         }
-        true
+        Booked { input, output }
     }
 }
 
 /// Everything the scanner remembers about one clone between passes. Volatile by design: the
-/// cumulative token totals live in `state.json` (durable), while cursors and dedup rings are
+/// cumulative token totals live in `state.json` (durable), while cursors and response ledgers are
 /// cheap to rebuild — see [`CloneScan::seeded`] for what a cold start does instead of
 /// back-filling.
 #[derive(Debug, Default)]
 struct CloneScan {
     cursors: HashMap<PathBuf, Cursor>,
-    dedup: Dedup,
+    ledger: Ledger,
     last_fable_ms: Option<i64>,
     /// Consecutive scan timeouts. At [`MAX_SCAN_TIMEOUTS`] this clone is skipped for good —
     /// see that constant for why a timeout alone is not enough.
@@ -202,8 +244,8 @@ impl Delta {
 struct ClaudeLine {
     #[serde(default)]
     timestamp: Option<String>,
-    /// The API request this line reports on. Two lines sharing one `requestId` are two
-    /// records of the SAME response and must be counted once.
+    /// The API request this line reports on. Present on a small minority of lines, and on none
+    /// of the subagent transcripts sampled — see [`response_key`].
     #[serde(rename = "requestId", default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -212,6 +254,10 @@ struct ClaudeLine {
 
 #[derive(Debug, Deserialize)]
 struct ClaudeMessage {
+    /// The API response id (`msg_…`). Every line carrying a `usage` block carries one, and all
+    /// the lines of one response share it, which is what makes it the counting key.
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
@@ -316,35 +362,50 @@ fn is_fable(model: &str) -> bool {
 /// non-API events (they carry all-zero usage, so counting them is harmless but pointless —
 /// stamping *activity* off them is not, since they are written without a model turn having
 /// happened).
-fn fold_claude_line(line: &str, dedup: &mut Dedup, delta: &mut Delta) {
+///
+/// Every line that survives those checks stamps activity, including the second and later lines
+/// of a response already counted. They are freshly written bytes with their own timestamps, so
+/// they are evidence the agent is working even when they add no tokens.
+fn fold_claude_line(line: &str, ledger: &mut Ledger, delta: &mut Delta) {
     let Ok(rec) = serde_json::from_str::<ClaudeLine>(line) else { return };
-    let Some(msg) = rec.message else { return };
-    let Some(usage) = msg.usage else { return };
-    let model = msg.model.unwrap_or_default();
+    let ClaudeLine { timestamp, request_id, message } = rec;
+    let Some(ClaudeMessage { id, model, usage }) = message else { return };
+    let Some(usage) = usage else { return };
+    let model = model.unwrap_or_default();
     if model.is_empty() || model.starts_with('<') {
         return; // `<synthetic>` and friends: not an API response
     }
-    // Suppress the duplicate-record case. A line with no request id cannot be checked, so it
-    // is counted — under-counting a real response is worse than the rare double-count of a
-    // record the CLI chose not to identify.
-    if let Some(id) = rec.request_id.as_deref() {
-        if !dedup.insert(id) {
-            return;
-        }
-    }
-    let ts = rec.timestamp.as_deref().and_then(parse_ts_ms);
     // Saturating throughout: release builds have `overflow-checks` off, so a crafted
     // `u64::MAX` would wrap a plain `+` to an attacker-chosen total rather than erroring.
     // (In a debug build the same input would panic — killing the scanner, which is worse.)
-    delta.input_tokens = delta
-        .input_tokens
-        .saturating_add(token(usage.input_tokens))
-        .saturating_add(token(usage.cache_creation_input_tokens));
-    delta.output_tokens = delta.output_tokens.saturating_add(token(usage.output_tokens));
+    let input =
+        token(usage.input_tokens).saturating_add(token(usage.cache_creation_input_tokens));
+    let output = token(usage.output_tokens);
+    // Credit the response, not the line. A line the CLI left unidentified cannot be tied to one,
+    // so it is counted on its own — over-counting an anonymous line is better than dropping a
+    // real response, and no sampled line lacked both keys.
+    let new = match response_key(id, request_id) {
+        Some(key) => ledger.credit(&key, input, output),
+        None => Booked { input, output },
+    };
+    delta.input_tokens = delta.input_tokens.saturating_add(new.input);
+    delta.output_tokens = delta.output_tokens.saturating_add(new.output);
+    let ts = timestamp.as_deref().and_then(parse_ts_ms);
     delta.observe(ts);
     if is_fable(&model) {
         delta.observe_fable(ts);
     }
+}
+
+/// What identifies the response a line belongs to.
+///
+/// `message.id` first: it is on every line that carries usage, in both main-session and subagent
+/// transcripts. `requestId` is the fallback only. It was the original key and it is the reason
+/// this went unnoticed — of 6,692 usage lines in this machine's main transcripts 54 carried one,
+/// and of 178 in its subagent transcripts, none did. Keying on it left subagent traffic with no
+/// duplicate suppression at all.
+fn response_key(message_id: Option<String>, request_id: Option<String>) -> Option<String> {
+    message_id.into_iter().chain(request_id).find(|k| !k.is_empty())
 }
 
 /// Fold one Codex rollout line into `delta`.
@@ -388,7 +449,7 @@ fn scan_file(
     path: &Path,
     prev: Option<Cursor>,
     flavor: Flavor,
-    dedup: &mut Dedup,
+    ledger: &mut Ledger,
     delta: &mut Delta,
     count: bool,
 ) -> Option<Cursor> {
@@ -453,7 +514,7 @@ fn scan_file(
         }
         let Ok(text) = std::str::from_utf8(line) else { continue };
         match flavor {
-            Flavor::Claude => fold_claude_line(text, dedup, delta),
+            Flavor::Claude => fold_claude_line(text, ledger, delta),
             Flavor::Codex => fold_codex_line(text, delta),
         }
     }
@@ -497,56 +558,118 @@ fn collect_jsonl(root: &Path, depth: usize, budget: &mut usize, out: &mut Vec<Pa
     }
 }
 
-/// The log files to scan for one clone home, paired with the parser each needs.
+/// One clone's log files: the ones to read this pass, and every one the walk saw.
+struct LogSet {
+    /// What to read, at most [`MAX_SCAN_FILES_PER_PROVIDER`] per provider.
+    scan: Vec<(PathBuf, Flavor)>,
+    /// Every `.jsonl` the walk enumerated, whether or not it made the `scan` cut. Cursors are
+    /// held for all of them: a file that drops out of one pass's cut still exists, and forgetting
+    /// its cursor would re-read it from byte 0 the moment it came back.
+    seen: HashSet<PathBuf>,
+}
+
+/// The log files for one clone home, paired with the parser each needs.
 ///
-/// The two providers share one [`MAX_FILES_PER_CLONE`] budget. Claude is walked first, so a
-/// clone spamming files under `.claude/projects` could starve its own Codex scan — acceptable,
-/// since only a clone attacking itself gets there, and a real home holds tens of files.
-fn log_files(home: &Path) -> Vec<(PathBuf, Flavor)> {
-    let mut out = Vec::new();
-    let mut budget = MAX_FILES_PER_CLONE;
-    let mut claude = Vec::new();
-    // `projects/<cwd-slug>/<session-uuid>.jsonl`, plus
-    // `projects/<cwd-slug>/<session-uuid>/subagents/agent-*.jsonl` — hence 3, not 1.
+/// The caps are arguments rather than constants read inline so the tests can exercise the
+/// over-cap path without creating tens of thousands of files.
+///
+/// Each provider gets its OWN budget. Sharing one meant a clone with many Claude transcripts
+/// consumed the whole allowance before the walk reached `.codex`, and its Codex sessions then
+/// counted for nothing — a clone doing ordinary work could starve its own second provider.
+fn log_files_capped(home: &Path, scan_cap: usize, enum_cap: usize) -> LogSet {
+    // Claude: `projects/<cwd-slug>/<session-uuid>.jsonl`, plus
+    // `projects/<cwd-slug>/<session-uuid>/subagents/agent-*.jsonl` — hence depth 3, not 1.
+    // Subagent transcripts are real API turns with real usage records, and on a subagent-heavy
+    // clone they are the overwhelming majority: 1,943 of 1,974 transcripts (98%) on the busiest
+    // production clone. Nested subagents write into that same flat `subagents/` directory rather
+    // than nesting further, so depth 3 reaches every generation of them.
     //
-    // Subagent transcripts are real API turns with real usage records, and on a
-    // subagent-heavy clone they are the overwhelming majority of the traffic: measured on a
-    // production clone, 1,943 of 1,974 transcripts (98%) sat at that deeper level. A depth-1
-    // walk saw 31 of them and the clone's token total understated by two orders of magnitude.
-    collect_jsonl(&home.join(".claude/projects"), 3, &mut budget, &mut claude);
-    out.extend(claude.into_iter().map(|p| (p, Flavor::Claude)));
-    let mut codex = Vec::new();
-    // `sessions/YYYY/MM/DD/rollout-*.jsonl` — three levels of date directory.
-    collect_jsonl(&home.join(".codex/sessions"), 3, &mut budget, &mut codex);
-    out.extend(codex.into_iter().map(|p| (p, Flavor::Codex)));
-    if budget == 0 {
-        tracing::warn!(
-            target: "agentlog",
-            "{} hit the {MAX_FILES_PER_CLONE}-file scan budget; some logs are not being counted",
-            home.display()
-        );
+    // Codex: `sessions/YYYY/MM/DD/rollout-*.jsonl` — three levels of date directory.
+    let roots = [
+        (home.join(".claude/projects"), Flavor::Claude),
+        (home.join(".codex/sessions"), Flavor::Codex),
+    ];
+    let mut set = LogSet { scan: Vec::new(), seen: HashSet::new() };
+    for (root, flavor) in roots {
+        let mut budget = enum_cap;
+        let mut found = Vec::new();
+        collect_jsonl(&root, 3, &mut budget, &mut found);
+        if budget == 0 {
+            tracing::warn!(
+                target: "agentlog",
+                "{} holds more than {enum_cap} log files; the rest are not being counted",
+                root.display()
+            );
+        }
+        set.seen.extend(found.iter().cloned());
+        let total = found.len();
+        if total > scan_cap {
+            keep_newest(&mut found, scan_cap);
+            tracing::warn!(
+                target: "agentlog",
+                "{} holds {total} log files; reading only the {scan_cap} most recent",
+                root.display(),
+            );
+        }
+        set.scan.extend(found.into_iter().map(|p| (p, flavor)));
     }
-    out
+    set
+}
+
+/// Reduce `paths` to the `keep` most recently modified.
+///
+/// Which files get dropped is the whole point. Whatever the fleet's busiest clone does next, the
+/// files it writes are by definition the newest ones, so a cap that keeps the newest degrades to
+/// "older sessions stop updating" instead of "this clone reports nothing". A path whose mtime
+/// cannot be read sorts oldest — it is either gone or unreadable, and either way there is nothing
+/// to read from it.
+fn keep_newest(paths: &mut Vec<PathBuf>, keep: usize) {
+    let mut dated: Vec<(std::time::SystemTime, PathBuf)> = paths
+        .drain(..)
+        .map(|p| {
+            let at = std::fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (at, p)
+        })
+        .collect();
+    dated.sort_unstable_by_key(|(at, _)| std::cmp::Reverse(*at));
+    dated.truncate(keep);
+    paths.extend(dated.into_iter().map(|(_, p)| p));
 }
 
 /// Scan one clone's logs, returning what changed since the last pass.
 fn scan_clone(home: &Path, scan: &mut CloneScan) -> Delta {
+    scan_clone_capped(home, scan, MAX_SCAN_FILES_PER_PROVIDER, MAX_ENUM_FILES_PER_PROVIDER)
+}
+
+/// [`scan_clone`] with the caps supplied, so the tests can reach the over-cap path.
+fn scan_clone_capped(home: &Path, scan: &mut CloneScan, scan_cap: usize, enum_cap: usize) -> Delta {
     let mut delta = Delta::default();
-    let files = log_files(home);
+    let files = log_files_capped(home, scan_cap, enum_cap);
     let count = scan.seeded;
-    let mut live: HashSet<PathBuf> = HashSet::with_capacity(files.len());
-    for (path, flavor) in files {
+    // The seeding pass adopts the current end of EVERY file the walk saw, not just the ones this
+    // pass would read. A file left unseeded would be counted from byte 0 the first time it made
+    // the cut, booking its whole retained history as if it had just been written.
+    let pass: Vec<(PathBuf, Flavor)> = if count {
+        files.scan
+    } else {
+        // Flavor is irrelevant here: a seeding pass stats a file and adopts its end, parsing
+        // nothing.
+        files.seen.iter().map(|p| (p.clone(), Flavor::Claude)).collect()
+    };
+    for (path, flavor) in pass {
         let prev = scan.cursors.get(&path).copied();
         // A file we have never seen, on a clone that IS seeded, is a genuinely new session:
         // count it from the start. Only the clone's very first pass seeds wholesale.
-        if let Some(next) = scan_file(&path, prev, flavor, &mut scan.dedup, &mut delta, count) {
+        if let Some(next) = scan_file(&path, prev, flavor, &mut scan.ledger, &mut delta, count) {
             scan.cursors.insert(path.clone(), next);
         }
-        live.insert(path);
     }
-    // Drop cursors for files that have gone (the CLIs prune old sessions), so the map tracks
-    // the live set rather than growing for the life of the server.
-    scan.cursors.retain(|p, _| live.contains(p));
+    // Drop cursors for files that have gone (the CLIs prune old sessions), so the map tracks the
+    // live set rather than growing for the life of the server. Keyed on everything the walk saw,
+    // so only a file that really disappeared loses its place.
+    scan.cursors.retain(|p, _| files.seen.contains(p));
     scan.seeded = true;
     delta
 }
@@ -679,7 +802,7 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
         scans.insert(host.id.clone(), scan);
     }
 
-    // Cursors and dedup rings only make sense for a clone we are still scanning; an archived
+    // Cursors and ledgers only make sense for a clone we are still scanning; an archived
     // clone re-seeds when it comes back, which is correct (its logs may have been pruned
     // meanwhile, and its persisted total is unaffected either way).
     scans.retain(|id, _| scanning_ids.contains(id));
@@ -756,13 +879,20 @@ mod tests {
         )
     }
 
-    fn fold_claude(lines: &[String]) -> (Delta, Dedup) {
-        let mut dedup = Dedup::default();
+    /// A line in the shape both CLIs actually write today: a `message.id`, no `requestId`.
+    fn claude_msg_line(msg_id: &str, model: &str, input: u64, cache_create: u64, output: u64) -> String {
+        format!(
+            r#"{{"isSidechain":true,"type":"assistant","timestamp":"2026-07-29T13:10:25.021Z","message":{{"id":"{msg_id}","model":"{model}","usage":{{"input_tokens":{input},"cache_creation_input_tokens":{cache_create},"cache_read_input_tokens":0,"output_tokens":{output}}}}}}}"#
+        )
+    }
+
+    fn fold_claude(lines: &[String]) -> (Delta, Ledger) {
+        let mut ledger = Ledger::default();
         let mut delta = Delta::default();
         for l in lines {
-            fold_claude_line(l, &mut dedup, &mut delta);
+            fold_claude_line(l, &mut ledger, &mut delta);
         }
-        (delta, dedup)
+        (delta, ledger)
     }
 
     #[test]
@@ -802,10 +932,10 @@ mod tests {
 
     #[test]
     fn lines_without_usage_are_ignored() {
-        let mut dedup = Dedup::default();
+        let mut ledger = Ledger::default();
         let mut delta = Delta::default();
-        fold_claude_line(r#"{"type":"user","message":{"role":"user"}}"#, &mut dedup, &mut delta);
-        fold_claude_line("not json at all", &mut dedup, &mut delta);
+        fold_claude_line(r#"{"type":"user","message":{"role":"user"}}"#, &mut ledger, &mut delta);
+        fold_claude_line("not json at all", &mut ledger, &mut delta);
         assert!(delta.is_empty());
     }
 
@@ -821,14 +951,73 @@ mod tests {
     }
 
     #[test]
-    fn dedup_ring_is_bounded_and_evicts_oldest_first() {
-        let mut d = Dedup::default();
-        for i in 0..DEDUP_CAPACITY + 10 {
-            assert!(d.insert(&format!("r{i}")));
+    fn ledger_is_bounded_and_evicts_oldest_first() {
+        let mut l = Ledger::default();
+        for i in 0..LEDGER_CAPACITY + 10 {
+            assert_eq!(l.credit(&format!("m{i}"), 1, 1), Booked { input: 1, output: 1 });
         }
-        assert_eq!(d.seen.len(), DEDUP_CAPACITY, "the set must stay bounded");
-        assert!(d.insert("r0"), "the oldest ids are evicted, so r0 reads as new again");
-        assert!(!d.insert(&format!("r{}", DEDUP_CAPACITY + 9)), "the newest is still held");
+        assert_eq!(l.booked.len(), LEDGER_CAPACITY, "the map must stay bounded");
+        assert_eq!(
+            l.credit("m0", 1, 1),
+            Booked { input: 1, output: 1 },
+            "the oldest are evicted, so m0 is credited afresh"
+        );
+        let newest = format!("m{}", LEDGER_CAPACITY + 9);
+        assert_eq!(l.credit(&newest, 1, 1), Booked::default(), "the newest is still held");
+    }
+
+    #[test]
+    fn one_response_split_across_content_blocks_counts_once() {
+        // The exact shape sampled from a subagent transcript: four lines, one per content block
+        // (thinking, text, tool_use, tool_use), sharing message.id and repeating the usage
+        // object. Input and cache-creation are identical on all four; output climbs to its real
+        // figure on the last. Summing the lines gave 4x the input and 349 output instead of 334.
+        let line = |output: u64| claude_msg_line("msg_011CdJ", "claude-opus-4-8", 2128, 32_045, output);
+        let (d, _) = fold_claude(&[line(5), line(5), line(5), line(334)]);
+        assert_eq!(d.input_tokens, 34_173, "2128 input + 32045 cache creation, counted once");
+        assert_eq!(d.output_tokens, 334, "the response's final output figure, not the sum");
+    }
+
+    #[test]
+    fn subagent_lines_carry_no_request_id_and_are_still_counted_once() {
+        // Not one of the 178 subagent usage lines sampled on this machine had a `requestId`.
+        // Keying on it left subagent traffic — 98% of a busy clone's transcripts — with no
+        // duplicate suppression at all.
+        let line = claude_msg_line("msg_sub", "claude-opus-5", 100, 0, 20);
+        assert!(!line.contains("requestId"));
+        let (d, _) = fold_claude(&[line.clone(), line]);
+        assert_eq!(d.input_tokens, 100);
+        assert_eq!(d.output_tokens, 20);
+    }
+
+    #[test]
+    fn a_response_split_across_two_passes_is_not_recounted() {
+        // The ledger lives in `CloneScan`, so a response whose lines straddle a 15s pass boundary
+        // is credited once across both.
+        let mut ledger = Ledger::default();
+        let mut first = Delta::default();
+        fold_claude_line(
+            &claude_msg_line("msg_straddle", "claude-opus-5", 900, 0, 12),
+            &mut ledger,
+            &mut first,
+        );
+        let mut second = Delta::default();
+        fold_claude_line(
+            &claude_msg_line("msg_straddle", "claude-opus-5", 900, 0, 700),
+            &mut ledger,
+            &mut second,
+        );
+        assert_eq!(first.input_tokens, 900);
+        assert_eq!(second.input_tokens, 0, "the input was already booked");
+        assert_eq!(first.output_tokens + second.output_tokens, 700, "output follows the maximum");
+    }
+
+    #[test]
+    fn a_repeat_line_adds_no_tokens_but_still_stamps_activity() {
+        let line = claude_msg_line("msg_act", "claude-opus-5", 10, 0, 3);
+        let (d, _) = fold_claude(&[line.clone(), line]);
+        assert!(d.last_activity_ms.is_some(), "a freshly written line means the agent is working");
+        assert_eq!(d.input_tokens, 10);
     }
 
     #[test]
@@ -866,14 +1055,14 @@ mod tests {
         writeln!(f, "{}", claude_line("r1", "claude-opus-5", 10, 0, 0, 1)).unwrap();
         f.flush().unwrap();
 
-        let mut dedup = Dedup::default();
+        let mut ledger = Ledger::default();
         let mut d1 = Delta::default();
-        let c1 = scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d1, true).unwrap();
+        let c1 = scan_file(&path, None, Flavor::Claude, &mut ledger, &mut d1, true).unwrap();
         assert_eq!(d1.input_tokens, 10);
 
         // Second pass with no new bytes must contribute nothing.
         let mut d2 = Delta::default();
-        let c2 = scan_file(&path, Some(c1), Flavor::Claude, &mut dedup, &mut d2, true).unwrap();
+        let c2 = scan_file(&path, Some(c1), Flavor::Claude, &mut ledger, &mut d2, true).unwrap();
         assert!(d2.is_empty(), "a re-scan must not re-count: {d2:?}");
         assert_eq!(c1, c2);
 
@@ -881,7 +1070,7 @@ mod tests {
         writeln!(f, "{}", claude_line("r2", "claude-opus-5", 7, 0, 0, 2)).unwrap();
         f.flush().unwrap();
         let mut d3 = Delta::default();
-        scan_file(&path, Some(c2), Flavor::Claude, &mut dedup, &mut d3, true).unwrap();
+        scan_file(&path, Some(c2), Flavor::Claude, &mut ledger, &mut d3, true).unwrap();
         assert_eq!(d3.input_tokens, 7, "only the new line");
     }
 
@@ -894,16 +1083,16 @@ mod tests {
         write!(f, "{}\n{{\"type\":\"assis", claude_line("r1", "claude-opus-5", 10, 0, 0, 1)).unwrap();
         f.flush().unwrap();
 
-        let mut dedup = Dedup::default();
+        let mut ledger = Ledger::default();
         let mut d = Delta::default();
-        let c = scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d, true).unwrap();
+        let c = scan_file(&path, None, Flavor::Claude, &mut ledger, &mut d, true).unwrap();
         assert_eq!(d.input_tokens, 10);
 
         // Completing the fragment yields its tokens exactly once.
         write!(f, "tant\",\"timestamp\":\"2026-07-29T13:10:25.021Z\",\"requestId\":\"r2\",\"message\":{{\"model\":\"claude-opus-5\",\"usage\":{{\"input_tokens\":5,\"output_tokens\":1}}}}}}\n").unwrap();
         f.flush().unwrap();
         let mut d2 = Delta::default();
-        scan_file(&path, Some(c), Flavor::Claude, &mut dedup, &mut d2, true).unwrap();
+        scan_file(&path, Some(c), Flavor::Claude, &mut ledger, &mut d2, true).unwrap();
         assert_eq!(d2.input_tokens, 5, "the completed line is read whole, once");
     }
 
@@ -913,9 +1102,9 @@ mod tests {
         let path = dir.join("s.jsonl");
         std::fs::write(&path, format!("{}\n", claude_line("r1", "claude-opus-5", 100, 0, 0, 1)))
             .unwrap();
-        let mut dedup = Dedup::default();
+        let mut ledger = Ledger::default();
         let mut d = Delta::default();
-        let c = scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d, true).unwrap();
+        let c = scan_file(&path, None, Flavor::Claude, &mut ledger, &mut d, true).unwrap();
         assert_eq!(d.input_tokens, 100);
 
         // Replace with a SHORTER file: the old offset would sit past the end, or worse,
@@ -923,7 +1112,7 @@ mod tests {
         std::fs::write(&path, format!("{}\n", claude_line("r9", "claude-opus-5", 3, 0, 0, 1)))
             .unwrap();
         let mut d2 = Delta::default();
-        scan_file(&path, Some(c), Flavor::Claude, &mut dedup, &mut d2, true).unwrap();
+        scan_file(&path, Some(c), Flavor::Claude, &mut ledger, &mut d2, true).unwrap();
         assert_eq!(d2.input_tokens, 3, "a shrunken file is re-read from the start");
     }
 
@@ -1008,13 +1197,111 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         std::fs::write(day.join("rollout-x.jsonl"), "").unwrap();
 
-        let found = log_files(&dir);
-        let names: Vec<String> =
-            found.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        let names = scanned_names(&log_files_capped(&dir, 64, 64));
         assert!(names.contains(&"ok.jsonl".to_string()), "main session transcript");
         assert!(names.contains(&"agent-abc.jsonl".to_string()), "subagent transcripts must count");
         assert!(names.contains(&"rollout-x.jsonl".to_string()), "codex rollout");
         assert!(!names.contains(&"too-deep.jsonl".to_string()), "the walk must stay bounded");
+    }
+
+    fn scanned_names(set: &LogSet) -> Vec<String> {
+        set.scan
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Write `n` transcripts, oldest first, one second apart, each holding one response worth
+    /// 500 input tokens. Returns the paths in age order.
+    fn write_aged(dir: &Path, n: usize) -> Vec<PathBuf> {
+        std::fs::create_dir_all(dir).unwrap();
+        let base = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_785_000_000);
+        (0..n)
+            .map(|i| {
+                let p = dir.join(format!("s{i:04}.jsonl"));
+                let name = p.display().to_string();
+                std::fs::write(
+                    &p,
+                    format!("{}\n", claude_msg_line(&format!("msg_hist_{name}"), "claude-opus-5", 500, 0, 9)),
+                )
+                .unwrap();
+                let at =
+                    std::fs::FileTimes::new().set_modified(base + Duration::from_secs(i as u64));
+                std::fs::File::options().write(true).open(&p).unwrap().set_times(at).unwrap();
+                p
+            })
+            .collect()
+    }
+
+    #[test]
+    fn over_the_cap_the_newest_files_are_the_ones_read() {
+        // The cap used to cut the walk in readdir order, which is unrelated to which sessions are
+        // being written. A busy clone could have every file it was actively appending to fall
+        // outside the cut and report nothing at all — which is exactly what happened in
+        // production. Cutting by age instead means the files still in use are always read.
+        let dir = tmpdir("newest");
+        let paths = write_aged(&dir.join(".claude/projects/slug"), 10);
+        let set = log_files_capped(&dir, 3, 100);
+        assert_eq!(set.scan.len(), 3, "the cap still bounds the read");
+        assert_eq!(set.seen.len(), 10, "but the walk saw them all");
+        let names = scanned_names(&set);
+        for newest in &paths[7..] {
+            let name = newest.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(names.contains(&name), "{name} is among the newest and must be read");
+        }
+    }
+
+    #[test]
+    fn a_file_pushed_out_of_the_cap_keeps_its_cursor() {
+        // Losing the cursor would re-read the file from byte 0 when it came back, booking its
+        // whole history a second time. Subagent lines carry no requestId, so nothing downstream
+        // would catch that.
+        let dir = tmpdir("cursor-hold");
+        let proj = dir.join(".claude/projects/slug");
+        let paths = write_aged(&proj, 3);
+        let mut scan = CloneScan::default();
+        // Seeding pass, then a counting pass that reads only the two newest of the three.
+        scan_clone_capped(&dir, &mut scan, 2, 100);
+        scan_clone_capped(&dir, &mut scan, 2, 100);
+        assert_eq!(scan.cursors.len(), 3, "cursors follow existence, not this pass's selection");
+        assert!(scan.cursors.contains_key(&paths[0]), "the file left out still has its place");
+
+        // The oldest is written to again, which makes it the newest and brings it back into the
+        // cut. Only the new line counts; its 500 tokens of history stay counted-never.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&paths[0]).unwrap();
+        writeln!(f, "{}", claude_msg_line("msg_resumed", "claude-opus-5", 12, 0, 4)).unwrap();
+        drop(f);
+        let d = scan_clone_capped(&dir, &mut scan, 2, 100);
+        assert_eq!(d.input_tokens, 12, "resumed where the cursor left off, not at byte 0");
+
+        // The one that really disappears is the one that loses its cursor.
+        std::fs::remove_file(&paths[0]).unwrap();
+        scan_clone_capped(&dir, &mut scan, 2, 100);
+        assert_eq!(scan.cursors.len(), 2);
+    }
+
+    #[test]
+    fn a_flood_of_claude_logs_does_not_starve_codex() {
+        // The providers used to share one budget, and Claude was walked first.
+        let dir = tmpdir("starve");
+        write_aged(&dir.join(".claude/projects/slug"), 8);
+        write_aged(&dir.join(".codex/sessions/2026/07/29"), 2);
+        let set = log_files_capped(&dir, 4, 100);
+        let codex = set.scan.iter().filter(|(_, f)| *f == Flavor::Codex).count();
+        assert_eq!(codex, 2, "codex has its own budget");
+        assert_eq!(set.scan.iter().filter(|(_, f)| *f == Flavor::Claude).count(), 4);
+    }
+
+    #[test]
+    fn seeding_adopts_files_beyond_the_read_cap_too() {
+        // A file left unseeded is counted from byte 0 the first time it makes the cut, which
+        // books history the feature deliberately never counts.
+        let dir = tmpdir("seed-all");
+        write_aged(&dir.join(".claude/projects/slug"), 6);
+        let mut scan = CloneScan::default();
+        let d = scan_clone(&dir, &mut scan);
+        assert!(d.is_empty());
+        assert_eq!(scan.cursors.len(), 6, "every file the walk saw is seeded, capped or not");
     }
 
     /// Build an app whose state holds the given clones and token totals.
@@ -1099,11 +1386,11 @@ mod tests {
     fn a_malformed_sibling_field_does_not_void_the_whole_record() {
         // `null` is a shape the real CLIs emit, and a bare `#[serde(default)] u64` rejects it —
         // which would fail the entire line and silently lose a real response.
-        let mut dedup = Dedup::default();
+        let mut ledger = Ledger::default();
         let mut delta = Delta::default();
         fold_claude_line(
             r#"{"timestamp":"2026-07-29T13:10:25.021Z","requestId":"r1","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_creation_input_tokens":null,"output_tokens":4}}}"#,
-            &mut dedup,
+            &mut ledger,
             &mut delta,
         );
         assert_eq!(delta.input_tokens, 10, "the good fields still count");
@@ -1125,14 +1412,14 @@ mod tests {
         body.push(b'\n');
         std::fs::write(&path, body).unwrap();
 
-        let mut dedup = Dedup::default();
+        let mut ledger = Ledger::default();
         let mut d = Delta::default();
-        let c1 = scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d, true).unwrap();
+        let c1 = scan_file(&path, None, Flavor::Claude, &mut ledger, &mut d, true).unwrap();
         assert_eq!(c1.offset, MAX_READ_PER_FILE, "the capped region is skipped past");
         assert_eq!(d.input_tokens, 0, "nothing countable was in it");
 
         // Next pass clears the remaining junk and reaches the real line behind it.
-        let c2 = scan_file(&path, Some(c1), Flavor::Claude, &mut dedup, &mut d, true).unwrap();
+        let c2 = scan_file(&path, Some(c1), Flavor::Claude, &mut ledger, &mut d, true).unwrap();
         assert!(c2.offset > c1.offset, "the scan keeps making progress");
         assert_eq!(d.input_tokens, 33, "and counts the record that followed the junk");
     }
@@ -1144,9 +1431,9 @@ mod tests {
         let dir = tmpdir("shortpartial");
         let path = dir.join("s.jsonl");
         std::fs::write(&path, b"{\"partial\":").unwrap();
-        let mut dedup = Dedup::default();
+        let mut ledger = Ledger::default();
         let mut d = Delta::default();
-        let c = scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d, true).unwrap();
+        let c = scan_file(&path, None, Flavor::Claude, &mut ledger, &mut d, true).unwrap();
         assert_eq!(c.offset, 0, "the cursor waits for the line to be completed");
     }
 
@@ -1158,10 +1445,10 @@ mod tests {
         let path = dir.join("s.jsonl");
         nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).expect("mkfifo");
 
-        let mut dedup = Dedup::default();
+        let mut ledger = Ledger::default();
         let mut d = Delta::default();
         assert!(
-            scan_file(&path, None, Flavor::Claude, &mut dedup, &mut d, true).is_none(),
+            scan_file(&path, None, Flavor::Claude, &mut ledger, &mut d, true).is_none(),
             "a FIFO must be refused before it can be opened"
         );
     }
@@ -1171,14 +1458,14 @@ mod tests {
         let dir = tmpdir("breadth");
         let proj = dir.join(".claude/projects/slug");
         std::fs::create_dir_all(&proj).unwrap();
-        for i in 0..(MAX_FILES_PER_CLONE + 50) {
+        for i in 0..60 {
             std::fs::write(proj.join(format!("s{i}.jsonl")), "").unwrap();
         }
-        assert_eq!(
-            log_files(&dir).len(),
-            MAX_FILES_PER_CLONE,
-            "a clone cannot make the walk unbounded by creating files"
-        );
+        // The enumeration cap stops the walk itself, so neither the read set nor the cursor map
+        // can be grown without limit by a clone creating files.
+        let set = log_files_capped(&dir, 8, 20);
+        assert_eq!(set.seen.len(), 20, "the walk stops at the enumeration cap");
+        assert_eq!(set.scan.len(), 8, "and reads at most the scan cap");
     }
 
     #[tokio::test(flavor = "multi_thread")]
