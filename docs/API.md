@@ -146,15 +146,18 @@ persisted on `Clone.forwards` and edited via `PUT /api/hosts/:id/forwards`.
 `{ inputTokens, outputTokens, fableActive }` per clone id, accumulated by
 [agentlog.rs](../crates/control-server/src/agentlog.rs) from the agent CLIs' own session
 transcripts: `~/.claude/projects/<cwd-slug>/<uuid>.jsonl`,
-`~/.claude/projects/<cwd-slug>/<uuid>/subagents/agent-*.jsonl`, and
+`~/.claude/projects/<cwd-slug>/<uuid>/subagents/agent-*.jsonl`,
+`~/.claude/projects/<cwd-slug>/<uuid>/subagents/workflows/<run>/agent-*.jsonl`, and
 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Every agent writes these regardless of who
 launched it, which is why a hand-run `claude` is counted too.
 
 **Subagents are the bulk of a busy clone's traffic**, not a footnote: 1,943 of one production
-clone's 1,974 Claude transcripts are subagent logs. A subagent spawned by a subagent writes into
-that same flat `subagents/` directory, so every generation lands one walk deep. Each provider gets
-its own file budget, and a clone holding more logs than the budget has its most recently modified
-files read, so the sessions actually being written are never the ones dropped.
+clone's 1,974 Claude transcripts are subagent logs, and on another 624 of 1,038 were a workflow's.
+A subagent spawned by a subagent writes into the same flat `subagents/` directory as its parent,
+so every generation lands one walk deep; a workflow instead gets a directory per run, two levels
+below that, which is why the walk goes five deep and not three. Each provider gets its own file
+budget, and a clone holding more logs than the budget has its most recently modified files read,
+so the sessions actually being written are never the ones dropped.
 
 The server reads them with **no `docker exec`**: [homes.rs](../crates/control-server/src/homes.rs)
 already symlinks `<data_dir>/hosts/<clone-id>` → `/proc/<pid>/root/home/rmng` for every running

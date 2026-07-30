@@ -104,6 +104,32 @@ const MAX_SCAN_FILES_PER_PROVIDER: usize = 8192;
 /// sandbox. Paths past it are dropped with a warning.
 const MAX_ENUM_FILES_PER_PROVIDER: usize = 32_768;
 
+/// How far below `~/.claude/projects` a transcript can sit.
+///
+/// Claude writes three shapes, and a walk that reaches only the first two silently drops the
+/// third. Counted across the CT 105 and CT 106 fleets, with the depth each needs:
+///
+/// | Shape | Depth | Files |
+/// |---|---|---|
+/// | `<slug>/<session>.jsonl` | 1 | 796 |
+/// | `<slug>/<session>/subagents/agent-*.jsonl` | 3 | 5,553 |
+/// | `<slug>/<session>/subagents/workflows/<run>/agent-*.jsonl` | 5 | 2,564 |
+///
+/// The third is what a workflow's agents write, one directory per run. On the clone that
+/// surfaced it, `haoran-dev-270`, it was 624 of 1,038 transcripts and every one of the files
+/// being appended to at the time: the clone had an agent working in front of someone's eyes and
+/// read `idle`, because nothing it was writing was in range.
+///
+/// 5 covers all three exactly, with no headroom, which is deliberate. Depth is what keeps this
+/// walk inside the CLI's own tree instead of descending into whatever a clone parks under it, and
+/// a shape this misses is a visible bug rather than a silent wrong number. Breadth is bounded
+/// separately by [`MAX_ENUM_FILES_PER_PROVIDER`].
+const CLAUDE_WALK_DEPTH: usize = 5;
+
+/// How far below `~/.codex/sessions` a rollout can sit: `YYYY/MM/DD/rollout-*.jsonl`, three
+/// levels of date directory. Codex writes one file per session and nests nothing under it.
+const CODEX_WALK_DEPTH: usize = 3;
+
 /// How long one clone's filesystem walk may take before the pass abandons it.
 ///
 /// Clone containers run privileged with `fusermount` available, so a clone can mount a FUSE
@@ -577,23 +603,15 @@ struct LogSet {
 /// consumed the whole allowance before the walk reached `.codex`, and its Codex sessions then
 /// counted for nothing — a clone doing ordinary work could starve its own second provider.
 fn log_files_capped(home: &Path, scan_cap: usize, enum_cap: usize) -> LogSet {
-    // Claude: `projects/<cwd-slug>/<session-uuid>.jsonl`, plus
-    // `projects/<cwd-slug>/<session-uuid>/subagents/agent-*.jsonl` — hence depth 3, not 1.
-    // Subagent transcripts are real API turns with real usage records, and on a subagent-heavy
-    // clone they are the overwhelming majority: 1,943 of 1,974 transcripts (98%) on the busiest
-    // production clone. Nested subagents write into that same flat `subagents/` directory rather
-    // than nesting further, so depth 3 reaches every generation of them.
-    //
-    // Codex: `sessions/YYYY/MM/DD/rollout-*.jsonl` — three levels of date directory.
     let roots = [
-        (home.join(".claude/projects"), Flavor::Claude),
-        (home.join(".codex/sessions"), Flavor::Codex),
+        (home.join(".claude/projects"), CLAUDE_WALK_DEPTH, Flavor::Claude),
+        (home.join(".codex/sessions"), CODEX_WALK_DEPTH, Flavor::Codex),
     ];
     let mut set = LogSet { scan: Vec::new(), seen: HashSet::new() };
-    for (root, flavor) in roots {
+    for (root, depth, flavor) in roots {
         let mut budget = enum_cap;
         let mut found = Vec::new();
-        collect_jsonl(&root, 3, &mut budget, &mut found);
+        collect_jsonl(&root, depth, &mut budget, &mut found);
         if budget == 0 {
             tracing::warn!(
                 target: "agentlog",
@@ -1188,8 +1206,15 @@ mod tests {
         let sub = dir.join(".claude/projects/slug/session-uuid/subagents");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("agent-abc.jsonl"), "").unwrap();
-        // One level past the real shape stays out of range — the bound still has to bound.
-        let deep = dir.join(".claude/projects/slug/session-uuid/subagents/nested");
+        // Claude, WORKFLOW agent: .../subagents/workflows/<run>/agent-*.jsonl. A workflow gets a
+        // directory per run, which puts its agents two levels below the flat subagent logs. On
+        // the clone that surfaced this it was 60% of all transcripts, and every file being
+        // written at the time.
+        let wf = sub.join("workflows/wf_20115a3b-949");
+        std::fs::create_dir_all(&wf).unwrap();
+        std::fs::write(wf.join("agent-acbff6cb7.jsonl"), "").unwrap();
+        // One level past the deepest real shape stays out of range — the bound still has to bound.
+        let deep = wf.join("nested");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(deep.join("too-deep.jsonl"), "").unwrap();
         // Codex: sessions/YYYY/MM/DD/rollout-*.jsonl.
@@ -1200,6 +1225,10 @@ mod tests {
         let names = scanned_names(&log_files_capped(&dir, 64, 64));
         assert!(names.contains(&"ok.jsonl".to_string()), "main session transcript");
         assert!(names.contains(&"agent-abc.jsonl".to_string()), "subagent transcripts must count");
+        assert!(
+            names.contains(&"agent-acbff6cb7.jsonl".to_string()),
+            "workflow agent transcripts must count"
+        );
         assert!(names.contains(&"rollout-x.jsonl".to_string()), "codex rollout");
         assert!(!names.contains(&"too-deep.jsonl".to_string()), "the walk must stay bounded");
     }
