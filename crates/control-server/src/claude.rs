@@ -44,7 +44,10 @@ const USER_AGENT: &str = "claude-swap/1.0";
 /// Refresh an access token this far before its expiry. Clones *run* on these
 /// tokens, so the lead must comfortably exceed the worst-case gap between polls
 /// (poll_secs default 600s, 429 backoff up to 30 min).
-const REFRESH_LEAD_MS: i64 = 60 * 60 * 1000;
+///
+/// Anthropic issues 8-hour access tokens (`expires_in: 28800`), so a 2-hour lead
+/// refreshes every 6 hours and leaves four back-to-back 30-minute backoffs of room.
+const REFRESH_LEAD_MS: i64 = 2 * 60 * 60 * 1000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGGER: Duration = Duration::from_millis(400);
 

@@ -29,7 +29,7 @@ const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Refresh an access token this far before its expiry (must exceed the worst-case
 /// poll gap). Matches claude's lead.
-const REFRESH_LEAD_MS: i64 = 60 * 60 * 1000;
+const REFRESH_LEAD_MS: i64 = 2 * 60 * 60 * 1000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const STAGGER: Duration = Duration::from_millis(400);
 
