@@ -1,6 +1,9 @@
 // One board column: a header (title, card count, and for operator-made columns a rename
 // and a delete) over a droppable, scrollable card list.
 //
+// The header sits on the board, outside the recess. What is carved out is the well the cards
+// live in, and a title floating inside it would claim to be one of them.
+//
 // The list stays a drop target when it is empty, which is what `useDroppable` on the body
 // is for: with only the cards registered, an empty column could never receive the first one.
 import { useDroppable } from "@dnd-kit/core";
@@ -36,17 +39,9 @@ export function BoardColumnPanel({
   const { setNodeRef } = useDroppable({ id });
   const [renaming, setRenaming] = useState<string | null>(null);
 
-  // Carved into the board rather than laid on it: a dark inner shadow across the top where
-  // a recess would fall into shadow, and a one-pixel light line along the bottom where its
-  // far wall would catch the light. The cards then read as sitting in the column, which is
-  // the one thing their own outer shadow cannot say by itself.
-  //
-  // Light only. A recess reads by being darker than what surrounds it, and in dark mode the
-  // column is already the lighter of the two — the same shadow there just muddies its top
-  // edge. The fill carries the separation on its own.
   return (
-    <section className="flex w-80 shrink-0 flex-col rounded-xl bg-slate-100/60 shadow-[inset_0_1px_3px_rgb(15_23_42_/_0.045),inset_0_1px_10px_rgb(15_23_42_/_0.03),inset_0_-1px_0_rgb(255_255_255_/_0.5)] dark:bg-slate-800/70 dark:shadow-none">
-      <header className="flex shrink-0 items-center gap-2 px-3 pt-3 pb-2">
+    <section className="flex w-80 shrink-0 flex-col">
+      <header className="flex shrink-0 items-center gap-2 px-1 pb-2">
         {renaming === null ? (
           <>
             <h2
@@ -108,12 +103,22 @@ export function BoardColumnPanel({
         )}
       </header>
 
-      {/* No hover tint on the drop target. The cards themselves already part around the
+      {/* The well the cards sit in, carved into the board rather than laid on it: a dark
+          inner shadow across the top where a recess would fall into shadow, and a one-pixel
+          light line along the bottom where its far wall would catch the light. The cards
+          then read as sitting in the column, which is the one thing their own outer shadow
+          cannot say by itself.
+
+          Light only. A recess reads by being darker than what surrounds it, and in dark
+          mode the column is already the lighter of the two — the same shadow there just
+          muddies its top edge. The fill carries the separation on its own.
+
+          No hover tint on the drop target. The cards themselves already part around the
           pointer to show where the drop lands, so a colour wash on the column only repeats
           it, and it repeats it a whole column wide. */}
       <div
         ref={setNodeRef}
-        className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-b-xl px-2 pb-2"
+        className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-xl bg-slate-100/60 p-2 shadow-[inset_0_1px_3px_rgb(15_23_42_/_0.045),inset_0_1px_10px_rgb(15_23_42_/_0.03),inset_0_-1px_0_rgb(255_255_255_/_0.5)] dark:bg-slate-800/70 dark:shadow-none"
       >
         <SortableContext items={cloneIds} strategy={verticalListSortingStrategy}>
           {children}
