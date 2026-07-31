@@ -7,6 +7,7 @@
 // renders identically on every load.
 import { CalendarClock, Clock, SendHorizontal } from "lucide-react";
 import { useEffect, useRef } from "react";
+import TextareaAutosize from "react-textarea-autosize";
 
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
@@ -219,8 +220,13 @@ export function ChatView({
             </button>
           </div>
         ) : null}
+        {/* The composer starts one line tall, level with the buttons beside it, and grows
+            with what is typed up to eight lines before it scrolls. `items-end` keeps the
+            buttons on the bottom line as it grows. `TextareaAutosize` measures the content
+            against a hidden copy of the field, which is the only way to get the height
+            right for wrapped text without reading it back from a layout pass. */}
         <div className="flex items-end gap-2">
-          <textarea
+          <TextareaAutosize
             value={input}
             onChange={(e) => onInputChange(e.target.value)}
             onKeyDown={(e) => {
@@ -229,7 +235,8 @@ export function ChatView({
                 submit();
               }
             }}
-            rows={2}
+            minRows={1}
+            maxRows={8}
             placeholder={
               archived
                 ? "Unarchive to message the agent"
