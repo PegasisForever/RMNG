@@ -30,7 +30,7 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { arrayMove, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 import { BoardCard, BoardCardBody } from "~/components/BoardCard";
 import { BoardColumnPanel } from "~/components/BoardColumnPanel";
@@ -145,6 +145,33 @@ export function arrange(lanes: Lane[], activeId: string, overId: string): Lane[]
   });
 }
 
+/** `next`, or `prev` itself when the two arrangements hold the same ids in the same order.
+ *
+ *  Identity is load-bearing. dnd-kit re-measures every droppable whenever this state changes,
+ *  and each measurement fires `onDragOver` again — so an arrangement that allocates a fresh
+ *  array while describing the same layout keeps that cycle alive until React gives up with
+ *  "Maximum update depth exceeded". `arrange` already returns its input untouched when a move
+ *  is a no-op within one lane; this covers the cross-lane branch, which always allocates. */
+/** How far the pointer must travel, in px, before the board will rearrange again.
+ *
+ *  Under the `PointerSensor`'s own 5px activation distance, so it costs nothing a drag has
+ *  not already paid for, and small enough that reordering still feels immediate. */
+const REARRANGE_MIN_TRAVEL = 4;
+
+function settle(prev: Lane[], next: Lane[]): Lane[] {
+  if (prev === next) return prev;
+  if (prev.length !== next.length) return next;
+  const unchanged = prev.every((lane, i) => {
+    const other = next[i];
+    return (
+      lane.id === other.id &&
+      lane.cloneIds.length === other.cloneIds.length &&
+      lane.cloneIds.every((id, j) => id === other.cloneIds[j])
+    );
+  });
+  return unchanged ? prev : next;
+}
+
 export function Board({
   columns,
   clones,
@@ -170,6 +197,9 @@ export function Board({
 }: BoardProps) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [preview, setPreview] = useState<Lane[] | null>(null);
+  // Where the pointer was when this drag last rearranged. A ref, not state: it gates an
+  // event handler and must never itself cause a render.
+  const arrangedAt = useRef<{ x: number; y: number } | null>(null);
   // Which parents have their sub clones showing. Collapsed by default: a parent working
   // through a task spawns helpers constantly, and every one of them expanded would bury the
   // clones the operator actually filed.
@@ -238,13 +268,30 @@ export function Board({
         ))
       : null;
 
-  const onDragStart = (event: DragStartEvent) => setDragId(String(event.active.id));
+  const onDragStart = (event: DragStartEvent) => {
+    arrangedAt.current = null;
+    setDragId(String(event.active.id));
+  };
 
   const onDragOver = (event: DragOverEvent) => {
     if (!event.over) return;
     const activeId = String(event.active.id);
     const overId = String(event.over.id);
-    setPreview((prev) => arrange(prev ?? base, activeId, overId));
+
+    // Rearranging moves the dragged card out from under the pointer, which drops the pointer
+    // onto a different card, which rearranges again. With a stationary pointer that is a
+    // two-state flip that runs until React throws "Maximum update depth exceeded". Requiring
+    // the pointer to have actually travelled breaks it: a layout shift alone can never
+    // justify the next move, and only the operator can.
+    const { x, y } = event.delta;
+    const since = arrangedAt.current;
+    if (since && Math.hypot(x - since.x, y - since.y) < REARRANGE_MIN_TRAVEL) return;
+
+    const from = preview ?? base;
+    const next = settle(from, arrange(from, activeId, overId));
+    if (next === from) return;
+    arrangedAt.current = { x, y };
+    setPreview(next);
   };
 
   const onDragEnd = (event: DragEndEvent) => {
@@ -252,6 +299,7 @@ export function Board({
     const settled = event.over
       ? arrange(preview ?? base, activeId, String(event.over.id))
       : (preview ?? base);
+    arrangedAt.current = null;
     setPreview(null);
     setDragId(null);
 
@@ -281,6 +329,7 @@ export function Board({
       onDragOver={onDragOver}
       onDragEnd={onDragEnd}
       onDragCancel={() => {
+        arrangedAt.current = null;
         setPreview(null);
         setDragId(null);
       }}
