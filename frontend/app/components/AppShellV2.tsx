@@ -31,16 +31,15 @@ export type ShellPane = "board" | "notes" | "chat";
  *  height and the other gets a quarter, so whichever one is in use is the readable one. */
 export type SideFocus = "notes" | "chat";
 
-/** The floating cards' surface. Translucent so the columns scrolling underneath stay
- *  visible, blurred just enough to keep the text on top readable, and outlined so the edge
- *  reads even where the card sits over empty board.
+/** The floating cards' surface, and only theirs. The board scrolling underneath is what
+ *  makes it read as glass, so the dialogs deliberately keep their opaque panel: over a
+ *  dimmed backdrop the same material just looks murky.
  *
- *  Opacity and blur do not trade against each other here, they pull apart: the fill is low
- *  so the board shows through, and the blur is high so what shows through is soft enough to
- *  read text over. Raising the fill instead is what kills it — at 70% the cards read as
- *  plain white panels, because the board is nearly white to begin with. The shadow is wide
- *  and faint for the same reason: a tight dark one draws a hard line the glass does not
- *  have. */
+ *  Opacity and blur pull apart here rather than trade against each other. The fill is low so
+ *  the columns show through, and the blur is what keeps text on top legible over them.
+ *  Raising the fill is what kills it: at 70% the cards read as plain white panels, because
+ *  the board is nearly white to begin with. The shadow is wide and faint for the same
+ *  reason — a tight dark one draws a hard line the glass does not have. */
 const CARD =
   "border border-slate-900/10 bg-white/25 shadow-[0_2px_16px_rgb(15_23_42_/_0.05),0_10px_50px_rgb(15_23_42_/_0.07)] backdrop-blur-sm dark:border-white/10 dark:bg-slate-900/25";
 
@@ -254,14 +253,9 @@ export function AppShellV2({
                   pane === "chat" ? "hidden" : "flex"
                 } ${sideFocus === "notes" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
               >
-                <div className="flex shrink-0 items-baseline gap-2 px-4 pt-3">
-                  <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    {selectedClone.id}
-                  </h2>
-                  <h3 className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-                    Notes
-                  </h3>
-                </div>
+                <h2 className="shrink-0 truncate px-4 pt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  {selectedClone.id}
+                </h2>
                 <div className="min-h-0 flex-1 overflow-y-auto py-2">{notes}</div>
               </section>
 
