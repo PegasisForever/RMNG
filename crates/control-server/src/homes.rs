@@ -19,6 +19,11 @@
 //! stopped/deleted/unmanaged clones. Best-effort throughout: a transient daemon error just
 //! retries next tick. When a clone's PID is known but `/proc/<pid>` isn't visible in our
 //! namespace (operator forgot `pid: "host"`), it warns ONCE per host, then skips.
+//!
+//! Not every uid-1000 process will do. A sandboxed browser tab chroots itself out of the clone's
+//! filesystem, and linking one produces a path that never resolves; [`pick_home_pid`] is where
+//! that is rejected, and it says what breaks when it is not. Three separate features read the
+//! clone's files through this link, so a bad pick is not only a browsing problem.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -56,12 +61,32 @@ fn proc_dir(pid: i64) -> PathBuf {
 }
 
 /// From `(pid, uid, mnt_ns_ino)` triples, pick a pid in the clone's mount namespace
-/// (`target_mnt_ino`) that runs as the clone user. Pure, so it's unit-testable.
-fn pick_home_pid(target_mnt_ino: u64, candidates: &[(i64, u32, u64)]) -> Option<i64> {
-    candidates
+/// (`target_mnt_ino`) that runs as the clone user AND whose proc-root leads to the clone's home.
+///
+/// `usable` is that last test, injected so this stays pure and unit-testable. It is not a
+/// formality: **a sandboxed browser tab passes every other check and fails this one.** Chrome and
+/// Firefox renderers `chroot` themselves into `/proc/<pid>/fdinfo`, so they run as uid 1000, sit
+/// in the clone's mount namespace, and report a `/proc/<pid>/root` that leads nowhere near the
+/// clone's filesystem. Once that pid is picked the link is broken for as long as the tab lives:
+/// the pid never changes, so [`ensure_symlink`] sees a link that already matches and leaves it,
+/// and the clone loses home browsing, token counting, and log-based activity detection all at
+/// once. Six of thirty-six clones on CT 105 were in that state, each pinned to a `Web Content` or
+/// `Isolated Web Co` process whose root pointed at an `fdinfo` directory of a long-dead pid.
+///
+/// Candidates are tried lowest pid first: within one clone that is the earliest-started process,
+/// which is the session leader rather than something transient a turn spawned.
+fn pick_home_pid(
+    target_mnt_ino: u64,
+    candidates: &[(i64, u32, u64)],
+    usable: impl Fn(i64) -> bool,
+) -> Option<i64> {
+    let mut pids: Vec<i64> = candidates
         .iter()
-        .find(|(_, uid, ino)| *uid == CLONE_UID && *ino == target_mnt_ino)
+        .filter(|(_, uid, ino)| *uid == CLONE_UID && *ino == target_mnt_ino)
         .map(|(pid, _, _)| *pid)
+        .collect();
+    pids.sort_unstable();
+    pids.into_iter().find(|pid| usable(*pid))
 }
 
 /// Real uid from `/proc/<pid>/status` (first field of the `Uid:` line).
@@ -78,8 +103,9 @@ fn mnt_ns_ino(pid: i64) -> Option<u64> {
     std::fs::metadata(format!("/proc/{pid}/ns/mnt")).ok().map(|m| m.ino())
 }
 
-/// A uid-1000 pid in the same mount namespace as the clone's root-owned main `pid`. Scans
-/// /proc once. `None` while the clone has no uid-1000 session yet (still booting).
+/// A uid-1000 pid in the same mount namespace as the clone's root-owned main `pid`, whose
+/// proc-root actually leads to the clone's home. Scans /proc once. `None` while the clone has no
+/// uid-1000 session yet (still booting).
 fn home_pid(main_pid: i64) -> Option<i64> {
     let target = mnt_ns_ino(main_pid)?;
     let mut candidates: Vec<(i64, u32, u64)> = Vec::new();
@@ -89,7 +115,9 @@ fn home_pid(main_pid: i64) -> Option<i64> {
             candidates.push((pid, uid, ino));
         }
     }
-    pick_home_pid(target, &candidates)
+    // `is_dir` follows the whole chain, so a chrooted process (whose root leads to a dead pid's
+    // `fdinfo`) reads as absent rather than as a home. See `pick_home_pid`.
+    pick_home_pid(target, &candidates, |pid| clone_home(pid).is_dir())
 }
 
 /// Names present under `hosts/` that no longer belong to a maintained clone and should be
@@ -248,9 +276,39 @@ mod tests {
     fn pick_home_pid_wants_uid1000_in_target_ns() {
         let target = 42u64; // the clone's mount-namespace inode
         let cands = [(1i64, 0u32, 42u64), (37, 1000, 42), (99, 1000, 7)];
-        assert_eq!(pick_home_pid(target, &cands), Some(37));
+        assert_eq!(pick_home_pid(target, &cands, |_| true), Some(37));
         // Clone still booting — no uid-1000 process in its ns yet → None.
-        assert_eq!(pick_home_pid(target, &[(1i64, 0u32, 42u64)]), None);
+        assert_eq!(pick_home_pid(target, &[(1i64, 0u32, 42u64)], |_| true), None);
+    }
+
+    #[test]
+    fn pick_home_pid_skips_a_sandboxed_browser_process() {
+        // A Chrome/Firefox renderer is uid 1000 and in the clone's mount namespace, but it has
+        // chrooted itself into /proc/<pid>/fdinfo, so its proc-root is not the clone's fs. Taking
+        // it broke home browsing, token counting, and activity detection for as long as the tab
+        // lived, because the pid never changed and the link was therefore never repointed.
+        let target = 42u64;
+        let cands = [(1i64, 0u32, 42u64), (868294, 1000, 42), (943649, 1000, 42)];
+        let usable = |pid: i64| pid != 868294; // the renderer's root leads nowhere
+        assert_eq!(pick_home_pid(target, &cands, usable), Some(943649));
+    }
+
+    #[test]
+    fn pick_home_pid_takes_the_lowest_pid_that_works() {
+        // Lowest first: within one clone that is the earliest-started process, which outlives
+        // whatever a single turn spawned.
+        let target = 42u64;
+        let cands = [(900i64, 1000u32, 42u64), (100, 1000, 42), (500, 1000, 42)];
+        assert_eq!(pick_home_pid(target, &cands, |_| true), Some(100));
+    }
+
+    #[test]
+    fn pick_home_pid_is_none_when_no_candidate_resolves() {
+        // Every uid-1000 process is sandboxed: no link is better than a broken one, and the
+        // reconciler's prune then clears any link left over from before.
+        let target = 42u64;
+        let cands = [(868294i64, 1000u32, 42u64), (943649, 1000, 42)];
+        assert_eq!(pick_home_pid(target, &cands, |_| false), None);
     }
 
     #[test]

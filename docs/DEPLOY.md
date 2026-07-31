@@ -381,7 +381,17 @@ maintains a symlink per running managed clone:
 ```
 
 That surfaces every clone's home (`/home/rmng`) in one directory. It repoints links across
-clone restarts (the PID changes) and prunes stopped/deleted clones. Reach it three ways:
+clone restarts (the PID changes) and prunes stopped/deleted clones.
+
+The pid is the lowest-numbered uid-1000 process in the clone's mount namespace **whose
+`/proc/<pid>/root` actually leads to the clone's home**. That last test exists because a Chrome or
+Firefox renderer chroots itself into `/proc/<pid>/fdinfo` while still running as uid 1000 in the
+clone's namespace: picking one produces a link that never resolves, and it never gets repointed,
+because the pid is stable and the reconciler only replaces a link whose target changed. Token
+counting and log-based activity detection read the clone's files through this same link, so a bad
+pick silently takes them down with the browsing.
+
+Reach it three ways:
 
 - **Over SMB** (the primary client path) — the control-server serves that directory as the
   `clones` share on port **445**, so `smb://<docker-host>/clones` browses every clone's home
