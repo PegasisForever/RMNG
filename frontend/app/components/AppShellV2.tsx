@@ -248,12 +248,16 @@ export function AppShellV2({
             className="pointer-events-auto absolute inset-y-0 left-1.5 z-10 hidden w-4 cursor-col-resize touch-none select-none outline-none lg:block"
           />
 
+          {/* The two cards swap heights on focus. The easing overshoots its target and
+              settles back, which is what makes the swap read as one card pushing the other
+              down rather than as both being redrawn. The pair briefly sums past 100% at the
+              peak; `flex-shrink` absorbs it, so nothing clips. */}
           {selectedClone ? (
             <>
               <section
                 onFocusCapture={() => onSideFocusChange("notes")}
                 onPointerDownCapture={() => onSideFocusChange("notes")}
-                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${CARD} ${
+                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-300 ease-[cubic-bezier(0.34,1.25,0.64,1)] lg:flex lg:grow-0 ${CARD} ${
                   pane === "chat" ? "hidden" : "flex"
                 } ${sideFocus === "notes" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
               >
@@ -266,7 +270,7 @@ export function AppShellV2({
               <section
                 onFocusCapture={() => onSideFocusChange("chat")}
                 onPointerDownCapture={() => onSideFocusChange("chat")}
-                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${CARD} ${
+                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-300 ease-[cubic-bezier(0.34,1.25,0.64,1)] lg:flex lg:grow-0 ${CARD} ${
                   pane === "notes" ? "hidden" : "flex"
                 } ${sideFocus === "chat" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
               >
