@@ -22,6 +22,16 @@ export type ShellPane = "board" | "notes" | "chat";
  *  height and the other gets a quarter, so whichever one is in use is the readable one. */
 export type SideFocus = "notes" | "chat";
 
+/** The floating cards' surface. Translucent so the columns scrolling underneath stay
+ *  visible, blurred so the text on top stays readable over whatever passes below.
+ *
+ *  The two settings trade against each other. More opacity buys legibility and costs the
+ *  effect; more blur buys legibility and costs the shapes that make it read as depth. The
+ *  board is nearly white already, so this sits lower on both than it looks like it should:
+ *  at 70% and `blur-xl` the cards read as plain white panels. */
+const CARD =
+  "bg-white/55 ring-white/70 backdrop-blur-md dark:bg-slate-900/55 dark:ring-white/10";
+
 export interface AppShellV2Props {
   /** Everything the board draws and does, minus the rail it renders for itself. */
   board: Omit<BoardProps, "rail">;
@@ -94,44 +104,47 @@ export function AppShellV2({
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        <div
-          className={`min-w-0 flex-1 lg:block ${pane === "board" ? "block" : "hidden"}`}
-        >
-          <Board {...board} rail={<BoardRail {...rail} />} />
+      <div className="relative flex min-h-0 flex-1">
+        {/* The board takes the whole width; the side panel floats over its right edge. The
+            strip's own right padding is what keeps the last column reachable: without it a
+            column at the end could never be scrolled out from under the panel. */}
+        <div className={`min-w-0 flex-1 lg:block ${pane === "board" ? "block" : "hidden"}`}>
+          <Board {...board} rail={<BoardRail {...rail} />} gutterRight />
         </div>
 
-        {/* Side panel: notes over chat, each taking half the height. */}
+        {/* Notes over chat, as two cards floating on the board. The container ignores the
+            pointer so the gaps between the cards belong to the board underneath; each card
+            takes it back. Below `lg` there is no room to float anything, so the panel drops
+            back into the flow as an ordinary full-width pane. */}
         <aside
-          className={`w-full shrink-0 flex-col border-l border-slate-200 bg-white lg:flex lg:w-[30%] lg:min-w-80 dark:border-slate-700 dark:bg-slate-900 ${
+          className={`w-full shrink-0 flex-col gap-3 p-3 lg:pointer-events-none lg:absolute lg:inset-y-0 lg:right-0 lg:z-20 lg:flex lg:w-[30%] lg:min-w-80 ${
             pane === "board" ? "hidden" : "flex"
           }`}
         >
           {selectedClone ? (
             <>
-              <div className="hidden shrink-0 items-baseline gap-2 border-b border-slate-100 px-4 py-3 lg:flex dark:border-slate-800">
-                <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  {selectedClone.id}
-                </h2>
-              </div>
-
               <section
                 onFocusCapture={() => onSideFocusChange("notes")}
                 onPointerDownCapture={() => onSideFocusChange("notes")}
-                className={`min-h-0 flex-1 flex-col overflow-hidden transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${
+                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl shadow-xl ring-1 transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${CARD} ${
                   pane === "chat" ? "hidden" : "flex"
                 } ${sideFocus === "notes" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
               >
-                <h3 className="shrink-0 px-4 pt-3 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-                  Notes
-                </h3>
+                <div className="flex shrink-0 items-baseline gap-2 px-4 pt-3">
+                  <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    {selectedClone.id}
+                  </h2>
+                  <h3 className="shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                    Notes
+                  </h3>
+                </div>
                 <div className="min-h-0 flex-1 overflow-y-auto py-2">{notes}</div>
               </section>
 
               <section
                 onFocusCapture={() => onSideFocusChange("chat")}
                 onPointerDownCapture={() => onSideFocusChange("chat")}
-                className={`min-h-0 flex-1 flex-col overflow-hidden border-t border-slate-200 bg-slate-50/50 transition-[flex-basis] duration-200 lg:flex lg:grow-0 dark:border-slate-700 dark:bg-slate-900/50 ${
+                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl shadow-xl ring-1 transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${CARD} ${
                   pane === "notes" ? "hidden" : "flex"
                 } ${sideFocus === "chat" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
               >
@@ -142,7 +155,9 @@ export function AppShellV2({
               </section>
             </>
           ) : (
-            <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-slate-400 dark:text-slate-500">
+            <div
+              className={`pointer-events-auto flex flex-1 items-center justify-center rounded-2xl px-6 text-center text-sm text-slate-500 shadow-xl ring-1 dark:text-slate-400 ${CARD}`}
+            >
               Select a clone to open its notes.
             </div>
           )}

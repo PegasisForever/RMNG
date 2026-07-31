@@ -60,6 +60,9 @@ export interface BoardProps {
   bastionPort: number;
   /** The control rail, drawn first in the strip (see BoardRail). */
   rail: ReactNode;
+  /** Leave room at the right end of the strip for a panel floating over the board, so the
+   *  last column can still be scrolled out from under it. */
+  gutterRight?: boolean;
 
   onSelectClone: (clone: Clone) => void;
   onDeleteClone: (clone: Clone) => void;
@@ -146,6 +149,7 @@ export function Board({
   sshPublicHost,
   bastionPort,
   rail,
+  gutterRight = false,
   onSelectClone,
   onDeleteClone,
   onCommitClone,
@@ -249,7 +253,11 @@ export function Board({
         setDragId(null);
       }}
     >
-      <div className="flex h-full min-h-0 items-stretch gap-3 overflow-x-auto bg-slate-50 p-3 dark:bg-slate-950">
+      <div
+        className={`flex h-full min-h-0 items-stretch gap-3 overflow-x-auto bg-slate-50 p-3 dark:bg-slate-950 ${
+          gutterRight ? "lg:pr-[30%]" : ""
+        }`}
+      >
         {rail}
 
         {userLanes.map((lane) => (
