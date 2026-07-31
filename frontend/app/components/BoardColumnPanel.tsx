@@ -36,8 +36,12 @@ export function BoardColumnPanel({
   const { setNodeRef } = useDroppable({ id });
   const [renaming, setRenaming] = useState<string | null>(null);
 
+  // Carved into the board rather than laid on it: a dark inner shadow across the top where
+  // a recess would fall into shadow, and a one-pixel light line along the bottom where its
+  // far wall would catch the light. The cards then read as sitting in the column, which is
+  // the one thing their own outer shadow cannot say by itself.
   return (
-    <section className="flex w-80 shrink-0 flex-col rounded-xl bg-slate-100 dark:bg-slate-800">
+    <section className="flex w-80 shrink-0 flex-col rounded-xl bg-slate-100/60 shadow-[inset_0_1px_3px_rgb(15_23_42_/_0.045),inset_0_1px_10px_rgb(15_23_42_/_0.03),inset_0_-1px_0_rgb(255_255_255_/_0.5)] dark:bg-slate-800/70 dark:shadow-[inset_0_1px_3px_rgb(0_0_0_/_0.22),inset_0_1px_10px_rgb(0_0_0_/_0.15),inset_0_-1px_0_rgb(255_255_255_/_0.04)]">
       <header className="flex shrink-0 items-center gap-2 px-3 pt-3 pb-2">
         {renaming === null ? (
           <>
