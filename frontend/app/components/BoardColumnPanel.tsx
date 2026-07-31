@@ -15,11 +15,8 @@ export interface BoardColumnPanelProps {
   cloneIds: string[];
   /** Shown when the column holds no cards. */
   empty: string;
-  /** A fixed column (archived) keeps its name and cannot be deleted. */
-  fixed?: boolean;
   onRename?: (title: string) => void;
-  /** Create a clone that lands in this column. Absent ⇒ no button, which is how the
-   *  archived column stays a destination rather than a starting point. */
+  /** Create a clone that lands in this column. Absent ⇒ no button. */
   onNewClone?: () => void;
   /** A clone is already being provisioned; the button waits it out. */
   newCloneBusy?: boolean;
@@ -31,7 +28,6 @@ export function BoardColumnPanel({
   title,
   cloneIds,
   empty,
-  fixed = false,
   onRename,
   onNewClone,
   newCloneBusy = false,
@@ -46,8 +42,8 @@ export function BoardColumnPanel({
         {renaming === null ? (
           <>
             <h2
-              onDoubleClick={fixed ? undefined : () => setRenaming(title)}
-              title={fixed ? undefined : "Double-click to rename"}
+              onDoubleClick={() => setRenaming(title)}
+              title="Double-click to rename"
               className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200"
             >
               {title}

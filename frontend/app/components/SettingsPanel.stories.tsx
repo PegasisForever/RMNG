@@ -64,9 +64,10 @@ const meta = {
     onDeleteCodexAccount: fn(),
     onImportAccount: fn(),
     boardColumns,
-    boardColumnCounts: { todo: 3, doing: 3, blocked: 1 },
+    boardColumnCounts: { todo: 3, doing: 3, blocked: 1, archived: 0 },
     onAddBoardColumn: fn(),
     onRenameBoardColumn: fn(),
+    onSetBoardColumnArchive: fn(),
     onDeleteBoardColumn: fn(),
     onReorderBoardColumns: fn(),
   },
@@ -79,12 +80,19 @@ const meta = {
         {...args}
         boardColumns={columns}
         onAddBoardColumn={(title) => {
-          setColumns((prev) => [...prev, { id: newColumnId(title, prev), title, cloneIds: [] }]);
+          setColumns((prev) => [
+            ...prev,
+            { id: newColumnId(title, prev), title, cloneIds: [], archive: false },
+          ]);
           args.onAddBoardColumn?.(title);
         }}
         onRenameBoardColumn={(columnId, title) => {
           setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, title } : c)));
           args.onRenameBoardColumn?.(columnId, title);
+        }}
+        onSetBoardColumnArchive={(columnId, archive) => {
+          setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, archive } : c)));
+          args.onSetBoardColumnArchive?.(columnId, archive);
         }}
         onDeleteBoardColumn={(columnId) => {
           setColumns((prev) => removeColumn(prev, columnId));

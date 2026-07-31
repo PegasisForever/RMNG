@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
-  ARCHIVED_COLUMN_ID,
-  archivedIds,
+  archivesOnDrop,
   columnIdOf,
   DEFAULT_COLUMNS,
   moveCard,
@@ -25,8 +24,9 @@ const clone = (id: string, archived = false): Clone => ({
 });
 
 const columns = (): BoardColumn[] => [
-  { id: "todo", title: "Todo", cloneIds: ["a", "b"] },
-  { id: "doing", title: "Doing", cloneIds: ["c"] },
+  { id: "todo", title: "Todo", cloneIds: ["a", "b"], archive: false },
+  { id: "doing", title: "Doing", cloneIds: ["c"], archive: false },
+  { id: "done", title: "Done", cloneIds: [], archive: true },
 ];
 
 test("a clone no column claims lands in the first column", () => {
@@ -36,22 +36,37 @@ test("a clone no column claims lands in the first column", () => {
   expect(out[1].cloneIds).toEqual(["c"]);
 });
 
-test("an archived clone leaves the columns and shows up in the archived list", () => {
-  const clones = [clone("a"), clone("b", true), clone("c")];
+test("an unfiled clone that is already archived lands in the first archive column", () => {
+  // Dropping it in Todo instead would mean the next drag out of Todo tried to unarchive it.
+  const out = resolveColumns(columns(), [clone("a"), clone("z", true)]);
 
-  expect(resolveColumns(columns(), clones)[0].cloneIds).toEqual(["a"]);
-  expect(archivedIds(clones)).toEqual(["b"]);
+  expect(out[0].cloneIds).toEqual(["a"]);
+  expect(out[2].cloneIds).toEqual(["z"]);
+});
+
+test("with no archive column an archived clone still shows up rather than vanishing", () => {
+  const plain: BoardColumn[] = [{ id: "todo", title: "Todo", cloneIds: [], archive: false }];
+
+  expect(resolveColumns(plain, [clone("z", true)])[0].cloneIds).toEqual(["z"]);
+});
+
+test("an archived clone stays in the column it was filed in", () => {
+  // The archive flag is a rule about the drop gesture, not a filter on the contents: the card
+  // must not move on its own when the server flips `archived`.
+  const out = resolveColumns(columns(), [clone("a", true), clone("b")]);
+
+  expect(out[0].cloneIds).toEqual(["a", "b"]);
+  expect(out[2].cloneIds).toEqual([]);
 });
 
 test("a deleted clone's leftover id is ignored", () => {
-  // The column list is persisted, so it outlives the clone until the next move rewrites it.
   expect(resolveColumns(columns(), [clone("a")])[0].cloneIds).toEqual(["a"]);
 });
 
 test("an id filed in two columns is drawn only in the first of them", () => {
   const dup: BoardColumn[] = [
-    { id: "todo", title: "Todo", cloneIds: ["a"] },
-    { id: "doing", title: "Doing", cloneIds: ["a", "c"] },
+    { id: "todo", title: "Todo", cloneIds: ["a"], archive: false },
+    { id: "doing", title: "Doing", cloneIds: ["a", "c"], archive: false },
   ];
   const out = resolveColumns(dup, [clone("a"), clone("c")]);
 
@@ -75,40 +90,40 @@ test("an index past the end appends rather than dropping the card", () => {
   expect(moveCard(columns(), "a", "doing", 99)[1].cloneIds).toEqual(["c", "a"]);
 });
 
-test("a move into the archived column only removes the card", () => {
-  const out = moveCard(columns(), "a", ARCHIVED_COLUMN_ID, 0);
+test("a move into an archive column stores the card there like any other", () => {
+  // Storing it is what keeps the card still while the archive call is in flight.
+  const out = moveCard(columns(), "a", "done", 0);
 
   expect(out[0].cloneIds).toEqual(["b"]);
-  expect(out[1].cloneIds).toEqual(["c"]);
-  expect(columnIdOf(out, "a")).toBeNull();
+  expect(out[2].cloneIds).toEqual(["a"]);
+  expect(columnIdOf(out, "a")).toBe("done");
+});
+
+test("only a column flagged archive archives what is dropped on it", () => {
+  expect(archivesOnDrop(columns(), "done")).toBe(true);
+  expect(archivesOnDrop(columns(), "todo")).toBe(false);
+  expect(archivesOnDrop(columns(), "nope")).toBe(false);
 });
 
 test("deleting a column moves its cards to the first one", () => {
   const out = removeColumn(columns(), "doing");
 
-  expect(out).toHaveLength(1);
+  expect(out).toHaveLength(2);
   expect(out[0].cloneIds).toEqual(["a", "b", "c"]);
 });
 
-test("deleting the first column hands its cards to the next", () => {
-  expect(removeColumn(columns(), "todo")[0].cloneIds).toEqual(["c", "a", "b"]);
-});
-
-test("a fresh install falls back to one default column", () => {
-  // Without this a clone would have no column to be unfiled into, so a new install would
-  // render an empty board despite having clones.
+test("a fresh install gets somewhere to work and somewhere to archive", () => {
   expect(withDefaults([])).toEqual(DEFAULT_COLUMNS);
+  expect(withDefaults([]).some((c) => c.archive)).toBe(true);
   expect(resolveColumns(withDefaults([]), [clone("a")])[0].cloneIds).toEqual(["a"]);
 });
 
-test("stored columns win over the default", () => {
+test("stored columns win over the defaults", () => {
   expect(withDefaults(columns())).toEqual(columns());
 });
 
 test("a new column id is a slug, and never collides with an existing one", () => {
   expect(newColumnId("In Review", columns())).toBe("in-review");
   expect(newColumnId("Todo", columns())).toBe("todo-2");
-  // "archived" is the fixed column's id, so a user column can never take it.
-  expect(newColumnId("archived", columns())).toBe("archived-2");
   expect(newColumnId("!!!", columns())).toBe("column");
 });

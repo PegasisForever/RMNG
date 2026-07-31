@@ -3,12 +3,18 @@
 /**
  * One column of the dashboard board, holding clone ids top to bottom.
  *
- * Two things are deliberately absent. The archived column is not stored: its contents come
- * from [`RmngClone::archived`], so the two can never disagree. And a clone the operator has
- * not filed anywhere is not stored either: the board draws it in the first column, which is
- * how a newly created clone shows up without anyone writing it here first.
- *
- * Ids of clones that no longer exist are harmless — the board ignores them, and the next
- * move rewrites the column without them.
+ * A clone the operator has not filed anywhere is not stored: the board draws it in the
+ * first column, which is how a newly created clone shows up without anyone writing it here
+ * first. Ids of clones that no longer exist are harmless — the board ignores them, and the
+ * next move rewrites the column without them.
  */
-export type BoardColumn = { id: string, title: string, cloneIds: Array<string>, };
+export type BoardColumn = { id: string, title: string, cloneIds: Array<string>, 
+/**
+ * Dropping a clone here archives it, and dragging one out starts it again.
+ *
+ * This is a rule about the *gesture*, not a filter on the contents: a clone archived
+ * from its own menu stays in whatever column it was already in. Nothing enforces that
+ * the two agree, which is what lets the card sit still while the server works — the
+ * column is where the operator put it, and `archived` is what the server made of it.
+ */
+archive: boolean, };

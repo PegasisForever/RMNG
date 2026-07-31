@@ -32,6 +32,8 @@ export interface BoardColumnsEditorProps {
   counts?: Record<string, number>;
   onAddColumn: (title: string) => void;
   onRenameColumn: (columnId: string, title: string) => void;
+  /** Turn the drop-here-to-archive rule on or off for one column. */
+  onSetArchive: (columnId: string, archive: boolean) => void;
   onDeleteColumn: (columnId: string) => void;
   /** The new column order, left to right on the board. */
   onReorderColumns: (columnIds: string[]) => void;
@@ -41,11 +43,13 @@ function ColumnRow({
   column,
   count,
   onRename,
+  onSetArchive,
   onDelete,
 }: {
   column: BoardColumn;
   count: number;
   onRename: (title: string) => void;
+  onSetArchive: (archive: boolean) => void;
   onDelete: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -83,6 +87,18 @@ function ColumnRow({
         aria-label={`${column.title} name`}
         className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-sm text-slate-900 hover:border-slate-300 focus:border-emerald-500 focus:outline-none dark:text-slate-100 dark:hover:border-slate-600"
       />
+      <label
+        className="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-slate-500 dark:text-slate-400"
+        title="Archive a clone when it is dropped in this column, and start it again when it is dragged out"
+      >
+        <input
+          type="checkbox"
+          checked={column.archive}
+          onChange={(e) => onSetArchive(e.target.checked)}
+          className="size-3.5 accent-emerald-600"
+        />
+        archive
+      </label>
       <span className="shrink-0 rounded-full bg-slate-100 px-2 text-xs font-medium tabular-nums text-slate-500 dark:bg-slate-700 dark:text-slate-400">
         {count}
       </span>
@@ -108,6 +124,7 @@ export function BoardColumnsEditor({
   counts = {},
   onAddColumn,
   onRenameColumn,
+  onSetArchive,
   onDeleteColumn,
   onReorderColumns,
 }: BoardColumnsEditorProps) {
@@ -151,6 +168,7 @@ export function BoardColumnsEditor({
                   column={column}
                   count={counts[column.id] ?? 0}
                   onRename={(next) => onRenameColumn(column.id, next)}
+                  onSetArchive={(archive) => onSetArchive(column.id, archive)}
                   onDelete={() => onDeleteColumn(column.id)}
                 />
               ))}

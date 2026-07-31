@@ -204,11 +204,14 @@ const meta = {
               onAddBoardColumn={(title) =>
                 setColumns((prev) => [
                   ...prev,
-                  { id: newColumnId(title, prev), title, cloneIds: [] },
+                  { id: newColumnId(title, prev), title, cloneIds: [], archive: false },
                 ])
               }
               onRenameBoardColumn={(columnId, title) =>
                 setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, title } : c)))
+              }
+              onSetBoardColumnArchive={(columnId, archive) =>
+                setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, archive } : c)))
               }
               onDeleteBoardColumn={(columnId) => setColumns((prev) => removeColumn(prev, columnId))}
               onReorderBoardColumns={(ids) =>
@@ -286,7 +289,7 @@ export const EmptyBoard: Story = {
   args: {
     board: {
       ...board,
-      columns: [{ id: "todo", title: "Todo", cloneIds: [] }],
+      columns: [{ id: "todo", title: "Todo", cloneIds: [], archive: false }],
       clones: [],
       selectedId: null,
     },

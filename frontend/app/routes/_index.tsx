@@ -559,11 +559,14 @@ function Dashboard({
               onAddBoardColumn={(title) =>
                 applyColumns([
                   ...columns,
-                  { id: newColumnId(title, columns), title, cloneIds: [] },
+                  { id: newColumnId(title, columns), title, cloneIds: [], archive: false },
                 ])
               }
               onRenameBoardColumn={(columnId, title) =>
                 applyColumns(columns.map((c) => (c.id === columnId ? { ...c, title } : c)))
+              }
+              onSetBoardColumnArchive={(columnId, archive) =>
+                applyColumns(columns.map((c) => (c.id === columnId ? { ...c, archive } : c)))
               }
               onDeleteBoardColumn={(columnId) => applyColumns(removeColumn(columns, columnId))}
               onReorderBoardColumns={(ids) =>

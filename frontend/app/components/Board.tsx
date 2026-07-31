@@ -1,15 +1,15 @@
-// The clone board: a fixed control rail, the operator's own columns, and a fixed
-// "Archived" column at the right edge. Cards are clones and columns are whatever the
-// operator makes them.
+// The clone board: the control rail followed by the operator's columns. Cards are clones and
+// columns are whatever the operator makes them; none is special-cased here.
 //
 // Column membership is a prop, so the board is controlled: a drop reports where the card
-// landed and the container persists it. The one piece of state kept here is the
-// in-flight drag arrangement, which has to update on every hover to make cards part
-// around the pointer; it is dropped the moment the drag ends.
+// landed and the container persists it. The one piece of state kept here is the in-flight
+// drag arrangement, which has to update on every hover to make cards part around the
+// pointer; it is dropped the moment the drag ends.
 //
-// Archiving rides the same gesture. The archived column's contents come from each clone's
-// own `archived` flag, so a drop into it calls `onArchiveClone` and a drop out of it calls
-// `onUnarchiveClone` — the card then follows the server's answer, not the drag.
+// Archiving rides the same gesture, driven by the target column's `archive` flag: dropping
+// into a flagged column archives, dragging out of one starts the clone again. The card is
+// stored in the column it was dropped in either way, so it sits still while the call
+// round-trips instead of bouncing back to where it came from and forward again.
 import {
   closestCorners,
   DndContext,
@@ -30,18 +30,17 @@ import { type ReactNode, useState } from "react";
 
 import { BoardCard, BoardCardBody } from "~/components/BoardCard";
 import { BoardColumnPanel } from "~/components/BoardColumnPanel";
-import { ARCHIVED_COLUMN_ID, archivedIds, resolveColumns, type BoardColumn } from "~/lib/board";
+import { archivesOnDrop, resolveColumns, type BoardColumn } from "~/lib/board";
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 
-/** A column as drawn, including the archived one. Ids are column ids; the archived lane
- *  is always last. */
+/** A column as drawn. Ids are column ids. */
 type Lane = { id: string; cloneIds: string[] };
 
 export interface BoardProps {
-  /** The operator's columns, in display order. The archived column is not one of them. */
+  /** The operator's columns, in display order. */
   columns: BoardColumn[];
   /** Every clone, archived ones included. */
   clones: Clone[];
@@ -69,15 +68,15 @@ export interface BoardProps {
   onCommitClone: (clone: Clone) => void;
   onChangeAccountClone: (clone: Clone) => void;
   onPortForwardClone: (clone: Clone) => void;
-  /** A card was dropped into the archived column. */
+  /** A card was dropped into a column flagged `archive` and is not archived yet. */
   onArchiveClone: (clone: Clone) => void;
-  /** A card was dragged back out of the archived column. */
+  /** A card was dragged out of an `archive` column and is still archived. */
   onUnarchiveClone: (clone: Clone) => void;
 
-  /** Create a clone and file it in this column. Every column offers this except the
-   *  archived one, which exists to retire clones rather than start them. */
+  /** Create a clone and file it in this column. Every column offers this, archive columns
+   *  included: the flag is a rule about the drop gesture, not a lock on the column. */
   onNewClone: (columnId: string) => void;
-  /** Where a card ended up. `toColumnId` is `archived` when it was dropped there. */
+  /** Where a card ended up. */
   onMoveCard: (cloneId: string, toColumnId: string, toIndex: number) => void;
   /** Rename from the board itself (double-click a column title). Adding, deleting and
    *  reordering columns live in the settings panel. */
@@ -166,16 +165,11 @@ export function Board({
 
   const byId = new Map(clones.map((clone) => [clone.id, clone]));
   const titles = new Map(columns.map((column) => [column.id, column.title]));
-  const base: Lane[] = [
-    ...resolveColumns(columns, clones).map((column) => ({
-      id: column.id,
-      cloneIds: column.cloneIds,
-    })),
-    { id: ARCHIVED_COLUMN_ID, cloneIds: archivedIds(clones) },
-  ];
+  const base: Lane[] = resolveColumns(columns, clones).map((column) => ({
+    id: column.id,
+    cloneIds: column.cloneIds,
+  }));
   const lanes = preview ?? base;
-  const userLanes = lanes.filter((lane) => lane.id !== ARCHIVED_COLUMN_ID);
-  const archivedLane = lanes.find((lane) => lane.id === ARCHIVED_COLUMN_ID);
 
   const sensors = useSensors(
     // The same 5px activation distance the sidebar used, so a plain click still selects
@@ -232,8 +226,9 @@ export function Board({
     const started = base.find((lane) => lane.cloneIds.includes(activeId));
     if (started?.id === landed.id && started.cloneIds.indexOf(activeId) === toIndex) return;
 
+    // The column decides; the clone's own flag says whether the server has caught up yet.
     const wasArchived = clone.archived === true;
-    const nowArchived = landed.id === ARCHIVED_COLUMN_ID;
+    const nowArchived = archivesOnDrop(columns, landed.id);
     if (nowArchived && !wasArchived) onArchiveClone(clone);
     if (!nowArchived && wasArchived) onUnarchiveClone(clone);
     onMoveCard(activeId, landed.id, toIndex);
@@ -260,7 +255,7 @@ export function Board({
       >
         {rail}
 
-        {userLanes.map((lane) => (
+        {lanes.map((lane) => (
           <BoardColumnPanel
             key={lane.id}
             id={lane.id}
@@ -277,19 +272,6 @@ export function Board({
             })}
           </BoardColumnPanel>
         ))}
-
-        <BoardColumnPanel
-          id={ARCHIVED_COLUMN_ID}
-          title="Archived"
-          cloneIds={archivedLane?.cloneIds ?? []}
-          empty="Nothing archived."
-          fixed
-        >
-          {(archivedLane?.cloneIds ?? []).map((id) => {
-            const clone = byId.get(id);
-            return clone ? <BoardCard key={id} id={id} {...cardProps(clone)} /> : null;
-          })}
-        </BoardColumnPanel>
       </div>
 
       <DragOverlay>

@@ -167,6 +167,7 @@ export interface SettingsPanelProps {
   boardColumnCounts?: Record<string, number>;
   onAddBoardColumn?: (title: string) => void;
   onRenameBoardColumn?: (columnId: string, title: string) => void;
+  onSetBoardColumnArchive?: (columnId: string, archive: boolean) => void;
   onDeleteBoardColumn?: (columnId: string) => void;
   onReorderBoardColumns?: (columnIds: string[]) => void;
 }
@@ -308,6 +309,7 @@ export function SettingsPanel({
   boardColumnCounts,
   onAddBoardColumn,
   onRenameBoardColumn,
+  onSetBoardColumnArchive,
   onDeleteBoardColumn,
   onReorderBoardColumns,
 }: SettingsPanelProps) {
@@ -736,13 +738,14 @@ export function SettingsPanel({
               <Section
                 title="Board columns"
                 effect="immediate"
-                hint="The dashboard board's columns, left to right. Drag to reorder. Archived is always the last column and is not listed. A clone in no column shows up in the first one."
+                hint="The dashboard board's columns, left to right. Drag to reorder. Tick archive to make a column stop and keep the clones dropped into it, and start them again when they are dragged out. A clone in no column shows up in the first one."
               >
                 <BoardColumnsEditor
                   columns={boardColumns}
                   counts={boardColumnCounts}
                   onAddColumn={(title) => onAddBoardColumn?.(title)}
                   onRenameColumn={(id, title) => onRenameBoardColumn?.(id, title)}
+                  onSetArchive={(id, archive) => onSetBoardColumnArchive?.(id, archive)}
                   onDeleteColumn={(id) => onDeleteBoardColumn?.(id)}
                   onReorderColumns={(ids) => onReorderBoardColumns?.(ids)}
                 />

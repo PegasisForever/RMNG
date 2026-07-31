@@ -149,13 +149,16 @@ export const cloneIds: string[] = hosts.map((h) => h.id);
 // unfiled clone shows up in the first column, which is how a new clone reaches the board.
 
 export const boardColumns: BoardColumn[] = [
-  { id: "todo", title: "Todo", cloneIds: [cloneIdle.id, cloneNoToken.id] },
+  { id: "todo", title: "Todo", cloneIds: [cloneIdle.id, cloneNoToken.id], archive: false },
   {
     id: "doing",
     title: "In progress",
     cloneIds: [cloneWorking.id, cloneSubClone.id, cloneDualProvider.id],
+    archive: false,
   },
-  { id: "blocked", title: "Blocked", cloneIds: [cloneOffline.id] },
+  { id: "blocked", title: "Blocked", cloneIds: [cloneOffline.id], archive: false },
+  // Dropping a clone here archives it; dragging one out starts it again.
+  { id: "archived", title: "Archived", cloneIds: [], archive: true },
 ];
 
 // --- live container usage (the volatile `stats` SSE map) --------------------
