@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 
-import { AppShellV2, type ShellPane, type SideFocus } from "~/components/AppShellV2";
+import { AppShellV2, type SideFocus } from "~/components/AppShellV2";
 import { ChangeAccountModal } from "~/components/ChangeAccountModal";
 import { CloneModal } from "~/components/CloneModal";
 import { CommitImageModal } from "~/components/CommitImageModal";
@@ -8,6 +8,7 @@ import { ImportAccountModal } from "~/components/ImportAccountModal";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
+import { MobileDashboard } from "~/components/mobile/MobileDashboard";
 import {
   activate,
   activateLayout,
@@ -45,6 +46,7 @@ import {
 } from "~/lib/board";
 import { type ControlState, type Clone, emptyState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
+import { useIsMobile } from "~/lib/useIsMobile";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
@@ -216,6 +218,9 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   // The live SSE state powers both the wizard (template-provision progress) and the
   // dashboard, so it lives here at the gate. `stats` is the volatile per-clone usage map.
   const { state, stats, lxcStats, forwards } = useLiveState(loaderData);
+  // Phone or desktop, decided once here in JavaScript. The two shells share this state and
+  // the config gate above, and nothing else — see `useIsMobile`.
+  const mobile = useIsMobile();
   // First-run gate: hold the config (null while loading). Render a minimal centered
   // "Loading…" until it resolves so the dashboard never flashes before the wizard
   // decision; render the wizard INSTEAD of the dashboard while setup isn't complete.
@@ -239,6 +244,19 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   }
   if (!cfg.setupComplete) {
     return <SetupWizard state={state} initialConfig={cfg} onDone={refetchConfig} />;
+  }
+  if (mobile) {
+    // The phone tree sizes to the viewport here, so its pages can size to their container
+    // and a Storybook frame can stand in for the screen.
+    return (
+      <div className="h-dvh">
+        <MobileDashboard
+          state={state}
+          cloneGroups={cfg.cloneGroups}
+          codexGroups={cfg.codexGroups}
+        />
+      </div>
+    );
   }
   return (
     <Dashboard
@@ -312,9 +330,7 @@ function Dashboard({
     refreshImages();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  // Below `lg` the board and the side panel cannot share the screen, so one of the three
-  // panes wins. Above it, `sideFocus` decides which half of the side panel gets the height.
-  const [pane, setPane] = useState<ShellPane>("board");
+  // Which half of the side panel gets the height.
   const [sideFocus, setSideFocus] = useState<SideFocus>("notes");
 
   // Board columns, held locally so a drag lands instantly, and re-adopted whenever the
@@ -417,8 +433,6 @@ function Dashboard({
     <AppShellV2
       selectedClone={selectedClone}
       error={error}
-      pane={pane}
-      onPaneChange={setPane}
       sideFocus={sideFocus}
       onSideFocusChange={setSideFocus}
       rail={{

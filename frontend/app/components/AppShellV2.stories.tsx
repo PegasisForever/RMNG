@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import { fn } from "storybook/test";
 
-import { AppShellV2, type ShellPane, type SideFocus } from "./AppShellV2";
+import { AppShellV2, type SideFocus } from "./AppShellV2";
 import { ChatView } from "./ChatView";
 import { NotesEditor } from "./NotesEditor";
 import { SettingsPanel } from "./SettingsPanel";
@@ -146,8 +146,6 @@ const meta = {
     rail,
     selectedClone: cloneWorking,
     error: null,
-    pane: "board" as ShellPane,
-    onPaneChange: fn(),
     sideFocus: "notes" as SideFocus,
     onSideFocusChange: fn(),
     notes: <NotesFixture />,
@@ -160,7 +158,6 @@ const meta = {
     const [columns, setColumns] = useState(args.board.columns);
     const [clones, setClones] = useState(args.board.clones);
     const [selectedId, setSelectedId] = useState(args.board.selectedId);
-    const [pane, setPane] = useState<ShellPane>(args.pane);
     const [sideFocus, setSideFocus] = useState<SideFocus>(args.sideFocus);
     const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -178,8 +175,6 @@ const meta = {
       <AppShellV2
         {...args}
         selectedClone={selectedClone}
-        pane={pane}
-        onPaneChange={setPane}
         sideFocus={sideFocus}
         onSideFocusChange={(next) => {
           setSideFocus(next);
