@@ -1,8 +1,12 @@
 import { useSyncExternalStore } from "react";
 
 /** Below this width the phone UI takes over. 768px is the usual phone-to-tablet line, so a
- *  tablet in portrait still gets the board. */
-export const MOBILE_MAX_WIDTH = 767;
+ *  tablet in portrait still gets the board.
+ *
+ *  That band, 768px up to the `lg` line, is the tight one: the side panel floats over the
+ *  board taking 30% and never less than 320px, so the columns underneath keep only what is
+ *  left. It stays usable because the panel floats rather than displacing anything. */
+const MOBILE_MAX_WIDTH = 767;
 
 const QUERY = `(max-width: ${MOBILE_MAX_WIDTH}px)`;
 

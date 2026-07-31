@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 
-import { AppShellV2, type ShellPane, type SideFocus } from "~/components/AppShellV2";
+import { AppShellV2, type SideFocus } from "~/components/AppShellV2";
 import { ChangeAccountModal } from "~/components/ChangeAccountModal";
 import { CloneModal } from "~/components/CloneModal";
 import { CommitImageModal } from "~/components/CommitImageModal";
@@ -330,9 +330,7 @@ function Dashboard({
     refreshImages();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  // Below `lg` the board and the side panel cannot share the screen, so one of the three
-  // panes wins. Above it, `sideFocus` decides which half of the side panel gets the height.
-  const [pane, setPane] = useState<ShellPane>("board");
+  // Which half of the side panel gets the height.
   const [sideFocus, setSideFocus] = useState<SideFocus>("notes");
 
   // Board columns, held locally so a drag lands instantly, and re-adopted whenever the
@@ -435,8 +433,6 @@ function Dashboard({
     <AppShellV2
       selectedClone={selectedClone}
       error={error}
-      pane={pane}
-      onPaneChange={setPane}
       sideFocus={sideFocus}
       onSideFocusChange={setSideFocus}
       rail={{

@@ -60,7 +60,9 @@ export interface BoardProps {
   /** The control rail, drawn first in the strip (see BoardRail). */
   rail: ReactNode;
   /** Leave room at the right end of the strip for a panel floating over the board, so the
-   *  last column can still be scrolled out from under it. */
+   *  last column can still be scrolled out from under it. The gutter matches the panel's
+   *  own width, `max(30%, 20rem)`, which is what keeps the two in step on a narrow laptop
+   *  where the percentage alone would fall short of the panel's minimum. */
   gutterRight?: boolean;
 
   onSelectClone: (clone: Clone) => void;
@@ -250,7 +252,7 @@ export function Board({
     >
       <div
         className={`flex h-full min-h-0 items-stretch gap-3 overflow-x-auto bg-slate-50 p-3 dark:bg-slate-950 ${
-          gutterRight ? "lg:pr-[30%]" : ""
+          gutterRight ? "pr-[max(30%,20rem)]" : ""
         }`}
       >
         {rail}
