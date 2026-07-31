@@ -39,9 +39,13 @@ export type SideFocus = "notes" | "chat";
  *  the columns show through, and the blur is what keeps text on top legible over them.
  *  Raising the fill is what kills it: at 70% the cards read as plain white panels, because
  *  the board is nearly white to begin with. The shadow is wide and faint for the same
- *  reason — a tight dark one draws a hard line the glass does not have. */
+ *  reason — a tight dark one draws a hard line the glass does not have.
+ *
+ *  Dark mode keeps that geometry but runs it in black at roughly five times the alpha. A
+ *  shadow only shows as the difference between it and the surface under it, and against a
+ *  slate-950 board the light-mode values come out to nothing. */
 const CARD =
-  "border border-slate-900/10 bg-white/25 shadow-[0_2px_16px_rgb(15_23_42_/_0.05),0_10px_50px_rgb(15_23_42_/_0.07)] backdrop-blur-sm dark:border-white/10 dark:bg-slate-900/25";
+  "border border-slate-900/10 bg-white/25 shadow-[0_2px_16px_rgb(15_23_42_/_0.05),0_10px_50px_rgb(15_23_42_/_0.07)] backdrop-blur-sm dark:border-white/10 dark:bg-slate-900/25 dark:shadow-[0_2px_16px_rgb(0_0_0_/_0.26),0_10px_50px_rgb(0_0_0_/_0.35)]";
 
 /** The side panel's width, as a percentage of the shell. The board pads its own right edge
  *  by the same number, so the two can never disagree and leave the last column stranded

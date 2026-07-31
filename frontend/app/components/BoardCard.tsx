@@ -13,9 +13,15 @@ import { SidebarClone, type SidebarCloneProps } from "~/components/SidebarClone"
 const OUTLINE = "border border-slate-900/10 dark:border-white/10";
 
 /** Wide and faint rather than tight and dark, so the card sits on the column instead of
- *  being cut out of it. A lifted card is told apart by how far its shadow spreads. */
-const RESTING = "shadow-[0_1px_6px_rgb(15_23_42_/_0.04),0_4px_16px_rgb(15_23_42_/_0.05)]";
-const LIFTED = "shadow-[0_4px_16px_rgb(15_23_42_/_0.06),0_16px_48px_rgb(15_23_42_/_0.10)]";
+ *  being cut out of it. A lifted card is told apart by how far its shadow spreads.
+ *
+ *  Dark mode runs the same geometry at roughly five times the alpha, in black rather than
+ *  slate. A shadow is only visible as the difference between it and the surface under it,
+ *  and against a slate-800 column the light-mode values come out to nothing. */
+const RESTING =
+  "shadow-[0_1px_6px_rgb(15_23_42_/_0.04),0_4px_16px_rgb(15_23_42_/_0.05)] dark:shadow-[0_1px_6px_rgb(0_0_0_/_0.22),0_4px_16px_rgb(0_0_0_/_0.26)]";
+const LIFTED =
+  "shadow-[0_4px_16px_rgb(15_23_42_/_0.06),0_16px_48px_rgb(15_23_42_/_0.10)] dark:shadow-[0_4px_16px_rgb(0_0_0_/_0.3),0_16px_48px_rgb(0_0_0_/_0.4)]";
 
 /** The card body, no drag wiring. Used for the drag overlay, where dnd-kit positions the
  *  node itself. */
