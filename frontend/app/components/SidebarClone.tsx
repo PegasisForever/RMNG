@@ -492,18 +492,20 @@ export function SidebarClone({
       aria-pressed={selected}
       onClick={onSelect}
       title={clone.id}
-      className={`group flex touch-none items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 dark:border-b-slate-700 ${
+      className={`group flex touch-none items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
         // Sub clone rows are indented under their parent; top-level rows keep the normal gutter.
         isChild ? "pl-6" : "pl-1.5"
       } ${draggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"} ${
-        // Per-side borders (explicit colors so they never collide): a slate-200 bottom
-        // divider between rows + a left accent for the selected row. Exactly one
-        // background wins (dragging ▸ selected ▸ default); the default is a solid white
-        // (not transparent) so a dragged card fully hides the rows under it. White is what
-        // leaves the selected row's tint and the hover the only colour in the column.
-        // While dragging the card lifts out as a rounded, divider-less floating card.
+        // The only border is the left accent for the selected row. A row carries no bottom
+        // divider: one card holds one row, so a divider there would just double the card's
+        // own outline and read as a heavier bottom edge.
+        //
+        // Exactly one background wins (dragging ▸ selected ▸ default). The default is a
+        // solid white (not transparent) so a dragged card fully hides the rows it passes
+        // over, and white is what leaves the selected tint and the hover as the only colour
+        // in a column.
         dragging
-          ? "rounded-md border-b-transparent bg-white shadow-lg ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600"
+          ? "rounded-md bg-white shadow-lg ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600"
           : selected
             ? "border-l-emerald-400 bg-emerald-50 dark:bg-emerald-950"
             : "bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-800"
