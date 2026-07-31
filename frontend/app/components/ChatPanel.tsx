@@ -11,9 +11,10 @@
 //
 // This module is the network half only. The markup lives in ChatView, which takes the
 // thread and the composer state as props.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { ChatView, localInputToEpochMs } from "~/components/ChatView";
+import { getDraft, setDraft } from "~/lib/chatDrafts";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 
@@ -29,7 +30,18 @@ interface ChatSnapshot {
 export default function ChatPanel({ cloneId, archived = false }: { cloneId: string; archived?: boolean }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
-  const [input, setInput] = useState("");
+  // Composer text, mirrored into the per-clone draft store. This panel is keyed by clone id,
+  // so it remounts on every clone switch; the store is what carries the unsent text across
+  // that remount. Every write goes through `writeInput`, so clearing the box on send (or
+  // restoring it on a failed send) keeps the store in step.
+  const [input, setInput] = useState(() => getDraft(cloneId));
+  const writeInput = useCallback(
+    (text: string) => {
+      setInput(text);
+      setDraft(cloneId, text);
+    },
+    [cloneId],
+  );
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [activity, setActivity] = useState<string | null>(null);
@@ -65,7 +77,7 @@ export default function ChatPanel({ cloneId, archived = false }: { cloneId: stri
   async function send() {
     const text = input.trim();
     if (!text || busy || archived) return;
-    setInput("");
+    writeInput("");
     setError(null);
     setBusy(true); // optimistic; the SSE snapshot confirms (or clears) it
     setActivity(null);
@@ -85,7 +97,7 @@ export default function ChatPanel({ cloneId, archived = false }: { cloneId: stri
       // messages and busy state from here.
     } catch (e) {
       setError((e as Error).message);
-      setInput(text); // restore the unsent text
+      writeInput(text); // restore the unsent text
       setBusy(false); // the turn never started; SSE will reconcile messages
     }
   }
@@ -113,7 +125,7 @@ export default function ChatPanel({ cloneId, archived = false }: { cloneId: stri
         const body = (await res.text().catch(() => "")).trim();
         throw new Error(body || "schedule failed");
       }
-      setInput("");
+      writeInput("");
       setScheduleAt(""); // collapse the picker back down
     } catch (e) {
       setError((e as Error).message);
@@ -162,7 +174,7 @@ export default function ChatPanel({ cloneId, archived = false }: { cloneId: stri
       archived={archived}
       scheduled={scheduled}
       input={input}
-      onInputChange={setInput}
+      onInputChange={writeInput}
       scheduleAt={scheduleAt}
       onScheduleAtChange={setScheduleAt}
       onSend={send}
