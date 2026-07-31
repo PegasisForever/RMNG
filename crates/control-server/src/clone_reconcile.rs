@@ -367,7 +367,8 @@ or GUI. The kind can't be changed after creation.
 - `rmng clone ls` — list clones with live CPU, RAM, status, and each provider's bound account.
   Sub clones are indented under their parent. `--json` gives one object per clone with `stats`
   nested.
-- `rmng op ls` — list recent operations (clone / delete / archive / pull / commit / update).
+- `rmng op ls` — list recent operations (clone / delete / archive / restore / pull / commit /
+  update).
 - `rmng op wait <op-id> [--timeout <secs>]` — block until an operation reaches a terminal state.
 
 ## Reach another clone
@@ -386,7 +387,31 @@ or GUI. The kind can't be changed after creation.
   `monitors`, `windows`, `move X Y`, `click [X Y]`, `right-click`, `middle-click`,
   `double-click`, `scroll`, `key <chord>`, `type <text>`, `move-window <id>`.
   Example: `rmng desktop pega-we-142 screenshot`. To *open* an app, use `rmng clone exec -d`
-  (above), not `desktop`.
+  (above), not `desktop`. Read "Desktop coordinates" below before you send any click.
+
+## Desktop coordinates
+
+The screenshot you get back and the `x`/`y` you send share one coordinate space. **That space
+is not the monitor's native resolution by default.** The daemon scales both to 1080p height,
+so 1920x1080 on a 16:9 monitor. A screenshot captured at native resolution by some other tool
+will not line up with these coordinates.
+
+- No flag: the 1080p-height space. Read the returned screenshot, click in those same numbers.
+- `--native`: use the monitor's real resolution for this call.
+- `--resolution <W>x<H>`: use an explicit space, for example `--resolution 1280x720`.
+
+Pass the same choice to every call in a sequence. Because one flag sets both the image and
+the coordinates, the two can never disagree within a call. They do disagree if you screenshot
+with `--native` and then click without it.
+
+These two flags work on `screenshot`, `move`, `click`, `right-click`, `middle-click`,
+`double-click`, and `scroll`. The other desktop flags:
+
+- `--monitor <n>`: target one monitor. `rmng desktop <clone> monitors` lists the ids. Works on
+  the seven verbs above plus `move-window`.
+- `--out <path>`: also write the returned screenshot to a file. Works on the seven verbs above
+  plus `key` and `type`.
+- `--mode <mode>`: placement for `move-window <id>`, for example `maximize` or `center-half`.
 
 ## Create clones
 
@@ -449,7 +474,10 @@ running: if you are on `auto`, so is it, and it gets its own pick. `--top-level`
   command elsewhere.
 - Everything is addressed by **clone id** (the first column of `rmng clone ls`).
 - `rmng clone select <clone>` points the operator's *viewer* at a clone — it does NOT change
-  which clone your other commands target.
+  which clone your other commands target. `rmng clone select --none` clears the selection.
+- `--wait` and `--timeout <secs>` are not create-only. Both also work on `rmng clone rm`,
+  `rmng clone archive`, `rmng clone restore`, `rmng image pull`, and `rmng image commit`.
+  Use `--wait` on a commit or a pull, which can run for many minutes.
 "#;
 
 /// The `rmng-cli` skill TarEntries: the same SKILL.md at both skill locations.
