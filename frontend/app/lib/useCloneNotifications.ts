@@ -12,7 +12,12 @@ import type { Clone } from "./types";
  *
  *  Seeding: a clone is only a fresh edge if we've previously seen it *not* unread. A clone
  *  seen for the first time (initial SSE frame, or a just-created clone) is baselined
- *  silently, so an already-unread clone never fires retroactively on page load. */
+ *  silently, so an already-unread clone never fires retroactively on page load.
+ *
+ *  Scope: top-level clones only. A sub clone is a helper its parent spawned, so it starts and
+ *  stops on its own schedule many times per parent task, and one notification per stop buries
+ *  the edges that matter. Sub clones are still baselined in `seen`, so promoting one back to
+ *  top level (or losing sight of it and seeing it again) does not fire a stale edge. */
 export function useCloneNotifications(hosts: Clone[], onActivate?: (id: string) => void) {
   const seen = useRef<Map<string, boolean>>(new Map());
   // Latest-ref for the activate callback so a notification's click handler (created in an
@@ -35,6 +40,7 @@ export function useCloneNotifications(hosts: Clone[], onActivate?: (id: string) 
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
 
     for (const h of hosts) {
+      if (h.parent) continue;
       if (h.unread && prev.has(h.id) && !prev.get(h.id)) {
         notifyStopped(h, activateRef.current);
       }
