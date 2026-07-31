@@ -17,8 +17,11 @@ const runtimeDir = process.env.XDG_RUNTIME_DIR ?? `/run/user/${uid()}`;
 export const CONFIG = {
   /** HTTP listen port — the control-server connects to http://<container-ip>:<port>. */
   port: Number(process.env.AGENT_PORT ?? 4096),
-  /** Claude model id. The container's logged-in `claude` subscription is used for auth. */
-  model: process.env.AGENT_MODEL ?? "claude-opus-4-8",
+  /** Model for the session, passed to the CLI as `--model`. The `opus` alias tracks the latest
+   * Opus release, so every clone follows it without a wrapper rebuild or a per-clone override.
+   * Fixed on purpose: the fleet runs one model, and the container's logged-in `claude`
+   * subscription is what authorizes it. */
+  model: "opus",
   /** JS runtime the SDK uses to run the bundled Claude Code CLI. Ignored when
    * `claudeExecutable` points at a standalone (native) binary — the SDK spawns it directly. */
   executable: (process.env.AGENT_EXECUTABLE as "node" | "bun" | "deno" | undefined) ?? "node",

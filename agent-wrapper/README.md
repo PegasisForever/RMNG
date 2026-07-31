@@ -20,10 +20,11 @@ The session id is in memory only: a CoW clone boots a fresh wrapper and starts a
 | Var | Default | Notes |
 |---|---|---|
 | `AGENT_PORT` | `4096` | listen port |
-| `AGENT_MODEL` | `claude-opus-4-8` | Claude model id |
 | `AGENT_EXECUTABLE` | `node` | JavaScript runtime for the bundled CLI |
 | `LINEAR_API_KEY` | unset | Linear hosted MCP identity, injected from the selected preset; empty skips it |
 | `AGENT_INSTRUCTIONS_PATH` | `~/.config/rmng/agent-instructions.md` | editable agent playbook injected by the control-server; present and non-empty overrides the baked-in default |
+
+The model is not configurable: the session runs on the `opus` alias, so the whole fleet tracks the latest Opus release.
 
 The wrapper always registers the clone-local desktop MCP (`http://127.0.0.1:9004`). It optionally registers the hosted Linear MCP. It does not report clone status directly: the control server owns liveness through Docker, and reads activity off this wrapper's `/events` `busy`/`activity` frames.
 
