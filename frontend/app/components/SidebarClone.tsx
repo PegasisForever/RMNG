@@ -498,14 +498,15 @@ export function SidebarClone({
       } ${draggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"} ${
         // Per-side borders (explicit colors so they never collide): a slate-200 bottom
         // divider between rows + a left accent for the selected row. Exactly one
-        // background wins (dragging ▸ selected ▸ default); the default is a solid
-        // slate-50 (not transparent) so a dragged card fully hides the rows under it.
+        // background wins (dragging ▸ selected ▸ default); the default is a solid white
+        // (not transparent) so a dragged card fully hides the rows under it. White is what
+        // leaves the selected row's tint and the hover the only colour in the column.
         // While dragging the card lifts out as a rounded, divider-less floating card.
         dragging
           ? "rounded-md border-b-transparent bg-white shadow-lg ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600"
           : selected
             ? "border-l-emerald-400 bg-emerald-50 dark:bg-emerald-950"
-            : "bg-slate-50 hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800"
+            : "bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-800"
       }`}
     >
       <div className="min-w-0 flex-1">
