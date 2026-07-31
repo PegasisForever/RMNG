@@ -18,10 +18,25 @@ import { workspaceBadge } from "~/lib/workspace";
 // The control server owns this compact lifecycle indicator: blue = recent token activity,
 // gray = Docker-running but inactive, purple = Docker stopped/gone. An unread working→not-working
 // transition replaces the dot with the red `!` badge below.
+//
+// Each dot glows in its own color: two box-shadow stops, a tight bright one and a wide dim
+// one, which is what reads as light rather than as a ring. The colors are spelled out
+// because a shadow cannot inherit the `bg-*` it belongs to. Idle glows far more faintly than
+// the rest — a dot that means "nothing is happening" should not be the brightest thing on
+// the card.
 const STATUS_DOT: Record<NonNullable<Clone["monitorState"]>, { dot: string; label: string }> = {
-  working: { dot: "bg-blue-500", label: "working" },
-  idle: { dot: "bg-slate-400 dark:bg-slate-500", label: "not working" },
-  offline: { dot: "bg-purple-500", label: "offline" },
+  working: {
+    dot: "bg-blue-500 shadow-[0_0_4px_rgb(59_130_246_/_0.7),0_0_10px_rgb(59_130_246_/_0.45)]",
+    label: "working",
+  },
+  idle: {
+    dot: "bg-slate-400 shadow-[0_0_4px_rgb(148_163_184_/_0.45)] dark:bg-slate-500 dark:shadow-[0_0_4px_rgb(100_116_139_/_0.55)]",
+    label: "not working",
+  },
+  offline: {
+    dot: "bg-purple-500 shadow-[0_0_4px_rgb(168_85_247_/_0.7),0_0_10px_rgb(168_85_247_/_0.45)]",
+    label: "offline",
+  },
 };
 
 type Metric = { label: string; value: string; title: string };
@@ -573,7 +588,7 @@ export function SidebarClone({
           <p className="mt-1.5 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
             {clone.unread && !selected ? (
               <span
-                className="mr-1 inline-flex size-3 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white"
+                className="mr-1 inline-flex size-3 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white shadow-[0_0_4px_rgb(239_68_68_/_0.7),0_0_10px_rgb(239_68_68_/_0.45)]"
                 title="was working and is no longer working"
                 aria-label="unread: working transitioned to not working"
               >
