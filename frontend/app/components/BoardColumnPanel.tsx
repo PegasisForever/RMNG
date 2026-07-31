@@ -33,7 +33,7 @@ export function BoardColumnPanel({
   newCloneBusy = false,
   children,
 }: BoardColumnPanelProps) {
-  const { setNodeRef, isOver } = useDroppable({ id });
+  const { setNodeRef } = useDroppable({ id });
   const [renaming, setRenaming] = useState<string | null>(null);
 
   return (
@@ -100,11 +100,12 @@ export function BoardColumnPanel({
         )}
       </header>
 
+      {/* No hover tint on the drop target. The cards themselves already part around the
+          pointer to show where the drop lands, so a colour wash on the column only repeats
+          it, and it repeats it a whole column wide. */}
       <div
         ref={setNodeRef}
-        className={`min-h-0 flex-1 space-y-2 overflow-y-auto rounded-b-xl px-2 pb-2 ${
-          isOver ? "bg-emerald-50/70 dark:bg-emerald-950/30" : ""
-        }`}
+        className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-b-xl px-2 pb-2"
       >
         <SortableContext items={cloneIds} strategy={verticalListSortingStrategy}>
           {children}
