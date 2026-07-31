@@ -1,6 +1,7 @@
-// The board dashboard. Seventy percent of the width is the clone board (control rail,
-// operator columns, archived column); the last thirty is the selected clone's notes over
-// its agent chat, split three-to-one in favour of whichever of the two was touched last.
+// The board dashboard. The clone board (control rail, operator columns) takes the width;
+// the selected clone's notes over its agent chat float on its right edge, split
+// three-to-one in favour of whichever of the two was touched last. The operator drags the
+// panel's left edge to set how much of the width it takes.
 //
 // Pure, like AppShell: no fetch, no SSE, no browser-only imports. The notes and chat panes
 // arrive as slots because both real implementations are lazy-loaded and client-only, so a
@@ -8,7 +9,15 @@
 //
 // Below the `lg` breakpoint the two columns cannot share the screen, so the top bar's
 // segmented control picks one of board / notes / chat instead.
-import type { ReactNode } from "react";
+import {
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { Board, type BoardProps } from "~/components/Board";
 import { BoardRail, type BoardRailProps } from "~/components/BoardRail";
@@ -23,14 +32,27 @@ export type ShellPane = "board" | "notes" | "chat";
 export type SideFocus = "notes" | "chat";
 
 /** The floating cards' surface. Translucent so the columns scrolling underneath stay
- *  visible, blurred so the text on top stays readable over whatever passes below.
+ *  visible, blurred just enough to keep the text on top readable, and outlined so the edge
+ *  reads even where the card sits over empty board.
  *
- *  The two settings trade against each other. More opacity buys legibility and costs the
- *  effect; more blur buys legibility and costs the shapes that make it read as depth. The
- *  board is nearly white already, so this sits lower on both than it looks like it should:
- *  at 70% and `blur-xl` the cards read as plain white panels. */
+ *  Opacity and blur do not trade against each other here, they pull apart: the fill is low
+ *  so the board shows through, and the blur is high so what shows through is soft enough to
+ *  read text over. Raising the fill instead is what kills it — at 70% the cards read as
+ *  plain white panels, because the board is nearly white to begin with. The shadow is wide
+ *  and faint for the same reason: a tight dark one draws a hard line the glass does not
+ *  have. */
 const CARD =
-  "bg-white/55 ring-white/70 backdrop-blur-md dark:bg-slate-900/55 dark:ring-white/10";
+  "border border-slate-900/10 bg-white/25 shadow-[0_2px_16px_rgb(15_23_42_/_0.05),0_10px_50px_rgb(15_23_42_/_0.07)] backdrop-blur-sm dark:border-white/10 dark:bg-slate-900/25";
+
+/** The side panel's width, as a percentage of the shell. The board pads its own right edge
+ *  by the same number, so the two can never disagree and leave the last column stranded
+ *  under the cards — which is why the panel has no pixel floor of its own. */
+const SIDE_MIN = 20;
+const SIDE_MAX = 60;
+const SIDE_DEFAULT = 30;
+const SIDE_KEY = "rmng.sidePanelWidth";
+
+const clampSide = (pct: number) => Math.min(SIDE_MAX, Math.max(SIDE_MIN, pct));
 
 export interface AppShellV2Props {
   /** Everything the board draws and does, minus the rail it renders for itself. */
@@ -68,6 +90,75 @@ export function AppShellV2({
   chat,
   overlays,
 }: AppShellV2Props) {
+  const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT);
+  // The live width during a drag. `sideWidth` lags a render behind, so the pointer handler
+  // and the persist-on-release both read this instead.
+  const widthRef = useRef(SIDE_DEFAULT);
+  // The board and the panel together, which is what a percentage is a percentage of.
+  const splitRef = useRef<HTMLDivElement | null>(null);
+
+  // Restore after mount rather than in the initial state, so the server and the first
+  // client render agree on the default.
+  useEffect(() => {
+    const stored = Number(window.localStorage.getItem(SIDE_KEY));
+    if (!Number.isFinite(stored) || stored <= 0) return;
+    const next = clampSide(stored);
+    widthRef.current = next;
+    setSideWidth(next);
+  }, []);
+
+  const applyWidth = (pct: number) => {
+    const next = clampSide(pct);
+    widthRef.current = next;
+    setSideWidth(next);
+  };
+
+  const persistWidth = () => window.localStorage.setItem(SIDE_KEY, String(Math.round(widthRef.current)));
+
+  /** Drag the panel's left edge. The pointer is captured by the handle, so the board's own
+   *  drag sensor never sees the move and the pointer can leave the handle without dropping
+   *  the resize. */
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    // `preventDefault` above suppresses the focus a click would normally give the handle,
+    // and the arrow keys are useless without it.
+    handle.focus();
+    handle.setPointerCapture(pointerId);
+
+    const track = (moved: globalThis.PointerEvent) => {
+      const split = splitRef.current?.getBoundingClientRect();
+      if (!split || split.width === 0) return;
+      applyWidth(((split.right - moved.clientX) / split.width) * 100);
+    };
+    const stop = () => {
+      handle.removeEventListener("pointermove", track);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+      persistWidth();
+    };
+
+    handle.addEventListener("pointermove", track);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+  };
+
+  /** Arrow keys move the edge in whole steps, so the panel is resizable without a pointer. */
+  const nudgeResize = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.key === "ArrowLeft" ? 2 : event.key === "ArrowRight" ? -2 : 0;
+    if (step === 0) return;
+    event.preventDefault();
+    applyWidth(widthRef.current + step);
+    persistWidth();
+  };
+
+  const resetResize = () => {
+    applyWidth(SIDE_DEFAULT);
+    persistWidth();
+  };
+
   const tab = (value: ShellPane, label: string) => (
     <button
       type="button"
@@ -104,7 +195,13 @@ export function AppShellV2({
         </div>
       </div>
 
-      <div className="relative flex min-h-0 flex-1">
+      {/* One variable sets the panel's width and the board's right padding, so the gutter
+          always matches whatever the operator dragged the edge to. */}
+      <div
+        ref={splitRef}
+        className="relative flex min-h-0 flex-1"
+        style={{ "--side-panel-w": `${sideWidth}%` } as CSSProperties}
+      >
         {/* The board takes the whole width; the side panel floats over its right edge. The
             strip's own right padding is what keeps the last column reachable: without it a
             column at the end could never be scrolled out from under the panel. */}
@@ -117,16 +214,43 @@ export function AppShellV2({
             takes it back. Below `lg` there is no room to float anything, so the panel drops
             back into the flow as an ordinary full-width pane. */}
         <aside
-          className={`w-full shrink-0 flex-col gap-3 p-3 lg:pointer-events-none lg:absolute lg:inset-y-0 lg:right-0 lg:z-20 lg:flex lg:w-[30%] lg:min-w-80 ${
+          className={`w-full shrink-0 flex-col gap-3 p-3 lg:pointer-events-none lg:absolute lg:inset-y-0 lg:right-0 lg:z-20 lg:flex lg:w-[var(--side-panel-w,30%)] ${
             pane === "board" ? "hidden" : "flex"
           }`}
         >
+          {/* The resize grip: a 16px hit area over the cards' own left edge, so the thing
+              the operator drags is the edge they can see and it grabs from either side. It
+              sits 6px out and 10px in rather than evenly, because the card's wide shadow
+              reads as part of the card and an even split feels outside-heavy. The panel's
+              own 12px padding is what leaves room for the outer half without reaching onto
+              the board.
+              `z-10` is load-bearing. The cards' `backdrop-filter` gives each one a stacking
+              context, which promotes them to the same paint step as this positioned grip;
+              tree order would then put them on top and swallow the half of the band that
+              overlaps a card.
+              Nothing is drawn here — the cursor is the affordance, and the focus ring is
+              off because it would flash over the card on every grab. Double-click puts the
+              width back. */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Side panel width"
+            aria-valuenow={Math.round(sideWidth)}
+            aria-valuemin={SIDE_MIN}
+            aria-valuemax={SIDE_MAX}
+            tabIndex={0}
+            onPointerDown={startResize}
+            onKeyDown={nudgeResize}
+            onDoubleClick={resetResize}
+            className="pointer-events-auto absolute inset-y-0 left-1.5 z-10 hidden w-4 cursor-col-resize touch-none select-none outline-none lg:block"
+          />
+
           {selectedClone ? (
             <>
               <section
                 onFocusCapture={() => onSideFocusChange("notes")}
                 onPointerDownCapture={() => onSideFocusChange("notes")}
-                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl shadow-xl ring-1 transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${CARD} ${
+                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${CARD} ${
                   pane === "chat" ? "hidden" : "flex"
                 } ${sideFocus === "notes" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
               >
@@ -144,7 +268,7 @@ export function AppShellV2({
               <section
                 onFocusCapture={() => onSideFocusChange("chat")}
                 onPointerDownCapture={() => onSideFocusChange("chat")}
-                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl shadow-xl ring-1 transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${CARD} ${
+                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-200 lg:flex lg:grow-0 ${CARD} ${
                   pane === "notes" ? "hidden" : "flex"
                 } ${sideFocus === "chat" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
               >
@@ -156,7 +280,7 @@ export function AppShellV2({
             </>
           ) : (
             <div
-              className={`pointer-events-auto flex flex-1 items-center justify-center rounded-2xl px-6 text-center text-sm text-slate-500 shadow-xl ring-1 dark:text-slate-400 ${CARD}`}
+              className={`pointer-events-auto flex flex-1 items-center justify-center rounded-2xl px-6 text-center text-sm text-slate-500 dark:text-slate-400 ${CARD}`}
             >
               Select a clone to open its notes.
             </div>
