@@ -5,7 +5,7 @@
 // The one piece of ambient state it needs is the clock: the schedule picker's `min` and
 // the "Today 15:30" labels both read the current time. That comes in as `now` so a story
 // renders identically on every load.
-import { CalendarClock, Clock, SendHorizontal } from "lucide-react";
+import { CalendarClock, Clock, LoaderCircle, SendHorizontal, Square } from "lucide-react";
 import { useEffect, useRef } from "react";
 import TextareaAutosize from "react-textarea-autosize";
 
@@ -279,10 +279,17 @@ export function ChatView({
               type="button"
               onClick={onStop}
               disabled={stopping}
-              title="Interrupt the agent's current turn"
-              className="shrink-0 rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+              title={stopping ? "Stopping…" : "Interrupt the agent's current turn"}
+              aria-label={stopping ? "Stopping…" : "Interrupt the agent's current turn"}
+              className="shrink-0 rounded-md bg-red-600 p-2 text-white hover:bg-red-700 disabled:opacity-50"
             >
-              {stopping ? "Stopping…" : "Stop"}
+              {/* The spinner is the only way an icon-only button can say the stop is in
+                  flight, now that "Stopping…" is not there to read. */}
+              {stopping ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <Square className="size-4 fill-current" />
+              )}
             </button>
           ) : (
             <button
