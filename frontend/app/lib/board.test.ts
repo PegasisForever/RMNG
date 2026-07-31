@@ -8,6 +8,7 @@ import {
   newColumnId,
   removeColumn,
   resolveColumns,
+  subCloneTree,
   withDefaults,
   type BoardColumn,
 } from "./board";
@@ -22,6 +23,8 @@ const clone = (id: string, archived = false): Clone => ({
   managed: true,
   archived,
 });
+
+const sub = (id: string, parent: string): Clone => ({ ...clone(id), parent });
 
 const columns = (): BoardColumn[] => [
   { id: "todo", title: "Todo", cloneIds: ["a", "b"], archive: false },
@@ -126,4 +129,34 @@ test("a new column id is a slug, and never collides with an existing one", () =>
   expect(newColumnId("In Review", columns())).toBe("in-review");
   expect(newColumnId("Todo", columns())).toBe("todo-2");
   expect(newColumnId("!!!", columns())).toBe("column");
+});
+
+test("a sub clone hangs under its parent rather than taking a card of its own", () => {
+  const { filed, childrenByParent } = subCloneTree([clone("a"), sub("a-1", "a"), clone("b")]);
+
+  expect(filed.map((c) => c.id)).toEqual(["a", "b"]);
+  expect(childrenByParent.get("a")?.map((c) => c.id)).toEqual(["a-1"]);
+});
+
+test("a sub clone whose parent is gone becomes a card of its own", () => {
+  // Dropping it instead would leave a running clone on no board and no way to reach it.
+  const { filed, childrenByParent } = subCloneTree([sub("a-1", "a")]);
+
+  expect(filed.map((c) => c.id)).toEqual(["a-1"]);
+  expect(childrenByParent.size).toBe(0);
+});
+
+test("a column never draws a sub clone, even with its id stored there", () => {
+  const stored: BoardColumn[] = [
+    { id: "todo", title: "Todo", cloneIds: ["a", "a-1"], archive: false },
+  ];
+  const out = resolveColumns(stored, [clone("a"), sub("a-1", "a")]);
+
+  expect(out[0].cloneIds).toEqual(["a"]);
+});
+
+test("a sub clone is not appended as unfiled either", () => {
+  const out = resolveColumns(columns(), [clone("a"), sub("a-1", "a")]);
+
+  expect(out.flatMap((c) => c.cloneIds)).not.toContain("a-1");
 });

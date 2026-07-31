@@ -8,6 +8,10 @@
 //
 // A clone the operator has not filed anywhere is not stored at all; `resolveColumns` gives it
 // a home so a newly created clone is visible without anyone writing it down first.
+//
+// A sub clone is never filed. It is drawn under whichever card its parent is on, so giving it
+// a column of its own would draw it twice and let a drag separate it from the parent that
+// spawned it. `subCloneTree` is the one place that rule lives.
 
 import type { Clone } from "~/lib/types";
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
@@ -39,10 +43,35 @@ function homeFor(columns: BoardColumn[], clone: Clone): string | undefined {
   return columns[0]?.id;
 }
 
-/** The columns as drawn: existing clones only, with anything unfiled appended to its home
- *  column. Returns `columns` unchanged in shape, so the caller can map over it directly. */
+/** Clones split into the ones the board files on its own and each parent's sub clones, both
+ *  keeping the incoming order.
+ *
+ *  A sub clone whose parent is gone — archived out of the list, or deleted — is promoted to a
+ *  card of its own rather than dropped, because the alternative is a running clone that has
+ *  vanished from the board with no way to reach it. */
+export function subCloneTree(clones: Clone[]): {
+  filed: Clone[];
+  childrenByParent: Map<string, Clone[]>;
+} {
+  const ids = new Set(clones.map((c) => c.id));
+  const filed: Clone[] = [];
+  const childrenByParent = new Map<string, Clone[]>();
+  for (const clone of clones) {
+    if (clone.parent && ids.has(clone.parent)) {
+      const siblings = childrenByParent.get(clone.parent) ?? [];
+      siblings.push(clone);
+      childrenByParent.set(clone.parent, siblings);
+    } else {
+      filed.push(clone);
+    }
+  }
+  return { filed, childrenByParent };
+}
+
+/** The columns as drawn: existing, non-sub clones only, with anything unfiled appended to its
+ *  home column. Returns `columns` unchanged in shape, so the caller can map over it directly. */
 export function resolveColumns(columns: BoardColumn[], clones: Clone[]): BoardColumn[] {
-  const live = new Map(clones.map((c) => [c.id, c]));
+  const live = new Map(subCloneTree(clones).filed.map((c) => [c.id, c]));
   const filed = new Set<string>();
   const out = columns.map((column) => {
     const cloneIds = column.cloneIds.filter((id) => {
@@ -53,7 +82,7 @@ export function resolveColumns(columns: BoardColumn[], clones: Clone[]): BoardCo
     return { ...column, cloneIds };
   });
   if (out.length === 0) return out;
-  for (const clone of clones) {
+  for (const clone of live.values()) {
     if (filed.has(clone.id)) continue;
     const home = homeFor(out, clone);
     const column = out.find((c) => c.id === home);

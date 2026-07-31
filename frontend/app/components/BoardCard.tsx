@@ -1,9 +1,13 @@
 // One clone as a board card. The card body is the same SidebarClone the list layout uses,
 // so a card keeps every action and metric it had in the sidebar; this wraps it in the
 // rounded, shadowed frame a board column expects and makes it draggable.
+//
+// A card holds one clone plus, through `children`, its sub clones. One frame around the whole
+// group is what says they belong to the clone that spawned them — separate cards would read
+// as peers, and a gap between them as unrelated work.
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import { SidebarClone, type SidebarCloneProps } from "~/components/SidebarClone";
 
@@ -24,8 +28,12 @@ const LIFTED =
   "shadow-[0_4px_16px_rgb(15_23_42_/_0.06),0_16px_48px_rgb(15_23_42_/_0.10)] dark:shadow-[0_4px_16px_rgb(0_0_0_/_0.3),0_16px_48px_rgb(0_0_0_/_0.4)]";
 
 /** The card body, no drag wiring. Used for the drag overlay, where dnd-kit positions the
- *  node itself. */
-export function BoardCardBody({ lifted = false, ...card }: SidebarCloneProps & { lifted?: boolean }) {
+ *  node itself. `children` are this clone's sub-clone rows, drawn inside the same frame. */
+export function BoardCardBody({
+  lifted = false,
+  children,
+  ...card
+}: SidebarCloneProps & { lifted?: boolean; children?: ReactNode }) {
   return (
     <div
       className={`overflow-hidden rounded-lg bg-white dark:bg-slate-900 ${OUTLINE} ${
@@ -33,11 +41,16 @@ export function BoardCardBody({ lifted = false, ...card }: SidebarCloneProps & {
       }`}
     >
       <SidebarClone {...card} />
+      {children}
     </div>
   );
 }
 
-export function BoardCard({ id, ...card }: SidebarCloneProps & { id: string }) {
+export function BoardCard({
+  id,
+  children,
+  ...card
+}: SidebarCloneProps & { id: string; children?: ReactNode }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id,
     // A clone with an operation in flight (delete, or a fresh clone finishing its setup)
@@ -54,7 +67,9 @@ export function BoardCard({ id, ...card }: SidebarCloneProps & { id: string }) {
 
   return (
     <div ref={setNodeRef} style={style}>
-      <BoardCardBody {...card} dragAttributes={attributes} dragListeners={listeners} />
+      <BoardCardBody {...card} dragAttributes={attributes} dragListeners={listeners}>
+        {children}
+      </BoardCardBody>
     </div>
   );
 }

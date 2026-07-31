@@ -147,13 +147,15 @@ export const cloneIds: string[] = hosts.map((h) => h.id);
 // --- board columns ----------------------------------------------------------
 // The dashboard board's swim lanes. `legacy-desktop` is deliberately in none of them: an
 // unfiled clone shows up in the first column, which is how a new clone reaches the board.
+// `pega-we-142-helper` is in none of them either, for the opposite reason: it is a sub clone,
+// so the board draws it under its parent rather than filing it anywhere.
 
 export const boardColumns: BoardColumn[] = [
   { id: "todo", title: "Todo", cloneIds: [cloneIdle.id, cloneNoToken.id], archive: false },
   {
     id: "doing",
     title: "In progress",
-    cloneIds: [cloneWorking.id, cloneSubClone.id, cloneDualProvider.id],
+    cloneIds: [cloneWorking.id, cloneDualProvider.id],
     archive: false,
   },
   { id: "blocked", title: "Blocked", cloneIds: [cloneOffline.id], archive: false },

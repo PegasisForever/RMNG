@@ -10,6 +10,10 @@
 // into a flagged column archives, dragging out of one starts the clone again. The card is
 // stored in the column it was dropped in either way, so it sits still while the call
 // round-trips instead of bouncing back to where it came from and forward again.
+//
+// Sub clones are the one thing a column does not hold. They hang under their parent's card,
+// collapsed until asked for, and carry no sortable id of their own — so a drag can never
+// separate a helper from the clone that spawned it, and moving the parent takes them along.
 import {
   closestCorners,
   DndContext,
@@ -30,7 +34,8 @@ import { type ReactNode, useState } from "react";
 
 import { BoardCard, BoardCardBody } from "~/components/BoardCard";
 import { BoardColumnPanel } from "~/components/BoardColumnPanel";
-import { archivesOnDrop, resolveColumns, type BoardColumn } from "~/lib/board";
+import { SidebarClone } from "~/components/SidebarClone";
+import { archivesOnDrop, resolveColumns, subCloneTree, type BoardColumn } from "~/lib/board";
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
@@ -165,7 +170,18 @@ export function Board({
 }: BoardProps) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [preview, setPreview] = useState<Lane[] | null>(null);
+  // Which parents have their sub clones showing. Collapsed by default: a parent working
+  // through a task spawns helpers constantly, and every one of them expanded would bury the
+  // clones the operator actually filed.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const toggleExpand = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
 
+  const { childrenByParent } = subCloneTree(clones);
   const byId = new Map(clones.map((clone) => [clone.id, clone]));
   const titles = new Map(columns.map((column) => [column.id, column.title]));
   const base: Lane[] = resolveColumns(columns, clones).map((column) => ({
@@ -203,6 +219,24 @@ export function Board({
     onArchive: () => onArchiveClone(clone),
     onUnarchive: () => onUnarchiveClone(clone),
   });
+
+  /** A clone's sub-clone rows, or null when they are collapsed or it has none.
+   *
+   *  Sub clones share their parent's card rather than taking one each, and carry no sortable
+   *  id: a drag cannot separate a helper from the clone that spawned it, and moving the
+   *  parent takes them along. The hairline is the only thing dividing the rows inside one
+   *  frame.
+   *
+   *  The column and the drag overlay both draw through this, so a card in flight carries the
+   *  same rows as the one it lifted out of. */
+  const subRows = (parentId: string) =>
+    expanded.has(parentId)
+      ? (childrenByParent.get(parentId) ?? []).map((child) => (
+          <div key={child.id} className="border-t border-slate-900/10 dark:border-white/10">
+            <SidebarClone isChild {...cardProps(child)} />
+          </div>
+        ))
+      : null;
 
   const onDragStart = (event: DragStartEvent) => setDragId(String(event.active.id));
 
@@ -271,14 +305,37 @@ export function Board({
           >
             {lane.cloneIds.map((id) => {
               const clone = byId.get(id);
-              return clone ? <BoardCard key={id} id={id} {...cardProps(clone)} /> : null;
+              if (!clone) return null;
+              const children = childrenByParent.get(id) ?? [];
+              const open = expanded.has(id);
+              return (
+                <BoardCard
+                  key={id}
+                  id={id}
+                  {...cardProps(clone)}
+                  childCount={children.length}
+                  expanded={open}
+                  onToggleExpand={() => toggleExpand(id)}
+                >
+                  {subRows(id)}
+                </BoardCard>
+              );
             })}
           </BoardColumnPanel>
         ))}
       </div>
 
       <DragOverlay>
-        {dragged ? <BoardCardBody lifted {...cardProps(dragged)} /> : null}
+        {dragged ? (
+          <BoardCardBody
+            lifted
+            {...cardProps(dragged)}
+            childCount={(childrenByParent.get(dragged.id) ?? []).length}
+            expanded={expanded.has(dragged.id)}
+          >
+            {subRows(dragged.id)}
+          </BoardCardBody>
+        ) : null}
       </DragOverlay>
     </DndContext>
   );
