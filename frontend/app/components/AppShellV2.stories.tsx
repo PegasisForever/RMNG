@@ -13,11 +13,13 @@ import {
   chatMessages,
   chatNow,
   claudeAccounts,
+  cloneGroups,
   cloneNoToken,
   appConfig,
   cloneOperation,
   cloneTokens,
   cloneWorking,
+  codexGroups,
   hosts,
   images,
   lxcStats,
@@ -102,6 +104,8 @@ const settingsStubs = {
 
 const rail = {
   accounts: claudeAccounts,
+  cloneGroups,
+  codexGroups,
   lxcStats,
   operations: [],
   presetNames: ["Default", "Focus"],
@@ -286,7 +290,7 @@ export const EmptyBoard: Story = {
       clones: [],
       selectedId: null,
     },
-    rail: { ...rail, accounts: [], lxcStats: null },
+    rail: { ...rail, accounts: [], cloneGroups: [], codexGroups: [], lxcStats: null },
     selectedClone: null,
   },
 };

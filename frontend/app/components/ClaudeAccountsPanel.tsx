@@ -12,6 +12,7 @@ import claudeLogo from "../assets/claude.svg";
 import { orderedWithinBuckets, useAccountOrder } from "~/lib/accountOrder";
 import { resetTooltip } from "~/lib/format";
 import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow } from "~/lib/types";
+import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
 const FIVE_H_MS = 5 * 60 * 60 * 1000;
 const SEVEN_D_MS = 7 * 24 * 60 * 60 * 1000;
@@ -89,6 +90,45 @@ function Bar({
   );
 }
 
+/** One rendered section: a configured pool, or the leftovers that belong to none. */
+export interface AccountSection {
+  /** Pool name, or null for the accounts no pool claims. */
+  name: string | null;
+  /** Which provider's pools this came from, so two pools sharing a name stay distinct. */
+  provider: "claude" | "codex";
+  accounts: ClaudeUsage[];
+}
+
+/** Split accounts into their pools, keeping `ordered`'s order inside each one.
+ *
+ *  An account in several pools appears in each of them: the pools are how a clone's binding
+ *  is resolved, so seeing an account once under "Medi" and again under "Personal" is the
+ *  point, not a duplicate to collapse.
+ *
+ *  A configured pool with no accounts still renders. An empty pool is a misconfiguration
+ *  worth seeing, and it is exactly the state that leaves clones bound to it unassigned. */
+export function groupAccounts(
+  ordered: ClaudeUsage[],
+  cloneGroups: CloneGroup[],
+  codexGroups: CloneGroup[],
+): AccountSection[] {
+  const out: AccountSection[] = [];
+  for (const provider of ["claude", "codex"] as const) {
+    const rows = ordered.filter((a) => (a.provider ?? "claude") === provider);
+    const groups = provider === "claude" ? cloneGroups : codexGroups;
+    const claimed = new Set<string>();
+    for (const group of groups) {
+      const emails = new Set(group.accounts);
+      const accounts = rows.filter((a) => emails.has(a.email));
+      accounts.forEach((a) => claimed.add(a.id));
+      out.push({ name: group.name, provider, accounts });
+    }
+    const loose = rows.filter((a) => !claimed.has(a.id));
+    if (loose.length > 0) out.push({ name: null, provider, accounts: loose });
+  }
+  return out;
+}
+
 function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
   const resetCredits =
     a.provider === "codex" && a.resetCredits != null ? Number(a.resetCredits) : null;
@@ -145,10 +185,16 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
 
 export function ClaudeAccountsPanel({
   accounts,
+  cloneGroups = [],
+  codexGroups = [],
   onRefresh,
   onImport,
 }: {
   accounts: ClaudeUsage[];
+  /** Configured Claude pools (`config.cloneGroups`). With none, the list stays flat. */
+  cloneGroups?: CloneGroup[];
+  /** Configured Codex pools (`config.codexGroups`). */
+  codexGroups?: CloneGroup[];
   onRefresh: () => void | Promise<void>;
   onImport: () => void | Promise<void>;
 }) {
@@ -162,6 +208,11 @@ export function ClaudeAccountsPanel({
     (a) => a.id,
     acctOrder,
   );
+  // With no pools configured there is nothing to group by, so the list stays flat.
+  const sections =
+    cloneGroups.length + codexGroups.length > 0
+      ? groupAccounts(rows, cloneGroups, codexGroups)
+      : [];
   const [busy, setBusy] = useState(false);
   const wrap = (fn: () => void | Promise<void>) => async () => {
     setBusy(true);
@@ -209,10 +260,33 @@ export function ClaudeAccountsPanel({
         >
           Import Claude account
         </button>
-      ) : (
+      ) : sections.length === 0 ? (
         <div className="mt-0.5 divide-y divide-slate-200/70 dark:divide-slate-700/70">
           {rows.map((a) => (
             <Row key={a.id} a={a} now={now} />
+          ))}
+        </div>
+      ) : (
+        <div className="mt-0.5 space-y-1.5">
+          {sections.map((section) => (
+            <div key={`${section.provider}|${section.name ?? ""}`}>
+              <h3 className="px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                {section.name ?? "No pool"}
+              </h3>
+              {section.accounts.length === 0 ? (
+                <p className="px-1 text-[10px] text-slate-400 dark:text-slate-500">
+                  no accounts
+                </p>
+              ) : (
+                <div className="divide-y divide-slate-200/70 dark:divide-slate-700/70">
+                  {section.accounts.map((a) => (
+                    // An account in two pools renders in both, so the pool has to be part of
+                    // the key.
+                    <Row key={`${section.provider}|${section.name ?? ""}|${a.id}`} a={a} now={now} />
+                  ))}
+                </div>
+              )}
+            </div>
           ))}
         </div>
       )}

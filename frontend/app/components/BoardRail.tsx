@@ -8,6 +8,7 @@ import { Settings } from "lucide-react";
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
 import type { ClaudeUsage, Operation } from "~/lib/types";
+import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 
 /** The whole-container totals as one line: CPU percentage, memory used, physical disk used.
@@ -30,6 +31,10 @@ export function formatLxcUsage(
 export interface BoardRailProps {
   /** Per-account usage rows (both providers), from `ControlState.claudeAccounts`. */
   accounts: ClaudeUsage[];
+  /** Configured Claude pools (`config.cloneGroups`) — the usage list groups by these. */
+  cloneGroups?: CloneGroup[];
+  /** Configured Codex pools (`config.codexGroups`). */
+  codexGroups?: CloneGroup[];
   /** Live CT-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
   lxcStats: LxcStats | null;
   /** All operations; the running ones render as progress rows. */
@@ -48,6 +53,8 @@ export interface BoardRailProps {
 
 export function BoardRail({
   accounts,
+  cloneGroups,
+  codexGroups,
   lxcStats,
   operations,
   presetNames,
@@ -105,7 +112,13 @@ export function BoardRail({
         </div>
       ) : null}
 
-      <ClaudeAccountsPanel accounts={accounts} onImport={onImportAccount} onRefresh={onRefresh} />
+      <ClaudeAccountsPanel
+        accounts={accounts}
+        cloneGroups={cloneGroups}
+        codexGroups={codexGroups}
+        onImport={onImportAccount}
+        onRefresh={onRefresh}
+      />
 
       {lxcUsage ? (
         <div

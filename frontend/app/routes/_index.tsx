@@ -48,6 +48,7 @@ import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
+import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
@@ -247,6 +248,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       forwards={forwards}
       sshPublicHost={cfg.ssh?.publicHost ?? ""}
       bastionPort={cfg.listen.bastion}
+      cloneGroups={cfg.cloneGroups}
+      codexGroups={cfg.codexGroups}
     />
   );
 }
@@ -257,6 +260,8 @@ function Dashboard({
   forwards,
   sshPublicHost,
   bastionPort,
+  cloneGroups,
+  codexGroups,
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
@@ -267,6 +272,10 @@ function Dashboard({
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied SSH commands jump through. */
   bastionPort: number;
+  /** Configured Claude pools (`config.cloneGroups`) — the rail's usage list groups by these. */
+  cloneGroups: CloneGroup[];
+  /** Configured Codex pools (`config.codexGroups`). */
+  codexGroups: CloneGroup[];
 }) {
   // OS notification whenever a clone transitions out of `working` (idle/offline) while
   // it isn't the selected one — driven by the server's `unread` edge. Clicking it selects
@@ -414,6 +423,8 @@ function Dashboard({
       onSideFocusChange={setSideFocus}
       rail={{
         accounts,
+        cloneGroups,
+        codexGroups,
         lxcStats,
         operations: state.operations,
         presetNames: state.layoutPresetNames ?? [],
