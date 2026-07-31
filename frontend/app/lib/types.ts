@@ -7,6 +7,7 @@
 // invisibly. In-progress clones are kept OUT of `hosts` until they are fully
 // provisioned, so the client never tries to connect to a half-built container.
 
+import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { PortForward } from "~/lib/wire/PortForward";
 
@@ -190,6 +191,8 @@ export interface ControlState {
    *  logs it is derived from get pruned), so it arrives with the ordinary state snapshot
    *  rather than on a volatile bus like `stats`. */
   cloneTokens: Record<string, CloneTokens>;
+  /** The board's columns, left to right. Empty until the operator makes one. */
+  boardColumns: BoardColumn[];
 }
 
 export function emptyState(): ControlState {
@@ -202,6 +205,7 @@ export function emptyState(): ControlState {
     activeLayout: "",
     layoutPresetNames: [],
     cloneTokens: {},
+    boardColumns: [],
   };
 }
 

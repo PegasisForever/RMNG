@@ -11,16 +11,18 @@ no signaling** in this app.
 
 ## What's reused (≈99% of the current UI)
 
-- Sidebar host list + selection, drag-reorder (`SidebarHost`, dnd-kit).
+- Clone board: a card per clone in operator-made columns, drag to move (`Board`, dnd-kit).
 - `CloneModal` (existing/new/plain ticket + Claude account picker).
 - `ClaudeAccountsPanel` (5h/7d usage bars).
 - `ChatPanel` (per-host agent chat over `/api/chat/:id/events`).
-- `HostEditor` (notes/BlockNote + uploads).
+- `CloneEditor` (notes/BlockNote + uploads).
 - `OperationProgress` (clone/delete progress).
 - SSE subscription to `/events` → `ControlState`.
 
-The two-pane layout stays Notes/Chat (`pane: "notes" | "chat"`) — the planned third
-"monitor" pane is dropped.
+The page is the board across 70% of the width and the selected clone's notes over its
+agent chat across the other 30% (`AppShellV2`). Below the `lg` breakpoint the three cannot
+share the screen, so a segmented control picks one (`pane: "board" | "notes" | "chat"`). The
+planned "monitor" pane is dropped.
 
 ## What's new
 

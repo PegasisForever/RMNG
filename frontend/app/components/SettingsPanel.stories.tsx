@@ -1,9 +1,11 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { SettingsPanel } from "./SettingsPanel";
+import { newColumnId, removeColumn } from "~/lib/board";
 import type { Operation } from "~/lib/types";
-import { appConfig, claudeAccounts, images } from "~/stories/fixtures";
+import { appConfig, boardColumns, claudeAccounts, images } from "~/stories/fixtures";
 
 // Mocked server calls — the component never imports the real API, so a story just
 // injects these. `fn(impl)` both runs the implementation and records the call in the
@@ -61,6 +63,44 @@ const meta = {
     onDeleteAccount: fn(),
     onDeleteCodexAccount: fn(),
     onImportAccount: fn(),
+    boardColumns,
+    boardColumnCounts: { todo: 3, doing: 3, blocked: 1 },
+    onAddBoardColumn: fn(),
+    onRenameBoardColumn: fn(),
+    onDeleteBoardColumn: fn(),
+    onReorderBoardColumns: fn(),
+  },
+  /** The board-columns editor is controlled, so the story holds the list. Adding, renaming,
+   *  reordering and deleting all take effect here, and still log to the Actions panel. */
+  render: (args) => {
+    const [columns, setColumns] = useState(args.boardColumns ?? []);
+    return (
+      <SettingsPanel
+        {...args}
+        boardColumns={columns}
+        onAddBoardColumn={(title) => {
+          setColumns((prev) => [...prev, { id: newColumnId(title, prev), title, cloneIds: [] }]);
+          args.onAddBoardColumn?.(title);
+        }}
+        onRenameBoardColumn={(columnId, title) => {
+          setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, title } : c)));
+          args.onRenameBoardColumn?.(columnId, title);
+        }}
+        onDeleteBoardColumn={(columnId) => {
+          setColumns((prev) => removeColumn(prev, columnId));
+          args.onDeleteBoardColumn?.(columnId);
+        }}
+        onReorderBoardColumns={(ids) => {
+          setColumns((prev) =>
+            ids.flatMap((id) => {
+              const column = prev.find((c) => c.id === id);
+              return column ? [column] : [];
+            }),
+          );
+          args.onReorderBoardColumns?.(ids);
+        }}
+      />
+    );
   },
 } satisfies Meta<typeof SettingsPanel>;
 

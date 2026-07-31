@@ -22,7 +22,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET | `/api/state` | Single-shot persisted `ControlState` snapshot | 200 `ControlState` |
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
 | POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
-| POST | `/api/reorder` | Reorder the clone list | 200 `ControlState` |
+| PUT | `/api/board` | Replace the board's columns | 200 `ControlState` |
 | POST | `/api/clone` | Start a clone from an image (Linear ticket / new ticket / plain / raw hostname) | 200 `{ok, op}` |
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
@@ -77,9 +77,10 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 |---|---|---|
 | `selected` | `string?` | clone id shown in the viewer |
 | `monitors` | `MonitorSpec[]` | legacy field, kept for JSON back-compat; no longer populated (always `[]`) — use `activeLayout` + the config's `layoutPresets` |
-| `activeLayout` | `string` | name of the active layout preset, mirrored from config so the sidebar switcher updates over SSE |
-| `layoutPresetNames` | `string[]` | names of all layout presets, in config order — drives the sidebar's segmented preset buttons |
+| `activeLayout` | `string` | name of the active layout preset, mirrored from config so the board rail's switcher updates over SSE |
+| `layoutPresetNames` | `string[]` | names of all layout presets, in config order — drives the board rail's preset buttons |
 | `hosts` | `Clone[]` | all registered clones (managed + unmanaged) |
+| `boardColumns` | `BoardColumn[]` | the board's columns, left to right — see [below](#boardcolumns) |
 | `operations` | `Operation[]` | in-flight + recent clone/delete/archive/unarchive/pull/commit/update jobs |
 | `claudeAccounts` | `ClaudeUsage[]` | every imported account's token-free usage view — **both** providers in one flat list, tagged by `provider` |
 | `codexResetMarks` | `CodexResetMark[]` | which Codex accounts have already spent a rate-limit reset this 7d window (cooldown bookkeeping) |
@@ -142,6 +143,24 @@ like `stats` — it never enters `ControlState`/`state.json`. The *desired* rule
 persisted on `Clone.forwards` and edited via `PUT /api/hosts/:id/forwards`.
 
 <a id="clonetokens"></a>
+### `boardColumns` — the board's columns
+
+Each column is `{ id, title, cloneIds }`, and the array order is the board's left-to-right
+order. The operator makes, renames, reorders and deletes columns in Settings; dragging a card
+rewrites `cloneIds`. Both paths write the whole list back through `PUT /api/board`.
+
+Three rules keep the stored list from ever hiding a clone:
+
+- A clone that no column claims is drawn in the **first** column. A newly created clone is
+  therefore visible immediately, with nothing written here first.
+- The **archived** column is not stored. Its contents come from each clone's `archived`
+  flag, so dropping a card there calls `POST /api/hosts/:id/archive` and dragging one out
+  calls the unarchive route; the card follows the server's answer, not the drag.
+- An id whose clone no longer exists is ignored on render, and the next write drops it.
+
+An empty list is legal and means the operator deleted every column. The frontend then draws
+one default column, so a fresh install still shows its clones.
+
 ### `cloneTokens` — per-clone token accounting
 `{ inputTokens, outputTokens, fableActive }` per clone id, accumulated by
 [agentlog.rs](../crates/control-server/src/agentlog.rs) from the agent CLIs' own session
@@ -227,14 +246,20 @@ holding its parent by the state it is still displayed with. Parentage is one lev
 
 ---
 
-## Clone selection & ordering
+## Clone selection & the board
 
 ### `POST /api/activate` — body `{ "id": string | null }`
 Set `selected` (or clear with `null`). Returns the updated `ControlState`. The media plane
 re-targets port 1 to the newly selected clone.
 
-### `POST /api/reorder` — body `{ "order": string[] }`
-Reorder `hosts` by the given list of ids. Returns the updated `ControlState`.
+### `PUT /api/board` — body `{ "columns": BoardColumn[] }`
+Replace `boardColumns` wholesale. Returns the updated `ControlState`.
+
+A column is `{ id, title, cloneIds }`. Two things are deliberately not stored. The archived
+column is derived from each clone's `archived` flag, so a clone dropped there is archived
+through `/api/hosts/:id/archive` and never appears in a stored column. A clone that no
+column claims is drawn in the first one, which is how a newly created clone reaches the
+board. Ids of deleted clones are ignored on render and dropped by the next write.
 
 ---
 

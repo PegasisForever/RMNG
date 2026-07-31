@@ -1,4 +1,5 @@
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
+import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 // The hand-maintained `Operation`, not the generated `wire/Operation`: ts-rs maps the
@@ -55,7 +56,6 @@ export type ClonePayload = (
 
 export const activate = (id: string | null) =>
   postJson("/api/activate", { id });
-export const reorder = (order: string[]) => postJson("/api/reorder", { order });
 /** Start a clone from a source image (`image` = a canonical reference from
  *  `listImages`, e.g. `pegasis0/rmng-template:latest`). Returns the driving Operation so
  *  the caller can follow it; progress streams over /events. */
@@ -77,6 +77,11 @@ export const putForwards = (
   cloneId: string,
   forwards: Array<{ id?: string; remotePort: number; localPort: number; enabled: boolean; label?: string }>,
 ) => putJson(`/api/hosts/${encodeURIComponent(cloneId)}/forwards`, { forwards });
+
+/** Replace the board's columns wholesale. The client owns the layout rules and sends the
+ *  settled list; the server just stores it and broadcasts the new state. */
+export const putBoardColumns = (columns: BoardColumn[]) =>
+  putJson("/api/board", { columns });
 
 // --- images (clone-source templates) ---------------------------------------
 

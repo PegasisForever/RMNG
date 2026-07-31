@@ -3,7 +3,11 @@
 // fixture + these callbacks". Kept in one place so the Sidebar / SidebarClone /
 // Settings stories stay consistent.
 
-import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
+import type { PartialBlock } from "@blocknote/core";
+
+import type { BoardColumn } from "~/lib/board";
+import type { ChatMessage, ClaudeUsage, Clone, Operation } from "~/lib/types";
+import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
@@ -139,6 +143,20 @@ export const hosts: Clone[] = [
   cloneDualProvider,
 ];
 export const cloneIds: string[] = hosts.map((h) => h.id);
+
+// --- board columns ----------------------------------------------------------
+// The dashboard board's swim lanes. `legacy-desktop` is deliberately in none of them: an
+// unfiled clone shows up in the first column, which is how a new clone reaches the board.
+
+export const boardColumns: BoardColumn[] = [
+  { id: "todo", title: "Todo", cloneIds: [cloneIdle.id, cloneNoToken.id] },
+  {
+    id: "doing",
+    title: "In progress",
+    cloneIds: [cloneWorking.id, cloneSubClone.id, cloneDualProvider.id],
+  },
+  { id: "blocked", title: "Blocked", cloneIds: [cloneOffline.id] },
+];
 
 // --- live container usage (the volatile `stats` SSE map) --------------------
 
@@ -301,6 +319,68 @@ export const deleteOperation: Operation = {
   log: ["stopping container"],
   startedAt: 1_700_000_000_000,
 };
+
+// --- agent chat -------------------------------------------------------------
+// The page story renders the chat pane from these instead of the per-clone SSE stream.
+// `chatNow` is the clock the view is given, so the scheduled-message labels ("Today
+// 15:30") come out the same on every load.
+
+export const chatNow = new Date(2026, 6, 27, 14, 5).getTime();
+
+export const chatMessages: ChatMessage[] = [
+  {
+    id: "m1",
+    role: "user",
+    text: "Open the sidebar mockup in Figma and compare it against the running dashboard.",
+    ts: chatNow - 9 * 60_000,
+  },
+  {
+    id: "m2",
+    role: "assistant",
+    text: "Both are open side by side. The metric row is 4px tighter in the mockup and the token counts sit on the second line rather than the first.",
+    ts: chatNow - 8 * 60_000,
+  },
+  {
+    id: "m3",
+    role: "user",
+    text: "Make the running dashboard match, then take a screenshot.",
+    ts: chatNow - 2 * 60_000,
+  },
+];
+
+/** Queued for later delivery, soonest first. */
+export const scheduledMessages: ScheduledMessage[] = [
+  {
+    id: "s1",
+    at: BigInt(chatNow + 55 * 60_000),
+    createdAt: BigInt(chatNow - 3 * 60_000),
+    text: "Re-run the visual diff once the build lands.",
+  },
+  {
+    id: "s2",
+    at: BigInt(chatNow + 20 * 3600_000),
+    createdAt: BigInt(chatNow - 3 * 60_000),
+    text: "Summarize what changed in the sidebar and post it in the notes.",
+  },
+];
+
+// --- clone notes ------------------------------------------------------------
+
+/** A sample BlockNote document, so the notes pane in the page story has real content
+ *  without touching /api/notes. */
+export const notesBlocks: PartialBlock[] = [
+  { type: "heading", props: { level: 2 }, content: "Sidebar redesign" },
+  {
+    type: "paragraph",
+    content:
+      "The clone rows carry three separate numbers (CPU, memory, tokens) and they currently compete for the same line. Give tokens their own row.",
+  },
+  { type: "bulletListItem", content: "Fixed-width metric labels so the arrows line up" },
+  { type: "bulletListItem", content: "Provider logo shrinks to 12px in the usage rows" },
+  { type: "checkListItem", props: { checked: true }, content: "Count tokens from the agent logs" },
+  { type: "checkListItem", props: { checked: false }, content: "Roll sub clone activity up to the parent" },
+  { type: "paragraph", content: "" },
+];
 
 // --- redacted app config (for the Settings story) --------------------------
 

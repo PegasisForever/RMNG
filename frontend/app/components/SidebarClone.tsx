@@ -476,7 +476,7 @@ export function SidebarClone({
       {...dragListeners}
       aria-pressed={selected}
       onClick={onSelect}
-      title={`${clone.id} · ${clone.host}:${clone.port}`}
+      title={clone.id}
       className={`group flex touch-none items-start gap-1 border-b border-b-slate-200 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 dark:border-b-slate-700 ${
         // Sub clone rows are indented under their parent; top-level rows keep the normal gutter.
         isChild ? "pl-6" : "pl-1.5"

@@ -31,7 +31,7 @@ pub use config::{
     PresetRedacted, SetupEnv, SshConfig,
 };
 pub use control::{
-    Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
+    BoardColumn, Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
     CloneTokens, CodexResetMark, ContainerStats, ControlState, RmngClone,
     LayoutPreset, LxcStats,
     MonitorSpec, MonitorState, Operation, OperationKind, OperationStatus, PortForward, Provider,

@@ -50,7 +50,7 @@ pub fn router(app: App) -> Router {
         .route("/api/state", get(state_get))
         .route("/api/stats", get(stats_get))
         .route("/api/activate", post(activate))
-        .route("/api/reorder", post(reorder))
+        .route("/api/board", put(board_put))
         .route("/api/clone", post(clone))
         .route("/api/layout/activate", post(layout_activate))
         .route("/api/delete", post(delete))
@@ -286,24 +286,20 @@ async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<
 }
 
 #[derive(Deserialize)]
-struct ReorderReq {
-    order: Vec<String>,
+#[serde(rename_all = "camelCase")]
+struct BoardPutReq {
+    columns: Vec<wire::BoardColumn>,
 }
 
-async fn reorder(State(app): State<App>, Json(req): Json<ReorderReq>) -> Json<ControlState> {
-    let next = app.store.mutate(|s| {
-        let mut by_id: std::collections::HashMap<String, _> =
-            s.hosts.drain(..).map(|h| (h.id.clone(), h)).collect();
-        let mut out = Vec::with_capacity(by_id.len());
-        for id in &req.order {
-            if let Some(h) = by_id.remove(id) {
-                out.push(h);
-            }
-        }
-        out.extend(by_id.into_values());
-        s.hosts = out;
-    });
-    Json(next)
+/// Replace the board's columns wholesale. The frontend owns the layout rules (which clone
+/// sits where, what a delete does with the leftovers) and sends the settled list, so there
+/// is nothing to merge here.
+///
+/// A clone id may appear in more than one column only by a client bug; the board draws the
+/// first occurrence and drops the rest, so this stores what it is given rather than
+/// second-guessing it.
+async fn board_put(State(app): State<App>, Json(req): Json<BoardPutReq>) -> Json<ControlState> {
+    Json(app.store.mutate(|s| s.board_columns = req.columns))
 }
 
 #[derive(Deserialize)]
@@ -2151,6 +2147,43 @@ mod tests {
             image: image.into(),
             running: true,
         }
+    }
+
+    fn column(id: &str, clone_ids: &[&str]) -> wire::BoardColumn {
+        wire::BoardColumn {
+            id: id.into(),
+            title: id.into(),
+            clone_ids: clone_ids.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn board_columns_are_replaced_wholesale_and_persist() {
+        let app = App::test_app();
+
+        board_put(State(app.clone()), Json(BoardPutReq { columns: vec![column("todo", &["a"])] }))
+            .await;
+        // A second write is a replacement, not a merge: the operator deleting a column has to
+        // be able to make the board smaller.
+        let after =
+            board_put(State(app.clone()), Json(BoardPutReq { columns: vec![column("doing", &[])] }))
+                .await;
+
+        assert_eq!(after.0.board_columns, vec![column("doing", &[])]);
+        assert_eq!(app.store.get().board_columns, vec![column("doing", &[])]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_column_list_clears_the_board() {
+        let app = App::test_app();
+        board_put(State(app.clone()), Json(BoardPutReq { columns: vec![column("todo", &[])] }))
+            .await;
+
+        board_put(State(app.clone()), Json(BoardPutReq { columns: Vec::new() })).await;
+
+        // Deleting the last column is legal; the frontend falls back to a default column so
+        // no clone is ever left without one.
+        assert!(app.store.get().board_columns.is_empty());
     }
 
     #[test]

@@ -47,6 +47,25 @@ pub enum Provider {
     Codex,
 }
 
+/// One column of the dashboard board, holding clone ids top to bottom.
+///
+/// Two things are deliberately absent. The archived column is not stored: its contents come
+/// from [`RmngClone::archived`], so the two can never disagree. And a clone the operator has
+/// not filed anywhere is not stored either: the board draws it in the first column, which is
+/// how a newly created clone shows up without anyone writing it here first.
+///
+/// Ids of clones that no longer exist are harmless — the board ignores them, and the next
+/// move rewrites the column without them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct BoardColumn {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub clone_ids: Vec<String>,
+}
+
 /// Server-owned lifecycle state. Docker supplies container liveness while passive proxy token
 /// activity distinguishes `working` from a running-but-not-working (`idle`) clone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -452,6 +471,10 @@ pub struct ControlState {
     pub layout_preset_names: Vec<String>,
     #[serde(default)]
     pub hosts: Vec<RmngClone>,
+    /// The board's columns, left to right. Empty until the operator makes one, in which
+    /// case the frontend draws a single default column so no clone is ever hidden.
+    #[serde(default)]
+    pub board_columns: Vec<BoardColumn>,
     #[serde(default)]
     pub operations: Vec<Operation>,
     /// Per-account usage view (no tokens). Despite the name it holds **both** providers'

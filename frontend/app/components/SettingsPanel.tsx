@@ -19,6 +19,8 @@ import { ChevronDown, ChevronRight, GripVertical, Plus, Trash2, X } from "lucide
 import { useEffect, useState } from "react";
 
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
+import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
+import type { BoardColumn } from "~/lib/board";
 import { ordered, useAccountOrder } from "~/lib/accountOrder";
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import { OperationProgress } from "~/components/OperationProgress";
@@ -157,6 +159,16 @@ export interface SettingsPanelProps {
   /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
    *  control-server harvests the tokens off a clone that's already signed in. */
   onImportAccount: () => void;
+  // --- board columns ---
+  /** The dashboard board's columns, left to right. Omit to hide the section entirely,
+   *  which is what a page without a board does. */
+  boardColumns?: BoardColumn[];
+  /** Clones per column id, so a delete can say what it displaces. */
+  boardColumnCounts?: Record<string, number>;
+  onAddBoardColumn?: (title: string) => void;
+  onRenameBoardColumn?: (columnId: string, title: string) => void;
+  onDeleteBoardColumn?: (columnId: string) => void;
+  onReorderBoardColumns?: (columnIds: string[]) => void;
 }
 
 /** The drag sensors used by the account lists. `distance: 5` keeps a plain click on the grip
@@ -292,6 +304,12 @@ export function SettingsPanel({
   onDeleteAccount,
   onDeleteCodexAccount,
   onImportAccount,
+  boardColumns,
+  boardColumnCounts,
+  onAddBoardColumn,
+  onRenameBoardColumn,
+  onDeleteBoardColumn,
+  onReorderBoardColumns,
 }: SettingsPanelProps) {
   // The account pool each provider's group editor draws from. `claudeAccounts` carries both
   // providers' rows; `provider` was added later, so rows that predate it (absent/null) are
@@ -712,6 +730,25 @@ export function SettingsPanel({
           <p className="py-8 text-center text-sm text-slate-400 dark:text-slate-500">Loading…</p>
         ) : (
           <div className="space-y-4">
+            {/* Board columns — the dashboard's swim lanes. Clones move between them by drag
+                on the board itself; the columns are made and ordered here. */}
+            {boardColumns ? (
+              <Section
+                title="Board columns"
+                effect="immediate"
+                hint="The dashboard board's columns, left to right. Drag to reorder. Archived is always the last column and is not listed. A clone in no column shows up in the first one."
+              >
+                <BoardColumnsEditor
+                  columns={boardColumns}
+                  counts={boardColumnCounts}
+                  onAddColumn={(title) => onAddBoardColumn?.(title)}
+                  onRenameColumn={(id, title) => onRenameBoardColumn?.(id, title)}
+                  onDeleteColumn={(id) => onDeleteBoardColumn?.(id)}
+                  onReorderColumns={(ids) => onReorderBoardColumns?.(ids)}
+                />
+              </Section>
+            ) : null}
+
             {/* Layout presets — named monitor arrangements; switch the active one from
                 the sidebar. Each preset uses the same editor as before. */}
             <Section

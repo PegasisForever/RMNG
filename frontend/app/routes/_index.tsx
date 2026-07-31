@@ -1,6 +1,6 @@
-import { Menu } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
 
+import { AppShellV2, type ShellPane, type SideFocus } from "~/components/AppShellV2";
 import { ChangeAccountModal } from "~/components/ChangeAccountModal";
 import { CloneModal } from "~/components/CloneModal";
 import { CommitImageModal } from "~/components/CommitImageModal";
@@ -8,7 +8,6 @@ import { ImportAccountModal } from "~/components/ImportAccountModal";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
-import { Sidebar } from "~/components/Sidebar";
 import {
   activate,
   activateLayout,
@@ -23,11 +22,11 @@ import {
   getUpdateStatus,
   listImages,
   pullTemplate,
+  putBoardColumns,
   putConfig,
   putForwards,
   refreshClaudeUsage,
   refreshCodexUsage,
-  reorder,
   restartServer,
   swapClaudeAccount,
   swapCodexAccount,
@@ -35,13 +34,21 @@ import {
   unarchiveClone,
   updateServer,
 } from "~/lib/api";
-import { type ClaudeUsage, type ControlState, type Clone, emptyState } from "~/lib/types";
+import {
+  columnIdOf,
+  moveCard,
+  newColumnId,
+  removeColumn,
+  resolveColumns,
+  withDefaults,
+  type BoardColumn,
+} from "~/lib/board";
+import { type ControlState, type Clone, emptyState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { LxcStats } from "~/lib/wire/LxcStats";
-import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
 import type { Route } from "./+types/_index";
@@ -210,13 +217,9 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       forwards={forwards}
       sshPublicHost={cfg.ssh?.publicHost ?? ""}
       bastionPort={cfg.listen.bastion}
-      cloneGroups={cfg.cloneGroups}
-      codexGroups={cfg.codexGroups}
-      onConfigChange={setCfg}
     />
   );
 }
-
 function Dashboard({
   state,
   stats,
@@ -224,30 +227,20 @@ function Dashboard({
   forwards,
   sshPublicHost,
   bastionPort,
-  cloneGroups,
-  codexGroups,
-  onConfigChange,
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
   lxcStats: LxcStats | null;
   forwards: Record<string, ForwardRuntime[]>;
-  /** `ssh.publicHost` (config) — threaded down to each sidebar row's copied SSH
-   *  command; empty ⇒ falls back to `window.location.hostname`. */
+  /** `ssh.publicHost` (config) — threaded down to each card's copied SSH command;
+   *  empty ⇒ falls back to `window.location.hostname`. */
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied SSH commands jump through. */
   bastionPort: number;
-  /** Configured Claude account pools (from `config.cloneGroups`) — the authoritative list
-   *  for the account pickers. */
-  cloneGroups: CloneGroup[];
-  /** Configured Codex account pools (from `config.codexGroups`). */
-  codexGroups: CloneGroup[];
-  /** Update the gate's config after an account/pool edit (returns the fresh redacted config). */
-  onConfigChange: (cfg: AppConfigRedacted) => void;
 }) {
   // OS notification whenever a clone transitions out of `working` (idle/offline) while
   // it isn't the selected one — driven by the server's `unread` edge. Clicking it selects
-  // that clone, the same activate path the sidebar uses.
+  // that clone, the same activate path a card click uses.
   useCloneNotifications(state.hosts, (id) => run(activate(id)));
 
   const [error, setError] = useState<string | null>(null);
@@ -280,27 +273,24 @@ function Dashboard({
     refreshImages();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  // Responsive state. Below `lg` the sidebar is an off-canvas drawer; below `xl`
-  // the notes editor and agent chat share the main pane via this tab toggle.
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [pane, setPane] = useState<"notes" | "chat">("notes");
+  // Below `lg` the board and the side panel cannot share the screen, so one of the three
+  // panes wins. Above it, `sideFocus` decides which half of the side panel gets the height.
+  const [pane, setPane] = useState<ShellPane>("board");
+  const [sideFocus, setSideFocus] = useState<SideFocus>("notes");
 
-  // Local display order for smooth drag-and-drop, reconciled with the server.
-  const [order, setOrder] = useState<string[]>(() => state.hosts.map((h) => h.id));
+  // Board columns, held locally so a drag lands instantly, and re-adopted whenever the
+  // server's own list changes. Keyed on the serialized list rather than the array identity:
+  // every SSE frame brings a fresh array, and resetting on each one would undo a drag that
+  // is still in flight.
+  const serverColumns = JSON.stringify(state.boardColumns ?? []);
+  const [columns, setColumns] = useState<BoardColumn[]>(() =>
+    withDefaults(state.boardColumns ?? []),
+  );
   useEffect(() => {
-    const serverIds = state.hosts.map((h) => h.id);
-    setOrder((prev) => {
-      const sameSet =
-        prev.length === serverIds.length && prev.every((id) => serverIds.includes(id));
-      return sameSet ? prev : serverIds;
-    });
-  }, [state.hosts]);
+    setColumns(withDefaults(JSON.parse(serverColumns) as BoardColumn[]));
+  }, [serverColumns]);
 
   const clonesById = new Map(state.hosts.map((h) => [h.id, h]));
-  const orderedClones = order.flatMap((id) => {
-    const h = clonesById.get(id);
-    return h ? [h] : [];
-  });
   const selectedClone = state.selected ? clonesById.get(state.selected) ?? null : null;
 
   // Refetch images when an image-mutating op (pull/commit/delete) leaves the
@@ -322,6 +312,31 @@ function Dashboard({
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
 
+  // Adopt a new column layout locally, then persist it. The board previews a drag on its
+  // own, so by the time this runs the operator has already seen the result; the PUT is
+  // what makes it survive a refresh.
+  const applyColumns = (next: BoardColumn[]) => {
+    setColumns(next);
+    run(putBoardColumns(next));
+  };
+
+  // A clone being provisioned into a specific column. The board can only file a clone that
+  // exists, and the clone does not exist until its op finishes, so the request is parked
+  // here and applied when the clone shows up in `hosts`.
+  const [pendingColumn, setPendingColumn] = useState<{ columnId: string; target: string } | null>(
+    null,
+  );
+  const [newCloneColumn, setNewCloneColumn] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingColumn) return;
+    const { columnId, target } = pendingColumn;
+    if (!state.hosts.some((h) => h.id === target)) return;
+    setPendingColumn(null);
+    if (columnIdOf(columns, target) === columnId) return;
+    applyColumns(moveCard(columns, target, columnId, 0));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.hosts, pendingColumn]);
+
   // Imported accounts, split per provider. `claudeAccounts` carries BOTH providers' rows
   // tagged by `provider`; a row written before that field existed has none, which means
   // Claude — so the Claude side matches on "not codex" rather than on "is claude".
@@ -334,22 +349,19 @@ function Dashboard({
   const onDeleteCodexAccount = (email: string) =>
     run(deleteCodexAccount(email).then(() => refreshCodexUsage()));
 
-  // Hot-swap a clone's account for one provider. `auto` / `none` / `group:<pool>` / an email
-  // all go through the same endpoint; the server installs the token into the clone's
-  // credential file immediately, with no restart.
-  const onSwapAccounts = (cloneId: string, claude: string, codex: string) =>
-    run(
-      Promise.all([
-        swapClaudeAccount(cloneId, claude),
-        swapCodexAccount(cloneId, codex),
-      ]),
-    );
-
-  // Drag-reorder: optimistically adopt the new order (smooth UI), then persist —
-  // the SSE frame confirms after the server writes it.
-  const onReorder = (next: string[]) => {
-    setOrder(next);
-    run(reorder(next));
+  // Archiving rides a drag into the Archived column, and that column's contents come from
+  // the server's `archived` flag rather than from the column list. So when the call fails
+  // the card has to go back where it was: `before` is the layout from before the drop, the
+  // board having fired this callback ahead of the move.
+  const archiveDrop = (clone: Clone, archived: boolean) => {
+    const before = columns;
+    const call = archived ? archiveClone(clone.id) : unarchiveClone(clone.id);
+    call
+      .then(() => setError(null))
+      .catch((e: Error) => {
+        setError(e.message);
+        applyColumns(before);
+      });
   };
 
   // The selected clone, when it can actually parent a sub clone: managed, and top-level
@@ -357,287 +369,248 @@ function Dashboard({
   const subCloneParent =
     selectedClone?.managed && !selectedClone.parent ? selectedClone : null;
 
+  // Clones per column, for the settings editor's counts (unfiled ones ride the first).
+  const columnCounts = Object.fromEntries(
+    resolveColumns(columns, state.hosts).map((c) => [c.id, c.cloneIds.length]),
+  );
+
   return (
-    <div className="flex h-screen flex-col">
-      {error ? (
-        <div className="shrink-0 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
-          {error}
-        </div>
-      ) : null}
-
-      {/* Mobile top bar: hamburger + context. Hidden once the sidebar is static. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 py-2 lg:hidden dark:border-slate-700 dark:bg-slate-800">
-        <button
-          type="button"
-          onClick={() => setSidebarOpen(true)}
-          aria-label="Open menu"
-          className="rounded-md p-1.5 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
-        >
-          <Menu className="size-4" />
-        </button>
-        <span className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-800 dark:text-slate-100">
-          {selectedClone ? selectedClone.id : "rmng control"}
-        </span>
-        {/* Notes/Chat toggle lives here on mobile — the only header < lg. */}
-        {selectedClone ? (
-          <div className="flex shrink-0 gap-0.5 rounded-md bg-slate-100 p-0.5 text-xs font-medium dark:bg-slate-800">
-            <button
-              type="button"
-              onClick={() => setPane("notes")}
-              className={`rounded px-3 py-1 ${
-                pane === "notes"
-                  ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100"
-                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
-              }`}
+    <AppShellV2
+      selectedClone={selectedClone}
+      error={error}
+      pane={pane}
+      onPaneChange={setPane}
+      sideFocus={sideFocus}
+      onSideFocusChange={setSideFocus}
+      rail={{
+        accounts,
+        lxcStats,
+        operations: state.operations,
+        presetNames: state.layoutPresetNames ?? [],
+        activeLayout: state.activeLayout ?? "",
+        onActivateLayout: (name) => run(activateLayout(name)),
+        onOpenSettings: () => setSettingsOpen(true),
+        onImportAccount: () => setImportOpen(true),
+        onRefresh: () => {
+          void Promise.all([refreshClaudeUsage(), refreshCodexUsage()]);
+        },
+      }}
+      board={{
+        columns,
+        clones: state.hosts,
+        stats,
+        cloneTokens: state.cloneTokens,
+        forwards,
+        operations: state.operations,
+        selectedId: state.selected,
+        sshPublicHost,
+        bastionPort,
+        onSelectClone: (clone) => run(activate(clone.id)),
+        onDeleteClone: (clone) => {
+          // Deleting a parent cascades to its sub clones (server-side), so say so up front.
+          const subCount = state.hosts.filter((h) => h.parent === clone.id).length;
+          const subs =
+            subCount > 0 ? ` and its ${subCount} sub clone${subCount === 1 ? "" : "s"}` : "";
+          const msg = clone.managed
+            ? `Delete ${clone.id}${subs}? This destroys its container${subCount > 0 ? "s" : ""}.`
+            : `Remove ${clone.id}? This unregisters the clone.`;
+          if (confirm(msg)) run(deleteClone(clone.id));
+        },
+        onCommitClone: (clone) => setCommitClone(clone),
+        onChangeAccountClone: (clone) => setChangeClone(clone),
+        onPortForwardClone: (clone) => {
+          setForwardError(null);
+          setForwardClone(clone);
+        },
+        onArchiveClone: (clone) => archiveDrop(clone, true),
+        onUnarchiveClone: (clone) => archiveDrop(clone, false),
+        onNewClone: (columnId) => {
+          setNewCloneColumn(columnId);
+          setCloneOpen(true);
+        },
+        onMoveCard: (cloneId, toColumnId, toIndex) =>
+          applyColumns(moveCard(columns, cloneId, toColumnId, toIndex)),
+        onRenameColumn: (columnId, title) =>
+          applyColumns(columns.map((c) => (c.id === columnId ? { ...c, title } : c))),
+      }}
+      notes={
+        selectedClone ? (
+          <ClientOnly>
+            <Suspense
+              fallback={
+                <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
+              }
             >
-              Notes
-            </button>
-            <button
-              type="button"
-              onClick={() => setPane("chat")}
-              className={`rounded px-3 py-1 ${
-                pane === "chat"
-                  ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100"
-                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
-              }`}
+              <CloneEditor key={selectedClone.id} cloneId={selectedClone.id} />
+            </Suspense>
+          </ClientOnly>
+        ) : null
+      }
+      chat={
+        selectedClone ? (
+          <ClientOnly>
+            <Suspense
+              fallback={
+                <div className="p-4 text-sm text-slate-400 dark:text-slate-500">Loading chat…</div>
+              }
             >
-              Chat
-            </button>
-          </div>
-        ) : null}
-      </div>
+              <ChatPanel
+                key={selectedClone.id}
+                cloneId={selectedClone.id}
+                archived={selectedClone.archived === true}
+              />
+            </Suspense>
+          </ClientOnly>
+        ) : null
+      }
+      overlays={
+        <>
+          {cloneOpen ? (
+            <CloneModal
+              images={images}
+              imagesLoading={imagesLoading}
+              operations={state.operations}
+              parentCandidate={subCloneParent}
+              accounts={accounts}
+              onClose={() => {
+                setCloneOpen(false);
+                setNewCloneColumn(null);
+              }}
+              // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
+              // progress, and closes when the op settles. So this just starts it and hands the
+              // Operation back — errors surface inside the dialog, not in the page banner.
+              // The op's target is the new clone's id, which is how it reaches the column
+              // whose button opened this.
+              onClone={(image, payload) =>
+                duplicateClone(image, payload).then((op) => {
+                  if (newCloneColumn) {
+                    setPendingColumn({ columnId: newCloneColumn, target: op.target });
+                  }
+                  return op;
+                })
+              }
+            />
+          ) : null}
 
-      <div className="relative flex min-h-0 flex-1">
-        {/* Backdrop behind the drawer (mobile only, when open). */}
-        {sidebarOpen ? (
-          <div
-            className="fixed inset-0 z-30 bg-slate-900/40 lg:hidden dark:bg-black/60"
-            onClick={() => setSidebarOpen(false)}
-            aria-hidden
-          />
-        ) : null}
+          {settingsOpen ? (
+            <SettingsPanel
+              accounts={accounts}
+              onClose={() => setSettingsOpen(false)}
+              getConfig={getConfig}
+              putConfig={putConfig}
+              testConfig={testConfig}
+              getUpdateStatus={getUpdateStatus}
+              updateServer={updateServer}
+              operations={state.operations}
+              restartServer={restartServer}
+              images={images}
+              imagesLoading={imagesLoading}
+              pullBusy={state.operations.some(
+                (o) => o.kind === "pull" && o.status === "running",
+              )}
+              onPullTemplate={(reference) => run(pullTemplate(reference))}
+              onDeleteImage={(reference) => run(deleteImage(reference))}
+              onImportAccount={() => setImportOpen(true)}
+              onDeleteAccount={onDeleteAccount}
+              onDeleteCodexAccount={onDeleteCodexAccount}
+              boardColumns={columns}
+              boardColumnCounts={columnCounts}
+              onAddBoardColumn={(title) =>
+                applyColumns([
+                  ...columns,
+                  { id: newColumnId(title, columns), title, cloneIds: [] },
+                ])
+              }
+              onRenameBoardColumn={(columnId, title) =>
+                applyColumns(columns.map((c) => (c.id === columnId ? { ...c, title } : c)))
+              }
+              onDeleteBoardColumn={(columnId) => applyColumns(removeColumn(columns, columnId))}
+              onReorderBoardColumns={(ids) =>
+                applyColumns(
+                  ids.flatMap((id) => {
+                    const column = columns.find((c) => c.id === id);
+                    return column ? [column] : [];
+                  }),
+                )
+              }
+            />
+          ) : null}
 
-        {/* Left: clone selection sidebar. Off-canvas drawer < lg, static ≥ lg.
-            Presentational — every server call is a callback wired up here. */}
-        <Sidebar
-          open={sidebarOpen}
-          accounts={accounts}
-          hosts={orderedClones}
-          stats={stats}
-          cloneTokens={state.cloneTokens}
-          lxcStats={lxcStats}
-          forwards={forwards}
-          operations={state.operations}
-          selectedId={state.selected}
-          sshPublicHost={sshPublicHost}
-          bastionPort={bastionPort}
-          presetNames={state.layoutPresetNames ?? []}
-          activeLayout={state.activeLayout ?? ""}
-          onActivateLayout={(name) => run(activateLayout(name))}
-          onOpenSettings={() => setSettingsOpen(true)}
-          onOpenClone={() => setCloneOpen(true)}
-          onImportAccount={() => setImportOpen(true)}
-          onRefresh={() => {
-            void Promise.all([refreshClaudeUsage(), refreshCodexUsage()]);
-          }}
-          onSelectClone={(clone) => {
-            run(activate(clone.id));
-            setSidebarOpen(false);
-          }}
-          onDeleteClone={(clone) => {
-            // Deleting a parent cascades to its sub clones (server-side), so say so up front.
-            const subCount = state.hosts.filter((h) => h.parent === clone.id).length;
-            const subs =
-              subCount > 0 ? ` and its ${subCount} sub clone${subCount === 1 ? "" : "s"}` : "";
-            const msg = clone.managed
-              ? `Delete ${clone.id}${subs}? This destroys its container${subCount > 0 ? "s" : ""}.`
-              : `Remove ${clone.id}? This unregisters the clone.`;
-            if (confirm(msg)) run(deleteClone(clone.id));
-          }}
-          onCommitClone={(clone) => setCommitClone(clone)}
-          onChangeAccountClone={(clone) => setChangeClone(clone)}
-          onPortForwardClone={(clone) => {
-            setForwardError(null);
-            setForwardClone(clone);
-          }}
-          onArchiveClone={(clone) => run(archiveClone(clone.id))}
-          onUnarchiveClone={(clone) => run(unarchiveClone(clone.id))}
-          onReorder={onReorder}
-        />
+          {commitClone ? (
+            <CommitImageModal
+              cloneId={commitClone.id}
+              busy={committing}
+              onClose={() => setCommitClone(null)}
+              onCommit={(name) => {
+                setCommitting(true);
+                commitImage(commitClone.id, name)
+                  .then(() => setError(null))
+                  .catch((e: Error) => setError(e.message))
+                  .finally(() => {
+                    setCommitting(false);
+                    setCommitClone(null);
+                  });
+              }}
+            />
+          ) : null}
 
-        {/* Right: per-clone editor */}
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white dark:bg-slate-900">
-          {selectedClone ? (
-            <>
-              {/* Per-clone header — only ≥ lg; on mobile the top bar shows id + tabs. */}
-              <div className="hidden shrink-0 items-center gap-3 border-b border-slate-100 px-4 py-3 sm:px-6 lg:flex dark:border-slate-800">
-                <h2 className="min-w-0 break-words text-base font-semibold text-slate-900 dark:text-slate-100">
-                  {selectedClone.id}
-                </h2>
-                <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">
-                  {selectedClone.host}:{selectedClone.port}
-                </span>
-              </div>
-              <div className="flex min-h-0 flex-1">
-                {/* Notes editor — full width < lg when its tab is active, else beside chat. */}
-                <div
-                  className={`min-w-0 flex-1 overflow-y-auto py-4 lg:block lg:border-r lg:border-slate-200 dark:lg:border-slate-700 ${
-                    pane === "notes" ? "block" : "hidden"
-                  }`}
-                >
-                  <ClientOnly>
-                    <Suspense
-                      fallback={
-                        <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
-                      }
-                    >
-                      <CloneEditor key={selectedClone.id} cloneId={selectedClone.id} />
-                    </Suspense>
-                  </ClientOnly>
-                </div>
-                {/* Agent chat — full width < lg when its tab is active, else a fixed column
-                    (a touch narrower at the tight lg width so the editor keeps room). */}
-                <div
-                  className={`w-full shrink-0 flex-col overflow-hidden bg-slate-50/50 lg:flex lg:w-80 xl:w-[400px] dark:bg-slate-900/50 ${
-                    pane === "chat" ? "flex" : "hidden"
-                  }`}
-                >
-                  <ClientOnly>
-                    <Suspense
-                      fallback={
-                        <div className="p-4 text-sm text-slate-400 dark:text-slate-500">Loading chat…</div>
-                      }
-                    >
-                      <ChatPanel
-                        key={selectedClone.id}
-                        cloneId={selectedClone.id}
-                        archived={selectedClone.archived === true}
-                      />
-                    </Suspense>
-                  </ClientOnly>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-slate-400 dark:text-slate-500">
-              Select a clone to open its notes.
-            </div>
-          )}
-        </main>
-      </div>
-
-      {cloneOpen ? (
-        <CloneModal
-          images={images}
-          imagesLoading={imagesLoading}
-          operations={state.operations}
-          parentCandidate={subCloneParent}
-          accounts={accounts}
-          onClose={() => setCloneOpen(false)}
-          // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
-          // progress, and closes when the op settles. So this just starts it and hands the
-          // Operation back — errors surface inside the dialog, not in the page banner.
-          onClone={(image, payload) => duplicateClone(image, payload)}
-        />
-      ) : null}
-
-      {settingsOpen ? (
-        <SettingsPanel
-          accounts={accounts}
-          onClose={() => setSettingsOpen(false)}
-          getConfig={getConfig}
-          putConfig={putConfig}
-          testConfig={testConfig}
-          getUpdateStatus={getUpdateStatus}
-          updateServer={updateServer}
-          operations={state.operations}
-          restartServer={restartServer}
-          images={images}
-          imagesLoading={imagesLoading}
-          pullBusy={state.operations.some(
-            (o) => o.kind === "pull" && o.status === "running",
-          )}
-          onPullTemplate={(reference) => run(pullTemplate(reference))}
-          onDeleteImage={(reference) => run(deleteImage(reference))}
-          onImportAccount={() => setImportOpen(true)}
-          onDeleteAccount={onDeleteAccount}
-          onDeleteCodexAccount={onDeleteCodexAccount}
-        />
-      ) : null}
-
-      {commitClone ? (
-        <CommitImageModal
-          cloneId={commitClone.id}
-          busy={committing}
-          onClose={() => setCommitClone(null)}
-          onCommit={(name) => {
-            setCommitting(true);
-            commitImage(commitClone.id, name)
-              .then(() => setError(null))
-              .catch((e: Error) => setError(e.message))
-              .finally(() => {
-                setCommitting(false);
-                setCommitClone(null);
-              });
-          }}
-        />
-      ) : null}
-
-      {importOpen ? (
-        <ImportAccountModal
-          clones={state.hosts}
-          onClose={() => setImportOpen(false)}
-          onImported={() => {
-            setImportOpen(false);
-            // The account is in the server's store immediately; its usage windows fill in on
-            // the next poll, which these kick off rather than waiting out the interval.
-            setError(null);
-            run(refreshClaudeUsage());
-            run(refreshCodexUsage());
-          }}
-        />
-      ) : null}
-
-      {changeClone ? (
-        <ChangeAccountModal
-          clone={changeClone}
-          accounts={claudeAccounts}
-          codexAccounts={codexAccounts}
-          busy={changing}
-          onClose={() => setChangeClone(null)}
-          onSubmit={(claude, codex) => {
-            setChanging(true);
-            Promise.all([
-              swapClaudeAccount(changeClone.id, claude),
-              swapCodexAccount(changeClone.id, codex),
-            ])
-              .then(() => {
+          {importOpen ? (
+            <ImportAccountModal
+              clones={state.hosts}
+              onClose={() => setImportOpen(false)}
+              onImported={() => {
+                setImportOpen(false);
+                // The account is in the server's store immediately; its usage windows fill in on
+                // the next poll, which these kick off rather than waiting out the interval.
                 setError(null);
-                setChangeClone(null);
-              })
-              .catch((e: Error) => setError(e.message))
-              .finally(() => setChanging(false));
-          }}
-        />
-      ) : null}
+                run(refreshClaudeUsage());
+                run(refreshCodexUsage());
+              }}
+            />
+          ) : null}
 
-      {forwardClone ? (
-        <PortForwardModal
-          clone={state.hosts.find((h) => h.id === forwardClone.id) ?? forwardClone}
-          runtime={forwards[forwardClone.id] ?? []}
-          busy={forwarding}
-          error={forwardError}
-          onClose={() => setForwardClone(null)}
-          onSubmit={(list) => {
-            setForwarding(true);
-            setForwardError(null);
-            putForwards(forwardClone.id, list)
-              .then(() => setForwardClone(null))
-              .catch((e: Error) => setForwardError(e.message))
-              .finally(() => setForwarding(false));
-          }}
-        />
-      ) : null}
-    </div>
+          {changeClone ? (
+            <ChangeAccountModal
+              clone={changeClone}
+              accounts={claudeAccounts}
+              codexAccounts={codexAccounts}
+              busy={changing}
+              onClose={() => setChangeClone(null)}
+              onSubmit={(claude, codex) => {
+                setChanging(true);
+                Promise.all([
+                  swapClaudeAccount(changeClone.id, claude),
+                  swapCodexAccount(changeClone.id, codex),
+                ])
+                  .then(() => {
+                    setError(null);
+                    setChangeClone(null);
+                  })
+                  .catch((e: Error) => setError(e.message))
+                  .finally(() => setChanging(false));
+              }}
+            />
+          ) : null}
+
+          {forwardClone ? (
+            <PortForwardModal
+              clone={state.hosts.find((h) => h.id === forwardClone.id) ?? forwardClone}
+              runtime={forwards[forwardClone.id] ?? []}
+              busy={forwarding}
+              error={forwardError}
+              onClose={() => setForwardClone(null)}
+              onSubmit={(list) => {
+                setForwarding(true);
+                setForwardError(null);
+                putForwards(forwardClone.id, list)
+                  .then(() => setForwardClone(null))
+                  .catch((e: Error) => setForwardError(e.message))
+                  .finally(() => setForwarding(false));
+              }}
+            />
+          ) : null}
+        </>
+      }
+    />
   );
 }
