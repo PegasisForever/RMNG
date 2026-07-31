@@ -5,6 +5,7 @@
 // The one piece of ambient state it needs is the clock: the schedule picker's `min` and
 // the "Today 15:30" labels both read the current time. That comes in as `now` so a story
 // renders identically on every load.
+import { CalendarClock, Clock, SendHorizontal } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import type { ChatMessage } from "~/lib/types";
@@ -246,22 +247,25 @@ export function ChatView({
             onClick={() => onScheduleAtChange(picking ? "" : epochMsToLocalInput(now + 15 * 60 * 1000))}
             disabled={archived}
             title={picking ? "Send now instead" : "Schedule this message for later"}
+            aria-label={picking ? "Send now instead" : "Schedule this message for later"}
             aria-pressed={picking}
-            className={`shrink-0 rounded-md border px-2.5 py-2 text-sm disabled:opacity-40 ${
+            className={`shrink-0 rounded-md border p-2 disabled:opacity-40 ${
               picking
                 ? "border-emerald-600 bg-emerald-50 text-emerald-700 dark:border-emerald-500 dark:bg-emerald-950/40 dark:text-emerald-400"
                 : "border-slate-300 text-slate-500 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-700"
             }`}
           >
-            🕑
+            <Clock className="size-4" />
           </button>
           {picking ? (
             <button
               type="submit"
               disabled={archived || !input.trim() || !scheduleAt}
-              className="shrink-0 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+              title="Schedule this message"
+              aria-label="Schedule this message"
+              className="shrink-0 rounded-md bg-emerald-600 p-2 text-white hover:bg-emerald-700 disabled:opacity-40"
             >
-              Schedule
+              <CalendarClock className="size-4" />
             </button>
           ) : busy && !archived ? (
             <button
@@ -277,9 +281,11 @@ export function ChatView({
             <button
               type="submit"
               disabled={archived || !input.trim()}
-              className="shrink-0 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+              title="Send this message"
+              aria-label="Send this message"
+              className="shrink-0 rounded-md bg-emerald-600 p-2 text-white hover:bg-emerald-700 disabled:opacity-40"
             >
-              Send
+              <SendHorizontal className="size-4" />
             </button>
           )}
         </div>
