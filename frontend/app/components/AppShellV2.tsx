@@ -186,16 +186,19 @@ export function AppShellV2({
       ) : null}
 
       {/* Pane switcher: the only header below `lg`, where board and side panel cannot share
-          the screen. */}
+          the screen. With nothing selected there are no other panes, so the switcher goes
+          rather than offering two tabs that lead nowhere. */}
       <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 py-2 lg:hidden dark:border-slate-700 dark:bg-slate-900">
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
           {selectedClone ? selectedClone.id : "rmng control"}
         </span>
-        <div className="flex shrink-0 gap-0.5 rounded-md bg-slate-100 p-0.5 text-xs font-medium dark:bg-slate-800">
-          {tab("board", "Board")}
-          {tab("notes", "Notes")}
-          {tab("chat", "Chat")}
-        </div>
+        {selectedClone ? (
+          <div className="flex shrink-0 gap-0.5 rounded-md bg-slate-100 p-0.5 text-xs font-medium dark:bg-slate-800">
+            {tab("board", "Board")}
+            {tab("notes", "Notes")}
+            {tab("chat", "Chat")}
+          </div>
+        ) : null}
       </div>
 
       {/* One variable sets the panel's width and the board's right padding, so the gutter
@@ -207,87 +210,85 @@ export function AppShellV2({
       >
         {/* The board takes the whole width; the side panel floats over its right edge. The
             strip's own right padding is what keeps the last column reachable: without it a
-            column at the end could never be scrolled out from under the panel. */}
-        <div className={`min-w-0 flex-1 lg:block ${pane === "board" ? "block" : "hidden"}`}>
-          <Board {...board} rail={<BoardRail {...rail} />} gutterRight />
+            column at the end could never be scrolled out from under the panel. With nothing
+            selected there is no panel, so the board keeps that width too — and it is the
+            only pane there is, whatever the switcher last said. */}
+        <div
+          className={`min-w-0 flex-1 lg:block ${
+            pane === "board" || !selectedClone ? "block" : "hidden"
+          }`}
+        >
+          <Board {...board} rail={<BoardRail {...rail} />} gutterRight={!!selectedClone} />
         </div>
 
         {/* Notes over chat, as two cards floating on the board. The container ignores the
             pointer so the gaps between the cards belong to the board underneath; each card
             takes it back. Below `lg` there is no room to float anything, so the panel drops
             back into the flow as an ordinary full-width pane. */}
-        <aside
-          className={`w-full shrink-0 flex-col gap-3 p-3 lg:pointer-events-none lg:absolute lg:inset-y-0 lg:right-0 lg:z-20 lg:flex lg:w-[var(--side-panel-w,30%)] ${
-            pane === "board" ? "hidden" : "flex"
-          }`}
-        >
-          {/* The resize grip: a 16px hit area over the cards' own left edge, so the thing
-              the operator drags is the edge they can see and it grabs from either side. It
-              sits 6px out and 10px in rather than evenly, because the card's wide shadow
-              reads as part of the card and an even split feels outside-heavy. The panel's
-              own 12px padding is what leaves room for the outer half without reaching onto
-              the board.
-              `z-10` is load-bearing. The cards' `backdrop-filter` gives each one a stacking
-              context, which promotes them to the same paint step as this positioned grip;
-              tree order would then put them on top and swallow the half of the band that
-              overlaps a card.
-              Nothing is drawn here — the cursor is the affordance, and the focus ring is
-              off because it would flash over the card on every grab. Double-click puts the
-              width back. */}
-          <div
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Side panel width"
-            aria-valuenow={Math.round(sideWidth)}
-            aria-valuemin={SIDE_MIN}
-            aria-valuemax={SIDE_MAX}
-            tabIndex={0}
-            onPointerDown={startResize}
-            onKeyDown={nudgeResize}
-            onDoubleClick={resetResize}
-            className="pointer-events-auto absolute inset-y-0 left-1.5 z-10 hidden w-4 cursor-col-resize touch-none select-none outline-none lg:block"
-          />
-
-          {/* The two cards swap heights on focus. The easing overshoots its target and
-              settles back, which is what makes the swap read as one card pushing the other
-              down rather than as both being redrawn. The pair briefly sums past 100% at the
-              peak; `flex-shrink` absorbs it, so nothing clips. */}
-          {selectedClone ? (
-            <>
-              <section
-                onFocusCapture={() => onSideFocusChange("notes")}
-                onPointerDownCapture={() => onSideFocusChange("notes")}
-                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-300 ease-[cubic-bezier(0.34,1.25,0.64,1)] lg:flex lg:grow-0 ${CARD} ${
-                  pane === "chat" ? "hidden" : "flex"
-                } ${sideFocus === "notes" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
-              >
-                <h2 className="shrink-0 truncate px-4 pt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  {selectedClone.id}
-                </h2>
-                <div className="min-h-0 flex-1 overflow-y-auto py-2">{notes}</div>
-              </section>
-
-              <section
-                onFocusCapture={() => onSideFocusChange("chat")}
-                onPointerDownCapture={() => onSideFocusChange("chat")}
-                className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-300 ease-[cubic-bezier(0.34,1.25,0.64,1)] lg:flex lg:grow-0 ${CARD} ${
-                  pane === "notes" ? "hidden" : "flex"
-                } ${sideFocus === "chat" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
-              >
-                <h3 className="shrink-0 px-4 pt-3 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-                  Assistant
-                </h3>
-                {chat}
-              </section>
-            </>
-          ) : (
+        {selectedClone ? (
+          <aside
+            className={`w-full shrink-0 flex-col gap-3 p-3 lg:pointer-events-none lg:absolute lg:inset-y-0 lg:right-0 lg:z-20 lg:flex lg:w-[var(--side-panel-w,30%)] ${
+              pane === "board" ? "hidden" : "flex"
+            }`}
+          >
+            {/* The resize grip: a 16px hit area over the cards' own left edge, so the thing
+                the operator drags is the edge they can see and it grabs from either side. It
+                sits 6px out and 10px in rather than evenly, because the card's wide shadow
+                reads as part of the card and an even split feels outside-heavy. The panel's
+                own 12px padding is what leaves room for the outer half without reaching onto
+                the board.
+                `z-10` is load-bearing. The cards' `backdrop-filter` gives each one a stacking
+                context, which promotes them to the same paint step as this positioned grip;
+                tree order would then put them on top and swallow the half of the band that
+                overlaps a card.
+                Nothing is drawn here — the cursor is the affordance, and the focus ring is
+                off because it would flash over the card on every grab. Double-click puts the
+                width back. */}
             <div
-              className={`pointer-events-auto flex flex-1 items-center justify-center rounded-2xl px-6 text-center text-sm text-slate-500 dark:text-slate-400 ${CARD}`}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Side panel width"
+              aria-valuenow={Math.round(sideWidth)}
+              aria-valuemin={SIDE_MIN}
+              aria-valuemax={SIDE_MAX}
+              tabIndex={0}
+              onPointerDown={startResize}
+              onKeyDown={nudgeResize}
+              onDoubleClick={resetResize}
+              className="pointer-events-auto absolute inset-y-0 left-1.5 z-10 hidden w-4 cursor-col-resize touch-none select-none outline-none lg:block"
+            />
+
+            {/* The two cards swap heights on focus. The easing overshoots its target and
+                settles back, which is what makes the swap read as one card pushing the other
+                down rather than as both being redrawn. The pair briefly sums past 100% at the
+                peak; `flex-shrink` absorbs it, so nothing clips. */}
+            <section
+              onFocusCapture={() => onSideFocusChange("notes")}
+              onPointerDownCapture={() => onSideFocusChange("notes")}
+              className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-300 ease-[cubic-bezier(0.34,1.25,0.64,1)] lg:flex lg:grow-0 ${CARD} ${
+                pane === "chat" ? "hidden" : "flex"
+              } ${sideFocus === "notes" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
             >
-              Select a clone to open its notes.
-            </div>
-          )}
-        </aside>
+              <h2 className="shrink-0 truncate px-4 pt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                {selectedClone.id}
+              </h2>
+              <div className="min-h-0 flex-1 overflow-y-auto py-2">{notes}</div>
+            </section>
+
+            <section
+              onFocusCapture={() => onSideFocusChange("chat")}
+              onPointerDownCapture={() => onSideFocusChange("chat")}
+              className={`pointer-events-auto min-h-0 flex-1 flex-col overflow-hidden rounded-2xl transition-[flex-basis] duration-300 ease-[cubic-bezier(0.34,1.25,0.64,1)] lg:flex lg:grow-0 ${CARD} ${
+                pane === "notes" ? "hidden" : "flex"
+              } ${sideFocus === "chat" ? "lg:basis-3/4" : "lg:basis-1/4"}`}
+            >
+              <h3 className="shrink-0 px-4 pt-3 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                Assistant
+              </h3>
+              {chat}
+            </section>
+          </aside>
+        ) : null}
       </div>
 
       {overlays}
