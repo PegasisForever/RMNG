@@ -7,15 +7,23 @@ import type { CSSProperties } from "react";
 
 import { SidebarClone, type SidebarCloneProps } from "~/components/SidebarClone";
 
+/** The same hairline the side panel's cards carry, so everything card-shaped on screen is
+ *  outlined the one way. It stays put when a card lifts: a border that darkens mid-drag
+ *  reads as the card changing, not as it rising. */
+const OUTLINE = "border border-slate-900/10 dark:border-white/10";
+
+/** Wide and faint rather than tight and dark, so the card sits on the column instead of
+ *  being cut out of it. A lifted card is told apart by how far its shadow spreads. */
+const RESTING = "shadow-[0_1px_6px_rgb(15_23_42_/_0.04),0_4px_16px_rgb(15_23_42_/_0.05)]";
+const LIFTED = "shadow-[0_4px_16px_rgb(15_23_42_/_0.06),0_16px_48px_rgb(15_23_42_/_0.10)]";
+
 /** The card body, no drag wiring. Used for the drag overlay, where dnd-kit positions the
  *  node itself. */
 export function BoardCardBody({ lifted = false, ...card }: SidebarCloneProps & { lifted?: boolean }) {
   return (
     <div
-      className={`overflow-hidden rounded-lg border bg-white dark:bg-slate-900 ${
-        lifted
-          ? "border-slate-300 shadow-xl dark:border-slate-600"
-          : "border-slate-200 shadow-sm dark:border-slate-700"
+      className={`overflow-hidden rounded-lg bg-white dark:bg-slate-900 ${OUTLINE} ${
+        lifted ? LIFTED : RESTING
       }`}
     >
       <SidebarClone {...card} />
