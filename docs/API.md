@@ -18,7 +18,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 
 | Method | Path | Purpose | Success |
 |---|---|---|---|
-| GET | `/events` | Global state SSE plus named `stats`, `lxcStats`, and `forwards` events | 200 SSE `ControlState` |
+| GET | `/events` | Global state SSE plus named `stats`, `lxcStats`, `forwards`, and `version` events | 200 SSE `ControlState` |
 | GET | `/api/state` | Single-shot persisted `ControlState` snapshot | 200 `ControlState` |
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
 | POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
@@ -65,6 +65,23 @@ are a plain string or `{error}`.
 Subscribe to all control-state changes. Emits a full `ControlState` JSON snapshot
 immediately, then a fresh snapshot on every `store.mutate()`; a `ping` comment every 20 s
 keeps the connection alive. This is what the dashboard subscribes to.
+
+One named `version` event rides every connection, once, right after the snapshot:
+
+```
+event: version
+data: {"buildId":"2ae7f50"}
+```
+
+`buildId` is the running image's git revision, read from its
+`org.opencontainers.image.revision` label at startup. A server with no self container or no
+label (a dev run, or an image built without `GIT_SHA`) reports a per-boot id instead, so the
+value is always present and always changes across a restart onto a different build.
+
+The dashboard remembers the first one it sees and reloads the page when a later connection
+reports a different one. An upgrade drops every SSE connection, so one frame per connection
+is enough; there is nothing to poll. This is what keeps a long-open tab from talking to a
+server its bundle was not built against.
 
 ### `GET /api/state`
 The current `ControlState` as a single-shot JSON snapshot — the same document as the first

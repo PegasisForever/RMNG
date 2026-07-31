@@ -53,6 +53,21 @@ pub struct App {
     /// changes (`web::activate`) and read by the monitor to suppress a `working → idle`
     /// notification for a clone whose latest output the operator has already seen.
     pub views: Arc<crate::monitor::ViewTracker>,
+    /// What this process is, for the browser's benefit. Starts as a per-boot id and becomes
+    /// the running image's git revision once Docker answers at startup. `/events` sends it on
+    /// connect, and a page that sees it change reloads itself, so an upgraded server never
+    /// leaves an old bundle talking to it.
+    build_id: Arc<RwLock<String>>,
+}
+
+/// A value unique to this process. Used until (and instead of) the image revision, so a dev
+/// run without an image label still tells its browsers apart across restarts.
+fn boot_id() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("boot-{}-{millis}", std::process::id())
 }
 
 impl App {
@@ -82,7 +97,24 @@ impl App {
             forwards: Arc::new(crate::forward::ForwardBus::new()),
             activity: Arc::new(crate::monitor::ActivityBus::new()),
             views: Arc::new(crate::monitor::ViewTracker::new()),
+            build_id: Arc::new(RwLock::new(boot_id())),
         }
+    }
+
+    /// Publish the running image's revision as this process's build identity, replacing the
+    /// boot id. Called once at startup after Docker answers; a dev run (no self container, or
+    /// an image built without `GIT_SHA`) keeps the boot id.
+    pub fn set_build_id(&self, revision: &str) {
+        if revision.is_empty() {
+            return;
+        }
+        *self.build_id.write().unwrap() = revision.to_string();
+    }
+
+    /// What `/events` reports as `version`. A browser reloads itself when this changes, so it
+    /// must be stable for the life of a process and different across an upgrade.
+    pub fn build_id(&self) -> String {
+        self.build_id.read().unwrap().clone()
     }
 
     /// A cheap snapshot of the current config.

@@ -79,6 +79,10 @@ export function clientLoader() {
 // jitter but quick enough to recover.
 const SSE_STALE_MS = 45_000;
 
+// How long to wait before reloading onto a new server build. Long enough for the notes
+// editor's 600ms autosave debounce to fire, short enough that nobody reads a stale page.
+const RELOAD_DELAY_MS = 1_500;
+
 /** Initial state from the SSR loader, kept live by the SSE stream. The same connection
  *  carries persisted `ControlState` plus volatile clone (`stats`) and CT-wide (`lxcStats`)
  *  resource events; neither metric stream touches `state.json`.
@@ -98,6 +102,10 @@ function useLiveState(initial: ControlState) {
     let es: EventSource | null = null;
     let lastActivity = Date.now();
     let disposed = false; // set on unmount so late callbacks don't reopen
+    // The build this page belongs to, learned from the first `version` frame. The server
+    // sends one per connection, and an upgrade drops every connection, so the reconnect
+    // after an update is where a different id shows up.
+    let buildId: string | null = null;
 
     const connect = () => {
       if (disposed) return;
@@ -143,6 +151,28 @@ function useLiveState(initial: ControlState) {
       // watchdog can distinguish a wedged socket from an idle-but-healthy one.
       es.addEventListener("ping", () => {
         lastActivity = Date.now();
+      });
+      // The server restarted onto a different build, so this page's bundle is stale: its
+      // JavaScript may be calling routes that moved or reading fields that changed shape.
+      // Reload rather than let it keep talking to a server it wasn't built against.
+      es.addEventListener("version", (e) => {
+        lastActivity = Date.now();
+        let next: string | null = null;
+        try {
+          next = (JSON.parse((e as MessageEvent).data) as { buildId?: string }).buildId ?? null;
+        } catch {
+          return; // malformed frame — leave the page alone
+        }
+        if (!next) return;
+        if (buildId === null) {
+          buildId = next;
+          return;
+        }
+        if (next !== buildId) {
+          disposed = true; // stop the watchdog rebuilding the socket under a reloading page
+          es?.close();
+          window.setTimeout(() => window.location.reload(), RELOAD_DELAY_MS);
+        }
       });
     };
 

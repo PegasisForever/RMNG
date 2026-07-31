@@ -210,6 +210,16 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     });
     let fwd_stream = fwd_initial.chain(fwd_updates);
 
+    // Who the browser is talking to, sent once per connection. A page that sees this change
+    // between connections is running a bundle from a server that no longer exists, so it
+    // reloads itself. An upgrade drops every SSE connection, which is what makes one frame on
+    // connect enough — there is no need to repeat it.
+    let build_id = json!({ "buildId": app.build_id() }).to_string();
+    let version_stream =
+        futures::stream::once(
+            async move { Ok(Event::default().event("version").data(build_id)) },
+        );
+
     // Observable heartbeat: a named `ping` event every 15s. Unlike the low-level keep-alive
     // *comment* below (which `EventSource` swallows silently), the client can see this — so
     // its watchdog can tell a wedged/half-open socket (pings stop arriving → reconnect)
@@ -228,7 +238,7 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
         futures::stream::select(
             futures::stream::select(
                 futures::stream::select(stats_stream, lxc_stream),
-                fwd_stream,
+                futures::stream::select(fwd_stream, version_stream),
             ),
             heartbeat,
         ),
@@ -3044,7 +3054,10 @@ not a var line
         {
             buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
             let seen = buf.replace(' ', "");
-            if seen.contains("event:stats") && seen.contains("event:forwards") {
+            if seen.contains("event:stats")
+                && seen.contains("event:forwards")
+                && seen.contains("event:version")
+            {
                 break;
             }
         }
@@ -3058,6 +3071,33 @@ not a var line
             seen.contains("event:forwards"),
             "no forwards snapshot in: {buf:?}"
         );
+        // The browser reloads when this changes between connections, so it has to be here
+        // on every connect and it has to carry a value.
+        assert!(
+            seen.contains("event:version"),
+            "no build identity in: {buf:?}"
+        );
+        assert!(
+            seen.contains("\"buildId\":\"boot-"),
+            "build identity should fall back to a boot id with no image label: {buf:?}"
+        );
+    }
+
+    #[test]
+    fn the_build_id_is_stable_until_an_image_revision_replaces_it() {
+        let app = App::test_app();
+        let boot = app.build_id();
+
+        assert!(boot.starts_with("boot-"), "dev runs get a per-boot id, got {boot}");
+        assert_eq!(app.build_id(), boot, "must not change while the process lives");
+
+        // An image built without `GIT_SHA` labels an empty revision; keep the boot id rather
+        // than publish an empty identity every client would compare equal.
+        app.set_build_id("");
+        assert_eq!(app.build_id(), boot);
+
+        app.set_build_id("2ae7f50");
+        assert_eq!(app.build_id(), "2ae7f50");
     }
 
     /// The observable heartbeat: a named `ping` event arrives within the first interval.

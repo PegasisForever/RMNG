@@ -112,6 +112,27 @@ async fn main() -> Result<()> {
         }
     }
 
+    // The running image's git revision, published to browsers on every `/events` connect so a
+    // page whose bundle predates an upgrade reloads itself. Read here once rather than per
+    // connect: it costs two Docker inspects and cannot change while this process lives.
+    // Runs after `self_setup`, which is what detects the self-container id. A dev run (no self
+    // container, or an image built without `GIT_SHA`) keeps the per-boot id instead.
+    {
+        let reference = app.config().docker.server_image;
+        let (repo, _) = crate::docker::split_reference(&reference);
+        if let Some(id) = app.docker.env().await.self_container {
+            match app.docker.self_image_info(&id, &repo).await {
+                Ok(info) => {
+                    if let Some(rev) = info.revision.as_deref() {
+                        app.set_build_id(rev);
+                        tracing::info!("running image revision {rev}");
+                    }
+                }
+                Err(e) => tracing::warn!("reading own image revision: {e}"),
+            }
+        }
+    }
+
     // Shared build infra (pull-through Hub mirror + remote BuildKit): ensure the two infra
     // containers exist + run. Gated on setup-complete + the master toggle; runs after
     // `self_setup` (which ensured the `rmng` network). Non-fatal + bounded — a down/slow
