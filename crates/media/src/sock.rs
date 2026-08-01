@@ -103,6 +103,32 @@ impl Listener {
     }
 }
 
+/// Why a [`Conn::send`] did not go out.
+///
+/// `WouldBlock` is the one worth handling separately: the peer is still connected but is not
+/// draining, which is exactly what a paused clone looks like. Everything else means the
+/// connection is finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// The receive queue is full and the peer is not reading. Retryable in principle, but
+    /// for per-frame messages the right answer is to drop it.
+    WouldBlock,
+    Io(String),
+    Encode(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WouldBlock => write!(f, "the clone is not reading its socket"),
+            Self::Io(e) => write!(f, "sendmsg: {e}"),
+            Self::Encode(e) => write!(f, "encoding message: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
+
 pub struct Conn {
     fd: OwnedFd,
 }
@@ -134,12 +160,24 @@ impl Conn {
     }
 
     /// Send a `ServerMsg` (no fds).
-    pub fn send(&self, msg: &ServerMsg) -> Result<()> {
-        let json = serde_json::to_vec(msg)?;
+    ///
+    /// Non-blocking, via `MSG_DONTWAIT`. A peer that has stopped reading but has not closed
+    /// — a paused clone, whose processes are frozen while its socket stays open — fills the
+    /// receive queue, and a blocking `sendmsg` would then park the calling thread with no
+    /// timeout and no way out. That thread is the one that owns viewer teardown, so losing
+    /// it costs more than the message.
+    ///
+    /// A full queue surfaces as [`SendError::WouldBlock`] so the caller can decide. Input
+    /// events are worthless late and should be dropped; a control message should not be.
+    pub fn send(&self, msg: &ServerMsg) -> std::result::Result<(), SendError> {
+        let json = serde_json::to_vec(msg).map_err(|e| SendError::Encode(e.to_string()))?;
         let iov = [IoSlice::new(&json)];
         let cmsgs: &[ControlMessage] = &[];
-        sendmsg::<()>(self.fd.as_raw_fd(), &iov, cmsgs, MsgFlags::empty(), None).context("sendmsg")?;
-        Ok(())
+        match sendmsg::<()>(self.fd.as_raw_fd(), &iov, cmsgs, MsgFlags::MSG_DONTWAIT, None) {
+            Ok(_) => Ok(()),
+            Err(nix::errno::Errno::EAGAIN) => Err(SendError::WouldBlock),
+            Err(e) => Err(SendError::Io(e.to_string())),
+        }
     }
 }
 

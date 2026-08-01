@@ -991,7 +991,11 @@ async fn run_archive(app: App, op_id: String, host_id: String) {
         // archiving meaningful for it rather than failing the operation outright.
         tracing::info!(target: "jobs", "{host_id}: pause failed ({e}), falling back to stop");
         progress("stop", "the clone was not running; stopping it instead");
-        if let Err(e) = app.docker.stop_container(&host_id).await {
+        // `stop_even_if_paused`, because the commonest reason a pause fails is that the
+        // container is paused already — the daemon answers 409. A plain stop would then
+        // signal frozen processes that can never handle it, waiting out the full 20s
+        // before killing them.
+        if let Err(e) = app.docker.stop_even_if_paused(&host_id).await {
             return fail_op(&app, &op_id, e.to_string());
         }
     }

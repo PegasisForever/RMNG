@@ -1222,7 +1222,66 @@ async fn ensure_payload_current(app: &App, clone_id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Make each managed clone's container agree with its `archived` flag: archived means
+/// paused, not archived means not paused.
+///
+/// The drift this exists for is a daemon restart. Docker SIGKILLs a frozen container on
+/// shutdown and `--restart unless-stopped` then brings it back **running**, so every
+/// archived clone silently resumes on a reboot while the UI still shows it archived. Nothing
+/// else notices: every sweep filters archived clones out, so the clone would run its agent,
+/// burn CPU, and lose its `/dev/shm` sizing with no path back short of a human spotting it.
+///
+/// The other direction covers the crash window inside `run_archive`, between the pause and
+/// the state write, which would otherwise leave a paused clone that no endpoint can restore.
+async fn reconcile_archived_state(app: &App, warned: &mut HashSet<String>) {
+    for h in app.store.get().hosts {
+        if !h.managed || !is_safe_id(&h.id) {
+            continue;
+        }
+        let id = h.id.as_str();
+        let paused = match app.docker.is_paused(id).await {
+            Ok(p) => p,
+            Err(_) => continue, // gone or the daemon is unreachable; not this loop's problem
+        };
+        if h.archived == paused {
+            continue;
+        }
+        if h.archived {
+            // Only re-pause something that is actually running. An archived clone sitting
+            // exited is the pre-pause shape and is perfectly valid.
+            if !app.docker.is_running(id).await.unwrap_or(false) {
+                continue;
+            }
+            match app.docker.pause_container(id).await {
+                Ok(()) => tracing::info!(
+                    target: "clone_reconcile",
+                    "clone {id}: archived but running, re-paused it"
+                ),
+                Err(e) => {
+                    if warned.insert(format!("{id}:repause")) {
+                        tracing::warn!(target: "clone_reconcile", "clone {id}: re-pause failed: {e:#}");
+                    }
+                }
+            }
+        } else {
+            match app.docker.unpause_container(id).await {
+                Ok(()) => tracing::info!(
+                    target: "clone_reconcile",
+                    "clone {id}: paused but not archived, thawed it"
+                ),
+                Err(e) => {
+                    if warned.insert(format!("{id}:unpause")) {
+                        tracing::warn!(target: "clone_reconcile", "clone {id}: thaw failed: {e:#}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
+    reconcile_archived_state(app, warned).await;
+
     let hosts: Vec<_> = app
         .store
         .get()

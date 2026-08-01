@@ -271,6 +271,18 @@ struct ActivateReq {
 }
 
 async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<ControlState> {
+    // An archived clone cannot be selected. Selecting one points the viewer's input at a
+    // frozen daemon that will never read its socket, and every pointer move then fills a
+    // queue nobody drains. Clicking an archived card leaves the selection where it was
+    // rather than failing, since the click is a navigation, not a command.
+    let req = match req.id.as_deref() {
+        Some(id)
+            if app.store.get().hosts.iter().any(|h| h.id == id && h.archived) =>
+        {
+            ActivateReq { id: app.store.get().selected }
+        }
+        _ => req,
+    };
     // Stamp "operator looked at this now" for both the clone being left and the one being
     // entered: each has just been on screen. The monitor reads these to suppress a later
     // working→idle notification for a clone whose output the operator already saw (see
