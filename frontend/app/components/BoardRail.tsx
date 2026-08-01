@@ -112,6 +112,15 @@ export function BoardRail({
         </div>
       ) : null}
 
+      {lxcUsage ? (
+        <div
+          className="px-1 text-[11px] font-semibold tabular-nums text-slate-500 dark:text-slate-400"
+          title="CT LXC totals: CPU and memory include all LXC processes; memory is RAM + swap excluding reclaimable file cache; disk is physical, compression-aware ZFS rootfs use"
+        >
+          CPU {lxcUsage.cpu} · MEM {lxcUsage.mem} · DISK {lxcUsage.disk}
+        </div>
+      ) : null}
+
       <ClaudeAccountsPanel
         accounts={accounts}
         cloneGroups={cloneGroups}
@@ -119,15 +128,6 @@ export function BoardRail({
         onImport={onImportAccount}
         onRefresh={onRefresh}
       />
-
-      {lxcUsage ? (
-        <div
-          className="rounded-lg bg-white px-2 py-1.5 text-[11px] font-semibold tabular-nums text-slate-500 dark:bg-slate-900 dark:text-slate-400"
-          title="CT LXC totals: CPU and memory include all LXC processes; memory is RAM + swap excluding reclaimable file cache; disk is physical, compression-aware ZFS rootfs use"
-        >
-          CPU {lxcUsage.cpu} · MEM {lxcUsage.mem} · DISK {lxcUsage.disk}
-        </div>
-      ) : null}
 
       {running.length > 0 ? (
         <div className="space-y-2">

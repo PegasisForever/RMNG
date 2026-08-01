@@ -71,9 +71,10 @@ export function formatCloneUsage(
  *  they measure the same. The arrows do NOT: `↑` and `↓` come out of a fallback font with
  *  per-glyph advance widths, which shifted the ↓ row a few px against the ↑ row.
  *
- *  `metric` is `undefined` for a clone with no sample (stopped, archived, unmanaged, or not yet
- *  scanned); the slot still renders, empty, so the row above never sits at a different width
- *  from the row below. */
+ *  A live clone always has all four metrics, so the caller passes a value for each and the two
+ *  rows match by construction. An archived clone drops CPU and MEM entirely rather than
+ *  rendering them empty: it keeps only the token pair, which is narrower on both rows equally.
+ *  The empty-slot case remains only for a caller that has no value to give. */
 function MetricSlot({ metric, labelWidth = "w-6" }: { metric?: Metric; labelWidth?: string }) {
   return (
     <span
@@ -447,7 +448,14 @@ export function SidebarClone({
     ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, clone.id)
     : undefined;
   const status = clone.archived ? undefined : STATUS_DOT[clone.monitorState ?? "idle"];
-  const usage = clone.archived ? null : formatCloneUsage(stats);
+  // A live clone always shows both figures, falling back to zero rather than to a blank. A
+  // clone that has not been scanned yet is idle, not unknowable, and a row that gains its
+  // numbers a moment later reads as the card changing shape.
+  //
+  // An archived clone has no figures at all — not blank ones. Its container is frozen, so
+  // there is nothing to report and no later sample coming, and holding the space open would
+  // promise otherwise.
+  const usage = clone.archived ? null : (formatCloneUsage(stats) ?? { cpu: "0%", mem: "0.0GB" });
   const cpuMetric = usage
     ? { label: "CPU", value: usage.cpu, title: "live container CPU (% of total host capacity)" }
     : undefined;
@@ -459,23 +467,18 @@ export function SidebarClone({
       }
     : undefined;
   // All-time token totals, summed across both providers. Unlike CPU/MEM these survive the
-  // clone going quiet, so they render for an archived clone too — the work already happened.
-  // A clone with no scan yet has no slot at all rather than a misleading "0".
-  const inMetric = tokens
-    ? {
-        label: "↑",
-        value: formatTokenCount(tokens.inputTokens),
-        title:
-          "all-time input tokens (Claude + Codex); newly processed only — cache reads excluded",
-      }
-    : undefined;
-  const outMetric = tokens
-    ? {
-        label: "↓",
-        value: formatTokenCount(tokens.outputTokens),
-        title: "all-time output tokens (Claude + Codex), including Codex reasoning tokens",
-      }
-    : undefined;
+  // clone going quiet, so they render for an archived clone too — the work already happened,
+  // and zero is the honest answer for a clone that has not done any yet.
+  const inMetric = {
+    label: "↑",
+    value: formatTokenCount(tokens?.inputTokens ?? 0),
+    title: "all-time input tokens (Claude + Codex); newly processed only — cache reads excluded",
+  };
+  const outMetric = {
+    label: "↓",
+    value: formatTokenCount(tokens?.outputTokens ?? 0),
+    title: "all-time output tokens (Claude + Codex), including Codex reasoning tokens",
+  };
   // Managed clones always show the binding line: an unassigned account is itself worth seeing.
   const showBindingLine = managed || !!cpuMetric;
   // Drag is owned by the enclosing SortableCloneGroup; a row is draggable only when it received
@@ -550,7 +553,7 @@ export function SidebarClone({
                 {/* The arrow labels are one glyph, so they get their own narrow width rather
                     than the three-character one CPU/MEM need. */}
                 <MetricSlot metric={inMetric} labelWidth="w-2" />
-                <MetricSlot metric={cpuMetric} />
+                {cpuMetric ? <MetricSlot metric={cpuMetric} /> : null}
               </div>
               <div className="flex min-w-0 items-center gap-2">
                 <AccountTag
@@ -560,7 +563,7 @@ export function SidebarClone({
                   selection={clone.codexSelection}
                 />
                 <MetricSlot metric={outMetric} labelWidth="w-2" />
-                <MetricSlot metric={memMetric} />
+                {memMetric ? <MetricSlot metric={memMetric} /> : null}
               </div>
             </div>
           ) : (
