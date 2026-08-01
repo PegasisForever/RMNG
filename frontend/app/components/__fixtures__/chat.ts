@@ -37,6 +37,17 @@ export const chatMessages: ChatMessage[] = [
   }),
 ];
 
+/** The agent's current tool line, shown under the working bubble while a turn is in flight. */
+export const chatActivity = "Bash(bun run build)";
+
+/** What a failed send puts in the banner. The server answers `{ error }`, and the panel shows
+ *  that string as it came. */
+export const chatError = "chat failed: agent is not running in pega-we-142";
+
+/** Unsent composer text, for the states where the box is not empty: a send that failed and
+ *  put the text back, or a message waiting on a delivery time. */
+export const chatDraft = "Roll the sub-clone activity up to the parent card.";
+
 export function makeScheduledMessage(overrides: Partial<ScheduledMessage> = {}): ScheduledMessage {
   return {
     id: "s1",

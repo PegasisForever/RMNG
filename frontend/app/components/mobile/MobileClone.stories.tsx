@@ -6,9 +6,9 @@ import { MobileClone, type CloneTab } from "./MobileClone";
 import { ChatView } from "~/components/ChatView";
 import { NotesEditor } from "~/components/NotesEditor";
 import { PhoneFrame } from "~/stories/PhoneFrame";
-import { chatMessages, chatNow, scheduledMessages } from "../__fixtures__/chat";
+import { chatActivity, chatMessages, chatNow, scheduledMessages } from "../__fixtures__/chat";
 import { cloneOffline, cloneWorking } from "../__fixtures__/clones";
-import { notesBlocks } from "../__fixtures__/notes";
+import { makeNotesBlocks } from "../__fixtures__/notes";
 
 /** The chat pane on fixtures instead of the per-clone SSE stream. */
 function ChatFixture({ busy = false }: { busy?: boolean }) {
@@ -19,7 +19,7 @@ function ChatFixture({ busy = false }: { busy?: boolean }) {
     <ChatView
       messages={chatMessages}
       busy={busy}
-      activity={busy ? "Bash(bun run build)" : null}
+      activity={busy ? chatActivity : null}
       scheduled={scheduled}
       input={input}
       onInputChange={setInput}
@@ -38,7 +38,7 @@ function ChatFixture({ busy = false }: { busy?: boolean }) {
 function NotesFixture() {
   return (
     <NotesEditor
-      initialContent={notesBlocks}
+      initialContent={makeNotesBlocks()}
       onChange={fn()}
       uploadFile={async () => "data:image/gif;base64,R0lGODlhAQABAAAAACw="}
     />

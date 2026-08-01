@@ -1,5 +1,5 @@
 // The draft store is what carries unsent composer text across a clone switch, since
-// ChatPanel is keyed by clone id and remounts. These cases pin the two properties that
+// ChatContainer is keyed by clone id and remounts. These cases pin the two properties that
 // makes that work: drafts are per clone, and an emptied box leaves nothing behind.
 import { beforeEach, expect, test } from "bun:test";
 

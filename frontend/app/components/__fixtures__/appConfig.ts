@@ -41,8 +41,10 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
       pinnedEmail: "alex@example.com",
     },
     codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
-    cloneGroups,
-    codexGroups,
+    // Copied per call, down to the member list, so two configs built from this builder never
+    // share an array with each other or with the accounts fixture module.
+    cloneGroups: cloneGroups.map((g) => ({ ...g, accounts: [...g.accounts] })),
+    codexGroups: codexGroups.map((g) => ({ ...g, accounts: [...g.accounts] })),
     presets: [
       {
         name: "webapp",

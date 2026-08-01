@@ -23,7 +23,7 @@ import type { CloneGroup } from "~/lib/wire/CloneGroup";
 // BlockNote and the chat panel are browser-only, and both are the desktop's modules
 // unchanged: the phone changes their surroundings, not what they do.
 const CloneEditor = lazy(() => import("~/components/CloneEditor"));
-const ChatPanel = lazy(() => import("~/components/ChatPanel"));
+const ChatContainer = lazy(() => import("~/components/ChatContainer"));
 
 function ClientOnly({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
@@ -92,7 +92,7 @@ export function MobileDashboard({
         chat={
           <ClientOnly>
             <Suspense fallback={<PaneFallback label="Loading chat…" />}>
-              <ChatPanel
+              <ChatContainer
                 key={openClone.id}
                 cloneId={openClone.id}
                 archived={openClone.archived === true}

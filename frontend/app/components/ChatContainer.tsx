@@ -9,16 +9,16 @@
 // restart). The pending queue rides the same SSE frame, so a cancel in one tab is reflected
 // in every other one with no extra stream to manage here.
 //
-// This module is the network half only. The markup lives in ChatView, which takes the
-// thread and the composer state as props.
+// This is the container half: the stream, the four calls behind it, the draft store, and the
+// clock. Every one of those is a thing a story cannot have, which is why they all live here
+// and nothing below ChatView knows about any of them. The markup is ChatView, which takes the
+// thread and the composer state as props and is the half Storybook renders.
 import { useCallback, useEffect, useState } from "react";
 
 import { ChatView, localInputToEpochMs } from "~/components/ChatView";
 import { getDraft, setDraft } from "~/lib/chatDrafts";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
-
-export { epochMsToLocalInput, localInputToEpochMs } from "~/components/ChatView";
 
 interface ChatSnapshot {
   busy: boolean;
@@ -27,7 +27,13 @@ interface ChatSnapshot {
   scheduled?: ScheduledMessage[];
 }
 
-export default function ChatPanel({ cloneId, archived = false }: { cloneId: string; archived?: boolean }) {
+export default function ChatContainer({
+  cloneId,
+  archived = false,
+}: {
+  cloneId: string;
+  archived?: boolean;
+}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   // Composer text, mirrored into the per-clone draft store. This panel is keyed by clone id,
@@ -181,6 +187,9 @@ export default function ChatPanel({ cloneId, archived = false }: { cloneId: stri
       onSchedule={schedule}
       onStop={stop}
       onCancelScheduled={cancelScheduled}
+      // The clock is read here, on the container's side of the seam, so the same props always
+      // draw the same pane. A story hands it a fixed instant instead.
+      now={Date.now()}
     />
   );
 }

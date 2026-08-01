@@ -1,6 +1,6 @@
 // The chat pane's markup, with no network of its own. Everything it draws arrives as
 // props and every intent leaves as a callback, so the same component backs the live
-// panel (ChatPanel wires it to the per-clone SSE stream) and the Storybook page.
+// panel (ChatContainer wires it to the per-clone SSE stream) and the Storybook page.
 //
 // The one piece of ambient state it needs is the clock: the schedule picker's `min` and
 // the "Today 15:30" labels both read the current time. That comes in as `now` so a story

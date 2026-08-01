@@ -1,6 +1,6 @@
 // Unsent composer text, one draft per clone, held in memory for the tab's lifetime.
 //
-// `ChatPanel` is mounted with `key={clone.id}`, so selecting another clone unmounts it and
+// `ChatContainer` is mounted with `key={clone.id}`, so selecting another clone unmounts it and
 // takes its `input` state with it. The drafts live out here, outside the component tree, so
 // text typed for one clone is still in the box after a detour through another.
 //

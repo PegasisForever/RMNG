@@ -15,10 +15,10 @@ import type { Clone } from "~/lib/types";
 import { claudeAccounts, cloneGroups, codexGroups } from "./__fixtures__/accounts";
 import { appConfig } from "./__fixtures__/appConfig";
 import { boardColumns, makeBoardColumn } from "./__fixtures__/board";
-import { chatMessages, chatNow, scheduledMessages } from "./__fixtures__/chat";
+import { chatActivity, chatMessages, chatNow, scheduledMessages } from "./__fixtures__/chat";
 import { cloneWorking, hosts, makeCloneNoToken } from "./__fixtures__/clones";
 import { images } from "./__fixtures__/images";
-import { notesBlocks } from "./__fixtures__/notes";
+import { makeNotesBlocks } from "./__fixtures__/notes";
 import { cloneOperation } from "./__fixtures__/operations";
 import { cloneTokens, lxcStats, stats } from "./__fixtures__/stats";
 import { linearTickets } from "./__fixtures__/tickets";
@@ -42,7 +42,7 @@ function ChatFixture({ busy = false, archived = false }: { busy?: boolean; archi
     <ChatView
       messages={chatMessages}
       busy={busy}
-      activity={busy ? "Bash(bun run build)" : null}
+      activity={busy ? chatActivity : null}
       archived={archived}
       scheduled={scheduled}
       input={input}
@@ -62,7 +62,7 @@ function ChatFixture({ busy = false, archived = false }: { busy?: boolean; archi
 function NotesFixture() {
   return (
     <NotesEditor
-      initialContent={notesBlocks}
+      initialContent={makeNotesBlocks()}
       onChange={fn()}
       uploadFile={async () => "data:image/gif;base64,R0lGODlhAQABAAAAACw="}
     />

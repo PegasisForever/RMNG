@@ -23,5 +23,3 @@ export function makeNotesBlocks(): PartialBlock[] {
     { type: "paragraph", content: "" },
   ];
 }
-
-export const notesBlocks: PartialBlock[] = makeNotesBlocks();

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { epochMsToLocalInput, localInputToEpochMs } from "./ChatPanel";
+import { epochMsToLocalInput, localInputToEpochMs } from "./ChatView";
 
 test("datetime-local text round-trips through epoch ms at minute precision", () => {
   // Built from local parts so the assertion holds in any TZ the test runs under.
