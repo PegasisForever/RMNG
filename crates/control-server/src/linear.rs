@@ -142,6 +142,126 @@ fn to_issue_info(prefix: &str, n: &Value) -> IssueInfo {
     }
 }
 
+/// The fields the ticket column draws. Wider than [`ISSUE_FIELDS`]: it needs the priority
+/// and each label's colour, which the ticket-driven clone path never looked at.
+const OPEN_ISSUE_FIELDS: &str = "identifier title url branchName priority description \
+    dueDate estimate team { key } state { type } assignee { displayName } \
+    labels { nodes { name color } } \
+    parent { identifier title url state { type } } \
+    children { nodes { identifier title url state { type } } }";
+
+/// Every open issue assigned to the key's own owner, newest first.
+///
+/// "Open" is Linear's state *types* `unstarted` and `started`, which its UI shows as Todo
+/// and In Progress. Backlog, completed, cancelled and triage are all excluded by the query
+/// rather than after the fact, so a workspace with thousands of closed issues costs nothing
+/// to poll.
+///
+/// Scoped through `viewer`, so the key answers for whoever owns it and nobody else. A fleet
+/// with several keys therefore gets several people's queues, which is the point: they are
+/// all the operator's own accounts.
+pub async fn fetch_open_assigned(
+    http: &reqwest::Client,
+    key: &str,
+) -> Result<Vec<wire::LinearTicket>, LinearError> {
+    let query = format!(
+        "query {{ viewer {{ assignedIssues( \
+            filter: {{ state: {{ type: {{ in: [\"unstarted\", \"started\"] }} }} }}, \
+            orderBy: updatedAt, first: 100 \
+        ) {{ nodes {{ {OPEN_ISSUE_FIELDS} }} }} }} }}"
+    );
+    let data = gql(http, key, &query, json!({})).await?;
+    let nodes = data
+        .pointer("/viewer/assignedIssues/nodes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(nodes.iter().filter_map(to_ticket).collect())
+}
+
+/// Linear's state *type* as ours. `triage` and anything Linear adds later answer `None`,
+/// which drops the issue rather than defaulting it: a ticket quietly showing up as Todo
+/// because its state was unrecognised is worse than one that does not show up at all.
+fn state_of(n: &Value) -> Option<wire::TicketState> {
+    match n.pointer("/state/type").and_then(Value::as_str)? {
+        "backlog" => Some(wire::TicketState::Backlog),
+        "unstarted" => Some(wire::TicketState::Todo),
+        "started" => Some(wire::TicketState::InProgress),
+        "completed" => Some(wire::TicketState::Done),
+        "canceled" => Some(wire::TicketState::Canceled),
+        _ => None,
+    }
+}
+
+/// A parent or sub-issue node as a link row. Any state qualifies here, unlike the list
+/// query: a sub-issue that is already done still belongs on its parent's panel.
+fn to_link(n: &Value) -> Option<wire::TicketLink> {
+    let s = |k: &str| n.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let id = s("identifier");
+    if id.is_empty() {
+        return None;
+    }
+    Some(wire::TicketLink { id, title: s("title"), url: s("url"), state: state_of(n)? })
+}
+
+/// One GraphQL node as a wire ticket, or `None` when it carries no identifier or a state
+/// type we do not model.
+fn to_ticket(n: &Value) -> Option<wire::LinearTicket> {
+    let s = |k: &str| n.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let id = s("identifier");
+    if id.is_empty() {
+        return None;
+    }
+    let state = state_of(n)?;
+    // Linear sends `0` for "no priority", and `1..=4` for urgent through low.
+    let priority = n
+        .get("priority")
+        .and_then(Value::as_u64)
+        .filter(|p| (1..=4).contains(p))
+        .map(|p| p as u8);
+    let labels = n
+        .pointer("/labels/nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter_map(|l| {
+                    Some(wire::TicketLabel {
+                        name: l.get("name").and_then(Value::as_str)?.to_string(),
+                        color: l
+                            .get("color")
+                            .and_then(Value::as_str)
+                            .unwrap_or("#94a3b8")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let opt = |v: String| (!v.is_empty()).then_some(v);
+    let children = n
+        .pointer("/children/nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| nodes.iter().filter_map(to_link).collect())
+        .unwrap_or_default();
+    Some(wire::LinearTicket {
+        id,
+        title: s("title"),
+        url: s("url"),
+        state,
+        team: n.pointer("/team/key").and_then(Value::as_str).map(str::to_string),
+        priority,
+        labels,
+        branch_name: opt(s("branchName")),
+        description: opt(s("description")),
+        assignee: n.pointer("/assignee/displayName").and_then(Value::as_str).map(str::to_string),
+        due_date: opt(s("dueDate")),
+        estimate: n.get("estimate").and_then(Value::as_f64),
+        parent: n.get("parent").filter(|v| !v.is_null()).and_then(to_link),
+        children,
+    })
+}
+
 /// Fetch an existing issue by team key + number, with an explicit API key.
 pub async fn fetch_issue(
     http: &reqwest::Client,
@@ -363,6 +483,49 @@ pub async fn create_issue(
 
 /// Move the issue to "In Progress" unless already started (no backwards drag).
 /// `key` should be one proven to see the issue (e.g. the [`fetch_issue_any`] key).
+/// Write a new title and/or description onto an issue, named by its `WE-142` identifier.
+///
+/// Linear's `issueUpdate` takes the issue's UUID, which the browser has no business knowing,
+/// so the identifier is resolved first through [`fetch_issue_any`]. That also answers which
+/// key can see it, and the mutation reuses exactly that key: a key that could read the issue
+/// is the one that may write it.
+///
+/// A `None` field is left alone. An empty description is a real value, though — clearing a
+/// body is something an operator does on purpose.
+pub async fn update_issue(
+    http: &reqwest::Client,
+    keys: &[&str],
+    identifier: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+) -> Result<(), LinearError> {
+    if title.is_none() && description.is_none() {
+        return Ok(());
+    }
+    let r = parse_ticket_ref(identifier)?;
+    let (issue, key) = fetch_issue_any(http, keys, &r).await?;
+
+    let mut input = serde_json::Map::new();
+    if let Some(t) = title {
+        input.insert("title".into(), json!(t));
+    }
+    if let Some(d) = description {
+        input.insert("description".into(), json!(d));
+    }
+    let data = gql(
+        http,
+        &key,
+        "mutation($id: String!, $input: IssueUpdateInput!) { \
+            issueUpdate(id: $id, input: $input) { success } }",
+        json!({ "id": issue.id, "input": Value::Object(input) }),
+    )
+    .await?;
+    match data.pointer("/issueUpdate/success").and_then(Value::as_bool) {
+        Some(true) => Ok(()),
+        _ => Err(LinearError(format!("Linear refused the update to {identifier}"))),
+    }
+}
+
 pub async fn ensure_in_progress(
     http: &reqwest::Client,
     key: &str,

@@ -30,6 +30,7 @@ mod smb;
 mod ssh;
 mod state;
 mod termplane;
+mod tickets;
 mod token_unmigrate;
 mod update;
 mod web;
@@ -273,6 +274,7 @@ async fn main() -> Result<()> {
             tokio::spawn(claude::run_rotator(app_for_bg.clone()));
             tokio::spawn(codex::run_poller(app_for_bg.clone()));
             tokio::spawn(codex::run_rotator(app_for_bg.clone()));
+            tokio::spawn(tickets::run_poller(app_for_bg.clone()));
         },
         move |media_init| {
             // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.

@@ -51,6 +51,7 @@ pub fn router(app: App) -> Router {
         .route("/api/stats", get(stats_get))
         .route("/api/activate", post(activate))
         .route("/api/board", put(board_put))
+        .route("/api/tickets/:id", put(ticket_put))
         .route("/api/clone", post(clone))
         .route("/api/layout/activate", post(layout_activate))
         .route("/api/delete", post(delete))
@@ -322,6 +323,53 @@ struct BoardPutReq {
 /// second-guessing it.
 async fn board_put(State(app): State<App>, Json(req): Json<BoardPutReq>) -> Json<ControlState> {
     Json(app.store.mutate(|s| s.board_columns = req.columns))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TicketPutReq {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// `PUT /api/tickets/:id` — write a title and/or description back to Linear.
+///
+/// The browser holds no Linear key, so every write comes through here. `:id` is the human
+/// identifier (`WE-142`); [`crate::linear::update_issue`] resolves it to Linear's own id and
+/// picks the key that can see it.
+///
+/// On success the ticket in `ControlState` is patched immediately rather than waiting for
+/// the next poll. The poll is a minute away, and a description that snaps back to its old
+/// text for that minute reads as the save having failed.
+async fn ticket_put(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+    Json(req): Json<TicketPutReq>,
+) -> Result<Json<ControlState>, (StatusCode, String)> {
+    let cfg = app.config();
+    let keys: Vec<&str> = cfg.presets.iter().map(|p| p.linear_key.as_str()).collect();
+    crate::linear::update_issue(
+        &app.http,
+        &keys,
+        &id,
+        req.title.as_deref(),
+        req.description.as_deref(),
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok(Json(app.store.mutate(|s| {
+        if let Some(t) = s.tickets.iter_mut().find(|t| t.id.eq_ignore_ascii_case(&id)) {
+            if let Some(title) = req.title {
+                t.title = title;
+            }
+            if let Some(description) = req.description {
+                t.description = (!description.is_empty()).then_some(description);
+            }
+        }
+    })))
 }
 
 #[derive(Deserialize)]

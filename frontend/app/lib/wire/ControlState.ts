@@ -4,6 +4,7 @@ import type { ClaudeUsage } from "./ClaudeUsage";
 import type { Clone } from "./Clone";
 import type { CloneTokens } from "./CloneTokens";
 import type { CodexResetMark } from "./CodexResetMark";
+import type { LinearTicket } from "./LinearTicket";
 import type { MonitorSpec } from "./MonitorSpec";
 import type { Operation } from "./Operation";
 
@@ -36,6 +37,17 @@ boardColumns: Array<BoardColumn>, operations: Array<Operation>,
  * is what lets the Claude and Codex pollers publish here without clobbering each other.
  */
 claudeAccounts: Array<ClaudeUsage>, 
+/**
+ * Open Linear issues across every preset API key, newest poll wins. Published here so
+ * the board's ticket column rides the same `/events` stream everything else does, and
+ * so the browser never sees a Linear key.
+ */
+tickets: Array<LinearTicket>, 
+/**
+ * Why the last Linear poll failed, if it did. The column keeps drawing whatever it
+ * last had and says this alongside: a stale list beats an empty one mid-flight.
+ */
+ticketsError?: string, 
 /**
  * Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
  * account per week, so it belongs in `state.json` (unlike per-tick stats).
