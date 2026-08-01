@@ -32,10 +32,12 @@ import {
 import { arrayMove, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { type ReactNode, useRef, useState } from "react";
 
-import { BoardCard, BoardCardBody } from "~/components/BoardCard";
+import { BoardCard, BoardCardBody, CardFrame } from "~/components/BoardCard";
 import { BoardColumnPanel } from "~/components/BoardColumnPanel";
 import { SidebarClone } from "~/components/SidebarClone";
+import { TicketCardBody, TicketColumn, type TicketColumnProps } from "~/components/TicketColumn";
 import { archivesOnDrop, resolveColumns, subCloneTree, type BoardColumn } from "~/lib/board";
+import { ticketIdFromDrag, TICKET_COLUMN_ID, type LinearTicket } from "~/lib/tickets";
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
@@ -57,6 +59,10 @@ export interface BoardProps {
   forwards?: Record<string, ForwardRuntime[]>;
   /** All operations; a card with a running one is frozen in place. */
   operations: Operation[];
+  /** The clone drawn as selected, which is not always the clone the fleet is pointed at.
+   *  A selected ticket owns the highlight while it is open, so the caller passes null then:
+   *  exactly one thing on the board is ever highlighted, and it is whichever the operator
+   *  picked last. The clone keeps the video stream and its notes underneath regardless. */
   selectedId: string | null;
   /** `ssh.publicHost` (config) — the `-J` jump target for each card's copied SSH command. */
   sshPublicHost: string;
@@ -64,6 +70,15 @@ export interface BoardProps {
   bastionPort: number;
   /** The control rail, drawn first in the strip (see BoardRail). */
   rail: ReactNode;
+  /** Unclaimed Linear tickets, drawn as a column between the rail and the operator's own.
+   *  Absent ⇒ no ticket column, which is what a fleet with no Linear key gets. */
+  tickets?: TicketColumnProps;
+  /** A ticket was dropped into a clone column. The container opens the clone dialog with
+   *  the ticket filled in; nothing about the board changes until that clone actually
+   *  exists. */
+  onNewCloneFromTicket?: (ticket: LinearTicket, columnId: string) => void;
+  /** The ticket column was rearranged. Ids top to bottom, for the container to persist. */
+  onReorderTickets?: (ticketIds: string[]) => void;
   /** Leave room at the right end of the strip for a panel floating over the board, so the
    *  last column can still be scrolled out from under it. The gutter is the panel's own
    *  width expression, `max(var(--side-panel-w), 20rem)`: the custom property is what the
@@ -183,6 +198,9 @@ export function Board({
   sshPublicHost,
   bastionPort,
   rail,
+  tickets,
+  onNewCloneFromTicket,
+  onReorderTickets,
   gutterRight = false,
   onSelectClone,
   onDeleteClone,
@@ -210,6 +228,9 @@ export function Board({
       if (!next.delete(id)) next.add(id);
       return next;
     });
+  // The ticket column's in-flight arrangement, the same idea as `preview` for the lanes:
+  // held only while a ticket is in the air, dropped the moment the drag ends.
+  const [ticketPreview, setTicketPreview] = useState<string[] | null>(null);
 
   const { childrenByParent } = subCloneTree(clones);
   const byId = new Map(clones.map((clone) => [clone.id, clone]));
@@ -219,6 +240,18 @@ export function Board({
     cloneIds: column.cloneIds,
   }));
   const lanes = preview ?? base;
+
+  // The ticket column, arranged by the in-flight preview when there is one. The container
+  // owns the persisted order, so `tickets.tickets` already arrives in it.
+  const ticketIds = tickets?.tickets.map((t) => t.id) ?? [];
+  const ticketById = new Map((tickets?.tickets ?? []).map((t) => [t.id, t]));
+  const ticketOrder = ticketPreview ?? ticketIds;
+  const orderedTickets = tickets
+    ? ticketOrder.flatMap((id) => {
+        const ticket = ticketById.get(id);
+        return ticket ? [ticket] : [];
+      })
+    : [];
 
   const sensors = useSensors(
     // The same 5px activation distance the sidebar used, so a plain click still selects
@@ -278,6 +311,23 @@ export function Board({
     const activeId = String(event.active.id);
     const overId = String(event.over.id);
 
+    // A ticket is not in any lane, so the clone columns never rearrange around one. Inside
+    // its own column it sorts like any card; over a clone column it stops moving, because
+    // the drop there makes a clone rather than filing the ticket.
+    const activeTicket = ticketIdFromDrag(activeId);
+    if (activeTicket) {
+      const overTicket = ticketIdFromDrag(overId);
+      if (!overTicket && overId !== TICKET_COLUMN_ID) return;
+      setTicketPreview((prev) => {
+        const current = prev ?? ticketIds;
+        const from = current.indexOf(activeTicket);
+        // Over the well itself rather than a card ⇒ the end of the list.
+        const to = overTicket ? current.indexOf(overTicket) : current.length - 1;
+        return from < 0 || to < 0 || from === to ? current : arrayMove(current, from, to);
+      });
+      return;
+    }
+
     // Rearranging moves the dragged card out from under the pointer, which drops the pointer
     // onto a different card, which rearranges again. With a stationary pointer that is a
     // two-state flip that runs until React throws "Maximum update depth exceeded". Requiring
@@ -296,6 +346,32 @@ export function Board({
 
   const onDragEnd = (event: DragEndEvent) => {
     const activeId = String(event.active.id);
+
+    const ticketId = ticketIdFromDrag(activeId);
+    if (ticketId) {
+      const settledOrder = ticketPreview ?? ticketIds;
+      setPreview(null);
+      setTicketPreview(null);
+      setDragId(null);
+
+      const overId = event.over ? String(event.over.id) : null;
+      // Still in its own column ⇒ this was a reorder. Report it only when it changed
+      // something, so a click that drifted five pixels does not write an order.
+      if (overId && (ticketIdFromDrag(overId) || overId === TICKET_COLUMN_ID)) {
+        if (settledOrder.join("\u0000") !== ticketIds.join("\u0000")) {
+          onReorderTickets?.(settledOrder);
+        }
+        return;
+      }
+
+      const column = overId ? laneOf(lanes, overId) : undefined;
+      const ticket = ticketById.get(ticketId);
+      // Dropped on nothing, or on the rail: no column means no clone, and the card simply
+      // returns to the ticket list.
+      if (column && ticket) onNewCloneFromTicket?.(ticket, column.id);
+      return;
+    }
+
     const settled = event.over
       ? arrange(preview ?? base, activeId, String(event.over.id))
       : (preview ?? base);
@@ -320,6 +396,8 @@ export function Board({
   };
 
   const dragged = dragId ? byId.get(dragId) : undefined;
+  const draggedTicketId = dragId ? ticketIdFromDrag(dragId) : null;
+  const draggedTicket = draggedTicketId ? ticketById.get(draggedTicketId) : undefined;
 
   return (
     <DndContext
@@ -331,6 +409,7 @@ export function Board({
       onDragCancel={() => {
         arrangedAt.current = null;
         setPreview(null);
+        setTicketPreview(null);
         setDragId(null);
       }}
     >
@@ -340,6 +419,20 @@ export function Board({
         }`}
       >
         {rail}
+
+        {tickets ? (
+          <TicketColumn
+            {...tickets}
+            tickets={orderedTickets}
+            // The menu names no column, so a clone made that way is filed in the first one,
+            // which is where an unfiled clone lands anyway.
+            onCreateClone={
+              onNewCloneFromTicket && lanes[0]
+                ? (ticket) => onNewCloneFromTicket(ticket, lanes[0].id)
+                : undefined
+            }
+          />
+        ) : null}
 
         {lanes.map((lane) => (
           <BoardColumnPanel
@@ -384,6 +477,14 @@ export function Board({
           >
             {subRows(dragged.id)}
           </BoardCardBody>
+        ) : null}
+        {/* No width wrapper on either card. dnd-kit sizes the overlay to the node that was
+            picked up, and a `w-80` here would draw the ticket at the column's full width
+            rather than the card's, which is that minus the well's padding. */}
+        {draggedTicket ? (
+          <CardFrame lifted>
+            <TicketCardBody ticket={draggedTicket} />
+          </CardFrame>
         ) : null}
       </DragOverlay>
     </DndContext>

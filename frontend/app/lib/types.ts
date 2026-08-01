@@ -9,6 +9,7 @@
 
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
+import type { LinearTicket } from "~/lib/wire/LinearTicket";
 import type { PortForward } from "~/lib/wire/PortForward";
 
 export interface MonitorSpec {
@@ -193,6 +194,12 @@ export interface ControlState {
   cloneTokens: Record<string, CloneTokens>;
   /** The board's columns, left to right. Empty until the operator makes one. */
   boardColumns: BoardColumn[];
+  /** Open Linear issues across every configured preset key, kept current by the server's
+   *  own poller. The browser never talks to Linear, so this is the whole source for the
+   *  ticket column. */
+  tickets: LinearTicket[];
+  /** Why the server's last Linear poll failed, if it did. */
+  ticketsError?: string;
 }
 
 export function emptyState(): ControlState {
@@ -206,6 +213,7 @@ export function emptyState(): ControlState {
     layoutPresetNames: [],
     cloneTokens: {},
     boardColumns: [],
+    tickets: [],
   };
 }
 

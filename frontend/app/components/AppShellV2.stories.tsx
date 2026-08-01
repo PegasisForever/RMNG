@@ -5,8 +5,12 @@ import { fn } from "storybook/test";
 import { AppShellV2, type SideFocus } from "./AppShellV2";
 import { ChatView } from "./ChatView";
 import { NotesEditor } from "./NotesEditor";
+import { CloneModal } from "./CloneModal";
+import { TicketPanel } from "./TicketPanel";
+import TicketDescription from "./TicketDescription";
 import { SettingsPanel } from "./SettingsPanel";
 import { moveCard, newColumnId, removeColumn, resolveColumns } from "~/lib/board";
+import { openTickets, orderTickets, type LinearTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 import {
   boardColumns,
@@ -22,6 +26,7 @@ import {
   codexGroups,
   hosts,
   images,
+  linearTickets,
   lxcStats,
   notesBlocks,
   scheduledMessages,
@@ -116,6 +121,16 @@ const rail = {
   onRefresh: fn(),
 };
 
+/** The ticket column's own props, hoisted so the render can rebuild just its list as
+ *  clones come and go without losing the callbacks. */
+const ticketColumn = {
+  tickets: openTickets(linearTickets, boardClones),
+  loading: false,
+  error: null,
+  onCancel: fn(),
+  onMoveToBacklog: fn(),
+};
+
 const board = {
   columns: boardColumns,
   clones: boardClones,
@@ -135,6 +150,9 @@ const board = {
   onNewClone: fn(),
   onMoveCard: fn(),
   onRenameColumn: fn(),
+  tickets: ticketColumn,
+  onNewCloneFromTicket: fn(),
+  onReorderTickets: fn(),
 };
 
 const meta = {
@@ -160,6 +178,17 @@ const meta = {
     const [selectedId, setSelectedId] = useState(args.board.selectedId);
     const [sideFocus, setSideFocus] = useState<SideFocus>(args.sideFocus);
     const [settingsOpen, setSettingsOpen] = useState(false);
+    // The ticket a drop opened the clone dialog for. Null = the dialog is closed.
+    const [ticketClone, setTicketClone] = useState<LinearTicket | null>(null);
+    // The operator's own arrangement of the ticket column. Empty means nobody has moved
+    // anything yet, so the list is still Linear's order.
+    const [ticketOrder, setTicketOrder] = useState<string[]>([]);
+    // Tickets the story has cancelled or sent to the backlog. The real container drops them
+    // the same way: the write lands in Linear, and the card goes without waiting for a
+    // fetch to confirm what was just asked for.
+    const [dropped, setDropped] = useState<string[]>([]);
+    // The ticket whose panel has the side column. Null = the clone's notes and chat have it.
+    const [openTicket, setOpenTicket] = useState<LinearTicket | null>(null);
 
     const setArchived = (cloneId: string, archived: boolean) =>
       setClones((prev) => prev.map((c) => (c.id === cloneId ? { ...c, archived } : c)));
@@ -175,6 +204,22 @@ const meta = {
       <AppShellV2
         {...args}
         selectedClone={selectedClone}
+        ticket={
+          openTicket ? (
+            <TicketPanel
+              ticket={openTicket}
+              description={
+                <TicketDescription
+                  key={openTicket.id}
+                  markdown={openTicket.description ?? ""}
+                  onSave={fn()}
+                />
+              }
+              onCreateClone={() => setTicketClone(openTicket)}
+              onTitleChange={fn()}
+            />
+          ) : undefined
+        }
         sideFocus={sideFocus}
         onSideFocusChange={(next) => {
           setSideFocus(next);
@@ -188,7 +233,18 @@ const meta = {
           },
         }}
         overlays={
-          settingsOpen ? (
+          ticketClone ? (
+            <CloneModal
+              images={images}
+              imagesLoading={false}
+              operations={args.board.operations}
+              parentCandidate={null}
+              accounts={args.rail.accounts}
+              initialTicket={ticketClone.url}
+              onClose={() => setTicketClone(null)}
+              onClone={async () => cloneOperation}
+            />
+          ) : settingsOpen ? (
             <SettingsPanel
               {...settingsStubs}
               accounts={args.rail.accounts}
@@ -224,8 +280,35 @@ const meta = {
           ...args.board,
           columns,
           clones,
-          selectedId,
+          tickets: {
+            ...ticketColumn,
+            tickets: orderTickets(openTickets(linearTickets, clones), ticketOrder).filter(
+              (t) => !dropped.includes(t.id),
+            ),
+            selectedId: openTicket?.id ?? null,
+            onSelectTicket: setOpenTicket,
+            onCancel: (ticket) => {
+              setDropped((prev) => [...prev, ticket.id]);
+              ticketColumn.onCancel(ticket);
+            },
+            onMoveToBacklog: (ticket) => {
+              setDropped((prev) => [...prev, ticket.id]);
+              ticketColumn.onMoveToBacklog(ticket);
+            },
+          },
+          onNewCloneFromTicket: (ticket, columnId) => {
+            setTicketClone(ticket);
+            args.board.onNewCloneFromTicket?.(ticket, columnId);
+          },
+          onReorderTickets: (order) => {
+            setTicketOrder(order);
+            args.board.onReorderTickets?.(order);
+          },
+          // A ticket owns the highlight while it is open, and the clone keeps its stream
+          // underneath. Picking any clone, the selected one included, closes the ticket.
+          selectedId: openTicket ? null : selectedId,
           onSelectClone: (clone) => {
+            setOpenTicket(null);
             setSelectedId(clone.id);
             args.board.onSelectClone(clone);
           },

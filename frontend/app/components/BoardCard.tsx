@@ -27,6 +27,21 @@ const RESTING =
 const LIFTED =
   "shadow-[0_4px_16px_rgb(15_23_42_/_0.06),0_16px_48px_rgb(15_23_42_/_0.10)] dark:shadow-[0_4px_16px_rgb(0_0_0_/_0.3),0_16px_48px_rgb(0_0_0_/_0.4)]";
 
+/** The frame every board card wears: rounded, outlined, and shadowed to sit on the column.
+ *  Exported because the ticket cards are the same object at rest, and two copies of these
+ *  values is how the board ends up with two kinds of card that almost match. */
+export function CardFrame({ lifted = false, children }: { lifted?: boolean; children: ReactNode }) {
+  return (
+    <div
+      className={`overflow-hidden rounded-lg bg-white dark:bg-slate-900 ${OUTLINE} ${
+        lifted ? LIFTED : RESTING
+      }`}
+    >
+      {children}
+    </div>
+  );
+}
+
 /** The card body, no drag wiring. Used for the drag overlay, where dnd-kit positions the
  *  node itself. `children` are this clone's sub-clone rows, drawn inside the same frame. */
 export function BoardCardBody({
@@ -35,14 +50,10 @@ export function BoardCardBody({
   ...card
 }: SidebarCloneProps & { lifted?: boolean; children?: ReactNode }) {
   return (
-    <div
-      className={`overflow-hidden rounded-lg bg-white dark:bg-slate-900 ${OUTLINE} ${
-        lifted ? LIFTED : RESTING
-      }`}
-    >
+    <CardFrame lifted={lifted}>
       <SidebarClone {...card} />
       {children}
-    </div>
+    </CardFrame>
   );
 }
 

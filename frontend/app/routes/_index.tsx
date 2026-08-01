@@ -9,6 +9,8 @@ import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
 import { MobileDashboard } from "~/components/mobile/MobileDashboard";
+import { TicketPanel } from "~/components/TicketPanel";
+import { openTickets, orderTickets } from "~/lib/tickets";
 import {
   activate,
   activateLayout,
@@ -26,6 +28,7 @@ import {
   putBoardColumns,
   putConfig,
   putForwards,
+  putTicket,
   refreshClaudeUsage,
   refreshCodexUsage,
   restartServer,
@@ -60,6 +63,9 @@ import type { Route } from "./+types/_index";
 // after mount so they never participate in SSR.
 const CloneEditor = lazy(() => import("~/components/CloneEditor"));
 const ChatPanel = lazy(() => import("~/components/ChatPanel"));
+// The ticket description is markdown, and rendering it means BlockNote, which is as
+// browser-only as the notes editor that already uses it.
+const TicketDescription = lazy(() => import("~/components/TicketDescription"));
 
 function ClientOnly({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
@@ -295,10 +301,17 @@ function Dashboard({
   /** Configured Codex pools (`config.codexGroups`). */
   codexGroups: CloneGroup[];
 }) {
+  // The ticket whose panel has the side column, by id. Held as an id rather than the object
+  // so a poll that rewrites the list keeps the panel on the current copy, not a stale one.
+  const [openTicketId, setOpenTicketId] = useState<string | null>(null);
+
   // OS notification whenever a clone transitions out of `working` (idle/offline) while
   // it isn't the selected one — driven by the server's `unread` edge. Clicking it selects
-  // that clone, the same activate path a card click uses.
-  useCloneNotifications(state.hosts, (id) => run(activate(id)));
+  // that clone, which closes an open ticket the same way a card click does.
+  useCloneNotifications(state.hosts, (id) => {
+    setOpenTicketId(null);
+    run(activate(id));
+  });
 
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
@@ -384,6 +397,20 @@ function Dashboard({
   const [newCloneColumn, setNewCloneColumn] = useState<string | null>(null);
   /** The clone the open create-dialog is making, selected when the dialog closes. */
   const [newClone, setNewClone] = useState<string | null>(null);
+  // Seeds the clone dialog's ticket field when a ticket opened it (dragged onto a column, or
+  // its menu). Empty for the column's own "New clone" button.
+  const [ticketPrefill, setTicketPrefill] = useState("");
+  // The operator's own arrangement of the ticket column, top to bottom. Browser-local: it is
+  // a view of somebody else's list, and the server has no opinion about how it is stacked.
+  const [ticketOrder, setTicketOrder] = useState<string[]>([]);
+
+  const visibleTickets = orderTickets(
+    openTickets(state.tickets ?? [], state.hosts),
+    ticketOrder,
+  );
+  // Derived: a ticket that leaves the list (cloned, closed, moved in Linear) closes its
+  // panel on its own, with no cleanup to run.
+  const openTicket = visibleTickets.find((t) => t.id === openTicketId) ?? null;
   useEffect(() => {
     if (!pendingColumn) return;
     const { columnId, target } = pendingColumn;
@@ -434,6 +461,29 @@ function Dashboard({
   return (
     <AppShellV2
       selectedClone={selectedClone}
+      ticket={
+        openTicket ? (
+          <TicketPanel
+            ticket={openTicket}
+            description={
+              <ClientOnly>
+                <Suspense fallback={<p className="px-1 text-xs text-slate-400">Loading…</p>}>
+                  <TicketDescription
+                    key={openTicket.id}
+                    markdown={openTicket.description ?? ""}
+                    onSave={(markdown) => run(putTicket(openTicket.id, { description: markdown }))}
+                  />
+                </Suspense>
+              </ClientOnly>
+            }
+            onTitleChange={(title) => run(putTicket(openTicket.id, { title }))}
+            onCreateClone={() => {
+              setTicketPrefill(openTicket.url);
+              setCloneOpen(true);
+            }}
+          />
+        ) : undefined
+      }
       error={error}
       sideFocus={sideFocus}
       onSideFocusChange={setSideFocus}
@@ -459,10 +509,18 @@ function Dashboard({
         cloneTokens: state.cloneTokens,
         forwards,
         operations: state.operations,
-        selectedId: state.selected,
+        // A ticket takes the highlight while it is open; the clone stays activated
+        // underneath, so the viewer keeps its stream.
+        selectedId: openTicket ? null : state.selected,
         sshPublicHost,
         bastionPort,
-        onSelectClone: (clone) => run(activate(clone.id)),
+        // Picking a clone always closes the ticket, the currently selected clone
+        // included: that click means "back to this clone", and there is nothing else it
+        // could mean once its own card is already the one activated.
+        onSelectClone: (clone) => {
+          setOpenTicketId(null);
+          run(activate(clone.id));
+        },
         onDeleteClone: (clone) => {
           // Deleting a parent cascades to its sub clones (server-side), so say so up front.
           const subCount = state.hosts.filter((h) => h.parent === clone.id).length;
@@ -481,6 +539,18 @@ function Dashboard({
         },
         onArchiveClone: (clone) => archiveDrop(clone, true),
         onUnarchiveClone: (clone) => archiveDrop(clone, false),
+        tickets: {
+          tickets: visibleTickets,
+          error: state.ticketsError ?? null,
+          selectedId: openTicket?.id ?? null,
+          onSelectTicket: (ticket) => setOpenTicketId(ticket.id),
+        },
+        onNewCloneFromTicket: (ticket, columnId) => {
+          setNewCloneColumn(columnId);
+          setTicketPrefill(ticket.url);
+          setCloneOpen(true);
+        },
+        onReorderTickets: setTicketOrder,
         onNewClone: (columnId) => {
           setNewCloneColumn(columnId);
           setCloneOpen(true);
@@ -529,14 +599,17 @@ function Dashboard({
               operations={state.operations}
               parentCandidate={subCloneParent}
               accounts={accounts}
+              initialTicket={ticketPrefill}
               onClose={() => {
                 setCloneOpen(false);
                 setNewCloneColumn(null);
+                setTicketPrefill("");
                 // Land on the clone that was just made. The dialog only closes once its
                 // operation has settled, so by the time this runs the clone either exists or
                 // the create failed — hence the check, so a failed create leaves the current
                 // selection alone rather than pointing at a clone that never appeared.
                 if (newClone && state.hosts.some((h) => h.id === newClone)) {
+                  setOpenTicketId(null);
                   run(activate(newClone));
                 }
                 setNewClone(null);

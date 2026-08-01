@@ -83,6 +83,12 @@ export const putForwards = (
 export const putBoardColumns = (columns: BoardColumn[]) =>
   putJson("/api/board", { columns });
 
+/** Write a title and/or description back to Linear. The browser holds no Linear key, so the
+ *  server does the mutation and answers with the patched state. An omitted field is left
+ *  alone; an empty description clears the body, which is a thing operators do on purpose. */
+export const putTicket = (id: string, patch: { title?: string; description?: string }) =>
+  putJson(`/api/tickets/${encodeURIComponent(id)}`, patch);
+
 // --- images (clone-source templates) ---------------------------------------
 
 /** The clone-source images (`rmng.image=1`); each carries the ids of the live

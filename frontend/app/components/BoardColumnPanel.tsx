@@ -11,6 +11,61 @@ import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable"
 import { Check, Plus, X } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
+/** The shared column chrome. A board column is a shell of a fixed width, a header row, and
+ *  a well the cards sit in; the ticket column is the same object with different contents, so
+ *  all three live here and neither side owns a private copy of the measurements. */
+export function ColumnShell({ children }: { children: ReactNode }) {
+  return <section className="flex w-80 shrink-0 flex-col">{children}</section>;
+}
+
+export function ColumnHeader({ children }: { children: ReactNode }) {
+  return <header className="flex shrink-0 items-center gap-2 px-1 pb-2">{children}</header>;
+}
+
+/** The header's title styling, as a class rather than a component: one column's title opens
+ *  a rename on double-click and the other's does nothing, so the element itself differs. */
+export const COLUMN_TITLE =
+  "min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200";
+
+/** The well the cards sit in, carved into the board rather than laid on it: a dark inner
+ *  shadow across the top where a recess would fall into shadow, and a one-pixel light line
+ *  along the bottom where its far wall would catch the light. The cards then read as sitting
+ *  in the column, which is the one thing their own outer shadow cannot say by itself.
+ *
+ *  Light only. A recess reads by being darker than what surrounds it, and in dark mode the
+ *  column is already the lighter of the two — the same shadow there just muddies its top
+ *  edge. The fill carries the separation on its own.
+ *
+ *  No hover tint on the drop target. The cards themselves already part around the pointer to
+ *  show where the drop lands, so a colour wash on the column only repeats it, and it repeats
+ *  it a whole column wide. */
+export function ColumnWell({
+  innerRef,
+  empty = null,
+  children,
+}: {
+  /** A drop target's node ref. Absent ⇒ the well receives nothing, which is what the ticket
+   *  column wants: a ticket leaves it by becoming a clone, not by being dropped back. */
+  innerRef?: (node: HTMLElement | null) => void;
+  /** Shown under the children when there is nothing in the well. */
+  empty?: string | null;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      ref={innerRef}
+      className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-xl bg-slate-100/60 p-2 shadow-[inset_0_1px_3px_rgb(15_23_42_/_0.045),inset_0_1px_10px_rgb(15_23_42_/_0.03),inset_0_-1px_0_rgb(255_255_255_/_0.5)] dark:bg-slate-800/70 dark:shadow-none"
+    >
+      {children}
+      {empty ? (
+        <p className="rounded-lg border border-dashed border-slate-300 p-4 text-center text-xs text-slate-400 dark:border-slate-600 dark:text-slate-500">
+          {empty}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export interface BoardColumnPanelProps {
   id: string;
   title: string;
@@ -40,14 +95,14 @@ export function BoardColumnPanel({
   const [renaming, setRenaming] = useState<string | null>(null);
 
   return (
-    <section className="flex w-80 shrink-0 flex-col">
-      <header className="flex shrink-0 items-center gap-2 px-1 pb-2">
+    <ColumnShell>
+      <ColumnHeader>
         {renaming === null ? (
           <>
             <h2
               onDoubleClick={() => setRenaming(title)}
               title="Double-click to rename"
-              className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200"
+              className={COLUMN_TITLE}
             >
               {title}
             </h2>
@@ -101,34 +156,13 @@ export function BoardColumnPanel({
             </button>
           </form>
         )}
-      </header>
+      </ColumnHeader>
 
-      {/* The well the cards sit in, carved into the board rather than laid on it: a dark
-          inner shadow across the top where a recess would fall into shadow, and a one-pixel
-          light line along the bottom where its far wall would catch the light. The cards
-          then read as sitting in the column, which is the one thing their own outer shadow
-          cannot say by itself.
-
-          Light only. A recess reads by being darker than what surrounds it, and in dark
-          mode the column is already the lighter of the two — the same shadow there just
-          muddies its top edge. The fill carries the separation on its own.
-
-          No hover tint on the drop target. The cards themselves already part around the
-          pointer to show where the drop lands, so a colour wash on the column only repeats
-          it, and it repeats it a whole column wide. */}
-      <div
-        ref={setNodeRef}
-        className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-xl bg-slate-100/60 p-2 shadow-[inset_0_1px_3px_rgb(15_23_42_/_0.045),inset_0_1px_10px_rgb(15_23_42_/_0.03),inset_0_-1px_0_rgb(255_255_255_/_0.5)] dark:bg-slate-800/70 dark:shadow-none"
-      >
+      <ColumnWell innerRef={setNodeRef} empty={cloneIds.length === 0 ? empty : null}>
         <SortableContext items={cloneIds} strategy={verticalListSortingStrategy}>
           {children}
         </SortableContext>
-        {cloneIds.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-slate-300 p-4 text-center text-xs text-slate-400 dark:border-slate-600 dark:text-slate-500">
-            {empty}
-          </p>
-        ) : null}
-      </div>
-    </section>
+      </ColumnWell>
+    </ColumnShell>
   );
 }

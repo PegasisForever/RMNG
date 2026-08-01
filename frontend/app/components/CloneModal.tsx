@@ -88,6 +88,7 @@ export function CloneModal({
   operations,
   parentCandidate,
   accounts,
+  initialTicket = "",
   onClose,
   onClone,
 }: {
@@ -101,6 +102,10 @@ export function CloneModal({
   parentCandidate: Clone | null;
   /** Imported accounts (both providers), so the two pickers can label each with its usage. */
   accounts: ClaudeUsage[];
+  /** Seeds the existing-ticket field, e.g. from a ticket dragged onto a board column. A
+   *  Linear URL is enough: the same parser reads an id out of a link or a bare `WE-142`,
+   *  so the preset auto-selects from it exactly as it would from typing. */
+  initialTicket?: string;
   onClose: () => void;
   /** Starts the clone and resolves with the driving Operation. The dialog stays open,
    *  showing its progress, until the operation settles. */
@@ -108,7 +113,7 @@ export function CloneModal({
 }) {
   const [image, setImage] = useState<string | null>(null);
   const [mode, setMode] = useState<"existing" | "create" | "plain">("existing");
-  const [ticket, setTicket] = useState("");
+  const [ticket, setTicket] = useState(initialTicket);
   // Linear team key for created tickets (e.g. "we" → WE-…). Picked from the presets' labels.
   const [team, setTeam] = useState("");
   const [title, setTitle] = useState("");

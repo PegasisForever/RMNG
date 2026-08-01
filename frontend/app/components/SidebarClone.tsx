@@ -1,6 +1,25 @@
 import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
-import { ArrowRight, ChevronDown, ChevronRight, EllipsisVertical, Terminal } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import {
+  Archive,
+  ArchiveRestore,
+  ArrowRight,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  Network,
+  Package,
+  Terminal,
+  Trash2,
+  UserCog,
+} from "lucide-react";
+import { useState } from "react";
+
+import {
+  MenuDivider,
+  MenuItem,
+  OverflowMenu,
+  useMenuClose,
+} from "~/components/OverflowMenu";
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
@@ -269,9 +288,10 @@ export interface SidebarCloneProps {
 
 /** A single overflow-menu item that copies `command` to the clipboard and shows a
  *  brief "Copied!" label before asking the menu to close. Kept separate from the
- *  plain-text `item()` helper because it needs its own transient state + delayed
- *  close (the other items close immediately on click). */
-function CopySshMenuItem({ command, onDone }: { command: string; onDone: () => void }) {
+ *  `item()` helper because it needs its own transient state + delayed close (the other
+ *  items close immediately on click), and it draws the same icon-and-label row by hand. */
+function CopySshMenuItem({ command }: { command: string }) {
+  const onDone = useMenuClose();
   // `null` = idle, `true` = copied, `false` = copy failed (both clipboard paths refused,
   // e.g. execCommand blocked). Only claim "Copied!" on a genuine success so the label
   // never lies about what reached the clipboard.
@@ -298,10 +318,10 @@ function CopySshMenuItem({ command, onDone }: { command: string; onDone: () => v
   );
 }
 
-/** The per-clone overflow menu (⋮) — collapses the commit / change-account / delete
- *  actions. Unmanaged rows (no container) only get Remove. Every trigger/item stops
- *  propagation so opening or invoking an action never selects or drags the row. */
-function OverflowMenu({
+/** The per-clone overflow menu (⋮): commit / change-account / delete and the rest. Unmanaged
+ *  rows (no container) only get Remove. The shell — trigger, portal, positioning, item row —
+ *  is shared with the ticket cards; only this list of actions is the clone's own. */
+function CloneMenu({
   cloneId,
   managed,
   archived,
@@ -313,6 +333,7 @@ function OverflowMenu({
   onUnarchive,
   onDelete,
   sshCommand,
+  linearUrl,
 }: {
   cloneId: string;
   managed: boolean;
@@ -327,90 +348,40 @@ function OverflowMenu({
   /** The ready-to-paste `ssh -J …` one-liner for this clone. Undefined for unmanaged
    *  rows (no real container/sshd to jump to), which hides the menu item. */
   sshCommand?: string;
+  /** The clone's Linear ticket URL. Undefined for a clone made without a ticket, which
+   *  hides the item rather than opening a dead link. */
+  linearUrl?: string;
 }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const item = (label: string, onClick: () => void, danger = false) => (
-    <button
-      type="button"
-      role="menuitem"
-      onPointerDown={(e) => e.stopPropagation()}
-      onClick={(e) => {
-        e.stopPropagation();
-        setOpen(false);
-        onClick();
-      }}
-      className={`block w-full cursor-pointer px-3 py-1.5 text-left text-xs ${
-        danger
-          ? "text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-          : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
-      }`}
-    >
-      {label}
-    </button>
-  );
-
   return (
-    <div ref={ref} className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
-      <button
-        type="button"
-        aria-label={`actions for ${cloneId}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        disabled={busy}
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((o) => !o);
-        }}
-        className={`cursor-pointer rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 disabled:opacity-0 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300 ${
-          open ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300" : ""
-        }`}
-      >
-        <EllipsisVertical className="size-4" />
-      </button>
-      {open ? (
-        <div
-          role="menu"
-          className="absolute right-0 top-full z-20 mt-1 w-40 overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800"
-        >
-          {managed && !archived ? (
-            <>
-              {item("Commit to image…", onCommit)}
-              {item("Change account…", onChangeAccount)}
-              {item("Port forward…", onPortForward)}
-              {sshCommand ? <CopySshMenuItem command={sshCommand} onDone={() => setOpen(false)} /> : null}
-              {item("Archive", onArchive)}
-              <div className="my-1 h-px bg-slate-100 dark:bg-slate-700" />
-            </>
-          ) : null}
-          {managed && archived ? (
-            <>
-              {item("Unarchive", onUnarchive)}
-              <div className="my-1 h-px bg-slate-100 dark:bg-slate-700" />
-            </>
-          ) : null}
-          {item(managed ? "Delete" : "Remove", onDelete, true)}
-        </div>
+    <OverflowMenu label={`actions for ${cloneId}`} disabled={busy}>
+      {linearUrl ? (
+        <>
+          <MenuItem
+            icon={ExternalLink}
+            label="Open in Linear"
+            onClick={() => window.open(linearUrl, "_blank", "noopener,noreferrer")}
+          />
+          <MenuDivider />
+        </>
       ) : null}
-    </div>
+      {managed && !archived ? (
+        <>
+          <MenuItem icon={Package} label="Commit to image…" onClick={onCommit} />
+          <MenuItem icon={UserCog} label="Change account…" onClick={onChangeAccount} />
+          <MenuItem icon={Network} label="Port forward…" onClick={onPortForward} />
+          {sshCommand ? <CopySshMenuItem command={sshCommand} /> : null}
+          <MenuItem icon={Archive} label="Archive" onClick={onArchive} />
+          <MenuDivider />
+        </>
+      ) : null}
+      {managed && archived ? (
+        <>
+          <MenuItem icon={ArchiveRestore} label="Unarchive" onClick={onUnarchive} />
+          <MenuDivider />
+        </>
+      ) : null}
+      <MenuItem icon={Trash2} label={managed ? "Delete" : "Remove"} onClick={onDelete} danger />
+    </OverflowMenu>
   );
 }
 
@@ -569,7 +540,7 @@ export function SidebarClone({
           ) : (
             <div className="min-w-0 flex-1" />
           )}
-          <OverflowMenu
+          <CloneMenu
             cloneId={clone.id}
             managed={managed}
             archived={clone.archived ?? false}
@@ -581,6 +552,7 @@ export function SidebarClone({
             onUnarchive={onUnarchive}
             onDelete={onDelete}
             sshCommand={sshCommand}
+            linearUrl={clone.linearTicketUrl ?? undefined}
           />
         </div>
 

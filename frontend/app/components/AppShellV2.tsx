@@ -61,6 +61,11 @@ export interface AppShellV2Props {
   rail: BoardRailProps;
   /** The clone whose notes and chat fill the side panel; null shows the empty state. */
   selectedClone: Clone | null;
+  /** A selected Linear ticket takes the side panel for itself, as one card instead of two.
+   *  A ticket is a different subject from the clone, not a third thing about it, so the two
+   *  do not share the space. The clone stays selected underneath and its cards come back
+   *  when the ticket closes. */
+  ticket?: ReactNode;
   /** Last failed action, shown as a banner above everything. */
   error?: string | null;
   /** The side panel's split: the focused half takes 3/4 of the height. Reported on the
@@ -79,6 +84,7 @@ export function AppShellV2({
   board,
   rail,
   selectedClone,
+  ticket,
   error = null,
   sideFocus,
   onSideFocusChange,
@@ -185,7 +191,7 @@ export function AppShellV2({
             The width is the same expression the board's gutter uses, so the two cannot
             disagree and strand the last column: the custom property is what the operator
             drags, and 20rem is the floor below which the cards stop being usable. */}
-        {selectedClone ? (
+        {selectedClone || ticket ? (
           <aside className="pointer-events-none absolute inset-y-0 right-0 z-20 flex w-[max(var(--side-panel-w,30%),20rem)] shrink-0 flex-col gap-3 p-3">
             {/* The resize grip: a 16px hit area over the cards' own left edge, so the thing
                 the operator drags is the edge they can see and it grabs from either side. It
@@ -216,10 +222,18 @@ export function AppShellV2({
               className="pointer-events-auto absolute inset-y-0 left-1.5 z-10 w-4 cursor-col-resize touch-none select-none outline-none"
             />
 
+            {ticket ? (
+              <section className={`pointer-events-auto flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl ${CARD}`}>
+                {ticket}
+              </section>
+            ) : null}
+
             {/* The two cards swap heights on focus. The easing overshoots its target and
                 settles back, which is what makes the swap read as one card pushing the other
                 down rather than as both being redrawn. The pair briefly sums past 100% at the
                 peak; `flex-shrink` absorbs it, so nothing clips. */}
+            {!ticket && selectedClone ? (
+            <>
             <section
               onFocusCapture={() => onSideFocusChange("notes")}
               onPointerDownCapture={() => onSideFocusChange("notes")}
@@ -245,6 +259,8 @@ export function AppShellV2({
               </h3>
               {chat}
             </section>
+            </>
+            ) : null}
           </aside>
         ) : null}
       </div>

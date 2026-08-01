@@ -6,6 +6,7 @@
 import type { PartialBlock } from "@blocknote/core";
 
 import type { BoardColumn } from "~/lib/board";
+import type { LinearTicket } from "~/lib/tickets";
 import type { ChatMessage, ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
@@ -448,3 +449,135 @@ export const appConfig: AppConfigRedacted = {
   globalPrompt: "# Working in this clone\n\n(sample shared operating memory)\n",
 };
 
+
+// --- Linear tickets ---------------------------------------------------------
+// What the ticket column draws: the union of every configured Linear key's own issues.
+// `WE-142` and `DEV-88` are deliberately here AND on a clone in `hosts`, and `DEV-104`
+// appears twice as two presets sharing one key would return it. `openTickets` is what
+// drops all three, so a story that skips the filter shows the bug rather than hiding it.
+
+export const linearTickets: LinearTicket[] = [
+  {
+    id: "WE-301",
+    title: "Encoder drops frames when a second monitor is hot-plugged",
+    url: "https://linear.app/pegasis/issue/WE-301/encoder-drops-frames",
+    // Linear sent its own branch name for this one, handle prefix and all; the rest fall
+    // back to the derived shape.
+    branchName: "alex/we-301-encoder-drops-frames-when-a-second-monitor",
+    assignee: "Alex",
+    dueDate: "2026-08-14",
+    estimate: 3,
+    description:
+      "Hot-plugging a second monitor mid-session drops roughly 40 frames before the encoder settles.\n\n" +
+      "## What happens\n\n" +
+      "`vapostproc` renegotiates caps when the monitor set changes, and the encoder is torn down and rebuilt " +
+      "while frames are still arriving. Those frames are dropped rather than queued.\n\n" +
+      "## What it should do\n\n" +
+      "1. Hold the incoming frames while the caps settle.\n" +
+      "2. Rebuild the encoder against the new layout.\n" +
+      "3. Drain the held frames.",
+    children: [
+      {
+        id: "WE-302",
+        title: "Reproduce with a scripted hot-plug",
+        url: "https://linear.app/pegasis/issue/WE-302/reproduce",
+        state: "done",
+      },
+      {
+        id: "WE-303",
+        title: "Hold frames across a caps renegotiation",
+        url: "https://linear.app/pegasis/issue/WE-303/hold-frames",
+        state: "in_progress",
+      },
+      {
+        id: "WE-304",
+        title: "Add a hot-plug case to the capture self-test",
+        url: "https://linear.app/pegasis/issue/WE-304/self-test",
+        state: "todo",
+      },
+    ],
+    labels: [
+      { name: "Bug", color: "#eb5757" },
+      { name: "Video", color: "#0f7488" },
+    ],
+    state: "todo",
+    team: "WE",
+    priority: 1,
+  },
+  {
+    id: "WE-288",
+    title: "Board columns should remember their scroll position",
+    url: "https://linear.app/pegasis/issue/WE-288/board-columns-scroll",
+    labels: [{ name: "Feature", color: "#bb87fc" }],
+    assignee: "Alex",
+    description:
+      "Scrolling a column, selecting a clone, and coming back puts you at the top again.\n\n" +
+      "Store the offset per column and restore it on mount.",
+    parent: {
+      id: "WE-280",
+      title: "Board polish",
+      url: "https://linear.app/pegasis/issue/WE-280/board-polish",
+      state: "in_progress",
+    },
+    children: [],
+    state: "in_progress",
+    team: "WE",
+    priority: 2,
+  },
+  {
+    id: "DEV-104",
+    title: "Retry the usage poll on a 429 instead of dropping the window",
+    url: "https://linear.app/pegasis/issue/DEV-104/retry-usage-poll",
+    labels: [
+      { name: "Feature", color: "#bb87fc" },
+      { name: "Voice", color: "#4ea7fc" },
+    ],
+    state: "todo",
+    team: "DEV",
+    priority: 3,
+    children: [],
+  },
+  {
+    id: "DEV-97",
+    title: "Document the bastion port in the SSH panel",
+    url: "https://linear.app/pegasis/issue/DEV-97/document-bastion-port",
+    labels: [{ name: "Docs", color: "#5e6ad2" }],
+    state: "todo",
+    team: "DEV",
+    children: [],
+  },
+  // The same issue again, as a second key carrying the same account would return it.
+  {
+    id: "DEV-104",
+    title: "Retry the usage poll on a 429 instead of dropping the window",
+    url: "https://linear.app/pegasis/issue/DEV-104/retry-usage-poll",
+    labels: [
+      { name: "Feature", color: "#bb87fc" },
+      { name: "Voice", color: "#4ea7fc" },
+    ],
+    state: "todo",
+    team: "DEV",
+    priority: 3,
+    children: [],
+  },
+  // Already cloned (see `cloneWorking` / `cloneIdle`), so the filter drops both.
+  {
+    id: "WE-142",
+    title: "Normalize sidebar CPU to % of allowance",
+    url: "https://linear.app/pegasis/issue/WE-142/normalize-sidebar-cpu",
+    state: "in_progress",
+    team: "WE",
+    priority: 2,
+    labels: [],
+    children: [],
+  },
+  {
+    id: "DEV-88",
+    title: "Wire up the pull-template wizard",
+    url: "https://linear.app/pegasis/issue/DEV-88/pull-template-wizard",
+    state: "todo",
+    team: "DEV",
+    labels: [],
+    children: [],
+  },
+];
