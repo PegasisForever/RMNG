@@ -2,14 +2,14 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 
 import { ImagePicker } from "./ImagePicker";
-import { images } from "./__fixtures__/images";
+import { imagesNow, makeImages } from "./__fixtures__/images";
+import { preferredCloneImage } from "~/lib/lastCloneImage";
 
 const meta = {
   title: "Clone/Components/ImagePicker",
   component: ImagePicker,
   parameters: { layout: "centered" },
-  // Local state so the dropdown actually selects; the picker also self-selects the
-  // base image on mount, matching its behaviour inside the clone dialog.
+  // Local state so the dropdown actually selects.
   render: (args) => {
     const [value, setValue] = useState<string | null>(args.value);
     return (
@@ -23,9 +23,10 @@ const meta = {
     );
   },
   args: {
-    images,
+    images: makeImages(),
     loading: false,
     value: null,
+    now: imagesNow,
     onChange: () => {},
   },
 } satisfies Meta<typeof ImagePicker>;
@@ -33,8 +34,16 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** The clone-source template picker — a dropdown of the available images, base preselected. */
-export const Default: Story = {};
+/** The clone-source template picker — a dropdown of the available images, the newest one
+ *  preselected.
+ *
+ *  Which image a fresh dialog starts on arrives as a prop rather than being worked out here:
+ *  the rule reads the last-cloned-from reference out of localStorage, so the clone dialog's
+ *  container owns it. The story derives the same answer from the same function, with nothing
+ *  remembered. */
+export const Default: Story = {
+  args: { value: preferredCloneImage(makeImages(), null) },
+};
 
 /** Still fetching the image list. */
 export const Loading: Story = {

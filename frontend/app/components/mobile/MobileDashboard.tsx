@@ -14,11 +14,13 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { MobileClone, type CloneTab } from "~/components/mobile/MobileClone";
 import { MobileHome } from "~/components/mobile/MobileHome";
+import { useAccountOrder } from "~/lib/accountOrder";
 import { activate, refreshClaudeUsage, refreshCodexUsage } from "~/lib/api";
 import { withDefaults } from "~/lib/board";
 import { browserLocale } from "~/lib/format";
 import type { ControlState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
+import { useNow } from "~/lib/useNow";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
 // BlockNote and the chat panel are browser-only, and both are the desktop's modules
@@ -52,6 +54,11 @@ export function MobileDashboard({
   const [usageOpen, setUsageOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The two session reads the usage bars need. Both belong here rather than in the panel:
+  // the store is shared with desktop Settings, and the clock has to tick somewhere the
+  // pure page cannot see.
+  const { acctOrder } = useAccountOrder();
+  const now = useNow();
 
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
@@ -109,11 +116,13 @@ export function MobileDashboard({
     <>
       <MobileHome
         accounts={state.claudeAccounts ?? []}
+        accountOrder={acctOrder}
         cloneGroups={cloneGroups}
         codexGroups={codexGroups}
         // Read here rather than in the usage bars, so the reset-time tooltips are a function
         // of the page's props like everything else it draws.
         locale={browserLocale()}
+        now={now}
         usageOpen={usageOpen}
         onUsageOpenChange={setUsageOpen}
         onRefresh={() => run(Promise.all([refreshClaudeUsage(), refreshCodexUsage()]))}

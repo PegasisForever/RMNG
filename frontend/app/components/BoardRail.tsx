@@ -7,6 +7,7 @@ import { Settings } from "lucide-react";
 
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { OperationProgress } from "~/components/OperationProgress";
+import type { AcctOrder } from "~/lib/accountOrder";
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { LxcStats } from "~/lib/wire/LxcStats";
@@ -31,6 +32,9 @@ export function formatLxcUsage(
 export interface BoardRailProps {
   /** Per-account usage rows (both providers), from `ControlState.claudeAccounts`. */
   accounts: ClaudeUsage[];
+  /** The operator's own ordering of those rows, as dragged out in Settings. The route
+   *  subscribes to the shared store and passes the value, so a drag there reorders here. */
+  accountOrder: AcctOrder;
   /** Configured Claude pools (`config.cloneGroups`) — the usage list groups by these. */
   cloneGroups?: CloneGroup[];
   /** Configured Codex pools (`config.codexGroups`). */
@@ -38,6 +42,9 @@ export interface BoardRailProps {
   /** Formats the usage bars' reset-time tooltips. Read once by the route (the operator's
    *  `navigator.language`) and handed down, so a story can pin it. */
   locale: string;
+  /** Wall-clock milliseconds for the usage bars' pace markers and reset tooltips. Read once
+   *  by the route, null until its clock has ticked. */
+  now: number | null;
   /** Live CT-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
   lxcStats: LxcStats | null;
   /** All operations; the running ones render as progress rows. */
@@ -56,9 +63,11 @@ export interface BoardRailProps {
 
 export function BoardRail({
   accounts,
+  accountOrder,
   cloneGroups,
   codexGroups,
   locale,
+  now,
   lxcStats,
   operations,
   presetNames,
@@ -127,9 +136,11 @@ export function BoardRail({
 
       <ClaudeAccountsPanel
         accounts={accounts}
+        accountOrder={accountOrder}
         cloneGroups={cloneGroups}
         codexGroups={codexGroups}
         locale={locale}
+        now={now}
         onImport={onImportAccount}
         onRefresh={onRefresh}
       />

@@ -106,9 +106,9 @@ export function SetupWizard({
       primary: m.primary,
     }));
 
-  // Round-trip every existing preset — like SettingsPanel's save — instead of sending just
-  // the one being edited. The server's `merge_update` replaces the whole `layoutPresets`
-  // array wholesale (that's how SettingsPanel expresses deletes), so a single-element patch
+  // Round-trip every existing preset — like the settings panel's save — instead of sending
+  // just the one being edited. The server's `merge_update` replaces the whole `layoutPresets`
+  // array wholesale (that's how `settingsPatch` expresses deletes), so a single-element patch
   // here would silently delete every other named preset on a mature config.
   const layoutPresetsPatch = () => {
     const existing = initialConfig.layoutPresets;

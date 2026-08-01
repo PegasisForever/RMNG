@@ -5,28 +5,17 @@
 // (elapsed fraction of [resetsAt - windowLength, resetsAt]); fill past the marker
 // = burning faster than uniform.
 import { Plus, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
-import { orderedWithinBuckets, useAccountOrder } from "~/lib/accountOrder";
+import { orderedWithinBuckets, type AcctOrder } from "~/lib/accountOrder";
 import { resetTooltip } from "~/lib/format";
 import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
 const FIVE_H_MS = 5 * 60 * 60 * 1000;
 const SEVEN_D_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** Client-only clock (null during SSR) so the pace marker never causes hydration drift. */
-function useNow(): number | null {
-  const [now, setNow] = useState<number | null>(null);
-  useEffect(() => {
-    setNow(Date.now());
-    const t = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(t);
-  }, []);
-  return now;
-}
 
 function barColor(pct: number): string {
   if (pct >= 90) return "bg-rose-500";
@@ -187,13 +176,19 @@ function Row({ a, now, locale }: { a: ClaudeUsage; now: number | null; locale: s
 
 export function ClaudeAccountsPanel({
   accounts,
+  accountOrder,
   cloneGroups = [],
   codexGroups = [],
   locale,
+  now,
   onRefresh,
   onImport,
 }: {
   accounts: ClaudeUsage[];
+  /** The cosmetic order the operator dragged out in Settings, per provider. The container
+   *  subscribes to the shared store and hands the value down, which is what keeps this panel
+   *  and the Settings lists in step without either one reading the store during render. */
+  accountOrder: AcctOrder;
   /** Configured Claude pools (`config.cloneGroups`). With none, the list stays flat. */
   cloneGroups?: CloneGroup[];
   /** Configured Codex pools (`config.codexGroups`). */
@@ -202,18 +197,19 @@ export function ClaudeAccountsPanel({
    *  (`navigator.language`) and passed down, so the panel draws the same string for the same
    *  props on every machine and a story can pin it. */
   locale: string;
+  /** Wall-clock milliseconds, driving both things a `resetsAt` decides: each bar's pace
+   *  marker and its reset tooltip. Null before the container's clock has ticked, which draws
+   *  neither. Injected for the same reason as `locale`: a panel that read the clock itself
+   *  would draw a different picture every time a story was opened. */
+  now: number | null;
   onRefresh: () => void | Promise<void>;
   onImport: () => void | Promise<void>;
 }) {
-  const now = useNow();
-  // The cosmetic order the operator dragged out in Settings. Reading the same store (rather
-  // than taking a prop) is what keeps the two views in step: a drag there re-renders here.
-  const { acctOrder } = useAccountOrder();
   const rows = orderedWithinBuckets(
     accounts,
     (a) => a.provider ?? "claude",
     (a) => a.id,
-    acctOrder,
+    accountOrder,
   );
   // With no pools configured there is nothing to group by, so the list stays flat.
   const sections =

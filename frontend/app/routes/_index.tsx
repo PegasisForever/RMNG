@@ -6,7 +6,7 @@ import { CloneModalContainer } from "~/components/CloneModalContainer";
 import { CommitImageModal } from "~/components/CommitImageModal";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { PortForwardModal } from "~/components/PortForwardModal";
-import { SettingsPanel } from "~/components/SettingsPanel";
+import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
 import { SetupWizard } from "~/components/SetupWizard";
 import { MobileDashboard } from "~/components/mobile/MobileDashboard";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
@@ -48,10 +48,12 @@ import {
   withDefaults,
   type BoardColumn,
 } from "~/lib/board";
+import { useAccountOrder } from "~/lib/accountOrder";
 import { browserLocale } from "~/lib/format";
 import { type ControlState, type Clone, emptyState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useIsMobile } from "~/lib/useIsMobile";
+import { useNow } from "~/lib/useNow";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
@@ -323,6 +325,11 @@ function Dashboard({
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The shared cosmetic account order and the live clock. Both are session reads, so they
+  // are resolved here and handed down: the rail's usage bars and the settings account lists
+  // then draw from props alone, and both stay in step because they read one subscription.
+  const { acctOrder, setAcctOrder } = useAccountOrder();
+  const now = useNow();
   const [commitClone, setCommitClone] = useState<Clone | null>(null);
   const [committing, setCommitting] = useState(false);
   const [changeClone, setChangeClone] = useState<Clone | null>(null);
@@ -522,11 +529,13 @@ function Dashboard({
       onSideFocusChange={setSideFocus}
       rail={{
         accounts,
+        accountOrder: acctOrder,
         cloneGroups,
         codexGroups,
         // The operator's locale, read here rather than in the usage bars, so the reset-time
         // tooltips are a function of the rail's props like everything else it draws.
         locale: browserLocale(),
+        now,
         lxcStats,
         operations: state.operations,
         presetNames: state.layoutPresetNames ?? [],
@@ -682,7 +691,7 @@ function Dashboard({
           ) : null}
 
           {settingsOpen ? (
-            <SettingsPanel
+            <SettingsPanelContainer
               accounts={accounts}
               onClose={() => setSettingsOpen(false)}
               getConfig={getConfig}

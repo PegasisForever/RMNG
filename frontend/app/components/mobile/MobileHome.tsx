@@ -16,6 +16,7 @@ import { ChevronRight, ChevronDown } from "lucide-react";
 
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
 import { CloneStatusDot } from "~/components/mobile/CloneStatus";
+import type { AcctOrder } from "~/lib/accountOrder";
 import { resolveColumns, withDefaults, type BoardColumn } from "~/lib/board";
 import type { ClaudeUsage, Clone } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
@@ -53,6 +54,9 @@ export function peakUsage(accounts: ClaudeUsage[]): UsagePeak | null {
 export interface MobileHomeProps {
   /** Per-account usage rows, both providers, from `ControlState.claudeAccounts`. */
   accounts: ClaudeUsage[];
+  /** The operator's own ordering of those rows, dragged out in desktop Settings. Read from
+   *  the shared store by the dashboard container and handed down. */
+  accountOrder: AcctOrder;
   /** Configured Claude pools (`config.cloneGroups`) — the usage list groups by these. */
   cloneGroups?: CloneGroup[];
   /** Configured Codex pools (`config.codexGroups`). */
@@ -60,6 +64,9 @@ export interface MobileHomeProps {
   /** Formats the usage bars' reset-time tooltips. Read once by the route (the operator's
    *  `navigator.language`) and handed down, so a story can pin it. */
   locale: string;
+  /** Wall-clock milliseconds for the usage bars' pace markers and reset tooltips. Read once
+   *  by the dashboard container, null until its clock has ticked. */
+  now: number | null;
   /** The usage section is collapsed by default: three accounts of bars would push the
    *  clone list off a phone screen, and the peak number answers the usual question. */
   usageOpen: boolean;
@@ -110,9 +117,11 @@ function CloneRow({ clone, onSelect }: { clone: Clone; onSelect: (clone: Clone) 
 
 export function MobileHome({
   accounts,
+  accountOrder,
   cloneGroups = [],
   codexGroups = [],
   locale,
+  now,
   usageOpen,
   onUsageOpenChange,
   onRefresh,
@@ -177,9 +186,11 @@ export function MobileHome({
             <div className="px-3 pb-3">
               <ClaudeAccountsPanel
                 accounts={accounts}
+                accountOrder={accountOrder}
                 cloneGroups={cloneGroups}
                 codexGroups={codexGroups}
                 locale={locale}
+                now={now}
                 onRefresh={onRefresh}
                 onImport={onImportAccount}
               />

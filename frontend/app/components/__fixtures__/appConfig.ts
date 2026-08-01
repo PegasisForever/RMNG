@@ -6,7 +6,9 @@
 // too. Call it per story, and per call inside a `getConfig` stub: a real fetch hands back a
 // fresh parse each time, so a stub that does the same is also the honest one.
 
+import { settingsDraftFrom, type SettingsDraft } from "~/lib/settingsDraft";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
+import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
 import { makeCloneGroups, makeCodexGroups } from "./accounts";
 import { makeClonePresets } from "./presets";
@@ -61,6 +63,32 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
     },
     agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
     globalPrompt: "# Working in this clone\n\n(sample shared operating memory)\n",
+    ...overrides,
+  };
+}
+
+/** The settings form, seeded from the config above through the same function the container
+ *  uses. Deriving it rather than hand-writing it is what stops a story from showing a form
+ *  the panel could never actually be in.
+ *
+ *  Freshly built, arrays and all: the sections replace what they are given, but every story
+ *  that edits one would otherwise be editing the next story's form too. */
+export function makeSettingsDraft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
+  return { ...settingsDraftFrom(makeAppConfig()), ...overrides };
+}
+
+/** The control-server's own version, as `GET /api/server/version` answers it. Up to date by
+ *  default; override `available` for the state that lights the Update button. */
+export function makeUpdateStatus(overrides: Partial<UpdateStatus> = {}): UpdateStatus {
+  const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+  return {
+    currentRevision: "a1b2c3d",
+    currentCreated: "2026-07-01T12:00:00Z",
+    currentDigest: digest,
+    remoteDigest: digest,
+    available: false,
+    reference: "pegasis0/rmng:latest",
+    error: null,
     ...overrides,
   };
 }

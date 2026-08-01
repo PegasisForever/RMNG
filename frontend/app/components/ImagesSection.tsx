@@ -16,6 +16,7 @@ export function ImagesSection({
   loading,
   pullBusy,
   templateRef,
+  now,
   onPull,
   onDelete,
 }: {
@@ -25,6 +26,9 @@ export function ImagesSection({
   pullBusy: boolean;
   /** Configured `docker.templateReference`, prefilled into the reference prompt. */
   templateRef: string;
+  /** Wall-clock milliseconds, for each row's age. Read by the container so this list draws
+   *  the same thing for the same props. */
+  now: number;
   onPull: (reference: string) => void;
   onDelete: (reference: string) => void;
 }) {
@@ -107,7 +111,7 @@ export function ImagesSection({
                     ) : null}
                   </div>
                   <p className="mt-0.5 truncate text-[11px] text-slate-400 dark:text-slate-500">
-                    {formatBytes(img.sizeBytes)} · {relativeAge(img.createdAt)}
+                    {formatBytes(img.sizeBytes)} · {relativeAge(img.createdAt, now)}
                     {inUse > 0 ? ` · ${inUse} clone${inUse === 1 ? "" : "s"}` : ""}
                   </p>
                 </div>

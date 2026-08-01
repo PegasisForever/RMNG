@@ -31,18 +31,26 @@ export function makeUsage(overrides: Partial<ClaudeUsage> = {}): ClaudeUsage {
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 
+/** The instant every account fixture is anchored to, and the one a story hands
+ *  `ClaudeAccountsPanel` as its `now`.
+ *
+ *  The two have to be the same number. A reset instant only means something against the
+ *  clock the bars are drawn with: pin the fixture and let the panel read the wall clock, and
+ *  every window is months in the past by the time anyone opens the story, so every bar draws
+ *  its pace marker at 100% with a "Reset …" tooltip. Pass this to both and the bars are
+ *  reproducible on every machine and every day. */
+export const accountsNow: number = Date.parse("2026-07-01T12:00:00Z");
+
 /** Both providers' rows, freshly built.
  *
- *  `now` anchors the reset instants, and they are relative to it rather than fixed because
- *  `ClaudeAccountsPanel` reads the live clock for both things a `resetsAt` drives: the
- *  hover tooltip's countdown and the vertical pace marker on each bar. A pinned instant would
- *  be in the past by the time anyone opened the story, and every bar would then draw at 100%
- *  pace with a "Reset …" tooltip, which is one state out of several and the least useful one.
- *  Pass an explicit `now` to make a story's bars reproducible.
+ *  `now` anchors the reset instants, and they are relative to it rather than fixed so that a
+ *  caller can decide what "now" means. It is required, not defaulted: a default of
+ *  `Date.now()` is exactly the drift this parameter exists to remove, and one that nobody
+ *  passes removes nothing. Pass `accountsNow`, and give the panel the same value.
  *
  *  One window is deliberately left with `resetsAt: null`, because that is what every row
  *  looks like before the poller has filled it in: no marker and no tooltip. */
-export function makeClaudeAccounts(now: number = Date.now()): ClaudeUsage[] {
+export function makeClaudeAccounts(now: number): ClaudeUsage[] {
   const at = (ms: number) => new Date(now + ms).toISOString();
   return [
     makeUsage({

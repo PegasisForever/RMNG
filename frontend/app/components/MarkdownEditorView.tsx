@@ -35,6 +35,11 @@ export function MarkdownEditorView({
   placeholder,
   className,
 }: MarkdownEditorViewProps) {
+  // Theme, not data. It is the one dependency the pure-UI rules keep out of props: a global
+  // the preview supplies for every story at once, through the `.dark` class its theme toolbar
+  // already sets. `useColorScheme` reads that class as well as the OS media query, so the
+  // toolbar rethemes this editor along with everything around it, and there is nothing for a
+  // container to inject that the decorator does not already control.
   const scheme = useColorScheme();
   const editor = useCreateBlockNote({
     uploadFile,

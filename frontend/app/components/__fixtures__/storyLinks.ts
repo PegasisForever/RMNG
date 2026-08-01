@@ -6,7 +6,7 @@
 //
 // Two exports, and the whole point of the pair is which one goes where:
 //
-//   in args:      onOpenSettings: makeStoryLink("Settings/Components/SettingsPanel", "Default")
+//   in args:      onOpenSettings: makeStoryLink("Settings/Components/SettingsPanelView", "Default")
 //   in a handler: onSelectTicket: (t) => goToStory("Board/Components/TicketPanel", nameFor(t))
 //
 // Put `goToStory` in args by mistake and the preview jumps the moment the module is evaluated,
@@ -39,7 +39,7 @@ export function goToStory(title: string, exportName: string): void {
  *  navigation seam:
  *
  *  ```ts
- *  onOpenSettings: makeStoryLink("Settings/Components/SettingsPanel", "Default")
+ *  onOpenSettings: makeStoryLink("Settings/Components/SettingsPanelView", "Default")
  *  ```
  *
  *  The handler ignores its arguments, so it satisfies a callback prop of any signature. */

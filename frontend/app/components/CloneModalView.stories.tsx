@@ -4,10 +4,15 @@ import { fn } from "storybook/test";
 
 import { CloneModalView } from "./CloneModalView";
 import { MarkdownEditorView } from "./MarkdownEditorView";
-import { makeClaudeAccounts, makeCloneGroups, makeCodexGroups } from "./__fixtures__/accounts";
+import {
+  accountsNow,
+  makeClaudeAccounts,
+  makeCloneGroups,
+  makeCodexGroups,
+} from "./__fixtures__/accounts";
 import { cloneTicketUrl, makeCloneDraft } from "./__fixtures__/cloneDialog";
 import { makeCloneWorking } from "./__fixtures__/clones";
-import { images } from "./__fixtures__/images";
+import { imagesNow, makeImages } from "./__fixtures__/images";
 import { makeOperation } from "./__fixtures__/operations";
 import { makeClonePresets } from "./__fixtures__/presets";
 import {
@@ -55,6 +60,19 @@ function form(draft: CloneDraft, presets: PresetRedacted[] = makeClonePresets())
   return { draft, ...derive(draft, presets) };
 }
 
+/** The server-side lists the dialog draws from, rebuilt per story. Nothing below copies them
+ *  into state today, but a builder called once at module load is the shape that starts
+ *  leaking the moment something does, so each story gets its own. */
+function sources() {
+  return {
+    images: makeImages(),
+    accounts: makeClaudeAccounts(accountsNow),
+    claudeGroups: makeCloneGroups(),
+    codexGroups: makeCodexGroups(),
+    parentCandidate: makeCloneWorking(),
+  };
+}
+
 /** The real description slot, on a stub upload: a pasted image really appears, from the copy
  *  already in the browser's memory. The live field posts to /api/upload instead. */
 const descriptionEditor = (
@@ -70,15 +88,11 @@ const meta = {
   component: CloneModalView,
   parameters: { layout: "fullscreen" },
   args: {
-    // Read-only server data: the dialog filters and maps these and never holds them, so one
-    // set behind the stories cannot leak an edit from one into the next. The draft is the one
-    // thing the dialog does edit, which is why every story builds its own.
-    images,
+    ...sources(),
     imagesLoading: false,
-    accounts: makeClaudeAccounts(),
-    claudeGroups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
-    parentCandidate: makeCloneWorking(),
+    // The clock the image rows' ages are measured against, pinned to the same instant the
+    // image fixtures are written for.
+    now: imagesNow,
     descriptionEditor,
     busy: false,
     error: null,
@@ -95,49 +109,59 @@ type Story = StoryObj<typeof meta>;
 
 /** How the dialog opens from a column's own New clone button: an image already picked, the
  *  Existing-ticket tab, and nothing typed. Clone is dead until a ticket parses. */
-export const Default: Story = {};
+export const Default: Story = { args: { ...sources() } };
 
 /** Opened by a ticket — dragged onto a column, or from the ticket panel's own button. The
  *  link is already in the field, so the id, the hostname and the preset are all resolved
  *  before the operator has done anything, and Clone is live. */
 export const FromTicket: Story = {
-  args: form(makeCloneDraft({ ticket: cloneTicketUrl })),
+  args: { ...sources(), ...form(makeCloneDraft({ ticket: cloneTicketUrl })) },
 };
 
 /** The New-ticket tab. The team dropdown is also the preset selector, so the resolved-preset
  *  line is gone; the description editor takes its place, and the button reads Create & clone. */
 export const NewTicket: Story = {
-  args: form(makeCloneDraft({ mode: "create", team: "we", title: "Tighten the metric row" })),
+  args: {
+    ...sources(),
+    ...form(makeCloneDraft({ mode: "create", team: "we", title: "Tighten the metric row" })),
+  },
 };
 
 /** The No-ticket tab: a container title, an optional first turn for the agent, and a preset
  *  picked by hand. Nothing here touches Linear, so this is the only tab that cannot be blocked
  *  by a missing key — and the only one with no instruction overrides. */
 export const NoTicket: Story = {
-  args: form(
-    makeCloneDraft({
-      mode: "plain",
-      title: "encoder-scratch",
-      message: "Read the VA-API notes, then summarize the options.",
-      plainPreset: "webapp",
-    }),
-  ),
+  args: {
+    ...sources(),
+    ...form(
+      makeCloneDraft({
+        mode: "plain",
+        title: "encoder-scratch",
+        message: "Read the VA-API notes, then summarize the options.",
+        plainPreset: "webapp",
+      }),
+    ),
+  },
 };
 
 /** A validation failure the operator cannot type their way out of: creating a ticket needs
  *  the resolved preset's own Linear key, and this team's preset has none. The warning names
  *  the preset and Clone stays dead until they pick another team or add the key. */
 export const MissingLinearKey: Story = {
-  args: form(makeCloneDraft({ mode: "create", team: "ops", title: "Encoder spike" })),
+  args: {
+    ...sources(),
+    ...form(makeCloneDraft({ mode: "create", team: "ops", title: "Encoder spike" })),
+  },
 };
 
 /** The clone is running. The form and both buttons lock, Escape is swallowed rather than
  *  closing over the operation, and the op's own progress renders under the fields. */
 export const Cloning: Story = {
   args: {
+    ...sources(),
     ...form(makeCloneDraft({ ticket: cloneTicketUrl })),
     busy: true,
-    operation: makeOperation({ target: "pega-we-142", source: images[0].reference }),
+    operation: makeOperation({ target: "pega-we-142", source: makeImages()[0].reference }),
   },
 };
 
@@ -145,6 +169,7 @@ export const Cloning: Story = {
  *  stands, and says why in its own footer rather than the page banner. */
 export const WithError: Story = {
   args: {
+    ...sources(),
     ...form(makeCloneDraft({ ticket: cloneTicketUrl })),
     error: "clone: no image named pegasis0/rmng-template:latest",
   },
@@ -154,6 +179,7 @@ export const WithError: Story = {
  *  tabs re-derives the preset and the Clone button, and Clone runs a stand-in operation that
  *  finishes after a beat. */
 export const Interactive: Story = {
+  args: { ...sources() },
   render: function Render(args) {
     const [draft, setDraft] = useState(args.draft);
     const [busy, setBusy] = useState(false);

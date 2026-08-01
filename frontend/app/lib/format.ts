@@ -23,7 +23,6 @@ export function formatBytes(bytes: bigint | number): string {
   return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
 }
 
-/** Coarse "time ago" from an ISO timestamp, e.g. `3d ago`, `just now`. */
 /** Compact integer count, e.g. `12.4k` or `3.1M`. Wire `u64` values are typed as bigint
  * but JSON events arrive as JavaScript numbers, so accept both representations. */
 export function formatTokenCount(value: bigint | number): string {
@@ -40,10 +39,15 @@ export function formatTokenCount(value: bigint | number): string {
   return `${scaled >= 100 ? Math.round(scaled) : scaled.toFixed(1)}${units[index]}`;
 }
 
-export function relativeAge(iso: string): string {
+/** Coarse "time ago" from an ISO timestamp, e.g. `3d ago`, `just now`.
+ *
+ *  `now` is passed in rather than read here, for the same reason `resetTooltip` takes one:
+ *  a formatter that reads the clock makes its caller a different component on every render,
+ *  and no story can pin what it draws. Read the clock at a container boundary. */
+export function relativeAge(iso: string, now: number): string {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return "—";
-  const secs = Math.max(0, (Date.now() - then) / 1000);
+  const secs = Math.max(0, (now - then) / 1000);
   if (secs < 60) return "just now";
   const mins = secs / 60;
   if (mins < 60) return `${Math.floor(mins)}m ago`;

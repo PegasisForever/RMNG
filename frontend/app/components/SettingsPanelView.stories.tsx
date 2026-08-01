@@ -1,0 +1,227 @@
+import type { Meta, StoryObj } from "@storybook/react-vite";
+import { useState } from "react";
+import { fn } from "storybook/test";
+
+import { SettingsPanelView, type SettingsPanelViewProps } from "./SettingsPanelView";
+import { newColumnId, removeColumn } from "~/lib/board";
+import { accountsNow, makeClaudeAccounts } from "./__fixtures__/accounts";
+import { makeSettingsDraft, makeUpdateStatus } from "./__fixtures__/appConfig";
+import { boardColumns } from "./__fixtures__/board";
+import { imagesNow, makeImages } from "./__fixtures__/images";
+import { makeOperation } from "./__fixtures__/operations";
+import { makeStoryLink } from "./__fixtures__/storyLinks";
+
+/** Everything a story edits, rebuilt per story: the form the sections write back into, the
+ *  account rows the two lists reorder, and the image list. One set behind every story is how
+ *  an edit in one shows up in the next. */
+function base() {
+  return {
+    draft: makeSettingsDraft(),
+    accounts: makeClaudeAccounts(accountsNow),
+    images: makeImages(),
+    boardColumns,
+    boardColumnCounts: { todo: 3, doing: 3, blocked: 1, archived: 0 },
+  };
+}
+
+/** A self-update op mid-flight, so the inline progress bar under the Update button renders. */
+function makeUpdateOp() {
+  return makeOperation({
+    id: "op_update_1",
+    kind: "update",
+    target: "rmng-control",
+    status: "running",
+    step: "pull",
+    pct: 45,
+    message: "pulling pegasis0/rmng:latest",
+    log: ["queued self-update", "pulling pegasis0/rmng:latest"],
+  });
+}
+
+/** The board-columns editor is controlled, so the story holds the list. Adding, renaming,
+ *  reordering and deleting all take effect here, and still log to the Actions panel. */
+function useBoardColumns(args: SettingsPanelViewProps) {
+  const [columns, setColumns] = useState(args.boardColumns ?? []);
+  return {
+    boardColumns: columns,
+    onAddBoardColumn: (title: string) => {
+      setColumns((prev) => [
+        ...prev,
+        { id: newColumnId(title, prev), title, cloneIds: [], archive: false },
+      ]);
+      args.onAddBoardColumn?.(title);
+    },
+    onRenameBoardColumn: (columnId: string, title: string) => {
+      setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, title } : c)));
+      args.onRenameBoardColumn?.(columnId, title);
+    },
+    onSetBoardColumnArchive: (columnId: string, archive: boolean) => {
+      setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, archive } : c)));
+      args.onSetBoardColumnArchive?.(columnId, archive);
+    },
+    onDeleteBoardColumn: (columnId: string) => {
+      setColumns((prev) => removeColumn(prev, columnId));
+      args.onDeleteBoardColumn?.(columnId);
+    },
+    onReorderBoardColumns: (ids: string[]) => {
+      setColumns((prev) =>
+        ids.flatMap((id) => {
+          const column = prev.find((c) => c.id === id);
+          return column ? [column] : [];
+        }),
+      );
+      args.onReorderBoardColumns?.(ids);
+    },
+  };
+}
+
+const meta = {
+  title: "Settings/Components/SettingsPanelView",
+  component: SettingsPanelView,
+  parameters: { layout: "fullscreen" },
+  args: {
+    ...base(),
+    onDraftChange: fn(),
+    // Nothing dragged, so the two account lists keep the order the rows arrive in.
+    accountOrder: {},
+    onReorderAccounts: fn(),
+    onDeleteAccount: fn(),
+    onDeleteCodexAccount: fn(),
+    // Importing an account opens a modal ON TOP of this panel, which is navigation: the
+    // story jumps to that modal's own story rather than stacking it here.
+    onImportAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn"),
+    setupComplete: true,
+    error: null,
+    restartRequired: false,
+    saving: false,
+    saved: false,
+    onSave: fn(),
+    onClose: fn(),
+    serverStatus: makeUpdateStatus(),
+    serverMessage: null,
+    updateOperation: null,
+    updateDisabled: true,
+    onCheckUpdate: fn(),
+    onUpdateServer: fn(),
+    onRestartServer: fn(),
+    testMessage: null,
+    onTestDocker: fn(),
+    imagesLoading: false,
+    pullBusy: false,
+    now: imagesNow,
+    onPullTemplate: fn(),
+    onDeleteImage: fn(),
+    onAddBoardColumn: fn(),
+    onRenameBoardColumn: fn(),
+    onSetBoardColumnArchive: fn(),
+    onDeleteBoardColumn: fn(),
+    onReorderBoardColumns: fn(),
+  },
+  render: function Render(args) {
+    return <SettingsPanelView {...args} {...useBoardColumns(args)} />;
+  },
+} satisfies Meta<typeof SettingsPanelView>;
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+/** The full settings panel on a loaded config: every section, the board columns at the top,
+ *  and the footer pinned under the scroll body. */
+export const Default: Story = { args: { ...base() } };
+
+/** The config is still in flight. One line where the sections will be, and no footer — there
+ *  is nothing to save yet. */
+export const Loading: Story = {
+  args: { ...base(), draft: null },
+};
+
+/** After a save that touched a restart-required setting — shows the restart banner. */
+export const RestartRequired: Story = {
+  args: { ...base(), restartRequired: true },
+};
+
+/** First-run setup: subnet is still editable (not yet baked in). */
+export const PreSetup: Story = {
+  args: { ...base(), setupComplete: false },
+};
+
+/** Nothing imported and no groups configured — both account lists and both group editors
+ *  show their empty states (and the group editors prompt to import accounts first). */
+export const NoAccounts: Story = {
+  args: {
+    ...base(),
+    accounts: [],
+    draft: makeSettingsDraft({ claudeGroups: [], codexGroups: [] }),
+  },
+};
+
+/** A self-update in flight: its progress renders inline under the Update button, so the
+ *  operator doesn't have to watch the sidebar to know how far along the restart is. */
+export const UpdateInProgress: Story = {
+  args: {
+    ...base(),
+    serverStatus: makeUpdateStatus({ available: true }),
+    serverMessage: "updating… the server will restart shortly",
+    updateOperation: makeUpdateOp(),
+    updateDisabled: true,
+  },
+};
+
+/** The load or the save failed. The banner sits above every section and the form stays
+ *  exactly as it was, so the attempt can be retried as it stands. */
+export const WithError: Story = {
+  args: {
+    ...base(),
+    error: "PUT /api/config: 400 subnet is fixed after first-run setup",
+    testMessage: "✗ docker: permission denied on /var/run/docker.sock",
+  },
+};
+
+/** Mid-save, then just after. Save holds its label and takes no second click; the tick in
+ *  the footer is what the container clears a couple of seconds later. */
+export const Saving: Story = {
+  args: { ...base(), saving: true },
+};
+
+/** The panel wired to local state instead of the container: every field really edits, adding
+ *  a preset or a pool really appends one, and Save locks the footer for a beat the way the
+ *  real PUT does. */
+export const Interactive: Story = {
+  args: { ...base() },
+  render: function Render(args) {
+    const [draft, setDraft] = useState(args.draft);
+    const [saving, setSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+    const [accountOrder, setAccountOrder] = useState(args.accountOrder);
+    return (
+      <SettingsPanelView
+        {...args}
+        {...useBoardColumns(args)}
+        draft={draft}
+        onDraftChange={(key, value) => {
+          setDraft((d) => (d ? { ...d, [key]: value } : d));
+          args.onDraftChange(key, value);
+        }}
+        accountOrder={accountOrder}
+        onReorderAccounts={(provider, ids) => {
+          setAccountOrder((prev) => ({ ...prev, [provider]: ids }));
+          args.onReorderAccounts(provider, ids);
+        }}
+        saving={saving}
+        saved={saved}
+        onSave={() => {
+          setSaving(true);
+          setSaved(false);
+          args.onSave();
+          // The point is the shape of a save, not the server: lock the footer, then let go
+          // and flash the tick.
+          window.setTimeout(() => {
+            setSaving(false);
+            setSaved(true);
+            window.setTimeout(() => setSaved(false), 2500);
+          }, 900);
+        }}
+      />
+    );
+  },
+};

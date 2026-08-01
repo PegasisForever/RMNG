@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { useState } from "react";
+import { cloneElement, isValidElement, useState, type ReactNode } from "react";
 import { fn } from "storybook/test";
 
 import { AppShellV2, type SideFocus } from "./AppShellV2";
@@ -10,15 +10,14 @@ import TicketDescription from "./TicketDescription";
 import { moveCard } from "~/lib/board";
 import { openTickets, orderTickets, type LinearTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
-import { makeClaudeAccounts, makeCloneGroups, makeCodexGroups } from "./__fixtures__/accounts";
-import { boardColumns, makeBoardColumn } from "./__fixtures__/board";
 import {
-  chatActivity,
-  chatLocale,
-  chatMessages,
-  chatNow,
-  scheduledMessages,
-} from "./__fixtures__/chat";
+  accountsNow,
+  makeClaudeAccounts,
+  makeCloneGroups,
+  makeCodexGroups,
+} from "./__fixtures__/accounts";
+import { boardColumns, makeBoardColumn } from "./__fixtures__/board";
+import { chatActivity, chatMessages, chatNow, scheduledMessages } from "./__fixtures__/chat";
 import { cloneWorking, hosts, makeCloneNoToken } from "./__fixtures__/clones";
 import { makeNotesBlocks } from "./__fixtures__/notes";
 import { cloneOperation } from "./__fixtures__/operations";
@@ -36,8 +35,20 @@ const archivedClone: Clone = makeCloneNoToken({
 
 const boardClones: Clone[] = [...hosts, archivedClone];
 
-/** The chat pane on fixtures instead of the per-clone SSE stream. */
-function ChatFixture({ busy = false, archived = false }: { busy?: boolean; archived?: boolean }) {
+/** The chat pane on fixtures instead of the per-clone SSE stream.
+ *
+ *  `locale` is stamped in by the render below rather than pinned here, so the toolbar moves
+ *  the timestamps in this pane as well as the reset tooltips in the rail. Without it the
+ *  toolbar changed half the page. */
+function ChatFixture({
+  busy = false,
+  archived = false,
+  locale = "en-GB",
+}: {
+  busy?: boolean;
+  archived?: boolean;
+  locale?: string;
+}) {
   const [input, setInput] = useState("");
   const [scheduleAt, setScheduleAt] = useState("");
   const [scheduled, setScheduled] = useState(scheduledMessages);
@@ -57,9 +68,15 @@ function ChatFixture({ busy = false, archived = false }: { busy?: boolean; archi
       onStop={fn()}
       onCancelScheduled={(id) => setScheduled((s) => s.filter((m) => m.id !== id))}
       now={chatNow}
-      locale={chatLocale}
+      locale={locale}
     />
   );
+}
+
+/** Re-stamp the locale onto a pane that arrives as a ready-made element. `chat` is an arg, so
+ *  the story that knows what is in it is the one that can apply the toolbar to it. */
+function withLocale(node: ReactNode, locale: string): ReactNode {
+  return isValidElement<{ locale?: string }>(node) ? cloneElement(node, { locale }) : node;
 }
 
 /** The notes pane on a sample document. Edits go nowhere — no autosave, no upload. */
@@ -78,7 +95,7 @@ function NotesFixture() {
 // a dialog can be in lives in one place instead of being reachable only through here.
 const toCloneModal = makeStoryLink("Clone/Components/CloneModalView", "Default");
 const toCloneModalFromTicket = makeStoryLink("Clone/Components/CloneModalView", "FromTicket");
-const toSettings = makeStoryLink("Settings/Components/SettingsPanel", "Default");
+const toSettings = makeStoryLink("Settings/Components/SettingsPanelView", "Default");
 const toImportAccount = makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn");
 const toChangeAccount = makeStoryLink("Clone/Components/ChangeAccountModalView", "BothProviders");
 const toPortForward = makeStoryLink("Modals/Components/PortForwardModal", "Default");
@@ -89,12 +106,18 @@ const toTicketModal = makeStoryLink("Board/Components/TicketModalView", "Default
  *  story leaks into the next. */
 function makeRail() {
   return {
-    accounts: makeClaudeAccounts(),
+    accounts: makeClaudeAccounts(accountsNow),
+    // The route subscribes to the shared order store and passes the value; nothing has been
+    // dragged in a story, so the accounts stay in the order they arrive.
+    accountOrder: {},
     cloneGroups: makeCloneGroups(),
     codexGroups: makeCodexGroups(),
     // The route reads the operator's own locale here; a story pins one so the usage bars'
     // reset tooltips read the same on every machine.
     locale: "en-GB",
+    // The route's clock. Pinned to the instant the account fixtures are written for, so each
+    // bar's pace marker and reset countdown are the same on every machine and every day.
+    now: accountsNow,
     lxcStats,
     operations: [],
     presetNames: ["Default", "Focus"],
@@ -159,8 +182,9 @@ const meta = {
    *  a drag into the Archived column actually stick, the way the server's answer would.
    *
    *  It also applies the locale toolbar by hand. The preview's decorator overrides an arg
-   *  named `locale`, and this shell has none: its locale is one field inside `rail`, which no
-   *  decorator can find. So the story that knows where it lives puts it there. */
+   *  named `locale`, and this shell has none: it has two, one inside `rail` and one inside the
+   *  chat pane it is handed. No decorator can find either, so the story that knows where they
+   *  live puts the toolbar's value in both. */
   render: (args, ctx) => {
     const [columns, setColumns] = useState(args.board.columns);
     const [clones, setClones] = useState(args.board.clones);
@@ -175,6 +199,7 @@ const meta = {
     const [dropped, setDropped] = useState<string[]>([]);
     // The ticket whose panel has the side column. Null = the clone's notes and chat have it.
     const [openTicket, setOpenTicket] = useState<LinearTicket | null>(null);
+    const locale = String(ctx.globals.locale ?? args.rail.locale);
 
     const setArchived = (cloneId: string, archived: boolean) =>
       setClones((prev) => prev.map((c) => (c.id === cloneId ? { ...c, archived } : c)));
@@ -184,7 +209,8 @@ const meta = {
     return (
       <AppShellV2
         {...args}
-        rail={{ ...args.rail, locale: String(ctx.globals.locale ?? args.rail.locale) }}
+        rail={{ ...args.rail, locale }}
+        chat={withLocale(args.chat, locale)}
         selectedClone={selectedClone}
         ticket={
           openTicket ? (

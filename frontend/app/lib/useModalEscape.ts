@@ -2,13 +2,13 @@
 //
 // Clicking a modal's backdrop no longer closes it (a stray click outside must never discard
 // a half-filled dialog), which leaves Escape as the only keyboard dismissal. That is fine
-// until two modals are open at once — SettingsPanel (z-50) with GroupLoginModal (z-60) on
+// until two modals are open at once — the settings panel (z-50) with GroupLoginModal (z-60) on
 // top of it. With each modal owning a plain `window` keydown listener, one Escape fires
 // BOTH and the operator loses the panel underneath as collateral.
 //
 // So the mounted modals keep a shared LIFO stack, and a modal handles Escape only when it
 // is on top. The stack is module-level rather than context because modals mount from
-// several unrelated places (the route, SettingsPanel) and threading a provider through all
+// several unrelated places (the route, the settings panel) and threading a provider through all
 // of them buys nothing here.
 import { useEffect } from "react";
 

@@ -34,6 +34,10 @@ export interface CloneModalViewProps {
   /** Clone-source images to pick from (from `listImages`). */
   images: ImageInfo[];
   imagesLoading: boolean;
+  /** Wall-clock milliseconds, for the age each image row shows. Captured when the dialog
+   *  opens rather than read per render: an image's age has no reason to tick, and a leaf
+   *  that read the clock would draw something different in every story run. */
+  now: number;
   /** Imported accounts, both providers in one flat list, so the two pickers can label each
    *  option with its usage. */
   accounts: ClaudeUsage[];
@@ -76,6 +80,7 @@ export function CloneModalView({
   onDraftChange,
   images,
   imagesLoading,
+  now,
   accounts,
   claudeGroups,
   codexGroups,
@@ -122,6 +127,7 @@ export function CloneModalView({
               images={images}
               loading={imagesLoading}
               value={draft.image}
+              now={now}
               onChange={(reference) => onDraftChange("image", reference)}
             />
           </div>

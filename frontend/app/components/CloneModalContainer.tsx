@@ -17,8 +17,12 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 import { CloneModalView } from "~/components/CloneModalView";
-import { rememberCloneImage } from "~/components/ImagePicker";
 import { getConfig, type ClonePayload } from "~/lib/api";
+import {
+  lastCloneImage,
+  preferredCloneImage,
+  rememberCloneImage,
+} from "~/lib/lastCloneImage";
 import {
   cloneDraftValid,
   emptyCloneDraft,
@@ -73,6 +77,19 @@ export function CloneModalContainer({
       setDraft((d) => ({ ...d, [key]: value })),
     [],
   );
+  // The instant the dialog opened, for the image rows' ages. It does not tick: an image is
+  // days old and nobody keeps this dialog open long enough for "6d ago" to turn into "7d".
+  const [now] = useState(() => Date.now());
+
+  // Which image a fresh dialog starts on. This is a session read (the last image actually
+  // cloned from, remembered in localStorage), so it is resolved here and the picker is told
+  // the answer. It re-runs when the list arrives, and skips whenever the operator has already
+  // picked one that still exists.
+  useEffect(() => {
+    if (draft.image && images.some((i) => i.reference === draft.image)) return;
+    const preferred = preferredCloneImage(images, lastCloneImage());
+    if (preferred) update("image", preferred);
+  }, [images, draft.image, update]);
 
   // Account pools and presets (from config).
   const [claudeGroups, setClaudeGroups] = useState<CloneGroup[]>([]);
@@ -216,6 +233,7 @@ export function CloneModalContainer({
       onDraftChange={update}
       images={images}
       imagesLoading={imagesLoading}
+      now={now}
       accounts={accounts}
       claudeGroups={claudeGroups}
       codexGroups={codexGroups}
