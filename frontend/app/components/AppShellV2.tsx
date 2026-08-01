@@ -3,9 +3,18 @@
 // three-to-one in favour of whichever of the two was touched last. The operator drags the
 // panel's left edge to set how much of the width it takes.
 //
-// Pure, like AppShell: no fetch, no SSE, no browser-only imports. The notes and chat panes
-// arrive as slots because both real implementations are lazy-loaded and client-only, so a
-// story can fill them with fixtures.
+// Pure, like AppShell: no fetch, no SSE, no browser-only imports, and it reads and writes no
+// storage. From `~/lib/sidePanelWidth` it takes only the pure half, `clampSideWidth` and the
+// three width constants. That module's `storedSideWidth` and `rememberSideWidth` are the ones
+// that touch localStorage, they belong to the container, and neither is called here.
+//
+// The notes and chat panes arrive as slots because both real implementations are lazy-loaded
+// and client-only, so a story can fill them with fixtures.
+//
+// Dialogs are NOT a slot. Every one of them is `fixed inset-0`, so the shell never lays one
+// out and a slot would be pass-through and nothing else. The container mounts them beside
+// this shell, the way the phone's container does, and this shell reports the tap that opens
+// one through an ordinary callback.
 //
 // This shell only ever renders at `lg` and up. Anything narrower gets the phone UI, which
 // is a different component tree the route picks in JavaScript (see `useIsMobile`), so there
@@ -23,6 +32,7 @@ import {
 import { Board, type BoardProps } from "~/components/Board";
 import { BoardRail, type BoardRailProps } from "~/components/BoardRail";
 import { GLASS_FILL, GLASS_OUTLINE, GLASS_SHADOW } from "~/lib/glass";
+import { clampSideWidth, SIDE_DEFAULT, SIDE_MAX, SIDE_MIN } from "~/lib/sidePanelWidth";
 import type { Clone } from "~/lib/types";
 
 /** Which half of the side panel was touched last. It gets three quarters of the panel's
@@ -34,21 +44,14 @@ export type SideFocus = "notes" | "chat";
  *  same material just looks murky. */
 const CARD = `${GLASS_OUTLINE} ${GLASS_FILL} ${GLASS_SHADOW}`;
 
-/** The side panel's width, as a percentage of the shell. The board pads its own right edge
- *  by the same number, so the two can never disagree and leave the last column stranded
- *  under the cards — which is why the panel has no pixel floor of its own. */
-const SIDE_MIN = 20;
-const SIDE_MAX = 60;
-const SIDE_DEFAULT = 30;
-const SIDE_KEY = "rmng.sidePanelWidth";
-
-const clampSide = (pct: number) => Math.min(SIDE_MAX, Math.max(SIDE_MIN, pct));
-
 export interface AppShellV2Props {
   /** Everything the board draws and does, minus the rail it renders for itself. */
   board: Omit<BoardProps, "rail">;
-  /** The board's fixed left column. */
-  rail: BoardRailProps;
+  /** The board's fixed left column, minus the locale the shell hands it. */
+  rail: Omit<BoardRailProps, "locale">;
+  /** Formats the rail's usage-bar reset tooltips. Read once by the container (the operator's
+   *  `navigator.language`) and handed down, so the preview's toolbar can pin it. */
+  locale: string;
   /** The clone whose notes and chat fill the side panel; null shows the empty state. */
   selectedClone: Clone | null;
   /** A selected Linear ticket takes the side panel for itself, as one card instead of two.
@@ -66,13 +69,18 @@ export interface AppShellV2Props {
   notes: ReactNode;
   /** The agent chat for `selectedClone`. */
   chat: ReactNode;
-  /** Modals and other overlays. They position themselves (`fixed inset-0`). */
-  overlays?: ReactNode;
+  /** The width the panel opens at, as a percentage of the shell. The container resolves it
+   *  (the operator's remembered one, or the default) and the drag below takes it from there. */
+  initialSideWidth: number;
+  /** A resize settled: dropped, nudged with an arrow key, or reset by double-click. The
+   *  container is what remembers it. Fires with the settled percentage, unrounded. */
+  onSideWidthCommit: (pct: number) => void;
 }
 
 export function AppShellV2({
   board,
   rail,
+  locale,
   selectedClone,
   ticket,
   error = null,
@@ -80,35 +88,33 @@ export function AppShellV2({
   onSideFocusChange,
   notes,
   chat,
-  overlays,
+  initialSideWidth,
+  onSideWidthCommit,
 }: AppShellV2Props) {
-  const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT);
+  const [sideWidth, setSideWidth] = useState(initialSideWidth);
   // The live width during a drag. `sideWidth` lags a render behind, so the pointer handler
   // and the persist-on-release both read this instead.
-  const widthRef = useRef(SIDE_DEFAULT);
+  const widthRef = useRef(initialSideWidth);
   // The board and the panel together, which is what a percentage is a percentage of.
   const splitRef = useRef<HTMLDivElement | null>(null);
   // The floating panel itself. A drag needs its left edge, which is not the same as the
   // percentage: the width has a 20rem floor the percentage does not know about.
   const panelRef = useRef<HTMLElement | null>(null);
 
-  // Restore after mount rather than in the initial state, so the server and the first
-  // client render agree on the default.
+  // Adopt the width the container resolved. It arrives a render after mount rather than in
+  // the initial state, so the server and the first client render agree on the default.
   useEffect(() => {
-    const stored = Number(window.localStorage.getItem(SIDE_KEY));
-    if (!Number.isFinite(stored) || stored <= 0) return;
-    const next = clampSide(stored);
-    widthRef.current = next;
-    setSideWidth(next);
-  }, []);
+    widthRef.current = initialSideWidth;
+    setSideWidth(initialSideWidth);
+  }, [initialSideWidth]);
 
   const applyWidth = (pct: number) => {
-    const next = clampSide(pct);
+    const next = clampSideWidth(pct);
     widthRef.current = next;
     setSideWidth(next);
   };
 
-  const persistWidth = () => window.localStorage.setItem(SIDE_KEY, String(Math.round(widthRef.current)));
+  const persistWidth = () => onSideWidthCommit(widthRef.current);
 
   /** Drag the panel's left edge. The pointer is captured by the handle, so the board's own
    *  drag sensor never sees the move and the pointer can leave the handle without dropping
@@ -181,7 +187,11 @@ export function AppShellV2({
             column at the end could never be scrolled out from under the panel. With nothing
             selected there is no panel, so the board keeps that width too. */}
         <div className="min-w-0 flex-1">
-          <Board {...board} rail={<BoardRail {...rail} />} gutterRight={!!selectedClone} />
+          <Board
+            {...board}
+            rail={<BoardRail {...rail} locale={locale} />}
+            gutterRight={!!selectedClone}
+          />
         </div>
 
         {/* Notes over chat, as two cards floating on the board. The container ignores the
@@ -267,8 +277,6 @@ export function AppShellV2({
           </aside>
         ) : null}
       </div>
-
-      {overlays}
     </div>
   );
 }

@@ -261,8 +261,9 @@ export interface SidebarCloneProps {
   /** Live runtime status for this clone's forwards (from the `forwards` SSE event),
    *  merged into the compact forwards chips by rule id. */
   forwardRuntime?: ForwardRuntime[];
-  /** `ssh.publicHost` (config) — the `-J` jump target for the copied command. Empty ⇒
-   *  falls back to `window.location.hostname` (this page's own address). */
+  /** The `-J` jump target for the copied command, already resolved: `ssh.publicHost` from
+   *  config, or this page's own address when no override is configured. The container reads
+   *  the page's address, so a card never has to. */
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied command jumps through. */
   bastionPort: number;
@@ -413,7 +414,7 @@ export function SidebarClone({
   // Archived clones retain their container but deliberately hide runtime actions until they
   // are restored; unmanaged rows have no container-backed SSH endpoint either.
   const sshCommand = managed && !clone.archived
-    ? buildSshCommand(sshPublicHost || window.location.hostname, bastionPort, clone.id)
+    ? buildSshCommand(sshPublicHost, bastionPort, clone.id)
     : undefined;
   const status = clone.archived ? undefined : STATUS_DOT[clone.monitorState ?? "idle"];
   // A live clone always shows both figures, falling back to zero rather than to a blank. A

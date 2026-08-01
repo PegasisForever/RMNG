@@ -51,7 +51,7 @@ export const Unread: Story = { args: { clone: cloneIdle } };
 
 /** The wrapper is unreachable, so the row is purple. Its notes and its thread are still
  *  there to read. */
-export const Offline: Story = { args: { clone: makeCloneOffline({ monitorState: "offline" }) } };
+export const Offline: Story = { args: { clone: makeCloneOffline() } };
 
 /** Archived. The dot goes quiet even with an unread flag standing, because an archived clone
  *  stopped on purpose. */

@@ -1,9 +1,9 @@
 // The phone app's network half: it owns which clone is open, talks to the server, and
 // hands the two pure pages (MobileHome, MobileClone) everything they draw.
 //
-// It is the counterpart of `Dashboard` in routes/_index.tsx, not a wrapper around it. The
-// board, its drag handlers, and every modal except account import stay on the desktop side
-// and are never imported here, so a phone downloads none of them.
+// It is the counterpart of `DashboardContainer`, not a wrapper around it. The board, its
+// drag handlers, and every modal except account import stay on the desktop side and are
+// never imported here, so a phone downloads none of them.
 //
 // Navigation is one piece of state: `openId`. Null is the clone list, an id is that clone's
 // screen. Selecting a clone activates it server-side the same way a board card does, which

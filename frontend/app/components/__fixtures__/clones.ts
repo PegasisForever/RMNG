@@ -66,7 +66,7 @@ export function makeCloneOffline(overrides: Partial<Clone> = {}): Clone {
     claudeAccountEmail: "alex@example.com",
     claudeSelection: "auto",
     displayName: "Database migration spike",
-    monitorState: "idle",
+    monitorState: "offline",
     ...overrides,
   });
 }

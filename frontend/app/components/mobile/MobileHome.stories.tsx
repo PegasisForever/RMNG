@@ -17,7 +17,12 @@ import { makeStoryLink } from "../__fixtures__/storyLinks";
 /** Everything the page is handed that something downstream holds, rebuilt per story: the
  *  usage panel copies the account rows and the pools, and the columns are a list the board
  *  rewrites on the desktop. One set behind every story is how an edit in one leaks into the
- *  next. */
+ *  next.
+ *
+ *  These props are deliberately absent from `meta.args`, so TypeScript refuses a story that
+ *  does not call this. A default on the meta would be one set of objects built once at module
+ *  scope, which is the leak this exists to prevent, and it would go unnoticed because the
+ *  story would still compile and still render. */
 function base() {
   return {
     accounts: makeClaudeAccounts(accountsNow),
@@ -39,7 +44,6 @@ const meta = {
   component: MobileHome,
   parameters: { layout: "centered" },
   args: {
-    ...base(),
     locale: "en-GB",
     usageOpen: false,
     onUsageOpenChange: fn(),
