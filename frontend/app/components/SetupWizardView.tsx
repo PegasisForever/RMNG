@@ -144,21 +144,9 @@ export function SetupWizardView({
           {/* Step 2: Server. */}
           {step === 1 ? (
             <SetupServerStep
-              hostnamePrefix={draft.hostnamePrefix}
-              cloneCpus={draft.cloneCpus}
-              cloneMemoryMb={draft.cloneMemoryMb}
-              monitors={draft.monitors}
-              chroma={draft.chroma}
-              listen={draft.listen}
-              agentPort={draft.agentPort}
+              draft={draft}
+              onDraftChange={onDraftChange}
               portsOpen={portsOpen}
-              onHostnamePrefixChange={(v) => onDraftChange("hostnamePrefix", v)}
-              onCloneCpusChange={(v) => onDraftChange("cloneCpus", v)}
-              onCloneMemoryMbChange={(v) => onDraftChange("cloneMemoryMb", v)}
-              onMonitorsChange={(monitors) => onDraftChange("monitors", monitors)}
-              onChromaChange={(chroma) => onDraftChange("chroma", chroma)}
-              onListenChange={(listen) => onDraftChange("listen", listen)}
-              onAgentPortChange={(port) => onDraftChange("agentPort", port)}
               onPortsOpenChange={setPortsOpen}
             />
           ) : null}

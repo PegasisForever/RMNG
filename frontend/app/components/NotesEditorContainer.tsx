@@ -5,7 +5,7 @@
 // callbacks as props and is the half Storybook renders.
 //
 // Client-only (BlockNote/ProseMirror touch the DOM), so it is lazy-imported behind a mount
-// gate in _index.tsx and MobileDashboard.tsx, and never runs during SSR.
+// gate in _index.tsx and MobileDashboardContainer.tsx, and never runs during SSR.
 import type { PartialBlock } from "@blocknote/core";
 import { useEffect, useRef, useState } from "react";
 

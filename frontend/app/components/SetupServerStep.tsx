@@ -2,52 +2,36 @@
 // per-clone resource limits, the monitor arrangement every clone boots with, the viewer's
 // chroma mode, and the listen ports.
 //
+// It takes the wizard's whole model plus one updater, the same pair `SetupWizardView` holds
+// and `SetupReviewStep` reads, rather than a value/setter couple per field. Seven of the nine
+// fields are edited here, so the couples were most of the prop surface; the two it does not
+// edit (the subnet and the template reference) belong to the steps that do.
+//
 // The ports are collapsed by default because a first run almost never changes them, and the
 // four numbers underneath are the ones a wrong guess makes unreachable. The open flag is a
-// prop rather than local state so the collapsed and expanded forms are both a story.
+// prop rather than local state so the collapsed and expanded forms are both a story, and it
+// is not part of the model: nothing outside this step reads it and nothing saves it.
 import { ChevronDown, ChevronRight } from "lucide-react";
 
-import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
+import { MonitorsEditor } from "~/components/MonitorsEditor";
 import { Field, settingsInput } from "~/components/SettingsFields";
+import type { SetupDraft } from "~/lib/setupDraft";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
-import type { ListenConfig } from "~/lib/wire/ListenConfig";
 
 export function SetupServerStep({
-  hostnamePrefix,
-  cloneCpus,
-  cloneMemoryMb,
-  monitors,
-  chroma,
-  listen,
-  agentPort,
+  draft,
+  onDraftChange,
   portsOpen,
-  onHostnamePrefixChange,
-  onCloneCpusChange,
-  onCloneMemoryMbChange,
-  onMonitorsChange,
-  onChromaChange,
-  onListenChange,
-  onAgentPortChange,
   onPortsOpenChange,
 }: {
-  hostnamePrefix: string;
-  cloneCpus: number;
-  cloneMemoryMb: number;
-  /** The one arrangement the wizard edits. There is no preset picker here: which named
-   *  preset this becomes is decided by the config, not by the operator. */
-  monitors: Mon[];
-  chroma: ChromaMode;
-  listen: ListenConfig;
-  agentPort: number;
+  /** The whole wizard form. The monitors in it are the one arrangement the wizard edits:
+   *  there is no preset picker here, because which named preset this becomes is decided by
+   *  the config, not by the operator. */
+  draft: SetupDraft;
+  /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
+  onDraftChange: <K extends keyof SetupDraft>(key: K, value: SetupDraft[K]) => void;
   /** The ports block is expanded. */
   portsOpen: boolean;
-  onHostnamePrefixChange: (value: string) => void;
-  onCloneCpusChange: (value: number) => void;
-  onCloneMemoryMbChange: (value: number) => void;
-  onMonitorsChange: (monitors: Mon[]) => void;
-  onChromaChange: (chroma: ChromaMode) => void;
-  onListenChange: (listen: ListenConfig) => void;
-  onAgentPortChange: (port: number) => void;
   onPortsOpenChange: (open: boolean) => void;
 }) {
   return (
@@ -58,15 +42,15 @@ export function SetupServerStep({
 
       <Field label="Clone hostname prefix">
         <input
-          value={hostnamePrefix}
-          onChange={(e) => onHostnamePrefixChange(e.target.value)}
+          value={draft.hostnamePrefix}
+          onChange={(e) => onDraftChange("hostnamePrefix", e.target.value)}
           placeholder="pega-"
           spellCheck={false}
           className={settingsInput}
         />
         <span className="mt-0.5 block text-xs text-slate-400 dark:text-slate-500">
           Prepended to derived clone hostnames — e.g.{" "}
-          <code>{hostnamePrefix || "pega-"}</code>dev-123.
+          <code>{draft.hostnamePrefix || "pega-"}</code>dev-123.
         </span>
       </Field>
 
@@ -75,8 +59,8 @@ export function SetupServerStep({
           <input
             type="number"
             min={1}
-            value={cloneCpus}
-            onChange={(e) => onCloneCpusChange(Number(e.target.value) || 0)}
+            value={draft.cloneCpus}
+            onChange={(e) => onDraftChange("cloneCpus", Number(e.target.value) || 0)}
             className={settingsInput}
           />
         </Field>
@@ -84,8 +68,8 @@ export function SetupServerStep({
           <input
             type="number"
             min={1024}
-            value={cloneMemoryMb}
-            onChange={(e) => onCloneMemoryMbChange(Number(e.target.value) || 0)}
+            value={draft.cloneMemoryMb}
+            onChange={(e) => onDraftChange("cloneMemoryMb", Number(e.target.value) || 0)}
             className={settingsInput}
           />
         </Field>
@@ -93,13 +77,16 @@ export function SetupServerStep({
 
       <div>
         <span className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">Monitors</span>
-        <MonitorsEditor monitors={monitors} onChange={onMonitorsChange} />
+        <MonitorsEditor
+          monitors={draft.monitors}
+          onChange={(monitors) => onDraftChange("monitors", monitors)}
+        />
       </div>
 
       <Field label="Chroma mode">
         <select
-          value={chroma}
-          onChange={(e) => onChromaChange(e.target.value as ChromaMode)}
+          value={draft.chroma}
+          onChange={(e) => onDraftChange("chroma", e.target.value as ChromaMode)}
           className={settingsInput}
         >
           <option value="yuv420">4:2:0 (default)</option>
@@ -123,9 +110,9 @@ export function SetupServerStep({
               <Field key={k} label={`Port: ${k}`}>
                 <input
                   type="number"
-                  value={listen[k]}
+                  value={draft.listen[k]}
                   onChange={(e) =>
-                    onListenChange({ ...listen, [k]: Number(e.target.value) || 0 })
+                    onDraftChange("listen", { ...draft.listen, [k]: Number(e.target.value) || 0 })
                   }
                   className={settingsInput}
                 />
@@ -134,8 +121,8 @@ export function SetupServerStep({
             <Field label="Agent-wrapper port">
               <input
                 type="number"
-                value={agentPort}
-                onChange={(e) => onAgentPortChange(Number(e.target.value) || 0)}
+                value={draft.agentPort}
+                onChange={(e) => onDraftChange("agentPort", Number(e.target.value) || 0)}
                 className={settingsInput}
               />
             </Field>

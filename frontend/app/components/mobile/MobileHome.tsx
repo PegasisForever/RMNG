@@ -12,44 +12,12 @@
 // Two things the desktop has are deliberately absent. There is no create button: a phone
 // answers work, it does not start it. And there is no settings gear, because every setting
 // behind it needs a keyboard and a wide screen.
-import { ChevronRight, ChevronDown } from "lucide-react";
-
-import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
-import { CloneStatusDot } from "~/components/mobile/CloneStatus";
+import { MobileCloneRow } from "~/components/mobile/MobileCloneRow";
+import { MobileUsageSection } from "~/components/mobile/MobileUsageSection";
 import type { AcctOrder } from "~/lib/accountOrder";
 import { resolveColumns, withDefaults, type BoardColumn } from "~/lib/board";
 import type { ClaudeUsage, Clone } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
-
-/** The single worst usage window across every account, which is what the collapsed usage
- *  row reports. */
-export interface UsagePeak {
-  pct: number;
-  email: string;
-  window: "5h" | "7d";
-}
-
-/** The highest rolling-window utilization anyone is at, or null with no accounts (or no
- *  window data yet).
- *
- *  Only the 5h and 7d windows count. The Fable window is display-only on the desktop panel
- *  and never gates a clone, so letting it drive the one number on the phone would raise an
- *  alarm about a limit nothing is waiting on. Ties go to the first account in the given
- *  order, which is the operator's own ordering from Settings. */
-export function peakUsage(accounts: ClaudeUsage[]): UsagePeak | null {
-  let peak: UsagePeak | null = null;
-  for (const a of accounts) {
-    const windows: [UsagePeak["window"], number | undefined][] = [
-      ["5h", a.fiveHour?.pct],
-      ["7d", a.sevenDay?.pct],
-    ];
-    for (const [window, pct] of windows) {
-      if (pct === undefined) continue;
-      if (!peak || pct > peak.pct) peak = { pct, email: a.email, window };
-    }
-  }
-  return peak;
-}
 
 export interface MobileHomeProps {
   /** Per-account usage rows, both providers, from `ControlState.claudeAccounts`. */
@@ -73,7 +41,8 @@ export interface MobileHomeProps {
   onUsageOpenChange: (open: boolean) => void;
   /** Refresh usage now. The panel draws the button. */
   onRefresh: () => void | Promise<void>;
-  /** Import an account from a clone that is already signed in. */
+  /** Import an account from a clone that is already signed in. Opening that dialog is
+   *  navigation, so this reports the tap and the container mounts the dialog. */
   onImportAccount: () => void | Promise<void>;
   /** The board's columns (`ControlState.boardColumns`), which become the section headers.
    *  Empty falls back to the same defaults the desktop board uses. */
@@ -84,35 +53,6 @@ export interface MobileHomeProps {
   onSelectClone: (clone: Clone) => void;
   /** Last failed action, shown as a banner under the header. */
   error?: string | null;
-}
-
-/** Ticket and account, the two things that say which clone this is when several share a
- *  shape. Empty when the clone has neither, and the row then shows its id instead. */
-function subtitle(clone: Clone): string {
-  return [clone.linearTicket, clone.claudeAccountEmail].filter(Boolean).join(" · ");
-}
-
-function CloneRow({ clone, onSelect }: { clone: Clone; onSelect: (clone: Clone) => void }) {
-  return (
-    <li>
-      <button
-        type="button"
-        onClick={() => onSelect(clone)}
-        className="flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left active:bg-slate-100 dark:active:bg-slate-800"
-      >
-        <CloneStatusDot clone={clone} />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium text-slate-800 dark:text-slate-100">
-            {clone.displayName ?? clone.id}
-          </span>
-          <span className="block truncate text-xs text-slate-500 dark:text-slate-400">
-            {subtitle(clone) || clone.id}
-          </span>
-        </span>
-        <ChevronRight aria-hidden className="size-4 shrink-0 text-slate-300 dark:text-slate-600" />
-      </button>
-    </li>
-  );
 }
 
 export function MobileHome({
@@ -131,7 +71,6 @@ export function MobileHome({
   onSelectClone,
   error = null,
 }: MobileHomeProps) {
-  const peak = peakUsage(accounts);
   const byId = new Map(clones.map((c) => [c.id, c]));
   // Empty columns are dropped rather than drawn as empty headers. On the desktop an empty
   // column is a drop target worth keeping on screen; here nothing can be dropped, so it
@@ -162,41 +101,18 @@ export function MobileHome({
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        <section className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-          <button
-            type="button"
-            onClick={() => onUsageOpenChange(!usageOpen)}
-            aria-expanded={usageOpen}
-            className="flex min-h-14 w-full items-center gap-3 px-4 py-3 text-left active:bg-slate-100 dark:active:bg-slate-800"
-          >
-            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">Usage</span>
-            <span className="min-w-0 flex-1 truncate text-right text-xs tabular-nums text-slate-500 dark:text-slate-400">
-              {peak
-                ? `${peak.pct}% ${peak.window} · ${peak.email}`
-                : accounts.length
-                  ? "no data yet"
-                  : "no accounts"}
-            </span>
-            <ChevronDown
-              aria-hidden
-              className={`size-4 shrink-0 text-slate-400 transition-transform ${usageOpen ? "rotate-180" : ""}`}
-            />
-          </button>
-          {usageOpen ? (
-            <div className="px-3 pb-3">
-              <ClaudeAccountsPanel
-                accounts={accounts}
-                accountOrder={accountOrder}
-                cloneGroups={cloneGroups}
-                codexGroups={codexGroups}
-                locale={locale}
-                now={now}
-                onRefresh={onRefresh}
-                onImport={onImportAccount}
-              />
-            </div>
-          ) : null}
-        </section>
+        <MobileUsageSection
+          accounts={accounts}
+          accountOrder={accountOrder}
+          cloneGroups={cloneGroups}
+          codexGroups={codexGroups}
+          locale={locale}
+          now={now}
+          usageOpen={usageOpen}
+          onUsageOpenChange={onUsageOpenChange}
+          onRefresh={onRefresh}
+          onImportAccount={onImportAccount}
+        />
 
         {sections.length === 0 ? (
           <p className="px-4 py-10 text-center text-sm text-slate-500 dark:text-slate-400">
@@ -215,7 +131,7 @@ export function MobileHome({
               </h2>
               <ul className="divide-y divide-slate-200 bg-white dark:divide-slate-800 dark:bg-slate-900">
                 {rows.map((clone) => (
-                  <CloneRow key={clone.id} clone={clone} onSelect={onSelectClone} />
+                  <MobileCloneRow key={clone.id} clone={clone} onSelect={onSelectClone} />
                 ))}
               </ul>
             </section>

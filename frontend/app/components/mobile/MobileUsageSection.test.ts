@@ -2,7 +2,7 @@
 // the one worth reacting to: the highest gating window across every account.
 import { expect, test } from "bun:test";
 
-import { peakUsage } from "./MobileHome";
+import { peakUsage } from "./MobileUsageSection";
 import type { ClaudeUsage } from "~/lib/types";
 
 function account(email: string, fiveHour?: number, sevenDay?: number): ClaudeUsage {

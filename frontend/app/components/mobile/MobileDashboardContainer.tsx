@@ -9,6 +9,11 @@
 // screen. Selecting a clone activates it server-side the same way a board card does, which
 // is what clears its unread flag and stops the monitor from notifying about output the
 // operator is looking at.
+//
+// Opening the import dialog is navigation too, even though the phone has one route: the home
+// screen reports the tap through `onImportAccount` and the dialog is mounted here, beside the
+// screen rather than inside it. That is what lets a story render the home screen without a
+// modal on top of it, and the dialog's own stories cover every state it has.
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
@@ -38,7 +43,7 @@ function PaneFallback({ label }: { label: string }) {
   return <p className="p-4 text-sm text-slate-400 dark:text-slate-500">{label}</p>;
 }
 
-export function MobileDashboard({
+export function MobileDashboardContainer({
   state,
   cloneGroups,
   codexGroups,

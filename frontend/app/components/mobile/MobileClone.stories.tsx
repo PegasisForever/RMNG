@@ -15,6 +15,7 @@ import {
 } from "../__fixtures__/chat";
 import { cloneOffline, cloneWorking } from "../__fixtures__/clones";
 import { makeNotesBlocks } from "../__fixtures__/notes";
+import { makeStoryLink } from "../__fixtures__/storyLinks";
 
 /** The chat pane on fixtures instead of the per-clone SSE stream. */
 function ChatFixture({ busy = false }: { busy?: boolean }) {
@@ -60,28 +61,17 @@ const meta = {
     clone: cloneWorking,
     tab: "chat" as CloneTab,
     onTabChange: fn(),
-    onBack: fn(),
+    // The chevron leaves this screen for the list, which is the phone's other page.
+    onBack: makeStoryLink("Mobile/Pages/MobileHome", "Default"),
     notes: <NotesFixture />,
     chat: <ChatFixture />,
     error: null,
   },
-  /** The page is controlled, so the story holds the selected tab and the switch actually
-   *  switches. */
-  render: (args) => {
-    const [tab, setTab] = useState<CloneTab>(args.tab);
-    return (
-      <PhoneFrame>
-        <MobileClone
-          {...args}
-          tab={tab}
-          onTabChange={(next) => {
-            setTab(next);
-            args.onTabChange(next);
-          }}
-        />
-      </PhoneFrame>
-    );
-  },
+  render: (args) => (
+    <PhoneFrame>
+      <MobileClone {...args} />
+    </PhoneFrame>
+  ),
 } satisfies Meta<typeof MobileClone>;
 
 export default meta;
@@ -110,4 +100,24 @@ export const Offline: Story = {
  *  report the same thing twice. */
 export const WithError: Story = {
   args: { error: "Failed to fetch" },
+};
+
+/** The page wired to local state instead of the container, so the two tabs really switch and
+ *  each pane mounts as it comes into view. Back still leaves for the clone list. */
+export const Interactive: Story = {
+  render: function Render(args) {
+    const [tab, setTab] = useState<CloneTab>(args.tab);
+    return (
+      <PhoneFrame>
+        <MobileClone
+          {...args}
+          tab={tab}
+          onTabChange={(next) => {
+            setTab(next);
+            args.onTabChange(next);
+          }}
+        />
+      </PhoneFrame>
+    );
+  },
 };

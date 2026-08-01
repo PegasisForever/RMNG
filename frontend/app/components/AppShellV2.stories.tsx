@@ -140,36 +140,40 @@ const ticketColumn = {
   onNewTicket: toTicketModal,
 };
 
-const board = {
-  columns: makeBoardColumns(),
-  clones: boardClones,
-  stats,
-  cloneTokens,
-  operations: [],
-  selectedId: cloneWorking.id,
-  sshPublicHost: "rmng.example.com",
-  bastionPort: 2222,
-  onSelectClone: fn(),
-  onDeleteClone: fn(),
-  onCommitClone: fn(),
-  onChangeAccountClone: toChangeAccount,
-  onPortForwardClone: toPortForward,
-  onArchiveClone: fn(),
-  onUnarchiveClone: fn(),
-  onNewClone: toCloneModal,
-  onMoveCard: fn(),
-  onRenameColumn: fn(),
-  tickets: ticketColumn,
-  onNewCloneFromTicket: toCloneModalFromTicket,
-  onReorderTickets: fn(),
-};
+/** The board's own props, built fresh per story. The columns are the reason: the shell copies
+ *  them into state and a drag rewrites the list, so one array behind every story is how a card
+ *  moved in one story shows up somewhere else in the next. */
+function makeBoard() {
+  return {
+    columns: makeBoardColumns(),
+    clones: boardClones,
+    stats,
+    cloneTokens,
+    operations: [],
+    selectedId: cloneWorking.id,
+    sshPublicHost: "rmng.example.com",
+    bastionPort: 2222,
+    onSelectClone: fn(),
+    onDeleteClone: fn(),
+    onCommitClone: fn(),
+    onChangeAccountClone: toChangeAccount,
+    onPortForwardClone: toPortForward,
+    onArchiveClone: fn(),
+    onUnarchiveClone: fn(),
+    onNewClone: toCloneModal,
+    onMoveCard: fn(),
+    onRenameColumn: fn(),
+    tickets: ticketColumn,
+    onNewCloneFromTicket: toCloneModalFromTicket,
+    onReorderTickets: fn(),
+  };
+}
 
 const meta = {
   title: "Dashboard/Pages/AppShellV2",
   component: AppShellV2,
   parameters: { layout: "fullscreen" },
   args: {
-    board,
     selectedClone: cloneWorking,
     error: null,
     sideFocus: "notes" as SideFocus,
@@ -293,17 +297,22 @@ type Story = StoryObj<typeof meta>;
 /** The board: control rail, three operator columns, the fixed Archived column, and the
  *  selected clone's notes and chat down the right quarter. Cards drag between columns.
  *  The gear, both New clone buttons and the card menus jump to their own stories. */
-export const Default: Story = { args: { rail: makeRail() } };
+export const Default: Story = { args: { rail: makeRail(), board: makeBoard() } };
 
 /** The agent is mid-turn, with the chat focused: it holds three quarters of the side panel
  *  and the notes shrink to a quarter. Clicking into the notes swaps the two. */
 export const AgentWorking: Story = {
-  args: { rail: makeRail(), chat: <ChatFixture busy />, sideFocus: "chat" },
+  args: {
+    rail: makeRail(),
+    board: makeBoard(),
+    chat: <ChatFixture busy />,
+    sideFocus: "chat",
+  },
 };
 
 /** No clone selected — the side panel holds its empty state. */
 export const NoCloneSelected: Story = {
-  args: { rail: makeRail(), board: { ...board, selectedId: null }, selectedClone: null },
+  args: { rail: makeRail(), board: { ...makeBoard(), selectedId: null }, selectedClone: null },
 };
 
 /** A failed action banners above the page while a clone is being provisioned, which the
@@ -312,7 +321,7 @@ export const WithError: Story = {
   args: {
     error: "swap account: clone pega-we-142 is not running",
     rail: { ...makeRail(), operations: [cloneOperation] },
-    board: { ...board, operations: [cloneOperation] },
+    board: { ...makeBoard(), operations: [cloneOperation] },
   },
 };
 
@@ -320,7 +329,7 @@ export const WithError: Story = {
 export const EmptyBoard: Story = {
   args: {
     board: {
-      ...board,
+      ...makeBoard(),
       columns: [makeBoardColumn()],
       clones: [],
       selectedId: null,

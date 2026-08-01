@@ -8,7 +8,7 @@ import { ImportAccountModalContainer } from "~/components/ImportAccountModalCont
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
 import { SetupWizardContainer } from "~/components/SetupWizardContainer";
-import { MobileDashboard } from "~/components/mobile/MobileDashboard";
+import { MobileDashboardContainer } from "~/components/mobile/MobileDashboardContainer";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
 import { cloneForTicket, findTicket, openTickets, orderTickets } from "~/lib/tickets";
@@ -267,7 +267,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     // and a Storybook frame can stand in for the screen.
     return (
       <div className="h-dvh">
-        <MobileDashboard
+        <MobileDashboardContainer
           state={state}
           cloneGroups={cfg.cloneGroups}
           codexGroups={cfg.codexGroups}
