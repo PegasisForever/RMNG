@@ -1049,8 +1049,10 @@ pub async fn delete_clone(
     let docker = &app.docker;
     on_progress("queued", &format!("queued delete of {host_id}"));
 
+    // Unpauses first when the clone is archived: a stop signal sent to frozen processes is
+    // one nobody can handle, so the daemon would wait out the full timeout and then kill.
     on_progress("stop", "stopping the clone (SIGRTMIN+3, up to 20s)");
-    docker.stop_container(host_id).await?;
+    docker.stop_even_if_paused(host_id).await?;
 
     on_progress("remove", "removing the container");
     docker.remove_container(host_id).await?;

@@ -82,8 +82,18 @@ impl App {
         Self {
             store,
             cfg: Arc::new(RwLock::new(cfg)),
+            // A paused clone keeps its IP and its listening sockets, so a connection to one
+            // is accepted by the kernel and then answered by nobody — a dial that used to
+            // fail instantly against a stopped clone now hangs instead. These two bounds are
+            // what keep an archived clone from parking a caller forever.
+            //
+            // `read_timeout`, not `timeout`: it bounds the gap between bytes rather than the
+            // whole request, so the agent's `/events` stream and other long-lived reads stay
+            // open as long as they are actually delivering.
             http: reqwest::Client::builder()
                 .user_agent("rmng-control-server")
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .read_timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("reqwest client"),
             claude,

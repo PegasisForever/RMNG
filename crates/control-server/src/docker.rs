@@ -66,6 +66,21 @@ pub const CLONE_USER: &str = "rmng";
 /// Stop timeout for systemd-PID-1 clones (with `StopSignal=SIGRTMIN+3` baked in).
 pub const STOP_TIMEOUT_SECS: i32 = 20;
 
+/// How long an exec may produce nothing before we check whether its container has been
+/// paused underneath it.
+///
+/// One second, because the check is close to free: an inspect over the unix socket measured
+/// 0.32 ms, so even fifty simultaneously-silent execs probing every second cost the daemon
+/// about 16 ms per second. The probe only runs while an exec is producing nothing at all, so
+/// a chatty one never pays it. Checking before the exec instead would not help — the pause
+/// that strands a caller is the one that lands *during* it.
+const EXEC_IDLE_PROBE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The absolute ceiling on silence from an exec, paused or not. Nothing we run should be
+/// mute for this long, and an unbounded wait is what turned one frozen clone into a stalled
+/// fleet. Generous, because provisioning scripts do go quiet for minutes at a time.
+const EXEC_MAX_SILENCE: std::time::Duration = std::time::Duration::from_secs(1800);
+
 /// Label marking an image as a clone source (shown in the image picker).
 pub const LABEL_IMAGE: &str = "rmng.image";
 /// Label marking the wizard-built base image.
@@ -1686,14 +1701,93 @@ impl DockerCtl {
         Ok(self.inspect_runtime(id).await?.ip)
     }
 
-    /// Whether a container is currently running. `false` (not an error) if it doesn't
-    /// exist.
+    /// Whether a container is currently running and able to answer. `false` (not an error)
+    /// if it doesn't exist.
+    ///
+    /// A paused container counts as NOT running, even though the daemon reports
+    /// `State.Running = true` for one. Every caller uses this to decide whether the clone can
+    /// be talked to, and a paused clone cannot: the daemon refuses `exec` against it and its
+    /// processes are frozen, so a monitor fetch or an SSH hop would hang rather than fail.
+    /// Archiving pauses, so this is what keeps an archived clone invisible to the rest of the
+    /// server exactly as a stopped one was.
     pub async fn is_running(&self, id: &str) -> Result<bool> {
         match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
-            Ok(info) => Ok(info.state.and_then(|s| s.running).unwrap_or(false)),
+            Ok(info) => {
+                let state = info.state.as_ref();
+                let running = state.and_then(|s| s.running).unwrap_or(false);
+                let paused = state.and_then(|s| s.paused).unwrap_or(false);
+                Ok(running && !paused)
+            }
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
             Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
         }
+    }
+
+    /// Whether a container exists and is paused. Distinguishes "archived the new way" from
+    /// "archived before pausing existed, so it is stopped", which is what lets
+    /// [`DockerCtl::resume_container`] pick the right verb.
+    pub async fn is_paused(&self, id: &str) -> Result<bool> {
+        match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+            Ok(info) => Ok(info.state.and_then(|s| s.paused).unwrap_or(false)),
+            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
+            Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
+        }
+    }
+
+    /// Freeze a container's processes with the cgroup freezer. Nothing exits, so the inner
+    /// Docker daemon, its own containers, and every GPU buffer the clone holds survive
+    /// untouched — which is what makes resuming instant instead of a fresh boot.
+    ///
+    /// A container that is already stopped cannot be paused; the caller falls back to a stop
+    /// so archiving still means something for a clone that had already exited.
+    pub async fn pause_container(&self, id: &str) -> Result<()> {
+        match self.daemon()?.pause_container(id).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(anyhow!("pausing container {id}: {e}")),
+        }
+    }
+
+    /// Thaw a paused container. Tolerates one that is not paused, so a double-resume is not
+    /// an error.
+    ///
+    /// The daemon answers "not paused" with a **500**, not the 409 you would expect, so the
+    /// message is what has to be matched. A daemon restart is the way to hit this: it
+    /// resumes paused containers, so the container can stop being paused between a caller's
+    /// check and this call.
+    pub async fn unpause_container(&self, id: &str) -> Result<()> {
+        match self.daemon()?.unpause_container(id).await {
+            Ok(()) => Ok(()),
+            Err(BollardError::DockerResponseServerError { message, .. })
+                if message.contains("is not paused") =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(anyhow!("unpausing container {id}: {e}")),
+        }
+    }
+
+    /// Bring an archived container back, whichever way it was archived: unpause a paused one,
+    /// start a stopped one. Clones archived before pausing existed are stopped, and they must
+    /// keep restoring correctly after an upgrade.
+    pub async fn resume_container(&self, id: &str) -> Result<()> {
+        if self.is_paused(id).await? {
+            self.unpause_container(id).await?;
+        }
+        // Start regardless of which branch ran. A container the daemon already resumed for
+        // us is neither paused nor stopped, and `start` on a running container is a 304 the
+        // client reads as success — so this settles every state without a second inspect
+        // that could go stale again in the same way.
+        self.start_container(id).await
+    }
+
+    /// Stop a container for good, unpausing first if it is paused. `docker stop` on a paused
+    /// container delivers a signal its frozen processes can never handle, so it waits out the
+    /// full timeout and then kills — slow, and an unclean shutdown for the clone.
+    pub async fn stop_even_if_paused(&self, id: &str) -> Result<()> {
+        if self.is_paused(id).await.unwrap_or(false) {
+            self.unpause_container(id).await.ok();
+        }
+        self.stop_container(id).await
     }
 
     /// The container's host PID (`State.Pid`), or `None` when it isn't running (the daemon
@@ -1793,6 +1887,52 @@ impl DockerCtl {
 
     // --- exec -------------------------------------------------------------------------
 
+    /// The next chunk from an exec's output stream, or an error once it is clear none is
+    /// coming.
+    ///
+    /// A paused container's exec never ends. The daemon holds the hijacked connection open,
+    /// and the frozen process will never write another byte or exit, so `next()` alone waits
+    /// forever. Archiving pauses, so any exec racing an archive would strand its caller —
+    /// and the callers are serial sweeps (the reconciler, the token pollers and rotators,
+    /// the infra sweep), so a single stranded exec stops that loop for every clone until the
+    /// server restarts.
+    ///
+    /// Waiting is only abandoned for a reason: either the container is genuinely paused, or
+    /// the exec has been silent past [`EXEC_MAX_SILENCE`]. A slow-but-live command is left
+    /// alone however long it takes. Dropping the stream afterwards closes our end; the exec
+    /// itself stays frozen inside the container and thaws with it.
+    async fn next_exec_chunk<S>(
+        &self,
+        container: &str,
+        output: &mut S,
+        silent_for: &mut std::time::Duration,
+    ) -> Result<Option<LogOutput>>
+    where
+        S: futures::Stream<Item = std::result::Result<LogOutput, BollardError>> + Unpin,
+    {
+        loop {
+            match tokio::time::timeout(EXEC_IDLE_PROBE, output.next()).await {
+                Ok(Some(chunk)) => {
+                    *silent_for = std::time::Duration::ZERO;
+                    return Ok(Some(chunk?));
+                }
+                Ok(None) => return Ok(None),
+                Err(_) => {
+                    *silent_for += EXEC_IDLE_PROBE;
+                    if self.is_paused(container).await.unwrap_or(false) {
+                        bail!("exec in {container} abandoned: the container was paused");
+                    }
+                    if *silent_for >= EXEC_MAX_SILENCE {
+                        bail!(
+                            "exec in {container} produced nothing for {}s, giving up",
+                            EXEC_MAX_SILENCE.as_secs()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Feed a shell script over exec stdin to `bash -s` (optionally with extra env +
     /// positional args), streaming stdout/stderr through **separate per-stream line
     /// buffers** (bollard `LogOutput` chunks are NOT line-aligned — gotcha #1). The
@@ -1855,8 +1995,9 @@ impl DockerCtl {
         let mut out_buf = LineSplitter::default();
         let mut err_buf = LineSplitter::default();
         let read_fut = async {
-            while let Some(chunk) = output.next().await {
-                match chunk? {
+            let mut silent_for = std::time::Duration::ZERO;
+            while let Some(chunk) = self.next_exec_chunk(container, &mut output, &mut silent_for).await? {
+                match chunk {
                     LogOutput::StdOut { message } | LogOutput::Console { message } => {
                         out_buf.push(&message, |line| on_line("out", line));
                     }
@@ -1866,7 +2007,7 @@ impl DockerCtl {
                     LogOutput::StdIn { .. } => {}
                 }
             }
-            Ok::<(), BollardError>(())
+            Ok::<(), anyhow::Error>(())
         };
         let (write_res, read_res) = tokio::join!(write_fut, read_fut);
 
@@ -1951,8 +2092,9 @@ impl DockerCtl {
         let mut stdout = String::new();
         let mut stderr = String::new();
         let read_fut = async {
-            while let Some(chunk) = output.next().await {
-                match chunk? {
+            let mut silent_for = std::time::Duration::ZERO;
+            while let Some(chunk) = self.next_exec_chunk(container, &mut output, &mut silent_for).await? {
+                match chunk {
                     LogOutput::StdOut { message } | LogOutput::Console { message } => {
                         out_buf.push(&message, |line| {
                             stdout.push_str(line);
@@ -1968,7 +2110,7 @@ impl DockerCtl {
                     LogOutput::StdIn { .. } => {}
                 }
             }
-            Ok::<(), BollardError>(())
+            Ok::<(), anyhow::Error>(())
         };
         let (write_res, read_res) = tokio::join!(write_fut, read_fut);
 

@@ -159,17 +159,27 @@ fn dup_owned(fd: &OwnedFd) -> Option<OwnedFd> {
 }
 
 impl MediaHandle {
+    /// Forward one input event to a clone-daemon.
+    ///
+    /// A full receive queue is not an error here. It means the clone has stopped reading —
+    /// a paused one never will — and a pointer event is worthless by the time the queue
+    /// drains anyway. Dropping it keeps the viewer's input thread moving, which matters
+    /// because that thread is the only thing that tears the viewer down when it leaves.
     pub fn send_input(&self, clone: &str, input: InputMsg) -> Result<(), String> {
         let conn = self.conns.lock().unwrap().get(clone).cloned();
         match conn {
-            Some(c) => c.send(&ServerMsg::Input(input)).map_err(|e| e.to_string()),
+            Some(c) => match c.send(&ServerMsg::Input(input)) {
+                Ok(()) | Err(media::sock::SendError::WouldBlock) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            },
             None => Err(format!("clone '{clone}' not connected")),
         }
     }
 
     /// Push a live layout to **every** connected clone-daemon. Best-effort; returns a
-    /// per-clone result so the caller can report partial failures. Cheap: `Conn::send`
-    /// is a single non-blocking `sendmsg`.
+    /// per-clone result so the caller can report partial failures. Cheap: `Conn::send` is a
+    /// single `MSG_DONTWAIT` `sendmsg`, so one clone that has stopped reading reports a
+    /// failure for itself rather than holding up the walk.
     pub fn set_monitors_all(
         &self,
         monitors: &[wire::MonitorSpec],
