@@ -1,5 +1,6 @@
 import { DndContext } from "@dnd-kit/core";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { fn } from "storybook/test";
 
 import { TicketColumn } from "./TicketColumn";
 import { openTickets, orderTickets } from "~/lib/tickets";
@@ -13,6 +14,7 @@ const meta = {
     tickets: openTickets(linearTickets, hosts),
     loading: false,
     error: null,
+    onNewTicket: fn(),
   },
   /** The cards are draggable, so they need a DndContext even when nothing can receive
    *  them. On the board that context is the board's own. */

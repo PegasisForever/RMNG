@@ -14,6 +14,7 @@ import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { LxcStats } from "~/lib/wire/LxcStats";
+import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
 const GiB = 1024 ** 3;
@@ -390,6 +391,45 @@ export const notesBlocks: PartialBlock[] = [
 
 // --- redacted app config (for the Settings story) --------------------------
 
+// --- presets ----------------------------------------------------------------
+// A preset's labels ARE the team keys the ticket and clone dialogs offer, so these match the
+// ticket fixtures below: WE and DEV. `platform` is the one with no Linear key, which is what
+// the dialogs block on.
+
+export const presets: PresetRedacted[] = [
+  {
+    name: "webapp",
+    labels: ["WE", "frontend"],
+    linearKeySet: true,
+    // A preset that defaults its clones to a pool; Codex left with no default.
+    claudeAccount: "group:pooled",
+    codexAccount: "",
+    vars: [{ key: "NODE_ENV", value: "development" }],
+    agentPlaybook: "",
+    globalPrompt: "",
+  },
+  {
+    name: "devtools",
+    labels: ["DEV"],
+    linearKeySet: true,
+    claudeAccount: "",
+    codexAccount: "",
+    vars: [],
+    agentPlaybook: "",
+    globalPrompt: "",
+  },
+  {
+    name: "platform",
+    labels: ["OPS"],
+    linearKeySet: false,
+    claudeAccount: "",
+    codexAccount: "",
+    vars: [],
+    agentPlaybook: "",
+    globalPrompt: "",
+  },
+];
+
 export const appConfig: AppConfigRedacted = {
   listen: { web: 9000, video: 9001, daemonMcp: 9004, forward: 9005, bastion: 2222 },
   agentPort: 4096,
@@ -427,19 +467,7 @@ export const appConfig: AppConfigRedacted = {
   codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
   cloneGroups,
   codexGroups,
-  presets: [
-    {
-      name: "webapp",
-      labels: ["frontend", "webapp"],
-      linearKeySet: true,
-      // A preset that defaults its clones to a pool; Codex left with no default.
-      claudeAccount: "group:pooled",
-      codexAccount: "",
-      vars: [{ key: "NODE_ENV", value: "development" }],
-      agentPlaybook: "",
-      globalPrompt: "",
-    },
-  ],
+  presets,
   chroma: "yuv420",
   ssh: {
     authorizedKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop"],

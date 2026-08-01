@@ -483,6 +483,91 @@ pub async fn create_issue(
 
 /// Move the issue to "In Progress" unless already started (no backwards drag).
 /// `key` should be one proven to see the issue (e.g. the [`fetch_issue_any`] key).
+/// Open an issue from the board's ticket column and hand back the ticket the column draws.
+///
+/// Deliberately not [`create_issue`], which answers the clone path with an [`IssueInfo`] and
+/// takes whatever state the team gives a new issue. Two differences matter here:
+///
+/// - The state is pinned to the team's first Todo state. The column shows Todo and In
+///   Progress only, so a ticket left in a team's default Backlog state would be created and
+///   vanish in the same breath.
+/// - The answer carries the column's own fields, so the new card can be drawn without
+///   waiting out the poll interval.
+///
+/// `priority` is Linear's own scale: 1 urgent, 2 high, 3 medium, 4 low. `None` and 0 both
+/// mean no priority, which is a real value there rather than a missing one.
+pub async fn create_ticket(
+    http: &reqwest::Client,
+    key: &str,
+    team_key: &str,
+    title: &str,
+    description: &str,
+    priority: Option<u8>,
+) -> Result<wire::LinearTicket, LinearError> {
+    let tk = team_key.to_uppercase();
+    // The team, its states, and the key's own owner in one round-trip. `viewer` is the user
+    // the key authenticates as, and the new ticket is assigned to them: the column lists
+    // what the key's owner is assigned, so an unassigned ticket would never appear in it.
+    let data = gql(
+        http,
+        key,
+        "query($team: String!) { \
+            teams(filter: { key: { eq: $team } }, first: 1) { \
+                nodes { id states { nodes { id type position } } } } \
+            viewer { id } }",
+        json!({ "team": &tk }),
+    )
+    .await?;
+    let team = data
+        .pointer("/teams/nodes/0")
+        .ok_or_else(|| LinearError(format!("team {tk} not found")))?;
+    let team_id = team
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LinearError(format!("team {tk} has no id")))?;
+
+    // A team can have several Todo states; Linear orders them by `position`, and the first
+    // is the one its own board puts a new issue in.
+    let mut todo: Vec<&Value> = team
+        .pointer("/states/nodes")
+        .and_then(Value::as_array)
+        .map(|ns| ns.iter().filter(|n| n.get("type").and_then(Value::as_str) == Some("unstarted")).collect())
+        .unwrap_or_default();
+    todo.sort_by(|a, b| {
+        let p = |v: &Value| v.get("position").and_then(Value::as_f64).unwrap_or(f64::MAX);
+        p(a).total_cmp(&p(b))
+    });
+    let state_id = todo.first().and_then(|n| n.get("id")).and_then(Value::as_str);
+
+    let mut input = serde_json::Map::new();
+    input.insert("teamId".into(), json!(team_id));
+    input.insert("title".into(), json!(title));
+    input.insert("description".into(), json!(description));
+    // Absent for an app or OAuth actor with no personal user. Leaving the field off keeps
+    // creation working; the ticket is then unassigned and the column will not list it.
+    if let Some(id) = data.pointer("/viewer/id").and_then(Value::as_str) {
+        input.insert("assigneeId".into(), json!(id));
+    }
+    if let Some(id) = state_id {
+        input.insert("stateId".into(), json!(id));
+    }
+    if let Some(p) = priority.filter(|p| *p > 0) {
+        input.insert("priority".into(), json!(p));
+    }
+
+    let mutation = format!(
+        "mutation($input: IssueCreateInput!) {{ issueCreate(input: $input) {{ \
+            success issue {{ {OPEN_ISSUE_FIELDS} }} }} }}"
+    );
+    let created = gql(http, key, &mutation, json!({ "input": Value::Object(input) })).await?;
+    let ok = created.pointer("/issueCreate/success").and_then(Value::as_bool).unwrap_or(false);
+    let node = created.pointer("/issueCreate/issue").cloned().filter(|v| !v.is_null());
+    match (ok, node.as_ref().and_then(to_ticket)) {
+        (true, Some(t)) => Ok(t),
+        _ => Err(LinearError(format!("Linear refused a new ticket in {tk}"))),
+    }
+}
+
 /// Write a new title and/or description onto an issue, named by its `WE-142` identifier.
 ///
 /// Linear's `issueUpdate` takes the issue's UUID, which the browser has no business knowing,

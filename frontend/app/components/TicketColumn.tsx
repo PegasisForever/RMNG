@@ -361,6 +361,9 @@ export interface TicketColumnProps {
   onCancel?: (ticket: LinearTicket) => void;
   /** Set the ticket Backlog in Linear. Same deal — the caller drops it. */
   onMoveToBacklog?: (ticket: LinearTicket) => void;
+  /** Open the new-ticket dialog. Absent ⇒ no button, which is what a board with no Linear
+   *  key configured gets. */
+  onNewTicket?: () => void;
 }
 
 export function TicketColumn({
@@ -372,6 +375,7 @@ export function TicketColumn({
   onCreateClone,
   onCancel,
   onMoveToBacklog,
+  onNewTicket,
 }: TicketColumnProps) {
   // The well takes drops so a ticket dragged back into the column lands, including on the
   // empty space below the last card.
@@ -390,9 +394,19 @@ export function TicketColumn({
     <ColumnShell>
       <ColumnHeader>
         <h2 className={COLUMN_TITLE}>Tickets</h2>
-        <span className="shrink-0 text-xs tabular-nums text-slate-400 dark:text-slate-500">
-          {loading ? "…" : tickets.length}
-        </span>
+        {/* The same button the clone columns carry, in the same place, for the same reason:
+            the thing a column is for is the thing you make more of at the top of it. */}
+        {onNewTicket ? (
+          <button
+            type="button"
+            onClick={onNewTicket}
+            title="Open a new Linear ticket"
+            className="flex shrink-0 cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-700"
+          >
+            <Plus className="size-3.5" />
+            New ticket
+          </button>
+        ) : null}
       </ColumnHeader>
 
       <ColumnWell innerRef={setNodeRef} empty={emptyLine}>

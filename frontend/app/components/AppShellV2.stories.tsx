@@ -129,6 +129,7 @@ const ticketColumn = {
   error: null,
   onCancel: fn(),
   onMoveToBacklog: fn(),
+  onNewTicket: fn(),
 };
 
 const board = {
