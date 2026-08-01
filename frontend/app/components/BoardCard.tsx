@@ -10,30 +10,45 @@ import { CSS } from "@dnd-kit/utilities";
 import type { CSSProperties, ReactNode } from "react";
 
 import { SidebarClone, type SidebarCloneProps } from "~/components/SidebarClone";
+import { GLASS_FILL, GLASS_OUTLINE, GLASS_SHADOW_LIFTED } from "~/lib/glass";
 
 /** The same hairline the side panel's cards carry, so everything card-shaped on screen is
  *  outlined the one way. It stays put when a card lifts: a border that darkens mid-drag
  *  reads as the card changing, not as it rising. */
-const OUTLINE = "border border-slate-900/10 dark:border-white/10";
+const OUTLINE = GLASS_OUTLINE;
 
-/** Wide and faint rather than tight and dark, so the card sits on the column instead of
- *  being cut out of it. A lifted card is told apart by how far its shadow spreads.
+/** A card at rest sits closer to the column than a floating panel does, so its shadow is
+ *  tighter than the glass one. Lifting it swaps in the shared lifted shadow, and how far
+ *  that spreads is what tells the two apart.
  *
  *  Dark mode runs the same geometry at roughly five times the alpha, in black rather than
  *  slate. A shadow is only visible as the difference between it and the surface under it,
  *  and against a slate-800 column the light-mode values come out to nothing. */
 const RESTING =
   "shadow-[0_1px_6px_rgb(15_23_42_/_0.04),0_4px_16px_rgb(15_23_42_/_0.05)] dark:shadow-[0_1px_6px_rgb(0_0_0_/_0.22),0_4px_16px_rgb(0_0_0_/_0.26)]";
-const LIFTED =
-  "shadow-[0_4px_16px_rgb(15_23_42_/_0.06),0_16px_48px_rgb(15_23_42_/_0.10)] dark:shadow-[0_4px_16px_rgb(0_0_0_/_0.3),0_16px_48px_rgb(0_0_0_/_0.4)]";
+const LIFTED = GLASS_SHADOW_LIFTED;
+
+/** A resting card is opaque, so it hides the column behind it. A lifted one is the glass
+ *  every floating thing on this screen is made of: a card in the air is over the board
+ *  rather than in it. */
+const RESTING_FILL = "bg-white dark:bg-slate-900";
 
 /** The frame every board card wears: rounded, outlined, and shadowed to sit on the column.
  *  Exported because the ticket cards are the same object at rest, and two copies of these
- *  values is how the board ends up with two kinds of card that almost match. */
+ *  values is how the board ends up with two kinds of card that almost match.
+ *
+ *  `data-lifted` is what lets the card's contents answer the drag. The fill lives on this
+ *  frame, but the clone row paints its own on top, so the row has to drop it while the card
+ *  is in the air. One attribute here reaches the row and every sub-clone row under it. */
 export function CardFrame({ lifted = false, children }: { lifted?: boolean; children: ReactNode }) {
   return (
     <div
-      className={`overflow-hidden rounded-lg bg-white dark:bg-slate-900 ${OUTLINE} ${
+      data-lifted={lifted ? "" : undefined}
+      // A card is a drag handle, so nothing in it is selectable. Dragging one otherwise
+      // paints a selection across its title on the way, and the text that comes with a card
+      // is a label, not content anybody copies out by hand. The ⋮ menu carries the copy
+      // actions for the parts that are worth copying.
+      className={`group/card select-none overflow-hidden rounded-lg ${lifted ? GLASS_FILL : RESTING_FILL} ${OUTLINE} ${
         lifted ? LIFTED : RESTING
       }`}
     >

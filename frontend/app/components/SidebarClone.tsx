@@ -282,8 +282,6 @@ export interface SidebarCloneProps {
    *  archived rows, Storybook). */
   dragAttributes?: DraggableAttributes;
   dragListeners?: DraggableSyntheticListeners;
-  /** True while this row's group is being dragged (drives the lifted-card styling). */
-  dragging?: boolean;
 }
 
 /** A single overflow-menu item that copies `command` to the clipboard and shows a
@@ -407,7 +405,6 @@ export function SidebarClone({
   onToggleExpand,
   dragAttributes,
   dragListeners,
-  dragging = false,
 }: SidebarCloneProps) {
   const busy = op?.status === "running";
   // Managed clones (backed by a container named after the clone id) get the commit /
@@ -474,15 +471,17 @@ export function SidebarClone({
         // divider: one card holds one row, so a divider there would just double the card's
         // own outline and read as a heavier bottom edge.
         //
-        // Exactly one background wins (dragging ▸ selected ▸ default). The default is a
-        // solid white (not transparent) so a dragged card fully hides the rows it passes
-        // over, and white is what leaves the selected tint and the hover as the only colour
-        // in a column.
-        dragging
-          ? "rounded-md bg-white shadow-lg ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600"
-          : selected
-            ? "border-l-emerald-400 bg-emerald-50 dark:bg-emerald-950"
-            : "bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-800"
+        // The default fill is solid white rather than transparent, so a card dragged over
+        // this row hides it completely, and white is what leaves the selected tint and the
+        // hover as the only colour in a column.
+        selected
+          ? "border-l-emerald-400 bg-emerald-50 dark:bg-emerald-950"
+          : "bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-800"
+      } ${
+        // In the air, the frame's glass is the card's surface, so the row gives up its own
+        // fill, including the selected tint, which is opaque and would seal the card shut.
+        // Hover goes with it: a card following the pointer is under it the whole time.
+        "group-data-[lifted]/card:bg-transparent group-data-[lifted]/card:hover:bg-transparent"
       }`}
     >
       <div className="min-w-0 flex-1">

@@ -11,6 +11,14 @@ import { EllipsisVertical, type LucideIcon } from "lucide-react";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
+import {
+  GLASS_DIVIDER,
+  GLASS_FILL_DENSE,
+  GLASS_HOVER,
+  GLASS_OUTLINE,
+  GLASS_SHADOW_LIFTED,
+} from "~/lib/glass";
+
 /** Lets an item close the menu it is in, including one that closes on its own delay. */
 const CloseContext = createContext<() => void>(() => {});
 
@@ -19,7 +27,7 @@ export function useMenuClose(): () => void {
 }
 
 export function MenuDivider() {
-  return <div className="my-1 h-px bg-slate-100 dark:bg-slate-700" />;
+  return <div className={`my-1 h-px ${GLASS_DIVIDER}`} />;
 }
 
 /** One row. The icon is required rather than optional: a menu where some items carry one and
@@ -48,8 +56,8 @@ export function MenuItem({
       }}
       className={`flex w-full cursor-pointer items-center gap-1.5 px-3 py-1.5 text-left text-xs ${
         danger
-          ? "text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-          : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
+          ? "text-red-600 hover:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20"
+          : `text-slate-600 dark:text-slate-300 ${GLASS_HOVER}`
       }`}
     >
       <Icon aria-hidden className="size-4 shrink-0" />
@@ -130,7 +138,7 @@ export function OverflowMenu({
                 ref={menuRef}
                 role="menu"
                 style={{ top: at.top, right: at.right }}
-                className="fixed z-50 w-56 overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-700 dark:bg-slate-800"
+                className={`fixed z-50 w-56 overflow-hidden rounded-md py-1 ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`}
                 onClick={(e) => e.stopPropagation()}
               >
                 {children}
