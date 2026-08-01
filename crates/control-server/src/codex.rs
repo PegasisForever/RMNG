@@ -489,18 +489,24 @@ pub async fn clear_clone_token(app: &App, host_id: &str) -> Result<()> {
 /// push. If the refresh rotated the token, fan it out to the account's other clones.
 pub async fn push_account_to_clone(app: &App, host_id: &str, email: &str) -> Result<()> {
     let (acct, rotated) = fresh_access_token(app, email).await?;
-    apply_clone_token(app, host_id, &acct).await?;
-    app.codex
-        .pushed
-        .lock()
-        .unwrap()
-        .insert(host_id.to_string(), acct.access_token.clone());
+    let applied = apply_clone_token(app, host_id, &acct).await;
+    if applied.is_ok() {
+        app.codex
+            .pushed
+            .lock()
+            .unwrap()
+            .insert(host_id.to_string(), acct.access_token.clone());
+    }
+    // Fan out even when this clone's own push failed — see `claude::push_account_to_clone`
+    // for why. The refresh has already invalidated the previous token for every clone on
+    // this account, and the one that triggered it is often a stopped clone that could never
+    // have taken the new one.
     if rotated {
         let app = app.clone();
         let email = email.to_string();
         tokio::spawn(async move { push_stale_tokens_for(&app, Some(&email)).await });
     }
-    Ok(())
+    applied
 }
 
 /// Fleet-wide reconcile pass: see [`push_stale_tokens_for`]. Runs at the end of every

@@ -1455,18 +1455,31 @@ pub async fn clear_clone_token(app: &App, host_id: &str) -> Result<()> {
 /// refresh rotated the token, fan it out to the account's other clones in the background.
 pub async fn push_account_to_clone(app: &App, host_id: &str, email: &str) -> Result<()> {
     let (token, rotated) = fresh_access_token(app, email).await?;
-    apply_clone_token(app, host_id, &token).await?;
-    app.claude
-        .pushed
-        .lock()
-        .unwrap()
-        .insert(host_id.to_string(), token);
+    let applied = apply_clone_token(app, host_id, &token).await;
+    if applied.is_ok() {
+        app.claude
+            .pushed
+            .lock()
+            .unwrap()
+            .insert(host_id.to_string(), token);
+    }
+    // Fan out whether or not THIS clone took its copy. The refresh above already happened,
+    // and Anthropic revokes the previous access token the moment it mints a new one — so
+    // every other clone on this account is broken from that instant, and their repair has
+    // nothing to do with whether this one succeeded.
+    //
+    // The distinction is load-bearing rather than theoretical. The rotate pass retries
+    // stopped clones forever, so the clone that happens to trigger a refresh is often one
+    // whose push cannot possibly work. Returning early there stranded the whole account
+    // until the next poll: measured twice on CT 105, 6m42s for `pegasis.personal@gmail.com`
+    // across 19 clones and 4m33s for `me@pegasis.site`, each time because the triggering
+    // clone was stopped.
     if rotated {
         let app = app.clone();
         let email = email.to_string();
         tokio::spawn(async move { push_stale_tokens_for(&app, Some(&email)).await });
     }
-    Ok(())
+    applied
 }
 
 /// Whether a clone assigned `host_email` is in scope for a push restricted to `only`.
