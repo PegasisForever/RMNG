@@ -513,44 +513,83 @@ pub async fn push_stale_tokens(app: &App) {
 /// the last successful push already delivered it. With `only` set, visit just that
 /// account's clones. Mirrors `claude::push_stale_tokens_for` (which carries the reasoning
 /// on scope), reading `RmngClone.codex_account_email`.
+/// See `claude::push_stale_tokens_for` for why this runs wide rather than one at a time: a
+/// refresh kills the previous token outright, so every clone still holding it is broken
+/// until this arrives.
 pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
-    let mut first = true;
+    let started = std::time::Instant::now();
+    let mut targets = Vec::new();
+    let mut skipped_fresh = 0usize;
+
     for host in app.store.get().hosts {
         let Some(email) = host.codex_account_email.as_deref() else {
             continue;
         };
-        if !only.is_none_or(|want| want == email) {
-            continue;
-        }
-        if !host.managed {
+        if !only.is_none_or(|want| want == email) || !host.managed {
             continue;
         }
         let Some(acct) = app.codex.get_by_email(email) else {
+            tracing::warn!(
+                "clone {} is bound to codex account {email}, which is not imported; leaving its token alone",
+                host.id
+            );
             continue;
         };
-        let stale = app.codex.pushed.lock().unwrap().get(&host.id) != Some(&acct.access_token);
-        if !stale {
+        if app.codex.pushed.lock().unwrap().get(&host.id) == Some(&acct.access_token) {
+            skipped_fresh += 1;
             continue;
         }
-        if !first {
-            tokio::time::sleep(STAGGER).await;
-        }
-        first = false;
-        match apply_clone_token(app, &host.id, &acct).await {
-            Ok(()) => {
-                app.codex
-                    .pushed
-                    .lock()
-                    .unwrap()
-                    .insert(host.id.clone(), acct.access_token.clone());
-                tracing::info!("pushed fresh codex token ({email}) to {}", host.id);
+        targets.push((host.id.clone(), email.to_string(), acct));
+    }
+
+    if targets.is_empty() {
+        tracing::debug!("codex token push: nothing to do ({skipped_fresh} already current)");
+        return;
+    }
+    tracing::info!(
+        "codex token push: {} clone(s) to update ({skipped_fresh} already current)",
+        targets.len()
+    );
+
+    let (mut ok, mut failed, mut unreachable) = (0usize, 0usize, 0usize);
+    for chunk in targets.chunks(crate::claude::PUSH_CONCURRENCY) {
+        let results = futures::future::join_all(chunk.iter().map(|(id, email, acct)| async move {
+            if !app.docker.is_running(id).await.unwrap_or(false) {
+                return (id, email, acct, None);
             }
-            Err(e) => tracing::warn!(
-                "pushing codex token ({email}) to {} failed (retried next pass): {e}",
-                host.id
-            ),
+            (id, email, acct, Some(apply_clone_token(app, id, acct).await))
+        }))
+        .await;
+
+        for (id, email, acct, outcome) in results {
+            match outcome {
+                None => {
+                    unreachable += 1;
+                    tracing::debug!("skipping codex token push to {id}: not running");
+                }
+                Some(Ok(())) => {
+                    ok += 1;
+                    app.codex
+                        .pushed
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), acct.access_token.clone());
+                    tracing::info!("pushed fresh codex token ({email}) to {id}");
+                }
+                Some(Err(e)) => {
+                    failed += 1;
+                    tracing::warn!(
+                        "pushing codex token ({email}) to {id} failed (retried next pass): {e}"
+                    );
+                }
+            }
         }
     }
+
+    tracing::info!(
+        "codex token push done in {:?}: {ok} pushed, {failed} failed, {unreachable} not running",
+        started.elapsed()
+    );
 }
 
 // --- usage fetch + mapping -------------------------------------------------

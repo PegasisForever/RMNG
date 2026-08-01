@@ -1483,56 +1483,104 @@ pub async fn push_stale_tokens(app: &App) {
     push_stale_tokens_for(app, None).await;
 }
 
+/// How many clones are pushed at once. A push is one `docker exec`, which costs seconds of
+/// waiting and almost no CPU, so the useful width is set by how many execs the daemon will
+/// happily carry rather than by cores. The old serial pass took a measured ~11s per clone,
+/// which on a forty-clone fleet left the last one running a dead token for minutes.
+pub const PUSH_CONCURRENCY: usize = 8;
+
 /// Give every clone assigned an account that account's current access token, unless
 /// the last successful push already delivered exactly that token. With `only` set,
 /// visit just that account's clones.
 ///
-/// Scope matters because the pass is serial: one `docker exec` per clone, measured at
-/// roughly 11 seconds each, so a 35-clone fleet takes over 6 minutes end to end. A
-/// refresh rotates exactly one account's token, and until the push lands that
-/// account's clones are running on a token the server has already replaced. Pushing
-/// only the rotated account's clones, immediately after the refresh, keeps that window
-/// proportional to the accounts affected rather than to the size of the fleet.
+/// Speed is the whole point. A refresh invalidates the previous token immediately, so every
+/// clone still holding it is broken until this reaches it — the agent gets a 401, not a
+/// warning. Serially that window grew with the fleet; this runs
+/// [`PUSH_CONCURRENCY`] at a time and skips clones that cannot receive a push at all, so it
+/// is bounded by the slowest clone rather than by their sum.
 pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
-    let mut first = true;
+    let started = std::time::Instant::now();
+    let mut targets: Vec<(String, String, String)> = Vec::new(); // (host, email, token)
+    let mut skipped_fresh = 0usize;
+    let mut skipped_no_account = 0usize;
+
     for host in app.store.get().hosts {
         let Some(email) = host.claude_account_email.as_deref() else {
             continue;
         };
-        if !in_push_scope(email, only) {
-            continue;
-        }
-        if !host.managed {
+        if !in_push_scope(email, only) || !host.managed {
             continue;
         }
         let Some(acct) = app.claude.get_by_email(email) else {
+            // Bound to an account the store does not have: the clone keeps whatever it has
+            // and nothing here can improve it, but staying silent made it indistinguishable
+            // from a clone that is up to date.
+            skipped_no_account += 1;
+            tracing::warn!(
+                "clone {} is bound to {email}, which is not an imported account; leaving its token alone",
+                host.id
+            );
             continue;
         };
-        let stale = app.claude.pushed.lock().unwrap().get(&host.id) != Some(&acct.access_token);
-        if !stale {
+        if app.claude.pushed.lock().unwrap().get(&host.id) == Some(&acct.access_token) {
+            skipped_fresh += 1;
             continue;
         }
-        if !first {
-            tokio::time::sleep(STAGGER).await; // gentle on the daemon
-        }
-        first = false;
-        match apply_clone_token(app, &host.id, &acct.access_token).await {
-            Ok(()) => {
-                app.claude
-                    .pushed
-                    .lock()
-                    .unwrap()
-                    .insert(host.id.clone(), acct.access_token);
-                tracing::info!("pushed fresh token ({email}) to {}", host.id);
+        targets.push((host.id.clone(), email.to_string(), acct.access_token));
+    }
+
+    if targets.is_empty() {
+        tracing::debug!(
+            "claude token push{}: nothing to do ({skipped_fresh} already current, {skipped_no_account} unbound)",
+            only.map(|e| format!(" [{e}]")).unwrap_or_default()
+        );
+        return;
+    }
+    tracing::info!(
+        "claude token push{}: {} clone(s) to update ({skipped_fresh} already current, {skipped_no_account} unbound)",
+        only.map(|e| format!(" [{e}]")).unwrap_or_default(),
+        targets.len()
+    );
+
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    let mut unreachable = 0usize;
+    for chunk in targets.chunks(PUSH_CONCURRENCY) {
+        let results = futures::future::join_all(chunk.iter().map(|(id, email, token)| async move {
+            // A clone whose container is not running cannot take a push, and asking costs a
+            // fraction of what the failing exec does. On a fleet with many stopped clones
+            // that is most of the pass.
+            if !app.docker.is_running(id).await.unwrap_or(false) {
+                return (id, email, token, None);
             }
-            Err(e) => {
-                tracing::warn!(
-                    "pushing token ({email}) to {} failed (retried next pass): {e}",
-                    host.id
-                )
+            (id, email, token, Some(apply_clone_token(app, id, token).await))
+        }))
+        .await;
+
+        for (id, email, token, outcome) in results {
+            match outcome {
+                None => {
+                    unreachable += 1;
+                    tracing::debug!("skipping token push to {id}: not running");
+                }
+                Some(Ok(())) => {
+                    ok += 1;
+                    app.claude.pushed.lock().unwrap().insert(id.clone(), token.clone());
+                    tracing::info!("pushed fresh token ({email}) to {id}");
+                }
+                Some(Err(e)) => {
+                    failed += 1;
+                    tracing::warn!("pushing token ({email}) to {id} failed (retried next pass): {e}");
+                }
             }
         }
     }
+
+    tracing::info!(
+        "claude token push{} done in {:?}: {ok} pushed, {failed} failed, {unreachable} not running",
+        only.map(|e| format!(" [{e}]")).unwrap_or_default(),
+        started.elapsed()
+    );
 }
 
 /// Self-scheduling poll loop with 429 backoff.
