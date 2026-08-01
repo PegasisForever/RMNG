@@ -1,64 +1,52 @@
-// Change a clone's Claude and Codex account/group after creation (Codex picker shows
-// only when Codex accounts/groups are configured). Mirrors the clone modal's picker
-// (auto / account / group); binding to a group lets the server move the clone to
-// another member account when its current one exhausts (sticky otherwise).
-import { useEffect, useState } from "react";
-
+// Change a clone's Claude and Codex account/group after creation, markup half. Mirrors the
+// clone dialog's picker (auto / account / group); binding to a group lets the server move the
+// clone to another member account when its current one exhausts (sticky otherwise).
+//
+// Controlled: the container seeds both selections from what the clone is bound to now, and
+// owns the swap calls. Nothing here reads the server, so each combination the operator can
+// pick is a story.
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
-import { getConfig } from "~/lib/api";
+import type { ClaudeUsage } from "~/lib/types";
 import { useModalEscape } from "~/lib/useModalEscape";
-import type { ClaudeUsage, Clone } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
-/** Current selection for a clone: the verbatim selection when recorded ("auto", "none",
- *  `group:<name>`, or an email), else derived from its group/account for legacy clones.
- *  A legacy clone with no account is effectively tokenless, so showing "none" lets
- *  choosing "auto" submit the swap that enrolls it in rotation. */
-export function currentValue(clone: Clone): string {
-  if (clone.claudeSelection) return clone.claudeSelection;
-  if (clone.claudeGroup) return `group:${clone.claudeGroup}`;
-  return clone.claudeAccountEmail ?? "none";
-}
+const select =
+  "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100";
 
-export function currentCodexValue(clone: Clone): string {
-  if (clone.codexSelection) return clone.codexSelection;
-  if (clone.codexGroup) return `group:${clone.codexGroup}`;
-  return clone.codexAccountEmail ?? "none";
-}
-
-export function ChangeAccountModal({
-  clone,
+export function ChangeAccountModalView({
+  cloneName,
   accounts,
+  groups,
   codexAccounts,
+  codexGroups,
+  claudeValue,
+  codexValue,
   busy,
+  onClaudeValueChange,
+  onCodexValueChange,
   onClose,
   onSubmit,
 }: {
-  clone: Clone;
-  /** Assignable accounts (imported Claude accounts). */
+  /** The clone this is about, as the heading names it (display name, else id). */
+  cloneName: string;
+  /** Assignable Claude accounts. */
   accounts: ClaudeUsage[];
+  /** Configured Claude pools (`config.cloneGroups`). */
+  groups: CloneGroup[];
   /** Assignable Codex accounts. */
   codexAccounts: ClaudeUsage[];
+  /** Configured Codex pools (`config.codexGroups`). */
+  codexGroups: CloneGroup[];
+  /** "auto", "none", an email, or `group:<name>`. */
+  claudeValue: string;
+  codexValue: string;
+  /** A swap is in flight. */
   busy: boolean;
+  onClaudeValueChange: (value: string) => void;
+  onCodexValueChange: (value: string) => void;
   onClose: () => void;
-  onSubmit: (claude: string, codex: string) => void;
+  onSubmit: () => void;
 }) {
-  const [value, setValue] = useState(() => currentValue(clone));
-  const [groups, setGroups] = useState<CloneGroup[]>([]);
-  const [codexValue, setCodexValue] = useState(() => currentCodexValue(clone));
-  const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
-
-  useEffect(() => {
-    getConfig()
-      .then((c) => {
-        setGroups(c.cloneGroups);
-        setCodexGroups(c.codexGroups);
-      })
-      .catch(() => {
-        // Config unreachable — only accounts (no group options).
-      });
-  }, []);
-
   // The Codex picker only shows when Codex accounts/groups are configured; the title
   // reflects both providers only when both are actually changeable here.
   const showCodex = codexAccounts.length > 0 || codexGroups.length > 0;
@@ -74,7 +62,7 @@ export function ChangeAccountModal({
       {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
       <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-          {showCodex ? "Accounts" : "Claude account"} · <span className="text-emerald-700 dark:text-emerald-400">{clone.displayName ?? clone.id}</span>
+          {showCodex ? "Accounts" : "Claude account"} · <span className="text-emerald-700 dark:text-emerald-400">{cloneName}</span>
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
           Pick a single account, a group (stays on one account until it exhausts,
@@ -86,9 +74,9 @@ export function ChangeAccountModal({
           <AccountGroupSelect
             groups={groups}
             accounts={accounts}
-            value={value}
-            onChange={setValue}
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+            value={claudeValue}
+            onChange={onClaudeValueChange}
+            className={select}
           />
         </label>
 
@@ -99,8 +87,8 @@ export function ChangeAccountModal({
               groups={codexGroups}
               accounts={codexAccounts}
               value={codexValue}
-              onChange={setCodexValue}
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+              onChange={onCodexValueChange}
+              className={select}
             />
           </label>
         ) : null}
@@ -115,7 +103,7 @@ export function ChangeAccountModal({
           </button>
           <button
             type="button"
-            onClick={() => onSubmit(value, codexValue)}
+            onClick={onSubmit}
             disabled={busy}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >

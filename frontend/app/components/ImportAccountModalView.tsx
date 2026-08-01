@@ -1,61 +1,52 @@
-// Import a Claude account from a clone that's already signed in to Claude Code.
-// Flow: pick a clone → the server runs `claude auth status` to confirm it's a
-// claude.ai login and shows the account → the server harvests the clone's OAuth
-// pair (it owns the refresh lifecycle from then on) and clears the clone's
-// credentials file so its Claude Code can't rotate the refresh token.
-import { useEffect, useState } from "react";
-
-import {
-  checkClaudeImport,
-  checkCodexImport,
-  importClaudeAccount,
-  importCodexAccount,
-} from "~/lib/api";
+// Import-account dialog, markup half. Pick a clone that is already signed in, read back who
+// it is signed in as, and import that account.
+//
+// It renders from props alone: the login check and the import itself are two server calls, and
+// both live in ImportAccountModalContainer. Every state the operator can reach here is one of
+// four props — `checking`, `info`, `error`, `importing` — so all of them are stories.
 import type { Clone } from "~/lib/types";
 import { useModalEscape } from "~/lib/useModalEscape";
 
 const input =
   "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500";
 
-export function ImportAccountModal({
+/** Who the selected clone is signed in as, as the check route reports it. */
+export interface ImportCandidate {
+  email: string;
+  /** Subscription or plan name, when the provider gives one. */
+  plan: string | null;
+}
+
+export function ImportAccountModalView({
+  provider,
   clones,
+  cloneId,
+  info,
+  checking,
+  importing,
+  error,
+  onProviderChange,
+  onCloneIdChange,
   onClose,
-  onImported,
+  onImport,
 }: {
+  provider: "claude" | "codex";
+  /** The clones that can be imported from. The container has already dropped the unmanaged
+   *  ones, so an empty list here means there is genuinely nowhere to import from. */
   clones: Clone[];
+  cloneId: string;
+  /** The selected clone's login, once the check comes back. Null while unknown. */
+  info: ImportCandidate | null;
+  /** A login check is in flight. */
+  checking: boolean;
+  /** The import itself is in flight. */
+  importing: boolean;
+  error: string | null;
+  onProviderChange: (provider: "claude" | "codex") => void;
+  onCloneIdChange: (cloneId: string) => void;
   onClose: () => void;
-  onImported: (email: string) => void;
+  onImport: () => void;
 }) {
-  // Only managed containers can be imported from.
-  const managed = clones.filter((h) => h.managed);
-  const [provider, setProvider] = useState<"claude" | "codex">("claude");
-  const [hostId, setHostId] = useState(() => managed[0]?.id ?? "");
-  const [info, setInfo] = useState<{ email: string; plan: string | null } | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Re-check the selected clone's login whenever it or the provider changes.
-  useEffect(() => {
-    if (!hostId) return;
-    let cancelled = false;
-    setInfo(null);
-    setError(null);
-    setChecking(true);
-    const check = provider === "codex" ? checkCodexImport : checkClaudeImport;
-    check(hostId)
-      .then((r) => {
-        // codex returns { email, plan }, claude returns { email, subscriptionType }.
-        const plan = "plan" in r ? r.plan : (r as { subscriptionType: string | null }).subscriptionType;
-        if (!cancelled) setInfo({ email: r.email, plan });
-      })
-      .catch((e: Error) => !cancelled && setError(e.message))
-      .finally(() => !cancelled && setChecking(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [hostId, provider]);
-
   const canImport = !!info && !importing;
 
   // Escape closes regardless of focus — a document-level listener since the backdrop click no
@@ -67,19 +58,6 @@ export function ImportAccountModal({
   // Escape — this one, since it mounts on top. Its z-60 must stay above the panel's z-50 to
   // match, or Escape would dismiss the dialog you can't see.
   useModalEscape(onClose);
-
-  function submit() {
-    if (!canImport) return;
-    setImporting(true);
-    setError(null);
-    const doImport = provider === "codex" ? importCodexAccount : importClaudeAccount;
-    doImport(hostId)
-      .then((r) => onImported(r.email))
-      .catch((e: Error) => {
-        setError(e.message);
-        setImporting(false);
-      });
-  }
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/30 p-4">
@@ -97,7 +75,7 @@ export function ImportAccountModal({
             <button
               key={p}
               type="button"
-              onClick={() => setProvider(p)}
+              onClick={() => onProviderChange(p)}
               className={
                 "rounded px-3 py-1 text-sm " +
                 (provider === p
@@ -110,7 +88,7 @@ export function ImportAccountModal({
           ))}
         </div>
 
-        {managed.length === 0 ? (
+        {clones.length === 0 ? (
           <p className="mt-4 rounded-md border border-dashed border-slate-300 p-3 text-center text-xs text-slate-400 dark:border-slate-600 dark:text-slate-500">
             No clones available to import from.
           </p>
@@ -119,11 +97,11 @@ export function ImportAccountModal({
             <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
               Clone
               <select
-                value={hostId}
-                onChange={(e) => setHostId(e.target.value)}
+                value={cloneId}
+                onChange={(e) => onCloneIdChange(e.target.value)}
                 className={input}
               >
-                {managed.map((h) => (
+                {clones.map((h) => (
                   <option key={h.id} value={h.id}>
                     {h.displayName ? `${h.displayName} (${h.id})` : h.id}
                   </option>
@@ -159,7 +137,7 @@ export function ImportAccountModal({
           </button>
           <button
             type="button"
-            onClick={submit}
+            onClick={onImport}
             disabled={!canImport}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >

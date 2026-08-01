@@ -7,8 +7,10 @@
 // the injected `uploadFile`. MarkdownEditorContainer supplies the /api/upload implementation,
 // and a story supplies a stub.
 //
-// BlockNote/ProseMirror touch the DOM, so this module is browser-only. Import it lazily
-// behind a mount gate (see CloneModal) and never during SSR.
+// BlockNote/ProseMirror touch the DOM, so this module is browser-only. MarkdownEditorContainer
+// is the lazy-import target (it carries the /api/upload call in the same chunk), which is why
+// this module has a named export only: a default export here would invite
+// `lazy(() => import(".../MarkdownEditorView"))`, and that mounts an editor with no upload.
 import "@blocknote/core/fonts/inter.css";
 import "@blocknote/mantine/style.css";
 
@@ -57,5 +59,3 @@ export function MarkdownEditorView({
     </div>
   );
 }
-
-export default MarkdownEditorView;

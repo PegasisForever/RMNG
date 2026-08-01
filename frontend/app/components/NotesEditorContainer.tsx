@@ -14,8 +14,13 @@ import { uploadFile } from "~/lib/api";
 
 const SAVE_DEBOUNCE_MS = 600;
 
-/** Debounced autosave; flushed immediately when the editor unmounts (clone switch)
- *  so nothing is lost between clones. */
+/** Debounced autosave, flushed on unmount (clone switch) so a pending edit is sent before
+ *  the editor goes.
+ *
+ *  Send is all it is. A flush drops `pending` before the request goes out and never looks at
+ *  the answer: `res.ok` is not checked, so a 500 resolves and vanishes, and the `.catch`
+ *  below swallows a network failure the same way. Nothing retries and nothing tells the
+ *  operator, so an edit can be lost with the pane still reading as saved. */
 function SavingEditor({
   cloneId,
   initialContent,
@@ -39,6 +44,8 @@ function SavingEditor({
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ blocks }),
       keepalive: true,
+      // Failure is dropped on purpose here, and by omission above: see the note on
+      // SavingEditor. Do not read this as "the save succeeded".
     }).catch(() => {});
   };
 

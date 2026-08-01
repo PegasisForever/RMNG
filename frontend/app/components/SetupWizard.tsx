@@ -8,7 +8,7 @@
 import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import { useCallback, useState } from "react";
 
-import { EnvChecklist } from "~/components/EnvChecklist";
+import { EnvChecklistContainer } from "~/components/EnvChecklistContainer";
 import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
 import { OperationProgress } from "~/components/OperationProgress";
 import { pullTemplate, putConfig } from "~/lib/api";
@@ -285,7 +285,7 @@ export function SetupWizard({
                 rmng drives your local Docker daemon over its unix socket. Confirm the environment
                 is ready, then pick the private subnet for the clone network.
               </p>
-              <EnvChecklist onChange={onEnvChange} />
+              <EnvChecklistContainer onChange={onEnvChange} />
 
               <OneTimeWarning>
                 The clone network subnet is baked into the <code>rmng</code> bridge and every

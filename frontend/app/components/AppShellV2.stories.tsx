@@ -5,15 +5,12 @@ import { fn } from "storybook/test";
 import { AppShellV2, type SideFocus } from "./AppShellV2";
 import { ChatView } from "./ChatView";
 import { NotesEditorView } from "./NotesEditorView";
-import { CloneModal } from "./CloneModal";
 import { TicketPanel } from "./TicketPanel";
 import TicketDescription from "./TicketDescription";
-import { SettingsPanel } from "./SettingsPanel";
-import { moveCard, newColumnId, removeColumn, resolveColumns } from "~/lib/board";
+import { moveCard } from "~/lib/board";
 import { openTickets, orderTickets, type LinearTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 import { makeClaudeAccounts, makeCloneGroups, makeCodexGroups } from "./__fixtures__/accounts";
-import { appConfig } from "./__fixtures__/appConfig";
 import { boardColumns, makeBoardColumn } from "./__fixtures__/board";
 import {
   chatActivity,
@@ -23,10 +20,10 @@ import {
   scheduledMessages,
 } from "./__fixtures__/chat";
 import { cloneWorking, hosts, makeCloneNoToken } from "./__fixtures__/clones";
-import { images } from "./__fixtures__/images";
 import { makeNotesBlocks } from "./__fixtures__/notes";
 import { cloneOperation } from "./__fixtures__/operations";
 import { cloneTokens, lxcStats, stats } from "./__fixtures__/stats";
+import { makeStoryLink } from "./__fixtures__/storyLinks";
 import { linearTickets } from "./__fixtures__/tickets";
 
 /** A clone that starts out in the archived column, so the fixed right column has something
@@ -76,32 +73,15 @@ function NotesFixture() {
   );
 }
 
-/** The settings modal's injected server calls. The board-columns section is the reason the
- *  gear is wired up here at all; the rest are stubs so the panel renders. */
-const settingsStubs = {
-  getConfig: async () => appConfig,
-  putConfig: async () => ({ config: appConfig, restartRequired: false }),
-  testConfig: async () => ({ ok: true, message: "Docker reachable" }),
-  getUpdateStatus: async () => ({
-    currentRevision: "a1b2c3d",
-    currentCreated: "2026-07-01T12:00:00Z",
-    currentDigest: "sha256:1111",
-    remoteDigest: "sha256:1111",
-    available: false,
-    reference: "pegasis0/rmng:latest",
-    error: null,
-  }),
-  updateServer: async () => cloneOperation,
-  restartServer: async () => ({ ok: true }),
-  images,
-  imagesLoading: false,
-  pullBusy: false,
-  onPullTemplate: fn(),
-  onDeleteImage: fn(),
-  onDeleteAccount: fn(),
-  onDeleteCodexAccount: fn(),
-  onImportAccount: fn(),
-};
+// Opening an overlay is navigation, so each of these jumps to that overlay's own story rather
+// than rendering it on top of the board. The page story then shows the page, and every state
+// a dialog can be in lives in one place instead of being reachable only through here.
+const toCloneModal = makeStoryLink("Clone/Components/CloneModalView", "Default");
+const toCloneModalFromTicket = makeStoryLink("Clone/Components/CloneModalView", "FromTicket");
+const toSettings = makeStoryLink("Settings/Components/SettingsPanel", "Default");
+const toImportAccount = makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn");
+const toChangeAccount = makeStoryLink("Clone/Components/ChangeAccountModalView", "BothProviders");
+const toPortForward = makeStoryLink("Modals/Components/PortForwardModal", "Default");
 
 /** The control rail's props, built fresh per story. The account lists and the pools reach
  *  components that hold them in state, so one array behind every story is how an edit in one
@@ -111,13 +91,16 @@ function makeRail() {
     accounts: makeClaudeAccounts(),
     cloneGroups: makeCloneGroups(),
     codexGroups: makeCodexGroups(),
+    // The route reads the operator's own locale here; a story pins one so the usage bars'
+    // reset tooltips read the same on every machine.
+    locale: "en-GB",
     lxcStats,
     operations: [],
     presetNames: ["Default", "Focus"],
     activeLayout: "Default",
     onActivateLayout: fn(),
-    onOpenSettings: fn(),
-    onImportAccount: fn(),
+    onOpenSettings: toSettings,
+    onImportAccount: toImportAccount,
     onRefresh: fn(),
   };
 }
@@ -144,15 +127,15 @@ const board = {
   onSelectClone: fn(),
   onDeleteClone: fn(),
   onCommitClone: fn(),
-  onChangeAccountClone: fn(),
-  onPortForwardClone: fn(),
+  onChangeAccountClone: toChangeAccount,
+  onPortForwardClone: toPortForward,
   onArchiveClone: fn(),
   onUnarchiveClone: fn(),
-  onNewClone: fn(),
+  onNewClone: toCloneModal,
   onMoveCard: fn(),
   onRenameColumn: fn(),
   tickets: ticketColumn,
-  onNewCloneFromTicket: fn(),
+  onNewCloneFromTicket: toCloneModalFromTicket,
   onReorderTickets: fn(),
 };
 
@@ -162,7 +145,6 @@ const meta = {
   parameters: { layout: "fullscreen" },
   args: {
     board,
-    rail: makeRail(),
     selectedClone: cloneWorking,
     error: null,
     sideFocus: "notes" as SideFocus,
@@ -172,15 +154,16 @@ const meta = {
   },
   /** The shell is controlled, so the story holds the board state: column membership,
    *  which clone is selected, and each clone's archived flag. That last one is what makes
-   *  a drag into the Archived column actually stick, the way the server's answer would. */
-  render: (args) => {
+   *  a drag into the Archived column actually stick, the way the server's answer would.
+   *
+   *  It also applies the locale toolbar by hand. The preview's decorator overrides an arg
+   *  named `locale`, and this shell has none: its locale is one field inside `rail`, which no
+   *  decorator can find. So the story that knows where it lives puts it there. */
+  render: (args, ctx) => {
     const [columns, setColumns] = useState(args.board.columns);
     const [clones, setClones] = useState(args.board.clones);
     const [selectedId, setSelectedId] = useState(args.board.selectedId);
     const [sideFocus, setSideFocus] = useState<SideFocus>(args.sideFocus);
-    const [settingsOpen, setSettingsOpen] = useState(false);
-    // The ticket a drop opened the clone dialog for. Null = the dialog is closed.
-    const [ticketClone, setTicketClone] = useState<LinearTicket | null>(null);
     // The operator's own arrangement of the ticket column. Empty means nobody has moved
     // anything yet, so the list is still Linear's order.
     const [ticketOrder, setTicketOrder] = useState<string[]>([]);
@@ -195,15 +178,11 @@ const meta = {
       setClones((prev) => prev.map((c) => (c.id === cloneId ? { ...c, archived } : c)));
 
     const selectedClone = clones.find((c) => c.id === selectedId) ?? null;
-    // What each column actually holds right now, so the settings list can say what a
-    // delete displaces (the unfiled clones count against the first column).
-    const counts = Object.fromEntries(
-      resolveColumns(columns, clones).map((column) => [column.id, column.cloneIds.length]),
-    );
 
     return (
       <AppShellV2
         {...args}
+        rail={{ ...args.rail, locale: String(ctx.globals.locale ?? args.rail.locale) }}
         selectedClone={selectedClone}
         ticket={
           openTicket ? (
@@ -216,7 +195,7 @@ const meta = {
                   onSave={fn()}
                 />
               }
-              onCreateClone={() => setTicketClone(openTicket)}
+              onCreateClone={toCloneModalFromTicket}
               onTitleChange={fn()}
             />
           ) : undefined
@@ -226,57 +205,6 @@ const meta = {
           setSideFocus(next);
           args.onSideFocusChange(next);
         }}
-        rail={{
-          ...args.rail,
-          onOpenSettings: () => {
-            setSettingsOpen(true);
-            args.rail.onOpenSettings();
-          },
-        }}
-        overlays={
-          ticketClone ? (
-            <CloneModal
-              images={images}
-              imagesLoading={false}
-              operations={args.board.operations}
-              parentCandidate={null}
-              accounts={args.rail.accounts}
-              initialTicket={ticketClone.url}
-              onClose={() => setTicketClone(null)}
-              onClone={async () => cloneOperation}
-            />
-          ) : settingsOpen ? (
-            <SettingsPanel
-              {...settingsStubs}
-              accounts={args.rail.accounts}
-              operations={args.board.operations}
-              onClose={() => setSettingsOpen(false)}
-              boardColumns={columns}
-              boardColumnCounts={counts}
-              onAddBoardColumn={(title) =>
-                setColumns((prev) => [
-                  ...prev,
-                  { id: newColumnId(title, prev), title, cloneIds: [], archive: false },
-                ])
-              }
-              onRenameBoardColumn={(columnId, title) =>
-                setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, title } : c)))
-              }
-              onSetBoardColumnArchive={(columnId, archive) =>
-                setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, archive } : c)))
-              }
-              onDeleteBoardColumn={(columnId) => setColumns((prev) => removeColumn(prev, columnId))}
-              onReorderBoardColumns={(ids) =>
-                setColumns((prev) =>
-                  ids.flatMap((id) => {
-                    const column = prev.find((c) => c.id === id);
-                    return column ? [column] : [];
-                  }),
-                )
-              }
-            />
-          ) : null
-        }
         board={{
           ...args.board,
           columns,
@@ -296,10 +224,6 @@ const meta = {
               setDropped((prev) => [...prev, ticket.id]);
               ticketColumn.onMoveToBacklog(ticket);
             },
-          },
-          onNewCloneFromTicket: (ticket, columnId) => {
-            setTicketClone(ticket);
-            args.board.onNewCloneFromTicket?.(ticket, columnId);
           },
           onReorderTickets: (order) => {
             setTicketOrder(order);
@@ -339,18 +263,19 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** The board: control rail, three operator columns, the fixed Archived column, and the
- *  selected clone's notes and chat down the right quarter. Cards drag between columns. */
-export const Default: Story = {};
+ *  selected clone's notes and chat down the right quarter. Cards drag between columns.
+ *  The gear, both New clone buttons and the card menus jump to their own stories. */
+export const Default: Story = { args: { rail: makeRail() } };
 
 /** The agent is mid-turn, with the chat focused: it holds three quarters of the side panel
  *  and the notes shrink to a quarter. Clicking into the notes swaps the two. */
 export const AgentWorking: Story = {
-  args: { chat: <ChatFixture busy />, sideFocus: "chat" },
+  args: { rail: makeRail(), chat: <ChatFixture busy />, sideFocus: "chat" },
 };
 
 /** No clone selected — the side panel holds its empty state. */
 export const NoCloneSelected: Story = {
-  args: { board: { ...board, selectedId: null }, selectedClone: null },
+  args: { rail: makeRail(), board: { ...board, selectedId: null }, selectedClone: null },
 };
 
 /** A failed action banners above the page while a clone is being provisioned, which the

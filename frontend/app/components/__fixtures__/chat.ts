@@ -47,10 +47,19 @@ export const chatMessages: ChatMessage[] = [
 /** The agent's current tool line, shown under the working bubble while a turn is in flight. */
 export const chatActivity = "Bash(bun run build)";
 
-/** What a failed send puts in the banner, all of it. The chat routes answer an error
- *  as a plain-text body, but the send path parses that body as JSON and reads `.error` off the
- *  result, so the parse always fails and the fallback string is all the operator ever sees.
- *  The server's own words ("clone 'pega-we-142' is archived") are discarded on the way. */
+/** What an HTTP failure of the SEND route puts in the banner, all of it. The chat routes
+ *  answer an error as a plain-text body, but the send path parses that body as JSON and reads
+ *  `.error` off the result, so the parse always fails and this fallback string is all the
+ *  operator ever sees. The server's own words ("clone 'pega-we-142' is archived") are
+ *  discarded on the way.
+ *
+ *  One banner carries every failure the pane can have, and the other three routes fill it
+ *  differently: abort collapses to "stop failed" through the same dropped JSON parse, cancel
+ *  to "cancel failed", and schedule alone reads the body as text, so it is the one route
+ *  whose banner holds the server's own words. Two more strings never come from a route at
+ *  all: a fetch that does not reach the server surfaces the browser's rejection ("Failed to
+ *  fetch"), and a delivery time in the past is refused locally with "Pick a time in the
+ *  future." */
 export const chatError = "chat failed";
 
 /** Unsent composer text, for the states where the box is not empty: a send that failed and

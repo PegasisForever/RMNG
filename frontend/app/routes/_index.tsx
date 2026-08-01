@@ -1,10 +1,10 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { AppShellV2, type SideFocus } from "~/components/AppShellV2";
-import { ChangeAccountModal } from "~/components/ChangeAccountModal";
-import { CloneModal } from "~/components/CloneModal";
+import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
+import { CloneModalContainer } from "~/components/CloneModalContainer";
 import { CommitImageModal } from "~/components/CommitImageModal";
-import { ImportAccountModal } from "~/components/ImportAccountModal";
+import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
@@ -47,6 +47,7 @@ import {
   withDefaults,
   type BoardColumn,
 } from "~/lib/board";
+import { browserLocale } from "~/lib/format";
 import { type ControlState, type Clone, emptyState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useIsMobile } from "~/lib/useIsMobile";
@@ -491,6 +492,9 @@ function Dashboard({
         accounts,
         cloneGroups,
         codexGroups,
+        // The operator's locale, read here rather than in the usage bars, so the reset-time
+        // tooltips are a function of the rail's props like everything else it draws.
+        locale: browserLocale(),
         lxcStats,
         operations: state.operations,
         presetNames: state.layoutPresetNames ?? [],
@@ -593,7 +597,7 @@ function Dashboard({
       overlays={
         <>
           {cloneOpen ? (
-            <CloneModal
+            <CloneModalContainer
               images={images}
               imagesLoading={imagesLoading}
               operations={state.operations}
@@ -699,7 +703,7 @@ function Dashboard({
           ) : null}
 
           {importOpen ? (
-            <ImportAccountModal
+            <ImportAccountModalContainer
               clones={state.hosts}
               onClose={() => setImportOpen(false)}
               onImported={() => {
@@ -714,7 +718,7 @@ function Dashboard({
           ) : null}
 
           {changeClone ? (
-            <ChangeAccountModal
+            <ChangeAccountModalContainer
               clone={changeClone}
               accounts={claudeAccounts}
               codexAccounts={codexAccounts}

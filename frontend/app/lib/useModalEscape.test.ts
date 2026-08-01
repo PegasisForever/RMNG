@@ -45,7 +45,7 @@ describe("modal Escape stacking", () => {
     __pushModal(under);
     __pushModal(busyClone);
 
-    // CloneModal mid-operation: it must not close...
+    // The clone dialog mid-operation: it must not close...
     expect(ownsEscape(busyClone, false)).toBe(false);
     // ...and the dialog beneath must not close either.
     expect(ownsEscape(under, true)).toBe(false);

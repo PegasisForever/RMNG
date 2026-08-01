@@ -55,11 +55,13 @@ function Bar({
   win,
   windowMs,
   now,
+  locale,
 }: {
   label: string;
   win?: ClaudeUsageWindow;
   windowMs: number;
   now: number | null;
+  locale: string;
 }) {
   if (!win) return null;
   const pct = Math.min(100, Math.max(0, win.pct));
@@ -68,8 +70,8 @@ function Bar({
   // until the effect runs) for the same reason as the pace marker: the string is rendered in
   // the BROWSER's time zone, which the prerender has no way to know, so computing it during
   // the first render would guarantee a hydration mismatch. Do not "simplify" this to
-  // `resetTooltip(win.resetsAt, Date.now())`.
-  const resetTitle = now != null ? resetTooltip(win.resetsAt, now) : null;
+  // `resetTooltip(win.resetsAt, Date.now(), navigator.language)`.
+  const resetTitle = now != null ? resetTooltip(win.resetsAt, now, locale) : null;
   return (
     <div className="flex items-center gap-1.5" title={resetTitle ?? undefined}>
       <span className="w-8 shrink-0 text-[10px] font-medium text-slate-500 dark:text-slate-400">{label}</span>
@@ -129,7 +131,7 @@ export function groupAccounts(
   return out;
 }
 
-function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
+function Row({ a, now, locale }: { a: ClaudeUsage; now: number | null; locale: string }) {
   const resetCredits =
     a.provider === "codex" && a.resetCredits != null ? Number(a.resetCredits) : null;
   return (
@@ -173,10 +175,10 @@ function Row({ a, now }: { a: ClaudeUsage; now: number | null }) {
           className={`mt-0.5 space-y-0.5 ${a.stale ? "opacity-60" : ""}`}
           title={a.stale ? "stale — last refresh failed (showing last known)" : undefined}
         >
-          <Bar label="5h" win={a.fiveHour} windowMs={FIVE_H_MS} now={now} />
-          <Bar label="7d" win={a.sevenDay} windowMs={SEVEN_D_MS} now={now} />
+          <Bar label="5h" win={a.fiveHour} windowMs={FIVE_H_MS} now={now} locale={locale} />
+          <Bar label="7d" win={a.sevenDay} windowMs={SEVEN_D_MS} now={now} locale={locale} />
           {/* Claude-only model-scoped weekly cap; a 7d window like sevenDay. Codex has none. */}
-          <Bar label="fable" win={a.fable} windowMs={SEVEN_D_MS} now={now} />
+          <Bar label="fable" win={a.fable} windowMs={SEVEN_D_MS} now={now} locale={locale} />
         </div>
       )}
     </div>
@@ -187,6 +189,7 @@ export function ClaudeAccountsPanel({
   accounts,
   cloneGroups = [],
   codexGroups = [],
+  locale,
   onRefresh,
   onImport,
 }: {
@@ -195,6 +198,10 @@ export function ClaudeAccountsPanel({
   cloneGroups?: CloneGroup[];
   /** Configured Codex pools (`config.codexGroups`). */
   codexGroups?: CloneGroup[];
+  /** Formats each bar's reset-time tooltip. Read on the container's side of the seam
+   *  (`navigator.language`) and passed down, so the panel draws the same string for the same
+   *  props on every machine and a story can pin it. */
+  locale: string;
   onRefresh: () => void | Promise<void>;
   onImport: () => void | Promise<void>;
 }) {
@@ -263,7 +270,7 @@ export function ClaudeAccountsPanel({
       ) : sections.length === 0 ? (
         <div className="mt-0.5 divide-y divide-slate-200/70 dark:divide-slate-700/70">
           {rows.map((a) => (
-            <Row key={a.id} a={a} now={now} />
+            <Row key={a.id} a={a} now={now} locale={locale} />
           ))}
         </div>
       ) : (
@@ -282,7 +289,12 @@ export function ClaudeAccountsPanel({
                   {section.accounts.map((a) => (
                     // An account in two pools renders in both, so the pool has to be part of
                     // the key.
-                    <Row key={`${section.provider}|${section.name ?? ""}|${a.id}`} a={a} now={now} />
+                    <Row
+                      key={`${section.provider}|${section.name ?? ""}|${a.id}`}
+                      a={a}
+                      now={now}
+                      locale={locale}
+                    />
                   ))}
                 </div>
               )}

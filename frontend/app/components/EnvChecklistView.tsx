@@ -1,40 +1,29 @@
-// The setup wizard's environment preflight: a checklist of `GET /api/setup/env`
-// rows (Docker socket reachable, render node present, sock mount, …), each pass or
-// fail, with a Retry that re-probes the daemon. Required failures block the wizard;
-// advisory failures are shown amber but don't block. Fetches on mount and on Retry.
+// The setup wizard's environment preflight, markup half: a list of checks (Docker socket
+// reachable, render node present, sock mount, …), each pass or fail, with a Retry that
+// re-probes the daemon.
+//
+// A failed REQUIRED check blocks the wizard and reads red; a failed advisory one reads amber
+// and blocks nothing. Both are props here, so the states that need a broken host to reach in
+// the real app are one story each. EnvChecklistContainer runs the probe.
 import { Check, TriangleAlert, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
 
-import { getSetupEnv } from "~/lib/api";
 import type { EnvCheckRow } from "~/lib/wire/EnvCheckRow";
 
-export function EnvChecklist({
-  onChange,
+export function EnvChecklistView({
+  rows,
+  loading,
+  error,
+  onRetry,
 }: {
-  /** Reports whether every *required* row passes (Next is gated on it). */
-  onChange?: (allRequiredPass: boolean) => void;
+  /** The probe's rows, or null before the first answer lands. Null with no error is the
+   *  running state; an empty array is a host that reported no checks at all. */
+  rows: EnvCheckRow[] | null;
+  /** A probe is in flight. */
+  loading: boolean;
+  /** The probe itself failed, as opposed to a check inside it. */
+  error: string | null;
+  onRetry: () => void;
 }) {
-  const [rows, setRows] = useState<EnvCheckRow[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const refresh = useCallback(() => {
-    setLoading(true);
-    setError(null);
-    getSetupEnv()
-      .then((r) => setRows(r.rows))
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    if (rows) onChange?.(rows.every((r) => !r.required || r.ok));
-  }, [rows, onChange]);
-
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -43,7 +32,7 @@ export function EnvChecklist({
         </span>
         <button
           type="button"
-          onClick={refresh}
+          onClick={onRetry}
           disabled={loading}
           className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
         >

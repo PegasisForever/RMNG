@@ -18,6 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ChatView, localInputToEpochMs } from "~/components/ChatView";
 import { getDraft, setDraft } from "~/lib/chatDrafts";
+import { browserLocale } from "~/lib/format";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 
@@ -190,10 +191,9 @@ export default function ChatContainer({
       onCancelScheduled={cancelScheduled}
       // The clock and the locale are read here, on the container's side of the seam, so the
       // same props always draw the same pane. A story hands over a fixed instant and a fixed
-      // locale instead. This module is client-only, so `navigator` is always there. The
-      // fallback exists only because the type cannot say so.
+      // locale instead.
       now={Date.now()}
-      locale={typeof navigator === "undefined" ? "en-US" : navigator.language}
+      locale={browserLocale()}
     />
   );
 }

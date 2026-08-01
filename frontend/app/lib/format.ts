@@ -1,4 +1,14 @@
-// Small display formatters shared by the image UI.
+// Small display formatters, plus the one session value they read from.
+
+/** The operator's locale, for the formatters that take one.
+ *
+ *  Read it at a container boundary and pass the result down. A leaf that calls this itself
+ *  renders differently on every machine and cannot be pinned by a story, which is the whole
+ *  reason `resetTooltip` and `ChatView` take a locale instead of reaching for one. The
+ *  fallback exists only because the type cannot say that the callers are client-only. */
+export function browserLocale(): string {
+  return typeof navigator === "undefined" ? "en-US" : navigator.language;
+}
 
 /** Human byte size, e.g. `1.4 GB`. `sizeBytes` on `ImageInfo` is a bigint. */
 export function formatBytes(bytes: bigint | number): string {
@@ -57,15 +67,21 @@ function until(ms: number): string {
 }
 
 /** Usage-bar hover tooltip: the concrete reset time in the viewer's local time zone plus a
- *  countdown, e.g. `Resets Jul 24, 3:45 PM EDT (in 2h 15m)`. `toLocaleString` with no locale
- *  renders in the browser's own zone; `timeZoneName` makes the offset explicit. `now` is passed
- *  in (rather than read here) so the caller controls when it ticks. Returns null for a missing
- *  or unparseable timestamp so the caller can omit the tooltip entirely. */
-export function resetTooltip(iso: string | null, now: number): string | null {
+ *  countdown, e.g. `Resets Jul 24, 3:45 PM EDT (in 2h 15m)`.
+ *
+ *  `locale` and `now` are both passed in rather than read here, so the same arguments always
+ *  produce the same string: `undefined` for the locale would take the browser's, which turns
+ *  one story into "Jul 24, 3:45 PM" on one machine and "24 Jul, 15:45" on the next. The time
+ *  ZONE is still the viewer's own, on purpose — a reset time is only useful against the clock
+ *  the operator is reading, and `timeZoneName` says which zone that is.
+ *
+ *  Returns null for a missing or unparseable timestamp so the caller can omit the tooltip
+ *  entirely. */
+export function resetTooltip(iso: string | null, now: number, locale: string): string | null {
   if (!iso) return null;
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return null;
-  const at = new Date(t).toLocaleString(undefined, {
+  const at = new Date(t).toLocaleString(locale, {
     month: "short",
     day: "numeric",
     hour: "numeric",

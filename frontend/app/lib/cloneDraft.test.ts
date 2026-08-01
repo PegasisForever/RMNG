@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { opPhase, resolvePreset } from "./CloneModal";
+import { opPhase, resolvePreset } from "./cloneDraft";
 import type { Operation } from "~/lib/types";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 

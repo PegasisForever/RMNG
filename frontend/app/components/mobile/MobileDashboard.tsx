@@ -11,11 +11,12 @@
 // operator is looking at.
 import { lazy, Suspense, useEffect, useState } from "react";
 
-import { ImportAccountModal } from "~/components/ImportAccountModal";
+import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { MobileClone, type CloneTab } from "~/components/mobile/MobileClone";
 import { MobileHome } from "~/components/mobile/MobileHome";
 import { activate, refreshClaudeUsage, refreshCodexUsage } from "~/lib/api";
 import { withDefaults } from "~/lib/board";
+import { browserLocale } from "~/lib/format";
 import type { ControlState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
@@ -110,6 +111,9 @@ export function MobileDashboard({
         accounts={state.claudeAccounts ?? []}
         cloneGroups={cloneGroups}
         codexGroups={codexGroups}
+        // Read here rather than in the usage bars, so the reset-time tooltips are a function
+        // of the page's props like everything else it draws.
+        locale={browserLocale()}
         usageOpen={usageOpen}
         onUsageOpenChange={setUsageOpen}
         onRefresh={() => run(Promise.all([refreshClaudeUsage(), refreshCodexUsage()]))}
@@ -120,7 +124,7 @@ export function MobileDashboard({
         error={error}
       />
       {importOpen ? (
-        <ImportAccountModal
+        <ImportAccountModalContainer
           clones={state.hosts}
           onClose={() => setImportOpen(false)}
           onImported={() => {

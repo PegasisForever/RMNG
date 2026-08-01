@@ -42,8 +42,8 @@ export function __popModal(token: symbol) {
  * Close `onClose` when Escape is pressed, but only while this modal is the topmost one.
  *
  * `enabled` gates the *handling*, not the stack membership: a modal that suppresses Escape
- * while an operation is in flight (CloneModal's `busy`) must still hold its stack slot, or
- * Escape would fall through and close the dialog underneath it instead.
+ * while an operation is in flight (the clone dialog's `busy`) must still hold its stack slot,
+ * or Escape would fall through and close the dialog underneath it instead.
  */
 export function useModalEscape(onClose: () => void, enabled = true) {
   useEffect(() => {

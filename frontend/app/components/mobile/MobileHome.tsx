@@ -57,6 +57,9 @@ export interface MobileHomeProps {
   cloneGroups?: CloneGroup[];
   /** Configured Codex pools (`config.codexGroups`). */
   codexGroups?: CloneGroup[];
+  /** Formats the usage bars' reset-time tooltips. Read once by the route (the operator's
+   *  `navigator.language`) and handed down, so a story can pin it. */
+  locale: string;
   /** The usage section is collapsed by default: three accounts of bars would push the
    *  clone list off a phone screen, and the peak number answers the usual question. */
   usageOpen: boolean;
@@ -109,6 +112,7 @@ export function MobileHome({
   accounts,
   cloneGroups = [],
   codexGroups = [],
+  locale,
   usageOpen,
   onUsageOpenChange,
   onRefresh,
@@ -175,6 +179,7 @@ export function MobileHome({
                 accounts={accounts}
                 cloneGroups={cloneGroups}
                 codexGroups={codexGroups}
+                locale={locale}
                 onRefresh={onRefresh}
                 onImport={onImportAccount}
               />

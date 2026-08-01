@@ -4,7 +4,7 @@ import { fn } from "storybook/test";
 
 import { MobileHome } from "./MobileHome";
 import { PhoneFrame } from "~/stories/PhoneFrame";
-import { claudeAccounts, cloneGroups, codexGroups } from "../__fixtures__/accounts";
+import { makeClaudeAccounts, makeCloneGroups, makeCodexGroups } from "../__fixtures__/accounts";
 import { boardColumns } from "../__fixtures__/board";
 import { hosts } from "../__fixtures__/clones";
 
@@ -13,9 +13,10 @@ const meta = {
   component: MobileHome,
   parameters: { layout: "centered" },
   args: {
-    accounts: claudeAccounts,
-    cloneGroups,
-    codexGroups,
+    accounts: makeClaudeAccounts(),
+    cloneGroups: makeCloneGroups(),
+    codexGroups: makeCodexGroups(),
+    locale: "en-GB",
     usageOpen: false,
     onUsageOpenChange: fn(),
     onRefresh: fn(),

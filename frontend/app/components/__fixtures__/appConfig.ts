@@ -1,9 +1,15 @@
 // The redacted config the Settings panel loads: same structure the server sends, with every
 // secret already replaced by a boolean "is set".
+//
+// A builder and nothing else. The panel loads this into state and edits it, so a story that
+// answered `getConfig` with one shared object would be editing every other story's config
+// too. Call it per story, and per call inside a `getConfig` stub: a real fetch hands back a
+// fresh parse each time, so a stub that does the same is also the honest one.
 
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
 import { makeCloneGroups, makeCodexGroups } from "./accounts";
+import { makePreset } from "./presets";
 
 export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
@@ -46,17 +52,11 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
     cloneGroups: makeCloneGroups(),
     codexGroups: makeCodexGroups(),
     presets: [
-      {
-        name: "webapp",
-        labels: ["frontend", "webapp"],
-        linearKeySet: true,
+      makePreset({
         // A preset that defaults its clones to a pool; Codex left with no default.
         claudeAccount: "group:pooled",
-        codexAccount: "",
         vars: [{ key: "NODE_ENV", value: "development" }],
-        agentPlaybook: "",
-        globalPrompt: "",
-      },
+      }),
     ],
     chroma: "yuv420",
     ssh: {
@@ -68,5 +68,3 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
     ...overrides,
   };
 }
-
-export const appConfig: AppConfigRedacted = makeAppConfig();

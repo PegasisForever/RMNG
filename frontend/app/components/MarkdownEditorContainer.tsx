@@ -6,8 +6,8 @@
 // Images land in the markdown as `![](/uploads/<name>)`. That URL is LAN-only, so the server
 // re-hosts each one in Linear (`linear::rehost_markdown_images`) before creating the ticket.
 //
-// Client-only (BlockNote/ProseMirror touch the DOM), so CloneModal lazy-imports it and it
-// never runs during SSR.
+// Client-only (BlockNote/ProseMirror touch the DOM), so CloneModalContainer lazy-imports it
+// and it never runs during SSR.
 import { MarkdownEditorView } from "~/components/MarkdownEditorView";
 import { uploadFile } from "~/lib/api";
 

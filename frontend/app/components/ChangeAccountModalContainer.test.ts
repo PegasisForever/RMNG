@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { currentCodexValue, currentValue } from "./ChangeAccountModal";
+import { currentCodexValue, currentValue } from "./ChangeAccountModalContainer";
 import type { Clone } from "~/lib/types";
 
 const clone = (overrides: Partial<Clone> = {}): Clone => ({

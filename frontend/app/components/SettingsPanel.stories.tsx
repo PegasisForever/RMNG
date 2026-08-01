@@ -5,17 +5,20 @@ import { fn } from "storybook/test";
 import { SettingsPanel } from "./SettingsPanel";
 import { newColumnId, removeColumn } from "~/lib/board";
 import type { Operation } from "~/lib/types";
-import { claudeAccounts } from "./__fixtures__/accounts";
-import { appConfig, makeAppConfig } from "./__fixtures__/appConfig";
+import { makeClaudeAccounts } from "./__fixtures__/accounts";
+import { makeAppConfig } from "./__fixtures__/appConfig";
 import { boardColumns } from "./__fixtures__/board";
 import { images } from "./__fixtures__/images";
 
 // Mocked server calls — the component never imports the real API, so a story just
 // injects these. `fn(impl)` both runs the implementation and records the call in the
 // Actions panel.
-const getConfig = () => fn(async () => appConfig);
+// Each call builds its own config, the way a real fetch hands back its own parse. The panel
+// edits what it is given, so a stub that answered one shared object would let the Default
+// story's edits show up in RestartRequired.
+const getConfig = () => fn(async () => makeAppConfig());
 const putConfig = (restartRequired = false) =>
-  fn(async () => ({ config: appConfig, restartRequired }));
+  fn(async () => ({ config: makeAppConfig(), restartRequired }));
 const testConfig = () =>
   fn(async () => ({ ok: true, message: "Docker reachable (Engine 27.1.1)" }));
 const getUpdateStatus = () =>
@@ -48,7 +51,7 @@ const meta = {
   parameters: { layout: "fullscreen" },
   args: {
     // The flat both-provider list the panel splits into its Claude / Codex account sections.
-    accounts: claudeAccounts,
+    accounts: makeClaudeAccounts(),
     onClose: fn(),
     getConfig: getConfig(),
     putConfig: putConfig(),

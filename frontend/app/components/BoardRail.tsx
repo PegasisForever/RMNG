@@ -35,6 +35,9 @@ export interface BoardRailProps {
   cloneGroups?: CloneGroup[];
   /** Configured Codex pools (`config.codexGroups`). */
   codexGroups?: CloneGroup[];
+  /** Formats the usage bars' reset-time tooltips. Read once by the route (the operator's
+   *  `navigator.language`) and handed down, so a story can pin it. */
+  locale: string;
   /** Live CT-wide CPU/RAM/rootfs usage (the volatile `lxcStats` SSE event). */
   lxcStats: LxcStats | null;
   /** All operations; the running ones render as progress rows. */
@@ -55,6 +58,7 @@ export function BoardRail({
   accounts,
   cloneGroups,
   codexGroups,
+  locale,
   lxcStats,
   operations,
   presetNames,
@@ -125,6 +129,7 @@ export function BoardRail({
         accounts={accounts}
         cloneGroups={cloneGroups}
         codexGroups={codexGroups}
+        locale={locale}
         onImport={onImportAccount}
         onRefresh={onRefresh}
       />
