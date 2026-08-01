@@ -2,6 +2,7 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
+import type { LinearTicket } from "~/lib/wire/LinearTicket";
 // The hand-maintained `Operation`, not the generated `wire/Operation`: ts-rs maps the
 // Rust `u64` timestamps to `bigint`, but `JSON.parse` yields plain numbers, so the
 // hand-maintained shape is the one these responses actually have at runtime.
@@ -88,6 +89,18 @@ export const putBoardColumns = (columns: BoardColumn[]) =>
  *  alone; an empty description clears the body, which is a thing operators do on purpose. */
 export const putTicket = (id: string, patch: { title?: string; description?: string }) =>
   putJson(`/api/tickets/${encodeURIComponent(id)}`, patch);
+
+/** Open a new Linear issue. `team` is a team key (`WE`), which also picks the preset whose
+ *  Linear key opens it. `priority` is Linear's scale: 1 urgent, 2 high, 3 medium, 4 low.
+ *
+ *  The server creates it as Todo and assigned to the key's owner, so the column can show it,
+ *  and answers with the created ticket. The column itself updates from the `/events` frame. */
+export const createTicket = (ticket: {
+  team: string;
+  title: string;
+  description: string;
+  priority?: number;
+}) => postJson("/api/tickets", ticket) as Promise<LinearTicket>;
 
 // --- uploads ---------------------------------------------------------------
 

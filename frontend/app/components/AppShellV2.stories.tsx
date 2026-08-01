@@ -82,6 +82,7 @@ const toSettings = makeStoryLink("Settings/Components/SettingsPanel", "Default")
 const toImportAccount = makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn");
 const toChangeAccount = makeStoryLink("Clone/Components/ChangeAccountModalView", "BothProviders");
 const toPortForward = makeStoryLink("Modals/Components/PortForwardModal", "Default");
+const toTicketModal = makeStoryLink("Board/Components/TicketModalView", "Default");
 
 /** The control rail's props, built fresh per story. The account lists and the pools reach
  *  components that hold them in state, so one array behind every story is how an edit in one
@@ -113,6 +114,7 @@ const ticketColumn = {
   error: null,
   onCancel: fn(),
   onMoveToBacklog: fn(),
+  onNewTicket: toTicketModal,
 };
 
 const board = {

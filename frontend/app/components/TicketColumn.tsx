@@ -263,15 +263,21 @@ export function TicketCardBody({
             <LabelPill key={label.name} name={label.name} color={label.color} />
           ))}
         </div>
-        <TicketMenu
-          ticket={ticket}
-          onCreateClone={onCreateClone}
-          onCancel={onCancel}
-          onMoveToBacklog={onMoveToBacklog}
-        />
+        {/* The ⋮ button is a 16px icon in a 24px hit area, ten pixels taller than the marks
+            it sits beside. Left alone it sets the row's height and opens a gap under the
+            marks that reads as the card's own spacing. Pulling its padding out of the flow
+            hands the height back to the marks and centres the icon on them. */}
+        <div className="-my-1 shrink-0">
+          <TicketMenu
+            ticket={ticket}
+            onCreateClone={onCreateClone}
+            onCancel={onCancel}
+            onMoveToBacklog={onMoveToBacklog}
+          />
+        </div>
       </div>
 
-      <p className="mt-1.5 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
+      <p className="mt-1 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
         <span
           className={`mr-1 inline-block rounded px-1 py-0.5 align-middle text-[10px] font-semibold leading-none ${workspaceBadge(
             teamOf(ticket),
@@ -355,6 +361,9 @@ export interface TicketColumnProps {
   onCancel?: (ticket: LinearTicket) => void;
   /** Set the ticket Backlog in Linear. Same deal — the caller drops it. */
   onMoveToBacklog?: (ticket: LinearTicket) => void;
+  /** Open the new-ticket dialog. Absent ⇒ no button, which is what a board with no Linear
+   *  key configured gets. */
+  onNewTicket?: () => void;
 }
 
 export function TicketColumn({
@@ -366,6 +375,7 @@ export function TicketColumn({
   onCreateClone,
   onCancel,
   onMoveToBacklog,
+  onNewTicket,
 }: TicketColumnProps) {
   // The well takes drops so a ticket dragged back into the column lands, including on the
   // empty space below the last card.
@@ -384,9 +394,19 @@ export function TicketColumn({
     <ColumnShell>
       <ColumnHeader>
         <h2 className={COLUMN_TITLE}>Tickets</h2>
-        <span className="shrink-0 text-xs tabular-nums text-slate-400 dark:text-slate-500">
-          {loading ? "…" : tickets.length}
-        </span>
+        {/* The same button the clone columns carry, in the same place, for the same reason:
+            the thing a column is for is the thing you make more of at the top of it. */}
+        {onNewTicket ? (
+          <button
+            type="button"
+            onClick={onNewTicket}
+            title="Open a new Linear ticket"
+            className="flex shrink-0 cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-700"
+          >
+            <Plus className="size-3.5" />
+            New ticket
+          </button>
+        ) : null}
       </ColumnHeader>
 
       <ColumnWell innerRef={setNodeRef} empty={emptyLine}>

@@ -57,12 +57,14 @@ export default function TicketDescription({
   );
 
   return (
-    <div className={ready ? "" : "opacity-0"}>
+    // `ticket-description` is what zeroes BlockNote's own 54px side padding (see app.css).
+    // A negative margin would do it too, and that is the trap: it widens the element past
+    // its container, which gives the panel a horizontal scrollbar and still leaves the body
+    // a few pixels off the title above it. Removing the padding leaves both edges honest.
+    <div className={`ticket-description ${ready ? "" : "opacity-0"}`}>
       <BlockNoteView
         editor={editor}
         theme={scheme}
-        // BlockNote pads for its own drag handles, which a narrow panel cannot spare.
-        className="-mx-12"
         onChange={() => {
           if (timer.current) clearTimeout(timer.current);
           timer.current = setTimeout(() => {

@@ -8,10 +8,10 @@
 // is the same click the operator makes next anyway — a dedicated X would be a second way to
 // do the thing they are already doing.
 //
-// Linear's own reading order, in one narrow column instead of its two: identifier and state
-// on top, then the title, then the properties, the description, and the sub-issues. Linear
-// runs the properties down a right-hand rail, which a floating panel has no room for, so
-// they become a wrapped row under the title.
+// Linear's own reading order, in one narrow column instead of its two: the identifier and
+// the ticket's marks on top, then the title, the parent, the description, and the
+// sub-issues. The marks are the card's own row, unchanged: state, priority, labels. A card
+// and its panel are the same ticket, so reading one teaches you the other.
 //
 // Pure, like AppShellV2: the description arrives as a slot, because rendering markdown means
 // BlockNote, which is browser-only and lazily loaded.
@@ -19,31 +19,11 @@ import { Check, ExternalLink, GitBranch } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import TextareaAutosize from "react-textarea-autosize";
 
-import {
-  LabelPill,
-  PriorityIcon,
-  PRIORITY_LABEL,
-  StateIcon,
-  STATE_LABEL,
-} from "~/components/TicketColumn";
+import { LabelPill, PriorityIcon, StateIcon } from "~/components/TicketColumn";
 import { copyText } from "~/lib/clipboard";
 import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import type { TicketLink } from "~/lib/wire/TicketLink";
 import { workspaceBadge } from "~/lib/workspace";
-
-/** One property: a muted term over its value, so a wrapped row still reads in pairs. */
-function Property({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-        {label}
-      </dt>
-      <dd className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-slate-700 dark:text-slate-200">
-        {children}
-      </dd>
-    </div>
-  );
-}
 
 /** Copy the ticket's git branch name. It sits in the header rather than among the
  *  properties because it is the one property nobody reads — they copy it and paste it into
@@ -63,7 +43,7 @@ function CopyBranch({ ticket }: { ticket: LinearTicket }) {
       }}
       title={`Copy branch name: ${branch}`}
       aria-label="Copy branch name"
-      className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-500/10 hover:text-slate-600 dark:hover:text-slate-300"
+      className="shrink-0 cursor-pointer rounded p-1 text-slate-400 hover:bg-slate-500/10 hover:text-slate-600 dark:hover:text-slate-300"
     >
       {copied ? (
         <Check aria-hidden className="size-4 text-emerald-600 dark:text-emerald-400" />
@@ -74,19 +54,37 @@ function CopyBranch({ ticket }: { ticket: LinearTicket }) {
   );
 }
 
-/** A parent or sub-issue: its state mark, its identifier, and its title. The whole row is a
- *  link out to Linear, since this board has no page of its own to send you to. */
-function LinkRow({ link }: { link: TicketLink }) {
+/** What a referenced issue turns into on this board. */
+export interface TicketLinkTarget {
+  /** The row's tooltip. It names where the click lands, since the two kinds of row look
+   *  alike and only one of them leaves the app. */
+  title: string;
+  /** Show it: select the ticket, or activate the clone somebody made for it. */
+  open: () => void;
+}
+
+/** A parent or sub-issue: its state mark, its identifier, and its title.
+ *
+ *  Where the row goes depends on whether the referenced issue is on this board. One that is
+ *  becomes a button that selects it here, because sending the operator to Linear for a thing
+ *  sitting one column over is a worse answer to the same click. One that is not stays a link
+ *  out, and the arrow at its end is what says so before the click rather than after. */
+function LinkRow({ link, here }: { link: TicketLink; here: TicketLinkTarget | null }) {
   const done = link.state === "done" || link.state === "canceled";
-  return (
-    <a
-      href={link.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-slate-500/10"
-    >
+  // `flex-1` and `min-w-0` are for the parent row, where the row shares a line with its term
+  // and has to give way to it. In the sub-issue list they do nothing, the container there
+  // being a block.
+  const row =
+    "flex w-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-slate-500/10";
+  const body = (
+    <>
       <StateIcon state={link.state} />
-      <span className="shrink-0 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+      {/* Nudged down a pixel. Flex centres the two spans' line boxes, which puts their
+          baselines level, and level baselines are what makes this one look high: an
+          identifier is all caps and digits with nothing below the baseline, while the title
+          next to it runs from cap height down through its descenders. The pixel puts the two
+          blocks of ink on the same middle. */}
+      <span className="shrink-0 translate-y-px font-mono text-[11px] text-slate-500 dark:text-slate-400">
         {link.id}
       </span>
       <span
@@ -98,6 +96,26 @@ function LinkRow({ link }: { link: TicketLink }) {
       >
         {link.title}
       </span>
+    </>
+  );
+
+  if (here) {
+    return (
+      <button type="button" onClick={here.open} title={here.title} className={row}>
+        {body}
+      </button>
+    );
+  }
+  return (
+    <a
+      href={link.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={`Open ${link.id} in Linear`}
+      className={row}
+    >
+      {body}
+      <ExternalLink aria-hidden className="size-3 shrink-0 text-slate-300 dark:text-slate-600" />
     </a>
   );
 }
@@ -111,6 +129,10 @@ export interface TicketPanelProps {
   onCreateClone?: () => void;
   /** Persist a new title to Linear. Absent ⇒ the title is read-only. */
   onTitleChange?: (title: string) => void;
+  /** Where the parent and sub-issue rows go. Called per row with the referenced identifier.
+   *  Return null when that issue is not on this board and the row should open Linear.
+   *  Absent ⇒ every row opens Linear, which is what a panel with no board behind it wants. */
+  resolveLink?: (ticketId: string) => TicketLinkTarget | null;
 }
 
 /** The title, editable in place.
@@ -142,7 +164,7 @@ function EditableTitle({
 
   if (!onTitleChange) {
     return (
-      <h2 className="text-base font-semibold leading-snug text-slate-900 dark:text-slate-100">
+      <h2 className="text-xl font-semibold leading-snug text-slate-900 dark:text-slate-100">
         {ticket.title}
       </h2>
     );
@@ -163,7 +185,7 @@ function EditableTitle({
           e.currentTarget.blur();
         }
       }}
-      className="w-full resize-none rounded bg-transparent text-base font-semibold leading-snug text-slate-900 outline-none hover:bg-slate-500/5 focus:bg-slate-500/5 dark:text-slate-100"
+      className="w-full resize-none rounded bg-transparent text-xl font-semibold leading-snug text-slate-900 outline-none hover:bg-slate-500/5 focus:bg-slate-500/5 dark:text-slate-100"
     />
   );
 }
@@ -173,6 +195,7 @@ export function TicketPanel({
   description,
   onCreateClone,
   onTitleChange,
+  resolveLink,
 }: TicketPanelProps) {
   const done = ticket.children.filter(
     (c) => c.state === "done" || c.state === "canceled",
@@ -188,10 +211,16 @@ export function TicketPanel({
         >
           {ticket.id}
         </span>
-        <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+        {/* The card's own row of marks, the same three in the same order. No state or
+            priority word next to them: a panel this narrow has better uses for the width,
+            and both marks name themselves on hover. A label already reads as its own name. */}
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
           <StateIcon state={ticket.state} />
-          <span className="truncate">{STATE_LABEL[ticket.state]}</span>
-        </span>
+          {ticket.priority ? <PriorityIcon level={ticket.priority} /> : null}
+          {ticket.labels.map((label) => (
+            <LabelPill key={label.name} name={label.name} color={label.color} />
+          ))}
+        </div>
         <CopyBranch ticket={ticket} />
         <a
           href={ticket.url}
@@ -206,46 +235,28 @@ export function TicketPanel({
       </header>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 pb-4 pt-2">
-        <EditableTitle ticket={ticket} onTitleChange={onTitleChange} />
+        {/* The title and its parent are one unit, held closer to each other than to anything
+            else. The parent names the thing the title is part of, so a section-sized gap
+            between them would read as two subjects instead of one. */}
+        <div className="space-y-0.5">
+          <EditableTitle ticket={ticket} onTitleChange={onTitleChange} />
 
-        {ticket.parent ? (
-          <div>
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-              Parent
-            </div>
-            <LinkRow link={ticket.parent} />
-          </div>
-        ) : null}
-
-        {/* Linear's right-hand property rail, wrapped into a row. Only what is set shows:
-            a column of "None" tells you nothing you could act on. */}
-        <dl className="flex flex-wrap gap-x-6 gap-y-3">
-          {ticket.priority ? (
-            <Property label="Priority">
-              <PriorityIcon level={ticket.priority} />
-              {PRIORITY_LABEL[ticket.priority]}
-            </Property>
-          ) : null}
-          {ticket.assignee ? <Property label="Assignee">{ticket.assignee}</Property> : null}
-          {ticket.estimate !== undefined ? (
-            <Property label="Estimate">{ticket.estimate}</Property>
-          ) : null}
-          {ticket.dueDate ? <Property label="Due">{ticket.dueDate}</Property> : null}
-          {ticket.labels.length > 0 ? (
-            <Property label="Labels">
-              <span className="flex flex-wrap items-center gap-1.5">
-                {ticket.labels.map((label) => (
-                  <LabelPill key={label.name} name={label.name} color={label.color} />
-                ))}
+          {/* The term rides the row rather than sitting above it. A ticket has one parent, so
+              a heading over a single item spends a line saying what the row beneath it
+              already says, and the panel is narrow enough that lines are the scarce thing. */}
+          {ticket.parent ? (
+            <div className="-mr-2 flex items-center gap-2">
+              <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                Parent
               </span>
-            </Property>
+              <LinkRow link={ticket.parent} here={resolveLink?.(ticket.parent.id) ?? null} />
+            </div>
           ) : null}
-        </dl>
+        </div>
 
+        {/* No heading over the body. It follows the title, which is the only thing it could
+            be about, and the editor's own first line says the rest. */}
         <section>
-          <h3 className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-            Description
-          </h3>
           {description ?? (
             <p className="text-xs text-slate-400 dark:text-slate-500">No description.</p>
           )}
@@ -258,7 +269,7 @@ export function TicketPanel({
             </h3>
             <div className="-mx-2">
               {ticket.children.map((child) => (
-                <LinkRow key={child.id} link={child} />
+                <LinkRow key={child.id} link={child} here={resolveLink?.(child.id) ?? null} />
               ))}
             </div>
           </section>
@@ -270,7 +281,7 @@ export function TicketPanel({
           <button
             type="button"
             onClick={onCreateClone}
-            className="w-full rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
+            className="w-full cursor-pointer rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
           >
             Create a clone for {ticket.id}
           </button>

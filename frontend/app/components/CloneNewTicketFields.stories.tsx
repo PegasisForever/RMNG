@@ -52,7 +52,7 @@ export const Default: Story = {};
 /** Mid-typing, on the second team. Nothing else about the tab changes with the team except
  *  which preset the clone will get. */
 export const Filled: Story = {
-  args: { team: "per", title: "Spike: swap the encoder to VA-API" },
+  args: { team: "dev", title: "Spike: swap the encoder to VA-API" },
 };
 
 /** No preset declares a team key, so there is no team to open an issue in and no preset to

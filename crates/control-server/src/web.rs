@@ -51,6 +51,7 @@ pub fn router(app: App) -> Router {
         .route("/api/stats", get(stats_get))
         .route("/api/activate", post(activate))
         .route("/api/board", put(board_put))
+        .route("/api/tickets", post(ticket_post))
         .route("/api/tickets/:id", put(ticket_put))
         .route("/api/clone", post(clone))
         .route("/api/layout/activate", post(layout_activate))
@@ -370,6 +371,61 @@ async fn ticket_put(
             }
         }
     })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TicketPostReq {
+    /// Team key, e.g. `WE`. Case-insensitive: it also names the preset whose key opens it.
+    team: String,
+    title: String,
+    #[serde(default)]
+    description: String,
+    /// Linear's scale: 1 urgent, 2 high, 3 medium, 4 low. Absent or 0 means none.
+    #[serde(default)]
+    priority: Option<u8>,
+}
+
+/// `POST /api/tickets` — open a new Linear issue from the ticket column.
+///
+/// The team key picks the preset, exactly as the clone dialog's "new ticket" tab does: a
+/// preset labelled `WE` owns team WE, and its Linear key is the one that opens the issue.
+/// The browser holds no key, so it names the team and the server does the rest.
+///
+/// The new ticket is prepended to `ControlState` rather than waited for. The poll is a
+/// minute away, and a column that stays empty for that minute reads as the create having
+/// failed.
+async fn ticket_post(
+    State(app): State<App>,
+    Json(req): Json<TicketPostReq>,
+) -> Result<Json<wire::LinearTicket>, (StatusCode, String)> {
+    let team = req.team.trim().to_string();
+    let title = req.title.trim().to_string();
+    if team.is_empty() || title.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "a team key and a title are required".into()));
+    }
+    let cfg = app.config();
+    let preset = linear::pick_preset_by_prefix(&cfg.presets, &team).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!("no preset is labelled {team}, so no Linear key can open a ticket there"),
+    ))?;
+    let ticket = linear::create_ticket(
+        &app.http,
+        &preset.linear_key,
+        &team,
+        &title,
+        &req.description,
+        req.priority,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    let published = ticket.clone();
+    app.store.mutate(move |s| {
+        s.tickets.retain(|t| !t.id.eq_ignore_ascii_case(&published.id));
+        s.tickets.insert(0, published.clone());
+    });
+    Ok(Json(ticket))
 }
 
 #[derive(Deserialize)]

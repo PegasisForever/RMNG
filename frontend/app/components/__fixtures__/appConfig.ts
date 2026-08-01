@@ -9,7 +9,7 @@
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
 import { makeCloneGroups, makeCodexGroups } from "./accounts";
-import { makePreset } from "./presets";
+import { makeClonePresets } from "./presets";
 
 export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
@@ -51,13 +51,9 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
     // an array with each other or with the accounts fixture module.
     cloneGroups: makeCloneGroups(),
     codexGroups: makeCodexGroups(),
-    presets: [
-      makePreset({
-        // A preset that defaults its clones to a pool; Codex left with no default.
-        claudeAccount: "group:pooled",
-        vars: [{ key: "NODE_ENV", value: "development" }],
-      }),
-    ],
+    // The same set both dialogs resolve against: the config IS where their team keys come
+    // from, so the Settings panel lists exactly the presets the ticket dialog offers.
+    presets: makeClonePresets(),
     chroma: "yuv420",
     ssh: {
       authorizedKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop"],

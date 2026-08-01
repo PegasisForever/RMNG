@@ -128,7 +128,7 @@ export const NoTicket: Story = {
  *  the resolved preset's own Linear key, and this team's preset has none. The warning names
  *  the preset and Clone stays dead until they pick another team or add the key. */
 export const MissingLinearKey: Story = {
-  args: form(makeCloneDraft({ mode: "create", team: "per", title: "Encoder spike" })),
+  args: form(makeCloneDraft({ mode: "create", team: "ops", title: "Encoder spike" })),
 };
 
 /** The clone is running. The form and both buttons lock, Escape is swallowed rather than

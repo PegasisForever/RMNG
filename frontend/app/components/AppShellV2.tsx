@@ -22,27 +22,17 @@ import {
 
 import { Board, type BoardProps } from "~/components/Board";
 import { BoardRail, type BoardRailProps } from "~/components/BoardRail";
+import { GLASS_FILL, GLASS_OUTLINE, GLASS_SHADOW } from "~/lib/glass";
 import type { Clone } from "~/lib/types";
 
 /** Which half of the side panel was touched last. It gets three quarters of the panel's
  *  height and the other gets a quarter, so whichever one is in use is the readable one. */
 export type SideFocus = "notes" | "chat";
 
-/** The floating cards' surface, and only theirs. The board scrolling underneath is what
- *  makes it read as glass, so the dialogs deliberately keep their opaque panel: over a
- *  dimmed backdrop the same material just looks murky.
- *
- *  Opacity and blur pull apart here rather than trade against each other. The fill is low so
- *  the columns show through, and the blur is what keeps text on top legible over them.
- *  Raising the fill is what kills it: at 70% the cards read as plain white panels, because
- *  the board is nearly white to begin with. The shadow is wide and faint for the same
- *  reason — a tight dark one draws a hard line the glass does not have.
- *
- *  Dark mode keeps that geometry but runs it in black at roughly five times the alpha. A
- *  shadow only shows as the difference between it and the surface under it, and against a
- *  slate-950 board the light-mode values come out to nothing. */
-const CARD =
-  "border border-slate-900/10 bg-white/25 shadow-[0_2px_16px_rgb(15_23_42_/_0.05),0_10px_50px_rgb(15_23_42_/_0.07)] backdrop-blur-sm dark:border-white/10 dark:bg-slate-900/25 dark:shadow-[0_2px_16px_rgb(0_0_0_/_0.26),0_10px_50px_rgb(0_0_0_/_0.35)]";
+/** The floating cards' surface. The board scrolling underneath is what makes it read as
+ *  glass, so the dialogs deliberately keep their opaque panel: over a dimmed backdrop the
+ *  same material just looks murky. */
+const CARD = `${GLASS_OUTLINE} ${GLASS_FILL} ${GLASS_SHADOW}`;
 
 /** The side panel's width, as a percentage of the shell. The board pads its own right edge
  *  by the same number, so the two can never disagree and leave the last column stranded
@@ -98,6 +88,9 @@ export function AppShellV2({
   const widthRef = useRef(SIDE_DEFAULT);
   // The board and the panel together, which is what a percentage is a percentage of.
   const splitRef = useRef<HTMLDivElement | null>(null);
+  // The floating panel itself. A drag needs its left edge, which is not the same as the
+  // percentage: the width has a 20rem floor the percentage does not know about.
+  const panelRef = useRef<HTMLElement | null>(null);
 
   // Restore after mount rather than in the initial state, so the server and the first
   // client render agree on the default.
@@ -129,10 +122,17 @@ export function AppShellV2({
     handle.focus();
     handle.setPointerCapture(pointerId);
 
+    // How far inside the panel's left edge the pointer landed. The grip is a band, not a
+    // line, so the pointer starts several pixels right of the edge it moves. Treating the
+    // pointer as the edge would snap the panel narrower by that much on the first move.
+    // Holding the offset keeps the edge under the same part of the grip for the whole drag.
+    const panel = panelRef.current?.getBoundingClientRect();
+    const grab = panel ? event.clientX - panel.left : 0;
+
     const track = (moved: globalThis.PointerEvent) => {
       const split = splitRef.current?.getBoundingClientRect();
       if (!split || split.width === 0) return;
-      applyWidth(((split.right - moved.clientX) / split.width) * 100);
+      applyWidth(((split.right - (moved.clientX - grab)) / split.width) * 100);
     };
     const stop = () => {
       handle.removeEventListener("pointermove", track);
@@ -192,7 +192,10 @@ export function AppShellV2({
             disagree and strand the last column: the custom property is what the operator
             drags, and 20rem is the floor below which the cards stop being usable. */}
         {selectedClone || ticket ? (
-          <aside className="pointer-events-none absolute inset-y-0 right-0 z-20 flex w-[max(var(--side-panel-w,30%),20rem)] shrink-0 flex-col gap-3 p-3">
+          <aside
+            ref={panelRef}
+            className="pointer-events-none absolute inset-y-0 right-0 z-20 flex w-[max(var(--side-panel-w,30%),20rem)] shrink-0 flex-col gap-3 p-3"
+          >
             {/* The resize grip: a 16px hit area over the cards' own left edge, so the thing
                 the operator drags is the edge they can see and it grabs from either side. It
                 sits 6px out and 10px in rather than evenly, because the card's wide shadow

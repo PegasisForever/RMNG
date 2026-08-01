@@ -9,8 +9,9 @@ import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
 import { MobileDashboard } from "~/components/mobile/MobileDashboard";
+import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
-import { openTickets, orderTickets } from "~/lib/tickets";
+import { cloneForTicket, findTicket, openTickets, orderTickets } from "~/lib/tickets";
 import {
   activate,
   activateLayout,
@@ -55,6 +56,7 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
@@ -275,6 +277,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       bastionPort={cfg.listen.bastion}
       cloneGroups={cfg.cloneGroups}
       codexGroups={cfg.codexGroups}
+      presets={cfg.presets}
     />
   );
 }
@@ -287,6 +290,7 @@ function Dashboard({
   bastionPort,
   cloneGroups,
   codexGroups,
+  presets,
 }: {
   state: ControlState;
   stats: Record<string, ContainerStats>;
@@ -301,6 +305,8 @@ function Dashboard({
   cloneGroups: CloneGroup[];
   /** Configured Codex pools (`config.codexGroups`). */
   codexGroups: CloneGroup[];
+  /** Configured presets (`config.presets`). Their labels are the ticket dialog's team keys. */
+  presets: PresetRedacted[];
 }) {
   // The ticket whose panel has the side column, by id. Held as an id rather than the object
   // so a poll that rewrites the list keeps the panel on the current copy, not a stale one.
@@ -398,6 +404,8 @@ function Dashboard({
   const [newCloneColumn, setNewCloneColumn] = useState<string | null>(null);
   /** The clone the open create-dialog is making, selected when the dialog closes. */
   const [newClone, setNewClone] = useState<string | null>(null);
+  // The new-ticket dialog. Nothing else in the app opens it, so it needs no argument.
+  const [newTicketOpen, setNewTicketOpen] = useState(false);
   // Seeds the clone dialog's ticket field when a ticket opened it (dragged onto a column, or
   // its menu). Empty for the column's own "New clone" button.
   const [ticketPrefill, setTicketPrefill] = useState("");
@@ -482,6 +490,30 @@ function Dashboard({
               setTicketPrefill(openTicket.url);
               setCloneOpen(true);
             }}
+            // A parent or sub-issue the board already holds is one click away, so the row
+            // goes there instead of to Linear. The ticket column first, then the clones:
+            // once work has a clone, the clone is the thing you wanted, and the ticket is
+            // no longer in the column to select anyway.
+            resolveLink={(id) => {
+              const ticket = findTicket(id, visibleTickets);
+              if (ticket) {
+                return {
+                  title: `Show ${ticket.id} in this panel`,
+                  open: () => setOpenTicketId(ticket.id),
+                };
+              }
+              const clone = cloneForTicket(id, state.hosts);
+              if (clone) {
+                return {
+                  title: `Show the clone for ${id}: ${clone.id}`,
+                  open: () => {
+                    setOpenTicketId(null);
+                    run(activate(clone.id));
+                  },
+                };
+              }
+              return null;
+            }}
           />
         ) : undefined
       }
@@ -548,6 +580,7 @@ function Dashboard({
           error: state.ticketsError ?? null,
           selectedId: openTicket?.id ?? null,
           onSelectTicket: (ticket) => setOpenTicketId(ticket.id),
+          onNewTicket: () => setNewTicketOpen(true),
         },
         onNewCloneFromTicket: (ticket, columnId) => {
           setNewCloneColumn(columnId);
@@ -596,6 +629,17 @@ function Dashboard({
       }
       overlays={
         <>
+          {newTicketOpen ? (
+            <TicketModalContainer
+              presets={presets}
+              onClose={() => setNewTicketOpen(false)}
+              // The server publishes the new ticket into the state it broadcasts, so the
+              // column draws it without a refetch. Opening its panel is the useful next
+              // step: a ticket worth creating is one you are about to work on.
+              onCreated={(created) => setOpenTicketId(created.id)}
+            />
+          ) : null}
+
           {cloneOpen ? (
             <CloneModalContainer
               images={images}
