@@ -23,7 +23,6 @@ import {
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
-import { copyText } from "~/lib/clipboard";
 import { formatTokenCount } from "~/lib/format";
 import { buildSshCommand } from "~/lib/ssh";
 import type { Clone, Operation } from "~/lib/types";
@@ -258,6 +257,14 @@ export interface SidebarCloneProps {
   onArchive: () => void;
   /** Restart a retained managed clone. */
   onUnarchive: () => void;
+  /** Put this clone's `ssh -J …` one-liner on the clipboard, answering with whether it
+   *  landed. Writing there is a browser API, so the container owns the call and the menu row
+   *  says "Copied!" only when the answer is yes. */
+  onCopySshCommand: (command: string) => Promise<boolean>;
+  /** Show this clone's Linear ticket, which leaves the app. Handed the URL the card holds.
+   *  A clone made without a ticket has no URL, so the item is not drawn and this is never
+   *  called. */
+  onOpenInLinear: (url: string) => void;
   /** Live runtime status for this clone's forwards (from the `forwards` SSE event),
    *  merged into the compact forwards chips by rule id. */
   forwardRuntime?: ForwardRuntime[];
@@ -288,8 +295,17 @@ export interface SidebarCloneProps {
 /** A single overflow-menu item that copies `command` to the clipboard and shows a
  *  brief "Copied!" label before asking the menu to close. Kept separate from the
  *  `item()` helper because it needs its own transient state + delayed close (the other
- *  items close immediately on click), and it draws the same icon-and-label row by hand. */
-function CopySshMenuItem({ command }: { command: string }) {
+ *  items close immediately on click), and it draws the same icon-and-label row by hand.
+ *
+ *  The write itself is the container's, handed in as `onCopy`. What the row currently says
+ *  and when it closes are this row's own, so they stay here. */
+function CopySshMenuItem({
+  command,
+  onCopy,
+}: {
+  command: string;
+  onCopy: (command: string) => Promise<boolean>;
+}) {
   const onDone = useMenuClose();
   // `null` = idle, `true` = copied, `false` = copy failed (both clipboard paths refused,
   // e.g. execCommand blocked). Only claim "Copied!" on a genuine success so the label
@@ -302,7 +318,7 @@ function CopySshMenuItem({ command }: { command: string }) {
       onPointerDown={(e) => e.stopPropagation()}
       onClick={async (e) => {
         e.stopPropagation();
-        const ok = await copyText(command);
+        const ok = await onCopy(command);
         setResult(ok);
         // On failure keep the menu open a beat longer so the user can select the
         // command text (shown in the title) and copy it by hand.
@@ -332,7 +348,9 @@ function CloneMenu({
   onUnarchive,
   onDelete,
   sshCommand,
+  onCopySshCommand,
   linearUrl,
+  onOpenInLinear,
 }: {
   cloneId: string;
   managed: boolean;
@@ -347,9 +365,11 @@ function CloneMenu({
   /** The ready-to-paste `ssh -J …` one-liner for this clone. Undefined for unmanaged
    *  rows (no real container/sshd to jump to), which hides the menu item. */
   sshCommand?: string;
+  onCopySshCommand: (command: string) => Promise<boolean>;
   /** The clone's Linear ticket URL. Undefined for a clone made without a ticket, which
    *  hides the item rather than opening a dead link. */
   linearUrl?: string;
+  onOpenInLinear: (url: string) => void;
 }) {
   return (
     <OverflowMenu label={`actions for ${cloneId}`} disabled={busy}>
@@ -358,7 +378,7 @@ function CloneMenu({
           <MenuItem
             icon={ExternalLink}
             label="Open in Linear"
-            onClick={() => window.open(linearUrl, "_blank", "noopener,noreferrer")}
+            onClick={() => onOpenInLinear(linearUrl)}
           />
           <MenuDivider />
         </>
@@ -368,7 +388,9 @@ function CloneMenu({
           <MenuItem icon={Package} label="Commit to image…" onClick={onCommit} />
           <MenuItem icon={UserCog} label="Change account…" onClick={onChangeAccount} />
           <MenuItem icon={Network} label="Port forward…" onClick={onPortForward} />
-          {sshCommand ? <CopySshMenuItem command={sshCommand} /> : null}
+          {sshCommand ? (
+            <CopySshMenuItem command={sshCommand} onCopy={onCopySshCommand} />
+          ) : null}
           <MenuItem icon={Archive} label="Archive" onClick={onArchive} />
           <MenuDivider />
         </>
@@ -397,6 +419,8 @@ export function SidebarClone({
   onPortForward,
   onArchive,
   onUnarchive,
+  onCopySshCommand,
+  onOpenInLinear,
   forwardRuntime,
   sshPublicHost,
   bastionPort,
@@ -552,7 +576,9 @@ export function SidebarClone({
             onUnarchive={onUnarchive}
             onDelete={onDelete}
             sshCommand={sshCommand}
+            onCopySshCommand={onCopySshCommand}
             linearUrl={clone.linearTicketUrl ?? undefined}
+            onOpenInLinear={onOpenInLinear}
           />
         </div>
 

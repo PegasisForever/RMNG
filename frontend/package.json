@@ -10,7 +10,8 @@
     "start": "bun run server.ts",
     "typecheck": "react-router typegen && tsc",
     "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build"
+    "build-storybook": "storybook build",
+    "storybook:sweep": "bun run scripts/storybook-console-sweep.ts"
   },
   "dependencies": {
     "@blocknote/core": "^0.51.4",

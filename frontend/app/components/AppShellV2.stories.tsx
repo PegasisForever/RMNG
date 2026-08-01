@@ -124,6 +124,7 @@ function TicketFixture({ ticket }: { ticket: LinearTicket }) {
       description={
         <TicketDescription key={ticket.id} markdown={ticket.description ?? ""} onSave={fn()} />
       }
+      onCopyBranchName={fn(async () => true)}
       onCreateClone={toCloneModalFromTicket}
       onTitleChange={fn()}
     />
@@ -168,6 +169,11 @@ function makeTicketColumn(clones: Clone[]) {
     onCancel: fn(),
     onMoveToBacklog: fn(),
     onNewTicket: toTicketModal,
+    // Leaving for Linear has no destination story, so it logs the URL instead. The two copies
+    // log the string rather than writing it to the real clipboard.
+    onOpenInLinear: fn(),
+    onCopyBranchName: fn(),
+    onCopyTicketLink: fn(),
   };
 }
 
@@ -192,6 +198,8 @@ function makeBoard() {
     onPortForwardClone: toPortForward,
     onArchiveClone: fn(),
     onUnarchiveClone: fn(),
+    onCopySshCommand: fn(async () => true),
+    onOpenInLinear: fn(),
     onNewClone: toCloneModal,
     onMoveCard: fn(),
     onRenameColumn: fn(),

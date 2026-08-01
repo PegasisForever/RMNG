@@ -47,6 +47,14 @@ const meta = {
     onPortForward: fn(),
     onArchive: fn(),
     onUnarchive: fn(),
+    // The clipboard write and the jump to Linear are the container's, so the story stands in
+    // for both. The copy answers `true` because that is what a working clipboard answers, and
+    // it is what makes the row show "Copied!" without a story touching the real one.
+    onCopySshCommand: fn(async () => true),
+    // No story to link to: "Open in Linear" goes to linear.app, which Storybook has nothing to
+    // show for. `fn()` logs the URL in the Actions panel, which is the whole of what there is
+    // to see.
+    onOpenInLinear: fn(),
   },
 } satisfies Meta<typeof SidebarClone>;
 
@@ -109,6 +117,18 @@ export const Selected: Story = {
     stats: stats[cloneWorking.id],
     tokens: cloneTokens[cloneWorking.id],
     selected: true,
+  },
+};
+
+/** Both clipboard paths refused, which is what an insecure context with `execCommand` blocked
+ *  does. The menu row says so and stays open a beat longer, so the command in its tooltip can
+ *  be selected and copied by hand. Open the ⋮ menu and pick "Copy SSH command" to see it. */
+export const CopySshRefused: Story = {
+  args: {
+    clone: cloneWorking,
+    stats: stats[cloneWorking.id],
+    tokens: cloneTokens[cloneWorking.id],
+    onCopySshCommand: fn(async () => false),
   },
 };
 

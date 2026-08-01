@@ -61,6 +61,7 @@ import {
   type BoardColumn,
 } from "~/lib/board";
 import { useAccountOrder } from "~/lib/accountOrder";
+import { copyText } from "~/lib/clipboard";
 import { browserLocale } from "~/lib/format";
 import { rememberSideWidth, SIDE_DEFAULT, storedSideWidth } from "~/lib/sidePanelWidth";
 import { type ControlState, type Clone } from "~/lib/types";
@@ -205,6 +206,16 @@ export function DashboardContainer({
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
 
+  // The two things a card asks the browser for rather than the server. Both leave the cards
+  // themselves pure: a menu item says what it wants done and this decides how.
+  //
+  // `noopener` is what stops the Linear tab from reaching back through `window.opener`, and
+  // `noreferrer` keeps this page's address off the request. Both menus that leave for Linear
+  // go through this one call, so neither can drift from the other.
+  const openInLinear = (url: string) => {
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
   // Adopt a new column layout locally, then persist it. The board previews a drag on its
   // own, so by the time this runs the operator has already seen the result; the PUT is
   // what makes it survive a refresh.
@@ -293,6 +304,7 @@ export function DashboardContainer({
           openTicket ? (
             <TicketPanel
               ticket={openTicket}
+              onCopyBranchName={copyText}
               description={
                 <ClientOnly>
                   <Suspense fallback={<p className="px-1 text-xs text-slate-400">Loading…</p>}>
@@ -401,12 +413,17 @@ export function DashboardContainer({
           },
           onArchiveClone: (clone) => archiveDrop(clone, true),
           onUnarchiveClone: (clone) => archiveDrop(clone, false),
+          onCopySshCommand: copyText,
+          onOpenInLinear: openInLinear,
           tickets: {
             tickets: visibleTickets,
             error: state.ticketsError ?? null,
             selectedId: openTicket?.id ?? null,
             onSelectTicket: (ticket) => setOpenTicketId(ticket.id),
             onNewTicket: () => setNewTicketOpen(true),
+            onOpenInLinear: openInLinear,
+            onCopyBranchName: copyText,
+            onCopyTicketLink: copyText,
           },
           onNewCloneFromTicket: (ticket, columnId) => {
             setNewCloneColumn(columnId);

@@ -26,7 +26,6 @@ import {
   ColumnWell,
   COLUMN_TITLE,
 } from "~/components/BoardColumnPanel";
-import { copyText } from "~/lib/clipboard";
 import { branchNameOf, ticketDragId, TICKET_COLUMN_ID, type LinearTicket } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
 
@@ -176,15 +175,25 @@ function teamOf(ticket: LinearTicket): string {
  *  Three kinds of item, in that order: one that starts work here, shortcuts out to Linear,
  *  and two that write a new state back to it. The writes are the only things on this board
  *  that change a ticket, and both mean the same thing to this column — a ticket that is
- *  neither Todo nor In progress is not waiting to be started, so it leaves the list. */
+ *  neither Todo nor In progress is not waiting to be started, so it leaves the list.
+ *
+ *  Leaving for Linear and writing to the clipboard both happen to the browser rather than to
+ *  the ticket, so the menu asks for them and the container does them. Each item is offered
+ *  only when its callback is, the same rule "Create a clone…" already follows. */
 function TicketMenu({
   ticket,
   onCreateClone,
+  onOpenInLinear,
+  onCopyBranchName,
+  onCopyTicketLink,
   onCancel,
   onMoveToBacklog,
 }: {
   ticket: LinearTicket;
   onCreateClone?: () => void;
+  onOpenInLinear?: (url: string) => void;
+  onCopyBranchName?: (branch: string) => void;
+  onCopyTicketLink?: (url: string) => void;
   onCancel?: () => void;
   onMoveToBacklog?: () => void;
 }) {
@@ -193,18 +202,24 @@ function TicketMenu({
       {onCreateClone ? (
         <MenuItem icon={Plus} label="Create a clone…" onClick={onCreateClone} />
       ) : null}
-      <MenuItem
-        icon={ExternalLink}
-        label="Open in Linear"
-        onClick={() => window.open(ticket.url, "_blank", "noopener,noreferrer")}
-      />
-      <MenuDivider />
-      <MenuItem
-        icon={GitBranch}
-        label="Copy branch name"
-        onClick={() => void copyText(branchNameOf(ticket))}
-      />
-      <MenuItem icon={Link2} label="Copy link" onClick={() => void copyText(ticket.url)} />
+      {onOpenInLinear ? (
+        <MenuItem
+          icon={ExternalLink}
+          label="Open in Linear"
+          onClick={() => onOpenInLinear(ticket.url)}
+        />
+      ) : null}
+      {onOpenInLinear && (onCopyBranchName || onCopyTicketLink) ? <MenuDivider /> : null}
+      {onCopyBranchName ? (
+        <MenuItem
+          icon={GitBranch}
+          label="Copy branch name"
+          onClick={() => onCopyBranchName(branchNameOf(ticket))}
+        />
+      ) : null}
+      {onCopyTicketLink ? (
+        <MenuItem icon={Link2} label="Copy link" onClick={() => onCopyTicketLink(ticket.url)} />
+      ) : null}
       {onMoveToBacklog || onCancel ? <MenuDivider /> : null}
       {onMoveToBacklog ? (
         <MenuItem icon={CircleDashed} label="Move to backlog" onClick={onMoveToBacklog} />
@@ -232,6 +247,9 @@ export function TicketCardBody({
   ticket,
   selected = false,
   onCreateClone,
+  onOpenInLinear,
+  onCopyBranchName,
+  onCopyTicketLink,
   onCancel,
   onMoveToBacklog,
 }: {
@@ -243,6 +261,12 @@ export function TicketCardBody({
   /** Opens the clone dialog for this ticket. Absent ⇒ the item is not offered, which is
    *  what the drag overlay and a board with no columns get. */
   onCreateClone?: () => void;
+  /** Show the ticket in Linear, which leaves the app. Absent ⇒ the item is not offered. */
+  onOpenInLinear?: (url: string) => void;
+  /** Put the ticket's git branch name on the clipboard. Absent ⇒ the item is not offered. */
+  onCopyBranchName?: (branch: string) => void;
+  /** Put the ticket's Linear URL on the clipboard. Absent ⇒ the item is not offered. */
+  onCopyTicketLink?: (url: string) => void;
   onCancel?: () => void;
   onMoveToBacklog?: () => void;
 }) {
@@ -271,6 +295,9 @@ export function TicketCardBody({
           <TicketMenu
             ticket={ticket}
             onCreateClone={onCreateClone}
+            onOpenInLinear={onOpenInLinear}
+            onCopyBranchName={onCopyBranchName}
+            onCopyTicketLink={onCopyTicketLink}
             onCancel={onCancel}
             onMoveToBacklog={onMoveToBacklog}
           />
@@ -296,6 +323,9 @@ function TicketCard({
   selected = false,
   onSelect,
   onCreateClone,
+  onOpenInLinear,
+  onCopyBranchName,
+  onCopyTicketLink,
   onCancel,
   onMoveToBacklog,
 }: {
@@ -303,6 +333,9 @@ function TicketCard({
   selected?: boolean;
   onSelect?: () => void;
   onCreateClone?: () => void;
+  onOpenInLinear?: (url: string) => void;
+  onCopyBranchName?: (branch: string) => void;
+  onCopyTicketLink?: (url: string) => void;
   onCancel?: () => void;
   onMoveToBacklog?: () => void;
 }) {
@@ -330,6 +363,9 @@ function TicketCard({
           ticket={ticket}
           selected={selected}
           onCreateClone={onCreateClone}
+          onOpenInLinear={onOpenInLinear}
+          onCopyBranchName={onCopyBranchName}
+          onCopyTicketLink={onCopyTicketLink}
           onCancel={onCancel}
           onMoveToBacklog={onMoveToBacklog}
         />
@@ -355,6 +391,18 @@ export interface TicketColumnProps {
    *  is filed is the caller's call: this action names no column, unlike a drag, which
    *  names the one it landed on. */
   onCreateClone?: (ticket: LinearTicket) => void;
+  /** The card menu's "Open in Linear". Leaving the app is the container's call, so the menu
+   *  hands over the ticket's URL and the container opens it. Absent ⇒ the item is not
+   *  offered. */
+  onOpenInLinear?: (url: string) => void;
+  /** The card menu's "Copy branch name", handed the branch the menu derived. Writing to the
+   *  clipboard is a browser API, so the container owns it. Absent ⇒ the item is not offered.
+   *
+   *  Nothing on the card reports whether the write landed, so the answer is not read here.
+   *  The two places that do say "Copied!" take a callback that reports it. */
+  onCopyBranchName?: (branch: string) => void;
+  /** The card menu's "Copy link", handed the ticket's URL. Absent ⇒ the item is not offered. */
+  onCopyTicketLink?: (url: string) => void;
   /** Set the ticket Cancelled in Linear. The caller drops it from `tickets` on its own:
    *  waiting for the next fetch would leave a card sitting there that has already been
    *  cancelled. */
@@ -373,6 +421,9 @@ export function TicketColumn({
   selectedId = null,
   onSelectTicket,
   onCreateClone,
+  onOpenInLinear,
+  onCopyBranchName,
+  onCopyTicketLink,
   onCancel,
   onMoveToBacklog,
   onNewTicket,
@@ -423,6 +474,9 @@ export function TicketColumn({
               selected={ticket.id === selectedId}
               onSelect={onSelectTicket ? () => onSelectTicket(ticket) : undefined}
               onCreateClone={onCreateClone ? () => onCreateClone(ticket) : undefined}
+              onOpenInLinear={onOpenInLinear}
+              onCopyBranchName={onCopyBranchName}
+              onCopyTicketLink={onCopyTicketLink}
               onCancel={onCancel ? () => onCancel(ticket) : undefined}
               onMoveToBacklog={onMoveToBacklog ? () => onMoveToBacklog(ticket) : undefined}
             />

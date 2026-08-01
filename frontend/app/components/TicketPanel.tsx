@@ -20,22 +20,32 @@ import { useEffect, useState, type ReactNode } from "react";
 import TextareaAutosize from "react-textarea-autosize";
 
 import { LabelPill, PriorityIcon, StateIcon } from "~/components/TicketColumn";
-import { copyText } from "~/lib/clipboard";
 import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import type { TicketLink } from "~/lib/wire/TicketLink";
 import { workspaceBadge } from "~/lib/workspace";
 
 /** Copy the ticket's git branch name. It sits in the header rather than among the
  *  properties because it is the one property nobody reads — they copy it and paste it into
- *  a terminal, so the button is the whole point and the string is just its tooltip. */
-function CopyBranch({ ticket }: { ticket: LinearTicket }) {
+ *  a terminal, so the button is the whole point and the string is just its tooltip.
+ *
+ *  The clipboard write belongs to the container; the tick that follows it does not. Whether
+ *  the button is currently showing a tick is this button's own business and nothing else's,
+ *  so it stays here with the timer that clears it. Only a write that actually landed turns
+ *  it on, which is why the callback answers with whether it did. */
+function CopyBranch({
+  ticket,
+  onCopyBranchName,
+}: {
+  ticket: LinearTicket;
+  onCopyBranchName: (branch: string) => Promise<boolean>;
+}) {
   const [copied, setCopied] = useState(false);
   const branch = branchNameOf(ticket);
   return (
     <button
       type="button"
       onClick={() => {
-        void copyText(branch).then((ok) => {
+        void onCopyBranchName(branch).then((ok) => {
           if (!ok) return;
           setCopied(true);
           window.setTimeout(() => setCopied(false), 1200);
@@ -125,6 +135,10 @@ export interface TicketPanelProps {
   /** The rendered description. Absent ⇒ the ticket has no body, and the panel says so
    *  rather than leaving a hole where one would be. */
   description?: ReactNode;
+  /** Put the ticket's git branch name on the clipboard, answering with whether it landed.
+   *  Writing there is a browser API and its two paths can both refuse, so the container owns
+   *  the call and the header shows its tick only on a real success. */
+  onCopyBranchName: (branch: string) => Promise<boolean>;
   /** Start a clone on this ticket. Absent ⇒ the button is not offered. */
   onCreateClone?: () => void;
   /** Persist a new title to Linear. Absent ⇒ the title is read-only. */
@@ -193,6 +207,7 @@ function EditableTitle({
 export function TicketPanel({
   ticket,
   description,
+  onCopyBranchName,
   onCreateClone,
   onTitleChange,
   resolveLink,
@@ -221,7 +236,7 @@ export function TicketPanel({
             <LabelPill key={label.name} name={label.name} color={label.color} />
           ))}
         </div>
-        <CopyBranch ticket={ticket} />
+        <CopyBranch ticket={ticket} onCopyBranchName={onCopyBranchName} />
         <a
           href={ticket.url}
           target="_blank"

@@ -18,8 +18,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ChatView, localInputToEpochMs } from "~/components/ChatView";
 import { getDraft, setDraft } from "~/lib/chatDrafts";
-import { chatErrorText } from "~/lib/chatError";
 import { browserLocale } from "~/lib/format";
+import { serverErrorText } from "~/lib/serverError";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 
@@ -33,11 +33,11 @@ interface ChatSnapshot {
 /** What the banner says when one of the four calls below fails.
  *
  *  Every chat route answers an error as axum `(StatusCode, String)`, so the body is plain text
- *  and reading it as JSON would throw away the one sentence the operator needs. `chatErrorText`
+ *  and reading it as JSON would throw away the one sentence the operator needs. `serverErrorText`
  *  decides how much of it the banner can hold. A body that never arrives (the connection
  *  dropped mid-read) is the same case as an empty one: `fallback`. */
 async function errorText(res: Response, fallback: string): Promise<string> {
-  return chatErrorText(await res.text().catch(() => ""), fallback);
+  return serverErrorText(await res.text().catch(() => ""), fallback);
 }
 
 export default function ChatContainer({

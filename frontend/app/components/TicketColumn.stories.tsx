@@ -16,6 +16,13 @@ const meta = {
     loading: false,
     error: null,
     onNewTicket: fn(),
+    // The card menu's three browser actions, which the container owns. "Open in Linear" leaves
+    // for linear.app, so there is no story to link it to and `fn()` is the honest wiring: the
+    // Actions panel logs the URL, which is all there is to see. The two copies log the string
+    // they were handed instead of writing it to the real clipboard.
+    onOpenInLinear: fn(),
+    onCopyBranchName: fn(),
+    onCopyTicketLink: fn(),
   },
   /** The cards are draggable, so they need a DndContext even when nothing can receive
    *  them. On the board that context is the board's own. */

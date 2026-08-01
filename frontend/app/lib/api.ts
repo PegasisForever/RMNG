@@ -8,34 +8,54 @@ import type { LinearTicket } from "~/lib/wire/LinearTicket";
 // hand-maintained shape is the one these responses actually have at runtime.
 import type { Operation } from "~/lib/types";
 import type { SetupEnv } from "~/lib/wire/SetupEnv";
+import { serverErrorText } from "~/lib/serverError";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
-// Client-side API wrappers. Each POSTs JSON; the server mutates state and
-// broadcasts, so the caller doesn't need the response beyond error handling —
-// the UI updates when the SSE frame arrives.
-async function postJson(url: string, body: unknown): Promise<unknown> {
-  const res = await fetch(url, {
-    method: "POST",
+// Client-side API wrappers. Most of these send JSON; the server mutates state and
+// broadcasts, so the caller doesn't need the response beyond error handling. The UI
+// updates when the SSE frame arrives.
+
+/** One request, and what the operator is told when it fails.
+ *
+ *  The body is read as text and parsed here rather than through `res.json()`, because a
+ *  failure arrives in one of two shapes. Most handlers answer axum `(StatusCode, String)`, a
+ *  plain-text body, and the six account routes wrap the same sentence as `{"error": "..."}`.
+ *  Text is the shape both of those are, and `serverErrorText` picks the sentence out of
+ *  whichever one came back. Reading a plain-text failure as JSON is what used to reduce
+ *  "reference is required" to "Bad Request".
+ *
+ *  The fallback names the status code when the response carries no status text, which is
+ *  every response over HTTP/2. */
+async function request(url: string, init?: RequestInit): Promise<unknown> {
+  const res = await fetch(url, init);
+  const body = await res.text().catch(() => "");
+  if (!res.ok) throw new Error(serverErrorText(body, res.statusText || `HTTP ${res.status}`));
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    // A 204, or a success body that is not JSON. No caller reads one.
+    return {};
+  }
+}
+
+function jsonInit(method: string, body: unknown): RequestInit {
+  return {
+    method,
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
-  });
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
-  if (!res.ok) throw new Error(data.error ?? res.statusText);
-  return data;
+  };
 }
 
-async function getJson(url: string): Promise<unknown> {
-  const res = await fetch(url);
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
-  if (!res.ok) throw new Error(data.error ?? res.statusText);
-  return data;
+function postJson(url: string, body: unknown): Promise<unknown> {
+  return request(url, jsonInit("POST", body));
 }
 
-async function delJson(url: string): Promise<unknown> {
-  const res = await fetch(url, { method: "DELETE" });
-  const data = (await res.json().catch(() => ({}))) as { error?: string };
-  if (!res.ok) throw new Error(data.error ?? res.statusText);
-  return data;
+function getJson(url: string): Promise<unknown> {
+  return request(url);
+}
+
+function delJson(url: string): Promise<unknown> {
+  return request(url, { method: "DELETE" });
 }
 
 /** Clone payload: an existing ticket link/id, a new ticket to create (in team
@@ -114,9 +134,9 @@ export const createTicket = (ticket: {
 export async function uploadFile(file: File): Promise<string> {
   const fd = new FormData();
   fd.append("file", file);
-  const res = await fetch("/api/upload", { method: "POST", body: fd });
-  const data = (await res.json()) as { url?: string; error?: string };
-  if (!res.ok || !data.url) throw new Error(data.error ?? "upload failed");
+  // No content-type header: the browser sets the multipart boundary itself.
+  const data = (await request("/api/upload", { method: "POST", body: fd })) as { url?: string };
+  if (!data.url) throw new Error("upload failed");
   return data.url;
 }
 
@@ -204,16 +224,8 @@ export const deleteCodexAccount = (account: string) =>
   postJson("/api/codex/delete", { account }) as Promise<{ ok: boolean; moved: string[] }>;
 
 // --- Settings / config (redacted read · partial write · validate) ----------
-// Config errors come back as plain text (not the {error} JSON shape), so PUT
-// reads the body as text on failure for a useful message.
-async function putJson(url: string, body: unknown): Promise<unknown> {
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error((await res.text().catch(() => "")) || res.statusText);
-  return res.json().catch(() => ({}));
+function putJson(url: string, body: unknown): Promise<unknown> {
+  return request(url, jsonInit("PUT", body));
 }
 
 /** Current config (secrets shown as set/unset booleans). */

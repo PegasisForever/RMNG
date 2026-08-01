@@ -10,9 +10,12 @@ export function browserLocale(): string {
   return typeof navigator === "undefined" ? "en-US" : navigator.language;
 }
 
-/** Human byte size, e.g. `1.4 GB`. `sizeBytes` on `ImageInfo` is a bigint. */
+/** Human byte size, e.g. `1.4 GB`. `sizeBytes` on `ImageInfo` is typed bigint, but the value
+ * that arrives can be a plain number (JSON events carry `u64` as one) or a string (an arg
+ * edited in Storybook's Controls panel comes back as one), so coerce with `Number` the way
+ * `formatTokenCount` does rather than trusting the declared type. */
 export function formatBytes(bytes: bigint | number): string {
-  let n = typeof bytes === "bigint" ? Number(bytes) : bytes;
+  let n = Number(bytes);
   if (!Number.isFinite(n) || n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;

@@ -32,6 +32,10 @@ const meta = {
   args: {
     ticket: ticketDetailed,
     description: <Description text={ticketDetailed.description} />,
+    // The header's copy button asks the container to write, and shows its tick only when the
+    // write landed. Answering `true` is what a working clipboard answers, so the story shows
+    // the tick without touching the real one.
+    onCopyBranchName: fn(async () => true),
     onCreateClone: fn(),
     onTitleChange: fn(),
     resolveLink,

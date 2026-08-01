@@ -5,7 +5,7 @@
 // machine. Without the locale the same story reads "Today 03:00 PM" under en-US and
 // "Today 15:00" under en-GB.
 
-import { chatErrorText } from "~/lib/chatError";
+import { serverErrorText } from "~/lib/serverError";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 
@@ -65,10 +65,10 @@ export const chatActivity = "Bash(bun run build)";
 export const chatError = "clone 'pega-we-142' is archived; unarchive it first";
 
 /** A failure whose body runs past what the banner can hold, as the container hands it over:
- *  through `chatErrorText`, so the story shows the real cut rather than a hand-shortened
+ *  through `serverErrorText`, so the story shows the real cut rather than a hand-shortened
  *  string. None of the four routes writes a sentence this long, but the body is whatever
  *  answered the request, and the banner has no height limit of its own. */
-export const chatErrorLong = chatErrorText(
+export const chatErrorLong = serverErrorText(
   "internal error: agent bootstrap failed for clone 'pega-we-142': POST " +
     "http://10.99.0.14:4096/prompt: connection refused (os error 111); the clone's agent " +
     "wrapper exited 1 during startup: rmng-agent: /root/.claude/settings.json: no such file " +

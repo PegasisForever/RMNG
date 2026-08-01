@@ -96,6 +96,13 @@ export interface BoardProps {
   onArchiveClone: (clone: Clone) => void;
   /** A card was dragged out of an `archive` column and is still archived. */
   onUnarchiveClone: (clone: Clone) => void;
+  /** A card menu asked for its clone's `ssh -J …` one-liner to go on the clipboard, and for
+   *  the answer to whether it landed. The ticket column asks for the same thing through
+   *  `tickets`, so one container handler serves both. */
+  onCopySshCommand: (command: string) => Promise<boolean>;
+  /** A card menu asked to show its clone's Linear ticket, which leaves the app. The ticket
+   *  column's menu asks the same way. */
+  onOpenInLinear: (url: string) => void;
 
   /** Create a clone and file it in this column. Every column offers this, archive columns
    *  included: the flag is a rule about the drop gesture, not a lock on the column. */
@@ -210,6 +217,8 @@ export function Board({
   onPortForwardClone,
   onArchiveClone,
   onUnarchiveClone,
+  onCopySshCommand,
+  onOpenInLinear,
   onNewClone,
   onMoveCard,
   onRenameColumn,
@@ -282,6 +291,8 @@ export function Board({
     onPortForward: () => onPortForwardClone(clone),
     onArchive: () => onArchiveClone(clone),
     onUnarchive: () => onUnarchiveClone(clone),
+    onCopySshCommand,
+    onOpenInLinear,
   });
 
   /** A clone's sub-clone rows, or null when they are collapsed or it has none.
