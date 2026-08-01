@@ -22,6 +22,16 @@ case "$OP" in
   status) inct 'claude auth status' 2>&1 || true ;;
   read)   inct 'cat "$HOME/.claude/.credentials.json"' ;;
   clear)  inct 'rm -f "$HOME/.claude/.credentials.json"'; echo CLEARED ;;
-  apply)  B64="$3"; inct "umask 077; mkdir -p \"\$HOME/.claude\"; echo '$B64' | base64 -d > \"\$HOME/.claude/.credentials.json\"; chmod 600 \"\$HOME/.claude/.credentials.json\"; echo OK" ;;
+  # `set -e` INSIDE the inner shell: `runuser -c` starts a fresh bash that does not inherit
+  # this script's `set -euo pipefail`, so without it the command's exit status is `echo`'s
+  # and a failed decode or a failed write still reported success. The server would then
+  # record the push as delivered and never revisit the clone.
+  #
+  # Decode to a temp file and rename, so a partial write cannot leave the clone with a
+  # truncated credentials file — the redirect truncates before `base64` has produced a byte.
+  #
+  # `RMNG_APPLY_OK`, not `OK`: the caller matches a substring against stdout and stderr
+  # merged, and plenty of ordinary output contains "OK".
+  apply)  B64="$3"; inct "set -e; umask 077; mkdir -p \"\$HOME/.claude\"; printf %s '$B64' | base64 -d > \"\$HOME/.claude/.credentials.json.tmp\"; chmod 600 \"\$HOME/.claude/.credentials.json.tmp\"; mv -f \"\$HOME/.claude/.credentials.json.tmp\" \"\$HOME/.claude/.credentials.json\"; echo RMNG_APPLY_OK" ;;
   *)      echo "unknown op: $OP" >&2; exit 2 ;;
 esac

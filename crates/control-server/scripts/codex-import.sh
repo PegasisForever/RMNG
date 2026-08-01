@@ -20,6 +20,8 @@ case "$OP" in
   status) inct 'cat "$HOME/.codex/auth.json" 2>/dev/null || echo "{}"' ;;
   read)   inct 'cat "$HOME/.codex/auth.json"' ;;
   clear)  inct 'rm -f "$HOME/.codex/auth.json"'; echo CLEARED ;;
-  apply)  B64="$3"; inct "umask 077; mkdir -p \"\$HOME/.codex\"; echo '$B64' | base64 -d > \"\$HOME/.codex/auth.json\"; chmod 600 \"\$HOME/.codex/auth.json\"; echo OK" ;;
+  # See claude-import.sh for why `set -e` has to be repeated inside the inner shell, why the
+  # decode goes through a temp file, and why the marker is not just "OK".
+  apply)  B64="$3"; inct "set -e; umask 077; mkdir -p \"\$HOME/.codex\"; printf %s '$B64' | base64 -d > \"\$HOME/.codex/auth.json.tmp\"; chmod 600 \"\$HOME/.codex/auth.json.tmp\"; mv -f \"\$HOME/.codex/auth.json.tmp\" \"\$HOME/.codex/auth.json\"; echo RMNG_APPLY_OK" ;;
   *)      echo "unknown op: $OP" >&2; exit 2 ;;
 esac

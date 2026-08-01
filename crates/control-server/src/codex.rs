@@ -462,7 +462,8 @@ pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredCodexAccou
     }
     let b64 = B64.encode(auth_json(acct).as_bytes());
     let out = run_clone_op(app, host_id, IMPORT_SCRIPT, "apply", &[&b64]).await?;
-    if out.contains("OK") {
+    // A distinctive marker rather than "OK", which is a substring of ordinary words.
+    if out.contains("RMNG_APPLY_OK") {
         Ok(())
     } else {
         bail!(
@@ -531,7 +532,8 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
         let Some(email) = host.codex_account_email.as_deref() else {
             continue;
         };
-        if !only.is_none_or(|want| want == email) || !host.managed {
+        // Archived clones cannot take a push; see `claude::push_stale_tokens_for`.
+        if !only.is_none_or(|want| want == email) || !host.managed || host.archived {
             continue;
         }
         let Some(acct) = app.codex.get_by_email(email) else {

@@ -1431,7 +1431,9 @@ pub async fn apply_clone_token(app: &App, host_id: &str, token: &str) -> Result<
     }
     let b64 = B64.encode(credentials_json(token).as_bytes());
     let out = crate::provision::run_clone_op(app, host_id, "apply", &[&b64]).await?;
-    if out.contains("OK") {
+    // A distinctive marker, matched against stdout and stderr merged. The old check was for
+    // "OK", which any line containing TOKEN, BROKEN or LOOKUP satisfies.
+    if out.contains("RMNG_APPLY_OK") {
         Ok(())
     } else {
         bail!("token apply produced unexpected output: {}", out.trim());
@@ -1521,7 +1523,10 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
         let Some(email) = host.claude_account_email.as_deref() else {
             continue;
         };
-        if !in_push_scope(email, only) || !host.managed {
+        // Archived clones stay bound to an account but can never take a push: their
+        // container is stopped or frozen. Leaving them in scope meant eight dead hosts on
+        // CT 105 failing an exec on every pass, forever.
+        if !in_push_scope(email, only) || !host.managed || host.archived {
             continue;
         }
         let Some(acct) = app.claude.get_by_email(email) else {
