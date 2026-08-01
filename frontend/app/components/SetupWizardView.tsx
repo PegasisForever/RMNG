@@ -35,6 +35,9 @@ export interface SetupWizardViewProps {
 
   /** The configured `docker.templateReference`, which is what a blank template field pulls. */
   templatePlaceholder: string;
+  /** The reference step 3 saves and pulls, already resolved against the placeholder. The
+   *  review step names it, so a skipped download still shows what clones will be built from. */
+  savedTemplateReference: string;
   /** The template pull this wizard started, once it shows up in the live op list. */
   pullOperation: Operation | null;
   /** The reference the pull was started for. */
@@ -66,6 +69,7 @@ export function SetupWizardView({
   onDraftChange,
   envChecklist,
   templatePlaceholder,
+  savedTemplateReference,
   pullOperation,
   pullTarget,
   pulling,
@@ -170,7 +174,12 @@ export function SetupWizardView({
 
           {/* Step 4: Finish. */}
           {step === 3 ? (
-            <SetupReviewStep draft={draft} pullTarget={pullTarget} pullDone={pullDone} />
+            <SetupReviewStep
+              draft={draft}
+              savedTemplateReference={savedTemplateReference}
+              pullTarget={pullTarget}
+              pullDone={pullDone}
+            />
           ) : null}
         </div>
 

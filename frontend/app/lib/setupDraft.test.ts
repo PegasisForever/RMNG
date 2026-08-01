@@ -15,6 +15,8 @@ import {
   setupDraftFrom,
   subnetOk,
   subnetPatch,
+  templateFallback,
+  templatePatch,
 } from "./setupDraft";
 import type { Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
@@ -188,6 +190,83 @@ test("a blank subnet is not valid — the bridge needs one", () => {
 test("a blank template field pulls the configured reference", () => {
   const draft = { ...setupDraftFrom(config()), templateReference: "   " };
   expect(pullReference(draft, config())).toBe("pegasis0/rmng-template:latest");
+});
+
+test("step 3 saves the reference it pulls, trimmed", () => {
+  const draft = { ...setupDraftFrom(config()), templateReference: "  acme/clone:26.04  " };
+  expect(templatePatch(draft, config())).toEqual({
+    docker: { templateReference: "acme/clone:26.04" },
+  });
+  expect(pullReference(draft, config())).toBe("acme/clone:26.04");
+});
+
+test("a blank template field saves the configured reference back, never a blank", () => {
+  const draft = { ...setupDraftFrom(config()), templateReference: "   " };
+  expect(templatePatch(draft, config())).toEqual({
+    docker: { templateReference: "pegasis0/rmng-template:latest" },
+  });
+});
+
+test("step 3 patches the template reference and nothing else", () => {
+  const draft = { ...setupDraftFrom(config()), templateReference: "acme/clone:26.04" };
+  const patch = templatePatch(draft, config());
+  expect(patch).not.toBeNull();
+  expect(Object.keys(patch!)).toEqual(["docker"]);
+  expect(Object.keys(patch!.docker)).toEqual(["templateReference"]);
+});
+
+test("the placeholder shown and the value a blank field saves are one string", () => {
+  // The promise the placeholder makes is "leave this empty and you keep what it says". Read
+  // the two through the same config and they cannot disagree, whatever that config holds.
+  for (const reference of ["pegasis0/rmng-template:latest", "acme/clone:26.04", ""]) {
+    const c = config({ docker: { ...config().docker, templateReference: reference } });
+    const blank = { ...setupDraftFrom(c), templateReference: "" };
+    expect(pullReference(blank, c)).toBe(templateFallback(c));
+    expect(templatePatch(blank, c)?.docker.templateReference ?? null).toBe(reference || null);
+  }
+});
+
+test("a second visit to step 3 falls back to what the first visit saved", () => {
+  // The wizard's steps write to the config while it is open, so the fallback has to be read
+  // from what the server last confirmed. Reading the config as it looked at mount instead
+  // silently rewrites the operator's own value the next time they clear the field.
+  const atMount = config();
+  const typed = { ...setupDraftFrom(atMount), templateReference: "acme/clone:26.04" };
+  expect(templatePatch(typed, atMount)).toEqual({
+    docker: { templateReference: "acme/clone:26.04" },
+  });
+
+  // What `PUT /api/config` answers with: the post-merge config.
+  const saved = config({ docker: { ...atMount.docker, templateReference: "acme/clone:26.04" } });
+  const cleared = { ...typed, templateReference: "" };
+  expect(templateFallback(saved)).toBe("acme/clone:26.04");
+  expect(templatePatch(cleared, saved)).toEqual({
+    docker: { templateReference: "acme/clone:26.04" },
+  });
+  // The same clear against the stale mount config is the data loss this guards.
+  expect(templatePatch(cleared, atMount)).toEqual({
+    docker: { templateReference: "pegasis0/rmng-template:latest" },
+  });
+});
+
+test("an untouched field saves the seeded reference unchanged", () => {
+  const draft = setupDraftFrom(config());
+  expect(templatePatch(draft, config())).toEqual({
+    docker: { templateReference: "pegasis0/rmng-template:latest" },
+  });
+});
+
+test("a blank field over an unset config has nothing to save", () => {
+  // The server reads an empty scalar as "unchanged", but that is its convention, not this
+  // step's intent. With no reference anywhere there is no PUT to make.
+  const c = config({ docker: { ...config().docker, templateReference: "" } });
+  const draft = { ...setupDraftFrom(c), templateReference: "  " };
+  expect(pullReference(draft, c)).toBe("");
+  expect(templatePatch(draft, c)).toBeNull();
+  // A typed reference on that same rig still saves.
+  expect(templatePatch({ ...draft, templateReference: "acme/clone:26.04" }, c)).toEqual({
+    docker: { templateReference: "acme/clone:26.04" },
+  });
 });
 
 test("the pull op is found by kind and target, and only once a pull was started", () => {

@@ -5,6 +5,7 @@
 // machine. Without the locale the same story reads "Today 03:00 PM" under en-US and
 // "Today 15:00" under en-GB.
 
+import { chatErrorText } from "~/lib/chatError";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 
@@ -47,20 +48,34 @@ export const chatMessages: ChatMessage[] = [
 /** The agent's current tool line, shown under the working bubble while a turn is in flight. */
 export const chatActivity = "Bash(bun run build)";
 
-/** What an HTTP failure of the SEND route puts in the banner, all of it. The chat routes
- *  answer an error as a plain-text body, but the send path parses that body as JSON and reads
- *  `.error` off the result, so the parse always fails and this fallback string is all the
- *  operator ever sees. The server's own words ("clone 'pega-we-142' is archived") are
- *  discarded on the way.
+/** What an HTTP failure of the SEND route puts in the banner: the server's own sentence,
+ *  verbatim. All four chat routes answer an error as a plain-text body (axum
+ *  `(StatusCode, String)`), and the container reads the body as text, so this is what a clone
+ *  archived in another tab looks like when a send lands on it.
  *
- *  One banner carries every failure the pane can have, and the other three routes fill it
- *  differently: abort collapses to "stop failed" through the same dropped JSON parse, cancel
- *  to "cancel failed", and schedule alone reads the body as text, so it is the one route
- *  whose banner holds the server's own words. Two more strings never come from a route at
- *  all: a fetch that does not reach the server surfaces the browser's rejection ("Failed to
- *  fetch"), and a delivery time in the past is refused locally with "Pick a time in the
- *  future." */
-export const chatError = "chat failed";
+ *  One banner carries every failure the pane can have, and the other three routes fill it the
+ *  same way. A send also reports "unknown clone 'pega-we-142'", a stop reports only this
+ *  archived line, a schedule adds "scheduled time must be in the future", and a cancel reports
+ *  "invalid clone id 'pega-we-142'" (a 404 there means the message already went, which is not
+ *  worth a banner). Each route has a fallback behind it for a body that arrives empty: "chat
+ *  failed", "stop failed", "schedule failed", "cancel failed". Two more strings never come from
+ *  a route at all. A fetch that does not reach the server surfaces the browser's rejection
+ *  ("Failed to fetch"), and a delivery time in the past is refused locally with "Pick a time in
+ *  the future." */
+export const chatError = "clone 'pega-we-142' is archived; unarchive it first";
+
+/** A failure whose body runs past what the banner can hold, as the container hands it over:
+ *  through `chatErrorText`, so the story shows the real cut rather than a hand-shortened
+ *  string. None of the four routes writes a sentence this long, but the body is whatever
+ *  answered the request, and the banner has no height limit of its own. */
+export const chatErrorLong = chatErrorText(
+  "internal error: agent bootstrap failed for clone 'pega-we-142': POST " +
+    "http://10.99.0.14:4096/prompt: connection refused (os error 111); the clone's agent " +
+    "wrapper exited 1 during startup: rmng-agent: /root/.claude/settings.json: no such file " +
+    "or directory; retried 3 times over 12s, giving up. Check the clone's own logs for the " +
+    "wrapper's output.",
+  "chat failed",
+);
 
 /** Unsent composer text, for the states where the box is not empty: a send that failed and
  *  put the text back, or a message waiting on a delivery time. */

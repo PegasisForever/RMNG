@@ -12,8 +12,8 @@
 //     preset in the list. The wizard edits ONE arrangement (the active preset, else the first)
 //     and round-trips the others exactly as the server sent them. `settingsPatch` would
 //     rewrite presets the wizard never showed the operator.
-//   - The wizard never saves `templateReference`. Step 3 pulls that reference; the field is
-//     the pull's argument, not a setting the wizard persists.
+//   - `docker.subnet` belongs to step 1 and `docker.templateReference` to step 3, so neither
+//     appears in the step-2 patch even though the panel writes all three in one PUT.
 //
 // Only `monitorPatch` is genuinely the same rule, so only `monitorPatch` is shared.
 
@@ -39,7 +39,7 @@ export interface SetupDraft {
   chroma: ChromaMode;
   listen: ListenConfig;
   agentPort: number;
-  /** The reference step 3 pulls. Never persisted: it is the pull's argument. */
+  /** The reference step 3 pulls, and saves as `docker.templateReference` on the way out. */
   templateReference: string;
 }
 
@@ -129,7 +129,7 @@ export function layoutPresetsPatch(draft: SetupDraft, config: AppConfigRedacted)
  * What step 2 (Server) sends: the fleet defaults, the edited arrangement, and the ports.
  *
  * `docker` names only the three fields this step edits. The subnet went in step 1 and the
- * template reference is never persisted, so neither appears here.
+ * template reference goes in step 3, so neither appears here.
  */
 export function serverPatch(draft: SetupDraft, config: AppConfigRedacted): unknown {
   return {
@@ -145,10 +145,50 @@ export function serverPatch(draft: SetupDraft, config: AppConfigRedacted): unkno
   };
 }
 
+/** What a blank template field means, which is also what its placeholder shows: the reference
+ *  already stored on the config.
+ *
+ *  The placeholder and the fallback are ONE expression on purpose. Both are the same promise
+ *  to the operator: leave this empty and you keep what it says. A screen that shows one value
+ *  while a blank field saves another breaks that promise, and this function is what makes the
+ *  two disagreeing impossible. Pass the config the server last confirmed, never a stale copy. */
+export function templateFallback(config: AppConfigRedacted): string {
+  return config.docker.templateReference;
+}
+
 /** The exact reference the server will pull: what was typed, else the configured default.
  *  Resolved here so the started op's `target` is a value the wizard already holds. */
 export function pullReference(draft: SetupDraft, config: AppConfigRedacted): string {
-  return draft.templateReference.trim() || config.docker.templateReference;
+  return draft.templateReference.trim() || templateFallback(config);
+}
+
+/**
+ * What step 3 (Download template) sends: the one field that step edits, or `null` when there is
+ * nothing to send.
+ *
+ * It saves the same string `pullReference` pulls, on purpose. The field's own help text says
+ * clones are created from this exact reference, so what the step pulls and what it stores
+ * cannot be two different values. A blank field means the configured reference (that is what
+ * the placeholder shows), so a blank field writes that value back rather than clearing it.
+ *
+ * `null` covers the one case where that resolves to nothing: a blank field over a config whose
+ * `templateReference` is itself empty. The server would read the resulting empty string as
+ * "unchanged" and store nothing, so the PUT is already a no-op, but that is the server's
+ * convention rather than this step's intent. Saying "nothing to save" here keeps the step
+ * honest whichever way the server reads an empty scalar, and keeps a value nobody typed out of
+ * the request body.
+ *
+ * The write happens on the way OUT of the step rather than on a successful pull, because the
+ * reference is a setting and the pull is one use of it. `POST /api/images/pull` defaults to
+ * `docker.templateReference`, so an operator who skips the pull and reaches for the Images
+ * panel later still gets the image they named here.
+ */
+export function templatePatch(
+  draft: SetupDraft,
+  config: AppConfigRedacted,
+): { docker: { templateReference: string } } | null {
+  const reference = pullReference(draft, config);
+  return reference ? { docker: { templateReference: reference } } : null;
 }
 
 /** The pull op is kind "pull" with target === the pulled reference (jobs.rs `start_pull` →

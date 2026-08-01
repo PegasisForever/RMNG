@@ -20,7 +20,11 @@ function checklist(rows = makeEnvRows()) {
  *  on every edit, so one set behind every story is how a drag in one shows up in the next. */
 function base() {
   const draft = makeSetupDraft();
-  return { draft, templatePlaceholder: draft.templateReference };
+  return {
+    draft,
+    templatePlaceholder: draft.templateReference,
+    savedTemplateReference: draft.templateReference,
+  };
 }
 
 const templateRef = makeSetupDraft().templateReference;
@@ -123,6 +127,12 @@ export const Saving: Story = {
   args: { ...base(), step: 1, saving: true, nextDisabled: true },
 };
 
+/** Step 3's own save, mid-flight. Leaving this step writes the template reference, so the
+ *  footer locks here exactly as it does on the two steps before it. */
+export const TemplateSaving: Story = {
+  args: { ...base(), step: 2, saving: true, nextDisabled: true },
+};
+
 /** The Finish click, mid-flight. Same lock, different word, because this one also latches the
  *  one-time subnet. */
 export const Finishing: Story = {
@@ -151,6 +161,9 @@ export const Interactive: Story = {
     const [pullOperation, setPullOperation] = useState<Operation | null>(null);
     const pullRunning = pullOperation?.status === "running";
     const pullDone = pullOperation?.status === "done";
+    // What the container resolves with `pullReference`: typed, else the placeholder. The pull
+    // and the review row read the same value here, as they do in the app.
+    const savedReference = draft.templateReference.trim() || args.templatePlaceholder;
 
     /** The shape of a step save, not the server: lock the footer for a beat, then advance. */
     const advance = () => {
@@ -171,6 +184,7 @@ export const Interactive: Story = {
           setDraft((d) => ({ ...d, [key]: value }));
           args.onDraftChange(key, value);
         }}
+        savedTemplateReference={savedReference}
         pullOperation={pullOperation}
         pullTarget={pullOperation?.target ?? null}
         pulling={pulling}
@@ -185,7 +199,7 @@ export const Interactive: Story = {
         onPull={() => {
           setPulling(true);
           args.onPull();
-          const target = draft.templateReference.trim() || args.templatePlaceholder;
+          const target = savedReference;
           // The POST answers first, then the op shows up on /events, then it finishes.
           window.setTimeout(() => {
             setPulling(false);

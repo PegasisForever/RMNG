@@ -8,6 +8,7 @@ import {
   chatActivity,
   chatDraft,
   chatError,
+  chatErrorLong,
   chatLocale,
   chatMessages,
   chatNow,
@@ -90,11 +91,17 @@ export const Stopping: Story = {
   args: { busy: true, stopping: true, activity: chatActivity, scheduled: [] },
 };
 
-/** A send that failed. The banner is the whole of what a send failure can say (the container
- *  drops the server's own words on the floor) and the unsent text is back in the box, ready
- *  for another try. */
+/** A send that failed, here on a clone archived from another tab. The banner carries the
+ *  server's own sentence, so the operator reads what to do about it, and the unsent text is
+ *  back in the box ready for another try. */
 export const WithError: Story = {
   args: { error: chatError, input: chatDraft, scheduled: [] },
+};
+
+/** A failure with more to say than the banner can hold. The container cuts the body at 300
+ *  characters, so the thread keeps its room and the composer stays on screen. */
+export const WithLongError: Story = {
+  args: { error: chatErrorLong, input: chatDraft, scheduled: [] },
 };
 
 /** An archived clone. The history stays readable, the composer is dead, and a strip above it

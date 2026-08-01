@@ -22,6 +22,8 @@ import {
   setupDraftFrom,
   subnetOk,
   subnetPatch,
+  templateFallback,
+  templatePatch,
   type SetupDraft,
 } from "~/lib/setupDraft";
 import type { Operation } from "~/lib/types";
@@ -34,9 +36,8 @@ export function SetupWizardContainer({
 }: {
   /** Live operations from the SSE state — the started template pull is tracked through these. */
   operations: Operation[];
-  /** The config as the server sent it. Seeds the form, and supplies the two things the form
-   *  does not carry: the layout preset the edited arrangement belongs to, and the template
-   *  reference a blank field falls back to. */
+  /** The config as the server sent it at mount. Seeds the form and the tracked config below.
+   *  Read it nowhere else, because the route fetches it once and never refetches. */
   initialConfig: AppConfigRedacted;
   /** Called after setup latches; the parent refetches config and swaps to the dashboard. */
   onDone: () => void;
@@ -45,6 +46,20 @@ export function SetupWizardContainer({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState<SetupDraft>(() => setupDraftFrom(initialConfig));
+
+  // The config as the server last confirmed it, which is what every step's patch reads for the
+  // fields the form does not carry: the layout preset the edited arrangement belongs to, and
+  // the template reference a blank field falls back to.
+  //
+  // It has to be state rather than the `initialConfig` prop. The route fetches config exactly
+  // once and never refetches, while the wizard writes to it on every Next. Reading the prop
+  // after a save answers with a value the operator has already replaced, and step 3 is where
+  // that costs data: the placeholder would name the OLD reference, and clearing the field
+  // would then save that old reference back over the one just stored. Every successful PUT
+  // answers with the post-merge redacted config (`ConfigPutResponse.config`), so the response
+  // body is the authority here. No extra GET, and a value the server normalized on the way in
+  // shows up as the server holds it.
+  const [config, setConfig] = useState<AppConfigRedacted>(initialConfig);
 
   // Whether every REQUIRED environment check passes. Reported up by the checklist's own
   // container, because the answer is a function of a response only that half has.
@@ -63,12 +78,16 @@ export function SetupWizardContainer({
   const pullRunning = pullOperation?.status === "running";
   const pullDone = pullOperation?.status === "done";
 
+  // The one reference step 3 deals in: what Download pulls, what Next saves, and what the
+  // review step names. Resolved once here so those three cannot answer differently.
+  const savedTemplateReference = pullReference(draft, config);
+
   /** Persist this step's fields; resolves true on success, false (banner shown) on failure. */
   async function persist(patch: unknown): Promise<boolean> {
     setSaving(true);
     setError(null);
     try {
-      await putConfig(patch);
+      setConfig((await putConfig(patch)).config);
       return true;
     } catch (e) {
       setError((e as Error).message);
@@ -87,9 +106,15 @@ export function SetupWizardContainer({
       }
       if (!(await persist(subnetPatch(draft)))) return;
     } else if (step === 1) {
-      if (!(await persist(serverPatch(draft, initialConfig)))) return;
+      if (!(await persist(serverPatch(draft, config)))) return;
+    } else if (step === 2) {
+      // Leaving the template step saves its reference, whether it was pulled or skipped: the
+      // pull is one use of the value, and `POST /api/images/pull` reads the saved one on every
+      // later use. Skip goes through here too, because the View wires it to onNext.
+      // A null patch is the empty case (blank field, no configured reference): nothing to save.
+      const patch = templatePatch(draft, config);
+      if (patch && !(await persist(patch))) return;
     }
-    // Step 2 (download template) has nothing to persist — the pull happens via pullTemplate.
     setStep((s) => Math.min(SETUP_STEPS.length - 1, s + 1));
     setError(null);
   }
@@ -101,9 +126,9 @@ export function SetupWizardContainer({
   }
 
   async function pull() {
-    // Resolve to the exact reference the server will pull (blank ⇒ configured default), so
-    // `pullTarget` matches the op's target and we can track it over /events.
-    const reference = pullReference(draft, initialConfig);
+    // The exact reference the server will pull (blank ⇒ configured default), so `pullTarget`
+    // matches the op's target and we can track it over /events.
+    const reference = savedTemplateReference;
     if (!reference || pulling || pullRunning) return;
     setPulling(true);
     setError(null);
@@ -148,7 +173,8 @@ export function SetupWizardContainer({
       draft={draft}
       onDraftChange={updateDraft}
       envChecklist={<EnvChecklistContainer onChange={onEnvChange} />}
-      templatePlaceholder={initialConfig.docker.templateReference}
+      templatePlaceholder={templateFallback(config)}
+      savedTemplateReference={savedTemplateReference}
       pullOperation={pullOperation ?? null}
       pullTarget={pullTarget}
       pulling={pulling}

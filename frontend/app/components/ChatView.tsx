@@ -162,7 +162,7 @@ export function ChatView({
       </div>
 
       {error ? (
-        <div className="border-t border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
+        <div className="border-t border-red-200 bg-red-50 px-3 py-1.5 text-xs break-words text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
           {error}
         </div>
       ) : null}

@@ -18,6 +18,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ChatView, localInputToEpochMs } from "~/components/ChatView";
 import { getDraft, setDraft } from "~/lib/chatDrafts";
+import { chatErrorText } from "~/lib/chatError";
 import { browserLocale } from "~/lib/format";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
@@ -27,6 +28,16 @@ interface ChatSnapshot {
   activity?: string;
   messages: ChatMessage[];
   scheduled?: ScheduledMessage[];
+}
+
+/** What the banner says when one of the four calls below fails.
+ *
+ *  Every chat route answers an error as axum `(StatusCode, String)`, so the body is plain text
+ *  and reading it as JSON would throw away the one sentence the operator needs. `chatErrorText`
+ *  decides how much of it the banner can hold. A body that never arrives (the connection
+ *  dropped mid-read) is the same case as an empty one: `fallback`. */
+async function errorText(res: Response, fallback: string): Promise<string> {
+  return chatErrorText(await res.text().catch(() => ""), fallback);
 }
 
 export default function ChatContainer({
@@ -97,10 +108,9 @@ export default function ChatContainer({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error ?? "chat failed");
-      }
+      // "unknown clone 'x'" (400), "clone 'x' is archived; unarchive it first" (409), or the
+      // reason the turn could not start ("a message is already being processed for this clone").
+      if (!res.ok) throw new Error(await errorText(res, "chat failed"));
       // Success: nothing to do — the SSE stream delivers the authoritative
       // messages and busy state from here.
     } catch (e) {
@@ -128,11 +138,7 @@ export default function ChatContainer({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text, at }),
       });
-      if (!res.ok) {
-        // The chat routes answer errors as a plain-text body (axum `(StatusCode, String)`).
-        const body = (await res.text().catch(() => "")).trim();
-        throw new Error(body || "schedule failed");
-      }
+      if (!res.ok) throw new Error(await errorText(res, "schedule failed"));
       writeInput("");
       setScheduleAt(""); // collapse the picker back down
     } catch (e) {
@@ -144,8 +150,9 @@ export default function ChatContainer({
     setError(null);
     try {
       const res = await fetch(`/api/chat/${cloneId}/schedule/${sid}`, { method: "DELETE" });
-      if (!res.ok && res.status !== 404) throw new Error("cancel failed");
       // 404 means it already fired or another tab cancelled it — SSE has the truth either way.
+      // Anything else is the server's ("invalid clone id 'x'"), so it goes to the banner as is.
+      if (!res.ok && res.status !== 404) throw new Error(await errorText(res, "cancel failed"));
       setScheduled((s) => s.filter((m) => m.id !== sid));
     } catch (e) {
       setError((e as Error).message);
@@ -160,10 +167,8 @@ export default function ChatContainer({
     setError(null);
     try {
       const res = await fetch(`/api/chat/${cloneId}/abort`, { method: "POST" });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error ?? "stop failed");
-      }
+      // The abort route's one refusal is an archived clone. An unknown id answers 204.
+      if (!res.ok) throw new Error(await errorText(res, "stop failed"));
       // Success: the SSE stream delivers the final (aborted) state from here.
     } catch (e) {
       setError((e as Error).message);

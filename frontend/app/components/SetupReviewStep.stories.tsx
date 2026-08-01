@@ -14,6 +14,7 @@ const meta = {
   parameters: { layout: "centered" },
   args: {
     draft: makeSetupDraft(),
+    savedTemplateReference: makeSetupDraft().templateReference,
     pullTarget: makeSetupDraft().templateReference,
     pullDone: true,
   },
@@ -30,10 +31,22 @@ type Story = StoryObj<typeof meta>;
 /** A complete first run: every field filled in and the template already on the host. */
 export const TemplatePulled: Story = {};
 
-/** The template step was skipped. The row says so rather than leaving a blank, because the
- *  rig still works: an image can be pulled from the Images panel afterwards. */
+/** The template step was skipped. The row still names the reference, because skipping skips
+ *  the download and not the setting: clones are built from this image once it is pulled from
+ *  the Images panel. */
 export const TemplateSkipped: Story = {
   args: { pullTarget: null, pullDone: false },
+};
+
+/** A skip with nothing saved: the operator emptied the field on a rig whose config carries no
+ *  reference either. There is no image to name, so the row is the bare state. */
+export const TemplateUnset: Story = {
+  args: {
+    draft: makeSetupDraft({ templateReference: "" }),
+    savedTemplateReference: "",
+    pullTarget: null,
+    pullDone: false,
+  },
 };
 
 /** The barest rig the wizard will finish: no hostname prefix, one screen, and a subnet field

@@ -7,16 +7,30 @@ import type { SetupDraft } from "~/lib/setupDraft";
 
 export function SetupReviewStep({
   draft,
+  savedTemplateReference,
   pullTarget,
   pullDone,
 }: {
   /** The wizard's model, as the steps left it. */
   draft: SetupDraft;
+  /** The reference step 3 saved, resolved: what was typed, else the configured default a blank
+   *  field falls back to. Empty only when neither exists. */
+  savedTemplateReference: string;
   /** The reference the template pull was started for. */
   pullTarget: string | null;
   /** The pull finished, so there is a template to name here. */
   pullDone: boolean;
 }) {
+  // The template row. A finished pull names the image that landed. Skipping still SAVED the
+  // reference, because "Skip for now" skips the download and not the setting, so the skip path
+  // names the saved value too. Clones are created from it either way, and this screen is the
+  // last place to catch a wrong one. With nothing saved there is nothing to name.
+  const template = pullDone
+    ? `${pullTarget} ✓`
+    : savedTemplateReference
+      ? `${savedTemplateReference} (not pulled, pull one later)`
+      : "not pulled (pull one later)";
+
   return (
     <div className="space-y-4">
       <p className="text-sm text-slate-600 dark:text-slate-300">
@@ -32,10 +46,7 @@ export function SetupReviewStep({
             ["Memory limit per clone", `${draft.cloneMemoryMb} MB`],
             ["Monitors", `${draft.monitors.length} monitor(s)`],
             ["Chroma", draft.chroma],
-            [
-              "Template image",
-              pullDone ? `${pullTarget} ✓` : "not pulled (pull one later)",
-            ],
+            ["Template image", template],
           ] as const
         ).map(([k, v]) => (
           <div key={k} className="flex justify-between gap-3 px-3 py-2">
