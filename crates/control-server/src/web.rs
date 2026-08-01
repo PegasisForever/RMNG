@@ -2164,6 +2164,7 @@ mod tests {
             id: id.into(),
             title: id.into(),
             clone_ids: clone_ids.iter().map(|s| (*s).to_string()).collect(),
+            archive: false,
         }
     }
 

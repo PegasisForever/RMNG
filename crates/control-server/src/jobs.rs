@@ -979,9 +979,21 @@ pub fn start_archive(app: &App, host_id: &str) -> Result<Operation, JobError> {
 
 async fn run_archive(app: App, op_id: String, host_id: String) {
     let mut progress = op_progress(&app, &op_id, OperationKind::Archive);
-    progress("stop", "stopping the clone (SIGRTMIN+3, up to 20s)");
-    if let Err(e) = app.docker.stop_container(&host_id).await {
-        return fail_op(&app, &op_id, e.to_string());
+    // Freeze rather than shut down. The clone's processes stop where they stand, so the inner
+    // Docker daemon and its containers, the agent's session, and every GPU buffer the clone
+    // holds are all still there when it comes back — restoring is a thaw, not a boot.
+    //
+    // The cost is that a paused clone keeps its memory resident. Archiving no longer hands
+    // the host back its RAM; it hands back its CPU.
+    progress("pause", "freezing the clone");
+    if let Err(e) = app.docker.pause_container(&host_id).await {
+        // A clone that had already exited cannot be paused. Falling back to a stop keeps
+        // archiving meaningful for it rather than failing the operation outright.
+        tracing::info!(target: "jobs", "{host_id}: pause failed ({e}), falling back to stop");
+        progress("stop", "the clone was not running; stopping it instead");
+        if let Err(e) = app.docker.stop_container(&host_id).await {
+            return fail_op(&app, &op_id, e.to_string());
+        }
     }
 
     app.store.mutate(|s| {
@@ -1040,8 +1052,10 @@ pub fn start_unarchive(app: &App, host_id: &str) -> Result<Operation, JobError> 
 
 async fn run_unarchive(app: App, op_id: String, host_id: String) {
     let mut progress = op_progress(&app, &op_id, OperationKind::Unarchive);
-    progress("start", "starting the archived clone");
-    if let Err(e) = app.docker.start_container(&host_id).await {
+    // Thaw a paused clone, start a stopped one. Clones archived before pausing existed are
+    // stopped, and an upgrade must not strand them.
+    progress("start", "restoring the archived clone");
+    if let Err(e) = app.docker.resume_container(&host_id).await {
         return fail_op(&app, &op_id, e.to_string());
     }
 

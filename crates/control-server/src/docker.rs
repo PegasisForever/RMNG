@@ -1686,14 +1686,80 @@ impl DockerCtl {
         Ok(self.inspect_runtime(id).await?.ip)
     }
 
-    /// Whether a container is currently running. `false` (not an error) if it doesn't
-    /// exist.
+    /// Whether a container is currently running and able to answer. `false` (not an error)
+    /// if it doesn't exist.
+    ///
+    /// A paused container counts as NOT running, even though the daemon reports
+    /// `State.Running = true` for one. Every caller uses this to decide whether the clone can
+    /// be talked to, and a paused clone cannot: the daemon refuses `exec` against it and its
+    /// processes are frozen, so a monitor fetch or an SSH hop would hang rather than fail.
+    /// Archiving pauses, so this is what keeps an archived clone invisible to the rest of the
+    /// server exactly as a stopped one was.
     pub async fn is_running(&self, id: &str) -> Result<bool> {
         match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
-            Ok(info) => Ok(info.state.and_then(|s| s.running).unwrap_or(false)),
+            Ok(info) => {
+                let state = info.state.as_ref();
+                let running = state.and_then(|s| s.running).unwrap_or(false);
+                let paused = state.and_then(|s| s.paused).unwrap_or(false);
+                Ok(running && !paused)
+            }
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
             Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
         }
+    }
+
+    /// Whether a container exists and is paused. Distinguishes "archived the new way" from
+    /// "archived before pausing existed, so it is stopped", which is what lets
+    /// [`DockerCtl::resume_container`] pick the right verb.
+    pub async fn is_paused(&self, id: &str) -> Result<bool> {
+        match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+            Ok(info) => Ok(info.state.and_then(|s| s.paused).unwrap_or(false)),
+            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
+            Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
+        }
+    }
+
+    /// Freeze a container's processes with the cgroup freezer. Nothing exits, so the inner
+    /// Docker daemon, its own containers, and every GPU buffer the clone holds survive
+    /// untouched — which is what makes resuming instant instead of a fresh boot.
+    ///
+    /// A container that is already stopped cannot be paused; the caller falls back to a stop
+    /// so archiving still means something for a clone that had already exited.
+    pub async fn pause_container(&self, id: &str) -> Result<()> {
+        match self.daemon()?.pause_container(id).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(anyhow!("pausing container {id}: {e}")),
+        }
+    }
+
+    /// Thaw a paused container. Tolerates a container that is not paused (409), so a
+    /// double-resume is not an error.
+    pub async fn unpause_container(&self, id: &str) -> Result<()> {
+        match self.daemon()?.unpause_container(id).await {
+            Ok(()) => Ok(()),
+            Err(BollardError::DockerResponseServerError { status_code: 409, .. }) => Ok(()),
+            Err(e) => Err(anyhow!("unpausing container {id}: {e}")),
+        }
+    }
+
+    /// Bring an archived container back, whichever way it was archived: unpause a paused one,
+    /// start a stopped one. Clones archived before pausing existed are stopped, and they must
+    /// keep restoring correctly after an upgrade.
+    pub async fn resume_container(&self, id: &str) -> Result<()> {
+        if self.is_paused(id).await? {
+            return self.unpause_container(id).await;
+        }
+        self.start_container(id).await
+    }
+
+    /// Stop a container for good, unpausing first if it is paused. `docker stop` on a paused
+    /// container delivers a signal its frozen processes can never handle, so it waits out the
+    /// full timeout and then kills — slow, and an unclean shutdown for the clone.
+    pub async fn stop_even_if_paused(&self, id: &str) -> Result<()> {
+        if self.is_paused(id).await.unwrap_or(false) {
+            self.unpause_container(id).await.ok();
+        }
+        self.stop_container(id).await
     }
 
     /// The container's host PID (`State.Pid`), or `None` when it isn't running (the daemon
