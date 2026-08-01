@@ -98,6 +98,9 @@ export function AppShellV2({
   const widthRef = useRef(SIDE_DEFAULT);
   // The board and the panel together, which is what a percentage is a percentage of.
   const splitRef = useRef<HTMLDivElement | null>(null);
+  // The floating panel itself. A drag needs its left edge, which is not the same as the
+  // percentage: the width has a 20rem floor the percentage does not know about.
+  const panelRef = useRef<HTMLElement | null>(null);
 
   // Restore after mount rather than in the initial state, so the server and the first
   // client render agree on the default.
@@ -129,10 +132,17 @@ export function AppShellV2({
     handle.focus();
     handle.setPointerCapture(pointerId);
 
+    // How far inside the panel's left edge the pointer landed. The grip is a band, not a
+    // line, so the pointer starts several pixels right of the edge it moves. Treating the
+    // pointer as the edge would snap the panel narrower by that much on the first move.
+    // Holding the offset keeps the edge under the same part of the grip for the whole drag.
+    const panel = panelRef.current?.getBoundingClientRect();
+    const grab = panel ? event.clientX - panel.left : 0;
+
     const track = (moved: globalThis.PointerEvent) => {
       const split = splitRef.current?.getBoundingClientRect();
       if (!split || split.width === 0) return;
-      applyWidth(((split.right - moved.clientX) / split.width) * 100);
+      applyWidth(((split.right - (moved.clientX - grab)) / split.width) * 100);
     };
     const stop = () => {
       handle.removeEventListener("pointermove", track);
@@ -192,7 +202,10 @@ export function AppShellV2({
             disagree and strand the last column: the custom property is what the operator
             drags, and 20rem is the floor below which the cards stop being usable. */}
         {selectedClone || ticket ? (
-          <aside className="pointer-events-none absolute inset-y-0 right-0 z-20 flex w-[max(var(--side-panel-w,30%),20rem)] shrink-0 flex-col gap-3 p-3">
+          <aside
+            ref={panelRef}
+            className="pointer-events-none absolute inset-y-0 right-0 z-20 flex w-[max(var(--side-panel-w,30%),20rem)] shrink-0 flex-col gap-3 p-3"
+          >
             {/* The resize grip: a 16px hit area over the cards' own left edge, so the thing
                 the operator drags is the edge they can see and it grabs from either side. It
                 sits 6px out and 10px in rather than evenly, because the card's wide shadow
