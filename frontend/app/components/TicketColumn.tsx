@@ -263,15 +263,21 @@ export function TicketCardBody({
             <LabelPill key={label.name} name={label.name} color={label.color} />
           ))}
         </div>
-        <TicketMenu
-          ticket={ticket}
-          onCreateClone={onCreateClone}
-          onCancel={onCancel}
-          onMoveToBacklog={onMoveToBacklog}
-        />
+        {/* The ⋮ button is a 16px icon in a 24px hit area, ten pixels taller than the marks
+            it sits beside. Left alone it sets the row's height and opens a gap under the
+            marks that reads as the card's own spacing. Pulling its padding out of the flow
+            hands the height back to the marks and centres the icon on them. */}
+        <div className="-my-1 shrink-0">
+          <TicketMenu
+            ticket={ticket}
+            onCreateClone={onCreateClone}
+            onCancel={onCancel}
+            onMoveToBacklog={onMoveToBacklog}
+          />
+        </div>
       </div>
 
-      <p className="mt-1.5 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
+      <p className="mt-1 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
         <span
           className={`mr-1 inline-block rounded px-1 py-0.5 align-middle text-[10px] font-semibold leading-none ${workspaceBadge(
             teamOf(ticket),

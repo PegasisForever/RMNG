@@ -4,6 +4,8 @@ import { expect, test } from "bun:test";
 
 import {
   branchNameOf,
+  cloneForTicket,
+  findTicket,
   openTickets,
   orderTickets,
   ticketDragId,
@@ -143,4 +145,18 @@ test("a title with nothing usable in it leaves the id alone", () => {
   const t = { ...ticket("WE-4"), title: "!!!" };
 
   expect(branchNameOf(t)).toBe("we-4");
+});
+
+test("a referenced issue in the column resolves to that ticket", () => {
+  const tickets = [ticket("WE-1"), ticket("WE-2")];
+
+  expect(findTicket("we-2", tickets)?.id).toBe("WE-2");
+  expect(findTicket("WE-9", tickets)).toBeNull();
+});
+
+test("a referenced issue somebody cloned resolves to that clone", () => {
+  const clones = [clone("mercury", "WE-2"), clone("venus")];
+
+  expect(cloneForTicket("we-2", clones)?.id).toBe("mercury");
+  expect(cloneForTicket("WE-1", clones)).toBeNull();
 });

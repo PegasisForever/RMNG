@@ -10,7 +10,7 @@ import { SettingsPanel } from "~/components/SettingsPanel";
 import { SetupWizard } from "~/components/SetupWizard";
 import { MobileDashboard } from "~/components/mobile/MobileDashboard";
 import { TicketPanel } from "~/components/TicketPanel";
-import { openTickets, orderTickets } from "~/lib/tickets";
+import { cloneForTicket, findTicket, openTickets, orderTickets } from "~/lib/tickets";
 import {
   activate,
   activateLayout,
@@ -480,6 +480,30 @@ function Dashboard({
             onCreateClone={() => {
               setTicketPrefill(openTicket.url);
               setCloneOpen(true);
+            }}
+            // A parent or sub-issue the board already holds is one click away, so the row
+            // goes there instead of to Linear. The ticket column first, then the clones:
+            // once work has a clone, the clone is the thing you wanted, and the ticket is
+            // no longer in the column to select anyway.
+            resolveLink={(id) => {
+              const ticket = findTicket(id, visibleTickets);
+              if (ticket) {
+                return {
+                  title: `Show ${ticket.id} in this panel`,
+                  open: () => setOpenTicketId(ticket.id),
+                };
+              }
+              const clone = cloneForTicket(id, state.hosts);
+              if (clone) {
+                return {
+                  title: `Show the clone for ${id}: ${clone.id}`,
+                  open: () => {
+                    setOpenTicketId(null);
+                    run(activate(clone.id));
+                  },
+                };
+              }
+              return null;
             }}
           />
         ) : undefined

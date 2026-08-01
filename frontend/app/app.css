@@ -58,3 +58,50 @@ body {
 .bn-editor {
   background-color: transparent !important;
 }
+
+/* BlockNote pads the editor 54px on each side to park its drag handles in. The ticket
+   panel is 20rem at its narrowest and sets its own gutter, so that padding is both width it
+   cannot spare and a second left edge the title above does not share. Zero it: the panel's
+   px-4 is the only gutter, and the body starts where the title starts.
+
+   Two class selectors, so this beats BlockNote's own single-class rule whatever order the
+   lazy editor chunk loads in. */
+.ticket-description .bn-editor {
+  padding-inline: 0;
+}
+
+/* Body text, 14px instead of BlockNote's 16px. The panel is a column beside the board, not
+   a document anybody reads at arm's length, and 14px is what the rest of the app runs at. */
+.ticket-description .bn-default-styles {
+  font-size: 14px;
+}
+
+/* Headings in a ticket body are capped under the panel's own title (20px semibold). Out of
+   the box BlockNote runs H1 at 3em, which is 42px against a 14px body: it was written for a
+   full-page editor, where the document title is the H1. Here the title sits above the
+   editor, so a heading inside the body is a level below it and has to look like one.
+
+   The sizes are `em` off the 14px block text: 18.2, 16.1, 14.7, then BlockNote's own 1em/
+   .9em/.8em for H4 to H6, which are already under the cap. `--prev-level` is the same ladder
+   for the frame in which a heading changes level, so the animation lands where it started.
+
+   Each selector carries the wrapper class, which outranks BlockNote's own single-attribute
+   rules whatever order the lazy editor chunk loads in. */
+.ticket-description [data-content-type="heading"] {
+  --level: 1.3em;
+}
+.ticket-description [data-content-type="heading"][data-level="2"] {
+  --level: 1.15em;
+}
+.ticket-description [data-content-type="heading"][data-level="3"] {
+  --level: 1.05em;
+}
+.ticket-description [data-prev-level="1"] {
+  --prev-level: 1.3em;
+}
+.ticket-description [data-prev-level="2"] {
+  --prev-level: 1.15em;
+}
+.ticket-description [data-prev-level="3"] {
+  --prev-level: 1.05em;
+}

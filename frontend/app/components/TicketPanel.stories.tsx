@@ -16,6 +16,17 @@ function Description({ text }: { text?: string }) {
   return <TicketDescription markdown={text ?? ""} onSave={fn()} />;
 }
 
+/** Three referenced issues, three answers. WE-302 has a clone on this board, WE-303 and
+ *  WE-280 are in the ticket column, and WE-304 is in neither, so only its row keeps the
+ *  arrow and opens Linear. The route resolves the same three ways against the real lists. */
+const onBoard: Record<string, string> = {
+  "WE-302": "Show the clone for WE-302: mercury",
+  "WE-303": "Show WE-303 in this panel",
+  "WE-280": "Show WE-280 in this panel",
+};
+const resolveLink = (id: string) =>
+  onBoard[id] ? { title: onBoard[id], open: fn() } : null;
+
 const meta = {
   title: "Board/TicketPanel",
   component: TicketPanel,
@@ -25,6 +36,7 @@ const meta = {
     description: <Description text={detailed.description} />,
     onCreateClone: fn(),
     onTitleChange: fn(),
+    resolveLink,
   },
   /** The panel fills a card in the shell's side column, so the story gives it one of the
    *  same size rather than letting it size to its contents. */
@@ -61,7 +73,9 @@ export const NoDescriptionSlot: Story = {
   args: { ticket: bare, description: undefined },
 };
 
-/** No clone action and no title editing: the title falls back to a plain heading. */
+/** No clone action and no title editing: the title falls back to a plain heading. Without a
+ *  resolver every referenced issue opens Linear, which is what a panel with no board behind
+ *  it wants. */
 export const ReadOnly: Story = {
-  args: { onCreateClone: undefined, onTitleChange: undefined },
+  args: { onCreateClone: undefined, onTitleChange: undefined, resolveLink: undefined },
 };

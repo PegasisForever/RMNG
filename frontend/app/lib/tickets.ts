@@ -61,13 +61,23 @@ export function branchNameOf(ticket: LinearTicket): string {
   return slug ? `${ticket.id.toLowerCase()}-${slug}` : ticket.id.toLowerCase();
 }
 
-/** Whether any clone was created for `ticketId`.
+/** The clone somebody made for `ticketId`, or null.
  *
  *  Archived clones count. The ticket did get a clone, and offering to make a second one
- *  because the first was retired is how you end up with two. */
-function hasClone(ticketId: string, clones: Clone[]): boolean {
+ *  because the first was retired is how you end up with two.
+ *
+ *  Identifiers are matched case-insensitively throughout this module: the operator types
+ *  them into the clone dialog by hand, and `we-301` means the same issue as `WE-301`. */
+export function cloneForTicket(ticketId: string, clones: Clone[]): Clone | null {
   const wanted = ticketId.toLowerCase();
-  return clones.some((c) => c.linearTicket?.toLowerCase() === wanted);
+  return clones.find((c) => c.linearTicket?.toLowerCase() === wanted) ?? null;
+}
+
+/** The ticket with `ticketId` among `tickets`, or null. Pass the list the column actually
+ *  draws: a ticket that is not in it has nothing on this board to show. */
+export function findTicket(ticketId: string, tickets: LinearTicket[]): LinearTicket | null {
+  const wanted = ticketId.toLowerCase();
+  return tickets.find((t) => t.id.toLowerCase() === wanted) ?? null;
 }
 
 /** The tickets the column draws: open ones nobody has cloned yet, deduplicated, in the
@@ -80,7 +90,7 @@ export function openTickets(tickets: LinearTicket[], clones: Clone[]): LinearTic
   return tickets.filter((t) => {
     if (t.state !== "todo" && t.state !== "in_progress") return false;
     const key = t.id.toLowerCase();
-    if (seen.has(key) || hasClone(t.id, clones)) return false;
+    if (seen.has(key) || cloneForTicket(t.id, clones)) return false;
     seen.add(key);
     return true;
   });
