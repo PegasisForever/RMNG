@@ -382,6 +382,8 @@ function Dashboard({
     null,
   );
   const [newCloneColumn, setNewCloneColumn] = useState<string | null>(null);
+  /** The clone the open create-dialog is making, selected when the dialog closes. */
+  const [newClone, setNewClone] = useState<string | null>(null);
   useEffect(() => {
     if (!pendingColumn) return;
     const { columnId, target } = pendingColumn;
@@ -530,6 +532,14 @@ function Dashboard({
               onClose={() => {
                 setCloneOpen(false);
                 setNewCloneColumn(null);
+                // Land on the clone that was just made. The dialog only closes once its
+                // operation has settled, so by the time this runs the clone either exists or
+                // the create failed — hence the check, so a failed create leaves the current
+                // selection alone rather than pointing at a clone that never appeared.
+                if (newClone && state.hosts.some((h) => h.id === newClone)) {
+                  run(activate(newClone));
+                }
+                setNewClone(null);
               }}
               // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
               // progress, and closes when the op settles. So this just starts it and hands the
@@ -541,6 +551,9 @@ function Dashboard({
                   if (newCloneColumn) {
                     setPendingColumn({ columnId: newCloneColumn, target: op.target });
                   }
+                  // The op's target is the new clone's id; `onClose` selects it once the
+                  // dialog settles, so making a clone leaves the operator looking at it.
+                  setNewClone(op.target);
                   return op;
                 })
               }

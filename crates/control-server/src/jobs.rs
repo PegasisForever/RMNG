@@ -1007,6 +1007,17 @@ async fn run_archive(app: App, op_id: String, host_id: String) {
             host.local_ip = None;
             host.unread = false;
         }
+        // Archiving the clone the operator is watching has to move them off it. A selection
+        // left pointing at a frozen clone aims the viewer's input at a daemon that will
+        // never read it, and leaves a still frame on screen that looks live. `activate`
+        // refuses to select an archived clone, so nothing else would ever clear this.
+        if s.selected.as_deref() == Some(host_id.as_str()) {
+            s.selected = s
+                .hosts
+                .iter()
+                .find(|h| !h.archived && h.managed)
+                .map(|h| h.id.clone());
+        }
         if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
             op.status = OperationStatus::Done;
             op.step = "done".into();

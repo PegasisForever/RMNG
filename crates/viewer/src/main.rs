@@ -850,11 +850,19 @@ fn build_ui(
 /// A blank placeholder for a secondary monitor window while a headless clone is selected (kept
 /// open per the "only the primary window shows tmux" rule, but with no live content).
 fn placeholder_widget() -> gtk4::Widget {
-    let label = gtk4::Label::new(Some("Headless clone selected — no desktop"));
+    message_widget("Headless clone selected — no desktop")
+}
+
+/// A centred dim label filling the window. The placeholder for any window with nothing to
+/// paint: a headless clone, or a monitor whose decoder could not be built.
+fn message_widget(text: &str) -> gtk4::Widget {
+    let label = gtk4::Label::new(Some(text));
     label.set_halign(gtk4::Align::Center);
     label.set_valign(gtk4::Align::Center);
     label.set_hexpand(true);
     label.set_vexpand(true);
+    label.set_wrap(true);
+    label.set_justify(gtk4::Justification::Center);
     label.add_css_class("dim-label");
     label.upcast()
 }
@@ -951,27 +959,40 @@ fn reconcile_view(
             // Headed clone: every window shows its monitor's video.
             if fresh || !matches!(mw.content, Content::Video(_)) {
                 teardown_content(mw, srcs, pointer_lock);
-                let vc = make_video_content(
+                match make_video_content(
                     m.id, &mw.window, &mw.fps_count, layout, writer, pointer_lock, warp, auto,
-                );
-                // Register the appsrc and flush any AUs that arrived before it existed — atomically
-                // under the srcs lock, so a net-thread direct push can't slip ahead of the queued
-                // (older) AUs and reorder the decode feed.
-                {
-                    let mut srcs_g = srcs.lock().unwrap();
-                    srcs_g.insert(m.id, vc.appsrc.clone());
-                    let mut q = aus.lock().unwrap();
-                    let mut i = 0;
-                    while i < q.len() {
-                        if q[i].0 == m.id {
-                            let (_, au) = q.remove(i).expect("index in range");
-                            let _ = vc.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
-                        } else {
-                            i += 1;
+                ) {
+                    Some(vc) => {
+                        // Register the appsrc and flush any AUs that arrived before it existed —
+                        // atomically under the srcs lock, so a net-thread direct push can't slip
+                        // ahead of the queued (older) AUs and reorder the decode feed.
+                        {
+                            let mut srcs_g = srcs.lock().unwrap();
+                            srcs_g.insert(m.id, vc.appsrc.clone());
+                            let mut q = aus.lock().unwrap();
+                            let mut i = 0;
+                            while i < q.len() {
+                                if q[i].0 == m.id {
+                                    let (_, au) = q.remove(i).expect("index in range");
+                                    let _ = vc.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
+                                } else {
+                                    i += 1;
+                                }
+                            }
                         }
+                        mw.content = Content::Video(vc);
+                    }
+                    // No decoder: say so in the window and keep the rest of the viewer alive.
+                    // Dropping any queued access units for this monitor with it, since nothing
+                    // will ever consume them and they would otherwise grow without bound.
+                    None => {
+                        aus.lock().unwrap().retain(|(id, _)| *id != m.id);
+                        mw.window.set_child(Some(&message_widget(
+                            "No video for this monitor.\nThe decode pipeline could not be built — see the log.",
+                        )));
+                        mw.content = Content::Placeholder;
                     }
                 }
-                mw.content = Content::Video(vc);
             }
         }
     }
@@ -1152,6 +1173,11 @@ fn make_window_shell(
 /// controllers, set as `window`'s child. Wires the shared FPS counter to the new paintable and
 /// returns the state the tick touches — including the window-level keyboard controller, which the
 /// caller removes (via `teardown_content`) when this window later leaves video mode.
+///
+/// `None` when the decode pipeline cannot be built — a missing GStreamer element, or a stream
+/// this machine's VA-API cannot handle. The caller shows a message instead. This must not
+/// panic: it runs inside a glib callback, which cannot unwind, so a panic here aborts the
+/// whole viewer rather than losing one window.
 #[allow(clippy::too_many_arguments)]
 fn make_video_content(
     mid: u32,
@@ -1162,8 +1188,14 @@ fn make_video_content(
     pointer_lock: &Option<Rc<PointerLock>>,
     warp: &WarpSuppress,
     auto: &AutoLockShared,
-) -> VideoContent {
-    let (appsrc, paintable, pipeline) = make_decoder(mid).expect("build decoder");
+) -> Option<VideoContent> {
+    let (appsrc, paintable, pipeline) = match make_decoder(mid) {
+        Ok(parts) => parts,
+        Err(e) => {
+            tracing::error!("monitor {mid}: cannot build the decode pipeline: {e:#}");
+            return None;
+        }
+    };
 
     let video = gtk4::Picture::for_paintable(&paintable);
     video.set_can_shrink(true);
@@ -1209,7 +1241,7 @@ fn make_video_content(
     install_pointer(&video, mid, &paintable, window, layout, writer, &state, pointer_lock, warp);
     let (keyboard, active_notify) = install_keyboard(window, writer, &state, pointer_lock, auto);
 
-    VideoContent {
+    Some(VideoContent {
         video,
         cursor,
         appsrc,
@@ -1220,7 +1252,7 @@ fn make_video_content(
         cursor_hidden: false,
         keyboard,
         active_notify: Some(active_notify),
-    }
+    })
 }
 
 /// The pre-connection window, shown from launch until the first monitor window
