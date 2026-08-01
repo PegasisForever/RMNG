@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 
 import { ImagePicker } from "./ImagePicker";
-import { images } from "~/stories/fixtures";
+import { images } from "./__fixtures__/images";
 
 const meta = {
   title: "Clone/ImagePicker",

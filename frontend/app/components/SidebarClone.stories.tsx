@@ -5,7 +5,6 @@ import { fn } from "storybook/test";
 
 import { SidebarClone } from "./SidebarClone";
 import {
-  deleteOperation,
   cloneDualProvider,
   cloneIdle,
   cloneIds,
@@ -13,9 +12,11 @@ import {
   cloneOffline,
   cloneUnmanaged,
   cloneWorking,
-  cloneTokens,
-  stats,
-} from "~/stories/fixtures";
+  makeCloneIdle,
+  makeCloneWorking,
+} from "./__fixtures__/clones";
+import { deleteOperation } from "./__fixtures__/operations";
+import { cloneTokens, stats } from "./__fixtures__/stats";
 
 const meta = {
   title: "Sidebar/SidebarClone",
@@ -98,7 +99,7 @@ export const Unmanaged: Story = {
 
 /** Retained clone: no live CPU/RAM, but its token totals stay — the work already happened. */
 export const Archived: Story = {
-  args: { clone: { ...cloneIdle, archived: true }, tokens: cloneTokens[cloneIdle.id] },
+  args: { clone: makeCloneIdle({ archived: true }), tokens: cloneTokens[cloneIdle.id] },
 };
 
 /** The selected (active) row. */
@@ -119,12 +120,11 @@ export const Busy: Story = {
 /** Overflow stress test: a very long title wraps back to the left edge past its ticket badge. */
 export const LongTitleAndDescription: Story = {
   args: {
-    clone: {
-      ...cloneWorking,
+    clone: makeCloneWorking({
       linearTicket: "WE-1042",
       displayName:
         "Investigate and fix the intermittent WebRTC reconnection storm when a clone's headless GNOME session restarts under sustained 4:4:4 encode load",
-    },
+    }),
     stats: stats[cloneWorking.id],
   },
 };
@@ -134,15 +134,14 @@ export const LongTitleAndDescription: Story = {
  *  error, offline (no runtime yet), and a muted rule toggled off. */
 export const WithForwards: Story = {
   args: {
-    clone: {
-      ...cloneWorking,
+    clone: makeCloneWorking({
       forwards: [
         { id: "f8080", remotePort: 3000, localPort: 8080, enabled: true, label: null },
         { id: "f9000", remotePort: 9000, localPort: 9000, enabled: true, label: null },
         { id: "f5433", remotePort: 5432, localPort: 5433, enabled: true, label: null },
         { id: "f7000", remotePort: 7000, localPort: 7000, enabled: false, label: null },
       ],
-    },
+    }),
     stats: stats[cloneWorking.id],
     forwardRuntime: [
       { id: "f8080", state: "listening", error: null, activeConns: 2 },

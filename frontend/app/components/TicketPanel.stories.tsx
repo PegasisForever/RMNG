@@ -3,11 +3,9 @@ import { fn } from "storybook/test";
 
 import { TicketPanel } from "./TicketPanel";
 import TicketDescription from "./TicketDescription";
-import { linearTickets } from "~/stories/fixtures";
-
-const detailed = linearTickets[0]; // WE-301: description, sub-issues, due date, estimate
-const child = linearTickets[1]; // WE-288: a parent, no sub-issues of its own
-const bare = linearTickets[3]; // DEV-97: nothing but a title
+// ticketDetailed is WE-301 (description, sub-issues, due date, estimate), ticketSubIssue is
+// WE-288 (a parent, no sub-issues of its own), and ticketBare is DEV-97 (nothing but a title).
+import { ticketBare, ticketDetailed, ticketSubIssue } from "./__fixtures__/tickets";
 
 /** The real editor, on a fixture. Edits go nowhere: the story spies on the save instead of
  *  writing to Linear. Stories run in the browser, so BlockNote needs no mount gate here —
@@ -21,8 +19,8 @@ const meta = {
   component: TicketPanel,
   parameters: { layout: "centered" },
   args: {
-    ticket: detailed,
-    description: <Description text={detailed.description} />,
+    ticket: ticketDetailed,
+    description: <Description text={ticketDetailed.description} />,
     onCreateClone: fn(),
     onTitleChange: fn(),
   },
@@ -45,20 +43,20 @@ export const Default: Story = {};
 /** A sub-issue itself. Its parent gets a row above the properties, which is where Linear
  *  puts it too. */
 export const WithParent: Story = {
-  args: { ticket: child, description: <Description text={child.description} /> },
+  args: { ticket: ticketSubIssue, description: <Description text={ticketSubIssue.description} /> },
 };
 
 /** Nothing but a title. Every unset property is left out rather than drawn as "None", and
  *  the description is an empty editor waiting to be typed into rather than a "none" line:
  *  the body is editable, so its empty state is the same box its full state is. */
 export const Bare: Story = {
-  args: { ticket: bare, description: <Description /> },
+  args: { ticket: ticketBare, description: <Description /> },
 };
 
 /** The description slot left out entirely, which is what a caller that cannot edit passes.
  *  Only then does the panel say there is nothing there. */
 export const NoDescriptionSlot: Story = {
-  args: { ticket: bare, description: undefined },
+  args: { ticket: ticketBare, description: undefined },
 };
 
 /** No clone action and no title editing: the title falls back to a plain heading. */

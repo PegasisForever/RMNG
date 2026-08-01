@@ -3,7 +3,8 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { TicketColumn } from "./TicketColumn";
 import { openTickets, orderTickets } from "~/lib/tickets";
-import { hosts, linearTickets } from "~/stories/fixtures";
+import { hosts } from "./__fixtures__/clones";
+import { linearTickets } from "./__fixtures__/tickets";
 
 const meta = {
   title: "Board/TicketColumn",

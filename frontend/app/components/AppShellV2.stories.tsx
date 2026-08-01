@@ -12,35 +12,24 @@ import { SettingsPanel } from "./SettingsPanel";
 import { moveCard, newColumnId, removeColumn, resolveColumns } from "~/lib/board";
 import { openTickets, orderTickets, type LinearTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
-import {
-  boardColumns,
-  chatMessages,
-  chatNow,
-  claudeAccounts,
-  cloneGroups,
-  cloneNoToken,
-  appConfig,
-  cloneOperation,
-  cloneTokens,
-  cloneWorking,
-  codexGroups,
-  hosts,
-  images,
-  linearTickets,
-  lxcStats,
-  notesBlocks,
-  scheduledMessages,
-  stats,
-} from "~/stories/fixtures";
+import { claudeAccounts, cloneGroups, codexGroups } from "./__fixtures__/accounts";
+import { appConfig } from "./__fixtures__/appConfig";
+import { boardColumns, makeBoardColumn } from "./__fixtures__/board";
+import { chatMessages, chatNow, scheduledMessages } from "./__fixtures__/chat";
+import { cloneWorking, hosts, makeCloneNoToken } from "./__fixtures__/clones";
+import { images } from "./__fixtures__/images";
+import { notesBlocks } from "./__fixtures__/notes";
+import { cloneOperation } from "./__fixtures__/operations";
+import { cloneTokens, lxcStats, stats } from "./__fixtures__/stats";
+import { linearTickets } from "./__fixtures__/tickets";
 
 /** A clone that starts out in the archived column, so the fixed right column has something
  *  in it to drag back out. */
-const archivedClone: Clone = {
-  ...cloneNoToken,
+const archivedClone: Clone = makeCloneNoToken({
   id: "pega-spike-4",
   displayName: "Spike: swap the encoder to VA-API",
   archived: true,
-};
+});
 
 const boardClones: Clone[] = [...hosts, archivedClone];
 
@@ -367,7 +356,7 @@ export const EmptyBoard: Story = {
   args: {
     board: {
       ...board,
-      columns: [{ id: "todo", title: "Todo", cloneIds: [], archive: false }],
+      columns: [makeBoardColumn()],
       clones: [],
       selectedId: null,
     },

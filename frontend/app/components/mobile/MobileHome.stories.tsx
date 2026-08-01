@@ -4,13 +4,9 @@ import { fn } from "storybook/test";
 
 import { MobileHome } from "./MobileHome";
 import { PhoneFrame } from "~/stories/PhoneFrame";
-import {
-  boardColumns,
-  claudeAccounts,
-  cloneGroups,
-  codexGroups,
-  hosts,
-} from "~/stories/fixtures";
+import { claudeAccounts, cloneGroups, codexGroups } from "../__fixtures__/accounts";
+import { boardColumns } from "../__fixtures__/board";
+import { hosts } from "../__fixtures__/clones";
 
 const meta = {
   title: "Page/Mobile/Home",

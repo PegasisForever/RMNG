@@ -6,14 +6,9 @@ import { MobileClone, type CloneTab } from "./MobileClone";
 import { ChatView } from "~/components/ChatView";
 import { NotesEditor } from "~/components/NotesEditor";
 import { PhoneFrame } from "~/stories/PhoneFrame";
-import {
-  chatMessages,
-  chatNow,
-  cloneOffline,
-  cloneWorking,
-  notesBlocks,
-  scheduledMessages,
-} from "~/stories/fixtures";
+import { chatMessages, chatNow, scheduledMessages } from "../__fixtures__/chat";
+import { cloneOffline, cloneWorking } from "../__fixtures__/clones";
+import { notesBlocks } from "../__fixtures__/notes";
 
 /** The chat pane on fixtures instead of the per-clone SSE stream. */
 function ChatFixture({ busy = false }: { busy?: boolean }) {

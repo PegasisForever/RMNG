@@ -16,7 +16,9 @@ async function flattenPlugins(plugins: PluginOption[]): Promise<{ name?: string 
 
 const config: StorybookConfig = {
   stories: ["../app/**/*.stories.@(ts|tsx)"],
-  addons: [],
+  // addon-links lets a story's navigation callback jump to the destination story, so an
+  // overlay is reachable from the page that opens it without ever rendering it inline.
+  addons: ["@storybook/addon-links"],
   framework: { name: "@storybook/react-vite", options: {} },
   async viteFinal(cfg) {
     // Storybook auto-merges the project's vite.config.ts — that's how Tailwind 4

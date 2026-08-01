@@ -5,7 +5,10 @@ import { fn } from "storybook/test";
 import { SettingsPanel } from "./SettingsPanel";
 import { newColumnId, removeColumn } from "~/lib/board";
 import type { Operation } from "~/lib/types";
-import { appConfig, boardColumns, claudeAccounts, images } from "~/stories/fixtures";
+import { claudeAccounts } from "./__fixtures__/accounts";
+import { appConfig, makeAppConfig } from "./__fixtures__/appConfig";
+import { boardColumns } from "./__fixtures__/board";
+import { images } from "./__fixtures__/images";
 
 // Mocked server calls — the component never imports the real API, so a story just
 // injects these. `fn(impl)` both runs the implementation and records the call in the
@@ -125,7 +128,7 @@ export const RestartRequired: Story = {
 
 /** First-run setup: subnet is still editable (not yet baked in). */
 export const PreSetup: Story = {
-  args: { getConfig: fn(async () => ({ ...appConfig, setupComplete: false })) },
+  args: { getConfig: fn(async () => makeAppConfig({ setupComplete: false })) },
 };
 
 /** Nothing imported and no groups configured — both account lists and both group editors
@@ -133,7 +136,7 @@ export const PreSetup: Story = {
 export const NoAccounts: Story = {
   args: {
     accounts: [],
-    getConfig: fn(async () => ({ ...appConfig, cloneGroups: [], codexGroups: [] })),
+    getConfig: fn(async () => makeAppConfig({ cloneGroups: [], codexGroups: [] })),
   },
 };
 
