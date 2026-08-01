@@ -15,7 +15,7 @@ no signaling** in this app.
 - `CloneModal` (existing/new/plain ticket + Claude account picker).
 - `ClaudeAccountsPanel` (5h/7d usage bars).
 - `ChatContainer` + `ChatView` (per-host agent chat over `/api/chat/:id/events`).
-- `CloneEditor` (notes/BlockNote + uploads).
+- `NotesEditorContainer` + `NotesEditorView` (notes/BlockNote + uploads).
 - `OperationProgress` (clone/delete progress).
 - SSE subscription to `/events` → `ControlState`.
 

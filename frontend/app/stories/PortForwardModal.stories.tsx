@@ -17,7 +17,7 @@ const clone: Clone = {
 };
 
 const meta: Meta<typeof PortForwardModal> = {
-  title: "Modals/PortForwardModal",
+  title: "Modals/Components/PortForwardModal",
   component: PortForwardModal,
   args: {
     clone,

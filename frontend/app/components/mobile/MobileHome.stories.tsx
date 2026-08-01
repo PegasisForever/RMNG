@@ -9,7 +9,7 @@ import { boardColumns } from "../__fixtures__/board";
 import { hosts } from "../__fixtures__/clones";
 
 const meta = {
-  title: "Page/Mobile/Home",
+  title: "Mobile/Pages/MobileHome",
   component: MobileHome,
   parameters: { layout: "centered" },
   args: {

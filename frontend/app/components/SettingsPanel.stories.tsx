@@ -43,7 +43,7 @@ const updateOp: Operation = {
 };
 
 const meta = {
-  title: "Settings/SettingsPanel",
+  title: "Settings/Components/SettingsPanel",
   component: SettingsPanel,
   parameters: { layout: "fullscreen" },
   args: {

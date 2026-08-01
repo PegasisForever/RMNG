@@ -15,7 +15,7 @@ function Description({ text }: { text?: string }) {
 }
 
 const meta = {
-  title: "Board/TicketPanel",
+  title: "Board/Components/TicketPanel",
   component: TicketPanel,
   parameters: { layout: "centered" },
   args: {

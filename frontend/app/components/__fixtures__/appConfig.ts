@@ -3,7 +3,7 @@
 
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
-import { cloneGroups, codexGroups } from "./accounts";
+import { makeCloneGroups, makeCodexGroups } from "./accounts";
 
 export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
@@ -41,10 +41,10 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
       pinnedEmail: "alex@example.com",
     },
     codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
-    // Copied per call, down to the member list, so two configs built from this builder never
-    // share an array with each other or with the accounts fixture module.
-    cloneGroups: cloneGroups.map((g) => ({ ...g, accounts: [...g.accounts] })),
-    codexGroups: codexGroups.map((g) => ({ ...g, accounts: [...g.accounts] })),
+    // Built per call, down to the member list, so two configs from this builder never share
+    // an array with each other or with the accounts fixture module.
+    cloneGroups: makeCloneGroups(),
+    codexGroups: makeCodexGroups(),
     presets: [
       {
         name: "webapp",

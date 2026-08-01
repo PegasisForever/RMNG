@@ -1,12 +1,19 @@
 // The agent thread and its queue, so the chat pane renders without the per-clone SSE stream.
 //
-// `chatNow` is the clock the view is given, so the scheduled-message labels ("Today 15:30")
-// come out the same on every load.
+// `chatNow` and `chatLocale` are the clock and the locale the view is given, so the
+// scheduled-message labels ("Today 15:00") come out the same on every load and on every
+// machine. Without the locale the same story reads "Today 03:00 PM" under en-US and
+// "Today 15:00" under en-GB.
 
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 
 export const chatNow = new Date(2026, 6, 27, 14, 5).getTime();
+
+/** A 24-hour English locale, so the labels read "Today 15:00" and "Tue 10:05" the way the
+ *  code's own examples say they do. Built from local wall-clock parts, `chatNow` also renders
+ *  the same under every TZ: the constructor and the formatter read the same local frame. */
+export const chatLocale = "en-GB";
 
 export function makeChatMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -40,9 +47,11 @@ export const chatMessages: ChatMessage[] = [
 /** The agent's current tool line, shown under the working bubble while a turn is in flight. */
 export const chatActivity = "Bash(bun run build)";
 
-/** What a failed send puts in the banner. The server answers `{ error }`, and the panel shows
- *  that string as it came. */
-export const chatError = "chat failed: agent is not running in pega-we-142";
+/** What a failed send puts in the banner, all of it. The chat routes answer an error
+ *  as a plain-text body, but the send path parses that body as JSON and reads `.error` off the
+ *  result, so the parse always fails and the fallback string is all the operator ever sees.
+ *  The server's own words ("clone 'pega-we-142' is archived") are discarded on the way. */
+export const chatError = "chat failed";
 
 /** Unsent composer text, for the states where the box is not empty: a send that failed and
  *  put the text back, or a message waiting on a delivery time. */

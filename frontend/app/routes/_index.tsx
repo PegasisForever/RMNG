@@ -61,7 +61,7 @@ import type { Route } from "./+types/_index";
 
 // BlockNote + the chat panel are browser-only; load them lazily and render only
 // after mount so they never participate in SSR.
-const CloneEditor = lazy(() => import("~/components/CloneEditor"));
+const NotesEditorContainer = lazy(() => import("~/components/NotesEditorContainer"));
 const ChatContainer = lazy(() => import("~/components/ChatContainer"));
 // The ticket description is markdown, and rendering it means BlockNote, which is as
 // browser-only as the notes editor that already uses it.
@@ -568,7 +568,7 @@ function Dashboard({
                 <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
               }
             >
-              <CloneEditor key={selectedClone.id} cloneId={selectedClone.id} />
+              <NotesEditorContainer key={selectedClone.id} cloneId={selectedClone.id} />
             </Suspense>
           </ClientOnly>
         ) : null

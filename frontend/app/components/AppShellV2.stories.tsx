@@ -4,7 +4,7 @@ import { fn } from "storybook/test";
 
 import { AppShellV2, type SideFocus } from "./AppShellV2";
 import { ChatView } from "./ChatView";
-import { NotesEditor } from "./NotesEditor";
+import { NotesEditorView } from "./NotesEditorView";
 import { CloneModal } from "./CloneModal";
 import { TicketPanel } from "./TicketPanel";
 import TicketDescription from "./TicketDescription";
@@ -12,10 +12,16 @@ import { SettingsPanel } from "./SettingsPanel";
 import { moveCard, newColumnId, removeColumn, resolveColumns } from "~/lib/board";
 import { openTickets, orderTickets, type LinearTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
-import { claudeAccounts, cloneGroups, codexGroups } from "./__fixtures__/accounts";
+import { makeClaudeAccounts, makeCloneGroups, makeCodexGroups } from "./__fixtures__/accounts";
 import { appConfig } from "./__fixtures__/appConfig";
 import { boardColumns, makeBoardColumn } from "./__fixtures__/board";
-import { chatActivity, chatMessages, chatNow, scheduledMessages } from "./__fixtures__/chat";
+import {
+  chatActivity,
+  chatLocale,
+  chatMessages,
+  chatNow,
+  scheduledMessages,
+} from "./__fixtures__/chat";
 import { cloneWorking, hosts, makeCloneNoToken } from "./__fixtures__/clones";
 import { images } from "./__fixtures__/images";
 import { makeNotesBlocks } from "./__fixtures__/notes";
@@ -54,6 +60,7 @@ function ChatFixture({ busy = false, archived = false }: { busy?: boolean; archi
       onStop={fn()}
       onCancelScheduled={(id) => setScheduled((s) => s.filter((m) => m.id !== id))}
       now={chatNow}
+      locale={chatLocale}
     />
   );
 }
@@ -61,7 +68,7 @@ function ChatFixture({ busy = false, archived = false }: { busy?: boolean; archi
 /** The notes pane on a sample document. Edits go nowhere — no autosave, no upload. */
 function NotesFixture() {
   return (
-    <NotesEditor
+    <NotesEditorView
       initialContent={makeNotesBlocks()}
       onChange={fn()}
       uploadFile={async () => "data:image/gif;base64,R0lGODlhAQABAAAAACw="}
@@ -96,19 +103,24 @@ const settingsStubs = {
   onImportAccount: fn(),
 };
 
-const rail = {
-  accounts: claudeAccounts,
-  cloneGroups,
-  codexGroups,
-  lxcStats,
-  operations: [],
-  presetNames: ["Default", "Focus"],
-  activeLayout: "Default",
-  onActivateLayout: fn(),
-  onOpenSettings: fn(),
-  onImportAccount: fn(),
-  onRefresh: fn(),
-};
+/** The control rail's props, built fresh per story. The account lists and the pools reach
+ *  components that hold them in state, so one array behind every story is how an edit in one
+ *  story leaks into the next. */
+function makeRail() {
+  return {
+    accounts: makeClaudeAccounts(),
+    cloneGroups: makeCloneGroups(),
+    codexGroups: makeCodexGroups(),
+    lxcStats,
+    operations: [],
+    presetNames: ["Default", "Focus"],
+    activeLayout: "Default",
+    onActivateLayout: fn(),
+    onOpenSettings: fn(),
+    onImportAccount: fn(),
+    onRefresh: fn(),
+  };
+}
 
 /** The ticket column's own props, hoisted so the render can rebuild just its list as
  *  clones come and go without losing the callbacks. */
@@ -145,12 +157,12 @@ const board = {
 };
 
 const meta = {
-  title: "Page/AppShellV2",
+  title: "Dashboard/Pages/AppShellV2",
   component: AppShellV2,
   parameters: { layout: "fullscreen" },
   args: {
     board,
-    rail,
+    rail: makeRail(),
     selectedClone: cloneWorking,
     error: null,
     sideFocus: "notes" as SideFocus,
@@ -346,7 +358,7 @@ export const NoCloneSelected: Story = {
 export const WithError: Story = {
   args: {
     error: "swap account: clone pega-we-142 is not running",
-    rail: { ...rail, operations: [cloneOperation] },
+    rail: { ...makeRail(), operations: [cloneOperation] },
     board: { ...board, operations: [cloneOperation] },
   },
 };
@@ -360,7 +372,7 @@ export const EmptyBoard: Story = {
       clones: [],
       selectedId: null,
     },
-    rail: { ...rail, accounts: [], cloneGroups: [], codexGroups: [], lxcStats: null },
+    rail: { ...makeRail(), accounts: [], cloneGroups: [], codexGroups: [], lxcStats: null },
     selectedClone: null,
   },
 };

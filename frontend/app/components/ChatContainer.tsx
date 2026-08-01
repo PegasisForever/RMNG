@@ -1,5 +1,5 @@
 // Per-clone chat with the in-container agent (Claude Agent SDK). Client-only, lazy-imported
-// and keyed by clone id (same pattern as CloneEditor). Subscribes to the per-clone
+// and keyed by clone id (same pattern as NotesEditorContainer). Subscribes to the per-clone
 // chat SSE (/api/chat/:id/events) for { busy, messages, scheduled }, so the agent's reply
 // and the "working" indicator survive a refresh — the POST only kicks the turn
 // off; the reply lands over SSE. Posting a message is fire-and-forget.
@@ -9,10 +9,11 @@
 // restart). The pending queue rides the same SSE frame, so a cancel in one tab is reflected
 // in every other one with no extra stream to manage here.
 //
-// This is the container half: the stream, the four calls behind it, the draft store, and the
-// clock. Every one of those is a thing a story cannot have, which is why they all live here
-// and nothing below ChatView knows about any of them. The markup is ChatView, which takes the
-// thread and the composer state as props and is the half Storybook renders.
+// This is the container half: the stream, the four calls behind it, the draft store, the
+// clock, and the operator's locale. Every one of those is a thing a story cannot have, which
+// is why they all live here and nothing below ChatView knows about any of them. The markup is
+// ChatView, which takes the thread and the composer state as props and is the half Storybook
+// renders.
 import { useCallback, useEffect, useState } from "react";
 
 import { ChatView, localInputToEpochMs } from "~/components/ChatView";
@@ -187,9 +188,12 @@ export default function ChatContainer({
       onSchedule={schedule}
       onStop={stop}
       onCancelScheduled={cancelScheduled}
-      // The clock is read here, on the container's side of the seam, so the same props always
-      // draw the same pane. A story hands it a fixed instant instead.
+      // The clock and the locale are read here, on the container's side of the seam, so the
+      // same props always draw the same pane. A story hands over a fixed instant and a fixed
+      // locale instead. This module is client-only, so `navigator` is always there. The
+      // fallback exists only because the type cannot say so.
       now={Date.now()}
+      locale={typeof navigator === "undefined" ? "en-US" : navigator.language}
     />
   );
 }

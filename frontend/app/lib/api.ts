@@ -89,6 +89,24 @@ export const putBoardColumns = (columns: BoardColumn[]) =>
 export const putTicket = (id: string, patch: { title?: string; description?: string }) =>
   putJson(`/api/tickets/${encodeURIComponent(id)}`, patch);
 
+// --- uploads ---------------------------------------------------------------
+
+/** Store a pasted or dropped image and answer with its URL.
+ *
+ *  Multipart, not JSON, so it goes around `postJson`. Both BlockNote editors hand this to the
+ *  library as its `uploadFile`, which is why it takes a `File` and returns a bare string.
+ *
+ *  The URL it returns is LAN-only (`/uploads/<name>`). A markdown body bound for Linear is
+ *  re-hosted server-side (`linear::rehost_markdown_images`) before the ticket is created. */
+export async function uploadFile(file: File): Promise<string> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/upload", { method: "POST", body: fd });
+  const data = (await res.json()) as { url?: string; error?: string };
+  if (!res.ok || !data.url) throw new Error(data.error ?? "upload failed");
+  return data.url;
+}
+
 // --- images (clone-source templates) ---------------------------------------
 
 /** The clone-source images (`rmng.image=1`); each carries the ids of the live

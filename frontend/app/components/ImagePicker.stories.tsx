@@ -5,7 +5,7 @@ import { ImagePicker } from "./ImagePicker";
 import { images } from "./__fixtures__/images";
 
 const meta = {
-  title: "Clone/ImagePicker",
+  title: "Clone/Components/ImagePicker",
   component: ImagePicker,
   parameters: { layout: "centered" },
   // Local state so the dropdown actually selects; the picker also self-selects the

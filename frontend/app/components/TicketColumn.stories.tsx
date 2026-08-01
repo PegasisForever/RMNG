@@ -7,7 +7,7 @@ import { hosts } from "./__fixtures__/clones";
 import { linearTickets } from "./__fixtures__/tickets";
 
 const meta = {
-  title: "Board/TicketColumn",
+  title: "Board/Components/TicketColumn",
   component: TicketColumn,
   parameters: { layout: "fullscreen" },
   args: {

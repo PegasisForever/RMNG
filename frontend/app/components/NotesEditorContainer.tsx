@@ -1,22 +1,16 @@
-// Per-clone notes container. Loads the clone's document from /api/notes/:id, autosaves
-// (debounced) back to it, and uploads pasted/dropped images via /api/upload. The editor
-// itself is NotesEditor; this module is the network half.
+// Per-clone notes: the network half. Loads the clone's document from /api/notes/:id, autosaves
+// it back (debounced), and hands the editor the /api/upload call for pasted images. Every one
+// of those is a thing a story cannot have, which is why they live here and nothing below
+// knows about any of them. The markup is NotesEditorView, which takes the document and the
+// callbacks as props and is the half Storybook renders.
 //
-// Client-only (BlockNote/ProseMirror touch the DOM), so it is lazy-imported behind a
-// mount gate in _index.tsx and never runs during SSR.
+// Client-only (BlockNote/ProseMirror touch the DOM), so it is lazy-imported behind a mount
+// gate in _index.tsx and MobileDashboard.tsx, and never runs during SSR.
 import type { PartialBlock } from "@blocknote/core";
 import { useEffect, useRef, useState } from "react";
 
-import { NotesEditor } from "~/components/NotesEditor";
-
-async function uploadFile(file: File): Promise<string> {
-  const fd = new FormData();
-  fd.append("file", file);
-  const res = await fetch("/api/upload", { method: "POST", body: fd });
-  const data = (await res.json()) as { url?: string; error?: string };
-  if (!res.ok || !data.url) throw new Error(data.error ?? "upload failed");
-  return data.url;
-}
+import { NotesEditorView } from "~/components/NotesEditorView";
+import { uploadFile } from "~/lib/api";
 
 const SAVE_DEBOUNCE_MS = 600;
 
@@ -51,7 +45,7 @@ function SavingEditor({
   useEffect(() => () => flush(), []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <NotesEditor
+    <NotesEditorView
       initialContent={initialContent}
       uploadFile={uploadFile}
       onChange={(blocks) => {
@@ -63,7 +57,7 @@ function SavingEditor({
   );
 }
 
-export default function CloneEditor({ cloneId }: { cloneId: string }) {
+export default function NotesEditorContainer({ cloneId }: { cloneId: string }) {
   const [initial, setInitial] = useState<"loading" | PartialBlock[] | undefined>(
     "loading",
   );

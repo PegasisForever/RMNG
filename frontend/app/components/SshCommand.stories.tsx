@@ -23,7 +23,7 @@ function SshCommandPreview({
 }
 
 const meta = {
-  title: "Sidebar/SshCommand",
+  title: "Sidebar/Components/SshCommand",
   component: SshCommandPreview,
   parameters: { layout: "padded" },
 } satisfies Meta<typeof SshCommandPreview>;

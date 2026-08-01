@@ -11,8 +11,9 @@ import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import { useModalEscape } from "~/lib/useModalEscape";
 import { parseTicketInput, workspaceBadge } from "~/lib/workspace";
 
-// BlockNote is browser-only and heavy; the description field pulls it in on demand.
-const MarkdownEditor = lazy(() => import("~/components/MarkdownEditor"));
+// BlockNote is browser-only and heavy; the description field pulls it in on demand. The
+// container is the import target, so the /api/upload call it owns rides the same lazy chunk.
+const MarkdownEditorContainer = lazy(() => import("~/components/MarkdownEditorContainer"));
 
 /** What the dialog should do about the clone operation it started. */
 export type OpPhase = "running" | "done" | "failed";
@@ -429,7 +430,7 @@ export function CloneModal({
                       </p>
                     }
                   >
-                    <MarkdownEditor
+                    <MarkdownEditorContainer
                       onChange={setDescription}
                       placeholder="What needs doing — paste images, format freely"
                     />

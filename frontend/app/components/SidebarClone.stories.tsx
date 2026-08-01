@@ -19,7 +19,7 @@ import { deleteOperation } from "./__fixtures__/operations";
 import { cloneTokens, stats } from "./__fixtures__/stats";
 
 const meta = {
-  title: "Sidebar/SidebarClone",
+  title: "Sidebar/Components/SidebarClone",
   component: SidebarClone,
   parameters: { layout: "padded" },
   // SidebarClone calls dnd-kit's useSortable, which reads from a DndContext +

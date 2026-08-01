@@ -8,6 +8,7 @@ import {
   chatActivity,
   chatDraft,
   chatError,
+  chatLocale,
   chatMessages,
   chatNow,
   makeChatMessage,
@@ -26,7 +27,7 @@ function Frame({ children }: { children: ReactNode }) {
 }
 
 const meta = {
-  title: "Clone/ChatView",
+  title: "Clone/Components/ChatView",
   component: ChatView,
   parameters: { layout: "centered" },
   args: {
@@ -46,8 +47,10 @@ const meta = {
     onSchedule: fn(),
     onStop: fn(),
     onCancelScheduled: fn(),
-    // A fixed instant, so "Today 15:00" and the picker's floor read the same on every load.
+    // A fixed instant and a fixed locale, so "Today 15:00" and the picker's floor read the
+    // same on every load and on every machine.
     now: chatNow,
+    locale: chatLocale,
   },
   render: (args) => (
     <Frame>
@@ -87,8 +90,9 @@ export const Stopping: Story = {
   args: { busy: true, stopping: true, activity: chatActivity, scheduled: [] },
 };
 
-/** A send that failed. The banner carries the server's own words and the unsent text is back
- *  in the box, ready for another try. */
+/** A send that failed. The banner is the whole of what a send failure can say (the container
+ *  drops the server's own words on the floor) and the unsent text is back in the box, ready
+ *  for another try. */
 export const WithError: Story = {
   args: { error: chatError, input: chatDraft, scheduled: [] },
 };

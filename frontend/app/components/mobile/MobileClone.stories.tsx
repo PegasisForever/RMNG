@@ -4,9 +4,15 @@ import { fn } from "storybook/test";
 
 import { MobileClone, type CloneTab } from "./MobileClone";
 import { ChatView } from "~/components/ChatView";
-import { NotesEditor } from "~/components/NotesEditor";
+import { NotesEditorView } from "~/components/NotesEditorView";
 import { PhoneFrame } from "~/stories/PhoneFrame";
-import { chatActivity, chatMessages, chatNow, scheduledMessages } from "../__fixtures__/chat";
+import {
+  chatActivity,
+  chatLocale,
+  chatMessages,
+  chatNow,
+  scheduledMessages,
+} from "../__fixtures__/chat";
 import { cloneOffline, cloneWorking } from "../__fixtures__/clones";
 import { makeNotesBlocks } from "../__fixtures__/notes";
 
@@ -30,6 +36,7 @@ function ChatFixture({ busy = false }: { busy?: boolean }) {
       onStop={fn()}
       onCancelScheduled={(id) => setScheduled((s) => s.filter((m) => m.id !== id))}
       now={chatNow}
+      locale={chatLocale}
     />
   );
 }
@@ -37,7 +44,7 @@ function ChatFixture({ busy = false }: { busy?: boolean }) {
 /** The notes pane on a sample document. Edits go nowhere — no autosave, no upload. */
 function NotesFixture() {
   return (
-    <NotesEditor
+    <NotesEditorView
       initialContent={makeNotesBlocks()}
       onChange={fn()}
       uploadFile={async () => "data:image/gif;base64,R0lGODlhAQABAAAAACw="}
@@ -46,7 +53,7 @@ function NotesFixture() {
 }
 
 const meta = {
-  title: "Page/Mobile/Clone",
+  title: "Mobile/Pages/MobileClone",
   component: MobileClone,
   parameters: { layout: "centered" },
   args: {

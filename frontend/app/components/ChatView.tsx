@@ -2,9 +2,10 @@
 // props and every intent leaves as a callback, so the same component backs the live
 // panel (ChatContainer wires it to the per-clone SSE stream) and the Storybook page.
 //
-// The one piece of ambient state it needs is the clock: the schedule picker's `min` and
-// the "Today 15:30" labels both read the current time. That comes in as `now` so a story
-// renders identically on every load.
+// Two pieces of ambient state it would otherwise read for itself arrive as props instead.
+// The clock (`now`) feeds the schedule picker's `min` and the "Today 15:30" labels. The
+// locale (`locale`) decides whether that label reads "15:30" or "3:30 PM". Both are required,
+// so a story renders identically on every load and on every machine.
 import { CalendarClock, Clock, LoaderCircle, SendHorizontal, Square } from "lucide-react";
 import { useEffect, useRef } from "react";
 import TextareaAutosize from "react-textarea-autosize";
@@ -27,16 +28,18 @@ export function epochMsToLocalInput(ms: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** "Today 15:30" / "Mon 09:00" / a full date when it's further out, relative to `now`. */
-export function formatWhen(ms: number, now: number): string {
+/** "Today 15:30" / "Mon 09:00" / a full date when it's further out, relative to `now`.
+ *  `locale` is passed in rather than left to the host default: an ambient default renders
+ *  "3:30 PM" on one machine and "15:30" on the next, which a story cannot pin down. */
+export function formatWhen(ms: number, now: number, locale: string): string {
   const d = new Date(ms);
-  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const time = d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
   const today = new Date(now);
   const sameDay = d.toDateString() === today.toDateString();
   if (sameDay) return `Today ${time}`;
   const withinAWeek = ms - now < 7 * 24 * 3600 * 1000;
-  if (withinAWeek) return `${d.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
-  return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
+  if (withinAWeek) return `${d.toLocaleDateString(locale, { weekday: "short" })} ${time}`;
+  return `${d.toLocaleDateString(locale, { month: "short", day: "numeric" })} ${time}`;
 }
 
 export interface ChatViewProps {
@@ -66,8 +69,11 @@ export interface ChatViewProps {
   onSchedule: () => void;
   onStop: () => void;
   onCancelScheduled: (id: string) => void;
-  /** Epoch ms treated as "now". Defaults to the real clock. */
-  now?: number;
+  /** Epoch ms treated as "now". Required: the container reads the clock, never this. */
+  now: number;
+  /** BCP 47 tag the date labels format under ("en-GB" ⇒ "Today 15:00"). Required for the
+   *  same reason as `now`: the container resolves the operator's locale, never this. */
+  locale: string;
 }
 
 function Bubble({ m }: { m: ChatMessage }) {
@@ -104,7 +110,8 @@ export function ChatView({
   onSchedule,
   onStop,
   onCancelScheduled,
-  now = Date.now(),
+  now,
+  locale,
 }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const picking = scheduleAt !== "";
@@ -173,7 +180,7 @@ export function ChatView({
               className="flex items-center gap-2 rounded-md border border-slate-300 bg-slate-50 px-2 py-1 text-xs dark:border-slate-600 dark:bg-slate-800"
             >
               <span className="shrink-0 font-medium text-emerald-700 dark:text-emerald-400">
-                {formatWhen(Number(m.at), now)}
+                {formatWhen(Number(m.at), now, locale)}
               </span>
               <span className="min-w-0 flex-1 truncate text-slate-600 dark:text-slate-300" title={m.text}>
                 {m.text}

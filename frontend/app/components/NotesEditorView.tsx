@@ -1,6 +1,6 @@
 // The notes pane's editor, with no network of its own: the document comes in as
 // `initialContent`, every edit leaves through `onChange`, and image uploads go through
-// the injected `uploadFile`. CloneEditor supplies the /api/notes and /api/upload
+// the injected `uploadFile`. NotesEditorContainer supplies the /api/notes and /api/upload
 // implementations; a story supplies fixtures and a no-op.
 //
 // BlockNote/ProseMirror touch the DOM, so this module is browser-only. Import it lazily
@@ -20,7 +20,7 @@ import { useEffect } from "react";
 
 import { useColorScheme } from "~/lib/useColorScheme";
 
-export interface NotesEditorProps {
+export interface NotesEditorViewProps {
   /** The document to open with. Empty or undefined starts a blank note. */
   initialContent: PartialBlock[] | undefined;
   /** Every edit, as the editor's current block list. Debouncing and persistence
@@ -30,7 +30,11 @@ export interface NotesEditorProps {
   uploadFile: (file: File) => Promise<string>;
 }
 
-export function NotesEditor({ initialContent, onChange, uploadFile }: NotesEditorProps) {
+export function NotesEditorView({
+  initialContent,
+  onChange,
+  uploadFile,
+}: NotesEditorViewProps) {
   // Follow the OS light/dark setting (BlockNote themes via a JS prop, not CSS).
   const scheme = useColorScheme();
   const editor = useCreateBlockNote({
@@ -91,4 +95,4 @@ export function NotesEditor({ initialContent, onChange, uploadFile }: NotesEdito
   );
 }
 
-export default NotesEditor;
+export default NotesEditorView;
