@@ -113,6 +113,21 @@ export function newGroup(): GroupDraft {
   return { name: "", accounts: [] };
 }
 
+/** One monitor as a save sends it: a size of at least 1, an offset of at least 0.
+ *
+ *  The number inputs accept anything a keyboard can produce, including a blank field that
+ *  reads back as 0, and a monitor 0 pixels wide is not a monitor. Shared with the setup
+ *  wizard, which clamps the arrangement it edits by exactly this rule. */
+export function monitorPatch(m: MonitorDraft): MonitorDraft {
+  return {
+    width: Math.max(1, m.width),
+    height: Math.max(1, m.height),
+    x: Math.max(0, m.x),
+    y: Math.max(0, m.y),
+    primary: m.primary,
+  };
+}
+
 /** Seed the form from the server's redacted config.
  *
  *  Every array is copied down to its members. The editors below replace rather than mutate,
@@ -189,13 +204,7 @@ export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unk
       .filter((p) => p.name.trim())
       .map((p) => ({
         name: p.name.trim(),
-        monitors: p.monitors.map((m) => ({
-          width: Math.max(1, m.width),
-          height: Math.max(1, m.height),
-          x: Math.max(0, m.x),
-          y: Math.max(0, m.y),
-          primary: m.primary,
-        })),
+        monitors: p.monitors.map(monitorPatch),
       })),
     docker: {
       hostnamePrefix: draft.hostnamePrefix,

@@ -12,14 +12,19 @@ export function makeBoardColumn(overrides: Partial<BoardColumn> = {}): BoardColu
   return { id: "todo", title: "Todo", cloneIds: [], archive: false, ...overrides };
 }
 
-export const boardColumns: BoardColumn[] = [
-  makeBoardColumn({ id: "todo", title: "Todo", cloneIds: [cloneIdle.id, cloneNoToken.id] }),
-  makeBoardColumn({
-    id: "doing",
-    title: "In progress",
-    cloneIds: [cloneWorking.id, cloneDualProvider.id],
-  }),
-  makeBoardColumn({ id: "blocked", title: "Blocked", cloneIds: [cloneOffline.id] }),
-  // Dropping a clone here archives it; dragging one out starts it again.
-  makeBoardColumn({ id: "archived", title: "Archived", archive: true }),
-];
+/** The four-lane board, freshly built. The columns editor rewrites this list on every add,
+ *  rename, reorder and delete, so a story that shared one array would be editing the next
+ *  story's board too. */
+export function makeBoardColumns(): BoardColumn[] {
+  return [
+    makeBoardColumn({ id: "todo", title: "Todo", cloneIds: [cloneIdle.id, cloneNoToken.id] }),
+    makeBoardColumn({
+      id: "doing",
+      title: "In progress",
+      cloneIds: [cloneWorking.id, cloneDualProvider.id],
+    }),
+    makeBoardColumn({ id: "blocked", title: "Blocked", cloneIds: [cloneOffline.id] }),
+    // Dropping a clone here archives it; dragging one out starts it again.
+    makeBoardColumn({ id: "archived", title: "Archived", archive: true }),
+  ];
+}

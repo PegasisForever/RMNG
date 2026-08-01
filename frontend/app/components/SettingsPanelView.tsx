@@ -96,7 +96,11 @@ export interface SettingsPanelViewProps {
   pullBusy: boolean;
   /** Wall-clock milliseconds, for each image row's age. */
   now: number;
-  onPullTemplate: (reference: string) => void;
+  /** Re-pull the configured template reference. The container confirms first. */
+  onPullLatestImage: () => void;
+  /** Pull some other reference. The container asks which one. */
+  onPullOtherImage: () => void;
+  /** Delete an image. The container confirms first. */
   onDeleteImage: (reference: string) => void;
 
   /** The dashboard board's columns, left to right. Omit to hide the section entirely,
@@ -140,7 +144,8 @@ export function SettingsPanelView({
   imagesLoading,
   pullBusy,
   now,
-  onPullTemplate,
+  onPullLatestImage,
+  onPullOtherImage,
   onDeleteImage,
   boardColumns,
   boardColumnCounts,
@@ -333,7 +338,8 @@ export function SettingsPanelView({
                 pullBusy={pullBusy}
                 templateRef={draft.templateReference}
                 now={now}
-                onPull={onPullTemplate}
+                onPullLatest={onPullLatestImage}
+                onPullOther={onPullOtherImage}
                 onDelete={onDeleteImage}
               />
             </Section>

@@ -1,7 +1,8 @@
 // Settings panel, impure half. Everything the overlay is not allowed to do lives here: the
 // config read that seeds the form, the save that sends it back, the Docker probe, the
 // control-server's version check and its two self-directed actions, the shared account-order
-// store, and the three confirms that guard a destructive click.
+// store, the five confirms that guard a destructive click, and the one prompt that asks which
+// image to pull.
 //
 // The server calls themselves arrive as props rather than being imported, which is how the
 // setup wizard can reuse this panel against a different pair of endpoints. The markup is
@@ -184,6 +185,42 @@ export function SettingsPanelContainer({
     }
   }
 
+  /** Which reference "+ Pull template" pulls. Prefilled with the configured template, which
+   *  is the one the operator almost always means. */
+  function promptPullImage() {
+    if (pullBusy) return;
+    const rawRef = window.prompt(
+      "Template reference to pull (Docker Hub repo:tag)",
+      draft?.templateReference ?? "",
+    );
+    if (rawRef == null) return;
+    const reference = rawRef.trim();
+    if (!reference) {
+      alert("Enter a template reference.");
+      return;
+    }
+    onPullTemplate(reference);
+  }
+
+  /** One-click refresh: re-pull the configured template reference. Re-pulling the same
+   *  `repo:tag` moves the local tag onto the freshly pulled image — that IS the refresh, and
+   *  it costs several gigabytes, so it is asked about first. */
+  function confirmPullLatest() {
+    if (pullBusy) return;
+    const templateRef = draft?.templateReference ?? "";
+    if (!confirm(`Pull the latest template (${templateRef || "configured reference"})?`)) return;
+    onPullTemplate(templateRef);
+  }
+
+  /** Deleting an image takes it out of the Docker daemon, so it is confirmed first. */
+  function confirmDeleteImage(reference: string) {
+    if (
+      confirm(`Delete image ${reference}?\n\nThis removes the image from the Docker daemon.`)
+    ) {
+      onDeleteImage(reference);
+    }
+  }
+
   /** Deleting an account removes its stored token, so it is confirmed before it is asked for. */
   function confirmDelete(email: string, remove: (email: string) => void) {
     if (
@@ -255,8 +292,9 @@ export function SettingsPanelContainer({
       imagesLoading={imagesLoading}
       pullBusy={pullBusy}
       now={now}
-      onPullTemplate={onPullTemplate}
-      onDeleteImage={onDeleteImage}
+      onPullLatestImage={confirmPullLatest}
+      onPullOtherImage={promptPullImage}
+      onDeleteImage={confirmDeleteImage}
       boardColumns={boardColumns}
       boardColumnCounts={boardColumnCounts}
       onAddBoardColumn={onAddBoardColumn}

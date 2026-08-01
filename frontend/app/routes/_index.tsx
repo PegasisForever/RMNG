@@ -7,7 +7,7 @@ import { CommitImageModal } from "~/components/CommitImageModal";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
-import { SetupWizard } from "~/components/SetupWizard";
+import { SetupWizardContainer } from "~/components/SetupWizardContainer";
 import { MobileDashboard } from "~/components/mobile/MobileDashboard";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
@@ -254,7 +254,13 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     );
   }
   if (!cfg.setupComplete) {
-    return <SetupWizard state={state} initialConfig={cfg} onDone={refetchConfig} />;
+    return (
+      <SetupWizardContainer
+        operations={state.operations}
+        initialConfig={cfg}
+        onDone={refetchConfig}
+      />
+    );
   }
   if (mobile) {
     // The phone tree sizes to the viewport here, so its pages can size to their container
@@ -328,7 +334,7 @@ function Dashboard({
   // The shared cosmetic account order and the live clock. Both are session reads, so they
   // are resolved here and handed down: the rail's usage bars and the settings account lists
   // then draw from props alone, and both stay in step because they read one subscription.
-  const { acctOrder, setAcctOrder } = useAccountOrder();
+  const { acctOrder } = useAccountOrder();
   const now = useNow();
   const [commitClone, setCommitClone] = useState<Clone | null>(null);
   const [committing, setCommitting] = useState(false);

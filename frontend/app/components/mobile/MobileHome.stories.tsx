@@ -10,7 +10,7 @@ import {
   makeCloneGroups,
   makeCodexGroups,
 } from "../__fixtures__/accounts";
-import { boardColumns } from "../__fixtures__/board";
+import { makeBoardColumns } from "../__fixtures__/board";
 import { hosts } from "../__fixtures__/clones";
 
 /** The usage panel's own props, rebuilt per story. The panel is handed these and the pools
@@ -41,7 +41,7 @@ const meta = {
     onUsageOpenChange: fn(),
     onRefresh: fn(),
     onImportAccount: fn(),
-    columns: boardColumns,
+    columns: makeBoardColumns(),
     clones: hosts,
     onSelectClone: fn(),
     error: null,

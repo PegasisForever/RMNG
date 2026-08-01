@@ -16,7 +16,7 @@ import {
   makeCloneGroups,
   makeCodexGroups,
 } from "./__fixtures__/accounts";
-import { boardColumns, makeBoardColumn } from "./__fixtures__/board";
+import { makeBoardColumn, makeBoardColumns } from "./__fixtures__/board";
 import { chatActivity, chatMessages, chatNow, scheduledMessages } from "./__fixtures__/chat";
 import { cloneWorking, hosts, makeCloneNoToken } from "./__fixtures__/clones";
 import { makeNotesBlocks } from "./__fixtures__/notes";
@@ -141,7 +141,7 @@ const ticketColumn = {
 };
 
 const board = {
-  columns: boardColumns,
+  columns: makeBoardColumns(),
   clones: boardClones,
   stats,
   cloneTokens,

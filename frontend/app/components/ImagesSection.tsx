@@ -1,11 +1,14 @@
-// Sidebar section listing the clone-source images (`rmng.image=1`). Each row shows
+// Settings section listing the clone-source images (`rmng.image=1`). Each row shows
 // the reference, a "base" badge for the wizard-pulled template, size, age and the count
-// of live clones running on it. Delete is confirm-gated and disabled while the
-// image is in use (a live clone's `source` points at it). A "+ Pull template" action
-// pulls a registry reference you enter (prefilled with the configured template) — the
-// pulled image keeps its own `repo:tag` (no local retag). A "Pull latest" action re-pulls
-// the configured reference in one click (confirm-gated); re-pulling the same `repo:tag`
-// naturally moves the tag onto the fresh image, which is the refresh.
+// of live clones running on it. Delete is disabled while the image is in use (a live clone's
+// `source` points at it). A "+ Pull template" action pulls a registry reference the operator
+// names — the pulled image keeps its own `repo:tag` (no local retag). A "Pull latest" action
+// re-pulls the configured reference in one click; re-pulling the same `repo:tag` naturally
+// moves the tag onto the fresh image, which is the refresh.
+//
+// The question each of those three asks (which reference? are you sure?) is a `window.prompt`
+// or a `window.confirm`, which is a side effect, so it belongs to the container. Every action
+// here is a bare callback and every one of them is a click a story can make.
 import { RefreshCw, X } from "lucide-react";
 
 import { formatBytes, relativeAge } from "~/lib/format";
@@ -17,41 +20,26 @@ export function ImagesSection({
   pullBusy,
   templateRef,
   now,
-  onPull,
+  onPullLatest,
+  onPullOther,
   onDelete,
 }: {
   images: ImageInfo[];
   loading: boolean;
-  /** True while a template-pull op is running (disables the pull action). */
+  /** True while a template-pull op is running (disables both pull actions). */
   pullBusy: boolean;
-  /** Configured `docker.templateReference`, prefilled into the reference prompt. */
+  /** Configured `docker.templateReference`, named in the "Pull latest" button's title. */
   templateRef: string;
   /** Wall-clock milliseconds, for each row's age. Read by the container so this list draws
    *  the same thing for the same props. */
   now: number;
-  onPull: (reference: string) => void;
+  /** Re-pull the configured template reference. The container confirms first. */
+  onPullLatest: () => void;
+  /** Pull some other reference. The container asks which one. */
+  onPullOther: () => void;
+  /** Delete this image. The container confirms first. */
   onDelete: (reference: string) => void;
 }) {
-  function pull() {
-    if (pullBusy) return;
-    const rawRef = window.prompt("Template reference to pull (Docker Hub repo:tag)", templateRef);
-    if (rawRef == null) return;
-    const reference = rawRef.trim();
-    if (!reference) {
-      alert("Enter a template reference.");
-      return;
-    }
-    onPull(reference);
-  }
-
-  // One-click refresh: re-pull the configured template reference (no prompts). Re-pulling the
-  // same `repo:tag` moves the local tag onto the freshly pulled image — that IS the refresh.
-  function pullLatest() {
-    if (pullBusy) return;
-    if (!confirm(`Pull the latest template (${templateRef || "configured reference"})?`)) return;
-    onPull(templateRef);
-  }
-
   return (
     <div>
       <div className="mb-1 flex items-center justify-between px-1">
@@ -61,7 +49,7 @@ export function ImagesSection({
         <div className="flex items-center gap-1">
           <button
             type="button"
-            onClick={pullLatest}
+            onClick={onPullLatest}
             disabled={pullBusy}
             title={`Pull the latest template (${templateRef || "configured reference"})`}
             className="flex items-center gap-1 rounded px-1 text-[11px] font-medium text-slate-400 hover:bg-slate-200 hover:text-slate-600 disabled:opacity-40 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300"
@@ -71,7 +59,7 @@ export function ImagesSection({
           </button>
           <button
             type="button"
-            onClick={pull}
+            onClick={onPullOther}
             disabled={pullBusy}
             title="Pull the clone template (Ubuntu 26.04) from Docker Hub"
             className="rounded px-1 text-[11px] font-medium text-slate-400 hover:bg-slate-200 hover:text-slate-600 disabled:opacity-40 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300"
@@ -119,12 +107,7 @@ export function ImagesSection({
                   type="button"
                   onClick={() => {
                     if (inUse > 0) return;
-                    if (
-                      confirm(
-                        `Delete image ${img.reference}?\n\nThis removes the image from the Docker daemon.`,
-                      )
-                    )
-                      onDelete(img.reference);
+                    onDelete(img.reference);
                   }}
                   disabled={inUse > 0}
                   aria-label={`delete image ${img.reference}`}

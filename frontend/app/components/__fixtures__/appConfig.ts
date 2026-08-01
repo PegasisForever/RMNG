@@ -7,6 +7,7 @@
 // fresh parse each time, so a stub that does the same is also the honest one.
 
 import { settingsDraftFrom, type SettingsDraft } from "~/lib/settingsDraft";
+import { setupDraftFrom, type SetupDraft } from "~/lib/setupDraft";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
@@ -75,6 +76,15 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
  *  that edits one would otherwise be editing the next story's form too. */
 export function makeSettingsDraft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
   return { ...settingsDraftFrom(makeAppConfig()), ...overrides };
+}
+
+/** The first-run wizard's form, seeded from the config above through the same function the
+ *  wizard's container uses.
+ *
+ *  Freshly built, monitors and ports included: the Server step replaces what it is given, but
+ *  every story that drags a monitor would otherwise be dragging the next story's too. */
+export function makeSetupDraft(overrides: Partial<SetupDraft> = {}): SetupDraft {
+  return { ...setupDraftFrom(makeAppConfig({ setupComplete: false })), ...overrides };
 }
 
 /** The control-server's own version, as `GET /api/server/version` answers it. Up to date by

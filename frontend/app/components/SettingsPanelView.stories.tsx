@@ -6,7 +6,7 @@ import { SettingsPanelView, type SettingsPanelViewProps } from "./SettingsPanelV
 import { newColumnId, removeColumn } from "~/lib/board";
 import { accountsNow, makeClaudeAccounts } from "./__fixtures__/accounts";
 import { makeSettingsDraft, makeUpdateStatus } from "./__fixtures__/appConfig";
-import { boardColumns } from "./__fixtures__/board";
+import { makeBoardColumns } from "./__fixtures__/board";
 import { imagesNow, makeImages } from "./__fixtures__/images";
 import { makeOperation } from "./__fixtures__/operations";
 import { makeStoryLink } from "./__fixtures__/storyLinks";
@@ -19,7 +19,7 @@ function base() {
     draft: makeSettingsDraft(),
     accounts: makeClaudeAccounts(accountsNow),
     images: makeImages(),
-    boardColumns,
+    boardColumns: makeBoardColumns(),
     boardColumnCounts: { todo: 3, doing: 3, blocked: 1, archived: 0 },
   };
 }
@@ -109,7 +109,8 @@ const meta = {
     imagesLoading: false,
     pullBusy: false,
     now: imagesNow,
-    onPullTemplate: fn(),
+    onPullLatestImage: fn(),
+    onPullOtherImage: fn(),
     onDeleteImage: fn(),
     onAddBoardColumn: fn(),
     onRenameBoardColumn: fn(),

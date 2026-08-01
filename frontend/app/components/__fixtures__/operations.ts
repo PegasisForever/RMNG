@@ -26,6 +26,26 @@ export const cloneOperation: Operation = makeOperation({
   log: ["pulling layers", "creating container", "starting gnome session"],
 });
 
+/** A template pull, as the setup wizard follows it. Its `target` IS the pulled reference,
+ *  which is how the wizard finds this op among the live ones. Override `status` and `pct` for
+ *  the finished state. */
+export function makePullOperation(overrides: Partial<Operation> = {}): Operation {
+  return makeOperation({
+    id: "op-pull-1",
+    kind: "pull",
+    target: "pegasis0/rmng-template:latest",
+    status: "running",
+    step: "download",
+    pct: 62,
+    message: "Downloading layers…",
+    log: [
+      "pulling pegasis0/rmng-template:latest",
+      "6f2c1a3b: downloading 2.1 GB / 6.8 GB",
+    ],
+    ...overrides,
+  });
+}
+
 /** A running delete op targeting an existing clone (shows the row's busy state). */
 export const deleteOperation: Operation = makeOperation({
   id: "op-delete-1",
