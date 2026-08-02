@@ -1,20 +1,20 @@
 // Open a Linear issue from the board, network half.
 //
-// Two things live here and nowhere below: the POST that creates the issue, and the markdown
-// editor the body is typed into, which carries its own /api/upload call. Everything else,
-// including which team is chosen and whether the button may fire, is TicketModalView.
+// Two things live here and nowhere below: the `issueCreate` mutation, and the markdown editor
+// the body is typed into, which carries its own image upload. Everything else, including
+// which team is chosen and whether the button may fire, is TicketModalView.
 //
-// The created ticket goes back up rather than being handled here: the column draws it from
-// the `/events` frame the server broadcasts, and opening its panel is the page's call.
+// The created ticket goes back up rather than being handled here: the column writes it into
+// its own list and opens its panel, which is the page's call and not the dialog's.
 import { lazy, Suspense, useState } from "react";
 
 import { TicketModalView } from "~/components/TicketModalView";
-import { createTicket } from "~/lib/api";
+import { issueCreate, keysForTeam } from "~/lib/linear/mutations";
 import type { LinearTicket } from "~/lib/tickets";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
 // BlockNote is browser-only and heavy; the description field pulls it in on demand. The
-// container is the import target, so the /api/upload call it owns rides the same lazy chunk.
+// container is the import target, so the upload call it owns rides the same lazy chunk.
 const MarkdownEditorContainer = lazy(() => import("~/components/MarkdownEditorContainer"));
 
 export function TicketModalContainer({
@@ -33,6 +33,14 @@ export function TicketModalContainer({
   // keystroke, and the View sends whatever it last said.
   const [description, setDescription] = useState("");
 
+  // Which key stores a pasted image. The team belongs to the View, which owns the dropdown,
+  // and the slot is built before the operator has touched it. So this is the first key in
+  // config order, which is the team the dropdown starts on. A fleet whose presets point at
+  // different Linear workspaces can therefore store an image in one workspace and reference
+  // it from an issue in another. Single-workspace fleets, which is every one so far, are
+  // unaffected.
+  const uploadKey = keysForTeam(presets, "")[0] ?? "";
+
   return (
     <TicketModalView
       presets={presets}
@@ -45,12 +53,13 @@ export function TicketModalContainer({
         >
           <MarkdownEditorContainer
             onChange={setDescription}
+            linearKey={uploadKey}
             placeholder="What needs doing — paste images, format freely"
           />
         </Suspense>
       }
       onClose={onClose}
-      onCreate={(ticket) => createTicket(ticket).then(onCreated)}
+      onCreate={(ticket) => issueCreate(keysForTeam(presets, ticket.team)[0] ?? "", ticket).then(onCreated)}
     />
   );
 }

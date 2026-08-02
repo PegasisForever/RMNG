@@ -115,7 +115,10 @@ export const putTicketOrder = (ticketIds: string[]) =>
 
 /** Write a title and/or description back to Linear. The server does the mutation and answers
  *  with the patched state. An omitted field is left alone; an empty description clears the
- *  body, which is a thing operators do on purpose. */
+ *  body, which is a thing operators do on purpose.
+ *
+ *  Nothing in the app calls this. The ticket panel writes through `~/lib/linear/mutations`
+ *  with the browser's own key, and this and its route go when the server's Linear code does. */
 export const putTicket = (id: string, patch: { title?: string; description?: string }) =>
   putJson(`/api/tickets/${encodeURIComponent(id)}`, patch);
 
@@ -123,7 +126,10 @@ export const putTicket = (id: string, patch: { title?: string; description?: str
  *  Linear key opens it. `priority` is Linear's scale: 1 urgent, 2 high, 3 medium, 4 low.
  *
  *  The server creates it as Todo and assigned to the key's owner, so the column can show it,
- *  and answers with the created ticket. The column itself updates from the `/events` frame. */
+ *  and answers with the created ticket.
+ *
+ *  Nothing in the app calls this either. The new-ticket dialog runs `issueCreate` in the
+ *  browser; this and its route go when the server's Linear code does. */
 export const createTicket = (ticket: {
   team: string;
   title: string;

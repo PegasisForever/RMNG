@@ -23,8 +23,15 @@ import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
+import { issueUpdate, keysForTeam } from "~/lib/linear/mutations";
 import { useTickets } from "~/lib/linear/useTickets";
-import { cloneForTicket, findTicket, openTickets, orderTickets } from "~/lib/tickets";
+import {
+  cloneForTicket,
+  findTicket,
+  openTickets,
+  orderTickets,
+  type LinearTicket,
+} from "~/lib/tickets";
 import {
   activate,
   activateLayout,
@@ -42,7 +49,6 @@ import {
   putBoardColumns,
   putConfig,
   putForwards,
-  putTicket,
   putTicketOrder,
   refreshClaudeUsage,
   refreshCodexUsage,
@@ -262,7 +268,22 @@ export function DashboardContainer({
 
   // Linear's own answer, asked for by this browser with the presets' keys. It is the one
   // piece of the board that does not come from the control server.
-  const { tickets: linearTickets, error: ticketsError } = useTickets(presets);
+  const {
+    tickets: linearTickets,
+    error: ticketsError,
+    loading: ticketsLoading,
+    refetch: refetchTickets,
+    upsert: upsertTicket,
+  } = useTickets(presets);
+
+  // Write a title or a body back to Linear, and put the new value on screen twice: once
+  // straight away so the panel does not snap back to what it said before the edit, and again
+  // from Linear's own answer a round trip later. Without the refetch the poll interval owns
+  // the panel, and reopening it inside that window shows the old text.
+  const editTicket = (ticket: LinearTicket, patch: { title?: string; description?: string }) => {
+    upsertTicket({ ...ticket, ...patch });
+    run(issueUpdate(keysForTeam(presets, ticket.team ?? ""), ticket, patch).then(refetchTickets));
+  };
 
   const visibleTickets = orderTickets(
     openTickets(linearTickets, state.hosts),
@@ -333,12 +354,12 @@ export function DashboardContainer({
                     <TicketDescription
                       key={openTicket.id}
                       markdown={openTicket.description ?? ""}
-                      onSave={(markdown) => run(putTicket(openTicket.id, { description: markdown }))}
+                      onSave={(markdown) => editTicket(openTicket, { description: markdown })}
                     />
                   </Suspense>
                 </ClientOnly>
               }
-              onTitleChange={(title) => run(putTicket(openTicket.id, { title }))}
+              onTitleChange={(title) => editTicket(openTicket, { title })}
               onCreateClone={() => {
                 setTicketPrefill(openTicket.url);
                 setCloneOpen(true);
@@ -439,6 +460,9 @@ export function DashboardContainer({
           onOpenInLinear: openInLinear,
           tickets: {
             tickets: visibleTickets,
+            // Nothing asked yet is not an empty queue. Without this the column claims every
+            // open ticket already has a clone for as long as the first fetch takes.
+            loading: ticketsLoading,
             error: ticketsError,
             selectedId: openTicket?.id ?? null,
             onSelectTicket: (ticket) => setOpenTicketId(ticket.id),
@@ -498,10 +522,14 @@ export function DashboardContainer({
         <TicketModalContainer
           presets={presets}
           onClose={() => setNewTicketOpen(false)}
-          // The server publishes the new ticket into the state it broadcasts, so the
-          // column draws it without a refetch. Opening its panel is the useful next
-          // step: a ticket worth creating is one you are about to work on.
-          onCreated={(created) => setOpenTicketId(created.id)}
+          // Linear answered with the whole ticket, so the column can draw it now. Opening
+          // its panel is the useful next step: a ticket worth creating is one you are about
+          // to work on, and the panel needs the ticket to be in the list to find it.
+          onCreated={(created) => {
+            upsertTicket(created);
+            setOpenTicketId(created.id);
+            refetchTickets();
+          }}
         />
       ) : null}
 

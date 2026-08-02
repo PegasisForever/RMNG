@@ -13,6 +13,19 @@ import { serverErrorText } from "~/lib/serverError";
 
 const LINEAR_API = "https://api.linear.app/graphql";
 
+/** How long one request may hang before it is abandoned.
+ *
+ *  A `fetch` with no signal has no deadline of its own: a half-open socket is only given up
+ *  on when the OS times the connection out, which is minutes. Every caller here runs on a
+ *  timer, so a request that outlives its own interval is worth nothing even if it eventually
+ *  answers, and holding the slot is worse than losing the answer.
+ *
+ *  20 seconds is the balance. It is far past any answer this API has been observed to give
+ *  for the queries in `queries.ts` and the mutations in `mutations.ts`, so a merely slow
+ *  network is not cut off, and it is well inside the 60-second poll so one wedged socket
+ *  costs a single round rather than every round after it. */
+const TIMEOUT_MS = 20_000;
+
 /** One GraphQL request, or a thrown `Error` carrying the sentence a banner can show.
  *
  *  A 200 is not success. GraphQL answers a rejected query with HTTP 200 and an `errors`
@@ -39,8 +52,14 @@ export async function gql<T>(
       method: "POST",
       headers: { "content-type": "application/json", authorization: key },
       body: JSON.stringify({ query, variables }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (e) {
+    // An abort is our own deadline, not the network refusing. Saying so names the thing the
+    // operator can act on, which is a connection that is up but not delivering.
+    if ((e as Error).name === "TimeoutError") {
+      throw new Error(`Linear API did not answer within ${TIMEOUT_MS / 1000}s`);
+    }
     throw new Error(`Linear API unreachable: ${(e as Error).message}`);
   }
 

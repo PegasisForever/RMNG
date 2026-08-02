@@ -19,8 +19,11 @@ export const LABEL_FALLBACK_COLOR = "#94a3b8";
 /** The fields the ticket column and its panel draw.
  *
  *  `id` is Linear's UUID and `identifier` is `WE-142`. Both are asked for: the identifier is
- *  what the operator sees and types, the UUID is what a mutation addresses. */
-const OPEN_ISSUE_FIELDS =
+ *  what the operator sees and types, the UUID is what a mutation addresses.
+ *
+ *  Exported because `issueCreate` selects the same set off the issue it just made, so the new
+ *  card is drawn from the mutation's own answer instead of waiting out the poll. */
+export const OPEN_ISSUE_FIELDS =
   "id identifier title url branchName priority description " +
   "team { key } state { type } labels { nodes { name color } } " +
   "parent { identifier title url state { type } } " +

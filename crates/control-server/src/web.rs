@@ -62,6 +62,7 @@ pub fn router(app: App) -> Router {
         .route("/api/delete", post(delete))
         .route("/api/notes/:id", get(notes_get).put(notes_save))
         .route("/api/upload", post(upload))
+        .route("/api/linear/upload-relay", post(linear_upload_relay))
         .route("/uploads/:file", get(uploads_serve))
         .route("/api/config", get(config_get).put(config_put))
         .route("/api/config/test", post(config_test))
@@ -1611,6 +1612,193 @@ async fn upload(
         }
     }
     Err((StatusCode::BAD_REQUEST, "no 'file' field".into()))
+}
+
+// --- the Linear upload relay -----------------------------------------------
+//
+// One hop, for one reason: a browser can run Linear's `fileUpload` mutation but cannot PUT to
+// the Google-signed URL it answers with. Measured twice. The bucket answers the preflight
+// with HTTP 200 and `vary: Origin` alone, no `access-control-allow-origin`, so the request
+// never leaves the page.
+//
+// So the browser posts the bytes here with the URL and the headers Linear handed it, and this
+// replays the PUT. It never calls Linear's GraphQL and holds no key: the mutation, the signed
+// URL, and the `assetUrl` that ends up in the markdown all stay in the browser. That is what
+// keeps the control-server out of the Linear business while the bytes still get through.
+
+/// The only host this route will PUT to.
+///
+/// Not defence in depth, the whole defence. The bucket returns 200 whatever `Origin` and
+/// `Referer` say, this port carries no authentication, and the URL comes from the request. An
+/// allowlist is the one thing between that and a general outbound proxy.
+const UPLOAD_RELAY_HOST: &str = "storage.googleapis.com";
+
+/// How long the PUT may take before this gives up on it.
+///
+/// Linear signs the URL with `X-Goog-Expires=60`, and a PUT 68 seconds after issue comes back
+/// 400 `ExpiredToken`. The browser has already spent part of that minute on the mutation and
+/// on posting the bytes here, so a hop still running at 45 seconds has missed the window. The
+/// caller is better served by this sentence than by waiting for the bucket to say so.
+const UPLOAD_RELAY_TIMEOUT_SECS: u64 = 45;
+
+/// Headers that describe this hop rather than the upload, and would break the replayed PUT.
+///
+/// `content-length` is reqwest's to set from the body it is given. `host` decides which
+/// virtual host the request lands on, which would undo the allowlist above. The other two are
+/// hop-by-hop by definition.
+const UPLOAD_RELAY_DROPPED: [&str; 4] = ["host", "content-length", "transfer-encoding", "connection"];
+
+/// Refuse any target but the signed-upload bucket.
+///
+/// Host, scheme, and port all have to match: `storage.googleapis.com.example.net` is a
+/// different host, `http` is a downgrade, and a port is a different listener on the same name.
+fn check_relay_target(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url.trim())
+        .map_err(|e| format!("upload url is not a URL: {e}"))?;
+    if parsed.scheme() != "https" {
+        return Err(format!("upload url must be https, got {}", parsed.scheme()));
+    }
+    if let Some(port) = parsed.port() {
+        return Err(format!("upload url must use the default https port, got {port}"));
+    }
+    match parsed.host_str() {
+        Some(UPLOAD_RELAY_HOST) => Ok(()),
+        Some(host) => Err(format!("upload url host must be {UPLOAD_RELAY_HOST}, got {host}")),
+        None => Err("upload url has no host".into()),
+    }
+}
+
+/// The headers to replay, out of the `[{ "key": ..., "value": ... }]` the browser sent.
+///
+/// Forwarded verbatim, because the signature covers them. Substituting
+/// `application/octet-stream` for the declared `content-type` returns 403
+/// `SignatureDoesNotMatch`, and one byte outside `x-goog-content-length-range` returns 400
+/// `EntityTooLarge`. Both were observed, not read.
+///
+/// A malformed entry is an error rather than a skip, for the same reason: a signed header
+/// dropped quietly comes back as a 403 with nothing pointing at the cause.
+fn relay_headers(raw: &str) -> Result<Vec<(String, String)>, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("headers is not JSON: {e}"))?;
+    let entries = parsed
+        .as_array()
+        .ok_or_else(|| "headers must be a JSON array".to_string())?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = entry.get("key").and_then(|v| v.as_str());
+        let value = entry.get("value").and_then(|v| v.as_str());
+        let (key, value) = match (key, value) {
+            (Some(k), Some(v)) if !k.trim().is_empty() => (k.trim(), v),
+            _ => return Err(format!("headers entry is not {{key, value}}: {entry}")),
+        };
+        if UPLOAD_RELAY_DROPPED.contains(&key.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        out.push((key.to_string(), value.to_string()));
+    }
+    Ok(out)
+}
+
+/// The PUT, built but not sent: the target, every header to replay, and this hop's deadline.
+///
+/// Separate from the handler so a test can point it at a stub and read back what arrived. The
+/// forwarding is the part with no margin in it. A header changed on the way through is a 403
+/// the caller cannot see the cause of.
+fn relay_request(
+    http: &reqwest::Client,
+    url: &str,
+    headers: &[(String, String)],
+) -> reqwest::RequestBuilder {
+    let mut req = http
+        .put(url)
+        .timeout(Duration::from_secs(UPLOAD_RELAY_TIMEOUT_SECS));
+    for (key, value) in headers {
+        req = req.header(key, value);
+    }
+    req
+}
+
+/// What to tell the operator when the bucket refuses.
+///
+/// Google answers with an XML body whose `<Code>` names the reason, and the three that this
+/// route can actually produce are worth saying plainly: an expired URL is a retry, a bad
+/// signature or a size mismatch is a bug here.
+fn relay_failure(status: u16, body: &str) -> String {
+    match xml_tag(body, "Code").as_deref() {
+        Some("ExpiredToken") => format!(
+            "the signed upload URL expired before the bytes reached the bucket \
+             (HTTP {status} ExpiredToken). Linear signs it for 60 seconds. Paste it again."
+        ),
+        Some(code) => format!("the storage bucket refused the upload (HTTP {status} {code})"),
+        None => format!("the storage bucket refused the upload (HTTP {status})"),
+    }
+}
+
+/// The text inside the first `<tag>…</tag>` of an XML body, when it holds one.
+fn xml_tag(body: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body.find(&open)? + open.len();
+    let end = body[start..].find(&close)? + start;
+    Some(body[start..end].trim().to_string())
+}
+
+/// `POST /api/linear/upload-relay`: replay one PUT to a Google-signed upload URL.
+///
+/// Multipart, three fields: `url` is the `uploadUrl` Linear signed, `headers` is its
+/// `headers[]` as JSON with the declared `content-type` in front, and `file` is the bytes.
+async fn linear_upload_relay(
+    State(app): State<App>,
+    mut mp: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+    let mut url = String::new();
+    let mut headers_raw = String::new();
+    let mut body: Option<Vec<u8>> = None;
+
+    while let Some(field) = mp
+        .next_field()
+        .await
+        .map_err(|e| bad(e.to_string()))?
+    {
+        match field.name().unwrap_or("") {
+            "url" => url = field.text().await.map_err(|e| bad(e.to_string()))?,
+            "headers" => headers_raw = field.text().await.map_err(|e| bad(e.to_string()))?,
+            "file" => {
+                body = Some(field.bytes().await.map_err(|e| bad(e.to_string()))?.to_vec())
+            }
+            _ => {}
+        }
+    }
+
+    let body = body.ok_or_else(|| bad("no 'file' field".into()))?;
+    check_relay_target(&url).map_err(bad)?;
+    // Absent means no headers at all, which the bucket answers with a 403. That is the caller's
+    // mistake to make, and reading it as "send nothing" beats guessing a content type.
+    let headers = if headers_raw.trim().is_empty() {
+        Vec::new()
+    } else {
+        relay_headers(&headers_raw).map_err(bad)?
+    };
+
+    let resp = relay_request(&app.http, url.trim(), &headers)
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("the upload never reached the storage bucket: {e}"),
+            )
+        })?;
+
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        tracing::warn!("linear upload relay: bucket answered {status}: {text}");
+        return Err((StatusCode::BAD_GATEWAY, relay_failure(status, &text)));
+    }
+    Ok(Json(json!({ "ok": true, "status": status })))
 }
 
 /// `GET /uploads/:file` — serve a stored upload by its generated name.
@@ -3219,6 +3407,208 @@ not a var line
             .await
             .unwrap();
         assert!(cleared.ticket_order.is_empty());
+    }
+
+    // --- POST /api/linear/upload-relay ---
+    //
+    // The route exists because a page cannot PUT to Linear's signed bucket URL. It holds no
+    // key and never calls Linear, so what is worth pinning is narrow: what it will send bytes
+    // to, and whether the headers arrive as they left.
+
+    #[test]
+    fn the_relay_puts_only_to_the_signed_upload_bucket() {
+        assert!(
+            check_relay_target(
+                "https://storage.googleapis.com/uploads/abc?X-Goog-Expires=60&X-Goog-Signature=de"
+            )
+            .is_ok()
+        );
+
+        // A name that merely contains the allowed one is a different host. This is the shape
+        // an attacker reaches for first, and a `contains` check would pass it.
+        for url in [
+            "https://storage.googleapis.com.example.net/x",
+            "https://evil.storage.googleapis.com.co/x",
+            "https://169.254.169.254/latest/meta-data/",
+            "http://storage.googleapis.com/x",
+            "https://storage.googleapis.com:8443/x",
+            "file:///etc/passwd",
+            "not a url",
+        ] {
+            assert!(check_relay_target(url).is_err(), "should refuse {url}");
+        }
+    }
+
+    #[test]
+    fn signed_headers_are_forwarded_verbatim_and_hop_headers_are_not() {
+        let parsed = relay_headers(
+            r#"[{"key":"content-type","value":"image/png"},
+                {"key":"x-goog-content-length-range","value":"0,7"},
+                {"key":"Host","value":"elsewhere.example"},
+                {"key":"content-length","value":"999"}]"#,
+        )
+        .unwrap();
+
+        // The two the signature covers survive exactly. The two that describe this hop do not.
+        assert_eq!(
+            parsed,
+            vec![
+                ("content-type".to_string(), "image/png".to_string()),
+                ("x-goog-content-length-range".to_string(), "0,7".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_malformed_header_entry_is_refused_rather_than_dropped() {
+        assert!(relay_headers("[{\"key\":\"content-type\"}]").is_err());
+        assert!(relay_headers("[{\"key\":\"\",\"value\":\"x\"}]").is_err());
+        assert!(relay_headers("{\"content-type\":\"image/png\"}").is_err());
+        assert!(relay_headers("nonsense").is_err());
+        assert!(relay_headers("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bucket_refusal_names_the_reason_it_gave() {
+        let expired = relay_failure(
+            400,
+            "<?xml version='1.0'?><Error><Code>ExpiredToken</Code><Message>…</Message></Error>",
+        );
+        assert!(expired.contains("expired"), "{expired}");
+        assert!(expired.contains("60 seconds"), "{expired}");
+
+        let signature = relay_failure(403, "<Error><Code>SignatureDoesNotMatch</Code></Error>");
+        assert!(signature.contains("SignatureDoesNotMatch"), "{signature}");
+
+        // A body with no XML at all still names the status rather than saying nothing.
+        assert!(relay_failure(500, "").contains("500"));
+    }
+
+    /// One multipart body, in the shape the browser's `FormData` produces. reqwest is built
+    /// without its `multipart` feature here, and hand-rolling it also pins the exact field
+    /// names the frontend sends.
+    fn multipart(text: &[(&str, &str)], file: Option<(&str, &[u8])>) -> (String, Vec<u8>) {
+        let boundary = "----rmngtestboundary";
+        let mut body: Vec<u8> = Vec::new();
+        for (name, value) in text {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some((filename, bytes)) = file {
+            body.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+                     filename=\"{filename}\"\r\nContent-Type: image/png\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(bytes);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    /// End-to-end through the real router: the route is reachable at the address the frontend
+    /// posts to, it parses the browser's three fields, and it refuses a target that is not the
+    /// signed-upload bucket. That refusal is the only thing standing between an unauthenticated
+    /// LAN port and a general outbound proxy, so it is asserted over a socket and not in
+    /// isolation.
+    #[tokio::test]
+    async fn upload_relay_refuses_a_host_that_is_not_the_bucket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        let post = |url: &'static str| {
+            let http = http.clone();
+            let base = format!("http://{addr}/api/linear/upload-relay");
+            async move {
+                let (ct, body) = multipart(
+                    &[
+                        ("url", url),
+                        ("headers", r#"[{"key":"content-type","value":"image/png"}]"#),
+                    ],
+                    Some(("shot.png", b"\x89PNG\r\n\x1a\n")),
+                );
+                let resp = http
+                    .post(base)
+                    .header("content-type", ct)
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                (resp.status(), resp.text().await.unwrap())
+            }
+        };
+
+        // A name that merely contains the allowed one, and a LAN address the operator's own
+        // network would answer. Both name the one host the route will talk to.
+        for url in [
+            "https://storage.googleapis.com.example.net/steal",
+            "https://127.0.0.1/steal",
+        ] {
+            let (status, text) = post(url).await;
+            assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "for {url}");
+            assert!(text.contains(UPLOAD_RELAY_HOST), "for {url}: {text}");
+        }
+
+        // The right host over the wrong scheme is still refused, and says which rule caught it.
+        let (status, text) = post("http://storage.googleapis.com/steal").await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains("https"), "{text}");
+    }
+
+    /// The bytes and every header reach the target unchanged. The allowlist keeps a real PUT
+    /// pointed at Google, so this drives `relay_request` directly against a stub that answers
+    /// with what it received, which is the only way to observe the forwarding at all.
+    #[tokio::test]
+    async fn the_relay_sends_the_declared_content_type_and_the_size_range_it_was_given() {
+        use axum::extract::Request;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub = Router::new().route(
+            "/put",
+            put(|req: Request| async move {
+                let seen: Vec<String> = req
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {}", v.to_str().unwrap_or("")))
+                    .collect();
+                let body = axum::body::to_bytes(req.into_body(), 1 << 20).await.unwrap();
+                Json(json!({ "headers": seen, "len": body.len() }))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
+
+        let headers =
+            relay_headers(r#"[{"key":"content-type","value":"image/png"},{"key":"x-goog-content-length-range","value":"0,8"}]"#)
+                .unwrap();
+        let bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        let seen: serde_json::Value =
+            relay_request(&reqwest::Client::new(), &format!("http://{addr}/put"), &headers)
+                .body(bytes.clone())
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+
+        let lines = seen["headers"].as_array().unwrap();
+        let has = |want: &str| lines.iter().any(|l| l.as_str() == Some(want));
+        // Exactly what was declared, not a substitute: `application/octet-stream` here is a
+        // 403 SignatureDoesNotMatch from the real bucket.
+        assert!(has("content-type: image/png"), "{lines:?}");
+        // Exactly the range that was signed: one byte outside it is a 400 EntityTooLarge.
+        assert!(has("x-goog-content-length-range: 0,8"), "{lines:?}");
+        assert_eq!(seen["len"].as_u64(), Some(bytes.len() as u64));
     }
 
     // What stays here is the control-server half of the boundary: the internal token-delta
