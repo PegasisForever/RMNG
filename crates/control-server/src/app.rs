@@ -18,17 +18,6 @@ pub struct App {
     /// Live config (mutable via `/api/config` in Phase 2; read per use elsewhere).
     pub cfg: Arc<RwLock<AppConfig>>,
     pub http: reqwest::Client,
-    /// The client for the two routes that fetch a URL the CALLER chose: the upload relay and
-    /// the Linear asset proxy. Identical to [`Self::http`] but for one setting, and that
-    /// setting is the whole reason it exists: it does not follow redirects.
-    ///
-    /// Those two routes check the target host before they send, and that check reads the FIRST
-    /// url only. reqwest's default is `Policy::limited(10)`, so a 301, 302, or 307 from the
-    /// allowlisted host would carry the method, the body, and every forwarded header to a host,
-    /// scheme, and port nobody checked, on a port with no authentication on any route. Google's
-    /// upload bucket does not answer with a `Location` today. That is a fact about somebody
-    /// else's server, not a property of this one.
-    pub relay_http: reqwest::Client,
     /// Claude accounts: the 0600 OAuth secret store + last-good usage cache. The server owns
     /// each account's refresh lifecycle and pushes only short-lived access tokens into clones
     /// (see [`crate::claude`]) — nothing that can refresh ever leaves this process.
@@ -107,17 +96,6 @@ impl App {
                 .read_timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("reqwest client"),
-            // Separate from `http` rather than a setting on it: every other caller hands this
-            // process a URL from its own config or from a clone it created, and several of
-            // those endpoints redirect legitimately. Only the two caller-supplied-URL routes
-            // want a redirect to be an error.
-            relay_http: reqwest::Client::builder()
-                .user_agent("rmng-control-server")
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .read_timeout(std::time::Duration::from_secs(120))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("reqwest relay client"),
             claude,
             codex,
             clone_keys,

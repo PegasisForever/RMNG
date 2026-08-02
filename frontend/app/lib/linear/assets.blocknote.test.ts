@@ -58,8 +58,7 @@ describe("BlockNote reads the proxy rewrite the way it is meant", () => {
     const images = flatten(blocks).filter((b) => b.type === "image");
 
     expect(images.map((b) => (b.props as Record<string, unknown>).url)).toEqual([PROXIED]);
-    // The one thing this whole narrowing exists for: a link keeps its cross-origin
-    // destination, so clicking it never lands on this server's own origin.
+    // A link keeps the destination it came with, so it still reads as the Linear URL it is.
     expect(hrefs(blocks)).toEqual([`${ASSET.replace("shot.png", "evil.html")}`]);
     expect(hrefs(blocks).some((h) => h.startsWith("/api/linear/asset"))).toBe(false);
   });

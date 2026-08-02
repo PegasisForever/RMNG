@@ -56,11 +56,10 @@ describe("linearAssetUrl", () => {
     expect(linearAssetUrl("/uploads/shot.png")).toBe("/uploads/shot.png");
   });
 
-  test("refuses a proxy path pointing anywhere but the asset host", () => {
-    // Only this module mints these, and it only mints them from Linear URLs. One that
-    // decodes to something else was written by hand.
-    const forged = "/api/linear/asset?url=https%3A%2F%2Fevil.example%2Fx";
-    expect(linearAssetUrl(forged)).toBe(forged);
+  test("reverses every proxy path, whatever it points at", () => {
+    // Nothing shaped like a proxy path may reach Linear, so the reverse never declines one.
+    const other = "/api/linear/asset?url=https%3A%2F%2Fexample.com%2Fx";
+    expect(linearAssetUrl(other)).toBe("https://example.com/x");
   });
 });
 
@@ -107,9 +106,9 @@ describe("markdown round trip", () => {
   });
 });
 
-// The proxy serves images, so an image destination is the only thing pointed at it. A link
-// destination rewritten is a one-click same-origin navigation to a file somebody else stored,
-// on an origin that serves `/api/hosts/:id/exec` and `/api/delete` with no credential asked.
+// An `<img>` source has to be same-origin and nothing else in a body does, so an image
+// destination is the only thing pointed at the proxy. A link and a bare URL stay readable
+// and already work in a browser.
 describe("only an image destination crosses to the proxy", () => {
   test("a link to the asset host keeps pointing at Linear", () => {
     for (const md of [
@@ -155,7 +154,7 @@ describe("only an image destination crosses to the proxy", () => {
 // asset URL, and closed anyway: the failure mode is a proxy path stored in a Linear body,
 // which is a broken image for everyone in the workspace.
 describe("the encoder and the pattern that reads it back agree", () => {
-  test("a path minted from a hostile URL still reverses", () => {
+  test("a path minted from an awkward URL still reverses", () => {
     for (const url of [
       "https://x'y@uploads.linear.app/a.png",
       "https://uploads.linear.app/a'b.png",

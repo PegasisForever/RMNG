@@ -469,33 +469,21 @@ page cannot send it itself: the bucket answers the preflight with `vary: Origin`
 `url` is the `uploadUrl`, `headers` is Linear's `headers[]` as JSON with the declared
 `content-type` in front, and `file` is the bytes. Every header is forwarded verbatim, because
 the signature covers them, minus `host`, `content-length`, `transfer-encoding`, and
-`connection`. Send `url` before `file`: the target is checked as it is read, and at most 1 MB
-of a file that arrives first is held while waiting for it.
+`connection`. The PUT goes to whatever `url` names. The whole body is capped at 64 MB by
+`DefaultBodyLimit`.
 
-Each of the three fields is read at most once, and a second one is a 400. `url` is capped at
-8 KB and `headers` at 64 KB. A field this route does not name is drained rather than held. The
-whole body is capped at 64 MB by `DefaultBodyLimit`.
-
-The target host must be `storage.googleapis.com` over https on the default port, and a
-redirect from it is refused rather than followed. The hop gives up at 45 seconds, inside the
-signed URL's 60-second `X-Goog-Expires` window.
+The hop gives up at 45 seconds, inside the signed URL's 60-second `X-Goog-Expires` window.
 
 ### `GET /api/linear/asset?url=<assetUrl>` → the image bytes
 Read one Linear-hosted image and serve it same-origin. An `assetUrl` answers an unauthenticated
 GET with 401, and `uploads.linear.app` leaves `authorization` out of its CORS allow-list, so
 neither an `<img>` nor a `fetch` in the page can read one. This route fetches it with a
-preset's Linear key, trying each configured key until one is allowed to.
+preset's Linear key, trying each configured key until one is allowed to. It GETs whatever `url`
+names.
 
-The host must be `uploads.linear.app` over https on the default port, and a redirect from it
-is refused.
-
-Images only. Linear stores the `contentType` its uploader declared and hands that back, so the
-type is checked against a closed table (`png`, `jpeg`, `gif`, `webp`, `avif`, `bmp`) and
-anything else is a 415. `image/svg+xml` is not on it: an SVG scripts, and no route on this port
-asks for a credential. What is served is the table's string, never the one Linear sent, with
-`X-Content-Type-Options: nosniff`. Linear's own `Content-Disposition` and
-`Content-Security-Policy` travel with the file, and default to `attachment` and `sandbox` when
-it sends neither.
+The `Content-Type` is whatever the upstream declared, forwarded as it arrived: Linear stores the
+`contentType` its uploader sent and hands the same string back. The answer also carries
+`Cache-Control: private, max-age=3600`, because an `assetUrl` addresses one immutable file.
 
 The bytes are streamed through rather than collected, capped at 32 MB by a declared
 `content-length` or by a running count without one. One 20-second deadline covers the whole
@@ -503,8 +491,8 @@ request, every key attempt and the body together, and a request past it is a 504
 
 Issue bodies keep the original `uploads.linear.app` URL. The browser rewrites IMAGE
 destinations to this route when it renders and rewrites back before it saves, so nothing stored
-in Linear points here. A link destination is left pointing at Linear, so following one is never
-a navigation onto this origin.
+in Linear points here. A link destination and a bare URL keep pointing at Linear, where they
+stay readable and already load without a key.
 
 ---
 

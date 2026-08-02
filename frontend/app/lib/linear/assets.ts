@@ -26,15 +26,15 @@
 /** The control-server route that reads one Linear asset with a key and answers same-origin. */
 export const ASSET_PROXY = "/api/linear/asset";
 
-/** The one host the proxy will read from. The server pins the same name; this copy is what
- *  decides which URLs are worth sending there at all. */
+/** The host whose files need the proxy at all. Everything else an editor holds is either
+ *  already same-origin or already loadable, so this is what decides where a rewrite applies. */
 export const LINEAR_ASSET_HOST = "uploads.linear.app";
 
-/** True when `url` addresses a file the proxy can fetch.
+/** True when `url` addresses a file only the proxy can fetch.
  *
  *  `URL` is what decides the host, which is the same parser the browser would dial with, so
- *  `evil.tld@uploads.linear.app` reads as the allowed host here exactly as it would there,
- *  and case folding is done once by the parser rather than by a comparison here. */
+ *  case folding and userinfo are handled once by the parser rather than by a comparison
+ *  here. */
 export function isLinearAsset(url: string): boolean {
   let parsed: URL;
   try {
@@ -48,9 +48,8 @@ export function isLinearAsset(url: string): boolean {
 /** `encodeURIComponent`, closed over the six characters it leaves alone.
  *
  *  It escapes everything but `A-Za-z0-9-_.!~*'()`, and `PROXY_URL` below stops a path at `'`
- *  or `)`. A URL carrying either one therefore mints a path that `toLinearMarkdown` cannot
- *  read back: `https://x'y@uploads.linear.app/a.png` proxies fine, reverses to nothing, and
- *  the proxy path itself reaches Linear as a broken image for the whole workspace.
+ *  or `)`. A URL carrying either one would otherwise mint a path that `toLinearMarkdown`
+ *  cannot read back, and that path reaches Linear as a broken image for the whole workspace.
  *
  *  Unreachable today, because `uploadToLinear` returns a `/uuid/uuid/uuid` asset URL. Closed
  *  anyway: what this costs is one `replace`, and what it buys is a pair that is total. */
@@ -68,20 +67,19 @@ export function assetProxyUrl(url: string): string {
   return `${ASSET_PROXY}?url=${encodeAsset(url)}`;
 }
 
-/** The Linear URL a proxy path stands for, or the path unchanged when it is not one. */
+/** The URL a proxy path stands for, or the path unchanged when it is not one.
+ *
+ *  Every path this reads reverses, whatever it decodes to. A proxy path that survived into a
+ *  Linear body would be a broken image for everyone in the workspace, so the reverse stays
+ *  total rather than picking which paths it is willing to undo. */
 export function linearAssetUrl(proxied: string): string {
   const prefix = `${ASSET_PROXY}?url=`;
   if (!proxied.startsWith(prefix)) return proxied;
-  const encoded = proxied.slice(prefix.length);
-  let decoded: string;
   try {
-    decoded = decodeURIComponent(encoded);
+    return decodeURIComponent(proxied.slice(prefix.length));
   } catch {
     return proxied;
   }
-  // A proxy path is only ever minted from a Linear URL. One that decodes to anything else was
-  // typed by hand, and passing it through is safer than trusting it.
-  return isLinearAsset(decoded) ? decoded : proxied;
 }
 
 // A URL ends where markdown or HTML says it does: whitespace, a closing paren or bracket, a
@@ -90,13 +88,11 @@ export function linearAssetUrl(proxied: string): string {
 const LINEAR_URL = `https://${LINEAR_ASSET_HOST.replace(/\./g, "\\.")}/[^\\s)\\]"'<>]+`;
 const PROXY_URL = new RegExp(`${ASSET_PROXY.replace(/\//g, "\\/")}\\?url=[^\\s)\\]"'<>&]+`, "g");
 
-// An IMAGE destination and nothing else. The proxy serves images, so an image is all it is
-// ever pointed at, and the narrower the rewrite the less this route is reachable from.
+// An IMAGE destination and nothing else, which is the whole of what the proxy is for: an
+// `<img>` source has to be same-origin, and nothing else in a body does.
 //
-// A link destination in particular is left where it is. `[click](https://uploads.linear.app/x)`
-// rewritten is a one-click same-origin NAVIGATION to whatever that file turns out to be, on an
-// origin that serves `/api/hosts/:id/exec` and `/api/delete` without a credential. Pointed at
-// Linear it is a cross-origin navigation to somebody else's document, which is a link.
+// A link destination keeps pointing at Linear, and so does a bare URL in prose. Both stay
+// readable that way, and both already work in a browser without a key.
 //
 // `![alt](url)`, including the `![alt](<url>)` form and a trailing `"title"`, which the URL
 // pattern stops before because it takes no whitespace. Alt text takes no `]` and no newline,
