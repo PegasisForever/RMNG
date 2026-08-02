@@ -61,6 +61,35 @@ export function branchNameOf(ticket: LinearTicket): string {
   return slug ? `${ticket.id.toLowerCase()}-${slug}` : ticket.id.toLowerCase();
 }
 
+/** A clone's Linear ticket as Linear has it now, in the two fields a clone card draws.
+ *
+ *  A clone stores both at creation and never hears about them again, so a ticket renamed in
+ *  Linear leaves the clone reading the old title forever. This is the live answer, resolved by
+ *  the browser and handed to the card. The stored fields stay, as what the card falls back to
+ *  when Linear has not answered. */
+export interface CloneTicket {
+  title: string;
+  url: string;
+}
+
+/** Each clone's live ticket, by clone id.
+ *
+ *  Only the clones whose ticket is in `tickets`: one Linear cannot answer for is absent rather
+ *  than blank, which is what lets the card tell "Linear says this" apart from "nobody asked
+ *  yet" and fall back for the second. */
+export function cloneTickets(
+  clones: Clone[],
+  tickets: LinearTicket[],
+): Record<string, CloneTicket> {
+  const byId = new Map(tickets.map((t) => [t.id.toLowerCase(), t]));
+  const live: Record<string, CloneTicket> = {};
+  for (const clone of clones) {
+    const ticket = clone.linearTicket ? byId.get(clone.linearTicket.toLowerCase()) : undefined;
+    if (ticket) live[clone.id] = { title: ticket.title, url: ticket.url };
+  }
+  return live;
+}
+
 /** The clone somebody made for `ticketId`, or null.
  *
  *  Archived clones count. The ticket did get a clone, and offering to make a second one

@@ -6,6 +6,7 @@
 import { ChevronRight } from "lucide-react";
 
 import { CloneStatusDot } from "~/components/mobile/CloneStatus";
+import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
 /** Ticket and account, the two things that say which clone this is when several share a
@@ -16,9 +17,13 @@ function subtitle(clone: Clone): string {
 
 export function MobileCloneRow({
   clone,
+  ticket,
   onSelect,
 }: {
   clone: Clone;
+  /** This clone's Linear ticket as Linear has it now. Absent ⇒ the row draws the title the
+   *  clone stored when it was made. */
+  ticket?: CloneTicket;
   /** Open this clone's screen. The container activates it server-side and swaps the page. */
   onSelect: (clone: Clone) => void;
 }) {
@@ -32,7 +37,7 @@ export function MobileCloneRow({
         <CloneStatusDot clone={clone} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium text-slate-800 dark:text-slate-100">
-            {clone.displayName ?? clone.id}
+            {ticket?.title ?? clone.displayName ?? clone.id}
           </span>
           <span className="block truncate text-xs text-slate-500 dark:text-slate-400">
             {subtitle(clone) || clone.id}

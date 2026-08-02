@@ -6,10 +6,13 @@ import { expect, test } from "bun:test";
 import {
   issueCreate,
   issueCreateInput,
+  issueSetState,
   issueUpdate,
   issueUpdateInput,
   keysForTeam,
   pickCreateStateId,
+  pickStateId,
+  teamKeyOf,
 } from "./mutations";
 
 function preset(name: string, labels: string[], linearKey: string) {
@@ -145,4 +148,46 @@ test("an omitted field is left alone and an empty description is a real value", 
 // The caller's signal that there is nothing to send. `issueUpdate` returns without a request.
 test("a patch that asks for nothing builds nothing", () => {
   expect(issueUpdateInput({})).toEqual({});
+});
+
+// --- moving a ticket to another state ----------------------------------------
+//
+// The column's Cancel and Move-to-backlog items. Both name a state *type*, so a workspace
+// that calls its backlog "Icebox" is moved into that one.
+
+test("a state is picked by type, lowest position first", () => {
+  const nodes = [
+    { id: "s-done", type: "completed", position: 0 },
+    { id: "s-cancel-late", type: "canceled", position: 3 },
+    { id: "s-cancel", type: "canceled", position: 1 },
+    { id: "s-icebox", type: "backlog", position: 2 },
+  ];
+
+  expect(pickStateId(nodes, "canceled")).toBe("s-cancel");
+  expect(pickStateId(nodes, "backlog")).toBe("s-icebox");
+  expect(pickStateId(nodes, "started")).toBeNull();
+});
+
+// The create path is that same rule asking for Todo, so the two cannot drift apart.
+test("a new issue still lands in the lowest Todo", () => {
+  const nodes = [
+    { id: "s-triage", type: "unstarted", position: 5 },
+    { id: "s-todo", type: "unstarted", position: 1 },
+  ];
+
+  expect(pickCreateStateId(nodes)).toBe(pickStateId(nodes, "unstarted"));
+  expect(pickCreateStateId(nodes)).toBe("s-todo");
+});
+
+test("the workflow is looked up by the ticket's team, or by its identifier's own prefix", () => {
+  expect(teamKeyOf({ id: "WE-142", team: "we" })).toBe("WE");
+  expect(teamKeyOf({ id: "dev-88" })).toBe("DEV");
+  expect(teamKeyOf({ id: "WE-142", team: "  " })).toBe("WE");
+});
+
+// No request is made, which is what makes this safe to run.
+test("moving a ticket with no key says so rather than asking Linear", async () => {
+  await expect(issueSetState([], { id: "WE-1" }, "canceled")).rejects.toThrow(
+    /no Linear API key configured/,
+  );
 });

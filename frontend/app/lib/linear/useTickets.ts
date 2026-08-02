@@ -1,5 +1,11 @@
-// The ticket column's source: every configured Linear key's own open issues, merged, kept
-// current by a poll the browser runs itself.
+// Every Linear ticket the page draws: each configured key's own open issues, plus the ticket
+// behind each clone that has one, merged and kept current by a poll the browser runs itself.
+//
+// The clone-linked half is a second phase of the same round rather than a second hook, because
+// the two lists overlap: a clone usually sits on a ticket that is In Progress and assigned to
+// the operator, which the open query already returned. Only what that query did not carry is
+// asked for by identifier, so the usual fleet costs no extra requests at all, and a clone whose
+// ticket has been closed costs exactly one.
 //
 // One poll per interval for the whole page, not one per key visible on screen: the query is
 // scoped to the key's viewer, and the answer is the same whoever is looking at it. Keys are
@@ -18,6 +24,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { fetchTicketAny, issueRefOf } from "~/lib/linear/issues";
 import { fetchOpenTickets } from "~/lib/linear/queries";
 import type { LinearTicket } from "~/lib/linear/types";
 
@@ -39,8 +46,9 @@ const ROUND_BUDGET_MS = 30_000;
 const WATCHDOG_MS = 5_000;
 
 export interface Tickets {
-  /** Every open issue across the configured keys, deduplicated. Empty until the first answer
-   *  lands, and unchanged by a poll in which every key failed. */
+  /** Every open issue across the configured keys plus every clone-linked one asked for by
+   *  identifier, deduplicated. Empty until the first answer lands, and unchanged by a poll in
+   *  which every key failed. */
   tickets: LinearTicket[];
   /** Why the last poll failed, if it did. Set alongside a partial list when only some keys
    *  answered. */
@@ -59,11 +67,15 @@ export interface Tickets {
   upsert: (ticket: LinearTicket) => void;
 }
 
-/** The ticket column's list, live.
+/** Every ticket the page draws, live.
  *
  *  Pass the presets from `GET /api/config`; the keys are read off them and nothing else is.
- *  A preset with no key is skipped, and two presets sharing one key are asked once. */
-export function useTickets(presets: { linearKey: string }[]): Tickets {
+ *  A preset with no key is skipped, and two presets sharing one key are asked once.
+ *
+ *  Pass `linked` the identifier of every clone that has one. Each is resolved in whatever state
+ *  Linear holds it, which is what puts a clone whose ticket is Done or Cancelled in the list:
+ *  the open query answers for neither, and the clone still draws its title. */
+export function useTickets(presets: { linearKey: string }[], linked: string[] = []): Tickets {
   const [tickets, setTickets] = useState<LinearTicket[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -77,9 +89,13 @@ export function useTickets(presets: { linearKey: string }[]): Tickets {
   // operator just typed into Settings. Keyed on the serialized list rather than the array,
   // because `presets` is a fresh array on every render that reaches this hook.
   const keysKey = JSON.stringify(linearKeys(presets));
+  // Same deal for the clone-linked identifiers, so a clone that has just been made has its
+  // ticket a round trip later rather than at the end of the interval.
+  const linkedKey = JSON.stringify(linkedIds(linked));
 
   useEffect(() => {
     const keys = JSON.parse(keysKey) as string[];
+    const wanted = JSON.parse(linkedKey) as string[];
     // Set on unmount, so a fetch still in flight cannot write state into a gone component or
     // arm another timer behind it. Same discipline as the SSE socket's own effect.
     let disposed = false;
@@ -134,16 +150,33 @@ export function useTickets(presets: { linearKey: string }[]): Tickets {
       // A superseded round answers into the void: whatever replaced it is newer, and its own
       // answer is the one on screen.
       if (disposed || mine !== round) return;
-      startedAt = null;
 
       // `Promise.all` answers in the order it was given, so the first key still wins a
       // repeated issue however the requests happened to race.
-      const merged = mergeTickets(answers.map((a) => a.found ?? []));
+      const open = mergeTickets(answers.map((a) => a.found ?? []));
       const errors = answers.map((a) => a.error).filter((e): e is string => e !== null);
+
+      // The clone-linked tickets the open lists did not carry. A miss here is silent: the
+      // clone falls back to the title and link it stored when it was made, which is exactly
+      // what those fields are for, and a banner about it would say nothing the operator can
+      // act on.
+      const carried = new Set(open.map((t) => t.id.toLowerCase()));
+      const extra = await Promise.all(
+        wanted.filter((id) => !carried.has(id)).map((id) => fetchLinked(keys, id)),
+      );
+      if (disposed || mine !== round) return;
+      startedAt = null;
+
       // Every key failed and nothing came back: keep whatever the column already has rather
       // than blanking it, and say why. A partial answer still replaces the list, because the
       // keys that did answer are authoritative for their own owners.
-      if (merged.length > 0 || errors.length === 0) setTickets(merged);
+      if (open.length > 0 || errors.length === 0) {
+        const found = extra.filter((t): t is LinearTicket => t !== null);
+        // The linked tickets already on screen come last, so one whose own lookup failed this
+        // round keeps the copy from the round before instead of blinking back to the stored
+        // title. A clone that is gone takes its ticket with it: `wanted` no longer names it.
+        setTickets((current) => mergeTickets([open, found, linkedOnly(current, wanted)]));
+      }
       setError(errors.length > 0 ? errors.join("; ") : null);
       setLoading(false);
       arm(errors.length > 0 ? ERROR_MS : POLL_MS);
@@ -186,7 +219,7 @@ export function useTickets(presets: { linearKey: string }[]): Tickets {
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [keysKey]);
+  }, [keysKey, linkedKey]);
 
   const refetch = useCallback(() => forceTick.current(), []);
   const upsert = useCallback((ticket: LinearTicket) => {
@@ -213,6 +246,42 @@ export function linearKeys(presets: { linearKey: string }[]): string[] {
     keys.push(key);
   }
   return keys;
+}
+
+/** Every distinct clone-linked identifier, lowercased, in the order given.
+ *
+ *  Lowercased because that is how every identifier is compared in this app, and deduplicated
+ *  because two clones on one ticket is a normal thing to do and would otherwise be two
+ *  requests for one answer. */
+export function linkedIds(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const raw of ids) {
+    const id = raw.trim().toLowerCase();
+    if (id === "" || seen.has(id)) continue;
+    seen.add(id);
+    kept.push(id);
+  }
+  return kept;
+}
+
+/** The tickets in `current` that `wanted` still names, in the order they were in.
+ *
+ *  What carries a clone's ticket across a round that could not re-read it. Nothing else in the
+ *  list survives on its own: an open ticket that stops being open is meant to disappear. */
+export function linkedOnly(current: LinearTicket[], wanted: string[]): LinearTicket[] {
+  const keep = new Set(wanted);
+  return current.filter((t) => keep.has(t.id.toLowerCase()));
+}
+
+/** One clone-linked ticket by identifier, or null when no key can see it.
+ *
+ *  Null rather than a throw, because the caller is a poll that has to finish either way. An
+ *  identifier that parses into nothing takes no request at all. */
+async function fetchLinked(keys: string[], id: string): Promise<LinearTicket | null> {
+  const ref = issueRefOf(id);
+  if (!ref) return null;
+  return fetchTicketAny(keys, ref).catch(() => null);
 }
 
 /** One list out of several keys' answers, in key order.

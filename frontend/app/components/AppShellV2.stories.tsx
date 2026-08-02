@@ -24,7 +24,7 @@ import { makeNotesBlocks } from "./__fixtures__/notes";
 import { cloneOperation } from "./__fixtures__/operations";
 import { cloneTokens, lxcStats, stats } from "./__fixtures__/stats";
 import { makeStoryLink } from "./__fixtures__/storyLinks";
-import { linearTickets, ticketDetailed } from "./__fixtures__/tickets";
+import { linearTickets, ticketCloned, ticketDetailed } from "./__fixtures__/tickets";
 
 /** A clone that starts out in the archived column, so the fixed right column has something
  *  in it to drag back out. */
@@ -116,8 +116,15 @@ const toTicketModal = makeStoryLink("Board/Components/TicketModalView", "Default
 // than a dialog somewhere else — so it links to this shell's own story for it.
 const toTicketOpen = makeStoryLink("Dashboard/Pages/AppShellV2", "TicketOpen");
 
-/** The side panel holding a ticket instead of the clone's two cards. */
-function TicketFixture({ ticket }: { ticket: LinearTicket }) {
+/** A ticket panel on fixtures. `onCreateClone` is the caller's: the column's panel offers the
+ *  button, and a clone's own notes card does not, because that clone is the one it would make. */
+function TicketFixture({
+  ticket,
+  onCreateClone,
+}: {
+  ticket: LinearTicket;
+  onCreateClone?: () => void;
+}) {
   return (
     <TicketPanel
       ticket={ticket}
@@ -125,7 +132,7 @@ function TicketFixture({ ticket }: { ticket: LinearTicket }) {
         <TicketDescription key={ticket.id} markdown={ticket.description ?? ""} onSave={fn()} />
       }
       onCopyBranchName={fn(async () => true)}
-      onCreateClone={toCloneModalFromTicket}
+      onCreateClone={onCreateClone}
       onTitleChange={fn()}
     />
   );
@@ -266,7 +273,21 @@ export const TicketOpen: Story = {
       selectedId: null,
       tickets: { ...makeTicketColumn(makeBoardClones()), selectedId: ticketDetailed.id },
     },
-    ticket: <TicketFixture ticket={ticketDetailed} />,
+    ticket: <TicketFixture ticket={ticketDetailed} onCreateClone={toCloneModalFromTicket} />,
+  },
+};
+
+/** The selected clone was made from a Linear ticket, so its notes card holds the ticket. The
+ *  card keeps its clone-id header and the chat keeps the quarter below it: this is the clone's
+ *  own panel with a different thing in its top half, not the ticket panel from the column.
+ *
+ *  There is no "Create a clone" button, and the notes for this clone are not reachable from
+ *  anywhere. Both are deliberate. */
+export const TicketInNotesCard: Story = {
+  args: {
+    rail: makeRail(),
+    board: makeBoard(),
+    notes: <TicketFixture ticket={ticketCloned} />,
   },
 };
 
@@ -333,7 +354,11 @@ export const Interactive: Story = {
         {...args}
         chat={withLocale(args.chat, args.locale)}
         selectedClone={selectedClone}
-        ticket={openTicket ? <TicketFixture ticket={openTicket} /> : undefined}
+        ticket={
+          openTicket ? (
+            <TicketFixture ticket={openTicket} onCreateClone={toCloneModalFromTicket} />
+          ) : undefined
+        }
         sideFocus={sideFocus}
         onSideFocusChange={(next) => {
           setSideFocus(next);

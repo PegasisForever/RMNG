@@ -8,6 +8,7 @@ import {
   cloneLinearMeta,
   ensureInProgress,
   fetchIssueAny,
+  issueByNumberQuery,
   issueFromNode,
   issueRefOf,
   needsInProgress,
@@ -16,6 +17,7 @@ import {
   stateTypeOf,
   type ResolvedIssue,
 } from "./issues";
+import { OPEN_ISSUE_FIELDS } from "./queries";
 import type { LinearTicket } from "./types";
 
 // --- splitting the identifier the query filters by ---------------------------
@@ -228,4 +230,21 @@ test("a created ticket that carried no team takes its prefix from its own identi
   expect(issue.prefix).toBe("per");
   expect(issue.uuid).toBe("");
   expect(issue.branch).toBe("");
+});
+
+// --- the same lookup, in the ticket column's shape ---------------------------
+//
+// A clone outlives its ticket being closed, so the board reads a clone's ticket through this
+// query rather than through the open one, which answers for neither a completed issue nor one
+// assigned to somebody else.
+
+test("the lookup filters by team and number alone, whatever field set it asks for", () => {
+  const query = issueByNumberQuery(OPEN_ISSUE_FIELDS);
+
+  expect(query).toContain("team: { key: { eq: $team } }");
+  expect(query).toContain("number: { eq: $num }");
+  expect(query).not.toContain("state: { type:");
+  // The panel's own field set, so a clone's ticket arrives with its body and its sub-issues.
+  expect(query).toContain("description");
+  expect(query).toContain("children");
 });

@@ -1,8 +1,9 @@
-// The two writes the ticket column can start: open an issue, and edit one.
+// The three writes the ticket column can start: open an issue, edit one, and move one to
+// another workflow state.
 //
-// Both used to be the server's. The browser holds the preset keys now, so it addresses Linear
-// itself and the control-server never sees a ticket body. What crossed over unchanged is the
-// part that is not obvious from the mutation names:
+// All three used to be the server's, or nobody's. The browser holds the preset keys now, so it
+// addresses Linear itself and the control-server never sees a ticket body. What crossed over
+// unchanged is the part that is not obvious from the mutation names:
 //
 // - A new issue is pinned to the team's lowest-`position` `unstarted` state. The column draws
 //   Todo and In Progress only, so an issue left in whatever state the team defaults to (very
@@ -11,12 +12,17 @@
 //   is assigned. An unassigned issue would never appear in it either.
 // - An edit addresses the issue by Linear's UUID, never by `WE-142`.
 //
+// A state is picked the same way whichever write is asking: a workflow can hold several states
+// of one type, and Linear orders them by `position`, so the lowest is the one its own board
+// would land the issue in.
+//
 // Everything that decides a variable is pure and exported. The network calls below are thin
 // wrappers over those, so the rules are testable without a key.
 
 import { gql } from "~/lib/linear/client";
+import { stateTypeOf } from "~/lib/linear/issues";
 import { OPEN_ISSUE_FIELDS, ticketFromNode } from "~/lib/linear/queries";
-import type { LinearTicket } from "~/lib/linear/types";
+import type { LinearTicket, TicketState } from "~/lib/linear/types";
 
 /** What the new-ticket dialog sends. `priority` is Linear's own scale: 1 urgent, 2 high,
  *  3 medium, 4 low. Zero and absent both mean no priority, which is a real value there. */
@@ -40,6 +46,9 @@ export interface IssuePatch {
 export interface IssueRef {
   id: string;
   uuid?: string;
+  /** Team key, e.g. `WE`. Names the workflow a state is picked out of. Absent falls back to
+   *  the identifier's own team part, which is the same answer for every real ticket. */
+  team?: string;
 }
 
 // --- what key writes what ----------------------------------------------------
@@ -90,23 +99,31 @@ const ISSUE_CREATE_MUTATION =
   "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { " +
   `success issue { ${OPEN_ISSUE_FIELDS} } } }`;
 
-/** The state a new issue is pinned to: the lowest-`position` state of type `unstarted`.
+/** The lowest-`position` state of `type` in a team's workflow.
  *
- *  A team can have several Todo states, and Linear orders them by `position`, so the lowest
- *  is the one its own board drops a new issue into. Null when the team declares none, which
- *  leaves the choice to Linear rather than inventing one.
+ *  A team can have several states of one type, and Linear orders them by `position`, so the
+ *  lowest is the one its own board would use. Null when the team declares none, which leaves
+ *  the choice to Linear rather than inventing one.
  *
  *  Takes the raw `states.nodes` array, because nothing type-checked the answer. */
-export function pickCreateStateId(nodes: unknown): string | null {
+export function pickStateId(nodes: unknown, type: string): string | null {
   if (!Array.isArray(nodes)) return null;
-  const unstarted = nodes.filter(
-    (n) => typeof n === "object" && n !== null && (n as { type?: unknown }).type === "unstarted",
+  const matching = nodes.filter(
+    (n) => typeof n === "object" && n !== null && (n as { type?: unknown }).type === type,
   ) as { id?: unknown; position?: unknown }[];
   // Stable, so two states sharing a position keep the order Linear listed them in. A state
   // with no position sorts last rather than first: an unknown rank is not rank zero.
-  const ranked = [...unstarted].sort((a, b) => rank(a.position) - rank(b.position));
+  const ranked = [...matching].sort((a, b) => rank(a.position) - rank(b.position));
   const id = ranked[0]?.id;
   return typeof id === "string" && id !== "" ? id : null;
+}
+
+/** The state a new issue is pinned to: the team's first Todo.
+ *
+ *  The column draws Todo and In Progress only, so an issue left in whatever state the team
+ *  defaults to would be created and disappear in the same breath. */
+export function pickCreateStateId(nodes: unknown): string | null {
+  return pickStateId(nodes, "unstarted");
 }
 
 function rank(position: unknown): number {
@@ -200,14 +217,33 @@ export function issueUpdateInput(patch: IssuePatch): Record<string, unknown> {
   return input;
 }
 
-/** Write a title and/or description onto an issue.
+/** Run `write` against each key in turn until one lands.
  *
- *  `keys` is tried in order and the first that lands wins, mirroring the server's rule that a
- *  key which can see an issue is the key that may write it. A workspace's own key is put
- *  first by `keysForTeam`, so the usual fleet spends exactly one request here.
+ *  Mirrors the server's rule that a key which can see an issue is the key that may write it. A
+ *  workspace's own key is put first by `keysForTeam`, so the usual fleet spends exactly one
+ *  request here.
  *
- *  Re-trying a patch against a second key cannot double-apply it: the patch is the value to
- *  set, not a delta, so applying it twice is applying it once. */
+ *  Re-trying against a second key cannot double-apply anything: every write below sets a value
+ *  rather than applying a delta, so doing it twice is doing it once. */
+async function withFirstKey(
+  keys: string[],
+  refused: string,
+  write: (key: string) => Promise<void>,
+): Promise<void> {
+  if (keys.length === 0) throw new Error("no Linear API key configured for that workspace");
+  let last: Error | null = null;
+  for (const key of keys) {
+    try {
+      await write(key);
+      return;
+    } catch (e) {
+      last = e as Error;
+    }
+  }
+  throw last ?? new Error(refused);
+}
+
+/** Write a title and/or description onto an issue. */
 export async function issueUpdate(
   keys: string[],
   ticket: IssueRef,
@@ -215,26 +251,61 @@ export async function issueUpdate(
 ): Promise<void> {
   const input = issueUpdateInput(patch);
   if (Object.keys(input).length === 0) return;
-  if (keys.length === 0) throw new Error("no Linear API key configured for that workspace");
+  const refused = `Linear refused the update to ${ticket.id}`;
+  await withFirstKey(keys, refused, async (key) => {
+    const uuid = await issueUuid(key, ticket);
+    const data = await gql<{ issueUpdate?: { success?: boolean } }>(key, ISSUE_UPDATE_MUTATION, {
+      id: uuid,
+      input,
+    });
+    if (data.issueUpdate?.success !== true) throw new Error(refused);
+  });
+}
 
-  let last: Error | null = null;
-  for (const key of keys) {
-    try {
-      const uuid = await issueUuid(key, ticket);
-      const data = await gql<{ issueUpdate?: { success?: boolean } }>(
-        key,
-        ISSUE_UPDATE_MUTATION,
-        { id: uuid, input },
-      );
-      if (data.issueUpdate?.success !== true) {
-        throw new Error(`Linear refused the update to ${ticket.id}`);
-      }
-      return;
-    } catch (e) {
-      last = e as Error;
-    }
-  }
-  throw last ?? new Error(`Linear refused the update to ${ticket.id}`);
+// --- issueUpdate { stateId } --------------------------------------------------
+
+/** A team's whole workflow, by team key. `position` is what orders two states of one type. */
+const TEAM_STATES_QUERY =
+  "query($team: String!) { teams(filter: { key: { eq: $team } }, first: 1) { " +
+  "nodes { states { nodes { id type position } } } } }";
+
+/** The team key a state lookup is filtered by: the ticket's own, or the part of its identifier
+ *  before the number. Uppercase, which is how Linear stores it. */
+export function teamKeyOf(ticket: IssueRef): string {
+  const team = (ticket.team ?? "").trim();
+  const dash = ticket.id.lastIndexOf("-");
+  return (team !== "" ? team : dash > 0 ? ticket.id.slice(0, dash) : ticket.id).toUpperCase();
+}
+
+/** Move an issue into `state`.
+ *
+ *  Two round trips per key: the state ids belong to the team's workflow and are not knowable
+ *  before it is asked. The state is named by type rather than by name, so a workspace calling
+ *  its backlog "Icebox" is moved into that one.
+ *
+ *  Nothing here drops the ticket from the column. The caller does that on its own, because
+ *  waiting out a poll would leave a card sitting there that was cancelled a second ago. */
+export async function issueSetState(
+  keys: string[],
+  ticket: IssueRef,
+  state: TicketState,
+): Promise<void> {
+  const type = stateTypeOf(state);
+  const team = teamKeyOf(ticket);
+  const refused = `Linear refused the state change on ${ticket.id}`;
+  await withFirstKey(keys, refused, async (key) => {
+    const found = await gql<{ teams?: { nodes?: unknown[] } }>(key, TEAM_STATES_QUERY, { team });
+    const node = found.teams?.nodes?.[0] as { states?: { nodes?: unknown } } | undefined;
+    const stateId = pickStateId(node?.states?.nodes, type);
+    if (stateId === null) throw new Error(`team ${team} has no ${type} state`);
+
+    const uuid = await issueUuid(key, ticket);
+    const data = await gql<{ issueUpdate?: { success?: boolean } }>(key, ISSUE_UPDATE_MUTATION, {
+      id: uuid,
+      input: { stateId },
+    });
+    if (data.issueUpdate?.success !== true) throw new Error(refused);
+  });
 }
 
 /** The UUID a mutation addresses the issue by.

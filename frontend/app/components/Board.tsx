@@ -37,7 +37,12 @@ import { BoardColumnPanel } from "~/components/BoardColumnPanel";
 import { SidebarClone } from "~/components/SidebarClone";
 import { TicketCardBody, TicketColumn, type TicketColumnProps } from "~/components/TicketColumn";
 import { archivesOnDrop, resolveColumns, subCloneTree, type BoardColumn } from "~/lib/board";
-import { ticketIdFromDrag, TICKET_COLUMN_ID, type LinearTicket } from "~/lib/tickets";
+import {
+  ticketIdFromDrag,
+  TICKET_COLUMN_ID,
+  type CloneTicket,
+  type LinearTicket,
+} from "~/lib/tickets";
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
@@ -51,6 +56,9 @@ export interface BoardProps {
   columns: BoardColumn[];
   /** Every clone, archived ones included. */
   clones: Clone[];
+  /** Each clone's Linear ticket as Linear has it now, by clone id. A clone missing from it
+   *  draws the title and link it stored when it was made. */
+  cloneTickets?: Record<string, CloneTicket>;
   /** Live per-clone CPU/RAM map (the volatile `stats` SSE event). */
   stats: Record<string, ContainerStats>;
   /** All-time per-clone token totals from `ControlState.cloneTokens`. */
@@ -198,6 +206,7 @@ function settle(prev: Lane[], next: Lane[]): Lane[] {
 export function Board({
   columns,
   clones,
+  cloneTickets = {},
   stats,
   cloneTokens = {},
   forwards = {},
@@ -277,6 +286,7 @@ export function Board({
 
   const cardProps = (clone: Clone) => ({
     clone,
+    ticket: cloneTickets[clone.id],
     stats: stats[clone.id],
     tokens: cloneTokens[clone.id],
     forwardRuntime: forwards[clone.id],

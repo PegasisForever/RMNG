@@ -25,6 +25,7 @@ import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
 import { formatTokenCount } from "~/lib/format";
 import { buildSshCommand } from "~/lib/ssh";
+import type { CloneTicket } from "~/lib/tickets";
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
@@ -233,6 +234,10 @@ function ForwardChips({ forwards, runtime }: { forwards: PortForward[]; runtime:
 
 export interface SidebarCloneProps {
   clone: Clone;
+  /** This clone's Linear ticket as Linear has it now. Absent ⇒ the card draws the title and
+   *  link the clone stored when it was made, which is what a ticket Linear will not answer for
+   *  falls back to. */
+  ticket?: CloneTicket;
   /** Live CPU/RAM usage for this clone's container, pushed over the `stats` SSE event.
    *  Absent for a stopped/unmanaged clone or before the first sample — renders nothing. */
   stats?: ContainerStats;
@@ -408,6 +413,7 @@ function CloneMenu({
 
 export function SidebarClone({
   clone,
+  ticket,
   stats,
   tokens,
   selected,
@@ -432,6 +438,11 @@ export function SidebarClone({
   dragListeners,
 }: SidebarCloneProps) {
   const busy = op?.status === "running";
+  // Linear's own title and link when the browser resolved the ticket, and what the clone
+  // stored at creation when it did not. Both are read in two places each, so they are named
+  // once here rather than repeating the fallback down the card.
+  const title = ticket?.title ?? clone.displayName ?? clone.id;
+  const linearUrl = ticket?.url ?? clone.linearTicketUrl ?? undefined;
   // Managed clones (backed by a container named after the clone id) get the commit /
   // account actions; plain unmanaged rows only get remove.
   const managed = clone.managed === true;
@@ -522,7 +533,7 @@ export function SidebarClone({
           {busy ? (
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <span className="min-w-0 flex-1 break-words text-sm font-medium text-slate-800 dark:text-slate-100">
-                {clone.displayName ?? clone.id}
+                {title}
               </span>
               <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400">
                 {op?.kind === "delete" ? "deleting…" : op?.step}
@@ -577,7 +588,7 @@ export function SidebarClone({
             onDelete={onDelete}
             sshCommand={sshCommand}
             onCopySshCommand={onCopySshCommand}
-            linearUrl={clone.linearTicketUrl ?? undefined}
+            linearUrl={linearUrl}
             onOpenInLinear={onOpenInLinear}
           />
         </div>
@@ -620,7 +631,7 @@ export function SidebarClone({
                 aria-label="headless clone (tmux view)"
               />
             ) : null}
-            {clone.displayName ?? clone.id}
+            {title}
           </p>
         ) : null}
 

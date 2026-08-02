@@ -5,6 +5,8 @@ import { fn } from "storybook/test";
 import { MobileClone, type CloneTab } from "./MobileClone";
 import { ChatView } from "~/components/ChatView";
 import { NotesEditorView } from "~/components/NotesEditorView";
+import { TicketPanel } from "~/components/TicketPanel";
+import TicketDescription from "~/components/TicketDescription";
 import { PhoneFrame } from "~/stories/PhoneFrame";
 import {
   chatActivity,
@@ -16,6 +18,7 @@ import {
 import { cloneOffline, cloneWorking } from "../__fixtures__/clones";
 import { makeNotesBlocks } from "../__fixtures__/notes";
 import { makeStoryLink } from "../__fixtures__/storyLinks";
+import { ticketCloned } from "../__fixtures__/tickets";
 
 /** The chat pane on fixtures instead of the per-clone SSE stream. */
 function ChatFixture({ busy = false }: { busy?: boolean }) {
@@ -49,6 +52,21 @@ function NotesFixture() {
       initialContent={makeNotesBlocks()}
       onChange={fn()}
       uploadFile={async () => "data:image/gif;base64,R0lGODlhAQABAAAAACw="}
+    />
+  );
+}
+
+/** The same pane holding the clone's Linear ticket. No "Create a clone" button: this clone is
+ *  the one it would make. */
+function TicketFixture() {
+  return (
+    <TicketPanel
+      ticket={ticketCloned}
+      description={
+        <TicketDescription markdown={ticketCloned.description ?? ""} onSave={fn()} />
+      }
+      onCopyBranchName={fn(async () => true)}
+      onTitleChange={fn()}
     />
   );
 }
@@ -88,6 +106,12 @@ export const AgentWorking: Story = {
 /** The notes tab, full screen, on the same block editor the desktop uses. */
 export const Notes: Story = {
   args: { tab: "notes" as CloneTab },
+};
+
+/** A clone made from a Linear ticket: the second tab reads "Ticket" and holds the ticket
+ *  itself. The clone's notes are not reachable from this screen, which is deliberate. */
+export const Ticket: Story = {
+  args: { tab: "notes" as CloneTab, notesLabel: "Ticket", notes: <TicketFixture /> },
 };
 
 /** An offline clone still shows its history. The header dot and label are what say so. */

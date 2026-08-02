@@ -1,8 +1,8 @@
-// The two rules the hook applies around its fetches: which keys get asked, and what happens
-// when two of them report the same issue.
+// The rules the hook applies around its fetches: which keys get asked, which clone-linked
+// identifiers get asked for by name, and what happens when two answers report the same issue.
 import { expect, test } from "bun:test";
 
-import { linearKeys, mergeTickets, upsertTicket } from "./useTickets";
+import { linearKeys, linkedIds, linkedOnly, mergeTickets, upsertTicket } from "./useTickets";
 import type { LinearTicket } from "./types";
 
 function preset(linearKey: string): { linearKey: string } {
@@ -82,4 +82,24 @@ test("the upsert leaves the list it was given alone", () => {
   upsertTicket(before, ticket("WE-1", "new"));
 
   expect(before[0]?.title).toBe("old");
+});
+
+// --- the clone-linked half ---------------------------------------------------
+//
+// A clone's own ticket is asked for by identifier, because the open query answers for
+// neither a closed ticket nor one assigned to somebody else.
+
+test("clone-linked identifiers are lowercased and asked for once each", () => {
+  expect(linkedIds(["WE-142", " dev-88 ", "we-142", ""])).toEqual(["we-142", "dev-88"]);
+  expect(linkedIds([])).toEqual([]);
+});
+
+test("a linked ticket survives a round that could not re-read it", () => {
+  const current = [ticket("WE-1"), ticket("WE-142"), ticket("DEV-88")];
+
+  expect(linkedOnly(current, ["we-142"]).map((t) => t.id)).toEqual(["WE-142"]);
+});
+
+test("a linked ticket whose clone is gone is not carried forward", () => {
+  expect(linkedOnly([ticket("WE-142")], [])).toEqual([]);
 });

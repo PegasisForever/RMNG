@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 import {
   branchNameOf,
   cloneForTicket,
+  cloneTickets,
   findTicket,
   openTickets,
   orderTickets,
@@ -172,4 +173,32 @@ test("a referenced issue somebody cloned resolves to that clone", () => {
 
   expect(cloneForTicket("we-2", clones)?.id).toBe("mercury");
   expect(cloneForTicket("WE-1", clones)).toBeNull();
+});
+
+// --- a clone's own ticket, live ----------------------------------------------
+//
+// A clone stores its ticket's title and link when it is made and never hears about them
+// again, so everything below is about the join that replaces them at render.
+
+test("a clone's live title and link come off the ticket that answered", () => {
+  const t = ticket("WE-2");
+  t.title = "Renamed in Linear";
+
+  const live = cloneTickets([clone("mercury", "WE-2")], [t]);
+
+  expect(live.mercury).toEqual({ title: "Renamed in Linear", url: t.url });
+});
+
+test("the identifier match ignores case, the way every other one does", () => {
+  const live = cloneTickets([clone("mercury", "we-2")], [ticket("WE-2")]);
+
+  expect(live.mercury?.title).toBe("WE-2");
+});
+
+test("a clone with no ticket, and one Linear did not answer for, are both absent", () => {
+  const clones = [clone("mercury", "WE-9"), clone("venus")];
+
+  const live = cloneTickets(clones, [ticket("WE-2")]);
+
+  expect(live).toEqual({});
 });

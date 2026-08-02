@@ -17,21 +17,30 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
+import { TicketPanel } from "~/components/TicketPanel";
 import { MobileClone, type CloneTab } from "~/components/mobile/MobileClone";
 import { MobileHome } from "~/components/mobile/MobileHome";
 import { useAccountOrder } from "~/lib/accountOrder";
 import { activate, refreshClaudeUsage, refreshCodexUsage } from "~/lib/api";
 import { withDefaults } from "~/lib/board";
+import { copyText } from "~/lib/clipboard";
 import { browserLocale } from "~/lib/format";
+import { issueUpdate, keysForTeam } from "~/lib/linear/mutations";
+import { useTickets } from "~/lib/linear/useTickets";
+import { cloneForTicket, cloneTickets, findTicket, type LinearTicket } from "~/lib/tickets";
 import type { ControlState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
 // BlockNote and the chat panel are browser-only, and both are the desktop's modules
 // unchanged: the phone changes their surroundings, not what they do.
 const NotesEditorContainer = lazy(() => import("~/components/NotesEditorContainer"));
 const ChatContainer = lazy(() => import("~/components/ChatContainer"));
+// The ticket description is markdown, and rendering it means BlockNote, which is as
+// browser-only as the notes editor beside it.
+const TicketDescription = lazy(() => import("~/components/TicketDescription"));
 
 function ClientOnly({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
@@ -47,12 +56,16 @@ export function MobileDashboardContainer({
   state,
   cloneGroups,
   codexGroups,
+  presets,
 }: {
   state: ControlState;
   /** Configured Claude pools (`config.cloneGroups`) — the usage list groups by these. */
   cloneGroups: CloneGroup[];
   /** Configured Codex pools (`config.codexGroups`). */
   codexGroups: CloneGroup[];
+  /** Configured presets (`config.presets`). Their Linear keys are what read a clone's own
+   *  ticket, which is the one thing on this screen the control server does not send. */
+  presets: PresetRedacted[];
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [tab, setTab] = useState<CloneTab>("chat");
@@ -80,14 +93,49 @@ export function MobileDashboardContainer({
   // notification opens it.
   useCloneNotifications(state.hosts, open);
 
+  // Every clone's own Linear ticket, read by this browser with the presets' keys. The phone
+  // has no ticket column, so the open queue is nobody's business here and only the clones'
+  // own identifiers are asked for.
+  const {
+    tickets: linearTickets,
+    refetch: refetchTickets,
+    upsert: upsertTicket,
+  } = useTickets(
+    presets,
+    state.hosts.flatMap((h) => (h.linearTicket ? [h.linearTicket] : [])),
+  );
+
+  // Write a title or a body back to Linear and show it now, with Linear's own answer a round
+  // trip later. A refused write puts the old value back. Same shape as the desktop's, which
+  // is the shape every write in this app takes.
+  const editTicket = (ticket: LinearTicket, patch: { title?: string; description?: string }) => {
+    upsertTicket({ ...ticket, ...patch });
+    run(
+      issueUpdate(keysForTeam(presets, ticket.team ?? ""), ticket, patch)
+        .catch((e: Error) => {
+          upsertTicket(ticket);
+          throw e;
+        })
+        .then(refetchTickets),
+    );
+  };
+
+  // Each clone's ticket as Linear has it now, which is where every row and every header on
+  // this screen takes its title from.
+  const liveCloneTickets = cloneTickets(state.hosts, linearTickets);
+
   // Derived, not stored: a clone deleted from the desktop while its screen is open simply
   // stops resolving, and the list comes back on the next frame with no cleanup to run.
   const openClone = openId ? (state.hosts.find((c) => c.id === openId) ?? null) : null;
+  const openTicket = openClone?.linearTicket
+    ? findTicket(openClone.linearTicket, linearTickets)
+    : null;
 
   if (openClone) {
     return (
       <MobileClone
         clone={openClone}
+        ticket={liveCloneTickets[openClone.id]}
         tab={tab}
         onTabChange={setTab}
         onBack={() => {
@@ -95,12 +143,46 @@ export function MobileDashboardContainer({
           run(activate(null));
         }}
         error={error}
+        // A clone made from a ticket shows the ticket where its notes would be, and the tab
+        // says so. The notes file stays on disk; nothing on this screen opens it.
+        notesLabel={openClone.linearTicket ? "Ticket" : "Notes"}
         notes={
-          <ClientOnly>
-            <Suspense fallback={<PaneFallback label="Loading notes…" />}>
-              <NotesEditorContainer key={openClone.id} cloneId={openClone.id} />
-            </Suspense>
-          </ClientOnly>
+          !openClone.linearTicket ? (
+            <ClientOnly>
+              <Suspense fallback={<PaneFallback label="Loading notes…" />}>
+                <NotesEditorContainer key={openClone.id} cloneId={openClone.id} />
+              </Suspense>
+            </ClientOnly>
+          ) : !openTicket ? (
+            <PaneFallback label={`Loading ${openClone.linearTicket}…`} />
+          ) : (
+            <TicketPanel
+              ticket={openTicket}
+              onCopyBranchName={copyText}
+              description={
+                <ClientOnly>
+                  <Suspense fallback={<PaneFallback label="Loading description…" />}>
+                    <TicketDescription
+                      key={openTicket.id}
+                      markdown={openTicket.description ?? ""}
+                      onSave={(markdown) => editTicket(openTicket, { description: markdown })}
+                    />
+                  </Suspense>
+                </ClientOnly>
+              }
+              onTitleChange={(title) => editTicket(openTicket, { title })}
+              // A sub-issue somebody already cloned is one tap away, so the row opens that
+              // clone instead of leaving for Linear. Everything else leaves.
+              resolveLink={(id) => {
+                const clone = cloneForTicket(id, state.hosts);
+                if (!clone) return null;
+                return {
+                  title: `Show the clone for ${id}: ${clone.id}`,
+                  open: () => open(clone.id),
+                };
+              }}
+            />
+          )
         }
         chat={
           <ClientOnly>
@@ -134,6 +216,7 @@ export function MobileDashboardContainer({
         onImportAccount={() => setImportOpen(true)}
         columns={withDefaults(state.boardColumns ?? [])}
         clones={state.hosts}
+        cloneTickets={liveCloneTickets}
         onSelectClone={(clone) => open(clone.id)}
         error={error}
       />

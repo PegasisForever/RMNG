@@ -23,14 +23,16 @@ import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
-import { issueUpdate, keysForTeam } from "~/lib/linear/mutations";
+import { issueSetState, issueUpdate, keysForTeam } from "~/lib/linear/mutations";
 import { useTickets } from "~/lib/linear/useTickets";
 import {
   cloneForTicket,
+  cloneTickets,
   findTicket,
   openTickets,
   orderTickets,
   type LinearTicket,
+  type TicketState,
 } from "~/lib/tickets";
 import {
   activate,
@@ -268,13 +270,20 @@ export function DashboardContainer({
 
   // Linear's own answer, asked for by this browser with the presets' keys. It is the one
   // piece of the board that does not come from the control server.
+  //
+  // The clones' own tickets are asked for by identifier alongside the open ones. A clone
+  // outlives its ticket being closed, and a closed ticket is in nobody's open queue, so
+  // without this a finished clone would draw the title it was made with forever.
   const {
     tickets: linearTickets,
     error: ticketsError,
     loading: ticketsLoading,
     refetch: refetchTickets,
     upsert: upsertTicket,
-  } = useTickets(presets);
+  } = useTickets(
+    presets,
+    state.hosts.flatMap((h) => (h.linearTicket ? [h.linearTicket] : [])),
+  );
 
   // Write a title or a body back to Linear, and put the new value on screen twice: once
   // straight away so the panel does not snap back to what it said before the edit, and again
@@ -297,10 +306,37 @@ export function DashboardContainer({
     );
   };
 
+  // Set a ticket Cancelled or Backlog in Linear, and take its card off the board now rather
+  // than at the end of the poll. Both states are outside what the column draws, so writing the
+  // new state into the list is what removes it: no separate "dropped" set to keep in step.
+  //
+  // A refused write puts the old state back, the same rollback `editTicket` does and for the
+  // same reason: sixty seconds of a card that is not there is worse than the error alone.
+  const moveTicket = (ticket: LinearTicket, next: TicketState) => {
+    upsertTicket({ ...ticket, state: next });
+    run(
+      issueSetState(keysForTeam(presets, ticket.team ?? ""), ticket, next)
+        .catch((e: Error) => {
+          upsertTicket(ticket);
+          throw e;
+        })
+        .then(refetchTickets),
+    );
+  };
+
   const visibleTickets = orderTickets(
     openTickets(linearTickets, state.hosts),
     ticketOrder,
   );
+  // Each clone's ticket as Linear has it now, which is what the cards draw their titles and
+  // their "Open in Linear" from. Built off the whole list rather than `visibleTickets`: that
+  // one has every cloned ticket filtered out of it by definition.
+  const liveCloneTickets = cloneTickets(state.hosts, linearTickets);
+  // The selected clone's own ticket, when it has one. Its notes card holds this instead of the
+  // notes editor, so a clone made from a ticket shows the ticket.
+  const selectedTicket = selectedClone?.linearTicket
+    ? findTicket(selectedClone.linearTicket, linearTickets)
+    : null;
   // Derived: a ticket that leaves the list (cloned, closed, moved in Linear) closes its
   // panel on its own, with no cleanup to run.
   const openTicket = visibleTickets.find((t) => t.id === openTicketId) ?? null;
@@ -351,6 +387,76 @@ export function DashboardContainer({
     resolveColumns(columns, state.hosts).map((c) => [c.id, c.cloneIds.length]),
   );
 
+  /** Where a parent or sub-issue row goes when somebody already made a clone for it.
+   *
+   *  Once work has a clone, the clone is the thing you wanted, and the ticket is no longer in
+   *  the column to select anyway. Null means nobody has, and the row opens Linear. */
+  const resolveToClone = (id: string) => {
+    const clone = cloneForTicket(id, state.hosts);
+    if (!clone) return null;
+    return {
+      title: `Show the clone for ${id}: ${clone.id}`,
+      open: () => {
+        setOpenTicketId(null);
+        run(activate(clone.id));
+      },
+    };
+  };
+
+  /** The side panel's top card: the selected clone's Linear ticket when it has one, and its
+   *  notes when it does not.
+   *
+   *  Replacing rather than joining is the point. A clone made from a ticket is the work that
+   *  ticket describes, so the ticket is what belongs over the chat. Its notes file stays on
+   *  disk and `/api/notes/:id` still serves it; nothing in the UI opens it.
+   *
+   *  Between selecting such a clone and Linear answering there is neither, so the card names
+   *  the ticket it is waiting on rather than showing notes it is about to replace. */
+  const topCard = () => {
+    if (!selectedClone) return null;
+    if (!selectedClone.linearTicket) {
+      return (
+        <ClientOnly>
+          <Suspense
+            fallback={
+              <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
+            }
+          >
+            <NotesEditorContainer key={selectedClone.id} cloneId={selectedClone.id} />
+          </Suspense>
+        </ClientOnly>
+      );
+    }
+    if (!selectedTicket) {
+      return (
+        <p className="px-4 text-sm text-slate-400 dark:text-slate-500">
+          Loading {selectedClone.linearTicket}…
+        </p>
+      );
+    }
+    return (
+      <TicketPanel
+        ticket={selectedTicket}
+        onCopyBranchName={copyText}
+        description={
+          <ClientOnly>
+            <Suspense fallback={<p className="px-1 text-xs text-slate-400">Loading…</p>}>
+              <TicketDescription
+                key={selectedTicket.id}
+                markdown={selectedTicket.description ?? ""}
+                onSave={(markdown) => editTicket(selectedTicket, { description: markdown })}
+              />
+            </Suspense>
+          </ClientOnly>
+        }
+        onTitleChange={(title) => editTicket(selectedTicket, { title })}
+        // No "Create a clone" button: this panel is only ever drawn for a ticket that
+        // already has one, and it is the clone you are looking at.
+        resolveLink={resolveToClone}
+      />
+    );
+  };
+
   return (
     <>
       <AppShellV2
@@ -377,9 +483,7 @@ export function DashboardContainer({
                 setCloneOpen(true);
               }}
               // A parent or sub-issue the board already holds is one click away, so the row
-              // goes there instead of to Linear. The ticket column first, then the clones:
-              // once work has a clone, the clone is the thing you wanted, and the ticket is
-              // no longer in the column to select anyway.
+              // goes there instead of to Linear. The ticket column first, then the clones.
               resolveLink={(id) => {
                 const ticket = findTicket(id, visibleTickets);
                 if (ticket) {
@@ -388,17 +492,7 @@ export function DashboardContainer({
                     open: () => setOpenTicketId(ticket.id),
                   };
                 }
-                const clone = cloneForTicket(id, state.hosts);
-                if (clone) {
-                  return {
-                    title: `Show the clone for ${id}: ${clone.id}`,
-                    open: () => {
-                      setOpenTicketId(null);
-                      run(activate(clone.id));
-                    },
-                  };
-                }
-                return null;
+                return resolveToClone(id);
               }}
             />
           ) : undefined
@@ -431,6 +525,7 @@ export function DashboardContainer({
         board={{
           columns,
           clones: state.hosts,
+          cloneTickets: liveCloneTickets,
           stats,
           cloneTokens: state.cloneTokens,
           forwards,
@@ -482,6 +577,8 @@ export function DashboardContainer({
             onOpenInLinear: openInLinear,
             onCopyBranchName: copyText,
             onCopyTicketLink: copyText,
+            onCancel: (ticket) => moveTicket(ticket, "canceled"),
+            onMoveToBacklog: (ticket) => moveTicket(ticket, "backlog"),
           },
           onNewCloneFromTicket: (ticket, columnId) => {
             setNewCloneColumn(columnId);
@@ -498,19 +595,7 @@ export function DashboardContainer({
           onRenameColumn: (columnId, title) =>
             applyColumns(columns.map((c) => (c.id === columnId ? { ...c, title } : c))),
         }}
-        notes={
-          selectedClone ? (
-            <ClientOnly>
-              <Suspense
-                fallback={
-                  <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
-                }
-              >
-                <NotesEditorContainer key={selectedClone.id} cloneId={selectedClone.id} />
-              </Suspense>
-            </ClientOnly>
-          ) : null
-        }
+        notes={topCard()}
         chat={
           selectedClone ? (
             <ClientOnly>

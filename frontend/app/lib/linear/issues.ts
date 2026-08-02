@@ -1,8 +1,13 @@
 // One Linear issue, looked up by the identifier an operator typed, and moved to In Progress.
 //
-// These are the last two Linear calls the clone route made server-side. The browser holds every
-// preset key now, so it does both itself and posts the answer to `/api/clone`. What crossed
-// over is the part the function names do not say:
+// Two callers, one lookup. The clone dialog resolves what was typed into it and then moves the
+// issue; the board resolves the ticket behind a clone that already exists, so a card and its
+// panel draw Linear's own title rather than the one copied onto the clone when it was made.
+// Both filter the same way and differ only in the field set they ask for.
+//
+// The move to In Progress is the last of the Linear calls the clone route made server-side. The
+// browser holds every preset key now, so it does both itself and posts the answer to
+// `/api/clone`. What crossed over is the part the function names do not say:
 //
 // - The lookup filters by team key AND issue number, not by the `WE-142` string. Linear's
 //   `issues(filter:)` has no identifier field, so the id is split and both halves are sent.
@@ -20,6 +25,7 @@
 
 import type { CloneLinearMeta } from "~/lib/api";
 import { gql } from "~/lib/linear/client";
+import { OPEN_ISSUE_FIELDS, ticketFromNode } from "~/lib/linear/queries";
 import type { LinearTicket, TicketState } from "~/lib/linear/types";
 import { parseTicketInput } from "~/lib/workspace";
 
@@ -87,11 +93,23 @@ const ISSUE_FIELDS =
   "id identifier title url branchName state { id name type } labels { nodes { name } }";
 
 /** By team key and number, because Linear's issue filter has no identifier field. `$num` is a
- *  `Float!`, which is what its schema declares for an issue number. */
-const ISSUE_BY_NUMBER_QUERY =
-  "query($team: String!, $num: Float!) { " +
-  "issues(filter: { team: { key: { eq: $team } }, number: { eq: $num } }, first: 1) { " +
-  `nodes { ${ISSUE_FIELDS} } } }`;
+ *  `Float!`, which is what its schema declares for an issue number.
+ *
+ *  No state filter, unlike the open-issues query. A clone outlives its ticket being marked
+ *  Done, and the ticket is still the thing the clone is named after, so every state answers. */
+export function issueByNumberQuery(fields: string): string {
+  return (
+    "query($team: String!, $num: Float!) { " +
+    "issues(filter: { team: { key: { eq: $team } }, number: { eq: $num } }, first: 1) { " +
+    `nodes { ${fields} } } }`
+  );
+}
+
+const ISSUE_BY_NUMBER_QUERY = issueByNumberQuery(ISSUE_FIELDS);
+
+/** The same lookup asking for the field set the ticket column and its panel draw, so a clone's
+ *  ticket arrives in the shape every ticket-rendering component already takes. */
+const TICKET_BY_NUMBER_QUERY = issueByNumberQuery(OPEN_ISSUE_FIELDS);
 
 /** One `ISSUE_FIELDS` node as a `ResolvedIssue`, or null when it carries no identifier.
  *
@@ -128,18 +146,33 @@ export async function fetchIssue(key: string, ref: IssueRef): Promise<ResolvedIs
   return issue;
 }
 
-/** The issue `ref` names, trying each key in turn until one sees it.
+/** The issue `ref` names, as the ticket column's own shape. Same filter and same throw as
+ *  `fetchIssue`; the field set is the wider one every ticket component draws from.
+ *
+ *  A state the column does not model (`triage`, or anything Linear adds later) reads as a miss
+ *  rather than as a ticket, because `ticketFromNode` refuses it. */
+export async function fetchTicket(key: string, ref: IssueRef): Promise<LinearTicket> {
+  const data = await gql<{ issues?: { nodes?: unknown[] } }>(key, TICKET_BY_NUMBER_QUERY, {
+    team: ref.teamKey,
+    num: ref.number,
+  });
+  const ticket = ticketFromNode(data.issues?.nodes?.[0]);
+  if (!ticket) throw new Error(`ticket ${ref.identifier} not found in Linear`);
+  return ticket;
+}
+
+/** Run `load` against each key in turn until one answers, and hand back the key that did.
  *
  *  Every key is personal and answers only for its own workspace, so a fleet pointing at two
  *  Linear accounts has to ask both. `keysForTeam` orders them so the preset claiming the team
  *  goes first, which means the usual fleet spends exactly one request here.
  *
- *  The key that found it comes back with it. It is the one proven to reach the issue, so it is
- *  the one `ensureInProgress` writes with. */
-export async function fetchIssueAny(
+ *  The key comes back with the answer. It is the one proven to reach the issue, so it is the
+ *  one a write that follows uses. */
+async function firstKeyThatSees<T>(
   keys: string[],
-  ref: IssueRef,
-): Promise<{ issue: ResolvedIssue; key: string }> {
+  load: (key: string) => Promise<T>,
+): Promise<{ value: T; key: string }> {
   let last: Error | null = null;
   const seen = new Set<string>();
   for (const raw of keys) {
@@ -147,7 +180,7 @@ export async function fetchIssueAny(
     if (key === "" || seen.has(key)) continue;
     seen.add(key);
     try {
-      return { issue: await fetchIssue(key, ref), key };
+      return { value: await load(key), key };
     } catch (e) {
       last = e as Error;
     }
@@ -155,6 +188,22 @@ export async function fetchIssueAny(
   throw (
     last ?? new Error("no preset has a Linear API key configured. Add one in Settings")
   );
+}
+
+/** The issue `ref` names, trying each key in turn until one sees it. The key that found it
+ *  comes back with it, because `ensureInProgress` writes with that one. */
+export async function fetchIssueAny(
+  keys: string[],
+  ref: IssueRef,
+): Promise<{ issue: ResolvedIssue; key: string }> {
+  const found = await firstKeyThatSees(keys, (key) => fetchIssue(key, ref));
+  return { issue: found.value, key: found.key };
+}
+
+/** The ticket `ref` names, trying each key in turn until one sees it. Nothing writes after
+ *  this, so the key that answered is dropped. */
+export async function fetchTicketAny(keys: string[], ref: IssueRef): Promise<LinearTicket> {
+  return (await firstKeyThatSees(keys, (key) => fetchTicket(key, ref))).value;
 }
 
 // --- moving it to In Progress ------------------------------------------------

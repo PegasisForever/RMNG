@@ -212,6 +212,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
           state={state}
           cloneGroups={cfg.cloneGroups}
           codexGroups={cfg.codexGroups}
+          presets={cfg.presets}
         />
       </div>
     );

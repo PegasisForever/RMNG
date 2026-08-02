@@ -16,6 +16,7 @@ import { MobileCloneRow } from "~/components/mobile/MobileCloneRow";
 import { MobileUsageSection } from "~/components/mobile/MobileUsageSection";
 import type { AcctOrder } from "~/lib/accountOrder";
 import { resolveColumns, withDefaults, type BoardColumn } from "~/lib/board";
+import type { CloneTicket } from "~/lib/tickets";
 import type { ClaudeUsage, Clone } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
@@ -50,6 +51,9 @@ export interface MobileHomeProps {
   /** Every clone to list. Their order inside a section comes from the column, not from
    *  here, and anything unfiled lands in its home column the way the board draws it. */
   clones: Clone[];
+  /** Each clone's Linear ticket as Linear has it now, by clone id. A clone missing from it
+   *  draws the title it stored when it was made. */
+  cloneTickets?: Record<string, CloneTicket>;
   onSelectClone: (clone: Clone) => void;
   /** Last failed action, shown as a banner under the header. */
   error?: string | null;
@@ -68,6 +72,7 @@ export function MobileHome({
   onImportAccount,
   columns,
   clones,
+  cloneTickets = {},
   onSelectClone,
   error = null,
 }: MobileHomeProps) {
@@ -131,7 +136,12 @@ export function MobileHome({
               </h2>
               <ul className="divide-y divide-slate-200 bg-white dark:divide-slate-800 dark:bg-slate-900">
                 {rows.map((clone) => (
-                  <MobileCloneRow key={clone.id} clone={clone} onSelect={onSelectClone} />
+                  <MobileCloneRow
+                    key={clone.id}
+                    clone={clone}
+                    ticket={cloneTickets[clone.id]}
+                    onSelect={onSelectClone}
+                  />
                 ))}
               </ul>
             </section>

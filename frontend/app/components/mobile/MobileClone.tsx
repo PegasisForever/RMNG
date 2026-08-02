@@ -10,25 +10,36 @@ import { ChevronLeft } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { CloneStatusDot, statusLabel } from "~/components/mobile/CloneStatus";
+import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
 /** Which pane owns the screen. There is no third: settings, archiving, and reordering are
  *  desktop-only, so nothing else competes for the space. */
 export type CloneTab = "chat" | "notes";
 
-const TABS: { id: CloneTab; label: string }[] = [
-  { id: "chat", label: "Chat" },
-  { id: "notes", label: "Notes" },
-];
+/** The two panes, in order. The second one names itself, because it holds the clone's notes
+ *  or the ticket it was made from and the tab is what says which. */
+function tabsFor(notesLabel: string): { id: CloneTab; label: string }[] {
+  return [
+    { id: "chat", label: "Chat" },
+    { id: "notes", label: notesLabel },
+  ];
+}
 
 export interface MobileCloneProps {
   clone: Clone;
+  /** This clone's Linear ticket as Linear has it now. Absent ⇒ the header draws the title the
+   *  clone stored when it was made. */
+  ticket?: CloneTicket;
   tab: CloneTab;
   onTabChange: (tab: CloneTab) => void;
   /** Back to the clone list. */
   onBack: () => void;
-  /** The notes editor for this clone. */
+  /** The notes editor for this clone, or its ticket when it has one. */
   notes: ReactNode;
+  /** What the second tab is called. The default names the notes; a clone showing its ticket
+   *  there passes "Ticket". */
+  notesLabel?: string;
   /** The agent chat for this clone. */
   chat: ReactNode;
   /** Last failed action, shown as a banner under the tabs. */
@@ -37,10 +48,12 @@ export interface MobileCloneProps {
 
 export function MobileClone({
   clone,
+  ticket,
   tab,
   onTabChange,
   onBack,
   notes,
+  notesLabel = "Notes",
   chat,
   error = null,
 }: MobileCloneProps) {
@@ -57,7 +70,7 @@ export function MobileClone({
         </button>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
-            {clone.displayName ?? clone.id}
+            {ticket?.title ?? clone.displayName ?? clone.id}
           </h1>
           <p className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
             <CloneStatusDot clone={clone} />
@@ -74,7 +87,7 @@ export function MobileClone({
         aria-label="Clone panes"
         className="grid shrink-0 grid-cols-2 border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"
       >
-        {TABS.map((t) => {
+        {tabsFor(notesLabel).map((t) => {
           const active = t.id === tab;
           return (
             <button

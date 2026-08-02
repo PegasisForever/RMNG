@@ -122,9 +122,29 @@ export function makeTicketDuplicated(overrides: Partial<LinearTicket> = {}): Lin
   });
 }
 
+/** The ticket `cloneWorking` was made from. `openTickets` drops it from the column, so it is
+ *  only ever drawn as a clone's own ticket: the panel in that clone's notes card, and the
+ *  title on its card. */
+export function makeTicketCloned(overrides: Partial<LinearTicket> = {}): LinearTicket {
+  return makeTicket({
+    id: "WE-142",
+    title: "Normalize sidebar CPU to % of allowance",
+    url: "https://linear.app/pegasis/issue/WE-142/normalize-sidebar-cpu",
+    description:
+      "The sidebar reports raw container CPU, so a clone pinned to two cores reads 200%.\n\n" +
+      "Divide by the host's core count and show one figure that means the same thing on " +
+      "every machine.",
+    labels: [{ name: "Frontend", color: "#4ea7fc" }],
+    state: "in_progress",
+    priority: 2,
+    ...overrides,
+  });
+}
+
 export const ticketDetailed: LinearTicket = makeTicketDetailed();
 export const ticketSubIssue: LinearTicket = makeTicketSubIssue();
 export const ticketBare: LinearTicket = makeTicketBare();
+export const ticketCloned: LinearTicket = makeTicketCloned();
 
 export const linearTickets: LinearTicket[] = [
   ticketDetailed,
@@ -134,13 +154,7 @@ export const linearTickets: LinearTicket[] = [
   // The same issue again, as a second key carrying the same account would return it.
   makeTicketDuplicated(),
   // Already cloned (see `cloneWorking` / `cloneIdle`), so the filter drops both.
-  makeTicket({
-    id: "WE-142",
-    title: "Normalize sidebar CPU to % of allowance",
-    url: "https://linear.app/pegasis/issue/WE-142/normalize-sidebar-cpu",
-    state: "in_progress",
-    priority: 2,
-  }),
+  ticketCloned,
   makeTicket({
     id: "DEV-88",
     title: "Wire up the pull-template wizard",
