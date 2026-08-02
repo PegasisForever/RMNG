@@ -33,7 +33,7 @@ impl std::fmt::Display for JobError {
 impl std::error::Error for JobError {}
 
 /// Linear ticket metadata stamped onto a cloned `RmngClone`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinearMeta {
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`).
     pub workspace: Option<String>,
@@ -45,7 +45,7 @@ pub struct LinearMeta {
 }
 
 /// Everything the API hands to `start_clone`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CloneSpec {
     /// The clone-source image reference (e.g. `pegasis0/rmng-template:latest`) or id to clone from.
     pub source_image: String,

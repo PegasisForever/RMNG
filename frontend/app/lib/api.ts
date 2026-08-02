@@ -58,17 +58,44 @@ function delJson(url: string): Promise<unknown> {
   return request(url, { method: "DELETE" });
 }
 
-/** Clone payload: an existing ticket link/id, a new ticket to create (in team
- *  `team`, using the resolved preset's Linear key — `create.description` is markdown),
- *  or a plain no-ticket clone (just a container title + an optional first agent message).
+/** A Linear issue the client has already resolved, as the clone route takes it.
+ *
+ *  This is the answer rather than the question: the browser holds the preset keys, so it looks
+ *  the issue up (or opens it), moves it to In Progress, and posts what came back. The server
+ *  makes no Linear call and takes every field verbatim.
+ *
+ *  `ticket` is the only one it cannot do without. The hostname derives from it, and that step
+ *  stays server-side because it needs the live clone list to guarantee uniqueness. */
+export interface CloneLinearMeta {
+  /** Lowercase team key, e.g. `we`. Picks the preset when `preset` is omitted. */
+  workspace: string;
+  /** Linear identifier, e.g. `WE-142`. */
+  ticket: string;
+  ticketUrl: string;
+  /** Linear's own `branchName`. */
+  branch: string;
+  /** The issue title, which becomes the clone's display name. */
+  title: string;
+  /** The issue's first Linear label. Omitted when it has none. */
+  label?: string;
+}
+
+/** Clone payload: a Linear issue the client already resolved, an existing ticket link/id, a
+ *  new ticket to create (in team `team`, using the resolved preset's Linear key, where
+ *  `create.description` is markdown), or a plain no-ticket clone (just a container title + an
+ *  optional first agent message).
  *  The ticket modes also accept optional clone-agent + Claude Code overrides.
  *  `group` (all modes) OVERRIDES the account pool the clone binds; omit it to let the
  *  server resolve it (preset default → first configured group). Every clone binds one.
  *  `preset` picks the clone preset (env vars + Linear key): omitted means auto-select by
- *  ticket-id prefix (ticket mode); create/plain send a resolved name.
- *  `parent` nests the new clone as a sub clone under that clone id. */
+ *  ticket-id prefix (ticket and linear modes); create/plain send a resolved name.
+ *  `parent` nests the new clone as a sub clone under that clone id.
+ *
+ *  The dialog sends `linear`. The `ticket` and `create` shapes are what the `rmng` CLI still
+ *  sends, and they are the only two that make the server call Linear. */
 export type ClonePayload = (
   | ((
+      | { linear: CloneLinearMeta }
       | { ticket: string }
       | { create: { team: string; title: string; description: string } }
     ) & { agentInstructions?: string; claudeInstructions?: string })

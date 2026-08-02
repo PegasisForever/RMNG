@@ -75,6 +75,30 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 - Live account hot-swap on a running clone, no restart needed
 - Named account groups with sticky auto-rotation
 
+## Scope rules
+
+RMNG is a single-operator tool. One person runs it, on their own hardware, reachable only
+over Tailscale. Build for that, and nothing else.
+
+**There is no threat model.** The control-server has no authentication on any route, on
+purpose. Every caller that can reach the port is the owner. Do not add allowlists, origin
+checks, sandboxing headers, content-type policing, or rate limits, and do not harden a route
+because a caller "could" abuse it. The caller is you. A reviewer who reports a
+request-forgery or cross-site-scripting path on this port has found a fact about the design,
+not a defect.
+
+**Trust the client.** The browser and the `rmng` CLI hold the same secrets the server does,
+including Linear API keys. When a client sends resolved data, store it. Do not re-derive it,
+re-validate it, or defend against a client that lies.
+
+**Write the version with no defensive layer.** Timeouts and size caps are fine when they stop
+the server hanging or dying. They are not fine as a security control. If a guard's only
+justification is an attacker, delete it.
+
+The failure mode this prevents is real and has happened here: a route grew a host allowlist,
+a redirect policy, a closed MIME table, per-field body caps, and 46 hostile-URL tests, none
+of which protected against anyone who was not already the owner. Simpler is correct.
+
 ## Quick start
 
 > **Hardware support:** the encode path (control-server, VA-API H.264) has only been tested on an AMD Radeon Pro W6800; the decode path (viewer) has only been tested on Intel integrated graphics (Linux) and Apple M-series (macOS). Other GPUs may work but are untested.

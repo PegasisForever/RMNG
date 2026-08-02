@@ -2,22 +2,40 @@
 // paste an existing Linear ticket (link or `WE-142`); create a new ticket (team key + title +
 // rich-text description); or a plain no-ticket clone (title + optional first message).
 //
-// Three things live here and nowhere below: the config read that supplies the presets and the
-// account pools, the clone POST, and the operation the POST returns. The dialog stays open on
-// that operation and closes only when it settles, which is why the op list is a prop rather
-// than something the View could ever have. The markup is CloneModalView.
+// Four things live here and nowhere below: the config read that supplies the presets and the
+// account pools, the Linear round trip that turns a ticket mode into a real issue, the clone
+// POST, and the operation the POST returns. The dialog stays open on that operation and closes
+// only when it settles, which is why the op list is a prop rather than something the View could
+// ever have. The markup is CloneModalView.
+//
+// **Both ticket modes talk to Linear from here.** The existing-ticket tab looks the issue up by
+// identifier, the new-ticket tab opens one, and either way it is moved to In Progress and the
+// resolved metadata is posted to `/api/clone`. The server holds no key and makes no call. The
+// move is best effort, the same as the server call it replaces: a workflow column is not worth
+// failing a clone over.
 //
 // **The preset is never picked by hand in the ticket modes** — it follows the team key
 // (`pick_preset_by_prefix`, mirrored client-side in `~/lib/cloneDraft`), and the dialog shows
 // which one resolved. The account group follows the resolved preset's default; the group
 // control is an *override* that only matters when the operator wants a different pool.
 //
-// The hostname derives from the ticket id (`WE-142` → `pega-we-142`) or the title slug. All
-// resolved server-side.
+// The hostname derives from the ticket id (`WE-142` → `pega-we-142`) or the title slug. That
+// one step stays server-side in every mode: it needs the live clone list to guarantee the
+// hostname is free, which no client can see.
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 import { CloneModalView } from "~/components/CloneModalView";
 import { getConfig, type ClonePayload } from "~/lib/api";
+import { toLinearMarkdown } from "~/lib/linear/assets";
+import {
+  cloneLinearMeta,
+  ensureInProgress,
+  fetchIssueAny,
+  issueRefOf,
+  resolvedFromTicket,
+  type ResolvedIssue,
+} from "~/lib/linear/issues";
+import { issueCreate, keysForTeam } from "~/lib/linear/mutations";
 import {
   lastCloneImage,
   preferredCloneImage,
@@ -171,6 +189,77 @@ export function CloneModalContainer({
 
   const busy = starting || (!!opId && !failed);
 
+  // Which key stores an image pasted into the new-ticket body. The issue is opened with the
+  // key of the preset that claims the chosen team, so its images belong in the same workspace.
+  // BlockNote captures its upload function at mount, so what counts is the team the editor
+  // mounted on; switching teams mid-draft leaves an already-pasted image where it was stored.
+  const uploadKey = keysForTeam(presets, draft.team)[0] ?? "";
+  // The one sentence the description slot shows before it can take a keystroke, whether the
+  // wait is for the config or for BlockNote's own chunk.
+  const editorLoading = (
+    <p className="px-3 text-xs text-slate-400 dark:text-slate-500">Loading editor…</p>
+  );
+
+  /** The issue this clone is for, and the key proven to reach it.
+   *
+   *  Existing-ticket looks it up by identifier across every configured key. New-ticket opens
+   *  one with the key of the preset that claims the team. Both answer the same pair, so the
+   *  step after them does not care which tab is open. */
+  async function resolveIssue(): Promise<{ issue: ResolvedIssue; key: string }> {
+    if (draft.mode === "existing") {
+      const ref = issueRefOf(draft.ticket);
+      // Unreachable while `valid` gates the button on the same parse, and stated anyway
+      // because this function is the one that would otherwise fetch `undefined`.
+      if (!ref) throw new Error(`could not find a ticket id (like WE-142) in "${draft.ticket}"`);
+      return fetchIssueAny(keysForTeam(presets, ref.prefix), ref);
+    }
+    const team = draft.team.trim();
+    const key = keysForTeam(presets, team)[0] ?? "";
+    // The editor holds every pasted image behind `/api/linear/asset`, because that is the only
+    // source an `<img>` on this page can load. Linear gets the `uploads.linear.app` URL back,
+    // so the issue reads correctly for everyone who is not on this LAN. This is the last place
+    // the body is ours.
+    const ticket = await issueCreate(key, {
+      team,
+      title: draft.title.trim(),
+      description: toLinearMarkdown(draft.description),
+    });
+    return { issue: resolvedFromTicket(ticket), key };
+  }
+
+  /** What `POST /api/clone` is sent, once Linear has answered.
+   *
+   *  The no-ticket tab reaches no network here at all. It has no issue to resolve, and its
+   *  payload is the same one it has always sent. */
+  async function buildPayload(
+    common: { claudeAccount?: string; codexAccount?: string; headless?: boolean; parent?: string },
+    extra: { agentInstructions?: string; claudeInstructions?: string },
+  ): Promise<ClonePayload> {
+    if (draft.mode === "plain") {
+      return {
+        plain: { title: draft.title.trim(), message: draft.message.trim() },
+        preset: draft.plainPreset || undefined,
+        ...common,
+      };
+    }
+    const { issue, key } = await resolveIssue();
+    // Best effort, exactly as the server call it replaces was: it only warned. A ticket that
+    // will not move is still a ticket worth cloning.
+    try {
+      await ensureInProgress(key, issue);
+    } catch (e) {
+      console.warn(`could not move ${issue.identifier} to In Progress:`, e);
+    }
+    return {
+      linear: cloneLinearMeta(issue),
+      ...extra,
+      // Omitted when no preset claims the team, which leaves the server to auto-select by the
+      // ticket's prefix, the same fallback the `{ticket}` mode has always relied on.
+      preset: preset?.name,
+      ...common,
+    };
+  }
+
   function submit() {
     const image = draft.image;
     if (!valid || busy || !image) return;
@@ -193,32 +282,8 @@ export function CloneModalContainer({
     if (draft.agentInstructions.trim()) extra.agentInstructions = draft.agentInstructions.trim();
     if (draft.claudeInstructions.trim()) extra.claudeInstructions = draft.claudeInstructions.trim();
 
-    const payload: ClonePayload =
-      draft.mode === "plain"
-        ? {
-            plain: { title: draft.title.trim(), message: draft.message.trim() },
-            preset: draft.plainPreset || undefined,
-            ...common,
-          }
-        : draft.mode === "existing"
-          ? {
-              ticket: draft.ticket.trim(),
-              ...extra,
-              // No preset field: the server auto-selects by the ticket's team prefix.
-              ...common,
-            }
-          : {
-              create: {
-                team: draft.team.trim().toLowerCase(),
-                title: draft.title.trim(),
-                description: draft.description,
-              },
-              ...extra,
-              preset: preset?.name,
-              ...common,
-            };
-
-    onClone(image, payload)
+    buildPayload(common, extra)
+      .then((payload) => onClone(image, payload))
       .then((started) => {
         rememberCloneImage(image);
         setOpId(started.id);
@@ -244,16 +309,21 @@ export function CloneModalContainer({
       linearKeyMissing={keyMissing}
       parentCandidate={parentCandidate}
       descriptionEditor={
-        <Suspense
-          fallback={
-            <p className="px-3 text-xs text-slate-400 dark:text-slate-500">Loading editor…</p>
-          }
-        >
-          <MarkdownEditorContainer
-            onChange={(markdown) => update("description", markdown)}
-            placeholder="What needs doing — paste images, format freely"
-          />
-        </Suspense>
+        // Held back until the config lands, because the key is what decides where a pasted
+        // image goes. An editor mounted without one uploads to this server's `/uploads`, and
+        // BlockNote captures its upload function once at mount, so a key arriving a moment
+        // later would not be used, and a LAN-only URL would reach a real Linear issue.
+        configLoaded ? (
+          <Suspense fallback={editorLoading}>
+            <MarkdownEditorContainer
+              onChange={(markdown) => update("description", markdown)}
+              linearKey={uploadKey}
+              placeholder="What needs doing — paste images, format freely"
+            />
+          </Suspense>
+        ) : (
+          editorLoading
+        )
       }
       valid={valid}
       busy={busy}
