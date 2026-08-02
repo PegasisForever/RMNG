@@ -22,8 +22,8 @@ export function TicketModalContainer({
   onClose,
   onCreated,
 }: {
-  /** Configured presets (`config.presets`). Their labels are the dialog's team keys, and
-   *  `linearKeySet` says which of them can actually open a ticket. */
+  /** Configured presets (`config.presets`). Their labels are the dialog's team keys, and a
+   *  non-empty `linearKey` says which of them can actually open a ticket. */
   presets: PresetRedacted[];
   onClose: () => void;
   /** The issue Linear answered with, once it exists. The dialog closes either way. */

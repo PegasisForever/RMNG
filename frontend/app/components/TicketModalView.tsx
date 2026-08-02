@@ -30,8 +30,8 @@ export interface NewTicket {
 }
 
 export interface TicketModalViewProps {
-  /** The configured presets. Their labels are the team keys, and `linearKeySet` says which
-   *  of them can actually open a ticket. */
+  /** The configured presets. Their labels are the team keys, and a non-empty `linearKey`
+   *  says which of them can actually open a ticket. */
   presets: PresetRedacted[];
   /** The body as markdown, as the editor slot last reported it. Sent with the ticket. */
   description: string;
@@ -63,7 +63,7 @@ export function TicketModalView({
 
   const chosen = teams.find((t) => t.key === team);
   // The server refuses a team whose preset carries no key, so the dialog says so first.
-  const keyMissing = !!chosen && !chosen.preset.linearKeySet;
+  const keyMissing = !!chosen && chosen.preset.linearKey === "";
   const canSubmit = !busy && !keyMissing && team !== "" && title.trim() !== "";
 
   const submit = () => {

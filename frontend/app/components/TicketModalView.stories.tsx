@@ -50,7 +50,7 @@ export const Default: Story = {};
  *  dialog says which preset and where to fix it, and the create button stays down. Pick OPS
  *  in the dropdown to see it. */
 export const NoLinearKey: Story = {
-  args: { presets: makeClonePresets().filter((p) => !p.linearKeySet) },
+  args: { presets: makeClonePresets().filter((p) => p.linearKey === "") },
 };
 
 /** No preset declares a team key at all, which is the first-run state. */

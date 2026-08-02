@@ -40,7 +40,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       {
         name: "webapp",
         labels: ["WE", "frontend"],
-        linearKeySet: true,
+        linearKey: "lin_api_fixture",
         claudeAccount: "group:pooled",
         codexAccount: "",
         vars: [{ key: "NODE_ENV", value: "development" }],

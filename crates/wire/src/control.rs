@@ -585,6 +585,16 @@ pub struct ControlState {
     /// case the frontend draws a single default column so no clone is ever hidden.
     #[serde(default)]
     pub board_columns: Vec<BoardColumn>,
+    /// The operator's own arrangement of the ticket column, top to bottom. Linear owns which
+    /// issues exist. Their arrangement is the one thing about them rmng owns, which is why
+    /// it is the one thing about them that is stored here.
+    ///
+    /// Ids are stored lowercased, because that is how the browser compares them when it
+    /// applies the order. An id for a ticket that no longer exists is ignored rather than
+    /// pruned: a closed ticket costs one stale string, and no consumer has to run a cleanup
+    /// pass to keep this honest.
+    #[serde(default)]
+    pub ticket_order: Vec<String>,
     #[serde(default)]
     pub operations: Vec<Operation>,
     /// Per-account usage view (no tokens). Despite the name it holds **both** providers'
@@ -593,8 +603,10 @@ pub struct ControlState {
     #[serde(default)]
     pub claude_accounts: Vec<ClaudeUsage>,
     /// Open Linear issues across every preset API key, newest poll wins. Published here so
-    /// the board's ticket column rides the same `/events` stream everything else does, and
-    /// so the browser never sees a Linear key.
+    /// the board's ticket column rides the same `/events` stream everything else does.
+    ///
+    /// The server's mirror of somebody else's data, and on its way out: the browser holds a
+    /// Linear key now and will query Linear itself.
     #[serde(default)]
     pub tickets: Vec<LinearTicket>,
     /// Why the last Linear poll failed, if it did. The column keeps drawing whatever it

@@ -139,8 +139,8 @@ export function linearKeyMissing(
   configLoaded: boolean,
 ): boolean {
   if (!configLoaded || mode === "plain") return false;
-  if (mode === "create") return !preset?.linearKeySet;
-  return !presets.some((p) => p.linearKeySet);
+  if (mode === "create") return !preset?.linearKey;
+  return !presets.some((p) => p.linearKey !== "");
 }
 
 /**

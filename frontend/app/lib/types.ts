@@ -194,9 +194,13 @@ export interface ControlState {
   cloneTokens: Record<string, CloneTokens>;
   /** The board's columns, left to right. Empty until the operator makes one. */
   boardColumns: BoardColumn[];
+  /** The operator's own arrangement of the ticket column, top to bottom, stored server-side
+   *  so it survives a reload. Ids are lowercased, which is how `orderTickets` compares them;
+   *  an id whose ticket is gone is ignored rather than pruned. */
+  ticketOrder: string[];
   /** Open Linear issues across every configured preset key, kept current by the server's
-   *  own poller. The browser never talks to Linear, so this is the whole source for the
-   *  ticket column. */
+   *  own poller. The whole source for the ticket column today, and on its way out: the
+   *  browser holds a Linear key now and will query Linear itself. */
   tickets: LinearTicket[];
   /** Why the server's last Linear poll failed, if it did. */
   ticketsError?: string;
@@ -213,6 +217,7 @@ export function emptyState(): ControlState {
     layoutPresetNames: [],
     cloneTokens: {},
     boardColumns: [],
+    ticketOrder: [],
     tickets: [],
   };
 }

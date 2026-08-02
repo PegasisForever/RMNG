@@ -30,7 +30,18 @@ layoutPresetNames: Array<string>, hosts: Array<Clone>,
  * The board's columns, left to right. Empty until the operator makes one, in which
  * case the frontend draws a single default column so no clone is ever hidden.
  */
-boardColumns: Array<BoardColumn>, operations: Array<Operation>, 
+boardColumns: Array<BoardColumn>, 
+/**
+ * The operator's own arrangement of the ticket column, top to bottom. Linear owns which
+ * issues exist. Their arrangement is the one thing about them rmng owns, which is why
+ * it is the one thing about them that is stored here.
+ *
+ * Ids are stored lowercased, because that is how the browser compares them when it
+ * applies the order. An id for a ticket that no longer exists is ignored rather than
+ * pruned: a closed ticket costs one stale string, and no consumer has to run a cleanup
+ * pass to keep this honest.
+ */
+ticketOrder: Array<string>, operations: Array<Operation>, 
 /**
  * Per-account usage view (no tokens). Despite the name it holds **both** providers'
  * rows, distinguished by [`ClaudeUsage::provider`]; `clone_ops::replace_provider_views`
@@ -39,8 +50,10 @@ boardColumns: Array<BoardColumn>, operations: Array<Operation>,
 claudeAccounts: Array<ClaudeUsage>, 
 /**
  * Open Linear issues across every preset API key, newest poll wins. Published here so
- * the board's ticket column rides the same `/events` stream everything else does, and
- * so the browser never sees a Linear key.
+ * the board's ticket column rides the same `/events` stream everything else does.
+ *
+ * The server's mirror of somebody else's data, and on its way out: the browser holds a
+ * Linear key now and will query Linear itself.
  */
 tickets: Array<LinearTicket>, 
 /**

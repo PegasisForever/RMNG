@@ -2,10 +2,20 @@
 import type { EnvVar } from "./EnvVar";
 
 /**
- * A preset as shown to the browser: everything but the Linear key, which is
- * replaced by a "is set" flag (write-only secret).
+ * A preset as shown to the browser: every field of [`Preset`], Linear key included.
+ *
+ * The name is a leftover from when this view withheld the key. It withholds nothing now,
+ * because the browser and the CLI are the only things that call Linear and both need a key.
+ * What remains of the redaction is a direction: `PUT /api/config` treats `linear_key` as
+ * write-only, so a blank submission keeps the stored key rather than clearing it.
  */
-export type PresetRedacted = { name: string, labels: Array<string>, linearKeySet: boolean, 
+export type PresetRedacted = { name: string, labels: Array<string>, 
+/**
+ * The preset's Linear personal API key, verbatim. Empty when none is configured, which
+ * is the whole test the settings panel runs to decide whether its write-only key input
+ * reads as already set.
+ */
+linearKey: string, 
 /**
  * Default account selections ([`Preset::claude_account`] / [`Preset::codex_account`]) —
  * not secrets, shown verbatim.

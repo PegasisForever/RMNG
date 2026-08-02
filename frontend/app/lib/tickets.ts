@@ -1,9 +1,10 @@
 // Linear tickets that have no clone yet: the board's inbox of work not started.
 //
-// The server holds a Linear API key per preset (`Preset.linear_key`, redacted to
-// `linearKeySet` for the browser), so it is the side that can list issues. This module is
-// the shape the browser draws and the one rule it applies, kept apart from the fetch so a
-// story can pass a fixture and the filter stays testable.
+// A Linear API key per preset (`Preset.linear_key`) reaches the browser verbatim as
+// `PresetRedacted.linearKey`. Listing the issues is still the server's job today, and the
+// key is there so the browser can take it over. This module is the shape the browser draws
+// and the one rule it applies, kept apart from the fetch so a story can pass a fixture and
+// the filter stays testable.
 //
 // Whose tickets: each key is personal, so each one answers for its own owner and the column
 // shows the union across every configured key. A fleet with a work key and a personal key

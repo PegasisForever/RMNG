@@ -104,9 +104,18 @@ export const putForwards = (
 export const putBoardColumns = (columns: BoardColumn[]) =>
   putJson("/api/board", { columns });
 
-/** Write a title and/or description back to Linear. The browser holds no Linear key, so the
- *  server does the mutation and answers with the patched state. An omitted field is left
- *  alone; an empty description clears the body, which is a thing operators do on purpose. */
+/** Replace the operator's ticket order wholesale, top to bottom. Same bargain as
+ *  `putBoardColumns`: the client owns the arrangement and sends the settled list of ticket
+ *  ids, and the server stores it (lowercased) and broadcasts the new state.
+ *
+ *  Ids for tickets that no longer exist are fine to send. Nothing prunes them and nothing
+ *  reads them. */
+export const putTicketOrder = (ticketIds: string[]) =>
+  putJson("/api/tickets/order", { ticketIds });
+
+/** Write a title and/or description back to Linear. The server does the mutation and answers
+ *  with the patched state. An omitted field is left alone; an empty description clears the
+ *  body, which is a thing operators do on purpose. */
 export const putTicket = (id: string, patch: { title?: string; description?: string }) =>
   putJson(`/api/tickets/${encodeURIComponent(id)}`, patch);
 

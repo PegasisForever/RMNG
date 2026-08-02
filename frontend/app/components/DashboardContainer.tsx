@@ -42,6 +42,7 @@ import {
   putConfig,
   putForwards,
   putTicket,
+  putTicketOrder,
   refreshClaudeUsage,
   refreshCodexUsage,
   restartServer,
@@ -238,9 +239,25 @@ export function DashboardContainer({
   // Seeds the clone dialog's ticket field when a ticket opened it (dragged onto a column, or
   // its menu). Empty for the column's own "New clone" button.
   const [ticketPrefill, setTicketPrefill] = useState("");
-  // The operator's own arrangement of the ticket column, top to bottom. Browser-local: it is
-  // a view of somebody else's list, and the server has no opinion about how it is stacked.
-  const [ticketOrder, setTicketOrder] = useState<string[]>([]);
+  // The operator's own arrangement of the ticket column, top to bottom. Stored server-side,
+  // and held locally on top of that so a drag lands instantly. Same shape as the columns
+  // above, for the same reason: keyed on the serialized list rather than the array identity,
+  // because every SSE frame brings a fresh array and resetting on each one would undo a drag
+  // that is still in flight.
+  const serverTicketOrder = JSON.stringify(state.ticketOrder ?? []);
+  const [ticketOrder, setTicketOrder] = useState<string[]>(() => state.ticketOrder ?? []);
+  useEffect(() => {
+    setTicketOrder(JSON.parse(serverTicketOrder) as string[]);
+  }, [serverTicketOrder]);
+
+  // Adopt a new order locally, then persist it. The column has already previewed the drag by
+  // the time this runs; the PUT is what makes it survive a refresh. The server lowercases
+  // what it stores, so the frame that comes back overwrites this with the same order in a
+  // different case, which `orderTickets` cannot tell apart.
+  const applyTicketOrder = (next: string[]) => {
+    setTicketOrder(next);
+    run(putTicketOrder(next));
+  };
 
   const visibleTickets = orderTickets(
     openTickets(state.tickets ?? [], state.hosts),
@@ -430,7 +447,7 @@ export function DashboardContainer({
             setTicketPrefill(ticket.url);
             setCloneOpen(true);
           },
-          onReorderTickets: setTicketOrder,
+          onReorderTickets: applyTicketOrder,
           onNewClone: (columnId) => {
             setNewCloneColumn(columnId);
             setCloneOpen(true);

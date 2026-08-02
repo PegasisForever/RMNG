@@ -52,6 +52,10 @@ pub fn router(app: App) -> Router {
         .route("/api/activate", post(activate))
         .route("/api/board", put(board_put))
         .route("/api/tickets", post(ticket_post))
+        // Ahead of `/api/tickets/:id` for the reader's sake, not the router's: axum matches
+        // a literal segment before a parameter whatever order they were added in, and
+        // `ticket_order_put_round_trips_over_http` is what proves it.
+        .route("/api/tickets/order", put(ticket_order_put))
         .route("/api/tickets/:id", put(ticket_put))
         .route("/api/clone", post(clone))
         .route("/api/layout/activate", post(layout_activate))
@@ -328,6 +332,29 @@ async fn board_put(State(app): State<App>, Json(req): Json<BoardPutReq>) -> Json
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TicketOrderPutReq {
+    ticket_ids: Vec<String>,
+}
+
+/// Replace the operator's ticket order wholesale. Same bargain as [`board_put`]: the client
+/// owns the arrangement and sends the settled list, so there is nothing to merge here.
+///
+/// Ids are lowercased on the way in. The browser already compares them case-insensitively,
+/// so mixed case would still draw correctly, but it would leave `state.json` holding a case
+/// its only reader never looks at.
+///
+/// Ids for tickets that no longer exist are kept, not filtered. This server no longer knows
+/// which tickets exist, and an entry that matches nothing costs one string.
+async fn ticket_order_put(
+    State(app): State<App>,
+    Json(req): Json<TicketOrderPutReq>,
+) -> Json<ControlState> {
+    let order: Vec<String> = req.ticket_ids.iter().map(|id| id.to_lowercase()).collect();
+    Json(app.store.mutate(|s| s.ticket_order = order))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TicketPutReq {
     #[serde(default)]
     title: Option<String>,
@@ -337,9 +364,9 @@ struct TicketPutReq {
 
 /// `PUT /api/tickets/:id` — write a title and/or description back to Linear.
 ///
-/// The browser holds no Linear key, so every write comes through here. `:id` is the human
-/// identifier (`WE-142`); [`crate::linear::update_issue`] resolves it to Linear's own id and
-/// picks the key that can see it.
+/// `:id` is the human identifier (`WE-142`); [`crate::linear::update_issue`] resolves it to
+/// Linear's own id and picks the key that can see it. The browser holds a Linear key of its
+/// own now and will make this call directly, so this route is on its way out.
 ///
 /// On success the ticket in `ControlState` is patched immediately rather than waiting for
 /// the next poll. The poll is a minute away, and a description that snaps back to its old
@@ -390,7 +417,8 @@ struct TicketPostReq {
 ///
 /// The team key picks the preset, exactly as the clone dialog's "new ticket" tab does: a
 /// preset labelled `WE` owns team WE, and its Linear key is the one that opens the issue.
-/// The browser holds no key, so it names the team and the server does the rest.
+/// The browser names the team and the server does the rest. It holds a key of its own now
+/// and will make this call directly, so this route is on its way out.
 ///
 /// The new ticket is prepended to `ControlState` rather than waited for. The poll is a
 /// minute away, and a column that stays empty for that minute reads as the create having
@@ -3138,6 +3166,59 @@ not a var line
             .await
             .unwrap();
         assert_eq!(got, doc);
+    }
+
+    /// End-to-end through the real router: the ticket column saves its order with `PUT` and
+    /// the `{ ticketIds }` envelope, and the patched state comes straight back.
+    ///
+    /// Two things this pins that a direct handler call could not. First the route itself:
+    /// `/api/tickets/:id` is also a `PUT`, so `order` would be a perfectly good `:id` if the
+    /// matcher preferred the parameter, and the save would silently try to write a Linear
+    /// issue called "order". Second the reload path: a second `GET /api/state` proves the
+    /// order is in the state document and not just in the response body.
+    #[tokio::test]
+    async fn ticket_order_put_round_trips_over_http() {
+        let app = test_app();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
+        let base = format!("http://{addr}");
+        let http = reqwest::Client::new();
+
+        // Mixed case in, lowercase out: the browser ranks by lowercased id, so that is the
+        // only case worth storing.
+        let put = http
+            .put(format!("{base}/api/tickets/order"))
+            .json(&serde_json::json!({ "ticketIds": ["WE-142", "dev-7", "We-9"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(put.status(), reqwest::StatusCode::OK);
+        let patched: wire::ControlState = put.json().await.unwrap();
+        assert_eq!(patched.ticket_order, vec!["we-142", "dev-7", "we-9"]);
+
+        // ...and it survives into the state a reloading page reads.
+        let state: wire::ControlState = http
+            .get(format!("{base}/api/state"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(state.ticket_order, vec!["we-142", "dev-7", "we-9"]);
+
+        // An empty list is a real value (the operator cleared the arrangement), not a no-op.
+        let cleared: wire::ControlState = http
+            .put(format!("{base}/api/tickets/order"))
+            .json(&serde_json::json!({ "ticketIds": [] }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(cleared.ticket_order.is_empty());
     }
 
     // What stays here is the control-server half of the boundary: the internal token-delta

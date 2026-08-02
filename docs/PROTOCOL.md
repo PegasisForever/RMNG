@@ -131,8 +131,9 @@ the requester. The clone-daemon bridges via Mutter `RemoteDesktop` selection
 
 `AppConfig` loads from `./config.json` in the working directory (no env override — the Docker
 image sets `WORKDIR /data`, so `config.json` + `data/` land in the `rmng-data` volume);
-written at `0600`. The web API returns `AppConfigRedacted` (the only secret, preset Linear
-keys, → `linearKeySet: bool`); `PUT /api/config` returns
+written at `0600`. The web API returns `AppConfigRedacted`, which carries the preset Linear
+keys verbatim as `linearKey: string` (the clients are what call Linear). `PUT /api/config`
+returns
 `{ config: AppConfigRedacted, restartRequired: bool, networkWarning?: string }`. Source:
 [config.rs](../crates/wire/src/config.rs).
 
@@ -148,7 +149,7 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 | `layout_presets` | `LayoutPreset[]` | `[]` | named monitor-layout presets (`{name, monitors: MonitorSpec[]}`); the operator switches the active one from the sidebar (`POST /api/layout/activate`) |
 | `active_layout` | string | `""` | name of the active layout preset; drives `effective_monitors()` (see below) |
 | `docker` | `DockerConfig` | see below | daemon socket + `rmng`-network subnet + hostname prefix + per-clone limits |
-| `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (**key secret**) |
+| `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (the key is a credential, and `GET /api/config` vends it to the clients) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
 | `clone_groups` | `CloneGroup[]` | `[]` | named account pools for Claude rotation (not secret) |
 | `codex` | `CodexConfig` | — | Codex usage polling config |
@@ -180,8 +181,9 @@ keys, → `linearKeySet: bool`); `PUT /api/config` returns
 - <a id="preset"></a>**`Preset`**: `name`, `labels` (ticket-id prefixes / Linear team keys,
   e.g. `DEV`, that auto-select this preset when cloning from a ticket — matched
   case-insensitively against the ticket's prefix like `DEV-196` → `dev`, first match in
-  config order wins), `linear_key` (personal API key, **secret** — fetches/creates tickets server-side
-  and is injected into the clone as `LINEAR_API_KEY`, authing its `linear` MCP), `vars`
+  config order wins), `linear_key` (personal API key — fetches/creates tickets server-side,
+  is injected into the clone as `LINEAR_API_KEY` authing its `linear` MCP, and is handed to
+  the browser and the CLI verbatim by `GET /api/config`), `vars`
   (env vars written to the clone's `/etc/environment`), and `agent_playbook` (optional,
   non-secret — text appended after a blank line to the global `agent_playbook` for
   clones of this preset; empty ⇒ global only). `PUT /api/config` merges rows by name

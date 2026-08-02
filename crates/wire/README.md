@@ -66,11 +66,13 @@ AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb,
 # auth.json into assigned clones' ~/.codex/auth.json (refresh_token emptied; see control-server).
 CodexConfig { pollSecs, pinnedEmail?, usagePolling: bool }
              # usagePolling=false suppresses GET /wham/usage; refresh + push still run
-AppConfigRedacted   # GET /api/config shape: the one secret → set/unset, never plaintext
+AppConfigRedacted   # GET /api/config shape: same fields, preset linear keys included
 ImageInfo   # GET /api/images row: {id, reference, size_bytes, created_at, base, created_from?, in_use_by}
 SetupEnv / EnvCheckRow   # GET /api/setup/env: the wizard's environment preflight rows
-# The only secret is the preset linear key (the Docker backend has none — local unix socket):
-# write-only, redacted on read, omitted-keeps-stored on write, NEVER placed in ControlState/SSE.
+# The only credential is the preset linear key (the Docker backend has none — local unix
+# socket). GET /api/config returns it verbatim: the browser and the CLI are what call Linear,
+# and this server is Tailscale-only. Write-only on the way back (blank keeps stored), and it
+# stays out of ControlState/SSE, which is a different document with a different lifetime.
 
 # socket protocol (clone-daemon ⇄ control-server, SOCK_SEQPACKET + SCM_RIGHTS)
 FrameMsg { monitor_id, fourcc, modifier, width, height, planes: [{stride, offset}], seq }

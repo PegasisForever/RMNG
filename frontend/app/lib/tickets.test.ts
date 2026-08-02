@@ -110,6 +110,19 @@ test("no stored order at all leaves Linear's order alone", () => {
   expect(ids(orderTickets(fromLinear, []))).toEqual(["WE-2", "WE-1"]);
 });
 
+// `PUT /api/tickets/order` lowercases every id before it stores one, so what comes back over
+// `/events` never matches a Linear identifier's own case. This is the test that makes that
+// safe to do.
+test("a stored order in a different case still places the tickets", () => {
+  const fromLinear = [ticket("WE-1"), ticket("WE-2"), ticket("WE-3")];
+
+  expect(ids(orderTickets(fromLinear, ["we-3", "we-1", "we-2"]))).toEqual([
+    "WE-3",
+    "WE-1",
+    "WE-2",
+  ]);
+});
+
 // --- the branch name ----------------------------------------------------------
 
 test("Linear's own branch name is used verbatim when it sent one", () => {

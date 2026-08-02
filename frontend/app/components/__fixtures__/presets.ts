@@ -13,7 +13,7 @@ export function makePreset(overrides: Partial<PresetRedacted> = {}): PresetRedac
   return {
     name: "webapp",
     labels: ["WE", "frontend"],
-    linearKeySet: true,
+    linearKey: "lin_api_fixture",
     claudeAccount: "",
     codexAccount: "",
     vars: [],
@@ -42,7 +42,7 @@ export function makeClonePresets(): PresetRedacted[] {
     makePreset({
       name: "webapp",
       labels: ["WE", "frontend"],
-      linearKeySet: true,
+      linearKey: "lin_api_fixture",
       // A preset that defaults its clones to a pool; Codex left with no default.
       claudeAccount: "group:pooled",
       vars: [{ key: "NODE_ENV", value: "development" }],
@@ -50,12 +50,12 @@ export function makeClonePresets(): PresetRedacted[] {
     makePreset({
       name: "devtools",
       labels: ["DEV"],
-      linearKeySet: true,
+      linearKey: "lin_api_fixture",
     }),
     makePreset({
       name: "platform",
       labels: ["OPS"],
-      linearKeySet: false,
+      linearKey: "",
     }),
   ];
 }

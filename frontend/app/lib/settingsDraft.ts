@@ -142,7 +142,9 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       name: p.name,
       labels: p.labels.join(", "),
       linearKey: "",
-      keySet: p.linearKeySet,
+      // The server vends the key itself now. The input stays write-only all the same: it
+      // exists to replace a key, not to read one back, and `""` still means "keep stored".
+      keySet: p.linearKey !== "",
       claudeAccount: p.claudeAccount,
       codexAccount: p.codexAccount,
       vars: p.vars.map((v) => ({ ...v })),

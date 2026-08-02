@@ -1,10 +1,13 @@
 //! `AppConfig` — every setting, edited via the Settings UI (no hand-edited files).
 //!
-//! Secrets (preset Linear keys) live only in the server's `config.json` (0600) and are
-//! **never** placed in `ControlState` or sent to the browser. `GET /api/config` returns
-//! [`AppConfigRedacted`] (secrets shown as set/unset); `PUT /api/config` takes write-only
-//! secret fields. The Docker backend has no secret (local unix socket), so
-//! [`DockerConfig`] passes through the redacted view intact.
+//! The preset Linear keys live in the server's `config.json` (0600) and **are** handed to
+//! the browser. That is deliberate. Every Linear call happens in a client now, so the
+//! browser and the CLI each need a key of their own, and this server answers only on a
+//! Tailscale-only network. `GET /api/config` returns [`AppConfigRedacted`], which carries
+//! each key verbatim; `PUT /api/config` still takes them as write-only fields, where a
+//! blank value means "keep the stored one". Keys stay out of `ControlState`, which is a
+//! separate document with its own file and its own broadcast. The Docker backend has no
+//! secret (local unix socket), so [`DockerConfig`] passes through the redacted view intact.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -110,7 +113,8 @@ pub struct EnvVar {
 /// ALWAYS be present (e.g. `XDG_CURRENT_DESKTOP`) are NOT presets — they're baked into the
 /// template's base session env by `template/setup/30-user.sh` at template build, inherited by
 /// every clone.
-/// NOT TS-exported: `linear_key` is a secret — the browser sees [`PresetRedacted`].
+/// NOT TS-exported: the browser reads [`PresetRedacted`], which carries the same
+/// `linear_key` verbatim and differs only in what a `PUT` may write back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Preset {
@@ -120,7 +124,9 @@ pub struct Preset {
     /// matching preset in config order wins. Named `labels` for config back-compat.
     #[serde(default)]
     pub labels: Vec<String>,
-    /// Linear personal API key (**secret**; injected into clones as `LINEAR_API_KEY`).
+    /// Linear personal API key. A credential, but not one this server keeps to itself: it is
+    /// injected into clones as `LINEAR_API_KEY` and handed to the browser and the CLI through
+    /// [`PresetRedacted`], because they are the ones that call Linear.
     #[serde(default)]
     pub linear_key: String,
     /// Default Claude account for clones of this preset — an account *selection* in the usual
@@ -155,7 +161,7 @@ impl Preset {
         PresetRedacted {
             name: self.name.clone(),
             labels: self.labels.clone(),
-            linear_key_set: !self.linear_key.is_empty(),
+            linear_key: self.linear_key.clone(),
             claude_account: self.claude_account.clone(),
             codex_account: self.codex_account.clone(),
             vars: self.vars.clone(),
@@ -165,15 +171,22 @@ impl Preset {
     }
 }
 
-/// A preset as shown to the browser: everything but the Linear key, which is
-/// replaced by a "is set" flag (write-only secret).
+/// A preset as shown to the browser: every field of [`Preset`], Linear key included.
+///
+/// The name is a leftover from when this view withheld the key. It withholds nothing now,
+/// because the browser and the CLI are the only things that call Linear and both need a key.
+/// What remains of the redaction is a direction: `PUT /api/config` treats `linear_key` as
+/// write-only, so a blank submission keeps the stored key rather than clearing it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct PresetRedacted {
     pub name: String,
     pub labels: Vec<String>,
-    pub linear_key_set: bool,
+    /// The preset's Linear personal API key, verbatim. Empty when none is configured, which
+    /// is the whole test the settings panel runs to decide whether its write-only key input
+    /// reads as already set.
+    pub linear_key: String,
     /// Default account selections ([`Preset::claude_account`] / [`Preset::codex_account`]) —
     /// not secrets, shown verbatim.
     pub claude_account: String,
@@ -793,8 +806,10 @@ mod tests {
         assert!(v.get("usagePolling").is_some());
     }
 
+    /// The redacted view vends the Linear key rather than hiding it: the browser and the CLI
+    /// call Linear themselves, so `GET /api/config` is where they get a key.
     #[test]
-    fn redaction_hides_secrets() {
+    fn redaction_vends_the_linear_key() {
         let c = AppConfig {
             clone_socket: "/srv/rmng-sock/clones.sock".into(),
             setup_complete: true,
@@ -828,15 +843,18 @@ mod tests {
         let r = c.redacted();
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("10.0.0.100"));
-        assert!(!json.contains("lin_api_secret"));
+        assert!(json.contains("lin_api_secret"), "the key is vended: {json}");
         assert_eq!(r.presets.len(), 2);
-        assert!(r.presets[0].linear_key_set && r.presets[0].name == "med");
+        assert_eq!(r.presets[0].linear_key, "lin_api_secret");
+        assert_eq!(r.presets[0].name, "med");
         assert_eq!(r.presets[0].labels, vec!["Backend"]); // labels/vars pass through
         assert_eq!(r.presets[0].vars.len(), 1);
         // Account defaults are not secrets — they pass through the redaction verbatim.
         assert_eq!(r.presets[0].claude_account, "group:pooled");
         assert_eq!(r.presets[0].codex_account, "");
-        assert!(!r.presets[1].linear_key_set);
+        // A preset with no key configured reads back empty, which is what the settings
+        // panel's write-only key input tests to show itself as unset.
+        assert_eq!(r.presets[1].linear_key, "");
         // Non-secret fields pass through verbatim; the Docker backend has no secret.
         assert_eq!(r.clone_socket, "/srv/rmng-sock/clones.sock");
         assert!(r.setup_complete);
