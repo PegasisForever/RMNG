@@ -23,6 +23,7 @@ import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
+import { useTickets } from "~/lib/linear/useTickets";
 import { cloneForTicket, findTicket, openTickets, orderTickets } from "~/lib/tickets";
 import {
   activate,
@@ -259,8 +260,12 @@ export function DashboardContainer({
     run(putTicketOrder(next));
   };
 
+  // Linear's own answer, asked for by this browser with the presets' keys. It is the one
+  // piece of the board that does not come from the control server.
+  const { tickets: linearTickets, error: ticketsError } = useTickets(presets);
+
   const visibleTickets = orderTickets(
-    openTickets(state.tickets ?? [], state.hosts),
+    openTickets(linearTickets, state.hosts),
     ticketOrder,
   );
   // Derived: a ticket that leaves the list (cloned, closed, moved in Linear) closes its
@@ -434,7 +439,7 @@ export function DashboardContainer({
           onOpenInLinear: openInLinear,
           tickets: {
             tickets: visibleTickets,
-            error: state.ticketsError ?? null,
+            error: ticketsError,
             selectedId: openTicket?.id ?? null,
             onSelectTicket: (ticket) => setOpenTicketId(ticket.id),
             onNewTicket: () => setNewTicketOpen(true),

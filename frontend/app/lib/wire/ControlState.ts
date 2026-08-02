@@ -49,16 +49,15 @@ ticketOrder: Array<string>, operations: Array<Operation>,
  */
 claudeAccounts: Array<ClaudeUsage>, 
 /**
- * Open Linear issues across every preset API key, newest poll wins. Published here so
- * the board's ticket column rides the same `/events` stream everything else does.
+ * Open Linear issues across every preset API key, newest poll wins.
  *
- * The server's mirror of somebody else's data, and on its way out: the browser holds a
- * Linear key now and will query Linear itself.
+ * The server's mirror of somebody else's data, and nothing reads it any more: the
+ * browser queries Linear itself with the keys `GET /api/config` hands it. This field and
+ * the poller behind it are on their way out.
  */
 tickets: Array<LinearTicket>, 
 /**
- * Why the last Linear poll failed, if it did. The column keeps drawing whatever it
- * last had and says this alongside: a stale list beats an empty one mid-flight.
+ * Why the last Linear poll failed, if it did. Unread, for the same reason.
  */
 ticketsError?: string, 
 /**

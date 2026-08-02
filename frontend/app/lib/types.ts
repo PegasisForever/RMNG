@@ -199,10 +199,11 @@ export interface ControlState {
    *  an id whose ticket is gone is ignored rather than pruned. */
   ticketOrder: string[];
   /** Open Linear issues across every configured preset key, kept current by the server's
-   *  own poller. The whole source for the ticket column today, and on its way out: the
-   *  browser holds a Linear key now and will query Linear itself. */
+   *  own poller. Nothing in the browser reads it: the ticket column queries Linear itself
+   *  through `~/lib/linear/useTickets`. The field and the poller behind it are on their way
+   *  out. */
   tickets: LinearTicket[];
-  /** Why the server's last Linear poll failed, if it did. */
+  /** Why the server's last Linear poll failed, if it did. Unread, for the same reason. */
   ticketsError?: string;
 }
 

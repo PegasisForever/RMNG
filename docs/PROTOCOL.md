@@ -183,7 +183,8 @@ returns
   case-insensitively against the ticket's prefix like `DEV-196` → `dev`, first match in
   config order wins), `linear_key` (personal API key — fetches/creates tickets server-side,
   is injected into the clone as `LINEAR_API_KEY` authing its `linear` MCP, and is handed to
-  the browser and the CLI verbatim by `GET /api/config`), `vars`
+  the browser verbatim by `GET /api/config`, which is how the ticket column lists issues
+  without the server), `vars`
   (env vars written to the clone's `/etc/environment`), and `agent_playbook` (optional,
   non-secret — text appended after a blank line to the global `agent_playbook` for
   clones of this preset; empty ⇒ global only). `PUT /api/config` merges rows by name

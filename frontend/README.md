@@ -32,8 +32,8 @@ planned "monitor" pane is dropped.
   four listen ports), replacing hand-edited `config.json`. Secret fields are
   masked/write-only with **Test connection** buttons (`POST /api/config/test`); saves go to
   `PUT /api/config` and apply live. Claude accounts are imported from a signed-in clone
-  (`ClaudeAccountsPanel`), not entered here. Reads the redacted `GET /api/config` —
-  plaintext secrets never reach the browser.
+  (`ClaudeAccountsPanel`), not entered here. Reads the redacted `GET /api/config`, which
+  hands over each preset's Linear key verbatim: the ticket column queries Linear itself.
 - A **"+ Pull template"** affordance (`POST /api/images/pull` — prompts for a registry
   reference, prefilled with the configured `docker.templateReference`), plus commit-a-clone
   (`POST /api/images/commit`), with progress shown via the existing `OperationProgress`.

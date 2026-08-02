@@ -1638,7 +1638,7 @@ pub(crate) fn mirror_layout_to_state(app: &App) {
 
 /// Repoint every clone whose group is blank or dangling at the first configured group.
 
-/// `GET /api/config` — the redacted view (no plaintext secrets).
+/// `GET /api/config` — the redacted view, each preset's Linear key included verbatim.
 async fn config_get(State(app): State<App>) -> Json<AppConfigRedacted> {
     Json(app.config().redacted())
 }

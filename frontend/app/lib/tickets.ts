@@ -1,10 +1,9 @@
 // Linear tickets that have no clone yet: the board's inbox of work not started.
 //
 // A Linear API key per preset (`Preset.linear_key`) reaches the browser verbatim as
-// `PresetRedacted.linearKey`. Listing the issues is still the server's job today, and the
-// key is there so the browser can take it over. This module is the shape the browser draws
-// and the one rule it applies, kept apart from the fetch so a story can pass a fixture and
-// the filter stays testable.
+// `PresetRedacted.linearKey`, and the browser lists the issues itself through
+// `~/lib/linear`. This module holds the rules it applies to that list, kept apart from the
+// fetch so a story can pass a fixture and the filter stays testable.
 //
 // Whose tickets: each key is personal, so each one answers for its own owner and the column
 // shows the union across every configured key. A fleet with a work key and a personal key
@@ -14,14 +13,14 @@
 // and then the same issue arrives twice.
 
 import type { Clone } from "~/lib/types";
-import type { LinearTicket } from "~/lib/wire/LinearTicket";
+import type { LinearTicket } from "~/lib/linear/types";
 
-/** The ticket shape is the server's, generated from `wire::LinearTicket` by ts-rs. It is
- *  re-exported here so every consumer imports tickets from one place, and so the fields the
- *  column reads are documented next to the rules that read them. */
-export type { LinearTicket } from "~/lib/wire/LinearTicket";
-export type { TicketLabel } from "~/lib/wire/TicketLabel";
-export type { TicketState } from "~/lib/wire/TicketState";
+/** The ticket shape belongs to `~/lib/linear/types`, next to the query that fills it in. It
+ *  is re-exported here so every consumer imports tickets from one place, and so the fields
+ *  the column reads are documented next to the rules that read them. */
+export type { LinearTicket } from "~/lib/linear/types";
+export type { TicketLabel } from "~/lib/linear/types";
+export type { TicketState } from "~/lib/linear/types";
 
 /** Drag ids have to be unique across the whole board, and a ticket id could in principle
  *  collide with a clone id. Prefixing keeps the two namespaces apart and lets the drag

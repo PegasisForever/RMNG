@@ -237,7 +237,8 @@ function putJson(url: string, body: unknown): Promise<unknown> {
   return request(url, jsonInit("PUT", body));
 }
 
-/** Current config (secrets shown as set/unset booleans). */
+/** Current config. Each preset's Linear key comes back verbatim, which is where the ticket
+ *  column gets the key it queries Linear with. */
 export const getConfig = () => getJson("/api/config") as Promise<AppConfigRedacted>;
 /** Merge a partial config update (empty-string secrets are left unchanged), persist,
  *  apply live. Returns the new redacted config plus whether a restart is required to

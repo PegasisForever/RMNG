@@ -602,15 +602,14 @@ pub struct ControlState {
     /// is what lets the Claude and Codex pollers publish here without clobbering each other.
     #[serde(default)]
     pub claude_accounts: Vec<ClaudeUsage>,
-    /// Open Linear issues across every preset API key, newest poll wins. Published here so
-    /// the board's ticket column rides the same `/events` stream everything else does.
+    /// Open Linear issues across every preset API key, newest poll wins.
     ///
-    /// The server's mirror of somebody else's data, and on its way out: the browser holds a
-    /// Linear key now and will query Linear itself.
+    /// The server's mirror of somebody else's data, and nothing reads it any more: the
+    /// browser queries Linear itself with the keys `GET /api/config` hands it. This field and
+    /// the poller behind it are on their way out.
     #[serde(default)]
     pub tickets: Vec<LinearTicket>,
-    /// Why the last Linear poll failed, if it did. The column keeps drawing whatever it
-    /// last had and says this alongside: a stale list beats an empty one mid-flight.
+    /// Why the last Linear poll failed, if it did. Unread, for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tickets_error: Option<String>,

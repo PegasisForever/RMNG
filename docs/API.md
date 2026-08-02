@@ -464,9 +464,9 @@ Serve an uploaded image by its generated `<16-hex>.<ext>` name, with the right C
 ## Configuration
 
 ### `GET /api/config` → `AppConfigRedacted`
-The full config, preset Linear keys included as `linearKey: string`. The browser and the CLI
-are the only things that call Linear, so this is where they get a key; the server answers
-only on a Tailscale-only network, which is what makes that acceptable.
+The full config, preset Linear keys included as `linearKey: string`. The browser lists Linear
+issues itself, so this is where it gets a key; the server answers only on a Tailscale-only
+network, which is what makes that acceptable.
 Everything else is returned verbatim — ports, `layoutPresets`/`activeLayout`, the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
 socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`,

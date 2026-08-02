@@ -31,7 +31,7 @@ export interface SettingsPanelContainerProps {
   onClose: () => void;
   // --- injected server calls (no API logic lives in this component, so it's
   //     renderable in isolation — e.g. Storybook — with mocked data) ---
-  /** Read the current redacted config (secrets shown as set/unset booleans). */
+  /** Read the current redacted config (each preset's Linear key comes back verbatim). */
   getConfig: () => Promise<AppConfigRedacted>;
   /** Persist a partial config patch; returns the merged config + a restart-required flag. */
   putConfig: (patch: unknown) => Promise<ConfigPutResponse & { networkWarning?: string }>;

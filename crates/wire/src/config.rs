@@ -1,9 +1,10 @@
 //! `AppConfig` — every setting, edited via the Settings UI (no hand-edited files).
 //!
 //! The preset Linear keys live in the server's `config.json` (0600) and **are** handed to
-//! the browser. That is deliberate. Every Linear call happens in a client now, so the
-//! browser and the CLI each need a key of their own, and this server answers only on a
-//! Tailscale-only network. `GET /api/config` returns [`AppConfigRedacted`], which carries
+//! the browser. That is deliberate. The browser lists Linear issues itself, so it needs a
+//! key of its own, and this server answers only on a Tailscale-only network. The server
+//! still holds the same keys for its own calls, and injects each one into its preset's
+//! clones. `GET /api/config` returns [`AppConfigRedacted`], which carries
 //! each key verbatim; `PUT /api/config` still takes them as write-only fields, where a
 //! blank value means "keep the stored one". Keys stay out of `ControlState`, which is a
 //! separate document with its own file and its own broadcast. The Docker backend has no
@@ -125,8 +126,8 @@ pub struct Preset {
     #[serde(default)]
     pub labels: Vec<String>,
     /// Linear personal API key. A credential, but not one this server keeps to itself: it is
-    /// injected into clones as `LINEAR_API_KEY` and handed to the browser and the CLI through
-    /// [`PresetRedacted`], because they are the ones that call Linear.
+    /// injected into clones as `LINEAR_API_KEY` and handed to the browser through
+    /// [`PresetRedacted`], because the browser lists its own issues.
     #[serde(default)]
     pub linear_key: String,
     /// Default Claude account for clones of this preset — an account *selection* in the usual
@@ -174,9 +175,9 @@ impl Preset {
 /// A preset as shown to the browser: every field of [`Preset`], Linear key included.
 ///
 /// The name is a leftover from when this view withheld the key. It withholds nothing now,
-/// because the browser and the CLI are the only things that call Linear and both need a key.
-/// What remains of the redaction is a direction: `PUT /api/config` treats `linear_key` as
-/// write-only, so a blank submission keeps the stored key rather than clearing it.
+/// because the browser queries Linear itself and needs a key to do it. What remains of the
+/// redaction is a direction: `PUT /api/config` treats `linear_key` as write-only, so a blank
+/// submission keeps the stored key rather than clearing it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -544,7 +545,8 @@ impl AppConfig {
         ]
     }
 
-    /// Produce the redacted view for `GET /api/config` (no plaintext secrets).
+    /// Produce the redacted view for `GET /api/config`. Each preset's Linear key passes
+    /// through verbatim; what the redaction still does is make it write-only on the way back.
     pub fn redacted(&self) -> AppConfigRedacted {
         AppConfigRedacted {
             listen: self.listen,
@@ -569,8 +571,10 @@ impl AppConfig {
     }
 }
 
-/// The shape `GET /api/config` returns: same structure as [`AppConfig`] but with
-/// every secret replaced by a boolean "is set". Powers the Settings UI.
+/// The shape `GET /api/config` returns: the same structure as [`AppConfig`], each preset's
+/// Linear key included verbatim. Nothing here is withheld, because the browser needs a key to
+/// query Linear with; the redaction is a direction rather than a mask, and `PUT /api/config`
+/// takes each key as write-only. Powers the Settings UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -806,8 +810,8 @@ mod tests {
         assert!(v.get("usagePolling").is_some());
     }
 
-    /// The redacted view vends the Linear key rather than hiding it: the browser and the CLI
-    /// call Linear themselves, so `GET /api/config` is where they get a key.
+    /// The redacted view vends the Linear key rather than hiding it: the browser calls Linear
+    /// itself, so `GET /api/config` is where it gets a key.
     #[test]
     fn redaction_vends_the_linear_key() {
         let c = AppConfig {

@@ -5,9 +5,9 @@ import type { EnvVar } from "./EnvVar";
  * A preset as shown to the browser: every field of [`Preset`], Linear key included.
  *
  * The name is a leftover from when this view withheld the key. It withholds nothing now,
- * because the browser and the CLI are the only things that call Linear and both need a key.
- * What remains of the redaction is a direction: `PUT /api/config` treats `linear_key` as
- * write-only, so a blank submission keeps the stored key rather than clearing it.
+ * because the browser queries Linear itself and needs a key to do it. What remains of the
+ * redaction is a direction: `PUT /api/config` treats `linear_key` as write-only, so a blank
+ * submission keeps the stored key rather than clearing it.
  */
 export type PresetRedacted = { name: string, labels: Array<string>, 
 /**
