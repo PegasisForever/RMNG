@@ -6,6 +6,7 @@
 
 mod args;
 mod commands;
+mod linear;
 mod output;
 mod wait;
 

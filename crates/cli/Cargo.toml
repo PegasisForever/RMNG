@@ -19,6 +19,8 @@ tokio.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 futures.workspace = true
+# The ticket verbs call `api.linear.app` themselves (see `src/linear.rs`).
+reqwest.workspace = true
 base64 = "0.22"
 
 # `poll(2)` on stdin so `rmng exec` only drains piped input that is actually

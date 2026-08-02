@@ -146,10 +146,10 @@ rmng clone create-from-ticket WE-142 --from pegasis0/rmng-template:latest --wait
 a label on some preset — that preset is used, and its Linear API key opens the issue. Hence no
 `--preset` here either: the team key *is* the preset choice.
 
-The description is **markdown**. `--description-file -` reads stdin, which is how to pass a
-multi-line body. Any `/uploads/<name>` image reference in it (e.g. from a body composed in the
-web dialog) is re-hosted in Linear before the issue is created, so the ticket doesn't depend on
-LAN access to this server.
+The description is **markdown**, sent to Linear verbatim. `--description-file -` reads stdin,
+which is how to pass a multi-line body. A `/uploads/<name>` image reference written into it
+stays as written, and only renders for a reader on this server's network. The web dialog is
+where pasted images get re-hosted in Linear.
 
 ```sh
 rmng clone create-with-new-ticket --from pegasis0/rmng-template:latest \

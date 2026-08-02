@@ -2775,6 +2775,7 @@ dependencies = [
  "control-client",
  "futures",
  "libc",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

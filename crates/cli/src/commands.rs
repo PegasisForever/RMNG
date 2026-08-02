@@ -239,8 +239,27 @@ pub async fn clone_create(
     started(client, op, &common.wait, json, "clone").await
 }
 
+/// The resolved-metadata `linear` mode of `POST /api/clone`: an issue this CLI already
+/// looked up (or opened) in Linear, said the way the server reads it. The server makes no
+/// Linear call of its own for this body; it derives the hostname and starts the clone.
+fn linear_mode(issue: &crate::linear::IssueInfo) -> Value {
+    json!({ "linear": {
+        "workspace": issue.prefix,
+        "ticket": issue.identifier,
+        "ticketUrl": issue.url,
+        "branch": issue.branch,
+        "title": issue.title,
+        // A clone stores one label, the issue's first. Blank when it has none, which the
+        // server reads as no label.
+        "label": issue.labels.first().map(String::as_str).unwrap_or(""),
+    }})
+}
+
 /// `rmng clone create-from-ticket <link-or-id>` — clone for an existing Linear ticket. No `--preset`:
 /// the server auto-selects it from the ticket's team prefix, matching the web dialog.
+///
+/// The ticket lookup happens here, against `api.linear.app`, with the preset Linear keys
+/// `GET /api/config` vends. Whichever key sees the issue also moves it to In Progress.
 pub async fn clone_create_from_ticket(
     client: &Client,
     ticket: &str,
@@ -249,10 +268,19 @@ pub async fn clone_create_from_ticket(
     common: &CreateArgs,
     json: bool,
 ) -> Result<u8> {
+    let http = reqwest::Client::new();
+    let r = crate::linear::parse_ticket_ref(ticket)?;
+    let cfg = client.config().await?;
+    let keys: Vec<&str> = cfg.presets.iter().map(|p| p.linear_key.as_str()).collect();
+    let (issue, key) = crate::linear::fetch_issue_any(&http, &keys, &r).await?;
+    // Best effort: a ticket that refuses to move is not a reason to withhold the clone.
+    if let Err(e) = crate::linear::ensure_in_progress(&http, &key, &issue).await {
+        eprintln!("warning: could not move {} to In Progress: {e}", issue.identifier);
+    }
     let op = client
         .clone_create(
             &common.from,
-            json!({ "ticket": ticket }),
+            linear_mode(&issue),
             &clone_opts(common, None, agent_instructions, claude_instructions),
         )
         .await?;
@@ -261,7 +289,8 @@ pub async fn clone_create_from_ticket(
 
 /// `rmng clone create-with-new-ticket --team <key> --title <t>` — create the Linear ticket, then clone
 /// for it. The team key picks the preset (whose API key opens the issue), so again no
-/// `--preset`. `description` is markdown; `/uploads/…` images in it are re-hosted in Linear.
+/// `--preset`. `description` is markdown, taken verbatim: unlike the web dialog this verb
+/// has no image upload behind it, so there is nothing to re-host.
 // Eight args because this verb takes the most flags of the four; grouping them into a struct
 // would just move the same fields behind one more name.
 #[allow(clippy::too_many_arguments)]
@@ -275,18 +304,36 @@ pub async fn clone_create_with_new_ticket(
     common: &CreateArgs,
     json: bool,
 ) -> Result<u8> {
+    let http = reqwest::Client::new();
+    let team = team.trim().to_ascii_lowercase();
+    let cfg = client.config().await?;
+    // The team key IS the preset choice: it is matched against the presets' own ticket-id
+    // prefixes, the same rule that auto-selects one for an existing ticket.
+    let preset = crate::linear::pick_preset_by_prefix(&cfg.presets, &team).ok_or_else(|| {
+        anyhow!(
+            "no preset claims team {}. Add it to a preset's ticket-id prefixes (configured: {})",
+            team.to_uppercase(),
+            preset_names(&cfg),
+        )
+    })?;
+    let issue =
+        crate::linear::create_issue(&http, &preset.linear_key, &team, title.trim(), description)
+            .await?;
+    if let Err(e) = crate::linear::ensure_in_progress(&http, &preset.linear_key, &issue).await {
+        eprintln!("warning: could not move {} to In Progress: {e}", issue.identifier);
+    }
     let op = client
         .clone_create(
             &common.from,
-            json!({ "create": {
-                "team": team.trim().to_ascii_lowercase(),
-                "title": title.trim(),
-                "description": description,
-            }}),
+            linear_mode(&issue),
             &clone_opts(common, None, agent_instructions, claude_instructions),
         )
         .await?;
     started(client, op, &common.wait, json, "clone").await
+}
+
+fn preset_names(cfg: &wire::AppConfigRedacted) -> String {
+    cfg.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
 }
 
 /// `rmng clone create-plain --title <t>` — no-ticket clone with a title-derived hostname.
