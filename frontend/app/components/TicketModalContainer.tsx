@@ -9,6 +9,7 @@
 import { lazy, Suspense, useState } from "react";
 
 import { TicketModalView } from "~/components/TicketModalView";
+import { toLinearMarkdown } from "~/lib/linear/assets";
 import { issueCreate, keysForTeam } from "~/lib/linear/mutations";
 import type { LinearTicket } from "~/lib/tickets";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
@@ -59,7 +60,16 @@ export function TicketModalContainer({
         </Suspense>
       }
       onClose={onClose}
-      onCreate={(ticket) => issueCreate(keysForTeam(presets, ticket.team)[0] ?? "", ticket).then(onCreated)}
+      // The editor holds every pasted image behind `/api/linear/asset`, because that is the
+      // only source an `<img>` on this page can load. Linear gets the `uploads.linear.app`
+      // URL back, so the issue reads correctly for everyone who is not on this LAN. That
+      // swap happens here and nowhere else: this is the last place the body is ours.
+      onCreate={(ticket) =>
+        issueCreate(keysForTeam(presets, ticket.team)[0] ?? "", {
+          ...ticket,
+          description: toLinearMarkdown(ticket.description),
+        }).then(onCreated)
+      }
     />
   );
 }

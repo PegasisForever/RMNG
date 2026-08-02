@@ -63,6 +63,7 @@ pub fn router(app: App) -> Router {
         .route("/api/notes/:id", get(notes_get).put(notes_save))
         .route("/api/upload", post(upload))
         .route("/api/linear/upload-relay", post(linear_upload_relay))
+        .route("/api/linear/asset", get(linear_asset))
         .route("/uploads/:file", get(uploads_serve))
         .route("/api/config", get(config_get).put(config_put))
         .route("/api/config/test", post(config_test))
@@ -1648,24 +1649,83 @@ const UPLOAD_RELAY_TIMEOUT_SECS: u64 = 45;
 /// hop-by-hop by definition.
 const UPLOAD_RELAY_DROPPED: [&str; 4] = ["host", "content-length", "transfer-encoding", "connection"];
 
-/// Refuse any target but the signed-upload bucket.
+/// How much of the `file` field to hold in memory while the `url` field has not arrived yet.
+///
+/// Field order is the client's to choose, and this route has no authentication in front of
+/// it, so a body aimed at a host that will be refused must not be able to cost what a body
+/// aimed at an accepted one costs. Four concurrent 60MB posts at a rejected host used to take
+/// the process from 35MB to 212MB resident.
+///
+/// Reading the target first makes that refusal free in the order our own `upload.ts` sends
+/// (`url`, `headers`, `file`), measured at 12KB of growth for the same four. This bounds the
+/// orders it does not send, measured at 4MB: one cap per request in flight.
+const UPLOAD_RELAY_PREBUFFER: usize = 1024 * 1024;
+
+/// The most one `url` field may be. A signed Google upload URL runs to about 700 bytes, so
+/// this leaves room for a much longer one and none for a payload wearing a target's name.
+const UPLOAD_RELAY_URL_MAX: usize = 8 * 1024;
+
+/// The most one `headers` field may be. Linear signs five short pairs into it.
+const UPLOAD_RELAY_HEADERS_MAX: usize = 64 * 1024;
+
+/// One text field, read a chunk at a time and refused past `cap`.
+///
+/// [`Field::text`] has no bound short of the 64MB `DefaultBodyLimit`, so a caller could spend
+/// 60MB in `url` or in `headers` and never send a `file` at all. Measured: 60MB in `url` took
+/// the process from 19064kB to 146280kB of VmHWM, and 60MB in `headers` with no `url` field at
+/// all took it from 19244kB to 145720kB. Every field this route reads is bounded, here or by
+/// the `file` arm's own cap, and the fields it does not read are drained rather than held.
+async fn field_text(
+    field: &mut axum::extract::multipart::Field<'_>,
+    name: &str,
+    cap: usize,
+) -> Result<String, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = field.chunk().await.map_err(|e| e.to_string())? {
+        if buf.len() + chunk.len() > cap {
+            return Err(format!(
+                "the '{name}' field is larger than the {cap} bytes this route reads"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).map_err(|_| format!("the '{name}' field is not text"))
+}
+
+/// Refuse any URL that is not plain https at exactly `allowed`.
 ///
 /// Host, scheme, and port all have to match: `storage.googleapis.com.example.net` is a
 /// different host, `http` is a downgrade, and a port is a different listener on the same name.
-fn check_relay_target(url: &str) -> Result<(), String> {
+///
+/// `reqwest::Url::parse` is what decides the host, which is the same parser reqwest itself
+/// will use to pick the connection. That is deliberate and it is what removes the whole class
+/// of parser-differential bypass: `evil.tld@storage.googleapis.com` has host
+/// `storage.googleapis.com` here AND connects there, `STORAGE.GOOGLEAPIS.COM` is lowercased
+/// by the same IDNA pass both sides run, and a trailing dot stays in the string both sides
+/// compare. A second parser here, however careful, could disagree with the one that dials.
+///
+/// Shared by the two routes that fetch a URL the caller chose. `allowed` is passed in rather
+/// than read from a list, so each route names its one host at its own call site and widening
+/// one can never widen the other.
+fn check_outbound_host(url: &str, allowed: &str, label: &str) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url.trim())
-        .map_err(|e| format!("upload url is not a URL: {e}"))?;
+        .map_err(|e| format!("{label} is not a URL: {e}"))?;
     if parsed.scheme() != "https" {
-        return Err(format!("upload url must be https, got {}", parsed.scheme()));
+        return Err(format!("{label} must be https, got {}", parsed.scheme()));
     }
     if let Some(port) = parsed.port() {
-        return Err(format!("upload url must use the default https port, got {port}"));
+        return Err(format!("{label} must use the default https port, got {port}"));
     }
     match parsed.host_str() {
-        Some(UPLOAD_RELAY_HOST) => Ok(()),
-        Some(host) => Err(format!("upload url host must be {UPLOAD_RELAY_HOST}, got {host}")),
-        None => Err("upload url has no host".into()),
+        Some(host) if host == allowed => Ok(()),
+        Some(host) => Err(format!("{label} host must be {allowed}, got {host}")),
+        None => Err(format!("{label} has no host")),
     }
+}
+
+/// Refuse any target but the signed-upload bucket.
+fn check_relay_target(url: &str) -> Result<(), String> {
+    check_outbound_host(url, UPLOAD_RELAY_HOST, "upload url")
 }
 
 /// The headers to replay, out of the `[{ "key": ..., "value": ... }]` the browser sent.
@@ -1747,41 +1807,93 @@ fn xml_tag(body: &str, tag: &str) -> Option<String> {
 ///
 /// Multipart, three fields: `url` is the `uploadUrl` Linear signed, `headers` is its
 /// `headers[]` as JSON with the declared `content-type` in front, and `file` is the bytes.
+///
+/// The target is checked the moment it is read, before the bytes are buffered, so a request
+/// aimed at a host this will refuse is refused for the price of one string. See
+/// [`UPLOAD_RELAY_PREBUFFER`] for the order the client does not send.
+///
+/// Every field is bounded, and each of the three is read at most once. A second `url` is what
+/// lets a caller spend a whole `file` under a target that was allowed and then name a
+/// different one, so it is refused rather than overwritten.
 async fn linear_upload_relay(
     State(app): State<App>,
     mut mp: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+    let dup = |name: &str| (StatusCode::BAD_REQUEST, format!("the '{name}' field was sent twice"));
     let mut url = String::new();
-    let mut headers_raw = String::new();
+    // Set once `url` has arrived AND passed [`check_relay_target`]: a failed check returns, so
+    // the two are the same fact. It gates the `file` cap below and refuses a second `url`.
+    let mut allowed = false;
+    let mut headers_raw: Option<String> = None;
     let mut body: Option<Vec<u8>> = None;
 
-    while let Some(field) = mp
+    while let Some(mut field) = mp
         .next_field()
         .await
         .map_err(|e| bad(e.to_string()))?
     {
         match field.name().unwrap_or("") {
-            "url" => url = field.text().await.map_err(|e| bad(e.to_string()))?,
-            "headers" => headers_raw = field.text().await.map_err(|e| bad(e.to_string()))?,
-            "file" => {
-                body = Some(field.bytes().await.map_err(|e| bad(e.to_string()))?.to_vec())
+            "url" => {
+                if allowed {
+                    return Err(dup("url"));
+                }
+                url = field_text(&mut field, "url", UPLOAD_RELAY_URL_MAX).await.map_err(bad)?;
+                check_relay_target(&url).map_err(bad)?;
+                allowed = true;
             }
-            _ => {}
+            "headers" => {
+                if headers_raw.is_some() {
+                    return Err(dup("headers"));
+                }
+                headers_raw = Some(
+                    field_text(&mut field, "headers", UPLOAD_RELAY_HEADERS_MAX)
+                        .await
+                        .map_err(bad)?,
+                );
+            }
+            "file" => {
+                if body.is_some() {
+                    return Err(dup("file"));
+                }
+                // Streamed rather than `field.bytes()`, which has no bound short of the 64MB
+                // body limit. A file that arrives before its target is capped: nothing has
+                // agreed to carry it anywhere yet.
+                let mut buf: Vec<u8> = Vec::new();
+                while let Some(chunk) = field.chunk().await.map_err(|e| bad(e.to_string()))? {
+                    if !allowed && buf.len() + chunk.len() > UPLOAD_RELAY_PREBUFFER {
+                        return Err(bad(format!(
+                            "send the 'url' field before the 'file' field: over \
+                             {}MB arrived with no upload target to check",
+                            UPLOAD_RELAY_PREBUFFER / (1024 * 1024)
+                        )));
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                body = Some(buf);
+            }
+            // A field this route does not read still arrives. Drained a chunk at a time so
+            // that naming one `payload` costs the same as naming it nothing.
+            _ => while field.chunk().await.map_err(|e| bad(e.to_string()))?.is_some() {},
         }
     }
 
+    // Reached only when `url` came last or never came at all. A missing field lands here as
+    // an empty string, which is not a URL, so the message still names the field.
+    if !allowed {
+        check_relay_target(&url).map_err(bad)?;
+    }
     let body = body.ok_or_else(|| bad("no 'file' field".into()))?;
-    check_relay_target(&url).map_err(bad)?;
     // Absent means no headers at all, which the bucket answers with a 403. That is the caller's
     // mistake to make, and reading it as "send nothing" beats guessing a content type.
+    let headers_raw = headers_raw.unwrap_or_default();
     let headers = if headers_raw.trim().is_empty() {
         Vec::new()
     } else {
         relay_headers(&headers_raw).map_err(bad)?
     };
 
-    let resp = relay_request(&app.http, url.trim(), &headers)
+    let resp = relay_request(&app.relay_http, url.trim(), &headers)
         .body(body)
         .send()
         .await
@@ -1793,12 +1905,347 @@ async fn linear_upload_relay(
         })?;
 
     let status = resp.status().as_u16();
+    if resp.status().is_redirection() {
+        let to = redirect_target(resp.headers());
+        tracing::warn!("linear upload relay: bucket answered {status} -> {to}, refusing to follow");
+        return Err((StatusCode::BAD_GATEWAY, relay_redirect_refused(status, &to)));
+    }
     if !resp.status().is_success() {
         let text = resp.text().await.unwrap_or_default();
         tracing::warn!("linear upload relay: bucket answered {status}: {text}");
         return Err((StatusCode::BAD_GATEWAY, relay_failure(status, &text)));
     }
     Ok(Json(json!({ "ok": true, "status": status })))
+}
+
+/// Where a 30x pointed, for a log line and an error message. `?` when it carried no `Location`.
+fn redirect_target(headers: &HeaderMap) -> String {
+    headers
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("?")
+        .to_string()
+}
+
+/// What the operator is told when an allowlisted host answers with a redirect.
+///
+/// The host check runs once, against the url the caller sent. Following a 301, 302, or 307
+/// would replay the PUT, its body, and its signed headers at whatever the `Location` names,
+/// on a port with no authentication on any route. A redirect is a dead end here by
+/// construction ([`App::relay_http`]), and this sentence says so rather than reading as a
+/// bucket error.
+fn relay_redirect_refused(status: u16, location: &str) -> String {
+    format!(
+        "the upload target answered HTTP {status} with a redirect to {location}, and this \
+         route does not follow redirects: only the first URL is checked against the \
+         {UPLOAD_RELAY_HOST} allowlist, so a second one is never sent"
+    )
+}
+
+// --- Linear asset proxy ----------------------------------------------------
+//
+// An image pasted into a ticket body now lives in Linear, because the body itself does: a
+// `/uploads/<name>` URL resolves on this LAN and nowhere else, so an issue carrying one is a
+// broken image for everyone but us. The cost is the mirror image of that problem. An
+// unauthenticated GET on a Linear `assetUrl` answers:
+//
+//     HTTP/2 401
+//     {"error":"unauthorized","message":"Please provide authorization header compatible
+//      with Linear GraphQL API"}
+//
+// with no redirect. An `<img>` cannot send that header, and the browser cannot fetch the bytes
+// itself either: `uploads.linear.app` answers a preflight with `access-control-allow-headers:
+// range`, and `authorization` is not in it. Both measured.
+//
+// So this route is the one Linear call the control-server keeps, and it is a read: it fetches
+// the asset with a preset's key and hands the bytes back same-origin, which is a source an
+// `<img>` can use. The markdown saved to Linear still carries the original `assetUrl`. The
+// rewrite to this route happens in the browser, at render time.
+
+/// The only host this route will GET from. Separate constant from [`UPLOAD_RELAY_HOST`] on
+/// purpose: two routes, two allowlists, one host each.
+const LINEAR_ASSET_HOST: &str = "uploads.linear.app";
+
+/// The most one asset may be served as. Counted as the bytes arrive, so a body that declares
+/// no length or lies about one is cut off at the same place a declared one is refused.
+const LINEAR_ASSET_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// How long the WHOLE request may take: every key attempt and the body, on one clock.
+///
+/// Per attempt this is a multiplier, not a bound. With two keys against a target that never
+/// answers, a per-attempt 20 seconds measured 40.002s of held connection, and five presets
+/// would be 100s. The route has no authentication in front of it, so the number a caller can
+/// hold a socket for has to be the number written here and not a multiple of it.
+const LINEAR_ASSET_TIMEOUT_SECS: u64 = 20;
+
+/// Refuse any target but Linear's asset host.
+fn check_asset_target(url: &str) -> Result<(), String> {
+    check_outbound_host(url, LINEAR_ASSET_HOST, "asset url")
+}
+
+/// The content types this route serves, and the exact string each is served as.
+///
+/// A closed table, never a passthrough. Linear stores whatever `contentType` the uploader
+/// declared and hands that back on a read, so the upstream header is chosen by whoever put the
+/// file there. A real asset in a real workspace answers:
+///
+///     HTTP/2 200
+///     content-type: text/html
+///     content-disposition: attachment; filename="linear_download.html"
+///     content-security-policy: sandbox
+///
+/// Forwarding that `content-type` put `<script>alert(document.domain)</script>` on an origin
+/// that serves `/api/hosts/:id/exec`, `/api/clone`, `/api/delete`, and `PUT /api/config`, none
+/// of which ask for a credential. `nosniff` is no help at all when the declared type IS
+/// `text/html`: it stops a browser guessing, and nothing here was a guess.
+///
+/// The same shape as [`files::mime_for_ext`], which decides `/uploads/:file`, with one
+/// difference: no `image/svg+xml`. An SVG is a document that draws, scripts included, and this
+/// origin has no authentication on any route. A stored upload is one the operator posted here;
+/// an asset is one anybody in the Linear workspace could have posted there.
+fn asset_mime(content_type: &str) -> Option<&'static str> {
+    // `image/png; charset=binary` is the same type as `image/png`, and a MIME type is not
+    // case-sensitive, so the parameters go and the type is folded before it is matched.
+    let declared = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    Some(match declared.as_str() {
+        "image/png" => "image/png",
+        "image/jpeg" => "image/jpeg",
+        "image/gif" => "image/gif",
+        "image/webp" => "image/webp",
+        "image/avif" => "image/avif",
+        "image/bmp" => "image/bmp",
+        _ => return None,
+    })
+}
+
+/// One upstream header value, cut down to what is safe to put in an error body.
+///
+/// What arrives here was chosen by whoever uploaded the file, so it is kept to the characters
+/// a MIME type is made of and to 64 of them. Nothing that reads as markup survives, which
+/// matters because the body it lands in is the one an operator will paste somewhere.
+fn quoted(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "/+-._; =".contains(*c))
+        .take(64)
+        .collect()
+}
+
+/// What to serve one asset as: the type off the closed table, plus Linear's disposition.
+///
+/// The `content-security-policy` is deliberately NOT taken from Linear. It is a guard, and a
+/// guard read off the same response it guards is worth nothing: whoever uploaded the file
+/// picked the header too, and `default-src * 'unsafe-inline'` travels as easily as `sandbox`.
+/// This origin authenticates nothing, so it states its own policy and ignores theirs.
+fn asset_headers(h: &HeaderMap) -> Result<(&'static str, String), (StatusCode, String)> {
+    let text = |name: header::HeaderName| {
+        h.get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+    };
+    let declared = text(header::CONTENT_TYPE).unwrap_or_default();
+    let mime = asset_mime(&declared).ok_or_else(|| {
+        let said = if declared.is_empty() { "nothing".to_string() } else { quoted(&declared) };
+        (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("this route serves images only, and Linear declared that asset '{said}'"),
+        )
+    })?;
+    // Disposition is Linear's to choose. Once the type is off the closed table the answer is an
+    // image either way, so `inline` and `attachment` differ only in what the browser does with
+    // a file it already refuses to run, and Linear's version carries the filename.
+    let disposition = text(header::CONTENT_DISPOSITION).unwrap_or_else(|| "attachment".into());
+    Ok((mime, disposition))
+}
+
+/// The asset's bytes, forwarded as they arrive, still under the cap and still on the clock.
+///
+/// Nothing between Linear and the browser holds the whole file. Reading it into a `Vec` first
+/// measured VmHWM 17604kB to 56604kB for one oversized fetch, which is 32MB a caller with no
+/// credential could pin per request. `deadline` is the same instant the key loop ran under, so
+/// a body that trickles cannot outlast the request that asked for it.
+fn asset_body(resp: reqwest::Response, deadline: tokio::time::Instant) -> axum::body::Body {
+    let stream = futures::stream::try_unfold((resp, 0usize), move |(mut resp, seen)| async move {
+        let chunk = match tokio::time::timeout_at(deadline, resp.chunk()).await {
+            Err(_) => {
+                return Err(std::io::Error::other(format!(
+                    "the asset was still arriving after {LINEAR_ASSET_TIMEOUT_SECS}s"
+                )));
+            }
+            Ok(Err(e)) => {
+                return Err(std::io::Error::other(format!(
+                    "the asset stopped arriving part way through: {e}"
+                )));
+            }
+            Ok(Ok(None)) => return Ok(None),
+            Ok(Ok(Some(chunk))) => chunk,
+        };
+        let seen = seen + chunk.len();
+        if seen > LINEAR_ASSET_MAX_BYTES {
+            return Err(std::io::Error::other(asset_too_large()));
+        }
+        Ok(Some((chunk, (resp, seen))))
+    });
+    axum::body::Body::from_stream(stream)
+}
+
+/// The one sentence for an asset past [`LINEAR_ASSET_MAX_BYTES`], said the same way whether
+/// the length was declared up front or counted as it arrived.
+fn asset_too_large() -> String {
+    format!(
+        "that asset is larger than the {}MB this route will read",
+        LINEAR_ASSET_MAX_BYTES / (1024 * 1024)
+    )
+}
+
+/// The `url` query parameter, and nothing else. The content type is the upstream's to
+/// declare, so there is no field here for the caller to set it with.
+#[derive(Deserialize)]
+struct AssetQuery {
+    url: String,
+}
+
+/// Every configured Linear key, in config order, deduped and without the blanks.
+///
+/// The route has no workspace to go on: an `assetUrl` names a file, not a team. So it tries
+/// each key until one is allowed to read the file, which is what `fetch_issue_any` does with
+/// the same problem for issues.
+fn linear_keys(cfg: &wire::AppConfig) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for preset in &cfg.presets {
+        let key = preset.linear_key.trim();
+        if key.is_empty() || keys.iter().any(|k| k == key) {
+            continue;
+        }
+        keys.push(key.to_string());
+    }
+    keys
+}
+
+/// The answer from the first configured key allowed to read one asset.
+///
+/// Separate from the handler so a test can point it at a stub, the way [`relay_request`] is:
+/// the allowlist keeps the real route aimed at Linear, so the key loop is unobservable through
+/// the route itself.
+///
+/// The body is left where it is. The handler streams it, so this returns as soon as the
+/// headers are in and nothing here ever holds a file.
+async fn fetch_asset(
+    http: &reqwest::Client,
+    url: &str,
+    keys: &[String],
+) -> Result<reqwest::Response, (StatusCode, String)> {
+    if keys.is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "no preset has a Linear API key configured, add one in Settings".into(),
+        ));
+    }
+
+    let mut last = String::new();
+    for key in keys {
+        // No per-attempt deadline: the caller holds one for the whole request, keys and body
+        // together, so that adding a preset cannot add 20 seconds to what a stranger can pin.
+        let resp = match http.get(url).header(header::AUTHORIZATION, key).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last = format!("the asset host was unreachable: {e}");
+                continue;
+            }
+        };
+
+        // Refused, not followed, for the reason the upload relay refuses one: the host check
+        // ran against this URL and no other. Returned rather than tried with the next key,
+        // because a redirect is not a statement about the key.
+        if resp.status().is_redirection() {
+            let to = redirect_target(resp.headers());
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "the asset host answered HTTP {} with a redirect to {to}, and this route \
+                     does not follow redirects: only the first URL is checked against the \
+                     {LINEAR_ASSET_HOST} allowlist",
+                    resp.status().as_u16()
+                ),
+            ));
+        }
+        if !resp.status().is_success() {
+            // 401 and 403 are "not this key", which is the whole reason for the loop. Every
+            // other status is remembered the same way, so what gets reported is the last
+            // answer seen rather than a guess about which key should have worked.
+            last = format!("Linear answered HTTP {} for that asset", resp.status().as_u16());
+            continue;
+        }
+        return Ok(resp);
+    }
+
+    // What Linear said, and not how many keys said it: an unauthenticated caller learning the
+    // preset count learns something about this deployment for the price of one bad URL.
+    Err((StatusCode::BAD_GATEWAY, last))
+}
+
+/// One asset read and made into a response, under one deadline for the whole of it.
+///
+/// Split from the handler for the reason [`fetch_asset`] is: the allowlist keeps the route
+/// itself aimed at Linear, so a stub is the only way to drive the key loop, the deadline, and
+/// the size cap. `budget` is that deadline, and it is what the handler spends
+/// [`LINEAR_ASSET_TIMEOUT_SECS`] on.
+async fn asset_response(
+    http: &reqwest::Client,
+    url: &str,
+    keys: &[String],
+    budget: Duration,
+) -> Result<Response, (StatusCode, String)> {
+    // One deadline, taken once and carried into the body stream. Every key attempt and every
+    // byte runs under it, so what a caller can hold is this number and never a multiple.
+    let deadline = tokio::time::Instant::now() + budget;
+    let slow = || {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("Linear did not answer for that asset within {budget:?}"),
+        )
+    };
+    let resp = tokio::time::timeout_at(deadline, fetch_asset(http, url, keys))
+        .await
+        .map_err(|_| slow())??;
+
+    let (mime, disposition) = asset_headers(resp.headers())?;
+    // A length past the cap is refused before a byte is read, so the common oversized case
+    // costs one round trip and the caller gets a status rather than a cut-off image.
+    if resp.content_length().is_some_and(|n| n > LINEAR_ASSET_MAX_BYTES as u64) {
+        return Err((StatusCode::BAD_GATEWAY, asset_too_large()));
+    }
+    Ok((
+        [
+            // Off the closed table, never the string Linear sent. See [`asset_mime`].
+            (header::CONTENT_TYPE, mime.to_string()),
+            // A stored file is data here, never a document: this origin has no authentication
+            // on any route, so a body re-read as HTML would run on it.
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+            // Ours, never Linear's. See [`asset_headers`].
+            (header::CONTENT_SECURITY_POLICY, "sandbox".to_string()),
+            // An `assetUrl` addresses one immutable file, so a reload should not cost another
+            // round trip to Linear. Private: these bytes sit behind a key.
+            (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
+        ],
+        asset_body(resp, deadline),
+    )
+        .into_response())
+}
+
+/// `GET /api/linear/asset?url=<assetUrl>`: read one Linear-hosted image, same-origin.
+async fn linear_asset(
+    State(app): State<App>,
+    axum::extract::Query(q): axum::extract::Query<AssetQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    check_asset_target(&q.url).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let keys = linear_keys(&app.config());
+    asset_response(
+        &app.relay_http,
+        q.url.trim(),
+        &keys,
+        Duration::from_secs(LINEAR_ASSET_TIMEOUT_SECS),
+    )
+    .await
 }
 
 /// `GET /uploads/:file` — serve a stored upload by its generated name.
@@ -3609,6 +4056,966 @@ not a var line
         // Exactly the range that was signed: one byte outside it is a 400 EntityTooLarge.
         assert!(has("x-goog-content-length-range: 0,8"), "{lines:?}");
         assert_eq!(seen["len"].as_u64(), Some(bytes.len() as u64));
+    }
+
+    /// A 30x from the checked host is a dead end, not a second request.
+    ///
+    /// `check_relay_target` reads the URL the caller sent and no other, so a redirect followed
+    /// would replay the PUT, its body, and its signed headers at a host, scheme, and port
+    /// nothing looked at, on a port with no authentication on any route. Google's bucket does
+    /// not answer with a `Location` today, which is a fact about somebody else's server. This
+    /// pins the property on ours.
+    #[tokio::test]
+    async fn a_redirect_from_the_upload_target_is_refused_rather_than_followed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Where a followed redirect would land. It counts what actually arrives.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let victim = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let victim_addr = victim.local_addr().unwrap();
+        let victim_app = Router::new().route(
+            "/steal",
+            put(move || {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    "pwnd"
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(victim, victim_app).await.unwrap() });
+
+        // The checked host's stand-in: it answers with 307, which is the one that preserves
+        // the method and the body.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let to = format!("http://{victim_addr}/steal");
+        let stub = Router::new().route(
+            "/put",
+            put(move || {
+                let to = to.clone();
+                async move { (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, to)]) }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
+
+        let app = test_app();
+        let headers = relay_headers(r#"[{"key":"content-type","value":"image/png"}]"#).unwrap();
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let target = format!("http://{addr}/put");
+
+        // The client the route uses: the redirect comes back as the answer.
+        let refused = relay_request(&app.relay_http, &target, &headers)
+            .body(png.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status().as_u16(), 307, "the 30x itself must be the response");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the PUT must not have been replayed");
+
+        // The shared client still follows, which is what makes the policy the difference and
+        // not some property of the stub. Other callers depend on this one following.
+        let followed = relay_request(&app.http, &target, &headers)
+            .body(png)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(followed.status().as_u16(), 200);
+        assert_eq!(followed.text().await.unwrap(), "pwnd");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // And the sentence the operator reads says which rule caught it.
+        let said = relay_redirect_refused(302, "https://evil.example/steal");
+        assert!(said.contains("302") && said.contains("evil.example"), "{said}");
+        assert!(said.contains(UPLOAD_RELAY_HOST), "{said}");
+    }
+
+    /// `file` first, then `url`. The frontend never sends this order. A caller that does is
+    /// the reason the pre-buffer cap exists.
+    fn multipart_file_first(url: &str, bytes: &[u8]) -> (String, Vec<u8>) {
+        let boundary = "----rmngtestboundary";
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+                 filename=\"big.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"url\"\r\n\r\n{url}\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        (format!("multipart/form-data; boundary={boundary}"), body)
+    }
+
+    /// The target is decided before the bytes are held, and what is held while no target has
+    /// been decided is bounded.
+    ///
+    /// Four concurrent 60MB posts at a host this refuses used to take the process from 35MB to
+    /// 212MB resident, on a route with no authentication and no concurrency cap. The three
+    /// cases below are the three orders a client can send, told apart by which sentence comes
+    /// back: the host message can only come from a check that ran, and the ordering message
+    /// can only come from the cap.
+    #[tokio::test]
+    async fn the_upload_target_is_checked_before_the_file_is_buffered() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
+        let http = reqwest::Client::new();
+        let url = format!("http://{addr}/api/linear/upload-relay");
+        let send = |ct: String, body: Vec<u8>| {
+            let (http, url) = (http.clone(), url.clone());
+            async move {
+                let resp =
+                    http.post(url).header("content-type", ct).body(body).send().await.unwrap();
+                (resp.status(), resp.text().await.unwrap())
+            }
+        };
+
+        // `url` first and refused: the file field is never reached at all, so its size is
+        // irrelevant. One byte is enough to prove which check answered.
+        let (ct, body) = multipart(
+            &[("url", "https://storage.googleapis.com.example.net/steal")],
+            Some(("shot.png", b"\x89PNG\r\n\x1a\n")),
+        );
+        let (status, text) = send(ct, body).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains(UPLOAD_RELAY_HOST), "{text}");
+
+        // `url` last and small: buffered, then checked. Out of order is handled, not refused
+        // for being out of order. The answer names the host, not the field order.
+        let (ct, body) =
+            multipart_file_first("https://127.0.0.1/steal", b"\x89PNG\r\n\x1a\n");
+        let (status, text) = send(ct, body).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains(UPLOAD_RELAY_HOST), "{text}");
+
+        // `url` last and past the cap: refused for the order, well inside the 64MB body limit
+        // that would otherwise be the only bound.
+        let big = vec![0u8; UPLOAD_RELAY_PREBUFFER + 64 * 1024];
+        let (ct, body) = multipart_file_first("https://storage.googleapis.com/ok", &big);
+        let (status, text) = send(ct, body).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains("'url' field before the 'file' field"), "{text}");
+    }
+
+    // --- GET /api/linear/asset ---
+    //
+    // The read half. A Linear `assetUrl` answers an unauthenticated GET with 401 and no
+    // redirect, and `uploads.linear.app` leaves `authorization` out of its CORS allow-list, so
+    // neither an `<img>` nor a `fetch` in the page can read one. This route holds a key and
+    // hands the bytes back same-origin.
+
+    #[test]
+    fn the_asset_proxy_reads_only_from_linears_asset_host() {
+        assert!(check_asset_target("https://uploads.linear.app/ab/cd/shot.png").is_ok());
+
+        // Userinfo does not move the host, and case and IDN are folded by the same parser
+        // that picks the connection, so all three of these ARE the allowed host.
+        assert!(check_asset_target("https://evil.tld@uploads.linear.app/x").is_ok());
+        assert!(check_asset_target("https://UPLOADS.LINEAR.APP/x").is_ok());
+        assert!(check_asset_target("https://uploads.linear.app:443/x").is_ok());
+
+        for url in [
+            // The other route's allowed host. Two allowlists, one host each, on purpose.
+            "https://storage.googleapis.com/x",
+            "https://uploads.linear.app.example.net/x",
+            "https://uploads.linear.app%2eevil.tld/x",
+            "https://uploads.linear.app./x",
+            "http://uploads.linear.app/x",
+            "https://uploads.linear.app:8443/x",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/x",
+            "file:///etc/passwd",
+            "not a url",
+            "",
+        ] {
+            assert!(check_asset_target(url).is_err(), "should refuse {url}");
+        }
+    }
+
+    /// Over the wire, at the address the browser puts in an `<img src>`. The allowlist is the
+    /// only thing between an unauthenticated LAN port and a read proxy for the whole internet,
+    /// so it is asserted through the router and not just in isolation.
+    #[tokio::test]
+    async fn the_asset_route_refuses_a_host_that_is_not_linears() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
+        let http = reqwest::Client::new();
+        let base = format!("http://{addr}/api/linear/asset");
+
+        for url in ["https://evil.example/x", "https://169.254.169.254/latest/meta-data/"] {
+            let resp = http.get(&base).query(&[("url", url)]).send().await.unwrap();
+            assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "for {url}");
+            assert!(resp.text().await.unwrap().contains(LINEAR_ASSET_HOST), "for {url}");
+        }
+
+        // No `url` at all is a bad request too, rather than a fetch of something empty.
+        let resp = http.get(&base).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+
+    /// An `assetUrl` names a file, not a team, so there is no workspace to pick a key from.
+    /// Each configured key is tried until one is allowed to read it, the way `fetch_issue_any`
+    /// answers the same question for issues. The allowlist keeps the real route pointed at
+    /// Linear, so this drives `fetch_asset` against a stub, as the relay's forwarding test does.
+    #[tokio::test]
+    async fn the_asset_proxy_tries_every_configured_key_until_one_can_read_the_file() {
+        use axum::extract::Request;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let png = b"\x89PNG\r\n\x1a\nrmng".to_vec();
+        let served = png.clone();
+        let tries = Arc::new(AtomicUsize::new(0));
+        let counter = tries.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub = Router::new().route(
+            "/asset",
+            get(move |req: Request| {
+                let (served, counter) = (served.clone(), counter.clone());
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let key = req
+                        .headers()
+                        .get(header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    if key != "second" {
+                        return (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "application/json")], b"{\"error\":\"unauthorized\"}".to_vec());
+                    }
+                    (StatusCode::OK, [(header::CONTENT_TYPE, "image/png")], served)
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
+
+        let app = test_app();
+        let url = format!("http://{addr}/asset");
+
+        // The second key is the one with access. The bytes and the upstream's own content
+        // type come back, and both keys were spent getting there.
+        let keys = vec!["first".to_string(), "second".to_string()];
+        let resp = fetch_asset(&app.relay_http, &url, &keys).await.unwrap();
+        let (mime, _) = asset_headers(resp.headers()).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(resp.bytes().await.unwrap().to_vec(), png);
+        assert_eq!(tries.load(Ordering::SeqCst), 2);
+
+        // No key has access: the answer reports what Linear said, and only that. How many
+        // presets this deployment holds is not something a caller with no credential is told.
+        let (status, text) =
+            fetch_asset(&app.relay_http, &url, &["first".into(), "third".into()]).await.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(text.contains("401"), "{text}");
+        assert!(!text.contains("key(s)") && !text.contains("2 key"), "{text}");
+
+        // No key configured at all says so, instead of reporting a network failure.
+        let (_, text) = fetch_asset(&app.relay_http, &url, &[]).await.unwrap_err();
+        assert!(text.contains("no preset has a Linear API key"), "{text}");
+    }
+
+    /// Both Linear routes, against Linear, in the order the browser drives them.
+    ///
+    /// Everything above stubs the far side, which is the only way to assert the forwarding and
+    /// the key loop at all. What no stub can answer is whether the pair still fits Linear's
+    /// own behaviour: whether the signed PUT is accepted as replayed, and whether the
+    /// `assetUrl` it produces is readable with the key that produced it. So this one is real,
+    /// and `#[ignore]`d for it.
+    ///
+    ///     LINEAR_API_KEY=… cargo test -p control-server \
+    ///       the_two_linear_routes_round_trip_an_image -- --ignored --nocapture
+    ///
+    /// It uploads one 70-byte PNG and touches no issue.
+    #[tokio::test]
+    #[ignore = "talks to api.linear.app and uploads.linear.app, needs LINEAR_API_KEY"]
+    async fn the_two_linear_routes_round_trip_an_image() {
+        let key = std::env::var("LINEAR_API_KEY").expect("set LINEAR_API_KEY to run this");
+        // 1x1 RGBA, the smallest thing that is honestly a PNG.
+        let png = B64
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            .unwrap();
+
+        let app = test_app();
+        *app.cfg.write().unwrap() = wire::AppConfig {
+            presets: vec![
+                // A key with no access leads, so the asset route has to fall past it.
+                wire::Preset { name: "dud".into(), linear_key: "lin_api_not_a_key".into(), ..Default::default() },
+                wire::Preset { name: "real".into(), linear_key: key.clone(), ..Default::default() },
+            ],
+            ..app.config()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        // The mutation the BROWSER runs. Never this server's, which is the whole point of the
+        // relay: it is handed a signed URL and replays one PUT at it.
+        let signed: serde_json::Value = http
+            .post("https://api.linear.app/graphql")
+            .header("authorization", &key)
+            .json(&json!({
+                "query": "mutation($contentType: String!, $filename: String!, $size: Int!) { \
+                            fileUpload(contentType: $contentType, filename: $filename, size: $size) { \
+                              success uploadFile { uploadUrl assetUrl headers { key value } } } }",
+                "variables": { "contentType": "image/png", "filename": "rmng-proxy-probe.png", "size": png.len() },
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let file = signed.pointer("/data/fileUpload/uploadFile").expect("fileUpload refused");
+        let upload_url = file["uploadUrl"].as_str().unwrap().to_string();
+        let asset_url = file["assetUrl"].as_str().unwrap().to_string();
+        // `content-type` leads, as `putHeaders` builds it: it is signed but not listed.
+        let mut headers = vec![json!({ "key": "content-type", "value": "image/png" })];
+        headers.extend(file["headers"].as_array().unwrap().iter().cloned());
+        println!("assetUrl {asset_url}");
+
+        let headers_raw = serde_json::to_string(&headers).unwrap();
+        let (ct, body) = multipart(
+            &[("url", upload_url.as_str()), ("headers", headers_raw.as_str())],
+            Some(("rmng-proxy-probe.png", &png)),
+        );
+        let put = http
+            .post(format!("http://{addr}/api/linear/upload-relay"))
+            .header("content-type", ct)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        let put_status = put.status();
+        println!("relay -> {} {}", put_status, put.text().await.unwrap());
+        assert!(put_status.is_success());
+
+        // The `<img src>` an editor in the page would use. Unauthenticated, same-origin.
+        let got = http
+            .get(format!("http://{addr}/api/linear/asset"))
+            .query(&[("url", &asset_url)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(got.status(), reqwest::StatusCode::OK);
+        let seen_ct = got.headers()[header::CONTENT_TYPE].to_str().unwrap().to_string();
+        for (name, value) in got.headers() {
+            println!("asset header {name}: {}", value.to_str().unwrap_or("?"));
+        }
+        let bytes = got.bytes().await.unwrap().to_vec();
+        println!("asset -> 200 {seen_ct} ({} bytes)", bytes.len());
+        assert_eq!(seen_ct, "image/png");
+        assert_eq!(bytes, png, "the bytes read back must be the bytes uploaded");
+
+        // And the same URL with nothing but the host changed is refused.
+        let forged = asset_url.replace(LINEAR_ASSET_HOST, "uploads.linear.app.example.net");
+        let refused = http
+            .get(format!("http://{addr}/api/linear/asset"))
+            .query(&[("url", &forged)])
+            .send()
+            .await
+            .unwrap();
+        let status = refused.status();
+        let text = refused.text().await.unwrap();
+        println!("forged host -> {status} {text}");
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains(LINEAR_ASSET_HOST));
+    }
+
+    /// The stored HTML asset, through the real route, with a real key.
+    ///
+    /// Linear serves it as `text/html` because that is the `contentType` its uploader
+    /// declared, and forwarding that put `<script>alert(document.domain)</script>` on this
+    /// origin. The upstream answer is printed alongside ours, so the two can be read together.
+    ///
+    ///     LINEAR_API_KEY=… cargo test -p control-server \
+    ///       a_stored_html_asset_is_refused_by_the_live_route -- --ignored --nocapture
+    ///
+    /// It reads one file and touches no issue.
+    #[tokio::test]
+    #[ignore = "reads one asset from uploads.linear.app, needs LINEAR_API_KEY"]
+    async fn a_stored_html_asset_is_refused_by_the_live_route() {
+        let key = std::env::var("LINEAR_API_KEY").expect("set LINEAR_API_KEY to run this");
+        let payload = "https://uploads.linear.app/d41ca53e-9014-4d04-b567-5eb5a10a5ac9\
+                       /3b114521-5436-4225-b9b8-d6ae5533b21e\
+                       /4f5dba7e-180d-41d7-aa02-2ad519a89c08";
+
+        let app = test_app();
+        *app.cfg.write().unwrap() = wire::AppConfig {
+            presets: vec![wire::Preset {
+                name: "real".into(),
+                linear_key: key.clone(),
+                ..Default::default()
+            }],
+            ..app.config()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        // What Linear itself answers, so the two sides of the boundary are on one page.
+        let up = http.get(payload).header("authorization", &key).send().await.unwrap();
+        println!("UPSTREAM status={}", up.status().as_u16());
+        for name in ["content-type", "content-disposition", "content-security-policy", "x-content-type-options"] {
+            if let Some(v) = up.headers().get(name) {
+                println!("UPSTREAM header {name}: {}", v.to_str().unwrap_or("?"));
+            }
+        }
+        println!("UPSTREAM body: {}", up.text().await.unwrap_or_default().trim());
+
+        let got = http
+            .get(format!("http://{addr}/api/linear/asset"))
+            .query(&[("url", payload)])
+            .send()
+            .await
+            .unwrap();
+        let status = got.status();
+        println!("PROXY status={}", status.as_u16());
+        for (name, value) in got.headers() {
+            println!("PROXY header {name}: {}", value.to_str().unwrap_or("?"));
+        }
+        let body = got.text().await.unwrap_or_default();
+        println!("PROXY body: {}", body.trim());
+
+        assert_eq!(status, reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(!body.contains("<script>"), "the payload must not reach this origin: {body}");
+        assert!(body.contains("images only"), "{body}");
+    }
+
+    #[test]
+    fn the_asset_proxy_takes_every_distinct_configured_key_in_config_order() {
+        let preset = |key: &str| wire::Preset { linear_key: key.into(), ..Default::default() };
+        let cfg = wire::AppConfig {
+            presets: vec![preset(""), preset("K2"), preset("K1"), preset("K2"), preset("  ")],
+            ..Default::default()
+        };
+        assert_eq!(linear_keys(&cfg), vec!["K2".to_string(), "K1".to_string()]);
+        assert!(linear_keys(&wire::AppConfig::default()).is_empty());
+    }
+
+    /// Linear stores the `contentType` its uploader declared and hands it back on a read, so
+    /// the type on the way out is chosen by whoever put the file there. Forwarding it served
+    /// `text/html` as `text/html` on an origin with no authentication on any route.
+    #[test]
+    fn only_an_image_type_comes_off_the_asset_table() {
+        for (declared, served) in [
+            ("image/png", "image/png"),
+            ("image/jpeg", "image/jpeg"),
+            ("image/gif", "image/gif"),
+            ("image/webp", "image/webp"),
+            ("image/avif", "image/avif"),
+            ("image/bmp", "image/bmp"),
+            // Parameters are not part of the type, and a type is not case-sensitive.
+            ("image/png; charset=binary", "image/png"),
+            ("IMAGE/PNG", "image/png"),
+            ("  image/jpeg  ", "image/jpeg"),
+        ] {
+            assert_eq!(asset_mime(declared), Some(served), "for {declared}");
+        }
+
+        for declared in [
+            "text/html",
+            "text/html; charset=utf-8",
+            "TEXT/HTML",
+            "application/xhtml+xml",
+            "text/plain",
+            "application/pdf",
+            "application/octet-stream",
+            "video/mp4",
+            // An SVG draws AND scripts. `/uploads/:file` serves one because the operator
+            // posted it here; nobody chose what sits behind an `assetUrl`.
+            "image/svg+xml",
+            "image/svg+xml; charset=utf-8",
+            "",
+            "image",
+            "imagepng",
+            "image/png/../../text/html",
+        ] {
+            assert_eq!(asset_mime(declared), None, "should refuse {declared}");
+        }
+    }
+
+    /// The whole read path against a stub answering exactly what a real workspace asset
+    /// answered: a stored HTML file with its three guards.
+    ///
+    ///     HTTP/2 200
+    ///     content-type: text/html
+    ///     content-disposition: attachment; filename="linear_download.html"
+    ///     content-security-policy: sandbox
+    ///     x-content-type-options: nosniff
+    ///
+    /// Forwarding only `content-type` and `nosniff` put `<script>alert(document.domain)</script>`
+    /// on this origin. `nosniff` is no answer at all when the declared type IS `text/html`.
+    #[tokio::test]
+    async fn a_stored_html_asset_is_refused_and_an_image_is_served() {
+        let payload = b"<script>alert(document.domain)</script>".to_vec();
+        let png = b"\x89PNG\r\n\x1a\nrmng".to_vec();
+        let (html_body, png_body) = (payload.clone(), png.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub = Router::new()
+            .route(
+                "/html",
+                get(move || {
+                    let body = html_body.clone();
+                    async move {
+                        (
+                            [
+                                (header::CONTENT_TYPE, "text/html"),
+                                (
+                                    header::CONTENT_DISPOSITION,
+                                    "attachment; filename=\"linear_download.html\"",
+                                ),
+                                (header::CONTENT_SECURITY_POLICY, "sandbox"),
+                                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                            ],
+                            body,
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/png",
+                get(move || {
+                    let body = png_body.clone();
+                    async move {
+                        (
+                            [
+                                (header::CONTENT_TYPE, "image/png"),
+                                (header::CONTENT_DISPOSITION, "inline; filename=\"shot.png\""),
+                                (header::CONTENT_SECURITY_POLICY, "sandbox"),
+                            ],
+                            body,
+                        )
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
+
+        let app = test_app();
+        let keys = vec!["k".to_string()];
+        let budget = Duration::from_secs(10);
+
+        let (status, text) =
+            asset_response(&app.relay_http, &format!("http://{addr}/html"), &keys, budget)
+                .await
+                .unwrap_err();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{text}");
+        assert!(text.contains("images only") && text.contains("text/html"), "{text}");
+        assert!(!text.contains("<script>"), "the payload must not be echoed: {text}");
+
+        // And nothing that reads as markup survives the type Linear declared, either.
+        let mut hostile = HeaderMap::new();
+        hostile.insert(header::CONTENT_TYPE, "text/html<script>alert(1)</script>".parse().unwrap());
+        let (_, said) = asset_headers(&hostile).unwrap_err();
+        assert!(!said.contains('<') && !said.contains('>'), "{said}");
+
+        // And the image the route exists for still comes back, with every guard on it.
+        let ok = asset_response(&app.relay_http, &format!("http://{addr}/png"), &keys, budget)
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let head = |name: header::HeaderName| ok.headers()[&name].to_str().unwrap().to_string();
+        assert_eq!(head(header::CONTENT_TYPE), "image/png");
+        assert_eq!(head(header::X_CONTENT_TYPE_OPTIONS), "nosniff");
+        // Linear's own two guards travel with the file rather than being dropped.
+        assert_eq!(head(header::CONTENT_DISPOSITION), "inline; filename=\"shot.png\"");
+        assert_eq!(head(header::CONTENT_SECURITY_POLICY), "sandbox");
+        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes.to_vec(), png);
+    }
+
+    /// An upstream that sends neither guard still gets both. `<img>` reads them as nothing,
+    /// and a browser pointed straight at the path reads them as "download it, no scripts".
+    #[test]
+    fn a_stored_file_with_no_guards_of_its_own_is_given_them() {
+        let mut h = HeaderMap::new();
+        h.insert(header::CONTENT_TYPE, "image/png".parse().unwrap());
+        let (mime, disposition) = asset_headers(&h).unwrap();
+        assert_eq!((mime, disposition.as_str()), ("image/png", "attachment"));
+
+        // No content type at all is not an image either, and the sentence says what happened.
+        let (status, text) = asset_headers(&HeaderMap::new()).unwrap_err();
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(text.contains("nothing"), "{text}");
+    }
+
+    /// The deadline bounds the request, not each key attempt.
+    ///
+    /// Per attempt it is a multiplier: two keys against a target that never answers measured
+    /// 40.002s of held connection at a 20-second per-attempt timeout, and five presets would
+    /// be 100s, on a route with no authentication. Three keys here, one budget, and the whole
+    /// thing has to end inside a budget and a bit rather than three of them.
+    #[tokio::test]
+    async fn the_asset_deadline_bounds_the_request_and_not_each_key() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accepts and then never writes a byte, which is the shape a stalled fetch has.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+
+        let app = test_app();
+        let keys = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+        let budget = Duration::from_millis(400);
+        let started = std::time::Instant::now();
+        let (status, text) =
+            asset_response(&app.relay_http, &format!("http://{addr}/x"), &keys, budget)
+                .await
+                .unwrap_err();
+        let took = started.elapsed();
+
+        println!("three keys, one {budget:?} budget, stalled target: {took:?} -> {status} {text}");
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{text}");
+        assert!(text.contains("within 400ms"), "{text}");
+        // Three keys times the budget would be 1.2s. Generous headroom, and still nowhere
+        // near what a per-attempt bound would take.
+        assert!(took < budget * 2, "one budget for three keys, took {took:?}");
+    }
+
+    /// The bytes are forwarded as they arrive, never collected first.
+    ///
+    /// Reading the body into a `Vec` measured VmHWM 17604kB to 56604kB for one oversized
+    /// fetch, which is memory an unauthenticated caller pins per request. The stub here holds
+    /// its second half back until the client has read its first, so a proxy that buffers
+    /// cannot answer at all and this test times out instead of passing.
+    #[tokio::test]
+    async fn an_asset_is_forwarded_as_it_arrives_rather_than_collected_first() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let gate = Arc::new(tokio::sync::Mutex::new(Some(rx)));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub = Router::new().route(
+            "/slow",
+            get(move || {
+                let gate = gate.clone();
+                async move {
+                    let stream = futures::stream::once(async move { Ok::<_, std::io::Error>(vec![b'a'; 64 * 1024]) })
+                        .chain(futures::stream::once(async move {
+                            let rx = gate.lock().await.take().unwrap();
+                            let _ = rx.await;
+                            Ok::<_, std::io::Error>(vec![b'b'; 16])
+                        }));
+                    ([(header::CONTENT_TYPE, "image/png")], axum::body::Body::from_stream(stream))
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
+
+        let app = test_app();
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let (client, upstream) = (app.relay_http.clone(), format!("http://{addr}/slow"));
+        let router = Router::new().route(
+            "/asset",
+            get(move || {
+                let (client, upstream) = (client.clone(), upstream.clone());
+                async move {
+                    asset_response(&client, &upstream, &["k".to_string()], Duration::from_secs(20))
+                        .await
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(proxy, router).await.unwrap() });
+
+        let mut got = reqwest::Client::new()
+            .get(format!("http://{proxy_addr}/asset"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(got.status(), reqwest::StatusCode::OK);
+
+        // The head of the body arrives while the tail is still held back upstream.
+        let first = tokio::time::timeout(Duration::from_secs(5), got.chunk())
+            .await
+            .expect("a buffering proxy cannot answer until the stub finishes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first[0], b'a');
+
+        tx.send(()).unwrap();
+        let mut rest = first.len();
+        while let Some(chunk) = got.chunk().await.unwrap() {
+            rest += chunk.len();
+        }
+        assert_eq!(rest, 64 * 1024 + 16);
+    }
+
+    /// The cap holds whether the length was declared or not.
+    ///
+    /// A declared length past it is refused before a byte is read. Without one the count runs
+    /// as the bytes arrive, so a body that declares nothing is cut off at the same place.
+    #[tokio::test]
+    async fn an_asset_past_the_cap_is_refused_declared_or_not() {
+        // Hand-written, because axum sets `content-length` from the body it is given and this
+        // stub's whole point is a declared length whose bytes never come.
+        let raw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let raw_addr = raw.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut held = Vec::new();
+            while let Ok((mut sock, _)) = raw.accept().await {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\n\r\n",
+                    LINEAR_ASSET_MAX_BYTES as u64 + 1
+                );
+                sock.write_all(head.as_bytes()).await.unwrap();
+                sock.flush().await.unwrap();
+                held.push(sock);
+            }
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub = Router::new().route(
+            "/chunked",
+            get(|| async {
+                // 33MB in 1MB pieces, no length declared.
+                let stream = futures::stream::iter(
+                    (0..33).map(|_| Ok::<_, std::io::Error>(vec![0u8; 1024 * 1024])),
+                );
+                ([(header::CONTENT_TYPE, "image/png")], axum::body::Body::from_stream(stream))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
+
+        let app = test_app();
+        let keys = vec!["k".to_string()];
+        let budget = Duration::from_secs(30);
+
+        let (status, text) =
+            asset_response(&app.relay_http, &format!("http://{raw_addr}/declared"), &keys, budget)
+                .await
+                .unwrap_err();
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(text.contains("32MB"), "{text}");
+
+        // No length to go on: the response starts, and the body stops at the cap.
+        let ok = asset_response(&app.relay_http, &format!("http://{addr}/chunked"), &keys, budget)
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let cut = axum::body::to_bytes(ok.into_body(), usize::MAX).await;
+        assert!(cut.is_err(), "an over-cap body must not read to completion");
+    }
+
+    /// Every field of the upload relay is bounded, and each of the three is read once.
+    ///
+    /// The pre-buffer cap used to guard the `file` arm alone. Measured VmHWM, one process per
+    /// case: 60MB in `url` took 19064kB to 146280kB, and 60MB in `headers` with no `url` field
+    /// at all took 19244kB to 145720kB. Sizes here are the caps plus a little, because what is
+    /// being asserted is which check answers and not how much memory it saves.
+    #[tokio::test]
+    async fn every_field_of_the_upload_relay_is_bounded_and_read_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
+        let http = reqwest::Client::new();
+        let url = format!("http://{addr}/api/linear/upload-relay");
+        let send = |ct: String, body: Vec<u8>| {
+            let (http, url) = (http.clone(), url.clone());
+            async move {
+                let resp =
+                    http.post(url).header("content-type", ct).body(body).send().await.unwrap();
+                (resp.status(), resp.text().await.unwrap())
+            }
+        };
+        let ok_target = "https://storage.googleapis.com/ok";
+
+        // A `url` field past its cap, with no `file` field anywhere in the body.
+        let long = format!("https://storage.googleapis.com/{}", "a".repeat(UPLOAD_RELAY_URL_MAX));
+        let (ct, body) = multipart(&[("url", long.as_str())], None);
+        let (status, text) = send(ct, body).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains("'url' field is larger"), "{text}");
+
+        // A `headers` field past its cap, likewise with no `file` field at all.
+        let fat = "h".repeat(UPLOAD_RELAY_HEADERS_MAX + 1);
+        let (ct, body) = multipart(&[("headers", fat.as_str())], None);
+        let (status, text) = send(ct, body).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains("'headers' field is larger"), "{text}");
+
+        // A second `url` is refused rather than overwriting the first. Without this, a caller
+        // spends a whole `file` under a target that was allowed and then names another one.
+        let (ct, body) = multipart(&[("url", ok_target), ("url", ok_target)], None);
+        let (status, text) = send(ct, body).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains("'url' field was sent twice"), "{text}");
+
+        // So are a second `headers` and a second `file`.
+        let (ct, body) = multipart(&[("url", ok_target), ("headers", "[]"), ("headers", "[]")], None);
+        let (status, text) = send(ct, body).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains("'headers' field was sent twice"), "{text}");
+
+        // A field this route does not read is drained, not held and not an error: the request
+        // still fails on the target it never named, which is the check further down.
+        let junk = "j".repeat(4 * 1024 * 1024);
+        let (ct, body) = multipart(&[("payload", junk.as_str())], Some(("s.png", b"\x89PNG")));
+        let (status, text) = send(ct, body).await;
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+        assert!(text.contains("upload url is not a URL"), "{text}");
+    }
+
+    /// VmHWM for one case, printed rather than asserted.
+    ///
+    /// This process is the SERVER and `curl` is the client, in a process of its own, because a
+    /// 60MB payload costs 60MB to hold on whichever side holds it and only one of those sides
+    /// is the thing under test. The body is written to a temp file a megabyte at a time for the
+    /// same reason. One case per process, which is what `--exact` gives, and the case comes
+    /// from the environment because a peak belongs to a process and not to a test:
+    ///
+    ///     for c in url headers file-then-url oversized-asset; do \
+    ///       RMNG_MEM_CASE=$c cargo test -p control-server \
+    ///         web::tests::the_bounded_paths_hold_no_more_than_they_say \
+    ///         -- --ignored --exact --nocapture; \
+    ///     done
+    #[tokio::test]
+    #[ignore = "a memory measurement, one case per process, driven by RMNG_MEM_CASE"]
+    async fn the_bounded_paths_hold_no_more_than_they_say() {
+        use std::io::Write;
+
+        fn vm_hwm() -> String {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap_or_default()
+                .lines()
+                .find(|l| l.starts_with("VmHWM:"))
+                .map(|l| l.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+                .unwrap_or_else(|| "?".into())
+        }
+        /// One 60MB multipart body on disk, built with a 1MB buffer so writing it is not what
+        /// gets measured. `fields` is what goes before and after the big one.
+        fn write_body(path: &Path, big_field: &str, before: &[(&str, &str)], after: &[(&str, &str)]) {
+            let boundary = "----rmngtestboundary";
+            let mut f = std::fs::File::create(path).unwrap();
+            let part = |name: &str, value: &str| {
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+                )
+            };
+            for (name, value) in before {
+                f.write_all(part(name, value).as_bytes()).unwrap();
+            }
+            let head = if big_field == "file" {
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+                     filename=\"big.png\"\r\nContent-Type: image/png\r\n\r\n"
+                )
+            } else {
+                format!(
+                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{big_field}\"\r\n\r\n"
+                )
+            };
+            f.write_all(head.as_bytes()).unwrap();
+            let mb = vec![b'x'; 1024 * 1024];
+            for _ in 0..60 {
+                f.write_all(&mb).unwrap();
+            }
+            f.write_all(b"\r\n").unwrap();
+            for (name, value) in after {
+                f.write_all(part(name, value).as_bytes()).unwrap();
+            }
+            f.write_all(format!("--{boundary}--\r\n").as_bytes()).unwrap();
+            f.flush().unwrap();
+        }
+
+        let case = std::env::var("RMNG_MEM_CASE").unwrap_or_else(|_| "url".into());
+        let ok_target = "https://storage.googleapis.com/ok";
+        let steal = "https://storage.googleapis.com.example.net/steal";
+        let path = std::env::temp_dir().join(format!("rmng-mem-{case}-{}.bin", std::process::id()));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The asset half needs an upstream. It streams 33MB in 1MB pieces, so the stub's own
+        // share of this process stays at one piece.
+        let stub_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stub_addr = stub_listener.local_addr().unwrap();
+        let stub = Router::new().route(
+            "/big",
+            get(|| async {
+                let stream = futures::stream::iter(
+                    (0..33).map(|_| Ok::<_, std::io::Error>(vec![0u8; 1024 * 1024])),
+                );
+                ([(header::CONTENT_TYPE, "image/png")], axum::body::Body::from_stream(stream))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(stub_listener, stub).await.unwrap() });
+        let app = test_app();
+        let (client, upstream) = (app.relay_http.clone(), format!("http://{stub_addr}/big"));
+        let served = router(app).route(
+            "/measure/asset",
+            get(move || {
+                let (client, upstream) = (client.clone(), upstream.clone());
+                async move {
+                    asset_response(&client, &upstream, &["k".to_string()], Duration::from_secs(60))
+                        .await
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
+
+        let post = |path: &Path| {
+            vec![
+                "-X".to_string(),
+                "POST".to_string(),
+                "-H".to_string(),
+                "content-type: multipart/form-data; boundary=----rmngtestboundary".to_string(),
+                "--data-binary".to_string(),
+                format!("@{}", path.display()),
+                format!("http://{addr}/api/linear/upload-relay"),
+            ]
+        };
+        let curl = match case.as_str() {
+            // 60MB in the `url` field, and no `file` field anywhere in the body.
+            "url" => {
+                write_body(&path, "url", &[], &[]);
+                post(&path)
+            }
+            // 60MB in the `headers` field, with no `url` field at all.
+            "headers" => {
+                write_body(&path, "headers", &[], &[]);
+                post(&path)
+            }
+            // A target that passes, then 60MB of file under it, then a second target.
+            "file-then-url" => {
+                write_body(&path, "file", &[("url", ok_target)], &[("url", steal)]);
+                post(&path)
+            }
+            // The read half: 33MB back through the streaming path, discarded by the client.
+            _ => vec![format!("http://{addr}/measure/asset")],
+        };
+
+        println!("case {case}, before: VmHWM {}", vm_hwm());
+        let out = tokio::process::Command::new("curl")
+            .args(["-sS", "-o", "/dev/null", "-w", "http %{http_code}, %{size_download} bytes down"])
+            .args(&curl)
+            .output()
+            .await
+            .unwrap();
+        println!(
+            "case {case}, answer: {} {}",
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        println!("case {case}, after:  VmHWM {}", vm_hwm());
+        let _ = std::fs::remove_file(&path);
     }
 
     // What stays here is the control-server half of the boundary: the internal token-delta

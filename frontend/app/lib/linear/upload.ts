@@ -19,6 +19,21 @@ import { serverErrorText } from "~/lib/serverError";
 /** Where the relay lives. Same-origin, so no CORS and no key. */
 const RELAY = "/api/linear/upload-relay";
 
+/** How long the relay hop may take before it is abandoned.
+ *
+ *  The budget is not this call's, it is the signed URL's. Linear signs it with
+ *  `X-Goog-Expires=60` and that clock starts when `fileUpload` answers, so the whole pair of
+ *  hops has to finish inside 60 seconds or the bucket returns 400 `ExpiredToken`. `gql` gives
+ *  the mutation up to 20 seconds (`TIMEOUT_MS` in `client.ts`), which leaves 40 at worst.
+ *
+ *  35 fits inside that with margin to spare: 20 + 35 = 55. The server caps its own hop at 45
+ *  seconds, which is the bound for a caller that sets no deadline at all, and 45 on top of 20
+ *  is past the window. This is the tighter of the two and it is the one that fires.
+ *
+ *  Without it there is no deadline here at all: a `fetch` with no signal is given up on when
+ *  the OS times the connection out, which is minutes after the URL stopped being valid. */
+const RELAY_TIMEOUT_MS = 35_000;
+
 const FILE_UPLOAD_MUTATION =
   "mutation($contentType: String!, $filename: String!, $size: Int!) { " +
   "fileUpload(contentType: $contentType, filename: $filename, size: $size) { " +
@@ -112,7 +127,24 @@ export async function uploadToLinear(key: string, file: File): Promise<string> {
   form.append("file", file);
 
   // No content-type header: the browser sets the multipart boundary itself.
-  const res = await fetch(RELAY, { method: "POST", body: form });
+  let res: Response;
+  try {
+    res = await fetch(RELAY, {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(RELAY_TIMEOUT_MS),
+    });
+  } catch (e) {
+    // An abort is our own deadline rather than the network refusing, and by the time it
+    // fires the signed URL is either expired or about to be, so retrying this upload is not
+    // the next step. Say which one happened.
+    if ((e as Error).name === "TimeoutError") {
+      throw new Error(
+        `the image did not reach Linear within ${RELAY_TIMEOUT_MS / 1000}s. Paste it again.`,
+      );
+    }
+    throw new Error(`the image never reached the server: ${(e as Error).message}`);
+  }
   const body = await res.text().catch(() => "");
   if (!res.ok) {
     throw new Error(serverErrorText(body, res.statusText || `HTTP ${res.status}`));

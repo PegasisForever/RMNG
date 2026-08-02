@@ -8,6 +8,13 @@
 // Saving is debounced, like the notes editor: an edit that never settles should not send a
 // mutation per keystroke to somebody else's API.
 //
+// Images cross a boundary in both directions here. A body from Linear carries
+// `https://uploads.linear.app/…` URLs, which answer an unauthenticated GET with 401, so the
+// editor is handed the same-origin proxy path instead. A body on its way back to Linear
+// carries the original again, because Linear has to keep working for everyone else. The
+// `markdown` prop and the `onSave` argument are therefore both in Linear's own form, and the
+// proxy exists only inside this editor. See `~/lib/linear/assets`.
+//
 // Client-only (BlockNote/ProseMirror touch the DOM). Import it lazily behind a mount gate.
 import "@blocknote/core/fonts/inter.css";
 import "@blocknote/mantine/style.css";
@@ -16,6 +23,7 @@ import { BlockNoteView } from "@blocknote/mantine";
 import { useCreateBlockNote } from "@blocknote/react";
 import { useEffect, useRef, useState } from "react";
 
+import { toLinearMarkdown, toProxyMarkdown } from "~/lib/linear/assets";
 import { useColorScheme } from "~/lib/useColorScheme";
 
 /** Long enough that a sentence being typed is one save, short enough that clicking away
@@ -42,7 +50,7 @@ export default function TicketDescription({
   // the operator: our own save round-trips back through the state and would then reset the
   // document under a cursor that has moved on.
   useEffect(() => {
-    const blocks = editor.tryParseMarkdownToBlocks(markdown);
+    const blocks = editor.tryParseMarkdownToBlocks(toProxyMarkdown(markdown));
     editor.replaceBlocks(editor.document, blocks);
     setReady(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -68,7 +76,7 @@ export default function TicketDescription({
         onChange={() => {
           if (timer.current) clearTimeout(timer.current);
           timer.current = setTimeout(() => {
-            onSave(editor.blocksToMarkdownLossy(editor.document));
+            onSave(toLinearMarkdown(editor.blocksToMarkdownLossy(editor.document)));
           }, SAVE_DEBOUNCE_MS);
         }}
       />

@@ -10,10 +10,16 @@
 // - Without one, into this server's own store as `![](/uploads/<name>)`. That is the clone
 //   dialog's new-ticket field, whose body the server still re-hosts on its way to Linear.
 //
+// The Linear branch hands the editor the proxy path rather than the `assetUrl` itself: a
+// stored Linear file answers an unauthenticated GET with 401, so the image the operator just
+// pasted would draw broken in the editor it was pasted into. `~/lib/linear/assets` says where
+// that boundary sits, and the caller converts back before the body reaches Linear.
+//
 // Client-only (BlockNote/ProseMirror touch the DOM), so every caller lazy-imports it and it
 // never runs during SSR.
 import { MarkdownEditorView } from "~/components/MarkdownEditorView";
 import { uploadFile } from "~/lib/api";
+import { assetProxyUrl } from "~/lib/linear/assets";
 import { uploadToLinear } from "~/lib/linear/upload";
 
 export default function MarkdownEditorContainer({
@@ -34,7 +40,9 @@ export default function MarkdownEditorContainer({
   return (
     <MarkdownEditorView
       onChange={onChange}
-      uploadFile={key === "" ? uploadFile : (file) => uploadToLinear(key, file)}
+      uploadFile={
+        key === "" ? uploadFile : (file) => uploadToLinear(key, file).then(assetProxyUrl)
+      }
       placeholder={placeholder}
       className={className}
     />

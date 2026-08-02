@@ -36,6 +36,8 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET/PUT | `/api/notes/:id` | Fetch or save a clone's rich-text notes | 200 `[block]` / 204 |
 | POST | `/api/upload` | Upload an image (multipart) | 200 `{url}` |
 | GET | `/uploads/:file` | Serve an uploaded image | 200 binary |
+| POST | `/api/linear/upload-relay` | Replay one PUT to a Linear-signed bucket URL (multipart) | 200 `{ok,status}` |
+| GET | `/api/linear/asset?url=` | Read one Linear-hosted image with a preset's key | 200 binary |
 | GET/PUT | `/api/config` | Read redacted config or merge a partial update | 200 `AppConfigRedacted` / `{config,restartRequired,networkWarning?}` |
 | POST | `/api/config/test` | Test a setting (currently `"docker"`) | 200 `{ok,message}` |
 | GET | `/api/setup/env` | Setup wizard environment preflight rows | 200 `SetupEnv` |
@@ -458,6 +460,51 @@ Image upload (png/jpeg/gif/webp/svg/avif/bmp, ≤15 MB) → `data/uploads/`.
 
 ### `GET /uploads/:file`
 Serve an uploaded image by its generated `<16-hex>.<ext>` name, with the right Content-Type.
+
+### `POST /api/linear/upload-relay` (multipart `url`, `headers`, `file`) → `{ "ok": true, "status": 200 }`
+Replay one PUT at the Google-signed URL Linear's `fileUpload` mutation handed the browser. The
+page cannot send it itself: the bucket answers the preflight with `vary: Origin` and no
+`access-control-allow-origin`. This route holds no key and never calls Linear's GraphQL.
+
+`url` is the `uploadUrl`, `headers` is Linear's `headers[]` as JSON with the declared
+`content-type` in front, and `file` is the bytes. Every header is forwarded verbatim, because
+the signature covers them, minus `host`, `content-length`, `transfer-encoding`, and
+`connection`. Send `url` before `file`: the target is checked as it is read, and at most 1 MB
+of a file that arrives first is held while waiting for it.
+
+Each of the three fields is read at most once, and a second one is a 400. `url` is capped at
+8 KB and `headers` at 64 KB. A field this route does not name is drained rather than held. The
+whole body is capped at 64 MB by `DefaultBodyLimit`.
+
+The target host must be `storage.googleapis.com` over https on the default port, and a
+redirect from it is refused rather than followed. The hop gives up at 45 seconds, inside the
+signed URL's 60-second `X-Goog-Expires` window.
+
+### `GET /api/linear/asset?url=<assetUrl>` → the image bytes
+Read one Linear-hosted image and serve it same-origin. An `assetUrl` answers an unauthenticated
+GET with 401, and `uploads.linear.app` leaves `authorization` out of its CORS allow-list, so
+neither an `<img>` nor a `fetch` in the page can read one. This route fetches it with a
+preset's Linear key, trying each configured key until one is allowed to.
+
+The host must be `uploads.linear.app` over https on the default port, and a redirect from it
+is refused.
+
+Images only. Linear stores the `contentType` its uploader declared and hands that back, so the
+type is checked against a closed table (`png`, `jpeg`, `gif`, `webp`, `avif`, `bmp`) and
+anything else is a 415. `image/svg+xml` is not on it: an SVG scripts, and no route on this port
+asks for a credential. What is served is the table's string, never the one Linear sent, with
+`X-Content-Type-Options: nosniff`. Linear's own `Content-Disposition` and
+`Content-Security-Policy` travel with the file, and default to `attachment` and `sandbox` when
+it sends neither.
+
+The bytes are streamed through rather than collected, capped at 32 MB by a declared
+`content-length` or by a running count without one. One 20-second deadline covers the whole
+request, every key attempt and the body together, and a request past it is a 504.
+
+Issue bodies keep the original `uploads.linear.app` URL. The browser rewrites IMAGE
+destinations to this route when it renders and rewrites back before it saves, so nothing stored
+in Linear points here. A link destination is left pointing at Linear, so following one is never
+a navigation onto this origin.
 
 ---
 

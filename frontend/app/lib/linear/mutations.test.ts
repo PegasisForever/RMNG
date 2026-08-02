@@ -4,7 +4,9 @@
 import { expect, test } from "bun:test";
 
 import {
+  issueCreate,
   issueCreateInput,
+  issueUpdate,
   issueUpdateInput,
   keysForTeam,
   pickCreateStateId,
@@ -114,6 +116,19 @@ test("priority 0 is no priority, and only whole ranks are sent", () => {
   expect(issueCreateInput({ ...base, priority: 0 }).priority).toBeUndefined();
   expect(issueCreateInput({ ...base, priority: 1.5 }).priority).toBeUndefined();
   expect(issueCreateInput({ ...base, priority: 4 }).priority).toBe(4);
+});
+
+// The dialog reaches `issueCreate` with `?? ""` when no preset holds a key for the chosen
+// team, so a blank key is a real caller and not a type error. Both writes now say the same
+// sentence about it. No request is made, which is what makes this test safe to run.
+test("opening an issue with no key says so rather than asking Linear", async () => {
+  const issue = { team: "WE", title: "Repro", description: "" };
+
+  await expect(issueCreate("", issue)).rejects.toThrow(/no Linear API key configured/);
+  await expect(issueCreate("   ", issue)).rejects.toThrow(/no Linear API key configured/);
+  await expect(issueUpdate([], { id: "WE-1" }, { title: "x" })).rejects.toThrow(
+    /no Linear API key configured/,
+  );
 });
 
 // --- what an edit carries ----------------------------------------------------

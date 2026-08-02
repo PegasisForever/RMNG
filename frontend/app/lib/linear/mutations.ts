@@ -145,6 +145,11 @@ export function issueCreateInput(fields: {
  *  Two round trips, in this order and not one: the state to pin it to and the user to assign
  *  it to are both properties of the team, and neither is knowable before the team is. */
 export async function issueCreate(key: string, issue: NewIssue): Promise<LinearTicket> {
+  // The same guard `issueUpdate` states, said here rather than one layer down in `gql`, so a
+  // caller reading this signature can see that a blank key is refused and not sent. The
+  // dialog reaches this with `?? ""` when no preset holds a key for the chosen team.
+  if (key.trim() === "") throw new Error("no Linear API key configured for that workspace");
+
   const team = issue.team.trim().toUpperCase();
   const data = await gql<{
     teams?: { nodes?: unknown[] };

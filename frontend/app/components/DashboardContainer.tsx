@@ -280,9 +280,21 @@ export function DashboardContainer({
   // straight away so the panel does not snap back to what it said before the edit, and again
   // from Linear's own answer a round trip later. Without the refetch the poll interval owns
   // the panel, and reopening it inside that window shows the old text.
+  //
+  // A refused mutation puts the old value back. The banner alone is not enough: the poll is
+  // 60 seconds, so the list would otherwise sit there showing an edit Linear does not have
+  // for up to a minute, with an error next to it. The rollback is on the mutation and not on
+  // the refetch, because a refetch that fails after a write that landed is still a good edit.
   const editTicket = (ticket: LinearTicket, patch: { title?: string; description?: string }) => {
     upsertTicket({ ...ticket, ...patch });
-    run(issueUpdate(keysForTeam(presets, ticket.team ?? ""), ticket, patch).then(refetchTickets));
+    run(
+      issueUpdate(keysForTeam(presets, ticket.team ?? ""), ticket, patch)
+        .catch((e: Error) => {
+          upsertTicket(ticket);
+          throw e;
+        })
+        .then(refetchTickets),
+    );
   };
 
   const visibleTickets = orderTickets(
