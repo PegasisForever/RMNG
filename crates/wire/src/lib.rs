@@ -33,9 +33,9 @@ pub use config::{
 pub use control::{
     BoardColumn, Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
     CloneTokens, CodexResetMark, ContainerStats, ControlState, RmngClone,
-    LayoutPreset, LinearTicket, LxcStats,
+    LayoutPreset, LxcStats,
     MonitorSpec, MonitorState, Operation, OperationKind, OperationStatus, PortForward, Provider,
-    ScheduledMessage, TicketLabel, TicketLink, TicketState, UpdateStatus,
+    ScheduledMessage, UpdateStatus,
 };
 pub use exec::{ExecRequest, ExecResult};
 pub use mcp::McpCallRequest;

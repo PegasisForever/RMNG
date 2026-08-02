@@ -23,7 +23,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
 | POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
 | PUT | `/api/board` | Replace the board's columns | 200 `ControlState` |
-| POST | `/api/clone` | Start a clone from an image (Linear ticket / new ticket / plain / raw hostname) | 200 `{ok, op}` |
+| POST | `/api/clone` | Start a clone from an image (resolved Linear ticket / plain / raw hostname) | 200 `{ok, op}` |
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
@@ -289,22 +289,20 @@ Start a clone container from a clone-source image. Runs async — returns an `Op
 immediately; progress flows over `/events`. After the clone is up the server kicks off the
 agent's first message ([chat::kickoff_agent](../crates/control-server/src/chat.rs)).
 
-Body (one of four modes + optional account/instructions):
+Body (one of three modes + optional account/instructions):
 ```jsonc
 {
   "image": "pegasis0/rmng-template:latest", // required: clone-source image reference (from GET /api/images)
   // -- pick ONE mode --
-  "ticket": "DEV-123",              // existing Linear ticket, OR
-  "create": { "team": "dev", "title": "...", "description": "<markdown>" }, // new ticket, OR
-  "plain":  { "title": "quick task", "message": "do X" },                 // no ticket, OR
+  "linear": { "workspace": "dev", "ticket": "DEV-123", "ticketUrl": "https://…",
+              "branch": "…", "title": "…", "label": "…" },  // a ticket the CLIENT resolved, OR
+  "plain":  { "title": "quick task", "message": "do X" },   // no ticket, OR
   "hostname": "w-cp-claude",        // raw clone under this exact hostname (fleet CLI mode)
   // -- optional --
-  "preset": "<name>" | "auto",      // clone preset (env + Linear key). Ticket mode:
-                                    //   absent/"auto" auto-selects by the ticket's labels
-                                    //   (400 listing them if nothing matches). Plain mode:
-                                    //   REQUIRED while any presets exist. Create mode:
-                                    //   REQUIRED (the preset's key creates the ticket) —
-                                    //   the web dialog derives it from the chosen team key.
+  "preset": "<name>" | "auto",      // clone preset (env + Linear key). Linear mode:
+                                    //   absent/"auto" auto-selects by the ticket's team
+                                    //   prefix (400 listing the presets if nothing matches).
+                                    //   Plain mode: REQUIRED while any presets exist.
                                     //   Hostname mode: OPTIONAL (fleet workers usually
                                     //   need none; a named preset still applies its env).
   "claudeAccount": "a@b.com",       // Claude account SELECTION, verbatim: an email, "auto",
@@ -326,11 +324,10 @@ Body (one of four modes + optional account/instructions):
                                     //   Mutually exclusive with `parent` (400).
 }
 ```
-**Create mode's `description` is markdown**, and any `/uploads/<name>` image reference in it
-is re-hosted in Linear (`fileUpload` → signed PUT) before the issue is created — otherwise the
-ticket would point at this server's LAN-only upload store and render broken for anyone off the
-network. A file that can't be read or uploaded keeps its original URL and logs a warning
-rather than failing the clone.
+**Linear mode makes no Linear call here.** The client (the web dialog or the `rmng` CLI)
+holds the preset keys, so it looks the issue up or opens it, moves it to In Progress, and
+posts what came back. Every field is stored verbatim. Only `ticket` is required; an omitted
+`workspace` falls back to the team part of the identifier.
 
 `image` accepts a `repo:tag` reference (e.g. `pegasis0/rmng-template:latest`), a full `sha256:…` id, or a bare 64-hex id;
 whatever form is passed is canonicalized to the reference and recorded on the clone as

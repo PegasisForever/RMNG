@@ -42,7 +42,7 @@ use crate::app::App;
 use crate::config;
 use crate::files;
 use crate::jobs::{self, CloneSpec, LinearMeta};
-use crate::linear;
+use crate::naming;
 
 pub fn router(app: App) -> Router {
     let routes = Router::new()
@@ -51,12 +51,7 @@ pub fn router(app: App) -> Router {
         .route("/api/stats", get(stats_get))
         .route("/api/activate", post(activate))
         .route("/api/board", put(board_put))
-        .route("/api/tickets", post(ticket_post))
-        // Ahead of `/api/tickets/:id` for the reader's sake, not the router's: axum matches
-        // a literal segment before a parameter whatever order they were added in, and
-        // `ticket_order_put_round_trips_over_http` is what proves it.
         .route("/api/tickets/order", put(ticket_order_put))
-        .route("/api/tickets/:id", put(ticket_put))
         .route("/api/clone", post(clone))
         .route("/api/layout/activate", post(layout_activate))
         .route("/api/delete", post(delete))
@@ -353,109 +348,6 @@ async fn ticket_order_put(
 ) -> Json<ControlState> {
     let order: Vec<String> = req.ticket_ids.iter().map(|id| id.to_lowercase()).collect();
     Json(app.store.mutate(|s| s.ticket_order = order))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TicketPutReq {
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-/// `PUT /api/tickets/:id` — write a title and/or description back to Linear.
-///
-/// `:id` is the human identifier (`WE-142`); [`crate::linear::update_issue`] resolves it to
-/// Linear's own id and picks the key that can see it. The browser holds a Linear key of its
-/// own now and will make this call directly, so this route is on its way out.
-///
-/// On success the ticket in `ControlState` is patched immediately rather than waiting for
-/// the next poll. The poll is a minute away, and a description that snaps back to its old
-/// text for that minute reads as the save having failed.
-async fn ticket_put(
-    State(app): State<App>,
-    AxPath(id): AxPath<String>,
-    Json(req): Json<TicketPutReq>,
-) -> Result<Json<ControlState>, (StatusCode, String)> {
-    let cfg = app.config();
-    let keys: Vec<&str> = cfg.presets.iter().map(|p| p.linear_key.as_str()).collect();
-    crate::linear::update_issue(
-        &app.http,
-        &keys,
-        &id,
-        req.title.as_deref(),
-        req.description.as_deref(),
-    )
-    .await
-    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    Ok(Json(app.store.mutate(|s| {
-        if let Some(t) = s.tickets.iter_mut().find(|t| t.id.eq_ignore_ascii_case(&id)) {
-            if let Some(title) = req.title {
-                t.title = title;
-            }
-            if let Some(description) = req.description {
-                t.description = (!description.is_empty()).then_some(description);
-            }
-        }
-    })))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TicketPostReq {
-    /// Team key, e.g. `WE`. Case-insensitive: it also names the preset whose key opens it.
-    team: String,
-    title: String,
-    #[serde(default)]
-    description: String,
-    /// Linear's scale: 1 urgent, 2 high, 3 medium, 4 low. Absent or 0 means none.
-    #[serde(default)]
-    priority: Option<u8>,
-}
-
-/// `POST /api/tickets` — open a new Linear issue from the ticket column.
-///
-/// The team key picks the preset, exactly as the clone dialog's "new ticket" tab does: a
-/// preset labelled `WE` owns team WE, and its Linear key is the one that opens the issue.
-/// The browser names the team and the server does the rest. It holds a key of its own now
-/// and will make this call directly, so this route is on its way out.
-///
-/// The new ticket is prepended to `ControlState` rather than waited for. The poll is a
-/// minute away, and a column that stays empty for that minute reads as the create having
-/// failed.
-async fn ticket_post(
-    State(app): State<App>,
-    Json(req): Json<TicketPostReq>,
-) -> Result<Json<wire::LinearTicket>, (StatusCode, String)> {
-    let team = req.team.trim().to_string();
-    let title = req.title.trim().to_string();
-    if team.is_empty() || title.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "a team key and a title are required".into()));
-    }
-    let cfg = app.config();
-    let preset = linear::pick_preset_by_prefix(&cfg.presets, &team).ok_or((
-        StatusCode::BAD_REQUEST,
-        format!("no preset is labelled {team}, so no Linear key can open a ticket there"),
-    ))?;
-    let ticket = linear::create_ticket(
-        &app.http,
-        &preset.linear_key,
-        &team,
-        &title,
-        &req.description,
-        req.priority,
-    )
-    .await
-    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    let published = ticket.clone();
-    app.store.mutate(move |s| {
-        s.tickets.retain(|t| !t.id.eq_ignore_ascii_case(&published.id));
-        s.tickets.insert(0, published.clone());
-    });
-    Ok(Json(ticket))
 }
 
 #[derive(Deserialize)]
@@ -940,12 +832,11 @@ fn account_or_preset_default(
         .filter(|s| !s.is_empty())
 }
 
-/// A Linear issue as everything downstream of the lookup needs it, whoever did the lookup.
+/// A Linear issue as everything downstream of the lookup needs it.
 ///
-/// The server resolves one itself in the `{ticket}` and `{create}` modes. The browser resolves
-/// one and posts it in the `{linear}` mode. Both funnel through this, so "the same issue"
-/// cannot mean two different clones depending on who looked it up: the hostname base, the
-/// display name, and the whole [`LinearMeta`] are built from this and from nothing else.
+/// The client does the lookup and posts the answer in the `{linear}` mode. This is what it
+/// arrives as: the hostname base, the display name, and the whole [`LinearMeta`] are built
+/// from this and from nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ResolvedIssue {
     /// Lowercase team key, e.g. `"we"`. Picks the preset when the request names none.
@@ -960,18 +851,6 @@ struct ResolvedIssue {
 }
 
 impl ResolvedIssue {
-    /// The issue this server just fetched or opened itself.
-    fn from_issue(issue: &linear::IssueInfo) -> Self {
-        Self {
-            prefix: issue.prefix.clone(),
-            identifier: issue.identifier.clone(),
-            title: issue.title.clone(),
-            url: issue.url.clone(),
-            branch: issue.branch.clone(),
-            label: issue.labels.first().cloned(),
-        }
-    }
-
     /// The `linear` object of a resolved-metadata request.
     ///
     /// The client already talked to Linear, so every field here is taken verbatim rather than
@@ -1035,12 +914,9 @@ fn derive_hostname(app: &App, base: &str, title: &str) -> (String, String) {
 /// `POST /api/clone` — start a clone from a source image. Body is one of:
 ///   `{ image, linear: { workspace, ticket, ticketUrl, branch, title, label } }`
 ///                                                       a ticket the CLIENT already resolved
-///                                                        in Linear (the web dialog). The server
-///                                                        makes no Linear call and trusts it
-///   `{ image, ticket }`                               — existing ticket (preset auto-selected
-///                                                        by the ticket's labels)
-///   `{ image, create: { team, title, description } }` — create a ticket first (preset required;
-///                                                        its Linear key creates the issue)
+///                                                        in Linear (the web dialog and the
+///                                                        `rmng` CLI both send this). The
+///                                                        server makes no Linear call
 ///   `{ image, plain: { title, message } }`            — no ticket (preset required if any exist)
 ///   `{ image, hostname }`                             — raw clone under an exact hostname
 ///                                                        (fleet CLI; preset optional, no ticket)
@@ -1049,8 +925,7 @@ fn derive_hostname(app: &App, base: &str, title: &str) -> (String, String) {
 /// `claudeInstructions`. `image` is a clone-source image reference (e.g.
 /// `pegasis0/rmng-template:latest`) from `GET /api/images`.
 ///
-/// The `{ticket}` and `{create}` modes are the only two that reach Linear from here, and the
-/// `rmng` CLI is what still sends them. Hostname derivation stays server-side in every mode:
+/// Nothing here reaches Linear. Hostname derivation stays server-side in every mode:
 /// [`jobs::next_free_hostname`] needs the live clone list to guarantee uniqueness, which no
 /// client can see.
 async fn clone(
@@ -1107,8 +982,8 @@ async fn clone(
     // preset on a sub clone). `auto`/`none`/empty resolve to "no explicit preset".
     let preset_field = str_field("preset").map(|s| s.trim().to_string());
     let preset_specified = preset_field.as_ref().is_some_and(|s| !s.is_empty());
-    // An explicitly chosen preset (by name); absent/"auto"/"none" means auto-select in
-    // ticket mode and "required, so error" in plain/create mode (checked per mode).
+    // An explicitly chosen preset (by name); absent/"auto"/"none" means auto-select by the
+    // ticket's team prefix in `linear` mode and "required, so error" in plain mode.
     let explicit = match preset_field
         .filter(|s| !s.is_empty() && s != "auto" && !s.eq_ignore_ascii_case("none"))
     {
@@ -1120,9 +995,6 @@ async fn clone(
         ),
         None => None,
     };
-
-    // Applied per mode because each resolves its preset differently (ticket mode's is
-    // label-auto-selected inside `resolve_issue`, so it isn't known until then).
 
     // Sub-clone resolution, shared by every mode: a `topLevel` flag forces top-level, an
     // explicit `parent` id is validated as a top-level managed clone, and otherwise the caller
@@ -1205,7 +1077,7 @@ async fn clone(
             }
         };
         let (hostname, display) =
-            derive_hostname(&app, &linear::plain_hostname_base(&prefix, &title), &title);
+            derive_hostname(&app, &naming::plain_hostname_base(&prefix, &title), &title);
         let spec = CloneSpec {
             source_image: image,
             new_hostname: hostname,
@@ -1249,54 +1121,36 @@ async fn clone(
 
     // Resolved-metadata mode: the CLIENT looked the ticket up in Linear (or opened it) and
     // moved it to In Progress, and posts the answer. Nothing here reaches Linear.
-    if let Some(meta) = body.get("linear").filter(|v| v.is_object()) {
-        let issue = ResolvedIssue::from_body(meta).map_err(bad)?;
-        // The client normally names the preset it resolved. When it does not, the team prefix
-        // picks one, which is the same rule `resolve_issue` applies to a fetched ticket.
-        let preset = match explicit {
-            Some(p) => p.clone(),
-            None => linear::pick_preset_by_prefix(&cfg.presets, &issue.prefix)
-                .cloned()
-                .ok_or_else(|| {
-                    bad(format!(
-                        "no preset matches ticket {}'s team {}. Pick a preset explicitly \
-                         (configured: {})",
-                        issue.identifier,
-                        issue.prefix.to_uppercase(),
-                        preset_names(&cfg),
-                    ))
-                })?,
-        };
-        let spec = ticket_clone_spec(&app, &cfg, &prefix, &issue, &preset, common);
-        let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
-        return Ok(Json(json!({ "ok": true, "op": op })));
-    }
-
-    // Ticket / create mode. `op_key` is the API key proven to reach the issue (used
-    // for the state mutation); the preset drives the clone's env + LINEAR_API_KEY.
-    let (issue, op_key, preset) = resolve_issue(&app, &cfg, explicit, &body)
-        .await
-        .map_err(bad)?;
-    if let Err(e) = linear::ensure_in_progress(&app.http, &op_key, &issue).await {
-        tracing::warn!("ensure_in_progress({}) failed: {e}", issue.identifier);
-    }
-    let spec = ticket_clone_spec(
-        &app,
-        &cfg,
-        &prefix,
-        &ResolvedIssue::from_issue(&issue),
-        &preset,
-        common,
-    );
+    let meta = body
+        .get("linear")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| bad("body must include { linear }, { plain } or { hostname }".into()))?;
+    let issue = ResolvedIssue::from_body(meta).map_err(bad)?;
+    // The client normally names the preset it resolved. When it does not, the team prefix
+    // picks one, matching the labels a preset claims.
+    let preset = match explicit {
+        Some(p) => p.clone(),
+        None => naming::pick_preset_by_prefix(&cfg.presets, &issue.prefix)
+            .cloned()
+            .ok_or_else(|| {
+                bad(format!(
+                    "no preset matches ticket {}'s team {}. Pick a preset explicitly \
+                     (configured: {})",
+                    issue.identifier,
+                    issue.prefix.to_uppercase(),
+                    preset_names(&cfg),
+                ))
+            })?,
+    };
+    let spec = ticket_clone_spec(&app, &cfg, &prefix, &issue, &preset, common);
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
 }
 
-/// The `CloneSpec` for a ticket-backed clone, whoever resolved the ticket.
+/// The `CloneSpec` for a ticket-backed clone.
 ///
-/// Every ticket mode ends here, which is the point: the two that ask Linear themselves and the
-/// one that is handed the answer cannot produce different clones for the same issue. The
-/// hostname is derived here rather than by the caller for the same reason.
+/// The hostname is derived here rather than by the caller, because uniqueness needs the live
+/// clone list and no client can see it.
 ///
 /// `hostname_prefix` is `config.docker.hostnamePrefix` (e.g. `pega-`).
 fn ticket_clone_spec(
@@ -1307,7 +1161,7 @@ fn ticket_clone_spec(
     preset: &wire::Preset,
     common: CloneRequestCommon,
 ) -> CloneSpec {
-    let base = linear::ticket_hostname_base(hostname_prefix, &issue.identifier);
+    let base = naming::ticket_hostname_base(hostname_prefix, &issue.identifier);
     let (hostname, display) = derive_hostname(app, &base, &issue.title);
     CloneSpec {
         source_image: common.image,
@@ -1375,100 +1229,6 @@ pub(crate) fn compose_global_prompt(cfg: &wire::AppConfig, preset: Option<&wire:
         Some(extra) => format!("{base}\n\n{extra}"),
         None => base.to_string(),
     }
-}
-
-/// Resolve the clone body to a Linear issue (create one, or fetch an existing), the
-/// API key proven to reach it, and the preset that drives the clone's env.
-async fn resolve_issue(
-    app: &App,
-    cfg: &wire::AppConfig,
-    explicit: Option<&wire::Preset>,
-    body: &serde_json::Value,
-) -> Result<(linear::IssueInfo, String, wire::Preset), String> {
-    if let Some(create) = body.get("create").filter(|v| v.is_object()) {
-        let team = create.get("team").and_then(|v| v.as_str()).unwrap_or("");
-        let title = create
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        let description = create
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        // Validate the team key BEFORE resolving the preset from it, so garbage input reads as
-        // "that isn't a team key" rather than "no preset claims it".
-        let prefix = team.trim().to_ascii_lowercase();
-        if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err("create.team must be a Linear team key like \"we\"".into());
-        }
-        if title.is_empty() {
-            return Err("create.title is required".into());
-        }
-        // The team key IS the preset choice: it comes from the presets' own ticket-id
-        // prefixes, so an omitted `preset` resolves through the same `pick_preset_by_prefix`
-        // the existing-ticket mode uses. The web dialog sends the name it resolved; the CLI's
-        // `clone create-with-new-ticket` sends only `--team` and relies on this.
-        let preset = match explicit {
-            Some(p) => p,
-            None => linear::pick_preset_by_prefix(&cfg.presets, &prefix).ok_or_else(|| {
-                format!(
-                    "no preset claims team {} — add it to a preset's ticket-id prefixes, \
-                     or name a preset explicitly (configured: {})",
-                    prefix.to_uppercase(),
-                    preset_names(cfg),
-                )
-            })?,
-        };
-        if preset.linear_key.is_empty() {
-            return Err(format!(
-                "preset '{}' has no Linear API key — required to create a ticket",
-                preset.name
-            ));
-        }
-        // The description arrives as markdown from the dialog's rich-text editor, so any
-        // pasted image points at this server's LAN-only `/uploads`. Re-host those in Linear
-        // first — otherwise the ticket renders broken images for anyone off the network.
-        let description = linear::rehost_markdown_images(
-            &app.http,
-            &preset.linear_key,
-            &app.config().data_dir,
-            description,
-        )
-        .await;
-        let issue =
-            linear::create_issue(&app.http, &preset.linear_key, &prefix, title, &description)
-                .await
-                .map_err(|e| e.to_string())?;
-        return Ok((issue, preset.linear_key.clone(), preset.clone()));
-    }
-    let ticket = body.get("ticket").and_then(|v| v.as_str()).unwrap_or("");
-    if ticket.is_empty() {
-        return Err("body must include { ticket } or { create }".into());
-    }
-    let r = linear::parse_ticket_ref(ticket).map_err(|e| e.to_string())?;
-    // Key order: the explicitly chosen preset's key first, then every preset's key
-    // in config order (fetch_issue_any dedups + skips blanks).
-    let mut keys: Vec<&str> = Vec::new();
-    if let Some(p) = explicit {
-        keys.push(p.linear_key.as_str());
-    }
-    keys.extend(cfg.presets.iter().map(|p| p.linear_key.as_str()));
-    let (issue, op_key) = linear::fetch_issue_any(&app.http, &keys, &r)
-        .await
-        .map_err(|e| e.to_string())?;
-    let preset = match explicit {
-        Some(p) => p.clone(),
-        None => linear::pick_preset_by_prefix(&cfg.presets, &issue.prefix).cloned().ok_or_else(|| {
-            format!(
-                "no preset matches ticket {}'s team {} — pick a preset explicitly (configured: {})",
-                issue.identifier,
-                r.team_key,
-                preset_names(cfg),
-            )
-        })?,
-    };
-    Ok((issue, op_key, preset))
 }
 
 // --- images (clone-source templates) ---------------------------------------
@@ -3028,48 +2788,31 @@ mod tests {
         app
     }
 
-    fn issue_info() -> linear::IssueInfo {
-        linear::IssueInfo {
-            prefix: "we".into(),
-            id: "8f2c-uuid".into(),
-            identifier: "WE-142".into(),
-            title: "Encoder drops frames".into(),
-            url: "https://linear.app/acme/issue/WE-142/encoder-drops-frames".into(),
-            branch: "pegasis/we-142-encoder-drops-frames".into(),
-            state_type: "unstarted".into(),
-            labels: vec!["backend".into(), "urgent".into()],
-        }
-    }
+    const TICKET_URL: &str = "https://linear.app/acme/issue/WE-142/encoder-drops-frames";
+    const TICKET_BRANCH: &str = "pegasis/we-142-encoder-drops-frames";
 
-    /// The `linear` object the browser posts for [`issue_info`]: the same issue, said the
-    /// other way round.
+    /// The `linear` object the browser posts for `WE-142`.
     fn issue_body() -> serde_json::Value {
-        let i = issue_info();
         json!({
-            "workspace": i.prefix,
-            "ticket": i.identifier,
-            "ticketUrl": i.url,
-            "branch": i.branch,
-            "title": i.title,
-            "label": i.labels[0],
+            "workspace": "we",
+            "ticket": "WE-142",
+            "ticketUrl": TICKET_URL,
+            "branch": TICKET_BRANCH,
+            "title": "Encoder drops frames",
+            "label": "backend",
         })
     }
 
-    /// The whole point of the mode: the same issue makes the same clone, whoever fetched it.
-    ///
-    /// Both paths go through `ticket_clone_spec`, so this is what stops the two from drifting
-    /// while the `{ticket}` mode is still on the server and the CLI still uses it.
+    /// The clone a resolved ticket makes: hostname off the ticket id, display name off the
+    /// title, the preset's env and account default carried through.
     #[tokio::test]
-    async fn resolved_metadata_builds_the_same_clone_spec_as_a_server_side_lookup() {
+    async fn resolved_metadata_builds_the_ticket_clone_spec() {
         let app = ticket_app();
         let cfg = app.config();
         let preset = cfg.presets[0].clone();
 
-        let server_side = ResolvedIssue::from_issue(&issue_info());
-        let client_side = ResolvedIssue::from_body(&issue_body()).unwrap();
-        assert_eq!(server_side, client_side);
-
-        let common = || CloneRequestCommon {
+        let issue = ResolvedIssue::from_body(&issue_body()).unwrap();
+        let common = CloneRequestCommon {
             image: "tmpl:latest".into(),
             claude_account: None,
             codex_account: None,
@@ -3078,34 +2821,28 @@ mod tests {
             headless: false,
             parent: None,
         };
-        let from_server =
-            ticket_clone_spec(&app, &cfg, "pega-", &server_side, &preset, common());
-        let from_client =
-            ticket_clone_spec(&app, &cfg, "pega-", &client_side, &preset, common());
-        assert_eq!(from_server, from_client);
+        let spec = ticket_clone_spec(&app, &cfg, "pega-", &issue, &preset, common);
 
-        // And it is the clone the ticket mode has always made: hostname off the ticket id,
-        // display name off the title, the preset's env and account default carried through.
-        assert_eq!(from_client.new_hostname, "pega-we-142");
+        assert_eq!(spec.new_hostname, "pega-we-142");
         assert_eq!(
-            from_client.linear,
+            spec.linear,
             Some(LinearMeta {
                 workspace: Some("we".into()),
                 ticket: Some("WE-142".into()),
-                ticket_url: Some(issue_info().url),
-                branch: Some(issue_info().branch),
+                ticket_url: Some(TICKET_URL.into()),
+                branch: Some(TICKET_BRANCH.into()),
                 display_name: Some("Encoder drops frames".into()),
                 // The FIRST label only, which is what a clone stores.
                 label: Some("backend".into()),
             })
         );
-        assert_eq!(from_client.preset_name.as_deref(), Some("work"));
-        assert_eq!(from_client.claude_account.as_deref(), Some("auto"));
-        assert!(from_client.env.iter().any(|v| v.key == "REPO"));
+        assert_eq!(spec.preset_name.as_deref(), Some("work"));
+        assert_eq!(spec.claude_account.as_deref(), Some("auto"));
+        assert!(spec.env.iter().any(|v| v.key == "REPO"));
     }
 
     /// `workspace` is a convenience, not a second source of truth: an omitted one falls back to
-    /// the team part of the identifier, which is where the server's own lookup reads it from.
+    /// the team part of the identifier.
     #[test]
     fn an_omitted_workspace_falls_back_to_the_ticket_prefix() {
         let issue = ResolvedIssue::from_body(&json!({ "ticket": "WE-142", "title": "x" })).unwrap();
@@ -3142,8 +2879,8 @@ mod tests {
         assert!(app.store.get().operations.iter().any(|o| o.id == op.id));
     }
 
-    /// No `preset` field: the team prefix picks one, the same rule `resolve_issue` applies to a
-    /// ticket the server fetched. A prefix nothing claims is a 400 that names the presets.
+    /// No `preset` field: the team prefix picks one, matching the labels a preset claims. A
+    /// prefix nothing claims is a 400 that names the presets.
     #[tokio::test]
     async fn clone_linear_mode_auto_selects_the_preset_by_team_prefix() {
         let app = ticket_app();
@@ -3169,45 +2906,19 @@ mod tests {
         assert!(err.1.contains("work"), "msg: {}", err.1);
     }
 
-    /// The old modes still route to `resolve_issue`, which is what the `rmng` CLI sends until a
-    /// later step moves it. Both reach Linear and fail there for want of a usable key, and the
-    /// sentence they fail with is the one `resolve_issue` writes, which is proof the request got
-    /// that far rather than being swallowed by the new branch.
+    /// An image and nothing else names no mode, so it is a 400 that lists the three.
     #[tokio::test]
-    async fn the_ticket_and_create_modes_still_reach_resolve_issue() {
-        let app = test_app(); // no presets, so no key
-        let ticket = clone(
-            State(app.clone()),
-            HeaderMap::new(),
-            Json(json!({ "image": "tmpl:latest", "ticket": "WE-142" })),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(ticket.0, StatusCode::BAD_REQUEST);
-        assert!(ticket.1.contains("no preset has a Linear API key"), "msg: {}", ticket.1);
-
-        let create = clone(
-            State(app.clone()),
-            HeaderMap::new(),
-            Json(json!({
-                "image": "tmpl:latest",
-                "create": { "team": "we", "title": "New thing", "description": "" },
-            })),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(create.0, StatusCode::BAD_REQUEST);
-        assert!(create.1.contains("no preset claims team WE"), "msg: {}", create.1);
-
-        // And a body with neither still says what it wanted.
-        let none = clone(
+    async fn a_clone_body_with_no_mode_names_the_modes() {
+        let app = test_app();
+        let err = clone(
             State(app.clone()),
             HeaderMap::new(),
             Json(json!({ "image": "tmpl:latest" })),
         )
         .await
         .unwrap_err();
-        assert!(none.1.contains("{ ticket } or { create }"), "msg: {}", none.1);
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("{ linear }, { plain } or { hostname }"), "msg: {}", err.1);
     }
 
     /// Every create mode honours `parent`, not just the fleet-CLI hostname mode.

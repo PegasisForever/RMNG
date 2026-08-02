@@ -56,8 +56,8 @@ AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb,
 # Clone sources are images (identified by their own repo:tag, e.g. pegasis0/rmng-template:latest),
 # not a config template block — pulled from a registry (docker.template_reference, default
 # pegasis0/rmng-template:latest) via POST /api/images/pull; see ImageInfo below + docs/API.md.
-# A preset's `labels` auto-select it when cloning from a Linear ticket; `linear_key`
-# fetches/creates tickets server-side and is injected into the clone as LINEAR_API_KEY.
+# A preset's `labels` auto-select it when cloning from a Linear ticket; `linear_key` is what
+# the clients fetch and create tickets with, and is injected into the clone as LINEAR_API_KEY.
 # Claude account tokens are NOT config: each account's OAuth pair lives in the server's
 # 0600 `claude-accounts.json`; the server refreshes it and pushes the current short-lived
 # access token into assigned clones' ~/.claude/.credentials.json (see control-server).

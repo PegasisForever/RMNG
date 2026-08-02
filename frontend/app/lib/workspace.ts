@@ -1,6 +1,6 @@
-// Client-side helpers for Linear ticket prefixes. Any `XX-123`-style id parses —
-// whether a preset's API key can actually reach the ticket is decided server-side
-// at clone time.
+// Client-side helpers for Linear ticket prefixes. Any `XX-123`-style id parses. Whether a
+// preset's API key can actually reach the ticket is settled by the lookup in
+// `~/lib/linear/issues`, which tries every configured key.
 
 /**
  * Badge palette — literal strings so the Tailwind compiler keeps them (no

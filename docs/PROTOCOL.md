@@ -181,10 +181,10 @@ returns
 - <a id="preset"></a>**`Preset`**: `name`, `labels` (ticket-id prefixes / Linear team keys,
   e.g. `DEV`, that auto-select this preset when cloning from a ticket — matched
   case-insensitively against the ticket's prefix like `DEV-196` → `dev`, first match in
-  config order wins), `linear_key` (personal API key — fetches/creates tickets server-side,
-  is injected into the clone as `LINEAR_API_KEY` authing its `linear` MCP, and is handed to
-  the browser verbatim by `GET /api/config`, which is how the ticket column lists issues
-  without the server), `vars`
+  config order wins), `linear_key` (personal API key — injected into the clone as
+  `LINEAR_API_KEY` authing its `linear` MCP, and handed to the clients verbatim by
+  `GET /api/config`, which is what the ticket column lists issues with and what the clone
+  dialog and the `rmng` ticket verbs resolve a ticket with), `vars`
   (env vars written to the clone's `/etc/environment`), and `agent_playbook` (optional,
   non-secret — text appended after a blank line to the global `agent_playbook` for
   clones of this preset; empty ⇒ global only). `PUT /api/config` merges rows by name

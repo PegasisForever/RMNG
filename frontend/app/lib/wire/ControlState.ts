@@ -4,7 +4,6 @@ import type { ClaudeUsage } from "./ClaudeUsage";
 import type { Clone } from "./Clone";
 import type { CloneTokens } from "./CloneTokens";
 import type { CodexResetMark } from "./CodexResetMark";
-import type { LinearTicket } from "./LinearTicket";
 import type { MonitorSpec } from "./MonitorSpec";
 import type { Operation } from "./Operation";
 
@@ -48,18 +47,6 @@ ticketOrder: Array<string>, operations: Array<Operation>,
  * is what lets the Claude and Codex pollers publish here without clobbering each other.
  */
 claudeAccounts: Array<ClaudeUsage>, 
-/**
- * Open Linear issues across every preset API key, newest poll wins.
- *
- * The server's mirror of somebody else's data, and nothing reads it any more: the
- * browser queries Linear itself with the keys `GET /api/config` hands it. This field and
- * the poller behind it are on their way out.
- */
-tickets: Array<LinearTicket>, 
-/**
- * Why the last Linear poll failed, if it did. Unread, for the same reason.
- */
-ticketsError?: string, 
 /**
  * Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
  * account per week, so it belongs in `state.json` (unlike per-tick stats).

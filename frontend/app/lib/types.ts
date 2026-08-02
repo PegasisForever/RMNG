@@ -9,7 +9,6 @@
 
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
-import type { LinearTicket } from "~/lib/wire/LinearTicket";
 import type { PortForward } from "~/lib/wire/PortForward";
 
 export interface MonitorSpec {
@@ -198,13 +197,6 @@ export interface ControlState {
    *  so it survives a reload. Ids are lowercased, which is how `orderTickets` compares them;
    *  an id whose ticket is gone is ignored rather than pruned. */
   ticketOrder: string[];
-  /** Open Linear issues across every configured preset key, kept current by the server's
-   *  own poller. Nothing in the browser reads it: the ticket column queries Linear itself
-   *  through `~/lib/linear/useTickets`. The field and the poller behind it are on their way
-   *  out. */
-  tickets: LinearTicket[];
-  /** Why the server's last Linear poll failed, if it did. Unread, for the same reason. */
-  ticketsError?: string;
 }
 
 export function emptyState(): ControlState {
@@ -219,7 +211,6 @@ export function emptyState(): ControlState {
     cloneTokens: {},
     boardColumns: [],
     ticketOrder: [],
-    tickets: [],
   };
 }
 

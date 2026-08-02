@@ -8,10 +8,10 @@
 // The order is the operator's, not Linear's: cards sort within the column, and the well
 // takes drops so one dragged back lands where it was let go.
 //
-// The list itself is pushed, never pulled. The server holds the Linear keys and polls with
-// them, so a ticket somebody moves in Linear appears or disappears here on its own, and
-// there is no refresh button to press: a button that has to be pressed is a promise that
-// the list is stale until you do.
+// The list refreshes itself. This browser holds the Linear keys and polls with them
+// (`~/lib/linear/useTickets`), so a ticket somebody moves in Linear appears or disappears
+// here on its own, and there is no refresh button to press: a button that has to be pressed
+// is a promise that the list is stale until you do.
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";

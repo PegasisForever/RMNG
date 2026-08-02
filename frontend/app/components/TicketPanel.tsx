@@ -21,7 +21,7 @@ import TextareaAutosize from "react-textarea-autosize";
 
 import { LabelPill, PriorityIcon, StateIcon } from "~/components/TicketColumn";
 import { branchNameOf, type LinearTicket } from "~/lib/tickets";
-import type { TicketLink } from "~/lib/wire/TicketLink";
+import type { TicketLink } from "~/lib/linear/types";
 import { workspaceBadge } from "~/lib/workspace";
 
 /** Copy the ticket's git branch name. It sits in the header rather than among the

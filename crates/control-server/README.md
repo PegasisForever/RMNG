@@ -34,7 +34,8 @@ clipboard broker) · `forward` (port-forward data plane: viewer TCP spliced to t
 `docker` (bollard primitives against the local daemon) · `provision` (clone/pull/commit/delete
 flows over those primitives) · `clone_reconcile` (the 30 s live-migration pass over running
 clones: payloads, sshd, `/etc/environment`, the generated agent configs) · `jobs` (the
-clone/delete/pull/commit Operation machine) · `linear`
+clone/delete/pull/commit Operation machine) · `naming` (clone hostname derivation + the
+preset lookup by ticket-id prefix)
 · `claude` / `codex` (the two account stores: usage poll + OAuth refresh + token push +
 assign/swap/rotate) · `clone_ops` (what those two share: the guest-script exec path, JWT decode,
 provider-scoped view replacement) · `token_unmigrate` (the one-shot startup migration off the
@@ -59,7 +60,7 @@ the owner and bytes back to the requester, re-binding as `selected` changes.
 ## Port 2 — web API
 
 State store + SSE, all `/api/*` routes, the served SPA, and `/uploads`. Orchestration
-(clone/delete/pull/commit + images over the local Docker daemon, Linear, Claude, chat proxy,
+(clone/delete/pull/commit + images over the local Docker daemon, Claude, chat proxy,
 monitor poller, clone-home reconciler). Every endpoint is documented in
 [API.md](../../docs/API.md). Config is edited via the Settings UI: `GET /api/config` returns a
 redacted view, `PUT` merges + persists 0600 + applies live, `POST /api/config/test {docker}`
@@ -137,8 +138,8 @@ browsing.
 ## Dependencies
 
 `axum`/`tokio`/`tower-http` (port 2 + static files), `reqwest` (the Anthropic + OpenAI OAuth/usage
-endpoints, Linear, agent-wrapper, the daemon-MCP proxy — `rustls-tls`, since the provider calls
-are HTTPS), `bollard` +
+endpoints, the two Linear image byte routes, agent-wrapper, the daemon-MCP proxy —
+`rustls-tls`, since the provider calls are HTTPS), `bollard` +
 `tar` (Docker orchestration over the unix socket), `notify` (file watch), `serde_json`,
 `wire`, `media`.
 

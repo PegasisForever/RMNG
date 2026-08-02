@@ -2,7 +2,6 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
-import type { LinearTicket } from "~/lib/wire/LinearTicket";
 // The hand-maintained `Operation`, not the generated `wire/Operation`: ts-rs maps the
 // Rust `u64` timestamps to `bigint`, but `JSON.parse` yields plain numbers, so the
 // hand-maintained shape is the one these responses actually have at runtime.
@@ -80,25 +79,19 @@ export interface CloneLinearMeta {
   label?: string;
 }
 
-/** Clone payload: a Linear issue the client already resolved, an existing ticket link/id, a
- *  new ticket to create (in team `team`, using the resolved preset's Linear key, where
- *  `create.description` is markdown), or a plain no-ticket clone (just a container title + an
- *  optional first agent message).
- *  The ticket modes also accept optional clone-agent + Claude Code overrides.
- *  `group` (all modes) OVERRIDES the account pool the clone binds; omit it to let the
+/** Clone payload: a Linear issue the client already resolved, or a plain no-ticket clone
+ *  (just a container title + an optional first agent message).
+ *  The ticket mode also accepts optional clone-agent + Claude Code overrides.
+ *  `group` (both modes) OVERRIDES the account pool the clone binds; omit it to let the
  *  server resolve it (preset default → first configured group). Every clone binds one.
  *  `preset` picks the clone preset (env vars + Linear key): omitted means auto-select by
- *  ticket-id prefix (ticket and linear modes); create/plain send a resolved name.
- *  `parent` nests the new clone as a sub clone under that clone id.
- *
- *  The dialog sends `linear`. The `ticket` and `create` shapes are what the `rmng` CLI still
- *  sends, and they are the only two that make the server call Linear. */
+ *  ticket-id prefix in the ticket mode; plain sends a resolved name.
+ *  `parent` nests the new clone as a sub clone under that clone id. */
 export type ClonePayload = (
-  | ((
-      | { linear: CloneLinearMeta }
-      | { ticket: string }
-      | { create: { team: string; title: string; description: string } }
-    ) & { agentInstructions?: string; claudeInstructions?: string })
+  | ({ linear: CloneLinearMeta } & {
+      agentInstructions?: string;
+      claudeInstructions?: string;
+    })
   | { plain: { title: string; message: string } }
 ) & { group?: string; preset?: string; headless?: boolean; parent?: string };
 
@@ -140,30 +133,6 @@ export const putBoardColumns = (columns: BoardColumn[]) =>
 export const putTicketOrder = (ticketIds: string[]) =>
   putJson("/api/tickets/order", { ticketIds });
 
-/** Write a title and/or description back to Linear. The server does the mutation and answers
- *  with the patched state. An omitted field is left alone; an empty description clears the
- *  body, which is a thing operators do on purpose.
- *
- *  Nothing in the app calls this. The ticket panel writes through `~/lib/linear/mutations`
- *  with the browser's own key, and this and its route go when the server's Linear code does. */
-export const putTicket = (id: string, patch: { title?: string; description?: string }) =>
-  putJson(`/api/tickets/${encodeURIComponent(id)}`, patch);
-
-/** Open a new Linear issue. `team` is a team key (`WE`), which also picks the preset whose
- *  Linear key opens it. `priority` is Linear's scale: 1 urgent, 2 high, 3 medium, 4 low.
- *
- *  The server creates it as Todo and assigned to the key's owner, so the column can show it,
- *  and answers with the created ticket.
- *
- *  Nothing in the app calls this either. The new-ticket dialog runs `issueCreate` in the
- *  browser; this and its route go when the server's Linear code does. */
-export const createTicket = (ticket: {
-  team: string;
-  title: string;
-  description: string;
-  priority?: number;
-}) => postJson("/api/tickets", ticket) as Promise<LinearTicket>;
-
 // --- uploads ---------------------------------------------------------------
 
 /** Store a pasted or dropped image and answer with its URL.
@@ -171,8 +140,8 @@ export const createTicket = (ticket: {
  *  Multipart, not JSON, so it goes around `postJson`. Both BlockNote editors hand this to the
  *  library as its `uploadFile`, which is why it takes a `File` and returns a bare string.
  *
- *  The URL it returns is LAN-only (`/uploads/<name>`). A markdown body bound for Linear is
- *  re-hosted server-side (`linear::rehost_markdown_images`) before the ticket is created. */
+ *  The URL it returns is LAN-only (`/uploads/<name>`), which is why an editor whose body is
+ *  bound for Linear uses `~/lib/linear/upload` instead: that one puts the bytes in Linear. */
 export async function uploadFile(file: File): Promise<string> {
   const fd = new FormData();
   fd.append("file", file);

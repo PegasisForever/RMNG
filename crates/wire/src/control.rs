@@ -47,111 +47,6 @@ pub enum Provider {
     Codex,
 }
 
-/// Where a Linear issue sits in its workflow: its state *type*, not the workspace's own
-/// state name, so `Shipped` and `Done` both arrive here as [`TicketState::Done`].
-///
-/// All five are modelled even though the ticket column only ever lists two of them. A
-/// sub-issue can be in any state, and drawing a completed one as Todo because the enum could
-/// not say otherwise would be worse than carrying three extra variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub enum TicketState {
-    /// Linear state type `backlog`.
-    Backlog,
-    /// Linear state type `unstarted`.
-    Todo,
-    /// Linear state type `started`.
-    InProgress,
-    /// Linear state type `completed`.
-    Done,
-    /// Linear state type `canceled`.
-    Canceled,
-}
-
-/// A pointer to another issue: this one's parent, or one of its sub-issues. Carries only
-/// what a one-line row draws, because opening it is a click away in Linear.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct TicketLink {
-    /// Human identifier, e.g. `WE-143`.
-    pub id: String,
-    pub title: String,
-    pub url: String,
-    pub state: TicketState,
-}
-
-/// One Linear label, with the colour Linear stores for it (`#rrggbb`). The colour is the
-/// operator's own scheme over there, so it travels with the label rather than being mapped
-/// onto a palette of ours.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct TicketLabel {
-    pub name: String,
-    pub color: String,
-}
-
-/// A Linear issue assigned to the owner of one of the configured preset API keys.
-///
-/// Each key is personal and answers only for its own owner, so the poller queries every
-/// configured key and publishes the union. Nothing here says which key found a ticket: the
-/// operator holds all of them, and the answer would never change what they do next.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct LinearTicket {
-    /// Human identifier, e.g. `WE-142`. Also what the clone dialog parses.
-    pub id: String,
-    pub title: String,
-    /// Canonical Linear URL, which is what a drop hands the clone dialog.
-    pub url: String,
-    pub state: TicketState,
-    /// Team key, e.g. `WE`. It is what picks the preset, so it is worth showing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub team: Option<String>,
-    /// Linear's priority, 1 (urgent) to 4 (low). Absent when none is set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub priority: Option<u8>,
-    /// Always serialized, empty list included: the column maps over it unconditionally,
-    /// and an absent array would make every consumer guard a field that is never unknown.
-    #[serde(default)]
-    pub labels: Vec<TicketLabel>,
-    /// Linear's own `branchName`, which is the string its "copy git branch name" produces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub branch_name: Option<String>,
-    /// The issue body, as Linear stores it: markdown. Absent when the issue has none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub description: Option<String>,
-    /// Display name of whoever it is assigned to. Every ticket here is assigned to one of
-    /// the operator's own accounts, so the cards leave it off — the detail panel shows it
-    /// because a fleet with several keys has several owners.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub assignee: Option<String>,
-    /// `YYYY-MM-DD`, as Linear sends it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub due_date: Option<String>,
-    /// Linear's point estimate, whatever scale the team set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub estimate: Option<f64>,
-    /// The issue this one hangs under, when it is itself a sub-issue.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub parent: Option<TicketLink>,
-    /// Sub-issues, in Linear's order, whatever state they are in. Always serialized so the
-    /// panel can map over it without guarding a field that is never unknown.
-    #[serde(default)]
-    pub children: Vec<TicketLink>,
-}
-
 /// One column of the dashboard board, holding clone ids top to bottom.
 ///
 /// A clone the operator has not filed anywhere is not stored: the board draws it in the
@@ -602,17 +497,6 @@ pub struct ControlState {
     /// is what lets the Claude and Codex pollers publish here without clobbering each other.
     #[serde(default)]
     pub claude_accounts: Vec<ClaudeUsage>,
-    /// Open Linear issues across every preset API key, newest poll wins.
-    ///
-    /// The server's mirror of somebody else's data, and nothing reads it any more: the
-    /// browser queries Linear itself with the keys `GET /api/config` hands it. This field and
-    /// the poller behind it are on their way out.
-    #[serde(default)]
-    pub tickets: Vec<LinearTicket>,
-    /// Why the last Linear poll failed, if it did. Unread, for the same reason.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub tickets_error: Option<String>,
     /// Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
     /// account per week, so it belongs in `state.json` (unlike per-tick stats).
     #[serde(default)]

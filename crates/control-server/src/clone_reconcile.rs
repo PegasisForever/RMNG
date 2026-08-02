@@ -937,7 +937,7 @@ fn preset_for_clone<'a>(cfg: &'a wire::AppConfig, host: &wire::RmngClone) -> Opt
         .as_deref()
         .filter(|s| !s.trim().is_empty())
     {
-        if let Some(preset) = crate::linear::pick_preset_by_prefix(&cfg.presets, prefix) {
+        if let Some(preset) = crate::naming::pick_preset_by_prefix(&cfg.presets, prefix) {
             return Some(preset);
         }
         if let Some(preset) = cfg
