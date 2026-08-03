@@ -223,6 +223,9 @@ export function CloneModalContainer({
       team,
       title: draft.title.trim(),
       description: toLinearMarkdown(draft.description),
+      ...(draft.priority > 0 ? { priority: draft.priority } : {}),
+      // No assignee: `issueCreate` falls back to the key's own owner, which is you, and the
+      // clone about to be made is yours.
     });
     return { issue: resolvedFromTicket(ticket), key };
   }

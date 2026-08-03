@@ -8,8 +8,10 @@
 // - A new issue is pinned to the team's lowest-`position` `unstarted` state. The column draws
 //   Todo and In Progress only, so an issue left in whatever state the team defaults to (very
 //   often Backlog) would be created and disappear in the same breath.
-// - A new issue is assigned to the key's own owner, because the column lists what that owner
-//   is assigned. An unassigned issue would never appear in it either.
+// - A new issue is assigned to whoever the caller named, and to the key's own owner when it
+//   named nobody. That fallback is why the column works: it lists what the owner is assigned,
+//   so an unassigned issue would never appear in it. An issue assigned to somebody else will
+//   not appear in it either, which the dialog says out loud before it is opened.
 // - An edit addresses the issue by Linear's UUID, never by `WE-142`.
 //
 // A state is picked the same way whichever write is asking: a workflow can hold several states
@@ -32,6 +34,9 @@ export interface NewIssue {
   title: string;
   description: string;
   priority?: number;
+  /** Who to assign it to, as Linear's user UUID. Absent assigns it to the key's own owner,
+   *  which is what every caller wanted before the dialog offered a choice. */
+  assigneeId?: string;
 }
 
 /** A title and/or a description. An omitted field is left alone. An empty description is a
@@ -132,14 +137,19 @@ function rank(position: unknown): number {
 
 /** The `IssueCreateInput` for a new issue.
  *
- *  `assigneeId` is left off rather than sent as null when the key has no personal user, which
- *  is the case for an app or OAuth actor. Creation still works. The issue is then unassigned
- *  and the column will not list it. Same for `stateId`. */
+ *  The assignee is whoever the caller named, and the key's own owner when it named nobody. That
+ *  fallback is the rule the column depends on: it lists what the key owner is assigned, so an
+ *  issue opened with no assignee at all would be created and never seen.
+ *
+ *  `assigneeId` is left off rather than sent as null when neither is known, which is the case
+ *  for an app or OAuth actor. Creation still works. The issue is then unassigned and the column
+ *  will not list it. Same for `stateId`. */
 export function issueCreateInput(fields: {
   teamId: string;
   title: string;
   description: string;
   viewerId?: string | null;
+  assigneeId?: string | null;
   stateId?: string | null;
   priority?: number;
 }): Record<string, unknown> {
@@ -148,7 +158,8 @@ export function issueCreateInput(fields: {
     title: fields.title,
     description: fields.description,
   };
-  if (fields.viewerId) input.assigneeId = fields.viewerId;
+  const assignee = (fields.assigneeId ?? "").trim() || fields.viewerId;
+  if (assignee) input.assigneeId = assignee;
   if (fields.stateId) input.stateId = fields.stateId;
   const priority = fields.priority;
   if (typeof priority === "number" && Number.isInteger(priority) && priority > 0) {
@@ -185,6 +196,7 @@ export async function issueCreate(key: string, issue: NewIssue): Promise<LinearT
     title: issue.title,
     description: issue.description,
     viewerId: data.viewer?.id ?? null,
+    assigneeId: issue.assigneeId ?? null,
     stateId: pickCreateStateId(node.states?.nodes),
     priority: issue.priority,
   });

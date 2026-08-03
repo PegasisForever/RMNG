@@ -26,6 +26,9 @@ export interface CloneDraft {
   /** New-ticket tab: the ticket body, as markdown. Written by the editor in the description
    *  slot rather than by a field of the form. */
   description: string;
+  /** New-ticket tab: Linear's own priority, 0 unranked through 4 low. There is no assignee
+   *  beside it: a clone is work you are about to start, so the issue is yours. */
+  priority: number;
   /** No-ticket tab: an optional first message to the agent. */
   message: string;
   /** Ticket tabs only: appended to the clone agent's and Claude Code's default instructions. */
@@ -57,6 +60,7 @@ export function emptyCloneDraft(ticket = ""): CloneDraft {
     team: "",
     title: "",
     description: "",
+    priority: 0,
     message: "",
     agentInstructions: "",
     claudeInstructions: "",

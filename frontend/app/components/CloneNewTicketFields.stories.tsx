@@ -1,8 +1,12 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { ReactNode } from "react";
+import { useArgs } from "storybook/preview-api";
 import { fn } from "storybook/test";
 
-import { CloneNewTicketFields } from "./CloneNewTicketFields";
+import {
+  CloneNewTicketFields,
+  type CloneNewTicketFieldsProps,
+} from "./CloneNewTicketFields";
 import { MarkdownEditorView } from "./MarkdownEditorView";
 import { makeClonePresets } from "./__fixtures__/presets";
 import { teamKeysOf } from "~/lib/cloneDraft";
@@ -30,15 +34,29 @@ const meta = {
     teamKeys: teamKeysOf(makeClonePresets()),
     team: "we",
     title: "",
+    priority: 0,
     description: descriptionEditor,
     onTeamChange: fn(),
     onTitleChange: fn(),
+    onPriorityChange: fn(),
   },
-  render: (args) => (
-    <Frame>
-      <CloneNewTicketFields {...args} />
-    </Frame>
-  ),
+  /** The priority menu is live in every story, and the Controls panel follows along, so a
+   *  story is a starting rank rather than the only one it can show. */
+  render: function Render(args) {
+    const [{ priority }, updateArgs] = useArgs<CloneNewTicketFieldsProps>();
+    return (
+      <Frame>
+        <CloneNewTicketFields
+          {...args}
+          priority={priority}
+          onPriorityChange={(next) => {
+            updateArgs({ priority: next });
+            args.onPriorityChange(next);
+          }}
+        />
+      </Frame>
+    );
+  },
 } satisfies Meta<typeof CloneNewTicketFields>;
 
 export default meta;
@@ -49,14 +67,14 @@ type Story = StoryObj<typeof meta>;
  *  also picking the preset. */
 export const Default: Story = {};
 
-/** Mid-typing, on the second team. Nothing else about the tab changes with the team except
- *  which preset the clone will get. */
+/** Mid-typing, on the second team and ranked urgent. Nothing else about the tab changes with
+ *  the team except which preset the clone will get. */
 export const Filled: Story = {
-  args: { team: "dev", title: "Spike: swap the encoder to VA-API" },
+  args: { team: "dev", title: "Spike: swap the encoder to VA-API", priority: 1 },
 };
 
 /** No preset declares a team key, so there is no team to open an issue in and no preset to
- *  open it with. The dropdown is replaced by what to go and fix. */
+ *  open it with. The dropdown reads "None" and the line under it says what to go and fix. */
 export const NoTeamKeys: Story = {
   args: { teamKeys: [], team: "" },
 };

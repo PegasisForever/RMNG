@@ -99,6 +99,32 @@ test("the create input carries the team, the assignee and the pinned state", () 
   });
 });
 
+// The dialog offers an assignee, and picking one has to beat the fallback. It is the same
+// field either way, so the only way to be wrong here is to send the wrong person.
+test("a named assignee wins over the key's own owner", () => {
+  const input = issueCreateInput({
+    teamId: "team-uuid",
+    title: "t",
+    description: "",
+    viewerId: "me-uuid",
+    assigneeId: "somebody-else-uuid",
+  });
+
+  expect(input.assigneeId).toBe("somebody-else-uuid");
+});
+
+test("a blank assignee falls back to the key's own owner, which is what the column lists", () => {
+  const blank = issueCreateInput({
+    teamId: "t",
+    title: "t",
+    description: "",
+    viewerId: "me-uuid",
+    assigneeId: "",
+  });
+
+  expect(blank.assigneeId).toBe("me-uuid");
+});
+
 // An app or OAuth actor has no personal user. Leaving the field off keeps creation working.
 // Sending null would too, but the ticket then belongs to nobody either way.
 test("no viewer, no state and no priority leave their fields off entirely", () => {

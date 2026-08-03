@@ -94,8 +94,11 @@ export function StateIcon({ state }: { state: LinearTicket["state"] }) {
   );
 }
 
-/** Linear's priority scale, 1 (urgent) to 4 (low). */
+/** Linear's priority scale, 1 (urgent) to 4 (low), and the 0 it sends for an issue nobody has
+ *  ranked. A card leaves 0 undrawn; the new-ticket dialog names it, because "no priority" is
+ *  one of the choices there. */
 export const PRIORITY_LABEL: Record<number, string> = {
+  0: "No priority",
   1: "Urgent",
   2: "High",
   3: "Medium",
@@ -121,9 +124,9 @@ export function PriorityIcon({ level }: { level: number }) {
       </svg>
     );
   }
-  // 2 High fills all three bars, 3 Medium two, 4 Low one. The rest stay faint rather than
-  // disappearing, so every glyph is the same shape and only its fill differs.
-  const filled = level === 2 ? 3 : level === 3 ? 2 : 1;
+  // 2 High fills all three bars, 3 Medium two, 4 Low one, and 0 none. The rest stay faint
+  // rather than disappearing, so every glyph is the same shape and only its fill differs.
+  const filled = level === 2 ? 3 : level === 3 ? 2 : level === 0 ? 0 : 1;
   const bars = [
     { x: 1.5, y: 9.5, h: 5 },
     { x: 6.5, y: 6.5, h: 8 },

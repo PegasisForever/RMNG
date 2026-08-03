@@ -156,9 +156,11 @@ export function CloneModalView({
               teamKeys={teamKeys}
               team={draft.team}
               title={draft.title}
+              priority={draft.priority}
               description={descriptionEditor}
               onTeamChange={(team) => onDraftChange("team", team)}
               onTitleChange={(title) => onDraftChange("title", title)}
+              onPriorityChange={(priority) => onDraftChange("priority", priority)}
             />
           ) : (
             <ClonePlainFields
