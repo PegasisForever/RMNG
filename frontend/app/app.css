@@ -59,10 +59,15 @@ body {
   background-color: transparent !important;
 }
 
-/* BlockNote pads the editor 54px on each side to park its drag handles in. The ticket
-   panel is 20rem at its narrowest and sets its own gutter, so that padding is both width it
-   cannot spare and a second left edge the title above does not share. Zero it: the panel's
-   px-4 is the only gutter, and the body starts where the title starts.
+/* A ticket's description, at the three metrics below, wherever it is edited: the panel beside
+   the board (`TicketDescription`) and the two dialogs that open a new issue
+   (`MarkdownEditorView`). One class, so a body reads the same size before and after the ticket
+   exists.
+
+   BlockNote pads the editor 54px on each side to park its drag handles in. Every box that
+   holds one here is narrow and sets its own gutter, so that padding is both width it cannot
+   spare and a second left edge the title above does not share. Zero it: the container's
+   padding is the only gutter, and the body starts where the title starts.
 
    Two class selectors, so this beats BlockNote's own single-class rule whatever order the
    lazy editor chunk loads in. */
@@ -70,16 +75,18 @@ body {
   padding-inline: 0;
 }
 
-/* Body text, 14px instead of BlockNote's 16px. The panel is a column beside the board, not
-   a document anybody reads at arm's length, and 14px is what the rest of the app runs at. */
+/* Body text, 14px instead of BlockNote's 16px. A ticket body is read in a column beside the
+   board or in a dialog, not as a document at arm's length, and 14px is what the rest of the
+   app runs at. */
 .ticket-description .bn-default-styles {
   font-size: 14px;
 }
 
-/* Headings in a ticket body are capped under the panel's own title (20px semibold). Out of
-   the box BlockNote runs H1 at 3em, which is 42px against a 14px body: it was written for a
-   full-page editor, where the document title is the H1. Here the title sits above the
-   editor, so a heading inside the body is a level below it and has to look like one.
+/* Headings in a ticket body are capped under the title above the editor (20px semibold in the
+   panel, a field label in the dialogs). Out of the box BlockNote runs H1 at 3em, which is 42px
+   against a 14px body: it was written for a full-page editor, where the document title is the
+   H1. Here the title sits outside the editor, so a heading inside the body is a level below it
+   and has to look like one.
 
    The sizes are `em` off the 14px block text: 18.2, 16.1, 14.7, then BlockNote's own 1em/
    .9em/.8em for H4 to H6, which are already under the cap. `--prev-level` is the same ladder

@@ -1,6 +1,8 @@
-// A compact BlockNote editor that yields **markdown**, used for the clone dialog's
-// new-ticket description. Same engine as the per-clone notes (`NotesEditorView`), so pasting
-// and image upload behave identically. This one is a controlled-ish field, though: it reports
+// A compact BlockNote editor that yields **markdown**, used for the description of a ticket
+// that does not exist yet: the clone dialog's new-ticket tab and the board's New ticket dialog.
+// Same engine as the per-clone notes (`NotesEditorView`), so pasting and image upload behave
+// identically, and the same metrics as `TicketDescription`, so a body reads the same size
+// before and after the issue is opened. This one is a controlled-ish field, though: it reports
 // markdown up on every change instead of autosaving to a document.
 //
 // No network of its own: every edit leaves through `onChange` and image uploads go through
@@ -49,7 +51,12 @@ export function MarkdownEditorView({
   });
 
   return (
-    <div className={className}>
+    // `ticket-description` is the metrics every ticket body is edited at: 14px text, headings
+    // capped under it, and none of BlockNote's own 54px side padding (see app.css). It is set
+    // here rather than asked of each caller because every body this editor holds is a ticket's,
+    // and the one already in Linear is edited at the same size in `TicketDescription`. The
+    // caller's own class still rides along, for whatever else it wants to say about the box.
+    <div className={`ticket-description ${className ?? ""}`}>
       <BlockNoteView
         editor={editor}
         theme={scheme}

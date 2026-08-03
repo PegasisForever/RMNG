@@ -11,7 +11,7 @@ function Frame({ children }: { children: ReactNode }) {
   return (
     <div className="w-[30rem] text-xs font-medium text-slate-500 dark:text-slate-400">
       Description
-      <div className="mt-1 min-h-[6.5rem] rounded-md border border-slate-300 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
+      <div className="mt-1 min-h-[6.5rem] rounded-md border border-slate-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
         {children}
       </div>
     </div>

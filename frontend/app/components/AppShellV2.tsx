@@ -67,6 +67,12 @@ export interface AppShellV2Props {
   onSideFocusChange: (focus: SideFocus) => void;
   /** The notes editor for `selectedClone`. */
   notes: ReactNode;
+  /** `selectedClone`'s own Linear ticket, which takes the notes card's place when it has one.
+   *  It arrives as its own slot rather than through `notes` because the card is drawn
+   *  differently: a ticket names itself in its own header, so the card drops the clone id and
+   *  the padding it wraps notes in, and the panel gets the whole card the way it does when a
+   *  ticket takes the side panel outright. */
+  cloneTicket?: ReactNode;
   /** The agent chat for `selectedClone`. */
   chat: ReactNode;
   /** The width the panel opens at, as a percentage of the shell. The container resolves it
@@ -87,6 +93,7 @@ export function AppShellV2({
   sideFocus,
   onSideFocusChange,
   notes,
+  cloneTicket,
   chat,
   initialSideWidth,
   onSideWidthCommit,
@@ -254,10 +261,18 @@ export function AppShellV2({
                 sideFocus === "notes" ? "basis-3/4" : "basis-1/4"
               }`}
             >
-              <h2 className="shrink-0 truncate px-4 pt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                {selectedClone.id}
-              </h2>
-              <div className="min-h-0 flex-1 overflow-y-auto py-2">{notes}</div>
+              {/* A ticket fills the card on its own, exactly as it does when one takes the
+                  whole side panel. No clone id over it: the ticket's own header is the card's
+                  title, and a hostname above that would name a second subject for a card that
+                  has one. */}
+              {cloneTicket ?? (
+                <>
+                  <h2 className="shrink-0 truncate px-4 pt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    {selectedClone.id}
+                  </h2>
+                  <div className="min-h-0 flex-1 overflow-y-auto py-2">{notes}</div>
+                </>
+              )}
             </section>
 
             <section

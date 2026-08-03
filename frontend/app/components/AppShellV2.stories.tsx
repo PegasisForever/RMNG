@@ -277,9 +277,9 @@ export const TicketOpen: Story = {
   },
 };
 
-/** The selected clone was made from a Linear ticket, so its notes card holds the ticket. The
- *  card keeps its clone-id header and the chat keeps the quarter below it: this is the clone's
- *  own panel with a different thing in its top half, not the ticket panel from the column.
+/** The selected clone was made from a Linear ticket, so the ticket takes the top card. It is
+ *  the same card TicketOpen draws, over the same chat quarter the notes had: no clone id above
+ *  it, since the ticket's own header is the card's title.
  *
  *  There is no "Create a clone" button, and the notes for this clone are not reachable from
  *  anywhere. Both are deliberate. */
@@ -287,7 +287,7 @@ export const TicketInNotesCard: Story = {
   args: {
     rail: makeRail(),
     board: makeBoard(),
-    notes: <TicketFixture ticket={ticketCloned} />,
+    cloneTicket: <TicketFixture ticket={ticketCloned} />,
   },
 };
 

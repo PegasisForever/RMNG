@@ -218,7 +218,10 @@ export function TicketPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 items-center gap-2 px-4 pt-3">
+      {/* `px-6` down the card, wider than the app's usual `px-4`. Everything here is prose the
+          operator reads rather than chrome they scan, and prose wants a margin: the ticket's
+          own text should not start where a card's border ends. */}
+      <header className="flex shrink-0 items-center gap-2 px-6 pt-3">
         <span
           className={`shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold leading-none ${workspaceBadge(
             ticket.team ?? ticket.id.split("-")[0],
@@ -249,7 +252,7 @@ export function TicketPanel({
         </a>
       </header>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 pb-4 pt-2">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-4 pt-2">
         {/* The title and its parent are one unit, held closer to each other than to anything
             else. The parent names the thing the title is part of, so a section-sized gap
             between them would read as two subjects instead of one. */}
@@ -292,7 +295,7 @@ export function TicketPanel({
       </div>
 
       {onCreateClone ? (
-        <footer className="shrink-0 border-t border-slate-900/10 px-4 py-2 dark:border-white/10">
+        <footer className="shrink-0 border-t border-slate-900/10 px-6 py-2 dark:border-white/10">
           <button
             type="button"
             onClick={onCreateClone}
