@@ -712,6 +712,41 @@ async fn clone_container_after_create(
         );
     }
 
+    // The activity probe, so the new clone reports working-vs-stuck from its first turn
+    // rather than from the reconciler's first pass 30s later. Stamped the same way, and
+    // best-effort for the same reason: the reconciler is the backstop.
+    on_progress("inject", "installing the activity probe");
+    let hook_ok = docker
+        .upload_tar(container, crate::clone_reconcile::rmng_hook_entries())
+        .await
+        .is_ok()
+        && docker
+            .exec_script(
+                container,
+                &crate::clone_reconcile::claude_hook_script(),
+                &[],
+                &[],
+                |_stream, line| {
+                    tracing::debug!(target: "provision", "claude-hook: {line}");
+                },
+            )
+            .await
+            .unwrap_or(1)
+            == 0;
+    if hook_ok {
+        if let Err(e) = docker
+            .upload_tar(
+                container,
+                vec![crate::clone_reconcile::claude_hook_stamp_entry()],
+            )
+            .await
+        {
+            tracing::warn!("clone {hostname}: writing claude hook stamp failed: {e:#} (non-fatal)");
+        }
+    } else {
+        tracing::warn!("clone {hostname}: activity probe install failed (reconciler will retry)");
+    }
+
     // The bashrc block can't go in the tar (it's an APPEND, not a whole file — /etc/bash.bashrc
     // already exists in the image). Delete any prior rmng-preset-path block then re-append,
     // so a re-provision stays idempotent. Only when the preset sets PATH.

@@ -481,6 +481,174 @@ running: if you are on `auto`, so is it, and it gets its own pick. `--top-level`
 "#;
 
 /// The `rmng-cli` skill TarEntries: the same SKILL.md at both skill locations.
+/// The activity probe, written to `~/.rmng/hook.py` and registered in Claude Code's
+/// `settings.json`. It is how the server tells a clone that is thinking from one that is
+/// waiting on a person: see [`crate::stuck`].
+///
+/// It runs on someone's live working clone, on every tool call, so it is built to be boring.
+/// It never raises, never blocks, and never writes anywhere but its own log. Every failure
+/// path still exits 0, because a hook that exits non-zero interrupts the agent.
+const RMNG_HOOK_PY: &str = r#"#!/usr/bin/env python3
+"""RMNG activity probe. One hook invocation appends one line, in one write().
+
+Installed and kept current by the control-server's clone reconciler. Editing this file in a
+clone accomplishes nothing: the reconciler stamps a hash of it and restores it within 30s.
+"""
+import json
+import os
+import sys
+import time
+
+LOG = os.path.expanduser("~/.rmng/agent-events.jsonl")
+CAP = 64 * 1024 * 1024  # never grow without bound on a clone nobody is watching
+
+KEEP = ("hook_event_name", "session_id", "agent_id", "agent_type", "cwd")
+
+
+def main():
+    try:
+        event = json.load(sys.stdin)
+    except Exception as exc:
+        event = {"hook_event_name": "PARSE_ERROR", "error": str(exc)}
+    if not isinstance(event, dict):
+        event = {"hook_event_name": "NON_DICT"}
+
+    record = {k: event.get(k) for k in KEEP}
+    record["ts"] = time.time()
+
+    # Stop carries the live outstanding-work set and the agent's own closing words. Both are
+    # the whole answer to "did this turn really end", so they are worth their bytes.
+    if isinstance(event.get("background_tasks"), list):
+        record["background_tasks"] = event["background_tasks"][:20]
+    if isinstance(event.get("last_assistant_message"), str):
+        record["last_assistant_message"] = event["last_assistant_message"][:700]
+    for extra in ("tool_name", "tool_use_id", "reason"):
+        if extra in event:
+            record[extra] = str(event[extra])[:120]
+    if "tool_input" in event:
+        record["tool_input"] = json.dumps(event["tool_input"])[:400]
+
+    line = (json.dumps(record, separators=(",", ":")) + "\n").encode()
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    try:
+        if os.path.getsize(LOG) > CAP:
+            return
+    except OSError:
+        pass
+    fd = os.open(LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass  # a probe must never be the reason an agent stops
+"#;
+
+/// The path Claude Code runs, as the CLONE sees it.
+///
+/// Everything else here works in host coordinates (`/proc/<pid>/root/home/rmng/…`), and
+/// writing one of those into `settings.json` produces a command that cannot exist inside the
+/// container. It fails in the worst way available: silently to us, and as a red hook error on
+/// every single tool call to whoever is working in that clone.
+const HOOK_IN_CLONE: &str = "/home/rmng/.rmng/hook.py";
+
+/// The events the probe subscribes to.
+///
+/// `SessionStart`, `Notification` and `ConfigChange` are deliberately absent: they carry
+/// nothing the decision uses. `PreToolUse`/`PostToolUse` are the expensive pair, roughly 33 ms
+/// each per tool call, and they stay because an unmatched `PreToolUse` is what keeps a clone
+/// mid-command from reading as finished. Measured over the 323 fleet samples that carry one:
+/// 8 false alarms with that evidence, 41 without.
+const HOOK_EVENTS: [&str; 9] = [
+    "UserPromptSubmit",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+];
+
+pub(crate) fn rmng_hook_entries() -> Vec<TarEntry> {
+    vec![TarEntry {
+        path: "home/rmng/.rmng/hook.py".to_string(),
+        data: RMNG_HOOK_PY.as_bytes().to_vec(),
+        mode: 0o755,
+        uid: CLONE_UID,
+        gid: CLONE_GID,
+    }]
+}
+
+/// Register the probe in `~/.claude/settings.json` without disturbing the operator's own keys.
+///
+/// That file is Claude Code's own user state: `model`, `theme`, `effortLevel`,
+/// `enabledPlugins`, whatever it adds next. So this sets `.hooks` and touches nothing else,
+/// the same jq-merge shape [`claude_mcp_script`] uses on `~/.claude.json` for the same reason.
+/// Assigning the whole `.hooks` object rather than merging into it is deliberate: it is how a
+/// renamed or dropped event stops firing, instead of lingering forever the way a
+/// merge-only-what-we-emit would leave it.
+pub(crate) fn claude_hook_script() -> String {
+    let hooks: serde_json::Map<String, serde_json::Value> = HOOK_EVENTS
+        .iter()
+        .map(|event| {
+            (
+                (*event).to_string(),
+                serde_json::json!([{
+                    "hooks": [{ "type": "command", "command": HOOK_IN_CLONE, "timeout": 10 }]
+                }]),
+            )
+        })
+        .collect();
+    let program = format!(".hooks = {}", serde_json::Value::Object(hooks));
+    format!(
+        r#"set -e
+f=/home/rmng/.claude/settings.json
+[ -s "$f" ] || printf '{{}}' > "$f"
+tmp="$(mktemp)"
+jq '{program}' "$f" > "$tmp"
+cat "$tmp" > "$f"
+rm -f "$tmp"
+chown rmng:rmng "$f"
+chmod 644 "$f"
+"#
+    )
+}
+
+fn claude_hook_stamp_path() -> &'static str {
+    "etc/rmng/claude-hook"
+}
+
+/// Keyed on a hash of the probe plus its registration, so editing [`RMNG_HOOK_PY`] or
+/// [`HOOK_EVENTS`] re-pushes to every clone with no manual version bump to remember.
+fn claude_hook_desired() -> String {
+    let mut entries = rmng_hook_entries();
+    entries.push(TarEntry {
+        path: "registration".into(),
+        data: claude_hook_script().into_bytes(),
+        mode: 0,
+        uid: 0,
+        gid: 0,
+    });
+    desired_payload_hash(&entries)
+}
+
+pub(crate) fn claude_hook_stamp_entry() -> TarEntry {
+    TarEntry {
+        path: claude_hook_stamp_path().to_string(),
+        data: format!("{}\n", claude_hook_desired()).into_bytes(),
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+    }
+}
+
 fn rmng_cli_skill_entries() -> Vec<TarEntry> {
     [
         "home/rmng/.claude/skills/rmng-cli/SKILL.md",
@@ -598,6 +766,7 @@ pub(crate) fn codex_prepare_script() -> &'static str {
 install -d -o rmng -g rmng -m700 /home/rmng/.codex
 install -d -o rmng -g rmng -m755 /home/rmng/.config /home/rmng/.config/rmng /home/rmng/.claude
 install -d -o rmng -g rmng -m755 /home/rmng/.claude/skills/rmng-cli /home/rmng/.agents/skills/rmng-cli
+install -d -o rmng -g rmng -m755 /home/rmng/.rmng
 mkdir -p /etc/rmng
 "#
 }
@@ -1107,6 +1276,39 @@ async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<
     Ok(true)
 }
 
+/// Install the activity probe and register it in Claude Code's settings.
+///
+/// Claude Code reloads `settings.json` live, so an already-running agent picks the hooks up
+/// with no restart. Confirmed on a 32-clone fleet: seven clones that were sitting idle at
+/// install time logged events on their next turn without being touched.
+async fn ensure_claude_hook(app: &App, clone_id: &str) -> Result<bool> {
+    let desired = claude_hook_desired();
+    if read_stamp(app, clone_id, claude_hook_stamp_path(), "claude hook")
+        .await?
+        .as_deref()
+        == Some(desired.as_str())
+    {
+        return Ok(false);
+    }
+    exec_ok(app, clone_id, codex_prepare_script(), "prepare clone dirs").await?;
+    app.docker
+        .upload_tar(clone_id, rmng_hook_entries())
+        .await
+        .with_context(|| format!("{clone_id}: uploading the activity probe"))?;
+    exec_ok(
+        app,
+        clone_id,
+        &claude_hook_script(),
+        "register hooks in ~/.claude/settings.json",
+    )
+    .await?;
+    app.docker
+        .upload_tar(clone_id, vec![claude_hook_stamp_entry()])
+        .await
+        .with_context(|| format!("{clone_id}: writing claude hook stamp"))?;
+    Ok(true)
+}
+
 fn codex_mcp_stamp_path() -> &'static str {
     "etc/rmng/codex-mcp"
 }
@@ -1483,6 +1685,29 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
+        // The activity probe: `~/.rmng/hook.py` plus its registration under `.hooks` in
+        // `~/.claude/settings.json`. What tells working from stuck (see `crate::stuck`).
+        // Stamped on a hash of the script, so editing it re-pushes fleet-wide by itself.
+        match ensure_claude_hook(app, id).await {
+            Ok(true) => {
+                warned.remove(&format!("{id}:claude-hook"));
+                tracing::info!(
+                    target: "clone_reconcile",
+                    "clone {id}: installed the activity probe and registered its hooks"
+                );
+            }
+            Ok(false) => {
+                warned.remove(&format!("{id}:claude-hook"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:claude-hook")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: activity probe install failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: activity probe install still failing: {e:#}");
+                }
+            }
+        }
+
         // Codex's `~/.codex/config.toml` MCP tables. A MERGE, not a rewrite: everything else in
         // that file is the operator's (model, approval_policy, sandbox, their own MCP servers).
         match ensure_codex_mcp(app, id, h.headless).await {
@@ -1833,6 +2058,7 @@ mod tests {
             ("claude_mcp", claude_mcp_script(false)),
             ("claude_mcp_headless", claude_mcp_script(true)),
             ("etc_environment_sync", etc_environment_sync_script("A=1\n")),
+            ("claude_hook", claude_hook_script()),
         ];
         for (name, body) in scripts {
             for cred in [".claude/.credentials.json", ".codex/auth.json"] {
@@ -2253,5 +2479,162 @@ mod tests {
                 "bootstrap script missing `{needle}`:\n{script}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    /// Run the real generated script against a real file, the way the Codex and
+    /// `/etc/environment` merges are tested. Asserting on the script's text would pass while
+    /// the jq program was wrong.
+    fn run(settings: &std::path::Path) -> String {
+        let script = claude_hook_script()
+            .replace("/home/rmng/.claude/settings.json", settings.to_str().unwrap())
+            .replace("chown rmng:rmng", "true");
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run the hook registration script");
+        assert!(
+            out.status.success(),
+            "script failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(settings).unwrap()
+    }
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rmng-hook-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn registration_keeps_every_key_the_operator_owns() {
+        let dir = tmpdir("merge");
+        let settings = dir.join("settings.json");
+        // What a real clone's file holds: Claude Code's own user state, none of it ours.
+        std::fs::write(
+            &settings,
+            r#"{"model":"opus[1m]","effortLevel":"xhigh","theme":"auto",
+                "skipDangerousModePermissionPrompt":true,"enabledPlugins":{"a":true}}"#,
+        )
+        .unwrap();
+
+        let body = run(&settings);
+        let got: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(got["model"], "opus[1m]");
+        assert_eq!(got["effortLevel"], "xhigh");
+        assert_eq!(got["theme"], "auto");
+        assert_eq!(got["skipDangerousModePermissionPrompt"], true);
+        assert_eq!(got["enabledPlugins"]["a"], true);
+
+        for event in HOOK_EVENTS {
+            assert_eq!(
+                got["hooks"][event][0]["hooks"][0]["command"], HOOK_IN_CLONE,
+                "{event} must run the in-clone path, never this host's view of it"
+            );
+        }
+        assert_eq!(got["hooks"].as_object().unwrap().len(), HOOK_EVENTS.len());
+
+        // A second identical pass must not rewrite the file, or the stamp is the only thing
+        // stopping an endless churn of settings writes at every clone.
+        assert_eq!(run(&settings), body, "second identical pass rewrote the file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_empty_settings_file_is_created_rather_than_fatal() {
+        let dir = tmpdir("absent");
+        let settings = dir.join("settings.json");
+        let got: serde_json::Value = serde_json::from_str(&run(&settings)).unwrap();
+        assert_eq!(got["hooks"]["Stop"][0]["hooks"][0]["command"], HOOK_IN_CLONE);
+
+        std::fs::write(&settings, "").unwrap();
+        let got: serde_json::Value = serde_json::from_str(&run(&settings)).unwrap();
+        assert_eq!(got["hooks"]["Stop"][0]["hooks"][0]["command"], HOOK_IN_CLONE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_event_we_stop_emitting_stops_firing() {
+        let dir = tmpdir("retire");
+        let settings = dir.join("settings.json");
+        // A registration from an older server, naming an event this one no longer emits.
+        std::fs::write(
+            &settings,
+            r#"{"theme":"auto","hooks":{"Retired":[{"hooks":[{"type":"command","command":"/gone.py"}]}]}}"#,
+        )
+        .unwrap();
+        let got: serde_json::Value = serde_json::from_str(&run(&settings)).unwrap();
+        assert!(
+            got["hooks"]["Retired"].is_null(),
+            "assigning .hooks wholesale is what retires an event; merging into it would leave \
+             /gone.py firing forever"
+        );
+        assert_eq!(got["theme"], "auto", "the operator's keys still survive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_stamp_tracks_the_probe_and_its_registration() {
+        // Editing the Python must re-push without anyone remembering to bump a version.
+        let base = claude_hook_desired();
+        assert_eq!(base, claude_hook_desired(), "the hash must be stable");
+        assert!(!base.is_empty());
+
+        let mut entries = rmng_hook_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "home/rmng/.rmng/hook.py");
+        // uid 1000, or the clone's own agent cannot write the log it is told to append to.
+        assert_eq!((entries[0].uid, entries[0].gid), (CLONE_UID, CLONE_GID));
+        assert_eq!(entries[0].mode, 0o755);
+
+        entries[0].data.push(b'#');
+        assert_ne!(desired_payload_hash(&entries), desired_payload_hash(&rmng_hook_entries()));
+    }
+
+    #[test]
+    fn the_probe_is_valid_python_that_survives_junk_on_stdin() {
+        let dir = tmpdir("py");
+        let hook = dir.join("hook.py");
+        std::fs::write(&hook, RMNG_HOOK_PY).unwrap();
+        // A hook that exits non-zero interrupts the agent, so every path must exit 0 —
+        // including a payload that is not even JSON.
+        for stdin in ["", "not json at all", "[1,2,3]", r#"{"hook_event_name":"Stop"}"#] {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "printf %s {} | HOME={} python3 {}",
+                    shell_quote(stdin),
+                    dir.display(),
+                    hook.display()
+                ))
+                .output()
+                .expect("run the probe");
+            assert!(
+                out.status.success(),
+                "stdin {stdin:?} made the probe exit {:?}: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        // The one well-formed payload above is the only line that should have been logged.
+        let log = std::fs::read_to_string(dir.join(".rmng/agent-events.jsonl")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 4, "every invocation logs exactly one line: {log}");
+        let last: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+        assert_eq!(last["hook_event_name"], "Stop");
+        assert!(last["ts"].as_f64().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn shell_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', r#"'\''"#))
     }
 }
