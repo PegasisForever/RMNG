@@ -156,7 +156,7 @@ async fn ensure_clone_mirror(app: &App, clone_id: &str) -> Result<()> {
             &[],
             &[],
             |stream, line| {
-                if stream == "out" {
+                if stream == crate::docker::STREAM_OUT {
                     current.push_str(line);
                     current.push('\n');
                 }

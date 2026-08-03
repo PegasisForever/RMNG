@@ -979,7 +979,7 @@ async fn exec_ok_marked(
     let code = app
         .docker
         .exec_script(clone_id, script, &[], &[], |stream, line| {
-            if stream == "stdout" && line.contains(marker) {
+            if stream == crate::docker::STREAM_OUT && line.contains(marker) {
                 seen = true;
             }
             tracing::debug!(target: "clone_reconcile", "{clone_id} {label} {stream}: {line}");
@@ -1012,7 +1012,7 @@ async fn read_stamp(app: &App, clone_id: &str, path: &str, label: &str) -> Resul
     let code = app
         .docker
         .exec_script(clone_id, &script, &[], &[], |stream, line| {
-            if stream == "out" {
+            if stream == crate::docker::STREAM_OUT {
                 out.push_str(line);
                 out.push('\n');
             }
@@ -1597,6 +1597,23 @@ mod tests {
         for banned in ["read_clone_ssh_config", "merge_ssh_config", "fleet_public_key"] {
             assert!(!body.contains(banned), "{banned} must no longer be used by the reconciler");
         }
+    }
+
+    /// A stream tag is compared against the constant, never a spelled-out literal.
+    ///
+    /// `exec_script` tags stdout `"out"`. `exec_ok_marked` compared against `"stdout"`, so it
+    /// never saw its marker and always returned false — meaning the agent-wrapper was never
+    /// restarted after `/etc/environment` changed, which is the one thing the marker exists to
+    /// trigger. It failed silently for months: the shell-level tests below run the script
+    /// directly and grep its stdout themselves, so they never exercised the tag at all.
+    #[test]
+    fn a_stream_tag_is_never_compared_against_a_bare_literal() {
+        let src = include_str!("clone_reconcile.rs");
+        let body = &src[..src.find("mod tests").unwrap_or(src.len())];
+        assert!(
+            !body.contains(r#"stream == ""#),
+            "compare against crate::docker::STREAM_OUT, so a wrong spelling cannot compile"
+        );
     }
 
     /// The agent-wrapper must have the retired inference vars cleared at the UNIT level.

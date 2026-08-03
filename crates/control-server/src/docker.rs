@@ -63,6 +63,17 @@ pub const NETWORK: &str = "rmng";
 pub const CONTROL_ALIAS: &str = "rmng-control";
 /// The in-clone Linux user the agent + desktop run as (uid 1000).
 pub const CLONE_USER: &str = "rmng";
+
+/// The `stream` tag [`DockerCtl::exec_script`] hands its line callback for stdout, and the one
+/// for stderr.
+///
+/// Constants rather than bare literals because a caller comparing against the wrong spelling
+/// fails silently, in a way no test that runs the script directly can see: `exec_ok_marked`
+/// compared against `"stdout"` for months, so it never observed its marker, and the
+/// agent-wrapper was never restarted after `/etc/environment` changed — the exact thing the
+/// marker was added to do.
+pub const STREAM_OUT: &str = "out";
+pub const STREAM_ERR: &str = "err";
 /// Stop timeout for systemd-PID-1 clones (with `StopSignal=SIGRTMIN+3` baked in).
 pub const STOP_TIMEOUT_SECS: i32 = 20;
 
@@ -1999,10 +2010,10 @@ impl DockerCtl {
             while let Some(chunk) = self.next_exec_chunk(container, &mut output, &mut silent_for).await? {
                 match chunk {
                     LogOutput::StdOut { message } | LogOutput::Console { message } => {
-                        out_buf.push(&message, |line| on_line("out", line));
+                        out_buf.push(&message, |line| on_line(STREAM_OUT, line));
                     }
                     LogOutput::StdErr { message } => {
-                        err_buf.push(&message, |line| on_line("err", line));
+                        err_buf.push(&message, |line| on_line(STREAM_ERR, line));
                     }
                     LogOutput::StdIn { .. } => {}
                 }
@@ -2013,8 +2024,8 @@ impl DockerCtl {
 
         // Flush trailing partials (a script may end without a newline) BEFORE any error
         // handling, so already-captured output always reaches the caller.
-        out_buf.flush(|line| on_line("out", line));
-        err_buf.flush(|line| on_line("err", line));
+        out_buf.flush(|line| on_line(STREAM_OUT, line));
+        err_buf.flush(|line| on_line(STREAM_ERR, line));
 
         read_res.with_context(|| format!("streaming exec output from {container}"))?;
         if let Err(e) = write_res {
