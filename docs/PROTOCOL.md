@@ -132,8 +132,9 @@ the requester. The clone-daemon bridges via Mutter `RemoteDesktop` selection
 `AppConfig` loads from `./config.json` in the working directory (no env override — the Docker
 image sets `WORKDIR /data`, so `config.json` + `data/` land in the `rmng-data` volume);
 written at `0600`. The web API returns `AppConfigRedacted`, which carries the preset Linear
-keys verbatim as `linearKey: string` (the clients are what call Linear). `PUT /api/config`
-returns
+keys verbatim as `linearKey: string` (the clients are what call Linear) but withholds the
+OpenRouter key, which reaches the browser only as `openrouterKeySet: bool` — nothing there
+calls OpenRouter. `PUT /api/config` returns
 `{ config: AppConfigRedacted, restartRequired: bool, networkWarning?: string }`. Source:
 [config.rs](../crates/wire/src/config.rs).
 
@@ -155,6 +156,7 @@ returns
 | `codex` | `CodexConfig` | — | Codex usage polling config |
 | `codex_groups` | `CloneGroup[]` | `[]` | named account pools for Codex rotation (not secret) |
 | `agent_playbook` | string | shipped default | the desktop agent's base playbook (operating notes + ticket procedure), injected into each new clone at creation as its system-prompt append (written to the clone's `~/.config/rmng/agent-instructions.md`, where the agent-wrapper reads it, overriding its baked-in fallback). Seeded from the wrapper's `agent-instructions.md`; editable in Settings; **non-secret** (passes through the redacted view); applies to the next clone (**not restart-required**) |
+| `openrouter` | `OpenRouterConfig` | — | credentials for working-vs-stuck detection: `key` (**secret** — the ONE field withheld from the browser, surfaced as `openrouterKeySet: bool`) and `model` (default `~deepseek/deepseek-v4-flash-latest`, non-secret). Empty key ⇒ no clone is ever reported `working` (see [monitorState](API.md#monitorstate)). Settings → Agents; **not restart-required** |
 
 - **`ListenConfig`**: `web 9000`, `video 9001`, `daemon_mcp 9004`, `forward 9005`, and `bastion 2222`.
 - **`DockerConfig`** (no secret — the local daemon is reached over a unix socket, so the

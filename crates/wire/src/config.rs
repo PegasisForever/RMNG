@@ -346,6 +346,44 @@ impl Default for ClaudeConfig {
     }
 }
 
+/// OpenRouter, used by one thing: deciding whether a quiet clone is still working or is
+/// stuck waiting on a person. See [`crate::MonitorState`].
+///
+/// NOT TS-exported, because unlike a preset's Linear key this one is withheld. The browser
+/// has no use for it — the server makes the call — so the redacted view carries only
+/// [`AppConfigRedacted::openrouter_key_set`].
+///
+/// With no key set, nothing answers the question and no clone is ever reported as working.
+/// That is deliberate: a guess in either direction is worse than an honest "not working",
+/// and per-clone token accounting is unaffected either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRouterConfig {
+    /// OpenRouter API key (**secret**, never sent to the browser). Empty means the stuck
+    /// detector does not run.
+    #[serde(default)]
+    pub key: String,
+    /// Which model answers. Cheap and fast matters far more than clever here: the question
+    /// is one boolean about one container, and it is asked once per clone per state change.
+    #[serde(default = "default_openrouter_model")]
+    pub model: String,
+}
+
+impl Default for OpenRouterConfig {
+    fn default() -> Self {
+        Self {
+            key: String::new(),
+            model: default_openrouter_model(),
+        }
+    }
+}
+
+/// The model a six-hour fleet pilot measured at 96.7% against a replay oracle, for roughly
+/// $0.013 per clone-hour. The `~` prefix is OpenRouter's "latest" alias.
+fn default_openrouter_model() -> String {
+    "~deepseek/deepseek-v4-flash-latest".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -460,6 +498,10 @@ pub struct AppConfig {
     /// in [`agent_playbook`] (the inner Cursor Claude Code reads CLAUDE.md and would recurse).
     #[serde(default = "default_global_prompt")]
     pub global_prompt: String,
+    /// OpenRouter credentials for the stuck detector. Its key is the one secret in this
+    /// struct the browser never sees.
+    #[serde(default)]
+    pub openrouter: OpenRouterConfig,
 }
 
 impl Default for AppConfig {
@@ -483,6 +525,7 @@ impl Default for AppConfig {
             ssh: SshConfig::default(),
             agent_playbook: default_agent_playbook(),
             global_prompt: default_global_prompt(),
+            openrouter: OpenRouterConfig::default(),
         }
     }
 }
@@ -567,14 +610,20 @@ impl AppConfig {
             ssh: self.ssh.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
+            openrouter_model: self.openrouter.model.clone(),
+            openrouter_key_set: !self.openrouter.key.is_empty(),
         }
     }
 }
 
 /// The shape `GET /api/config` returns: the same structure as [`AppConfig`], each preset's
-/// Linear key included verbatim. Nothing here is withheld, because the browser needs a key to
-/// query Linear with; the redaction is a direction rather than a mask, and `PUT /api/config`
-/// takes each key as write-only. Powers the Settings UI.
+/// Linear key included verbatim, because the browser needs a key to query Linear with. For
+/// those keys the redaction is a direction rather than a mask, and `PUT /api/config` takes
+/// each one as write-only. Powers the Settings UI.
+///
+/// One field is genuinely withheld: the OpenRouter key, which arrives only as
+/// [`Self::openrouter_key_set`]. Nothing in the browser calls OpenRouter, so there is no
+/// reason to hand it over.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -597,6 +646,12 @@ pub struct AppConfigRedacted {
     pub ssh: SshConfig,
     pub agent_playbook: String,
     pub global_prompt: String,
+    /// Which model answers the stuck question. Not a secret, so it passes through.
+    pub openrouter_model: String,
+    /// Whether an OpenRouter key is stored. The key itself never leaves the server; this
+    /// is the whole test the settings panel runs to decide whether its write-only input
+    /// reads as already set.
+    pub openrouter_key_set: bool,
 }
 
 /// Response body for `PUT /api/config`: the redacted config after the merge, plus
@@ -823,6 +878,10 @@ mod tests {
                 template_reference: "pegasis0/rmng-template:v9".into(),
                 ..Default::default()
             },
+            openrouter: OpenRouterConfig {
+                key: "sk-or-v1-openrouter-secret".into(),
+                model: "~vendor/model-latest".into(),
+            },
             presets: vec![
                 Preset {
                     name: "med".into(),
@@ -866,6 +925,15 @@ mod tests {
         assert_eq!(r.docker.hostname_prefix, "dev-");
         // template_reference is non-secret — it passes through the redacted view intact.
         assert_eq!(r.docker.template_reference, "pegasis0/rmng-template:v9");
+        // The OpenRouter key is the one thing here that IS withheld: nothing in the browser
+        // calls OpenRouter, so it gets a boolean and the model name, never the key.
+        assert!(
+            !json.contains("sk-or-v1-openrouter-secret"),
+            "the OpenRouter key must not reach the browser: {json}"
+        );
+        assert!(r.openrouter_key_set);
+        assert_eq!(r.openrouter_model, "~vendor/model-latest");
+        assert!(!AppConfig::default().redacted().openrouter_key_set);
     }
 
     #[test]

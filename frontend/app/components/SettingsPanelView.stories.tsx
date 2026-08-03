@@ -111,6 +111,8 @@ const meta = {
     onRestartServer: fn(),
     testMessage: null,
     onTestDocker: fn(),
+    openrouterTestMessage: null,
+    onTestOpenRouter: fn(),
     imagesLoading: false,
     pullBusy: false,
     now: imagesNow,

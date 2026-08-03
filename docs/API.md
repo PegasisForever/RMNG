@@ -230,35 +230,61 @@ in the usage event, and Fable is a Claude family regardless.
 
 <a id="monitorstate"></a>
 ### `Clone.monitorState` — where `working` vs `idle` comes from
-Docker liveness supplies `offline`. The split between the other two is read off the
-agent-wrapper's `/events` SSE stream, which the control-server already holds open for every
-running managed clone ([chat.rs](../crates/control-server/src/chat.rs)
-`run_autonomous_listener`), so it costs no extra connection and no clone-side change. A
-`{busy: true}` frame (a turn starting) and every `activity` line (streamed throughout it) stamp
-a volatile per-clone timestamp ([monitor.rs](../crates/control-server/src/monitor.rs)
-`ActivityBus`); a clone quiet for 5 minutes reads `idle`. `{busy: false}` is deliberately **not**
-stamped — it marks work *ending*, and counting it as activity would pin a finished clone at
-`working` for another whole window; the `activity` lines are stamped so a turn longer than the
-window doesn't slide to `idle` mid-work.
+Docker liveness supplies `offline`. The other two answer one question about the clone's agent:
+**will it get any further without a person?** A clone that finished its task reads `idle`, and so
+does one that asked a question, one whose only running command never returns, and one wedged
+inside a command that has hung. All four need the same thing, which is you.
 
-Reading the wrapper's stream rather than `ChatSnapshot.busy` is what makes autonomous background
-work count, not just operator-solicited turns.
+Three quarters of a fleet is settled from files alone, with no model involved. Claude Code keeps a
+live registry at `~/.claude/sessions/<pid>.json`, and the server reads it through the symlink
+[homes.rs](../crates/control-server/src/homes.rs) already maintains:
 
-A **second, independent input** stamps the same `ActivityBus`: the agent CLIs' own session logs,
-polled by [agentlog.rs](../crates/control-server/src/agentlog.rs) (see
-[`cloneTokens`](#clonetokens)). This is what covers an agent a user starts *by hand* inside a
-clone — a bare `claude`/`codex` in a terminal, with no wrapper in front of it. Those emit no SSE
-frames, but they do write their transcript, and it is appended *during* the turn rather than
-flushed at exit. The two sources are complementary, not redundant: SSE is instant, the log poll
-is up to 15 s behind but sees everything. Whichever observes work first wins.
+| what the registry says | verdict |
+|---|---|
+| no live session (its process is gone) | `idle` — nothing is running that could wake it |
+| any session `waiting` | `idle` — a dialog is up |
+| every session `idle` | `idle` — all sitting at the prompt |
+| anything else | ask (below) |
 
-The map is never persisted: after a server restart every clone reads `idle` until it next works,
-which is the right cold default.
+The all-`idle` shortcut is exact rather than a guess: Claude Code publishes `shell`, not `idle`,
+the moment a background task, dialog or queued request exists. A session record stores its pid as
+the *container* numbers it, so liveness is checked against the container's own `/proc`, and
+`procStart` guards a reused pid.
 
-**A parent clone is only `idle` when its sub clones are too.** Activity is observed per clone, so
-a parent that handed work to a sub clone and is waiting on it produces no frames and no log lines
-of its own, and would read `idle` while the work it started is still running. After each tick's
-states are computed, a working sub clone lifts its parent's `idle` back to `working`
+**The remaining clones get one model call.** The question is narrow enough to be mostly a property
+of a command: `cargo build` returns, `npm run dev` does not, and reading a pipe returns only if a
+machine and not a person is going to write it. The evidence comes from an activity probe the
+reconciler installs in every clone (`~/.rmng/hook.py`, registered under `.hooks` in
+`~/.claude/settings.json`), which records turn boundaries, subagent starts and stops, the
+outstanding background-task set, and every tool call. An unmatched `PreToolUse` is what tells a
+clone sitting inside a command from one that has finished. See
+[stuck.rs](../crates/control-server/src/stuck.rs).
+
+Answers are cached on the view with elapsed times bucketed, so a clone in one state is asked about
+once rather than once per four-second tick. On a 32-clone fleet that was 381 calls over six hours,
+about **$0.013 per clone-hour**.
+
+**With no OpenRouter key configured, no clone is ever reported `working`.** The file checks only
+ever produce `idle` or "ask", and nothing answers the ask. That is deliberate: a guess in either
+direction is worse than an honest "not working". Per-clone [`cloneTokens`](#clonetokens) accounting
+is separate and unaffected. Set the key in Settings → Agents.
+
+Measured against a replay oracle over two runs on a live 32-clone fleet (2955 scorable samples, 25
+real stalls), against the 5-minute token-idle rule this replaced:
+
+| | accuracy | missed a stuck clone | false alarm | median lag | worst lag |
+|---|---|---|---|---|---|
+| token idle | 90.9% | 250 | 20 | 331s | 1487s |
+| this | 96.7% | 44 | 54 | 31s | 92s |
+
+The known gap: a loop that ends when an external system reaches a state it never reaches (polling
+CI that stays pending) reads as `working`. The model's reasoning is right and the world does not
+cooperate.
+
+**A parent clone is only `idle` when its sub clones are too.** State is decided per clone, so a
+parent that handed work to a sub clone and is waiting on it looks quiet, and would read `idle`
+while the work it started is still running. After each tick's states are computed, a working sub
+clone lifts its parent's `idle` back to `working`
 ([monitor.rs](../crates/control-server/src/monitor.rs) `lift_sub_clone_activity`). `offline` is
 never lifted, since that state is about the container. A sub clone the tick could not reach keeps
 holding its parent by the state it is still displayed with. Parentage is one level deep

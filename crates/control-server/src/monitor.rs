@@ -1,7 +1,8 @@
 //! Docker-backed clone maintenance and server-owned lifecycle state.
 //!
-//! Docker determines whether a managed container is running; agent-wrapper busy frames (see
-//! [`ActivityBus`]) distinguish `working` from a Docker-running but inactive (`idle`) clone.
+//! Docker determines whether a managed container is running; [`crate::stuck`] decides whether
+//! a running one is `working` or `idle`, by reading Claude Code's own session registry and
+//! agent hooks and, for the cases those cannot settle, asking a cheap model one question.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock as StdRwLock;
@@ -137,11 +138,6 @@ impl ViewTracker {
     }
 }
 
-/// How long after a clone's last observed agent activity it still counts as `working`.
-///
-/// Matches the window the retired proxy-token accounting used, so the sidebar's working/idle
-/// behaviour is unchanged by the switch of underlying signal.
-const ACTIVITY_INACTIVE_MS: i64 = 5 * 60 * 1000;
 
 /// Volatile per-clone "agent was last busy" timestamps (wall-clock ms) — the signal behind
 /// `working` vs `idle`.
@@ -184,21 +180,16 @@ impl ActivityBus {
         self.last_active.read().unwrap().get(clone_id).copied()
     }
 
-    /// Whether `clone_id` has been quiet long enough to read as `idle`. A clone we have never
-    /// seen work is inactive — it has produced nothing to be "working" on.
-    pub fn is_inactive(&self, clone_id: &str, now_ms: i64) -> bool {
-        match self.last_active_at(clone_id) {
-            Some(last) => now_ms.saturating_sub(last) >= ACTIVITY_INACTIVE_MS,
-            None => true,
-        }
-    }
-
     /// Drop entries for clones no longer in the active managed fleet, so the map cannot grow
     /// unbounded across the life of a long-running server.
     pub fn retain(&self, ids: &HashSet<String>) {
         self.last_active.write().unwrap().retain(|id, _| ids.contains(id));
     }
 }
+
+/// One clone the daemon answered for this tick: id, running, its stats sample, and its IP
+/// (the outer `Option` is "did we look", the inner one is "does it have one").
+type SettledProbe = (String, bool, Option<ContainerStats>, Option<Option<String>>);
 
 #[derive(Clone, Copy)]
 struct CpuSample {
@@ -465,10 +456,12 @@ async fn poll_once(
     let (lxc_stats, probes) = tokio::join!(sample_lxc(previous_lxc_cpu), probes);
     let prev_stats = app.stats.latest_map();
 
-    let now = crate::clone_ops::now_ms();
     let mut next: HashMap<String, MonitorState> = HashMap::with_capacity(probes.len());
     let mut stats_map = HashMap::new();
     let mut ip_updates: HashMap<String, Option<String>> = HashMap::new();
+    // Clones whose liveness Docker actually answered for. An unreachable daemon leaves a
+    // clone out entirely, which is what keeps its stored state untouched.
+    let mut settled: Vec<SettledProbe> = Vec::with_capacity(probes.len());
     for (id, running, stats, ip, cpu_sample) in probes {
         match cpu_sample {
             Some(sample) => {
@@ -481,12 +474,22 @@ async fn poll_once(
         let Some(running) = running else {
             continue;
         };
-        let state = if !running {
-            MonitorState::Offline
-        } else if app.activity.is_inactive(&id, now) {
-            MonitorState::Idle
+        settled.push((id, running, stats, ip));
+    }
+
+    // Deciding working-vs-stuck reads each clone's files and may ask a model, so it happens
+    // once for the whole fleet, concurrently, rather than inline per clone.
+    let states = crate::stuck::resolve_fleet(
+        app,
+        settled.iter().filter(|(_, up, _, _)| *up).map(|(id, ..)| id.clone()).collect(),
+    )
+    .await;
+
+    for (id, running, stats, ip) in settled {
+        let state = if running {
+            states.get(&id).copied().unwrap_or(MonitorState::Idle)
         } else {
-            MonitorState::Working
+            MonitorState::Offline
         };
         if let Some(stats) = pick_stat(stats, state, prev_stats.get(&id)) {
             stats_map.insert(id.clone(), stats);
@@ -788,21 +791,6 @@ mod tests {
         act.retain(&HashSet::from(["a".to_string()]));
         assert_eq!(act.last_active_at("a"), Some(150));
         assert_eq!(act.last_active_at("b"), None);
-    }
-
-    /// The working/idle boundary. A never-seen clone must read inactive (it has produced
-    /// nothing to be working on), and the window must be a `>=` so a clone sitting exactly on
-    /// the boundary settles to idle rather than flapping.
-    #[test]
-    fn activity_bus_inactivity_window() {
-        let act = ActivityBus::new();
-        assert!(act.is_inactive("never-seen", 1_000), "an unknown clone is not 'working'");
-
-        act.mark("a", 1_000);
-        assert!(!act.is_inactive("a", 1_000), "just-active is working");
-        assert!(!act.is_inactive("a", 1_000 + ACTIVITY_INACTIVE_MS - 1), "still inside the window");
-        assert!(act.is_inactive("a", 1_000 + ACTIVITY_INACTIVE_MS), "the boundary reads idle");
-        assert!(act.is_inactive("a", 1_000 + ACTIVITY_INACTIVE_MS * 2));
     }
 
     #[test]

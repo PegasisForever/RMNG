@@ -2008,17 +2008,28 @@ async fn config_put(
 #[derive(Deserialize)]
 struct TestReq {
     what: String,
+    /// A value to test INSTEAD of the stored one, for a credential the operator has typed
+    /// but not saved. Without it, "paste key, press Test" would test the previous key and
+    /// report on something the operator is not looking at.
+    #[serde(default)]
+    value: String,
 }
 
 /// `POST /api/config/test` — validate a setting from the UI. `"docker"` re-runs the Docker
 /// self-setup probe and collapses the [`crate::docker::EnvReport`] into a single
 /// `(ok, message)` verdict (the row-by-row breakdown is `GET /api/setup/env`).
+/// `"openrouter"` asks OpenRouter what the key is worth.
 async fn config_test(State(app): State<App>, Json(req): Json<TestReq>) -> Json<serde_json::Value> {
     let (ok, message) = match req.what.as_str() {
         "docker" => {
             let setup_complete = app.config().setup_complete;
             let report = app.docker.self_setup(setup_complete).await;
             collapse_env_report(&report)
+        }
+        "openrouter" => {
+            let stored = app.config().openrouter.key;
+            let key = if req.value.is_empty() { stored } else { req.value };
+            crate::stuck::probe_key(&app.http, &key).await
         }
         other => (false, format!("unknown test '{other}'")),
     };

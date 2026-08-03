@@ -71,8 +71,9 @@ pub struct BoardColumn {
     pub archive: bool,
 }
 
-/// Server-owned lifecycle state. Docker supplies container liveness while passive proxy token
-/// activity distinguishes `working` from a running-but-not-working (`idle`) clone.
+/// Server-owned lifecycle state. Docker supplies container liveness; `working` versus `idle`
+/// answers one question about the clone's agent, "will it get any further without a person",
+/// so a clone that has finished, asked something, or wedged all read `idle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -199,8 +200,8 @@ pub struct RmngClone {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_label: Option<String>,
-    /// Current server-owned lifecycle state. It is derived from Docker liveness and passive
-    /// proxy token activity, never reported by a clone-local process.
+    /// Current server-owned lifecycle state. Derived from Docker liveness plus the clone's own
+    /// Claude Code session registry and agent hooks, never reported by a clone-local process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor_state: Option<MonitorState>,
     /// The clone container's IPv4 on the rmng bridge network — the address other

@@ -47,8 +47,13 @@ pub struct App {
     /// event. SSE-only — never persisted (see [`crate::forward::ForwardBus`]).
     pub forwards: Arc<crate::forward::ForwardBus>,
     /// Volatile per-clone agent-activity timestamps, fed by the agent-wrapper's `busy`/`activity`
-    /// SSE frames. The `working` vs `idle` signal (see [`crate::monitor::ActivityBus`]).
+    /// SSE frames and the transcript scanner. No longer decides `working` vs `idle` — that is
+    /// [`crate::stuck`] now — but it is still what `should_flag_unread` reads to tell an idle
+    /// clone the operator has already seen from one that just went quiet.
     pub activity: Arc<crate::monitor::ActivityBus>,
+    /// Remembers what the model said about a clone, so one state is asked about once rather
+    /// than once per four-second tick.
+    pub stuck: Arc<crate::stuck::Judge>,
     /// Volatile per-clone "operator last looked at this clone" timestamps. Set on selection
     /// changes (`web::activate`) and read by the monitor to suppress a `working → idle`
     /// notification for a clone whose latest output the operator has already seen.
@@ -106,6 +111,7 @@ impl App {
             lxc_stats: Arc::new(crate::monitor::LxcStatsBus::new()),
             forwards: Arc::new(crate::forward::ForwardBus::new()),
             activity: Arc::new(crate::monitor::ActivityBus::new()),
+            stuck: Arc::new(crate::stuck::Judge::new()),
             views: Arc::new(crate::monitor::ViewTracker::new()),
             build_id: Arc::new(RwLock::new(boot_id())),
         }

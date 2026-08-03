@@ -77,8 +77,8 @@ linearWorkspace: string | null, linearTicket: string | null, linearTicketUrl: st
  */
 presetName: string | null, displayName: string | null, linearLabel: string | null, 
 /**
- * Current server-owned lifecycle state. It is derived from Docker liveness and passive
- * proxy token activity, never reported by a clone-local process.
+ * Current server-owned lifecycle state. Derived from Docker liveness plus the clone's own
+ * Claude Code session registry and agent hooks, never reported by a clone-local process.
  */
 monitorState: MonitorState | null, 
 /**

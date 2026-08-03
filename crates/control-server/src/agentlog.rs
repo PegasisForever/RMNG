@@ -67,11 +67,12 @@ const MAX_READ_PER_FILE: u64 = 8 * 1024 * 1024;
 /// How far ahead of our own clock a log timestamp may sit and still be believed.
 ///
 /// The timestamp is written by the CLONE, which is a sandbox someone (or some agent) has root
-/// in. [`crate::monitor::ActivityBus::mark`] is monotonic-max and `is_inactive` subtracts with
-/// `saturating_sub` on `i64` — which saturates at the type bound, not at zero — so a single
-/// record dated 2099 yields a permanently negative "age" and pins the clone at `working`
-/// forever, with no way back short of deleting it from the fleet. Records beyond this bound are
-/// dropped rather than clamped to now: clamping would still light the badge off a garbage line.
+/// in. [`crate::monitor::ActivityBus::mark`] is monotonic-max, so a single record dated 2099
+/// pins that clone's last-activity stamp in the future permanently, with no way back short of
+/// deleting it from the fleet. Downstream that stamp decides whether a clone going quiet is
+/// still news (`should_flag_unread`), so a poisoned one silences its notifications for good.
+/// Records beyond this bound are dropped rather than clamped to now: clamping would still
+/// light the badge off a garbage line.
 /// The allowance covers ordinary clock skew between a clone and the host.
 const FUTURE_SKEW_TOLERANCE_MS: i64 = 2 * 60 * 1000;
 
@@ -1498,9 +1499,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_future_timestamp_cannot_pin_a_clone_at_working() {
-        // `ActivityBus::mark` is monotonic-max and `is_inactive` subtracts with a saturating
-        // i64 op, so a single record dated 2099 would make the clone read `working` forever.
+    async fn a_future_timestamp_is_rejected_rather_than_believed() {
+        // `ActivityBus::mark` is monotonic-max, so a single record dated 2099 would pin this
+        // clone's last-activity stamp in the future permanently. That no longer decides
+        // working-vs-stuck, but `should_flag_unread` still reads it to tell an idle clone the
+        // operator has already seen from one that just went quiet.
         let app = app_with(&[("evil", false)], &[]);
         let dir = crate::homes::hosts_root(&app.config().data_dir);
         let home = dir.join("evil");
@@ -1524,9 +1527,10 @@ mod tests {
         scan_once(&app, &mut scans).await;
 
         let now = crate::clone_ops::now_ms();
+        let stamped = app.activity.last_active_at("evil").unwrap_or(0);
         assert!(
-            app.activity.is_inactive("evil", now),
-            "a far-future timestamp must be rejected, not believed"
+            stamped <= now,
+            "a far-future timestamp must be rejected, not believed (stamped {stamped}, now {now})"
         );
         // The tokens on that record still count — only the CLOCK is untrusted.
         assert_eq!(app.store.get().clone_tokens.get("evil").map(|t| t.input_tokens), Some(5));

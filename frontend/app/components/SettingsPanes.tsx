@@ -16,6 +16,7 @@ import { SettingsDockerSection } from "~/components/SettingsDockerSection";
 import { Field, Section, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
 import { SettingsLayoutPresets } from "~/components/SettingsLayoutPresets";
+import { SettingsOpenRouterSection } from "~/components/SettingsOpenRouterSection";
 import type { SettingsPanelViewProps } from "~/components/SettingsPanelView";
 import { SettingsPresetList } from "~/components/SettingsPresetList";
 import { SettingsProviderFields } from "~/components/SettingsProviderFields";
@@ -83,9 +84,25 @@ export function BoardPane({
 
 /** Agents: the two prompt layers every clone is built with. The global one is every agent's
  *  native rules file; the second is the node-agent's alone. */
-export function AgentsPane({ draft, onDraftChange }: SettingsPaneProps) {
+export function AgentsPane({
+  draft,
+  onDraftChange,
+  onTestOpenRouter,
+  openrouterTestMessage,
+}: SettingsPaneProps) {
   return (
     <>
+      {/* How RMNG tells a clone that is thinking from one that is waiting on you. */}
+      <SettingsOpenRouterSection
+        keyValue={draft.openrouterKey}
+        keySet={draft.openrouterKeySet}
+        model={draft.openrouterModel}
+        onKeyChange={(v) => onDraftChange("openrouterKey", v)}
+        onModelChange={(v) => onDraftChange("openrouterModel", v)}
+        onTest={onTestOpenRouter}
+        testMessage={openrouterTestMessage}
+      />
+
       {/* Layer a: the shared operating memory EVERY agent reads as its native global rules
           (CLAUDE.md / AGENTS.md). Kept in sync into existing clones by the reconciler. */}
       <Section

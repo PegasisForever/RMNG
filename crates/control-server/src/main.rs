@@ -29,6 +29,7 @@ mod shm;
 mod smb;
 mod ssh;
 mod state;
+mod stuck;
 mod termplane;
 mod token_unmigrate;
 mod update;

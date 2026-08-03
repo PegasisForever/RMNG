@@ -94,6 +94,10 @@ export interface SettingsPanelViewProps {
   /** The result of the last Docker probe. */
   testMessage: string | null;
   onTestDocker: () => void;
+  /** A second slot rather than one shared string: the two tests live in different
+   *  categories, and one verdict overwriting the other reads as the wrong answer. */
+  openrouterTestMessage: string | null;
+  onTestOpenRouter: () => void;
 
   /** Clone-source images (moved here from the sidebar). */
   images: ImageInfo[];

@@ -52,6 +52,8 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     ssh: { authorizedKeys: ["ssh-ed25519 AAAA me@laptop"], publicHost: "rmng.example.com" },
     agentPlaybook: "playbook",
     globalPrompt: "prompt",
+    openrouterModel: "~vendor/model-latest",
+    openrouterKeySet: true,
     ...overrides,
   };
 }
@@ -75,6 +77,7 @@ type Patch = {
     claudeAccount: string;
     vars: { key: string; value: string }[];
   }[];
+  openrouter: { key: string; model: string };
 };
 
 const patch = (draft: ReturnType<typeof settingsDraftFrom>, setupComplete = true) =>
@@ -275,4 +278,24 @@ test("a freshly imported account lands after the ordered ones, not first", () =>
   const rows = orderedAccounts(accounts, { claude: ["claude|a@x.com"] });
 
   expect(rows.claude.map((a) => a.email)).toEqual(["a@x.com", "fresh@x.com"]);
+});
+
+test("the OpenRouter key is never handed to the form, only whether one is stored", () => {
+  // Unlike a preset's Linear key, this one is withheld: nothing in the browser calls
+  // OpenRouter, so `AppConfigRedacted` carries a boolean and the model name, never the key.
+  const draft = settingsDraftFrom(config());
+
+  expect(draft.openrouterKey).toBe("");
+  expect(draft.openrouterKeySet).toBe(true);
+  expect(draft.openrouterModel).toBe("~vendor/model-latest");
+});
+
+test("submitting a blank OpenRouter key keeps the stored one", () => {
+  // The whole write-only mechanism: `deep_merge` on the server treats an empty string as
+  // "unchanged", so a save the operator did not retype must not clear their key.
+  const untouched = patch(settingsDraftFrom(config()));
+  expect(untouched.openrouter.key).toBe("");
+
+  const typed = patch({ ...settingsDraftFrom(config()), openrouterKey: "sk-or-v1-new" });
+  expect(typed.openrouter.key).toBe("sk-or-v1-new");
 });

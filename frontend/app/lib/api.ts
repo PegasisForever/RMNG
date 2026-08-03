@@ -252,8 +252,11 @@ export const putConfig = (patch: unknown) =>
     ConfigPutResponse & { networkWarning?: string }
   >;
 /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
-export const testConfig = (what: string) =>
-  postJson("/api/config/test", { what }) as Promise<{ ok: boolean; message: string }>;
+export const testConfig = (what: string, value?: string) =>
+  postJson("/api/config/test", { what, value: value ?? "" }) as Promise<{
+    ok: boolean;
+    message: string;
+  }>;
 /** Make `name` the active layout preset and live-apply it to all running clones. */
 export const activateLayout = (name: string) =>
   postJson("/api/layout/activate", { name }) as Promise<{

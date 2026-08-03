@@ -55,6 +55,8 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     ssh: { authorizedKeys: [], publicHost: "" },
     agentPlaybook: "",
     globalPrompt: "",
+    openrouterModel: "~deepseek/deepseek-v4-flash-latest",
+    openrouterKeySet: false,
     ...overrides,
   };
 }

@@ -37,7 +37,8 @@ export interface SettingsPanelContainerProps {
   /** Persist a partial config patch; returns the merged config + a restart-required flag. */
   putConfig: (patch: unknown) => Promise<ConfigPutResponse & { networkWarning?: string }>;
   /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
-  testConfig: (what: string) => Promise<{ ok: boolean; message: string }>;
+  /** `value` tests an unsaved credential the operator has just typed. */
+  testConfig: (what: string, value?: string) => Promise<{ ok: boolean; message: string }>;
   /** Read the control-server's own version + update-available status. */
   getUpdateStatus: () => Promise<UpdateStatus>;
   /** Pull the latest control-server image and swap the running container onto it. Returns
@@ -113,6 +114,7 @@ export function SettingsPanelContainer({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [orTestMsg, setOrTestMsg] = useState<string | null>(null);
   // True after a save that touched a restart-required setting (ports / cloneSocket /
   // staticDir / chroma) — surfaces a persistent banner until a later save clears it.
   const [restartRequired, setRestartRequired] = useState(false);
@@ -264,6 +266,18 @@ export function SettingsPanelContainer({
     }
   }
 
+  // Tests what is typed, falling back to what is stored. Testing only the saved key would
+  // report on the previous one, which is not what the operator is looking at.
+  async function runOpenRouterTest() {
+    setOrTestMsg("testing…");
+    try {
+      const r = await testConfig("openrouter", draft?.openrouterKey || "");
+      setOrTestMsg(`${r.ok ? "✓" : "✗"} ${r.message}`);
+    } catch (e) {
+      setOrTestMsg(`✗ ${(e as Error).message}`);
+    }
+  }
+
   return (
     <SettingsPanelView
       draft={draft}
@@ -294,6 +308,8 @@ export function SettingsPanelContainer({
       onRestartServer={doRestart}
       testMessage={testMsg}
       onTestDocker={runTest}
+      openrouterTestMessage={orTestMsg}
+      onTestOpenRouter={runOpenRouterTest}
       images={images}
       imagesLoading={imagesLoading}
       pullBusy={pullBusy}

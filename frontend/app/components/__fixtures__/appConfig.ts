@@ -64,6 +64,8 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
     },
     agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
     globalPrompt: "# Working in this clone\n\n(sample shared operating memory)\n",
+    openrouterModel: "~deepseek/deepseek-v4-flash-latest",
+    openrouterKeySet: true,
     ...overrides,
   };
 }
