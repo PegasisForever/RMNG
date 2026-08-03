@@ -18,7 +18,6 @@ import {
   closestCorners,
   DndContext,
   DragOverlay,
-  KeyboardSensor,
   pointerWithin,
   PointerSensor,
   rectIntersection,
@@ -29,7 +28,7 @@ import {
   type DragOverEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { arrayMove, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { arrayMove } from "@dnd-kit/sortable";
 import { type ReactNode, useRef, useState } from "react";
 
 import { BoardCard, BoardCardBody, CardFrame } from "~/components/BoardCard";
@@ -272,11 +271,15 @@ export function Board({
       })
     : [];
 
+  // Pointer only, no `KeyboardSensor`. Every card on this board is its own drag activator
+  // rather than carrying a grip, so a keyboard activator fires on any Space or Enter that
+  // reaches a card, including one aimed at a button inside it or at scrolling the page.
+  // The cards drop dnd-kit's keyboard listener themselves as well, which is what holds in
+  // Storybook, where a bare `DndContext` supplies the default sensors.
   const sensors = useSensors(
     // The same 5px activation distance the sidebar used, so a plain click still selects
     // the card instead of starting a drag.
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   const opFor = (id: string) =>

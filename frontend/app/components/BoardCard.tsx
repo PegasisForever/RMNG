@@ -77,12 +77,18 @@ export function BoardCard({
   children,
   ...card
 }: SidebarCloneProps & { id: string; children?: ReactNode }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id,
     // A clone with an operation in flight (delete, or a fresh clone finishing its setup)
     // stays put until it settles.
     disabled: card.op?.status === "running",
   });
+  // Pointer drag only. The whole card is the drag activator, so dnd-kit's keyboard activator
+  // lifts the card on any Space or Enter that reaches it, including a click that left focus on
+  // the card. Dropping the handler is what disables that; dnd-kit's `attributes` go with it,
+  // since they are what advertise the keyboard drag (`tabIndex`, `role`, and the
+  // `aria-describedby` that points at "press the space bar to pick up").
+  const { onKeyDown: _liftOnSpace, ...dragListeners } = listeners ?? {};
   const style: CSSProperties = {
     transform: CSS.Translate.toString(transform),
     transition,
@@ -93,7 +99,7 @@ export function BoardCard({
 
   return (
     <div ref={setNodeRef} style={style}>
-      <BoardCardBody {...card} dragAttributes={attributes} dragListeners={listeners}>
+      <BoardCardBody {...card} dragListeners={dragListeners}>
         {children}
       </BoardCardBody>
     </div>

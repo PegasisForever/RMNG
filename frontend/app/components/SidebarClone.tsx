@@ -1,4 +1,4 @@
-import type { DraggableAttributes, DraggableSyntheticListeners } from "@dnd-kit/core";
+import type { DraggableSyntheticListeners } from "@dnd-kit/core";
 import {
   Archive,
   ArchiveRestore,
@@ -289,11 +289,10 @@ export interface SidebarCloneProps {
   expanded?: boolean;
   /** Toggle this clone's sub-clone expansion. */
   onToggleExpand?: () => void;
-  /** dnd-kit drag activator props from the enclosing sortable group (see `SortableCloneGroup`).
-   *  Present only on a draggable top-level row; spread onto the card so grabbing it drags the
-   *  whole group (parent + its expanded sub clones). Absent ⇒ the row is static (children,
-   *  archived rows, Storybook). */
-  dragAttributes?: DraggableAttributes;
+  /** dnd-kit pointer activator from the enclosing board card. Present only on a draggable
+   *  top-level row; spread onto the card so grabbing it drags the whole group (parent + its
+   *  expanded sub clones). Absent ⇒ the row is static (children, archived rows, Storybook).
+   *  Carries no keyboard activator: a card drags with the pointer only (see `BoardCard`). */
   dragListeners?: DraggableSyntheticListeners;
 }
 
@@ -434,7 +433,6 @@ export function SidebarClone({
   childCount = 0,
   expanded = false,
   onToggleExpand,
-  dragAttributes,
   dragListeners,
 }: SidebarCloneProps) {
   const busy = op?.status === "running";
@@ -485,8 +483,8 @@ export function SidebarClone({
   };
   // Managed clones always show the binding line: an unassigned account is itself worth seeing.
   const showBindingLine = managed || !!cpuMetric;
-  // Drag is owned by the enclosing SortableCloneGroup; a row is draggable only when it received
-  // drag listeners (top-level active rows). Children/archived rows get none and stay static.
+  // Drag is owned by the enclosing `BoardCard`. A row is draggable only when it received drag
+  // listeners (top-level active rows). Children/archived rows get none and stay static.
   const draggable = !!dragListeners;
 
   return (
@@ -494,7 +492,6 @@ export function SidebarClone({
     // plain click selects (the sensor's 5px activation distance keeps clicks and drags
     // apart); a drag reorders. The ⋯ menu and the expand control stop propagation.
     <div
-      {...dragAttributes}
       {...dragListeners}
       aria-pressed={selected}
       onClick={onSelect}

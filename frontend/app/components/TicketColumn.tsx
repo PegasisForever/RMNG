@@ -339,9 +339,15 @@ function TicketCard({
   onCancel?: () => void;
   onMoveToBacklog?: () => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: ticketDragId(ticket.id),
   });
+  // Pointer drag only, the same rule the clone cards follow (see `BoardCard`). The whole card
+  // is the drag activator, so dnd-kit's keyboard activator lifts it on any Space or Enter that
+  // reaches it. Its `attributes` go with the handler, since they are what advertise the
+  // keyboard drag: `tabIndex`, `role`, and an `aria-describedby` pointing at "press the space
+  // bar to pick up".
+  const { onKeyDown: _liftOnSpace, ...dragListeners } = listeners ?? {};
   const style: CSSProperties = {
     transform: CSS.Translate.toString(transform),
     transition,
@@ -353,8 +359,7 @@ function TicketCard({
     <div
       ref={setNodeRef}
       style={style}
-      {...attributes}
-      {...listeners}
+      {...dragListeners}
       onClick={onSelect}
       className="cursor-grab touch-none"
     >
