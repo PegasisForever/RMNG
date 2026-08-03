@@ -9,6 +9,7 @@
 // SettingsPanelView.
 import { useEffect, useState } from "react";
 
+import type { SettingsCategory } from "~/components/SettingsNav";
 import { SettingsPanelView } from "~/components/SettingsPanelView";
 import { useAccountOrder } from "~/lib/accountOrder";
 import type { BoardColumn } from "~/lib/board";
@@ -101,6 +102,9 @@ export function SettingsPanelContainer({
   onDeleteBoardColumn,
   onReorderBoardColumns,
 }: SettingsPanelContainerProps) {
+  // Which category the rail is on. Resets to the top every time the panel opens, which is the
+  // right default: the panel is closed by the operator, and the next open is a new errand.
+  const [category, setCategory] = useState<SettingsCategory>("board");
   // The loaded config, kept alongside the form for the one thing the form does not carry:
   // whether first-run setup has finished, which decides both the subnet field and the patch.
   const [config, setConfig] = useState<AppConfigRedacted | null>(null);
@@ -264,6 +268,8 @@ export function SettingsPanelContainer({
     <SettingsPanelView
       draft={draft}
       onDraftChange={updateDraft}
+      category={category}
+      onCategoryChange={setCategory}
       accounts={accounts}
       accountOrder={acctOrder}
       onReorderAccounts={(provider, ids) =>

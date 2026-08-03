@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
+import { useArgs } from "storybook/preview-api";
 import { fn } from "storybook/test";
 
 import { SettingsPanelView, type SettingsPanelViewProps } from "./SettingsPanelView";
@@ -82,6 +83,10 @@ const meta = {
   args: {
     ...base(),
     onDraftChange: fn(),
+    // Which pane a story opens on. The rail is live in every story (see `render` below), so
+    // this is the starting point rather than a fixed one.
+    category: "board" as const,
+    onCategoryChange: fn(),
     // Nothing dragged, so the two account lists keep the order the rows arrive in.
     accountOrder: {},
     onReorderAccounts: fn(),
@@ -119,40 +124,83 @@ const meta = {
     onReorderBoardColumns: fn(),
   },
   render: function Render(args) {
-    return <SettingsPanelView {...args} {...useBoardColumns(args)} />;
+    const columns = useBoardColumns(args);
+    // The rail switches panes in every story, and the Controls panel follows along, so a
+    // story is a starting pane rather than the only one it can show.
+    const [{ category }, updateArgs] = useArgs<SettingsPanelViewProps>();
+    return (
+      <SettingsPanelView
+        {...args}
+        {...columns}
+        category={category}
+        onCategoryChange={(next) => {
+          updateArgs({ category: next });
+          args.onCategoryChange(next);
+        }}
+      />
+    );
   },
 } satisfies Meta<typeof SettingsPanelView>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** The full settings panel on a loaded config: every section, the board columns at the top,
- *  and the footer pinned under the scroll body. */
+/** The panel as it opens: the rail on the left, the Board pane beside it, and the footer
+ *  pinned under both. Every other pane is one click away. */
 export const Default: Story = { args: { ...base() } };
 
-/** The config is still in flight. One line where the sections will be, and no footer — there
- *  is nothing to save yet. */
+/** Agents: the two prompt layers, which are the panel's longest pane. The rail stays put
+ *  while they scroll. */
+export const Agents: Story = { args: { ...base(), category: "agents" } };
+
+/** Presets: one section, and the one that grows without limit. A workspace per row. */
+export const Presets: Story = { args: { ...base(), category: "presets" } };
+
+/** Claude: the provider's polling, its imported accounts, and the pools built from them,
+ *  which used to be three sections scattered down one scroll. */
+export const Claude: Story = { args: { ...base(), category: "claude" } };
+
+/** Codex: the same three sections for the other provider. */
+export const Codex: Story = { args: { ...base(), category: "codex" } };
+
+/** Clones: what a new clone is cut from, and the images it is cut out of. */
+export const Clones: Story = { args: { ...base(), category: "clones" } };
+
+/** Server: the control-server's own version and the settings it reads at startup. */
+export const Server: Story = { args: { ...base(), category: "server" } };
+
+/** A page with no board (the setup wizard's reuse of this panel). The rail drops the Board
+ *  category, and asking for it anyway lands on the first one that is left. */
+export const NoBoard: Story = {
+  args: { ...base(), boardColumns: undefined, category: "board" },
+};
+
+/** The config is still in flight. One line where the rail and the pane will be, and no
+ *  footer: there is nothing to save yet. */
 export const Loading: Story = {
   args: { ...base(), draft: null },
 };
 
-/** After a save that touched a restart-required setting — shows the restart banner. */
+/** After a save that touched a restart-required setting. The banner sits above the rail, so
+ *  it stands whichever pane the save was made from. */
 export const RestartRequired: Story = {
-  args: { ...base(), restartRequired: true },
+  args: { ...base(), restartRequired: true, category: "server" },
 };
 
 /** First-run setup: subnet is still editable (not yet baked in). */
 export const PreSetup: Story = {
-  args: { ...base(), setupComplete: false },
+  args: { ...base(), setupComplete: false, category: "clones" },
 };
 
-/** Nothing imported and no groups configured — both account lists and both group editors
- *  show their empty states (and the group editors prompt to import accounts first). */
+/** Nothing imported and no groups configured. The account list and the group editor both
+ *  show their empty states, and the group editor prompts to import accounts first. Codex
+ *  is the same story one rail item down. */
 export const NoAccounts: Story = {
   args: {
     ...base(),
     accounts: [],
     draft: makeSettingsDraft({ claudeGroups: [], codexGroups: [] }),
+    category: "claude",
   },
 };
 
@@ -165,16 +213,19 @@ export const UpdateInProgress: Story = {
     serverMessage: "updating… the server will restart shortly",
     updateOperation: makeUpdateOp(),
     updateDisabled: true,
+    category: "server",
   },
 };
 
-/** The load or the save failed. The banner sits above every section and the form stays
- *  exactly as it was, so the attempt can be retried as it stands. */
+/** The load or the save failed. The banner sits above the rail and the form stays exactly as
+ *  it was, so the attempt can be retried as it stands. Opened on Clones, where the failed
+ *  Docker probe reports too. */
 export const WithError: Story = {
   args: {
     ...base(),
     error: "PUT /api/config: 400 subnet is fixed after first-run setup",
     testMessage: "✗ docker: permission denied on /var/run/docker.sock",
+    category: "clones",
   },
 };
 
@@ -190,14 +241,21 @@ export const Saving: Story = {
 export const Interactive: Story = {
   args: { ...base() },
   render: function Render(args) {
+    const columns = useBoardColumns(args);
     const [draft, setDraft] = useState(args.draft);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [accountOrder, setAccountOrder] = useState(args.accountOrder);
+    const [category, setCategory] = useState(args.category);
     return (
       <SettingsPanelView
         {...args}
-        {...useBoardColumns(args)}
+        {...columns}
+        category={category}
+        onCategoryChange={(next) => {
+          setCategory(next);
+          args.onCategoryChange(next);
+        }}
         draft={draft}
         onDraftChange={(key, value) => {
           setDraft((d) => (d ? { ...d, [key]: value } : d));
