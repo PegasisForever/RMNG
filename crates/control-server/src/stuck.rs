@@ -27,9 +27,12 @@
 //! `npm run dev` does not. `cat /tmp/ci.fifo` returns only if whatever feeds the pipe is a
 //! machine and not the person you would be notifying.
 //!
+//! GPT answers it, on an imported Codex account's ChatGPT plan. There is no key to set and no
+//! provider to pick: the server already holds that account's token to run the clones.
+//!
 //! [`Verdict::Working`] is never produced here — only [`apply_verdict`] can, from the
-//! model's answer. That is what makes "no OpenRouter key" behave correctly with no branch
-//! for it: with nothing to answer [`Verdict::Ask`], no clone is ever reported working.
+//! model's answer. That is what makes "no Codex account imported" behave correctly with no
+//! branch for it: with nothing to answer [`Verdict::Ask`], no clone is ever reported working.
 //!
 //! Nothing is stored between ticks except the answer cache. Every verdict is recomputed
 //! from the session registry, the hook log, and file mtimes, so there is no history to
@@ -38,6 +41,9 @@
 //! Measured against a replay oracle over two runs on a live 32-clone fleet (2955 scorable
 //! samples, 25 real stalls): 96.7% accurate against token idle's 90.9%, 44 missed stuck
 //! clones against 250, and a median 31s to flag a stall against 331s.
+//!
+//! On the 1167 distinct views those runs recorded, `gpt-5.6-luna` at medium effort scores
+//! 94.5% with the prompt below (43 missed, 21 false alarms), at a median 1.8s per call.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -55,8 +61,12 @@ const MOVING_WINDOW_S: f64 = 60.0;
 /// Bounded so one slow provider cannot stall a monitor tick.
 const ASK_TIMEOUT: Duration = Duration::from_secs(30);
 
-const OPENROUTER_CHAT: &str = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_KEY_INFO: &str = "https://openrouter.ai/api/v1/key";
+/// The Responses endpoint a ChatGPT plan reaches GPT through: the same one the Codex CLI
+/// calls, with the same OAuth access token the server already holds for the clones.
+const CODEX_RESPONSES: &str = "https://chatgpt.com/backend-api/codex/responses";
+/// Reasoning effort for the GPT path. Measured at 3.5s per call on `gpt-5.6-luna`, well
+/// inside [`ASK_TIMEOUT`].
+const CODEX_EFFORT: &str = "medium";
 
 /// A clone's answer. `Working` is deliberately absent: see the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,8 +693,8 @@ pub fn build_view(root: &Path, sessions: &[Session], events: &[HookEvent], now: 
 // Asking the model
 // ---------------------------------------------------------------------------------------
 
-/// The question, arrived at over two fleet pilots. Three sentences in here are load-bearing
-/// and were each added to fix a measured failure, so read the git history before trimming:
+/// The question, arrived at over two fleet pilots. Five passages in here are load-bearing and
+/// were each added to fix a measured failure, so read the git history before trimming:
 ///
 /// - "read the WHOLE command" fixes calling `tail -c 120 file` non-terminating because the
 ///   examples mentioned `tail -f`.
@@ -692,6 +702,17 @@ pub fn build_view(root: &Path, sessions: &[Session], events: &[HookEvent], now: 
 ///   from one the operator must write by hand.
 /// - "a background task that finishes wakes the agent" stops a clone with a live task from
 ///   reading as finished-and-idle.
+/// - "not inside its first minute" stops GPT declaring a 3-second `ssh` and a 7-second
+///   `grep` hung. It was doing that on 24 of its 43 false alarms.
+/// - "that writer has to show up in the rest of the view" stops the opposite failure, where
+///   an agent says it dispatched a worker, nothing in the view corresponds to it, and the
+///   clone sits there. One such stall accounted for 33 missed views.
+///
+/// Those last two are what took `gpt-5.6-luna` at medium effort from 89.6% to 94.5% over the
+/// 1167 recorded views (misses 78 to 43, false alarms 43 to 21). Measured, not guessed: a
+/// dev/holdout split by situation, then confirmed on the whole set. Higher reasoning effort
+/// was tried instead and bought 0.4 points, so the wording is what matters here, not thinking
+/// time.
 ///
 /// One thing deliberately absent: any elapsed-time rule for background tasks. It was tested
 /// against all 1167 recorded views and rejected. Misses stayed at exactly 44 while false
@@ -727,6 +748,12 @@ is coming: false. Judge against the specific command, never against a fixed numb
 release build or a large dependency install legitimately runs a long time, so a big
 running_for_seconds on one of those is still true.
 
+Do not call anything hung inside its first minute. Under a minute you cannot tell a hung
+command from a slow one, and the cost of guessing wrong is a person being told to look at
+a clone that was fine. Work that leaves the machine is slower still: ssh, git fetch,
+docker, a remote exec, or anything pulling over the network routinely takes tens of
+seconds, and several of them in one command line add up.
+
 agent_last_said is usually where the agent names what it is waiting on and what will
 deliver it. Take it at its word about the writer: if it names a machine, a job, a build,
 or another process, that counts as something that will wake it, and no elapsed time on
@@ -755,6 +782,11 @@ a background task that is going to finish is true, even though the agent is doin
 while it waits. The agent being at its prompt with a task still running is not the same
 as the agent being done.
 
+One check on the writer it names. That writer has to show up in the rest of the view, as a
+background task, an in-flight tool call, or a subagent. If the agent says it dispatched
+something and nothing here corresponds to it, then whatever it started is already over and
+it was not woken: false.
+
 Reply with only a JSON object:
 {"will_progress": true, "reason": "one short sentence"}"#;
 
@@ -768,9 +800,18 @@ const BUCKETS: [f64; 9] = [30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0, 4800
 /// miss on every tick and ask ~900 times an hour per clone. Rounding every `*_seconds` field
 /// to a bucket means a clone is re-asked only when it crosses one or when something real
 /// changes. On the pilot fleet this held 32 clones to 381 calls over six hours.
+///
+/// Keyed on the view alone, never on who answered. Changing provider therefore keeps the
+/// answers already given until each clone's view moves, which is right: the question is about
+/// the clone, and the two providers are answering the same one. A failed call is not cached
+/// at all, so a provider that comes back is asked again on the next tick.
 #[derive(Default)]
 pub struct Judge {
     answers: StdRwLock<HashMap<String, (bool, String)>>,
+    /// The last "nothing can answer" line logged. A judge nobody configured is a standing
+    /// condition, and the fleet pass runs every few seconds, so it is said once and again
+    /// only when it changes.
+    last_gap: StdRwLock<String>,
 }
 
 fn bucket(seconds: f64) -> usize {
@@ -803,12 +844,59 @@ fn cache_key(view: &Value) -> String {
     walk(view).to_string()
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Answer {
     #[serde(default)]
     will_progress: Option<bool>,
     #[serde(default)]
     reason: Option<String>,
+}
+
+/// What answers [`Verdict::Ask`]: one imported Codex account's credentials, resolved once per
+/// fleet pass because the access token in it has to be a fresh one.
+///
+/// No `Debug`: it holds a live access token, and a derived one would print it the first time
+/// anything logged a backend.
+#[derive(Clone)]
+pub struct Backend {
+    token: String,
+    account_id: String,
+    model: String,
+}
+
+/// Which imported Codex account pays, or the line that says why none.
+///
+/// Both the fleet pass and the settings Test button ask this, and they have to give the same
+/// answer: "your account is gone" and "you have no accounts" are different problems.
+fn judge_account(app: &crate::app::App, want: &str) -> Result<String, String> {
+    crate::codex::judge_email(app, want).ok_or_else(|| match want.is_empty() {
+        true => "no Codex account is imported".to_string(),
+        false => format!("no imported Codex account for '{want}'"),
+    })
+}
+
+/// The account the judge will bill, with its token refreshed if it was due.
+///
+/// Called at most once per fleet pass, and only when some clone actually needs asking. A rig
+/// with no Codex account gets `None` plus a line saying so, which the caller logs once rather
+/// than once per clone per tick, and every undecided clone reads idle.
+pub async fn backend(app: &crate::app::App) -> (Option<Backend>, String) {
+    let cfg = app.config();
+    let email = match judge_account(app, &cfg.judge.codex_email.unwrap_or_default()) {
+        Ok(email) => email,
+        Err(why) => return (None, why),
+    };
+    match crate::codex::fresh_access_token(app, &email).await {
+        Ok((acct, _)) => (
+            Some(Backend {
+                token: acct.access_token,
+                account_id: acct.account_id,
+                model: cfg.judge.codex_model,
+            }),
+            String::new(),
+        ),
+        Err(e) => (None, format!("{email}: {e:#}")),
+    }
 }
 
 impl Judge {
@@ -820,18 +908,30 @@ impl Judge {
     pub async fn resolve(
         &self,
         http: &reqwest::Client,
-        cfg: &wire::OpenRouterConfig,
+        backend: &Backend,
         view: &Value,
     ) -> Result<(wire::MonitorState, String, bool)> {
         let key = cache_key(view);
         if let Some((progress, reason)) = self.answers.read().unwrap().get(&key).cloned() {
             return Ok((apply_verdict(Some(progress)), reason, false));
         }
-        let answer = ask(http, cfg, view).await?;
+        let answer = ask(http, backend, view).await?;
         let progress = answer.will_progress == Some(true);
         let reason = answer.reason.unwrap_or_default();
         self.answers.write().unwrap().insert(key, (progress, reason.clone()));
         Ok((apply_verdict(Some(progress)), reason, true))
+    }
+
+    /// Whether `why` is worth logging: true the first time it is seen and again whenever it
+    /// changes. Pass an empty string once the judge answers again, so a fault that comes back
+    /// is reported again.
+    pub fn note_gap(&self, why: &str) -> bool {
+        let mut last = self.last_gap.write().unwrap();
+        if *last == why {
+            return false;
+        }
+        *last = why.to_string();
+        !why.is_empty()
     }
 
     /// Drop cached answers once the fleet has moved on, mirroring `ActivityBus::retain`.
@@ -843,34 +943,100 @@ impl Judge {
     }
 }
 
-async fn ask(http: &reqwest::Client, cfg: &wire::OpenRouterConfig, view: &Value) -> Result<Answer> {
+async fn ask(http: &reqwest::Client, backend: &Backend, view: &Value) -> Result<Answer> {
+    ask_codex(http, &backend.token, &backend.account_id, &backend.model, view).await
+}
+
+/// Ask GPT over the Codex CLI's own endpoint, on an imported account's ChatGPT plan.
+///
+/// Three things about this endpoint, all measured against it rather than assumed:
+/// `stream: false` is refused with `400 Stream must be set to true`, `store` must be false,
+/// and the `response.completed` event carries an EMPTY `output` array, so the answer has to
+/// be picked out of the item events instead ([`codex_answer_text`]). The whole stream is
+/// ~14KB, so it is read as one body rather than consumed incrementally.
+async fn ask_codex(
+    http: &reqwest::Client,
+    token: &str,
+    account_id: &str,
+    model: &str,
+    view: &Value,
+) -> Result<Answer> {
     let body = json!({
-        "model": cfg.model,
-        "messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": serde_json::to_string_pretty(view)?},
-        ],
-        "max_tokens": 3000,
-        "temperature": 0,
-        // Off is a cost and latency choice, not an accuracy one: minimal, low, medium, high
-        // and a 256-token budget all scored the same on the fixture set.
-        "reasoning": {"enabled": false},
+        "model": model,
+        "instructions": SYSTEM,
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": serde_json::to_string_pretty(view)?}],
+        }],
+        "reasoning": {"effort": CODEX_EFFORT},
+        "store": false,
+        "stream": true,
     });
     let resp = http
-        .post(OPENROUTER_CHAT)
+        .post(CODEX_RESPONSES)
         .timeout(ASK_TIMEOUT)
-        .header("Authorization", format!("Bearer {}", cfg.key))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("chatgpt-account-id", account_id)
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("originator", "codex_cli_rs")
+        .header("Accept", "text/event-stream")
         .json(&body)
         .send()
         .await?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        bail!("openrouter {}: {}", status.as_u16(), snippet(&text));
+        bail!("codex {}: {}", status.as_u16(), snippet(&text));
     }
-    let parsed: Value = serde_json::from_str(&text)?;
-    let content = parsed["choices"][0]["message"]["content"].as_str().unwrap_or_default();
-    Ok(parse_answer(content))
+    Ok(parse_answer(&codex_answer_text(&text)?))
+}
+
+/// The assistant's text, out of a Responses SSE body.
+///
+/// Read in the order the events are trustworthy: the finished message item carries the whole
+/// text, `response.output_text.done` repeats it, and the deltas are the last resort if the
+/// backend ever stops sending either. A stream that failed part way names its error rather
+/// than reading as an empty answer, which would be indistinguishable from "no".
+fn codex_answer_text(body: &str) -> Result<String> {
+    let mut message = String::new();
+    let mut done = String::new();
+    let mut delta = String::new();
+    for line in body.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        match event["type"].as_str().unwrap_or_default() {
+            "response.output_item.done" if event["item"]["type"] == "message" => {
+                message = event["item"]["content"]
+                    .as_array()
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|p| p["text"].as_str())
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+            }
+            "response.output_text.done" => done = event["text"].as_str().unwrap_or_default().into(),
+            "response.output_text.delta" => {
+                delta.push_str(event["delta"].as_str().unwrap_or_default())
+            }
+            "response.failed" | "error" => {
+                let why = event["response"]["error"]["message"]
+                    .as_str()
+                    .or_else(|| event["error"]["message"].as_str())
+                    .or_else(|| event["message"].as_str())
+                    .unwrap_or("no message");
+                bail!("codex stream failed: {}", snippet(why));
+            }
+            _ => {}
+        }
+    }
+    Ok([message, done, delta].into_iter().find(|t| !t.is_empty()).unwrap_or_default())
 }
 
 /// Pull the JSON object out of the reply. Models fence it, prefix it, or return it bare, and
@@ -887,33 +1053,35 @@ fn snippet(s: &str) -> String {
     s.chars().take(200).collect()
 }
 
-/// Does this key work? Used by `POST /api/config/test`.
-pub async fn probe_key(http: &reqwest::Client, key: &str) -> (bool, String) {
-    if key.is_empty() {
-        return (false, "no OpenRouter key set — clones will never read as working".into());
-    }
-    let resp = http
-        .get(OPENROUTER_KEY_INFO)
-        .timeout(ASK_TIMEOUT)
-        .header("Authorization", format!("Bearer {key}"))
-        .send()
-        .await;
-    match resp {
-        Err(e) => (false, format!("OpenRouter unreachable: {e}")),
-        Ok(r) if !r.status().is_success() => {
-            let code = r.status().as_u16();
-            let body = r.text().await.unwrap_or_default();
-            (false, format!("OpenRouter rejected the key ({code}): {}", snippet(&body)))
-        }
-        Ok(r) => {
-            let body: Value = r.json().await.unwrap_or_else(|_| json!({}));
-            let limit = body["data"]["limit"].as_f64();
-            let used = body["data"]["usage"].as_f64().unwrap_or(0.0);
-            match limit {
-                Some(l) => (true, format!("key works — ${used:.2} used of ${l:.2}")),
-                None => (true, format!("key works — ${used:.2} used, no limit set")),
-            }
-        }
+/// Does the GPT path work end to end? Used by `POST /api/config/test`.
+///
+/// Asks the real question against a fixture view rather than pinging something cheaper, which
+/// is the point: one call exercises the account lookup, the token refresh, the endpoint and
+/// the model name together, and those are the four things that break.
+pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bool, String) {
+    let email = match judge_account(app, email) {
+        Ok(email) => email,
+        Err(why) => return (false, why),
+    };
+    let acct = match crate::codex::fresh_access_token(app, &email).await {
+        Ok((acct, _)) => acct,
+        Err(e) => return (false, format!("{email}: {e:#}")),
+    };
+    let view = json!({
+        "sessions": [{"status": "shell", "quiet_for_seconds": 40}],
+        "background_tasks": [{"command": "cargo build --release", "running_for_seconds": 90}],
+    });
+    match ask_codex(&app.http, &acct.access_token, &acct.account_id, model, &view).await {
+        Err(e) => (false, format!("{model} on {email}: {e:#}")),
+        Ok(a) => match a.will_progress {
+            // The fixture describes a release build still running, so a judge that is working
+            // says true. Anything else means the model answered but not the question.
+            Some(true) => (true, format!("{model} answers on {email}")),
+            _ => (
+                false,
+                format!("{model} on {email} gave an unusable answer: {}", a.reason.unwrap_or_default()),
+            ),
+        },
     }
 }
 
@@ -927,16 +1095,14 @@ pub async fn probe_key(http: &reqwest::Client, key: &str) -> (bool, String) {
 /// shallow walks), so each clone's read happens on the blocking pool; the model calls that
 /// follow are ordinary concurrent futures.
 ///
-/// With no OpenRouter key configured this still runs, and every clone that the files cannot
-/// settle comes back `Idle`. That is the whole "no key" behaviour: no guess, no model, and no
+/// With no judge configured this still runs, and every clone that the files cannot settle
+/// comes back `Idle`. That is the whole unconfigured behaviour: no guess, no model, and no
 /// clone ever reported as working. Per-clone token accounting is elsewhere and unaffected.
 pub async fn resolve_fleet(
     app: &crate::app::App,
     ids: Vec<String>,
 ) -> HashMap<String, wire::MonitorState> {
-    let cfg = app.config();
-    let data_dir = cfg.data_dir.clone();
-    let openrouter = cfg.openrouter.clone();
+    let data_dir = app.config().data_dir.clone();
 
     let reads = ids.into_iter().map(|id| {
         let data_dir = data_dir.clone();
@@ -948,8 +1114,23 @@ pub async fn resolve_fleet(
     });
     let read = futures::future::join_all(reads).await;
 
+    // Only now, and only if some clone actually needs asking: the Codex path refreshes an
+    // access token to build this, which a fleet that settled from files alone should not pay
+    // for every four seconds.
+    let asking = read.iter().any(|(_, s)| matches!(s, Some((Verdict::Ask, ..))));
+    let backend = match asking {
+        false => None,
+        true => {
+            let (backend, why) = backend(app).await;
+            if app.stuck.note_gap(&why) {
+                tracing::warn!(target: "stuck", "no clone can read as working: {why}");
+            }
+            backend
+        }
+    };
+
     let decided = read.into_iter().map(|(id, snapshot)| {
-        let openrouter = openrouter.clone();
+        let backend = backend.clone();
         async move {
             // A clone whose home is not readable right now (restarting, or `homes` has not
             // repointed its symlink yet) tells us nothing. Leaving it Idle is the honest
@@ -963,23 +1144,26 @@ pub async fn resolve_fleet(
                     tracing::debug!(target: "stuck", "clone {id}: idle — {why}");
                     (id, wire::MonitorState::Idle)
                 }
-                Verdict::Ask if openrouter.key.is_empty() => (id, wire::MonitorState::Idle),
-                Verdict::Ask => match app.stuck.resolve(&app.http, &openrouter, &view).await {
-                    Ok((state, reason, asked)) => {
-                        if asked {
-                            tracing::debug!(
-                                target: "stuck",
-                                "clone {id}: {state:?} — {reason}"
-                            );
+                Verdict::Ask => match backend.as_ref() {
+                    None => (id, wire::MonitorState::Idle),
+                    Some(backend) => match app.stuck.resolve(&app.http, backend, &view).await {
+                        Ok((state, reason, asked)) => {
+                            if asked {
+                                tracing::debug!(
+                                    target: "stuck",
+                                    "clone {id}: {state:?} — {reason}"
+                                );
+                            }
+                            (id, state)
                         }
-                        (id, state)
-                    }
-                    Err(e) => {
-                        // A provider outage must not flip the fleet to working. Idle is the
-                        // same answer an unset key gives, and it is the safe one.
-                        tracing::warn!(target: "stuck", "clone {id}: asking failed: {e:#}");
-                        (id, wire::MonitorState::Idle)
-                    }
+                        Err(e) => {
+                            // An outage at the provider must not flip the fleet to working.
+                            // Idle is the same answer an unconfigured judge gives, and it is
+                            // the safe one.
+                            tracing::warn!(target: "stuck", "clone {id}: asking failed: {e:#}");
+                            (id, wire::MonitorState::Idle)
+                        }
+                    },
                 },
             }
         }
@@ -1656,4 +1840,103 @@ mod tests {
         assert_eq!(clone_state(&sessions, true), Verdict::Ask);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // --- the GPT path ---------------------------------------------------------------------
+
+    /// Trimmed from a real `gpt-5.6-luna` reply: the same events in the same order, with the
+    /// reasoning blobs cut. Note `response.completed` carrying an empty `output`, which is
+    /// why the answer has to be read off the item events.
+    const CODEX_STREAM: &str = r#"event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","output":[]}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","content":[],"encrypted_content":"gAAAAAB","summary":[]},"output_index":0}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":"{\"will_progress\":","item_id":"msg_1","output_index":1}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":"true}","item_id":"msg_1","output_index":1}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","content_index":0,"item_id":"msg_1","output_index":1,"text":"{\"will_progress\":true,\"reason\":\"the release build is still running\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"text":"{\"will_progress\":true,\"reason\":\"the release build is still running\"}"}],"role":"assistant"},"output_index":1}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":67,"output_tokens":66}}}
+
+"#;
+
+    #[test]
+    fn the_answer_is_read_out_of_the_finished_message() {
+        let text = codex_answer_text(CODEX_STREAM).expect("a stream that completed");
+        let answer = parse_answer(&text);
+        assert_eq!(answer.will_progress, Some(true));
+        assert_eq!(answer.reason.as_deref(), Some("the release build is still running"));
+    }
+
+    /// The deltas are the last resort, for a backend that stops sending either finished form.
+    #[test]
+    fn deltas_alone_still_answer() {
+        let deltas: String = CODEX_STREAM
+            .lines()
+            .filter(|l| !l.contains("output_text.done") && !l.contains(r#""type":"message""#))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(codex_answer_text(&deltas).unwrap(), r#"{"will_progress":true}"#);
+    }
+
+    /// A stream that died part way through has to be an error. Read as an empty answer it
+    /// would parse to "no", which is a real verdict about the clone rather than about us.
+    #[test]
+    fn a_failed_stream_is_an_error_not_a_no() {
+        let stream = "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"rate limit reached\"}}}\n";
+        let e = codex_answer_text(stream).expect_err("a failed stream");
+        assert!(format!("{e:#}").contains("rate limit reached"), "{e:#}");
+    }
+
+    /// The GPT path against the real endpoint.
+    ///
+    /// Everything above replays a captured stream, which cannot answer whether the request is
+    /// still shaped the way ChatGPT wants it: the backend refuses `stream: false` outright,
+    /// the model name has to exist, and the answer has to survive the whole prompt rather than
+    /// the two-line one a probe would use. So this one is real, and `#[ignore]`d for it.
+    ///
+    ///     RMNG_CODEX_AUTH=$HOME/.codex/auth.json cargo test -p control-server \
+    ///       gpt_answers_the_real_question -- --ignored --nocapture
+    ///
+    /// Two short calls on that account's ChatGPT plan. It reads the auth file and never writes
+    /// it, so the refresh token it holds is not touched.
+    #[tokio::test]
+    #[ignore = "talks to chatgpt.com, needs RMNG_CODEX_AUTH pointing at a codex auth.json"]
+    async fn gpt_answers_the_real_question() {
+        let path = std::env::var("RMNG_CODEX_AUTH").expect("RMNG_CODEX_AUTH");
+        let raw = std::fs::read_to_string(path).expect("a readable codex auth.json");
+        let auth: Value = serde_json::from_str(&raw).unwrap();
+        let token = auth["tokens"]["access_token"].as_str().expect("an access token");
+        let account = auth["tokens"]["account_id"].as_str().expect("an account id");
+        let http = reqwest::Client::new();
+
+        // A release build that is still running: something machine-driven will finish it.
+        let building = json!({
+            "sessions": [{"status": "shell", "quiet_for_seconds": 40}],
+            "background_tasks": [{"command": "cargo build --release", "running_for_seconds": 90}],
+        });
+        let answer = ask_codex(&http, token, account, "gpt-5.6-luna", &building).await.unwrap();
+        assert_eq!(answer.will_progress, Some(true), "{answer:?}");
+        println!("building: {answer:?}");
+
+        // Finished, with a dev server it left running. Nothing there will ever wake anybody.
+        let served = json!({
+            "sessions": [{"status": "idle", "quiet_for_seconds": 600}],
+            "background_tasks": [{"command": "npm run dev", "running_for_seconds": 900}],
+            "agent_last_said": "The dev server is up on port 3000. Let me know what to build next.",
+        });
+        let answer = ask_codex(&http, token, account, "gpt-5.6-luna", &served).await.unwrap();
+        assert_eq!(answer.will_progress, Some(false), "{answer:?}");
+        println!("served: {answer:?}");
+    }
+
 }

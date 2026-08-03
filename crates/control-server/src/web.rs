@@ -2094,12 +2094,16 @@ struct TestReq {
     /// report on something the operator is not looking at.
     #[serde(default)]
     value: String,
+    /// Same idea for a second unsaved field, used by `"judge"`: `value` carries the account
+    /// and this carries the model.
+    #[serde(default)]
+    model: String,
 }
 
 /// `POST /api/config/test` — validate a setting from the UI. `"docker"` re-runs the Docker
 /// self-setup probe and collapses the [`crate::docker::EnvReport`] into a single
 /// `(ok, message)` verdict (the row-by-row breakdown is `GET /api/setup/env`).
-/// `"openrouter"` asks OpenRouter what the key is worth.
+/// `"judge"` puts one real stuck-detection question to GPT on an imported Codex account.
 async fn config_test(State(app): State<App>, Json(req): Json<TestReq>) -> Json<serde_json::Value> {
     let (ok, message) = match req.what.as_str() {
         "docker" => {
@@ -2107,10 +2111,10 @@ async fn config_test(State(app): State<App>, Json(req): Json<TestReq>) -> Json<s
             let report = app.docker.self_setup(setup_complete).await;
             collapse_env_report(&report)
         }
-        "openrouter" => {
-            let stored = app.config().openrouter.key;
-            let key = if req.value.is_empty() { stored } else { req.value };
-            crate::stuck::probe_key(&app.http, &key).await
+        "judge" => {
+            let stored = app.config().judge;
+            let model = if req.model.is_empty() { stored.codex_model } else { req.model };
+            crate::stuck::probe_codex(&app, &req.value, &model).await
         }
         other => (false, format!("unknown test '{other}'")),
     };

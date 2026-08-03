@@ -37,8 +37,12 @@ export interface SettingsPanelContainerProps {
   /** Persist a partial config patch; returns the merged config + a restart-required flag. */
   putConfig: (patch: unknown) => Promise<ConfigPutResponse & { networkWarning?: string }>;
   /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
-  /** `value` tests an unsaved credential the operator has just typed. */
-  testConfig: (what: string, value?: string) => Promise<{ ok: boolean; message: string }>;
+  /** `value` and `model` test unsaved fields the operator has just typed. */
+  testConfig: (
+    what: string,
+    value?: string,
+    model?: string,
+  ) => Promise<{ ok: boolean; message: string }>;
   /** Read the control-server's own version + update-available status. */
   getUpdateStatus: () => Promise<UpdateStatus>;
   /** Pull the latest control-server image and swap the running container onto it. Returns
@@ -114,7 +118,7 @@ export function SettingsPanelContainer({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
-  const [orTestMsg, setOrTestMsg] = useState<string | null>(null);
+  const [judgeTestMsg, setJudgeTestMsg] = useState<string | null>(null);
   // True after a save that touched a restart-required setting (ports / cloneSocket /
   // staticDir / chroma) — surfaces a persistent banner until a later save clears it.
   const [restartRequired, setRestartRequired] = useState(false);
@@ -266,15 +270,15 @@ export function SettingsPanelContainer({
     }
   }
 
-  // Tests what is typed, falling back to what is stored. Testing only the saved key would
-  // report on the previous one, which is not what the operator is looking at.
-  async function runOpenRouterTest() {
-    setOrTestMsg("testing…");
+  // Tests what is typed rather than what is stored, so the verdict is about the fields the
+  // operator is looking at. There is no key to check, so it puts one real question to GPT.
+  async function runJudgeTest() {
+    setJudgeTestMsg("testing…");
     try {
-      const r = await testConfig("openrouter", draft?.openrouterKey || "");
-      setOrTestMsg(`${r.ok ? "✓" : "✗"} ${r.message}`);
+      const r = await testConfig("judge", draft?.judge.codexEmail || "", draft?.judge.codexModel);
+      setJudgeTestMsg(`${r.ok ? "✓" : "✗"} ${r.message}`);
     } catch (e) {
-      setOrTestMsg(`✗ ${(e as Error).message}`);
+      setJudgeTestMsg(`✗ ${(e as Error).message}`);
     }
   }
 
@@ -308,8 +312,8 @@ export function SettingsPanelContainer({
       onRestartServer={doRestart}
       testMessage={testMsg}
       onTestDocker={runTest}
-      openrouterTestMessage={orTestMsg}
-      onTestOpenRouter={runOpenRouterTest}
+      judgeTestMessage={judgeTestMsg}
+      onTestJudge={runJudgeTest}
       images={images}
       imagesLoading={imagesLoading}
       pullBusy={pullBusy}

@@ -16,12 +16,12 @@ import { SettingsDockerSection } from "~/components/SettingsDockerSection";
 import { Field, Section, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
 import { SettingsLayoutPresets } from "~/components/SettingsLayoutPresets";
-import { SettingsOpenRouterSection } from "~/components/SettingsOpenRouterSection";
 import type { SettingsPanelViewProps } from "~/components/SettingsPanelView";
 import { SettingsPresetList } from "~/components/SettingsPresetList";
 import { SettingsProviderFields } from "~/components/SettingsProviderFields";
 import { SettingsServerSection } from "~/components/SettingsServerSection";
 import { SettingsSshSection } from "~/components/SettingsSshSection";
+import { SettingsStuckSection } from "~/components/SettingsStuckSection";
 import type { ClaudeUsage } from "~/lib/types";
 import type { SettingsDraft } from "~/lib/settingsDraft";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
@@ -87,20 +87,21 @@ export function BoardPane({
 export function AgentsPane({
   draft,
   onDraftChange,
-  onTestOpenRouter,
-  openrouterTestMessage,
+  onTestJudge,
+  judgeTestMessage,
+  rows,
 }: SettingsPaneProps) {
   return (
     <>
       {/* How RMNG tells a clone that is thinking from one that is waiting on you. */}
-      <SettingsOpenRouterSection
-        keyValue={draft.openrouterKey}
-        keySet={draft.openrouterKeySet}
-        model={draft.openrouterModel}
-        onKeyChange={(v) => onDraftChange("openrouterKey", v)}
-        onModelChange={(v) => onDraftChange("openrouterModel", v)}
-        onTest={onTestOpenRouter}
-        testMessage={openrouterTestMessage}
+      <SettingsStuckSection
+        model={draft.judge.codexModel}
+        email={draft.judge.codexEmail}
+        accounts={rows.codex.map((a) => a.email)}
+        onModelChange={(v) => onDraftChange("judge", { ...draft.judge, codexModel: v })}
+        onEmailChange={(v) => onDraftChange("judge", { ...draft.judge, codexEmail: v })}
+        onTest={onTestJudge}
+        testMessage={judgeTestMessage}
       />
 
       {/* Layer a: the shared operating memory EVERY agent reads as its native global rules

@@ -251,9 +251,11 @@ export const putConfig = (patch: unknown) =>
   putJson("/api/config", patch) as Promise<
     ConfigPutResponse & { networkWarning?: string }
   >;
-/** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
-export const testConfig = (what: string, value?: string) =>
-  postJson("/api/config/test", { what, value: value ?? "" }) as Promise<{
+/** Validate a setting (e.g. `"docker"`, which re-runs the Docker self-setup probe). `value` and
+ *  `model` carry what the operator has typed but not saved, so a test reports on the fields
+ *  they are looking at. */
+export const testConfig = (what: string, value?: string, model?: string) =>
+  postJson("/api/config/test", { what, value: value ?? "", model: model ?? "" }) as Promise<{
     ok: boolean;
     message: string;
   }>;

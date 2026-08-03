@@ -441,6 +441,28 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredCodexAc
     Ok((acct, true))
 }
 
+/// Which imported account pays for the stuck detector's GPT calls: `want` when it names one
+/// that is still imported, otherwise the first account in the store when `want` is blank.
+///
+/// A `want` that names a deleted account resolves to nothing rather than to somebody else.
+/// Spending a different person's weekly allowance because their account happened to sort
+/// first is the worse failure, and the settings Test button names the missing account.
+fn pick_judge_account<'a>(
+    accounts: &'a [StoredCodexAccount],
+    want: &str,
+) -> Option<&'a StoredCodexAccount> {
+    if want.is_empty() {
+        return accounts.first();
+    }
+    accounts.iter().find(|a| a.email == want)
+}
+
+/// [`pick_judge_account`] against the live store, as an email.
+pub fn judge_email(app: &App, want: &str) -> Option<String> {
+    let accounts = app.codex.accounts.lock().unwrap();
+    pick_judge_account(&accounts, want).map(|a| a.email.clone())
+}
+
 /// The `~/.codex/auth.json` body that runs codex under `acct`'s current tokens. The
 /// refresh token is emptied and `last_refresh` set to now so the clone's CLI never tries
 /// to rotate or abandon the server-owned token (see the module + PROTOCOL docs).
@@ -1673,6 +1695,28 @@ mod tests {
             refresh_token: "rt-1".into(),
             expires_at: 0,
         }
+    }
+
+    /// One imported account is the common rig, and it should need no answer in Settings.
+    #[test]
+    fn the_judge_falls_back_to_the_only_account_there_is() {
+        let mut second = sample_account();
+        second.email = "b@openai.com".into();
+        let accounts = vec![sample_account(), second];
+
+        let pick = pick_judge_account(&accounts, "").expect("an account to bill");
+        assert_eq!(pick.email, "z@openai.com");
+        let pick = pick_judge_account(&accounts, "b@openai.com").expect("the named account");
+        assert_eq!(pick.email, "b@openai.com");
+        assert!(pick_judge_account(&[], "").is_none());
+    }
+
+    /// Deleting the account the judge was pinned to stops the judge, rather than quietly
+    /// moving the spend onto whoever sorts first.
+    #[test]
+    fn a_judge_account_that_is_gone_resolves_to_nobody() {
+        let accounts = vec![sample_account()];
+        assert!(pick_judge_account(&accounts, "deleted@openai.com").is_none());
     }
 
     #[test]

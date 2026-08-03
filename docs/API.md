@@ -42,7 +42,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/linear/upload-relay` | Replay one PUT to a Linear-signed bucket URL (multipart) | 200 `{ok,status}` |
 | GET | `/api/linear/asset?url=` | Read one Linear-hosted image with a preset's key | 200 binary |
 | GET/PUT | `/api/config` | Read redacted config or merge a partial update | 200 `AppConfigRedacted` / `{config,restartRequired,networkWarning?}` |
-| POST | `/api/config/test` | Test a setting (currently `"docker"`) | 200 `{ok,message}` |
+| POST | `/api/config/test` | Test a setting (`"docker"`, `"judge"`) | 200 `{ok,message}` |
 | GET | `/api/setup/env` | Setup wizard environment preflight rows | 200 `SetupEnv` |
 | POST | `/api/{claude,codex}/import/check` | Report the account a clone is signed in to, before importing | 200 identity |
 | POST | `/api/{claude,codex}/import` | Take ownership of a signed-in clone's OAuth pair | 200 `{ok,email,cleared}` |
@@ -279,13 +279,32 @@ also spell out `"matcher": "*"` rather than leaving it implicit, because Cursor'
 Cursor fires both registrations, so most events arrive twice and duplicates are dropped on read.
 
 Answers are cached on the view with elapsed times bucketed, so a clone in one state is asked about
-once rather than once per four-second tick. On a 32-clone fleet that was 381 calls over six hours,
-about **$0.013 per clone-hour**.
+once rather than once per four-second tick. On a 32-clone fleet that was 381 calls over six hours.
 
-**With no OpenRouter key configured, no clone is ever reported `working`.** The file checks only
+**With no Codex account imported, no clone is ever reported `working`.** The file checks only
 ever produce `idle` or "ask", and nothing answers the ask. That is deliberate: a guess in either
 direction is worse than an honest "not working". Per-clone [`cloneTokens`](#clonetokens) accounting
-is separate and unaffected. Set the key in Settings → Agents.
+is separate and unaffected. Import an account under Settings → Codex.
+
+GPT answers, on an imported Codex account's ChatGPT plan (`gpt-5.6-luna` at medium reasoning
+effort, both settable under Settings → Agents). There is no key to configure: the server already
+holds that account's token to run the clones, and the judge spends the same weekly allowance they
+do, so a fleet near its cap will feel it. `judge.codexEmail` names the account, and unset means
+the first imported one. An account that gets deleted stops the judge rather than moving the spend
+onto whoever sorts first.
+
+The calls go to the Codex CLI's own endpoint, `POST https://chatgpt.com/backend-api/codex/responses`.
+Three things about it are load-bearing and were measured against it: `stream: false` is refused with
+`400 Stream must be set to true`, `store` must be false, and the `response.completed` event carries
+an empty `output` array, so the answer is read off `response.output_item.done` instead. Median call
+1.8s. `POST /api/config/test` with `{"what":"judge"}` puts one real question to the model and reports
+what came back.
+
+On the 1167 distinct views the pilots recorded, that model with this prompt scores **94.5%** (43
+missed stuck clones, 21 false alarms). Two paragraphs of the prompt are worth 4.9 of those points,
+one forbidding a hung verdict inside a command's first minute and one requiring a worker the agent
+names to appear somewhere in the view. Higher reasoning effort was measured instead and bought 0.4
+points, so the wording carries this, not thinking time.
 
 Measured against a replay oracle over two runs on a live 32-clone fleet (2955 scorable samples, 25
 real stalls), against the 5-minute token-idle rule this replaced:
@@ -639,10 +658,14 @@ lists are independent). `docker.subnet` is validated as an IPv4 `/16`–`/24` CI
 (`dataDir`, `cloneSocket`, `docker.subnet`) are locked once `setupComplete` latches (which
 itself is a one-way latch).
 
-### `POST /api/config/test` — body `{ "what": "docker" }` → `{ ok, message }`
-Synchronously test a setting. Currently only `"docker"`: re-runs the Docker self-setup probe
-and collapses the environment report (daemon reachable, sock mount, render node) into a single
-`(ok, message)` verdict. The row-by-row breakdown is `GET /api/setup/env`.
+### `POST /api/config/test` (body `{ "what", "value"?, "model"? }`) → `{ ok, message }`
+Synchronously test a setting. `value` and `model` carry what the operator has typed but not saved,
+so the verdict is about the field they are looking at rather than about the stored one.
+
+| `what` | tests | `value` / `model` |
+|---|---|---|
+| `docker` | re-runs the Docker self-setup probe and collapses the environment report (daemon reachable, sock mount, render node) into one verdict. The row-by-row breakdown is `GET /api/setup/env` | neither |
+| `judge` | puts one real stuck-detection question to GPT, which exercises the account lookup, the token refresh, the endpoint and the model name together | `value` = the account email (blank = the first imported), `model` = the GPT model |
 
 ---
 

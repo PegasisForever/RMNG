@@ -84,12 +84,10 @@ export interface SettingsDraft {
   agentPlaybook: string;
   globalPrompt: string;
   ssh: SshConfig;
-  /** Write-only, like every preset's Linear key: blank means "keep the stored one". Unlike
-   *  those, the stored value never comes back — the browser has no use for it. */
-  openrouterKey: string;
-  /** Whether the server holds one. The only thing the panel can know about it. */
-  openrouterKeySet: boolean;
-  openrouterModel: string;
+  /** Which GPT answers the stuck question, and which Codex account pays for it.
+   *  `codexEmail` is flattened to "" here, as `claude.pinnedEmail` is, so no input has to
+   *  handle a null. */
+  judge: { codexModel: string; codexEmail: string };
 }
 
 /** The layout preset a rig with none configured is given to edit. Offering an empty list
@@ -182,11 +180,10 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     chroma: c.chroma,
     agentPlaybook: c.agentPlaybook,
     globalPrompt: c.globalPrompt,
-    // Seeded blank on purpose: the input is write-only, and re-seeding from the server's
-    // response after a save is what clears it.
-    openrouterKey: "",
-    openrouterKeySet: c.openrouterKeySet,
-    openrouterModel: c.openrouterModel,
+    judge: {
+      codexModel: c.judge?.codexModel ?? "",
+      codexEmail: c.judge?.codexEmail ?? "",
+    },
     ssh: {
       authorizedKeys: c.ssh?.authorizedKeys ?? [],
       publicHost: c.ssh?.publicHost ?? "",
@@ -239,10 +236,9 @@ export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unk
     ssh: draft.ssh,
     agentPlaybook: draft.agentPlaybook,
     globalPrompt: draft.globalPrompt,
-    openrouter: {
-      key: draft.openrouterKey, // "" = keep the stored key
-      model: draft.openrouterModel,
-    },
+    // `null` rather than "", which the server reads as "keep stored": picking an account and
+    // then going back to "the first one" has to be sendable.
+    judge: { ...draft.judge, codexEmail: draft.judge.codexEmail || null },
     presets: draft.presets
       .filter((p) => p.name.trim())
       .map((p) => ({

@@ -346,42 +346,45 @@ impl Default for ClaudeConfig {
     }
 }
 
-/// OpenRouter, used by one thing: deciding whether a quiet clone is still working or is
-/// stuck waiting on a person. See [`crate::MonitorState`].
+/// What settles the clones the file checks cannot: GPT, on an imported Codex account's
+/// ChatGPT plan. See [`crate::MonitorState`].
 ///
-/// NOT TS-exported, because unlike a preset's Linear key this one is withheld. The browser
-/// has no use for it — the server makes the call — so the redacted view carries only
-/// [`AppConfigRedacted::openrouter_key_set`].
+/// No credential of its own. The server already holds that account's OAuth pair to run the
+/// clones, and the judge spends the same weekly allowance they do. With no Codex account
+/// imported, nothing answers the question and no clone is ever reported as working. That is
+/// deliberate: a guess in either direction is worse than an honest "not working", and
+/// per-clone token accounting is unaffected either way.
 ///
-/// With no key set, nothing answers the question and no clone is ever reported as working.
-/// That is deliberate: a guess in either direction is worse than an honest "not working",
-/// and per-clone token accounting is unaffected either way.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Nothing here is secret, so the whole struct reaches the browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct OpenRouterConfig {
-    /// OpenRouter API key (**secret**, never sent to the browser). Empty means the stuck
-    /// detector does not run.
-    #[serde(default)]
-    pub key: String,
-    /// Which model answers. Cheap and fast matters far more than clever here: the question
-    /// is one boolean about one container, and it is asked once per clone per state change.
-    #[serde(default = "default_openrouter_model")]
-    pub model: String,
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct JudgeConfig {
+    /// Which GPT answers.
+    #[serde(default = "default_codex_judge_model")]
+    pub codex_model: String,
+    /// Which imported Codex account pays for those calls. Unset means the first imported
+    /// account, so a rig with one account needs no answer here. The calls come out of that
+    /// account's weekly ChatGPT allowance, the same one its clones spend.
+    ///
+    /// `Option` for the same reason [`ClaudeConfig::pinned_email`] is one: a `PUT` reads an
+    /// empty string as "keep what is stored", so `null` is how the panel says "no account in
+    /// particular" once one has been picked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_email: Option<String>,
 }
 
-impl Default for OpenRouterConfig {
+impl Default for JudgeConfig {
     fn default() -> Self {
         Self {
-            key: String::new(),
-            model: default_openrouter_model(),
+            codex_model: default_codex_judge_model(),
+            codex_email: None,
         }
     }
 }
 
-/// The model a six-hour fleet pilot measured at 96.7% against a replay oracle, for roughly
-/// $0.013 per clone-hour. The `~` prefix is OpenRouter's "latest" alias.
-fn default_openrouter_model() -> String {
-    "~deepseek/deepseek-v4-flash-latest".into()
+fn default_codex_judge_model() -> String {
+    "gpt-5.6-luna".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -498,10 +501,9 @@ pub struct AppConfig {
     /// in [`agent_playbook`] (the inner Cursor Claude Code reads CLAUDE.md and would recurse).
     #[serde(default = "default_global_prompt")]
     pub global_prompt: String,
-    /// OpenRouter credentials for the stuck detector. Its key is the one secret in this
-    /// struct the browser never sees.
+    /// Which GPT the stuck detector asks, and which Codex account pays for it.
     #[serde(default)]
-    pub openrouter: OpenRouterConfig,
+    pub judge: JudgeConfig,
 }
 
 impl Default for AppConfig {
@@ -525,7 +527,7 @@ impl Default for AppConfig {
             ssh: SshConfig::default(),
             agent_playbook: default_agent_playbook(),
             global_prompt: default_global_prompt(),
-            openrouter: OpenRouterConfig::default(),
+            judge: JudgeConfig::default(),
         }
     }
 }
@@ -610,8 +612,7 @@ impl AppConfig {
             ssh: self.ssh.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
-            openrouter_model: self.openrouter.model.clone(),
-            openrouter_key_set: !self.openrouter.key.is_empty(),
+            judge: self.judge.clone(),
         }
     }
 }
@@ -621,9 +622,9 @@ impl AppConfig {
 /// those keys the redaction is a direction rather than a mask, and `PUT /api/config` takes
 /// each one as write-only. Powers the Settings UI.
 ///
-/// One field is genuinely withheld: the OpenRouter key, which arrives only as
-/// [`Self::openrouter_key_set`]. Nothing in the browser calls OpenRouter, so there is no
-/// reason to hand it over.
+/// Nothing in it is withheld. Every credential the server holds is either a preset's Linear
+/// key, which the browser needs, or an account token that lives in its own store rather than
+/// in the config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -646,12 +647,8 @@ pub struct AppConfigRedacted {
     pub ssh: SshConfig,
     pub agent_playbook: String,
     pub global_prompt: String,
-    /// Which model answers the stuck question. Not a secret, so it passes through.
-    pub openrouter_model: String,
-    /// Whether an OpenRouter key is stored. The key itself never leaves the server; this
-    /// is the whole test the settings panel runs to decide whether its write-only input
-    /// reads as already set.
-    pub openrouter_key_set: bool,
+    /// Which GPT the stuck detector asks, and which Codex account pays for it.
+    pub judge: JudgeConfig,
 }
 
 /// Response body for `PUT /api/config`: the redacted config after the merge, plus
@@ -878,10 +875,6 @@ mod tests {
                 template_reference: "pegasis0/rmng-template:v9".into(),
                 ..Default::default()
             },
-            openrouter: OpenRouterConfig {
-                key: "sk-or-v1-openrouter-secret".into(),
-                model: "~vendor/model-latest".into(),
-            },
             presets: vec![
                 Preset {
                     name: "med".into(),
@@ -925,15 +918,28 @@ mod tests {
         assert_eq!(r.docker.hostname_prefix, "dev-");
         // template_reference is non-secret — it passes through the redacted view intact.
         assert_eq!(r.docker.template_reference, "pegasis0/rmng-template:v9");
-        // The OpenRouter key is the one thing here that IS withheld: nothing in the browser
-        // calls OpenRouter, so it gets a boolean and the model name, never the key.
-        assert!(
-            !json.contains("sk-or-v1-openrouter-secret"),
-            "the OpenRouter key must not reach the browser: {json}"
-        );
-        assert!(r.openrouter_key_set);
-        assert_eq!(r.openrouter_model, "~vendor/model-latest");
-        assert!(!AppConfig::default().redacted().openrouter_key_set);
+    }
+
+    /// Which provider answers is a choice rather than a credential, so it passes through
+    /// whole. A config written before the setting existed reads back as OpenRouter, which is
+    /// what those rigs were already doing.
+    #[test]
+    fn the_judge_choice_survives_the_redaction() {
+        let c: AppConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.judge.codex_model, "gpt-5.6-luna");
+        assert_eq!(c.judge.codex_email, None);
+
+        let c = AppConfig {
+            judge: JudgeConfig {
+                codex_email: Some("alex@example.com".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let r = c.redacted();
+        assert_eq!(r.judge.codex_email.as_deref(), Some("alex@example.com"));
+        let v = serde_json::to_value(&r.judge).unwrap();
+        assert!(v.get("codexModel").is_some(), "round-trips as camelCase: {v}");
     }
 
     #[test]

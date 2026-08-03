@@ -52,8 +52,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     ssh: { authorizedKeys: ["ssh-ed25519 AAAA me@laptop"], publicHost: "rmng.example.com" },
     agentPlaybook: "playbook",
     globalPrompt: "prompt",
-    openrouterModel: "~vendor/model-latest",
-    openrouterKeySet: true,
+    judge: { codexModel: "gpt-5.6-luna", codexEmail: null },
     ...overrides,
   };
 }
@@ -77,7 +76,7 @@ type Patch = {
     claudeAccount: string;
     vars: { key: string; value: string }[];
   }[];
-  openrouter: { key: string; model: string };
+  judge: { codexModel: string; codexEmail: string | null };
 };
 
 const patch = (draft: ReturnType<typeof settingsDraftFrom>, setupComplete = true) =>
@@ -280,22 +279,16 @@ test("a freshly imported account lands after the ordered ones, not first", () =>
   expect(rows.claude.map((a) => a.email)).toEqual(["a@x.com", "fresh@x.com"]);
 });
 
-test("the OpenRouter key is never handed to the form, only whether one is stored", () => {
-  // Unlike a preset's Linear key, this one is withheld: nothing in the browser calls
-  // OpenRouter, so `AppConfigRedacted` carries a boolean and the model name, never the key.
-  const draft = settingsDraftFrom(config());
+test("clearing the judge's Codex account sends null, not a blank the server would ignore", () => {
+  // An empty string means "keep stored" on the way in, so going back to "the first imported
+  // account" after picking one has to be sent as null. Same rule as a pinned account email.
+  const seeded = settingsDraftFrom(config());
+  expect(seeded.judge.codexEmail).toBe("");
+  expect(patch(seeded).judge.codexEmail).toBe(null);
 
-  expect(draft.openrouterKey).toBe("");
-  expect(draft.openrouterKeySet).toBe(true);
-  expect(draft.openrouterModel).toBe("~vendor/model-latest");
-});
-
-test("submitting a blank OpenRouter key keeps the stored one", () => {
-  // The whole write-only mechanism: `deep_merge` on the server treats an empty string as
-  // "unchanged", so a save the operator did not retype must not clear their key.
-  const untouched = patch(settingsDraftFrom(config()));
-  expect(untouched.openrouter.key).toBe("");
-
-  const typed = patch({ ...settingsDraftFrom(config()), openrouterKey: "sk-or-v1-new" });
-  expect(typed.openrouter.key).toBe("sk-or-v1-new");
+  const picked = patch({
+    ...seeded,
+    judge: { codexModel: "gpt-5.6-luna", codexEmail: "alex@example.com" },
+  });
+  expect(picked.judge.codexEmail).toBe("alex@example.com");
 });

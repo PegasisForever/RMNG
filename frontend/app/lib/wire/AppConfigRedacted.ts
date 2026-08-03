@@ -4,6 +4,7 @@ import type { ClaudeConfig } from "./ClaudeConfig";
 import type { CloneGroup } from "./CloneGroup";
 import type { CodexConfig } from "./CodexConfig";
 import type { DockerConfig } from "./DockerConfig";
+import type { JudgeConfig } from "./JudgeConfig";
 import type { LayoutPreset } from "./LayoutPreset";
 import type { ListenConfig } from "./ListenConfig";
 import type { PresetRedacted } from "./PresetRedacted";
@@ -15,18 +16,12 @@ import type { SshConfig } from "./SshConfig";
  * those keys the redaction is a direction rather than a mask, and `PUT /api/config` takes
  * each one as write-only. Powers the Settings UI.
  *
- * One field is genuinely withheld: the OpenRouter key, which arrives only as
- * [`Self::openrouter_key_set`]. Nothing in the browser calls OpenRouter, so there is no
- * reason to hand it over.
+ * Nothing in it is withheld. Every credential the server holds is either a preset's Linear
+ * key, which the browser needs, or an account token that lives in its own store rather than
+ * in the config.
  */
 export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataDir: string, staticDir: string, cloneSocket: string, setupComplete: boolean, layoutPresets: Array<LayoutPreset>, activeLayout: string, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, cloneGroups: Array<CloneGroup>, codexGroups: Array<CloneGroup>, presets: Array<PresetRedacted>, chroma: ChromaMode, ssh: SshConfig, agentPlaybook: string, globalPrompt: string, 
 /**
- * Which model answers the stuck question. Not a secret, so it passes through.
+ * Which GPT the stuck detector asks, and which Codex account pays for it.
  */
-openrouterModel: string, 
-/**
- * Whether an OpenRouter key is stored. The key itself never leaves the server; this
- * is the whole test the settings panel runs to decide whether its write-only input
- * reads as already set.
- */
-openrouterKeySet: boolean, };
+judge: JudgeConfig, };
