@@ -522,7 +522,9 @@ def main():
         record["background_tasks"] = event["background_tasks"][:20]
     if isinstance(event.get("last_assistant_message"), str):
         record["last_assistant_message"] = event["last_assistant_message"][:700]
-    for extra in ("tool_name", "tool_use_id", "reason"):
+    # `status` is how Cursor reports the way a turn ended: completed, aborted, or error.
+    # Claude Code splits the same three across Stop and StopFailure.
+    for extra in ("tool_name", "tool_use_id", "reason", "status"):
         if extra in event:
             record[extra] = str(event[extra])[:120]
     if "tool_input" in event:
@@ -576,6 +578,28 @@ const HOOK_EVENTS: [&str; 9] = [
     "PostToolUseFailure",
 ];
 
+/// The same probe, in Cursor's own vocabulary.
+///
+/// Cursor reads `~/.claude/settings.json` as well and converts it, so this looks redundant.
+/// It is not. The converter drops three events it has no Claude name for, and one of them is
+/// `postToolUseFailure` — which is the ONLY event Cursor fires when a tool call fails. Going
+/// through the converter alone, every failed tool call stays unmatched forever and the clone
+/// reads as blocked inside a command that finished. Registering natively also picks up
+/// `subagentStart`, the other event the converter drops.
+///
+/// Cursor fires both registrations, so most events arrive twice.
+/// [`crate::stuck::read_hook_events`] drops the duplicate.
+const CURSOR_HOOK_EVENTS: [&str; 8] = [
+    "beforeSubmitPrompt",
+    "stop",
+    "sessionEnd",
+    "subagentStart",
+    "subagentStop",
+    "preToolUse",
+    "postToolUse",
+    "postToolUseFailure",
+];
+
 pub(crate) fn rmng_hook_entries() -> Vec<TarEntry> {
     vec![TarEntry {
         path: "home/rmng/.rmng/hook.py".to_string(),
@@ -601,22 +625,50 @@ pub(crate) fn claude_hook_script() -> String {
             (
                 (*event).to_string(),
                 serde_json::json!([{
+                    // Claude Code reads a missing matcher as "every tool". Cursor reads this
+                    // same file and its converter calls `.split()` on the matcher without
+                    // checking for one, so a missing matcher throws and Cursor silently
+                    // registers NONE of these hooks. Spelling out the default costs nothing
+                    // and is the whole difference between the probe working in Cursor and
+                    // not existing there.
+                    "matcher": "*",
                     "hooks": [{ "type": "command", "command": HOOK_IN_CLONE, "timeout": 10 }]
                 }]),
             )
         })
         .collect();
-    let program = format!(".hooks = {}", serde_json::Value::Object(hooks));
+    let claude = format!(".hooks = {}", serde_json::Value::Object(hooks));
+
+    let cursor_hooks: serde_json::Map<String, serde_json::Value> = CURSOR_HOOK_EVENTS
+        .iter()
+        .map(|event| {
+            (
+                (*event).to_string(),
+                serde_json::json!([{ "command": HOOK_IN_CLONE, "timeout": 10 }]),
+            )
+        })
+        .collect();
+    let cursor =
+        format!(".version = 1 | .hooks = {}", serde_json::Value::Object(cursor_hooks));
+
+    // Both files belong to the user, so both are merged rather than written: Claude Code
+    // keeps `model`, `theme` and `enabledPlugins` in one, and Cursor's own hooks would live
+    // beside ours in the other.
     format!(
         r#"set -e
-f=/home/rmng/.claude/settings.json
-[ -s "$f" ] || printf '{{}}' > "$f"
-tmp="$(mktemp)"
-jq '{program}' "$f" > "$tmp"
-cat "$tmp" > "$f"
-rm -f "$tmp"
-chown rmng:rmng "$f"
-chmod 644 "$f"
+merge() {{
+  d="$(dirname "$1")"
+  install -d -o rmng -g rmng -m 755 "$d"
+  [ -s "$1" ] || printf '{{}}' > "$1"
+  tmp="$(mktemp)"
+  jq "$2" "$1" > "$tmp"
+  cat "$tmp" > "$1"
+  rm -f "$tmp"
+  chown rmng:rmng "$1"
+  chmod 644 "$1"
+}}
+merge /home/rmng/.claude/settings.json '{claude}'
+merge /home/rmng/.cursor/hooks.json '{cursor}'
 "#
     )
 }
@@ -2490,9 +2542,18 @@ mod hook_tests {
     /// `/etc/environment` merges are tested. Asserting on the script's text would pass while
     /// the jq program was wrong.
     fn run(settings: &std::path::Path) -> String {
+        run_both(settings).0
+    }
+
+    /// Both files the script merges: Claude Code's settings and Cursor's hooks.
+    fn run_both(settings: &std::path::Path) -> (String, String) {
+        let cursor = settings.with_file_name("cursor-hooks.json");
         let script = claude_hook_script()
             .replace("/home/rmng/.claude/settings.json", settings.to_str().unwrap())
-            .replace("chown rmng:rmng", "true");
+            .replace("/home/rmng/.cursor/hooks.json", cursor.to_str().unwrap())
+            .replace("chown rmng:rmng", "true")
+            // Ownership needs root; the directory still has to be created.
+            .replace("install -d -o rmng -g rmng -m 755", "mkdir -p");
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(&script)
@@ -2503,7 +2564,10 @@ mod hook_tests {
             "script failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        std::fs::read_to_string(settings).unwrap()
+        (
+            std::fs::read_to_string(settings).unwrap(),
+            std::fs::read_to_string(&cursor).unwrap(),
+        )
     }
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
@@ -2631,6 +2695,73 @@ mod hook_tests {
         let last: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
         assert_eq!(last["hook_event_name"], "Stop");
         assert!(last["ts"].as_f64().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cursor throws converting a Claude hook entry whose matcher is absent, and registers
+    /// none of them when it does. This is the single key that keeps the probe alive there.
+    #[test]
+    fn every_claude_tool_hook_spells_out_its_matcher() {
+        let dir = tmpdir("matcher");
+        let settings = dir.join("settings.json");
+        let got: serde_json::Value = serde_json::from_str(&run(&settings)).unwrap();
+        for event in HOOK_EVENTS {
+            assert_eq!(
+                got["hooks"][event][0]["matcher"], "*",
+                "{event} without a matcher makes Cursor drop every hook in the file"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursor_gets_the_events_its_claude_converter_drops() {
+        let dir = tmpdir("cursor");
+        let settings = dir.join("settings.json");
+        let (_, body) = run_both(&settings);
+        let got: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(got["version"], 1);
+        for event in CURSOR_HOOK_EVENTS {
+            assert_eq!(
+                got["hooks"][event][0]["command"], HOOK_IN_CLONE,
+                "{event} must run the in-clone path"
+            );
+        }
+        assert_eq!(got["hooks"].as_object().unwrap().len(), CURSOR_HOOK_EVENTS.len());
+        // The reason this file exists at all: Cursor's Claude converter has no name for
+        // these, and the first is the only event a failed tool call fires.
+        for missing in ["postToolUseFailure", "subagentStart"] {
+            assert!(
+                CURSOR_HOOK_EVENTS.contains(&missing),
+                "{missing} is why the native registration exists"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cursors_own_hooks_survive_the_merge() {
+        let dir = tmpdir("cursorkeep");
+        let settings = dir.join("settings.json");
+        let cursor = dir.join("cursor-hooks.json");
+        std::fs::write(
+            &cursor,
+            r#"{"version":1,"hooks":{"beforeReadFile":[{"command":"/theirs.sh"}]}}"#,
+        )
+        .unwrap();
+
+        let (_, body) = run_both(&settings);
+        let got: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            got["hooks"]["beforeReadFile"].is_null(),
+            "assigning .hooks wholesale is what retires an event, here as in the Claude file"
+        );
+        assert_eq!(got["hooks"]["stop"][0]["command"], HOOK_IN_CLONE);
+
+        // A second identical pass must be byte-identical, or the stamp is all that stops an
+        // endless churn of writes into a file Cursor watches and reloads on every change.
+        assert_eq!(run_both(&settings).1, body, "second identical pass rewrote the file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

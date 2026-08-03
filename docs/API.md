@@ -251,14 +251,30 @@ the moment a background task, dialog or queued request exists. A session record 
 the *container* numbers it, so liveness is checked against the container's own `/proc`, and
 `procStart` guards a reused pid.
 
+**Cursor feeds the same table.** It publishes no registry, so a conversation is rebuilt from the
+probe's own event stream instead: a turn that has ended reads `idle`, and one still open reads
+`busy`. Two details are load-bearing. A Cursor subagent runs under its own conversation id, never
+receives a prompt and never fires its own stop, so only a conversation that has received a
+`beforeSubmitPrompt` counts as a session. And `~/.config/Cursor/code.lock` names the running
+Cursor and is rewritten at every start, so its mtime dates events to the process that produced
+them: without that cut, a Cursor killed mid-turn would read as working until the log rolled.
+
 **The remaining clones get one model call.** The question is narrow enough to be mostly a property
 of a command: `cargo build` returns, `npm run dev` does not, and reading a pipe returns only if a
 machine and not a person is going to write it. The evidence comes from an activity probe the
-reconciler installs in every clone (`~/.rmng/hook.py`, registered under `.hooks` in
-`~/.claude/settings.json`), which records turn boundaries, subagent starts and stops, the
-outstanding background-task set, and every tool call. An unmatched `PreToolUse` is what tells a
-clone sitting inside a command from one that has finished. See
+reconciler installs in every clone (`~/.rmng/hook.py`), which records turn boundaries, subagent
+starts and stops, the outstanding background-task set, and every tool call. An unmatched
+`PreToolUse` is what tells a clone sitting inside a command from one that has finished. See
 [stuck.rs](../crates/control-server/src/stuck.rs).
+
+The probe is registered twice, under `.hooks` in `~/.claude/settings.json` and again in
+`~/.cursor/hooks.json`. Cursor reads the Claude file too and converts it, but the converter has no
+name for `postToolUseFailure` and drops it, and that is the only event Cursor fires when a tool
+call fails: through the converter alone every failed tool call would stay unmatched forever and
+the clone would read as blocked inside a command that had already finished. The Claude entries
+also spell out `"matcher": "*"` rather than leaving it implicit, because Cursor's converter calls
+`.split()` on the matcher without checking for one and registers nothing at all when it throws.
+Cursor fires both registrations, so most events arrive twice and duplicates are dropped on read.
 
 Answers are cached on the view with elapsed times bucketed, so a clone in one state is asked about
 once rather than once per four-second tick. On a 32-clone fleet that was 381 calls over six hours,

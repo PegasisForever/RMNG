@@ -242,11 +242,46 @@ pub struct HookEvent {
     pub background_tasks: Vec<BackgroundTask>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// How a Cursor turn ended: `completed`, `aborted`, or `error`. Claude Code splits these
+    /// across `Stop` and `StopFailure`; Cursor sends one `stop` and puts the outcome here.
+    #[serde(default)]
+    pub status: Option<String>,
     /// The clone's own clock. Only ever differenced against another stamp from the same
     /// clone, never compared to this server's clock.
     #[serde(default)]
     pub ts: f64,
+    /// Set by [`read_hook_events`] when the line arrived under a Cursor event name. Cursor
+    /// conversations are rebuilt from the stream, and a Claude Code session must never be
+    /// invented from one.
+    #[serde(skip)]
+    pub from_cursor: bool,
 }
+
+/// Cursor names the same events in its own vocabulary, so one table lets every fold below
+/// stay written once. Verified against Cursor 3.11.19's `packages/hooks/src/hook-step.ts`
+/// and against a live capture of all 21 native steps.
+///
+/// Only the events the probe subscribes to appear here. Cursor's other steps
+/// (`beforeShellExecution`, `afterAgentThought`, `workspaceOpen`, ...) are left alone: they
+/// pass through under their own name and no fold matches them.
+fn claude_name(cursor: &str) -> Option<&'static str> {
+    Some(match cursor {
+        "beforeSubmitPrompt" => "UserPromptSubmit",
+        "preToolUse" => "PreToolUse",
+        "postToolUse" => "PostToolUse",
+        "postToolUseFailure" => "PostToolUseFailure",
+        "stop" => "Stop",
+        "subagentStart" => "SubagentStart",
+        "subagentStop" => "SubagentStop",
+        "sessionEnd" => "SessionEnd",
+        _ => return None,
+    })
+}
+
+/// How close two copies of one event land. Cursor loads a hook file once as user config and
+/// again as project config whenever the workspace root holds it, and fires both. Observed
+/// spread between copies: under 20 ms.
+const DUPLICATE_WINDOW_S: f64 = 1.0;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct BackgroundTask {
@@ -265,16 +300,134 @@ pub struct BackgroundTask {
 /// Read the WHOLE log, never a tail. A fold over a truncated log is not the fold: it loses
 /// the `SubagentStart` of anything long-running, and it invents open sessions whose
 /// `UserPromptSubmit` survived the cut while their `Stop` did not.
+///
+/// Cursor's event names are translated to Claude Code's here, and duplicate copies of one
+/// event are dropped, so that every fold downstream sees one vocabulary and one copy.
 pub fn read_hook_events(root: &Path) -> Vec<HookEvent> {
     let path = root.join("home/rmng/.rmng/agent-events.jsonl");
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
-    raw.lines()
-        .filter(|l| !l.trim().is_empty())
+    let mut out: Vec<HookEvent> = Vec::new();
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
         // A torn final line is normal: the probe appends while this reads. Skip it and
         // pick it up next tick.
-        .filter_map(|l| serde_json::from_str::<HookEvent>(l).ok())
+        let Ok(mut e) = serde_json::from_str::<HookEvent>(line) else {
+            continue;
+        };
+        if let Some(claude) = claude_name(&e.hook_event_name) {
+            e.hook_event_name = claude.to_string();
+            e.from_cursor = true;
+        }
+        // The duplicate always lands within milliseconds of its twin, and two genuine events
+        // that agree on session, name AND `tool_use_id` cannot: a tool use id is unique to
+        // one call. Scanning backwards over the tail rather than only the last entry, because
+        // a clone with Cursor and Claude Code both live interleaves the two streams.
+        let dup = out
+            .iter()
+            .rev()
+            .take_while(|p| e.ts - p.ts <= DUPLICATE_WINDOW_S)
+            .any(|p| {
+                p.hook_event_name == e.hook_event_name
+                    && p.session_id == e.session_id
+                    && p.tool_use_id == e.tool_use_id
+                    && p.agent_id == e.agent_id
+            });
+        if !dup {
+            out.push(e);
+        }
+    }
+    out
+}
+
+/// Cursor's main process and the wall-clock instant it claimed the profile, or `None` when
+/// Cursor is not running in this clone.
+///
+/// `~/.config/Cursor/code.lock` holds the main process's pid and is written once at startup.
+/// Its mtime is the process start in the same clock the hook timestamps use, which is what
+/// makes it usable directly: no boot time, no clock-tick conversion.
+///
+/// The pid is checked against the container's own `/proc`, never this host's, for the same
+/// reason [`read_sessions`] does it. `cmdline` stands in for a `procStart` guard: a reused
+/// pid running something else fails it, and Cursor's own renderer children carry a `--type=`
+/// argument the main process does not.
+fn cursor_process(root: &Path) -> Option<(i64, f64)> {
+    let lock = root.join("home/rmng/.config/Cursor/code.lock");
+    let meta = std::fs::metadata(&lock).ok()?;
+    let started =
+        meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
+    let pid: i64 = std::fs::read_to_string(&lock).ok()?.trim().parse().ok()?;
+    let raw = std::fs::read(root.join("proc").join(pid.to_string()).join("cmdline")).ok()?;
+    let mut args = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(String::from_utf8_lossy);
+    if !args.next()?.ends_with("/cursor") {
+        return None;
+    }
+    if args.any(|a| a.starts_with("--type=")) {
+        return None;
+    }
+    Some((pid, started))
+}
+
+/// Cursor's conversations, shaped as sessions so one resolver covers both agents.
+///
+/// Cursor publishes no registry: there is no `~/.claude/sessions` equivalent to read, and a
+/// clone worked only through Cursor has none of those files at all. The hook stream is the
+/// whole signal, so a conversation is reconstructed from it:
+///
+/// - Only a conversation that has received a `UserPromptSubmit` counts. A Cursor subagent
+///   runs under its own conversation id and never gets one, and it never fires its own
+///   `Stop` either (it ends with a `SubagentStop` on the parent), so counting it would leave
+///   a session that reads as mid-turn forever.
+/// - A turn that has ended maps to `idle`, the same status Claude Code publishes for it.
+///   `aborted` and `error` are ends too: all three want a human before anything else happens.
+/// - A turn in flight maps to `busy`, which carries the same two states it does for Claude
+///   Code: generating, or blocked inside a tool call. [`build_view`] already separates those
+///   two with the in-flight tool set, and that is the right split for Cursor as well.
+///
+/// Mapping an open turn to no status instead would look more cautious and measures worse.
+/// The statusless fallback is transcript mtime, and Cursor writes a conversation's transcript
+/// only when the turn ends: through a 25-second generation the file was observed not to move
+/// once. A clone was called idle 17 seconds before its turn actually finished because of it.
+///
+/// Events older than the current Cursor process belong to a previous one. Without that cut a
+/// Cursor killed mid-turn leaves a conversation that never sees its `Stop` and reads as
+/// working for as long as the log survives.
+pub fn read_cursor_sessions(root: &Path, events: &[HookEvent]) -> Vec<Session> {
+    let Some((pid, started)) = cursor_process(root) else {
+        return Vec::new();
+    };
+    let stops = latest_live_stop(events);
+    let mut order: Vec<&str> = Vec::new();
+    let mut ended: HashSet<&str> = HashSet::new();
+    for e in events.iter().filter(|e| e.from_cursor && e.ts >= started) {
+        let Some(sid) = e.session_id.as_deref() else {
+            continue;
+        };
+        match e.hook_event_name.as_str() {
+            "UserPromptSubmit" => {
+                if !order.contains(&sid) {
+                    order.push(sid);
+                }
+                ended.remove(sid);
+            }
+            "SessionEnd" => {
+                ended.insert(sid);
+            }
+            _ => {}
+        }
+    }
+    order
+        .into_iter()
+        .filter(|sid| !ended.contains(sid))
+        .map(|sid| Session {
+            pid,
+            session_id: sid.to_string(),
+            status: Some(
+                if stops.contains_key(sid) { "idle" } else { "busy" }.to_string(),
+            ),
+            alive: true,
+            ..Default::default()
+        })
         .collect()
 }
 
@@ -355,8 +508,13 @@ fn current_api_errors(events: &[HookEvent]) -> HashMap<&str, &HookEvent> {
 /// judge used to get by parsing JSONL now arrives on a hook payload instead.
 fn transcript_silence(root: &Path, now: f64) -> HashMap<String, f64> {
     let mut out = HashMap::new();
-    let base = root.join("home/rmng/.claude/projects");
-    let mut stack = vec![base];
+    // Cursor files its transcripts under `~/.cursor/projects/<workspace>/agent-transcripts/
+    // <conversation>/<conversation>.jsonl`, so the stem is the conversation id and the same
+    // stem-keyed walk covers both agents.
+    let mut stack = vec![
+        root.join("home/rmng/.claude/projects"),
+        root.join("home/rmng/.cursor/projects"),
+    ];
     // Bounded walk: a clone keeps every project it has ever opened, and the tree is shallow.
     let mut budget = 20_000;
     while let Some(dir) = stack.pop() {
@@ -474,6 +632,10 @@ pub fn build_view(root: &Path, sessions: &[Session], events: &[HookEvent], now: 
             "generating": generating,
             "quiet_for_seconds": quiet(sid).min(1.0e9).round(),
             "agent_last_said": stop.and_then(|e| e.last_assistant_message.clone()),
+            // Cursor reports how the turn ended on the stop itself. `aborted` means a person
+            // pressed stop and `error` means the turn died, and both are worth the model
+            // seeing: neither resumes on its own.
+            "turn_ended_with": stop.and_then(|e| e.status.clone()),
         }));
         for task in stop.iter().flat_map(|e| e.background_tasks.iter()) {
             let got = outputs.get(&task.id);
@@ -838,13 +1000,21 @@ pub async fn resolve_fleet(
 /// most actionable of them.
 fn read_clone(data_dir: &str, id: &str) -> Option<(Verdict, Value, String)> {
     let root = clone_root(data_dir, id)?;
-    let sessions = read_sessions(&root);
+    let mut sessions = read_sessions(&root);
+    // Cursor's conversations come out of the hook log, so a clone running Cursor has to read
+    // it before the verdict rather than after. Gated on Cursor actually running, which is two
+    // small file reads, so a clone without it keeps the fast path below untouched.
+    let mut events = Vec::new();
+    if cursor_process(&root).is_some() {
+        events = read_hook_events(&root);
+        sessions.extend(read_cursor_sessions(&root, &events));
+    }
     let verdict = clone_state(&sessions, true);
     if verdict != Verdict::Ask {
         // Nothing else is read: three quarters of a fleet settles here, and the cheapest
         // request is the one not made.
         let why = match blocked_reasons(&sessions).as_slice() {
-            [] if sessions.iter().all(|s| !s.alive) => "no live Claude Code session".to_string(),
+            [] if sessions.iter().all(|s| !s.alive) => "no live agent session".to_string(),
             [] => "every session is idle at its prompt".to_string(),
             waiting => format!(
                 "waiting on {}",
@@ -857,7 +1027,9 @@ fn read_clone(data_dir: &str, id: &str) -> Option<(Verdict, Value, String)> {
         };
         return Some((verdict, Value::Null, why));
     }
-    let events = read_hook_events(&root);
+    if events.is_empty() {
+        events = read_hook_events(&root);
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64());
@@ -1205,6 +1377,283 @@ mod tests {
         // The hook fired while the log was being read, so its stamp is ahead of `now`.
         let view = build_view(&root, &sessions, &[pre], 499.0);
         assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(0.0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Cursor
+    // -----------------------------------------------------------------------------------
+
+    /// Cursor running in a fake clone: the lock file naming its pid, and a `/proc` entry
+    /// whose `cmdline` is the main process rather than a renderer child.
+    fn write_cursor(root: &Path, pid: i64, args: &[&str]) {
+        let cfg = root.join("home/rmng/.config/Cursor");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("code.lock"), format!("{pid}\n")).unwrap();
+        let dir = root.join("proc").join(pid.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut raw = Vec::new();
+        for arg in args {
+            raw.extend_from_slice(arg.as_bytes());
+            raw.push(0);
+        }
+        std::fs::write(dir.join("cmdline"), raw).unwrap();
+    }
+
+    fn write_log(root: &Path, lines: &[Value]) {
+        let dir = root.join("home/rmng/.rmng");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body: String =
+            lines.iter().map(|l| format!("{l}\n")).collect::<Vec<_>>().concat();
+        std::fs::write(dir.join("agent-events.jsonl"), body).unwrap();
+    }
+
+    /// Comfortably after the lock file this test just wrote, whose mtime is now.
+    fn soon() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            + 30.0
+    }
+
+    #[test]
+    fn cursor_event_names_arrive_as_claude_ones() {
+        let root = fake_clone("cursorname");
+        write_log(
+            &root,
+            &[
+                json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "c1", "ts": 1.0}),
+                json!({"hook_event_name": "preToolUse", "session_id": "c1",
+                       "tool_use_id": "t1", "ts": 2.0}),
+                json!({"hook_event_name": "postToolUseFailure", "session_id": "c1",
+                       "tool_use_id": "t1", "ts": 3.0}),
+                json!({"hook_event_name": "stop", "session_id": "c1", "status": "aborted",
+                       "ts": 4.0}),
+            ],
+        );
+        let events = read_hook_events(&root);
+        let names: Vec<&str> = events.iter().map(|e| e.hook_event_name.as_str()).collect();
+        assert_eq!(names, ["UserPromptSubmit", "PreToolUse", "PostToolUseFailure", "Stop"]);
+        assert!(events.iter().all(|e| e.from_cursor));
+        assert_eq!(events[3].status.as_deref(), Some("aborted"));
+        // The point of the translation: the existing folds work on Cursor unchanged.
+        assert!(in_flight_tools(&events).is_empty());
+        assert!(latest_live_stop(&events).contains_key("c1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn one_event_registered_twice_is_read_once() {
+        let root = fake_clone("cursordupe");
+        // Cursor loads a hook file as user config and again as project config when the
+        // workspace root holds it, then fires both copies milliseconds apart.
+        write_log(
+            &root,
+            &[
+                json!({"hook_event_name": "preToolUse", "session_id": "c1",
+                       "tool_use_id": "t1", "ts": 100.000}),
+                json!({"hook_event_name": "preToolUse", "session_id": "c1",
+                       "tool_use_id": "t1", "ts": 100.011}),
+                // A different call, however close, is a different call.
+                json!({"hook_event_name": "preToolUse", "session_id": "c1",
+                       "tool_use_id": "t2", "ts": 100.020}),
+            ],
+        );
+        let events = read_hook_events(&root);
+        assert_eq!(events.len(), 2);
+        assert_eq!(in_flight_tools(&events).len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cursor_turn_in_flight_is_a_busy_session() {
+        let root = fake_clone("cursorlive");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let t = soon();
+        write_log(
+            &root,
+            &[json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "c1", "ts": t})],
+        );
+        let events = read_hook_events(&root);
+        let sessions = read_cursor_sessions(&root, &events);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "c1");
+        // Not statusless: Cursor writes a transcript only at turn end, so the mtime fallback
+        // a statusless session gets would read a live generation as silence.
+        assert_eq!(sessions[0].status.as_deref(), Some("busy"));
+        assert!(sessions[0].alive);
+        let view = build_view(&root, &sessions, &events, soon() + 5.0);
+        assert_eq!(view["sessions"][0]["generating"], json!(true));
+        // A clone worked only through Cursor has no Claude session at all, and used to read
+        // as stuck for that reason alone.
+        assert_eq!(clone_state(&sessions, true), Verdict::Ask);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_finished_cursor_turn_is_idle_however_it_ended() {
+        for status in ["completed", "aborted", "error"] {
+            let root = fake_clone(&format!("cursorend-{status}"));
+            write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+            let t = soon();
+            write_log(
+                &root,
+                &[
+                    json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "c1",
+                           "ts": t}),
+                    json!({"hook_event_name": "stop", "session_id": "c1", "status": status,
+                           "ts": t + 1.0}),
+                ],
+            );
+            let events = read_hook_events(&root);
+            let sessions = read_cursor_sessions(&root, &events);
+            assert_eq!(sessions[0].status.as_deref(), Some("idle"), "{status}");
+            assert_eq!(clone_state(&sessions, true), Verdict::Stuck, "{status}");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn an_abort_that_closes_its_tool_after_the_stop_still_reads_as_ended() {
+        let root = fake_clone("cursorabort");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let t = soon();
+        // The real order, measured: Cursor sends `stop` and only then the failure that
+        // retires the tool. Anything that took the last event as the state would call this
+        // clone mid-turn.
+        write_log(
+            &root,
+            &[
+                json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "c1", "ts": t}),
+                json!({"hook_event_name": "preToolUse", "session_id": "c1",
+                       "tool_use_id": "t1", "ts": t + 1.0}),
+                json!({"hook_event_name": "stop", "session_id": "c1", "status": "aborted",
+                       "ts": t + 22.0}),
+                json!({"hook_event_name": "postToolUseFailure", "session_id": "c1",
+                       "tool_use_id": "t1", "ts": t + 22.4}),
+            ],
+        );
+        let events = read_hook_events(&root);
+        let sessions = read_cursor_sessions(&root, &events);
+        assert_eq!(sessions[0].status.as_deref(), Some("idle"));
+        assert_eq!(clone_state(&sessions, true), Verdict::Stuck);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cursor_subagent_is_not_a_session_of_its_own() {
+        let root = fake_clone("cursorsub");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let t = soon();
+        // A subagent runs under its own conversation id, never receives a prompt of its own,
+        // and never fires its own stop: it ends with a SubagentStop on the parent. Counted as
+        // a session it would sit mid-turn forever and no clone would ever read as stuck.
+        write_log(
+            &root,
+            &[
+                json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "parent",
+                       "ts": t}),
+                json!({"hook_event_name": "preToolUse", "session_id": "parent",
+                       "tool_use_id": "task1", "ts": t + 1.0}),
+                json!({"hook_event_name": "subagentStart", "session_id": "parent", "ts": t + 2.0}),
+                json!({"hook_event_name": "preToolUse", "session_id": "sub",
+                       "tool_use_id": "s1", "ts": t + 3.0}),
+                json!({"hook_event_name": "postToolUse", "session_id": "sub",
+                       "tool_use_id": "s1", "ts": t + 4.0}),
+                json!({"hook_event_name": "subagentStop", "session_id": "parent", "ts": t + 5.0}),
+                json!({"hook_event_name": "postToolUse", "session_id": "parent",
+                       "tool_use_id": "task1", "ts": t + 6.0}),
+                json!({"hook_event_name": "stop", "session_id": "parent",
+                       "status": "completed", "ts": t + 7.0}),
+            ],
+        );
+        let events = read_hook_events(&root);
+        let sessions = read_cursor_sessions(&root, &events);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "parent");
+        assert_eq!(clone_state(&sessions, true), Verdict::Stuck);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cursor_turn_sitting_in_a_tool_call_is_blocked_not_generating() {
+        let root = fake_clone("cursorblocked");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let t = soon();
+        write_log(
+            &root,
+            &[
+                json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "c1", "ts": t}),
+                json!({"hook_event_name": "preToolUse", "session_id": "c1",
+                       "tool_name": "Shell", "tool_use_id": "t1", "ts": t + 1.0}),
+            ],
+        );
+        let events = read_hook_events(&root);
+        let sessions = read_cursor_sessions(&root, &events);
+        let view = build_view(&root, &sessions, &events, t + 400.0);
+        // `busy` covers generating and waiting on a command. The unmatched tool call is what
+        // tells them apart, and the model needs the command itself to judge the second.
+        assert_eq!(view["sessions"][0]["generating"], json!(false));
+        assert_eq!(view["in_flight_tool_calls"][0]["tool"], json!("Shell"));
+        assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(399.0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_turn_from_a_previous_cursor_does_not_outlive_it() {
+        let root = fake_clone("cursorstale");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        // Killed mid-turn, so the stop never came. The lock file was rewritten when Cursor
+        // came back, which is what dates these events to the process that is gone.
+        write_log(
+            &root,
+            &[
+                json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "old", "ts": 1.0}),
+                json!({"hook_event_name": "preToolUse", "session_id": "old",
+                       "tool_use_id": "t1", "ts": 2.0}),
+            ],
+        );
+        let events = read_hook_events(&root);
+        assert!(read_cursor_sessions(&root, &events).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cursor_gone_means_no_cursor_sessions() {
+        let root = fake_clone("cursorgone");
+        let t = soon();
+        write_log(
+            &root,
+            &[json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "c1", "ts": t})],
+        );
+        let events = read_hook_events(&root);
+        // No lock file at all.
+        assert!(read_cursor_sessions(&root, &events).is_empty());
+
+        // A lock naming a pid that a different process now holds.
+        write_cursor(&root, 901, &["/usr/bin/python3", "something.py"]);
+        assert!(read_cursor_sessions(&root, &events).is_empty());
+
+        // A lock naming one of Cursor's own renderer children rather than the main process.
+        write_cursor(&root, 902, &["/usr/share/cursor/cursor", "--type=zygote"]);
+        assert!(read_cursor_sessions(&root, &events).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cursor_mid_turn_beside_an_idle_claude_session_is_not_stuck() {
+        let root = fake_clone("cursorboth");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let t = soon();
+        write_log(
+            &root,
+            &[json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "c1", "ts": t})],
+        );
+        let events = read_hook_events(&root);
+        let mut sessions = vec![session(Some("idle"), true)];
+        sessions.extend(read_cursor_sessions(&root, &events));
+        assert_eq!(clone_state(&sessions, true), Verdict::Ask);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
