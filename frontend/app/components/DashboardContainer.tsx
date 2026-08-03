@@ -410,28 +410,41 @@ export function DashboardContainer({
    *  ticket describes, so the ticket is what belongs over the chat. Its notes file stays on
    *  disk and `/api/notes/:id` still serves it; nothing in the UI opens it.
    *
-   *  Between selecting such a clone and Linear answering there is neither, so the card names
-   *  the ticket it is waiting on rather than showing notes it is about to replace. */
+   *  Before the first answer the card names the ticket it is waiting on, rather than showing
+   *  notes it is about to replace. After that answer a ticket that still did not resolve is one
+   *  Linear will not give us: the key is gone, the issue moved workspace, or Linear is down. The
+   *  card falls back to notes and says why, because a clone whose ticket cannot load is still a
+   *  clone somebody needs to work in. A later poll that does resolve it takes the card back. */
   const topCard = () => {
     if (!selectedClone) return null;
-    if (!selectedClone.linearTicket) {
-      return (
-        <ClientOnly>
-          <Suspense
-            fallback={
-              <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
-            }
-          >
-            <NotesEditorContainer key={selectedClone.id} cloneId={selectedClone.id} />
-          </Suspense>
-        </ClientOnly>
-      );
-    }
+    const notes = (
+      <ClientOnly>
+        <Suspense
+          fallback={
+            <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
+          }
+        >
+          <NotesEditorContainer key={selectedClone.id} cloneId={selectedClone.id} />
+        </Suspense>
+      </ClientOnly>
+    );
+    if (!selectedClone.linearTicket) return notes;
     if (!selectedTicket) {
+      if (ticketsLoading) {
+        return (
+          <p className="px-4 text-sm text-slate-400 dark:text-slate-500">
+            Loading {selectedClone.linearTicket}…
+          </p>
+        );
+      }
       return (
-        <p className="px-4 text-sm text-slate-400 dark:text-slate-500">
-          Loading {selectedClone.linearTicket}…
-        </p>
+        <>
+          <p className="px-4 pb-2 text-xs text-slate-400 dark:text-slate-500">
+            {selectedClone.linearTicket} did not load{ticketsError ? `: ${ticketsError}` : ""}.
+            Showing notes.
+          </p>
+          {notes}
+        </>
       );
     }
     return (

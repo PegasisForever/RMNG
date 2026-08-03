@@ -1,5 +1,5 @@
 //! Shared application state handed to every request handler and background job:
-//! the state store, the live config, and two shared HTTP clients.
+//! the state store, the live config, and the shared HTTP client.
 
 use std::sync::{Arc, RwLock};
 

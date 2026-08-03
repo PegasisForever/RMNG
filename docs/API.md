@@ -23,6 +23,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
 | POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
 | PUT | `/api/board` | Replace the board's columns | 200 `ControlState` |
+| PUT | `/api/tickets/order` | Replace the ticket column's arrangement | 200 `ControlState` |
 | POST | `/api/clone` | Start a clone from an image (resolved Linear ticket / plain / raw hostname) | 200 `{ok, op}` |
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
@@ -279,6 +280,15 @@ column is derived from each clone's `archived` flag, so a clone dropped there is
 through `/api/hosts/:id/archive` and never appears in a stored column. A clone that no
 column claims is drawn in the first one, which is how a newly created clone reaches the
 board. Ids of deleted clones are ignored on render and dropped by the next write.
+
+### `PUT /api/tickets/order` (body `{ "ticketIds": string[] }`)
+Replace `ticketOrder` wholesale. Returns the updated `ControlState`.
+
+This is the operator's own arrangement of the ticket column, top to bottom, and it is the
+only thing the server stores about tickets. Identifiers are lowercased on write, which is how
+the browser compares them. An identifier no longer in Linear is ignored rather than pruned,
+so a stale entry costs nothing. A ticket the stored order has never seen is drawn on top,
+because new work should land where somebody looks rather than at the bottom of a queue.
 
 ---
 
