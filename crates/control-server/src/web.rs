@@ -60,6 +60,10 @@ pub fn router(app: App) -> Router {
         .route("/api/linear/upload-relay", post(linear_upload_relay))
         .route("/api/linear/asset", get(linear_asset))
         .route("/uploads/:file", get(uploads_serve))
+        // Distilled clone transcripts, kept after the clone is gone (see `crate::ledger`). Both
+        // run the read server-side, so a caller gets matches back instead of a corpus.
+        .route("/api/ledger/search", get(ledger_search))
+        .route("/api/ledger/read", get(ledger_read))
         .route("/api/config", get(config_get).put(config_put))
         .route("/api/config/test", post(config_test))
         .route("/api/setup/env", get(setup_env))
@@ -1886,6 +1890,83 @@ async fn linear_asset(
     .await
 }
 
+// --- transcript ledger (see `crate::ledger`) --------------------------------
+
+#[derive(Deserialize)]
+struct LedgerSearchQuery {
+    /// The pattern, as a case-insensitive substring of the whole ledger line.
+    q: String,
+    /// One clone id, or absent for every clone the ledger knows.
+    #[serde(default)]
+    clone: Option<String>,
+    /// Epoch milliseconds, both inclusive.
+    #[serde(default)]
+    since: Option<i64>,
+    #[serde(default)]
+    until: Option<i64>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /api/ledger/search?q=&clone=&since=&until=&limit=`: grep every clone's distilled
+/// transcripts, including clones that no longer exist.
+///
+/// The search runs here rather than in the caller, so an assistant asking how a piece of work was
+/// done gets the matching lines back instead of the corpus. Each hit carries the byte offset of
+/// its line, which is what [`ledger_read`] takes to read the conversation around it.
+async fn ledger_search(
+    State(app): State<App>,
+    axum::extract::Query(q): axum::extract::Query<LedgerSearchQuery>,
+) -> Result<Json<crate::ledger::SearchResult>, (StatusCode, String)> {
+    let pattern = q.q.trim().to_string();
+    if pattern.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "q is required".into()));
+    }
+    let data_dir = app.config().data_dir;
+    let query = crate::ledger::SearchQuery {
+        pattern,
+        clone: q.clone.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
+        since_ms: q.since,
+        until_ms: q.until,
+        limit: q.limit.unwrap_or_else(crate::ledger::default_limit),
+    };
+    // Blocking: one search can read every ledger file on disk.
+    tokio::task::spawn_blocking(move || crate::ledger::search(&data_dir, &query))
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+#[derive(Deserialize)]
+struct LedgerReadQuery {
+    clone: String,
+    session: String,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    len: Option<u64>,
+}
+
+/// `GET /api/ledger/read?clone=&session=&offset=&len=`: a byte range of one session's ledger.
+///
+/// The range is snapped outward to line boundaries, so the response is always whole NDJSON lines.
+/// Pass an offset below a hit's own to read what led up to it.
+async fn ledger_read(
+    State(app): State<App>,
+    axum::extract::Query(q): axum::extract::Query<LedgerReadQuery>,
+) -> Result<Json<crate::ledger::Range>, (StatusCode, String)> {
+    let data_dir = app.config().data_dir;
+    let offset = q.offset.unwrap_or(0);
+    let len = q.len.unwrap_or(64 * 1024);
+    tokio::task::spawn_blocking(move || {
+        crate::ledger::read_range(&data_dir, q.clone.trim(), q.session.trim(), offset, len)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
 /// `GET /uploads/:file` — serve a stored upload by its generated name.
 async fn uploads_serve(State(app): State<App>, AxPath(file): AxPath<String>) -> Response {
     match files::read_upload(&app.config().data_dir, &file) {
@@ -2676,6 +2757,86 @@ mod tests {
             ..Default::default()
         };
         App::new(store, cfg)
+    }
+
+    #[tokio::test]
+    async fn the_ledger_routes_find_a_line_and_read_back_around_it() {
+        let app = test_app();
+        // Stand in for what the tailer writes: two events of one retired clone's session.
+        let dir = crate::ledger::ledger_root(&app.config().data_dir).join("pega-we-142");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("sess-1.ndjson"),
+            "{\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:00:00.000Z\",\"kind\":\"user\",\"text\":\"swap the encoder to VA-API\"}\n\
+             {\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:05:00.000Z\",\"kind\":\"assistant\",\"text\":\"done, the encoder is VA-API now\"}\n",
+        )
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
+        let base = format!("http://{addr}");
+        let http = reqwest::Client::new();
+
+        // A search with no pattern is a 400 rather than a full dump.
+        let bad = http.get(format!("{base}/api/ledger/search")).send().await.unwrap();
+        assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        let found: serde_json::Value = http
+            .get(format!("{base}/api/ledger/search?q=VA-API&clone=pega-we-142"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let hits = found["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2);
+        // Newest first, and the clone is named even though it no longer exists in state.
+        assert_eq!(hits[0]["kind"], "assistant");
+        assert_eq!(hits[0]["clone"], "pega-we-142");
+
+        // The hit's own offset reads back as exactly that line.
+        let hit = &hits[1];
+        let range: serde_json::Value = http
+            .get(format!(
+                "{base}/api/ledger/read?clone=pega-we-142&session=sess-1&offset={}&len={}",
+                hit["offset"], hit["len"]
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let text = range["text"].as_str().unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("swap the encoder"));
+
+        // Reading from 0 picks up both lines, and `size` says how much there is.
+        let whole: serde_json::Value = http
+            .get(format!("{base}/api/ledger/read?clone=pega-we-142&session=sess-1"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(whole["text"].as_str().unwrap().lines().count(), 2);
+        assert_eq!(whole["size"], whole["len"]);
+
+        // A time bound cuts the earlier half.
+        let late: serde_json::Value = http
+            // 2026-08-01T10:02:00Z, between the two records.
+            .get(format!("{base}/api/ledger/search?q=encoder&since=1785578520000"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(late["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(late["hits"][0]["kind"], "assistant");
     }
 
     #[tokio::test]

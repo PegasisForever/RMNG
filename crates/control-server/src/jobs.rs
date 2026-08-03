@@ -262,6 +262,11 @@ pub fn fail_stale_ops(app: &App) {
 
 /// Pick a free clone id for a ticket base name (`base`, then `base a..z`). Race-free
 /// when called immediately before `start_clone` (single state snapshot).
+///
+/// A name is taken if a clone holds it, if a clone is being created under it, or if a clone that
+/// no longer exists left a transcript ledger under it. That last one is why cloning the same
+/// ticket twice keeps walking the alphabet after the first clone is deleted: the ledger is filed
+/// by clone name and outlives the clone (see [`crate::ledger`]).
 pub fn next_free_hostname(app: &App, base: &str) -> String {
     let st = app.store.get();
     let mut taken: std::collections::HashSet<String> =
@@ -271,6 +276,7 @@ pub fn next_free_hostname(app: &App, base: &str) -> String {
             taken.insert(o.target.clone());
         }
     }
+    taken.extend(crate::ledger::reserved_names(&app.config().data_dir));
     if !taken.contains(base) {
         return base.to_string();
     }
@@ -310,6 +316,19 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
         return Err(JobError(format!(
             "'{}' is already being created",
             spec.new_hostname
+        )));
+    }
+    // A retired clone keeps its transcript ledger, and the ledger is filed by clone name. Handing
+    // the name to a new clone would file two unrelated histories in one bucket, so the name stays
+    // spent until the operator says otherwise. `next_free_hostname` skips these, so only an
+    // exact-hostname create (the fleet CLI's `clone create <hostname>`) reaches this rejection.
+    let data_dir = app.config().data_dir;
+    if crate::ledger::reserved_names(&data_dir).contains(&spec.new_hostname) {
+        return Err(JobError(format!(
+            "a retired clone was named '{name}'; its transcript ledger still holds that history. \
+             Pick another name, or remove {}/{name} to release it.",
+            crate::ledger::ledger_root(&data_dir).display(),
+            name = spec.new_hostname
         )));
     }
     // Sub-clone invariant (defense in depth; `web::resolve_parent` already validated): the parent
@@ -896,6 +915,11 @@ pub fn start_delete(app: &App, host_id: &str) -> Result<Operation, JobError> {
 }
 
 async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
+    // Last chance at this clone's transcripts. The `hosts/<id>` symlink disappears the moment the
+    // container stops, so whatever has not been tailed by then is gone for good, and a worker
+    // clone deletes itself seconds after the last correction is typed. Best effort: it is bounded
+    // by its own timeout and it cannot fail the delete.
+    crate::ledger::tail_once(&app, &host_id).await;
     if managed {
         let progress = op_progress(&app, &op_id, OperationKind::Delete);
         if let Err(e) = delete_clone(&app, &host_id, progress).await {
@@ -978,6 +1002,10 @@ pub fn start_archive(app: &App, host_id: &str) -> Result<Operation, JobError> {
 }
 
 async fn run_archive(app: App, op_id: String, host_id: String) {
+    // Same last chance as a delete. An archived clone refuses exec with a 409 and `homes` drops
+    // its symlink, so its transcripts are unreachable from the moment it freezes even though the
+    // files themselves survive.
+    crate::ledger::tail_once(&app, &host_id).await;
     let mut progress = op_progress(&app, &op_id, OperationKind::Archive);
     // Freeze rather than shut down. The clone's processes stop where they stand, so the inner
     // Docker daemon and its containers, the agent's session, and every GPU buffer the clone
@@ -1131,6 +1159,48 @@ mod tests {
             started_at: now_ms(),
             finished_at: None,
         }
+    }
+
+    /// Stand in for a clone that has been deleted: its ledger directory is all that is left.
+    fn retire(app: &App, id: &str) {
+        let dir = crate::ledger::ledger_root(&app.config().data_dir).join(id);
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_retired_clones_name_is_not_handed_out_again() {
+        let app = test_app();
+        assert_eq!(next_free_hostname(&app, "pega-we-142"), "pega-we-142");
+
+        // The clone came and went. Its transcripts are filed under that name, so the next clone
+        // for the same ticket takes the next letter rather than inheriting the history.
+        retire(&app, "pega-we-142");
+        assert_eq!(next_free_hostname(&app, "pega-we-142"), "pega-we-142a");
+        retire(&app, "pega-we-142a");
+        assert_eq!(next_free_hostname(&app, "pega-we-142"), "pega-we-142b");
+    }
+
+    #[tokio::test]
+    async fn an_exact_hostname_that_a_retired_clone_used_is_rejected() {
+        let app = test_app();
+        retire(&app, "worker-7");
+        let spec = CloneSpec {
+            source_image: "img:latest".into(),
+            new_hostname: "worker-7".into(),
+            ..Default::default()
+        };
+        let err = start_clone(&app, spec).unwrap_err().0;
+        assert!(err.contains("retired"), "{err}");
+        // The message names the directory to remove, so the rejection is actionable.
+        assert!(err.contains("ledger/worker-7"), "{err}");
+
+        // A name nobody has used is untouched by the check.
+        let ok = CloneSpec {
+            source_image: "img:latest".into(),
+            new_hostname: "worker-8".into(),
+            ..Default::default()
+        };
+        assert!(start_clone(&app, ok).is_ok());
     }
 
     #[test]

@@ -21,6 +21,7 @@ mod files;
 mod forward;
 mod homes;
 mod jobs;
+mod ledger;
 mod mediaplane;
 mod monitor;
 mod naming;
@@ -258,6 +259,11 @@ async fn main() -> Result<()> {
             // hence spawned after it. Supplies per-clone token totals and the activity signal
             // for agents RMNG did not launch (a human running `claude` over SSH).
             tokio::spawn(agentlog::run_scanner(app_for_bg.clone()));
+            // Reads the same transcripts through the same symlinks, for a different reason:
+            // it keeps a distilled, greppable copy under data/ledger so a clone's work history
+            // outlives the clone. Its directory listing is also the registry of names already
+            // used, which is what stops a new clone inheriting a retired one's history.
+            tokio::spawn(ledger::run(app_for_bg.clone()));
             tokio::spawn(shm::run(app_for_bg.clone()));
             tokio::spawn(buildinfra::run(app_for_bg.clone()));
             // Scheduled chat delivery: fires operator-queued messages once their time passes.

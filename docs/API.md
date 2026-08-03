@@ -37,6 +37,8 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET/PUT | `/api/notes/:id` | Fetch or save a clone's rich-text notes | 200 `[block]` / 204 |
 | POST | `/api/upload` | Upload an image (multipart) | 200 `{url}` |
 | GET | `/uploads/:file` | Serve an uploaded image | 200 binary |
+| GET | `/api/ledger/search?q=` | Grep every clone's distilled transcripts, retired clones included | 200 `{hits,scannedBytes,truncated}` |
+| GET | `/api/ledger/read?clone=&session=` | Read a byte range of one session's ledger | 200 `{clone,session,offset,len,size,text}` |
 | POST | `/api/linear/upload-relay` | Replay one PUT to a Linear-signed bucket URL (multipart) | 200 `{ok,status}` |
 | GET | `/api/linear/asset?url=` | Read one Linear-hosted image with a preset's key | 200 binary |
 | GET/PUT | `/api/config` | Read redacted config or merge a partial update | 200 `AppConfigRedacted` / `{config,restartRequired,networkWarning?}` |
@@ -542,6 +544,68 @@ Issue bodies keep the original `uploads.linear.app` URL. The browser rewrites IM
 destinations to this route when it renders and rewrites back before it saves, so nothing stored
 in Linear points here. A link destination and a bare URL keep pointing at Linear, where they
 stay readable and already load without a key.
+
+---
+
+## Transcript ledger
+
+A distilled copy of every clone's Claude Code transcripts, kept after the clone is gone. The
+server tails `data/hosts/<id>/.claude/projects/<slug>/<session>.jsonl` every 30 seconds through
+the symlinks the clone-home reconciler maintains, and writes one NDJSON record per event to
+`data/ledger/<clone>/<session>.ndjson`. Nothing runs inside a clone and no model runs here.
+
+One more pass runs at the start of a delete and an archive. The `hosts/<id>` symlink disappears
+the moment the container stops, so anything not captured while the clone runs is unrecoverable.
+
+**Record shape.** Every line names its clone, session, timestamp and kind first, so a grep hit
+reads without needing its file header.
+
+```json
+{"clone":"pega-we-142","session":"49a5…","ts":"2026-08-01T10:00:00.000Z","kind":"user","text":"implement PER-26"}
+{"clone":"pega-we-142","session":"49a5…","ts":"…","kind":"toolUse","tool":"Bash","toolId":"toolu_1","text":"{\"command\":\"cargo test\"}"}
+{"clone":"pega-we-142","session":"49a5…","ts":"…","kind":"toolResult","toolId":"toolu_1","text":"412 passed"}
+```
+
+`kind` is one of `user`, `assistant`, `toolUse`, `toolResult`, `title` (the CLI's own session
+title, written only when it changes) or `compact` (a compaction boundary, which the CLI appends
+in place rather than rewriting the file). `sidechain: true` marks a subagent's turn. What never
+reaches a record: base64 image data, replaced by `[image/jpeg, 373332 base64 bytes dropped]`,
+and the model's thinking. Tool inputs are clipped at 800 characters, tool results at 2000, and
+message text at 20000, each with the dropped byte count spelled out.
+
+Measured on one three-day session: 132,486,201 raw bytes distil to 2,875,456, which is 2.2
+percent, in 3,879 records.
+
+**Names are spent for good.** A ledger directory outlives its clone, so `data/ledger/` is the
+registry of every clone name ever used. A derived hostname skips those names, and `POST
+/api/clone` with an exact `hostname` rejects one with a 400 naming the directory to remove.
+Reusing a name would file two unrelated histories in one bucket.
+
+### `GET /api/ledger/search` → `{ hits, scannedBytes, truncated }`
+
+| Param | Meaning |
+|---|---|
+| `q` | Required. A case-insensitive substring, matched against the whole ledger line, so it reaches the text, the tool name and the kind alike |
+| `clone` | One clone id. Absent searches every clone the ledger knows, live or retired |
+| `since` / `until` | Epoch milliseconds, both inclusive. A record whose timestamp will not parse passes both bounds |
+| `limit` | Hits to return. Default 50, capped at 500 |
+
+Each hit is `{clone, session, ts, kind, offset, len, line}`. `offset` and `len` locate the line
+inside `<clone>/<session>.ndjson`, which is what the read endpoint takes.
+
+Files are searched newest-modified first, so a limit cuts the oldest sessions rather than the
+most recent. `truncated` is true when the search stopped on the hit limit or on its 512 MB byte
+budget, meaning there are more matches. Hits come back newest first.
+
+### `GET /api/ledger/read` → `{ clone, session, offset, len, size, text }`
+
+`clone` and `session` are required; `offset` defaults to 0 and `len` to 64 KB, capped at 1 MB.
+Pass an offset below a hit's own to read what led up to it.
+
+The range is snapped outward to line boundaries, so `text` is always whole NDJSON lines and
+never a fragment of one. `offset` and `len` in the answer are the snapped ones, and `size` is
+the whole file, so a caller can tell how much is left on either side. Reading past the end
+returns an empty `text` rather than an error. An unknown clone or session is a 400.
 
 ---
 
