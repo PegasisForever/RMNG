@@ -237,21 +237,33 @@ Docker liveness supplies `offline`. The other two answer one question about the 
 does one that asked a question, one whose only running command never returns, and one wedged
 inside a command that has hung. All four need the same thing, which is you.
 
-Three quarters of a fleet is settled from files alone, with no model involved. Claude Code keeps a
-live registry at `~/.claude/sessions/<pid>.json`, and the server reads it through the symlink
+**The unit of judgement is one agent session, not one clone.** A clone runs as many sessions as
+its operator opened, they are independent, and the clone is `working` when any single one of them
+is. Each session is decided on its own evidence alone, and no session ever sees another's. Pooling
+them is what let one abandoned permission dialog mark a busy clone idle, and one interrupted tool
+call mark it hung for hours.
+
+Most sessions are settled from files alone, with no model involved. Claude Code keeps a live
+registry at `~/.claude/sessions/<pid>.json`, and the server reads it through the symlink
 [homes.rs](../crates/control-server/src/homes.rs) already maintains:
 
-| what the registry says | verdict |
+| what the registry says about a session | verdict |
 |---|---|
-| no live session (its process is gone) | `idle` — nothing is running that could wake it |
-| any session `waiting` | `idle` — a dialog is up |
-| every session `idle` | `idle` — all sitting at the prompt |
+| no live session in the clone at all | `idle` for the clone — nothing could wake it |
+| this session `waiting` | this session is stuck — a dialog is up |
+| this session `idle` | this session is stuck — sitting at its prompt |
 | anything else | ask (below) |
 
-The all-`idle` shortcut is exact rather than a guess: Claude Code publishes `shell`, not `idle`,
-the moment a background task, dialog or queued request exists. A session record stores its pid as
-the *container* numbers it, so liveness is checked against the container's own `/proc`, and
+The `idle` shortcut is exact rather than a guess: Claude Code publishes `shell`, not `idle`, the
+moment a background task, dialog or queued request exists. A session record stores its pid as the
+*container* numbers it, so liveness is checked against the container's own `/proc`, and
 `procStart` guards a reused pid.
+
+Every fold over the probe's event log is scoped to an owner, `(session, agent)`, and one rule
+retires all of them. A turn boundary on a session (`Stop`, `UserPromptSubmit`, `SessionEnd`) ends
+that session's main-agent evidence, and `SubagentStop` or `StopFailure` ends that subagent's. A
+matching `PostToolUse` is not the only thing that ends a tool call: interrupting one fires no hook
+at all, and only the next turn boundary says it is over.
 
 **Cursor feeds the same table.** It publishes no registry, so a conversation is rebuilt from the
 probe's own event stream instead: a turn that has ended reads `idle`, and one still open reads
@@ -300,11 +312,10 @@ an empty `output` array, so the answer is read off `response.output_item.done` i
 1.8s. `POST /api/config/test` with `{"what":"judge"}` puts one real question to the model and reports
 what came back.
 
-On the 1167 distinct views the pilots recorded, that model with this prompt scores **94.5%** (43
-missed stuck clones, 21 false alarms). Two paragraphs of the prompt are worth 4.9 of those points,
-one forbidding a hung verdict inside a command's first minute and one requiring a worker the agent
-names to appear somewhere in the view. Higher reasoning effort was measured instead and bought 0.4
-points, so the wording carries this, not thinking time.
+Two paragraphs of the prompt are worth 4.9 points on their own, one forbidding a hung verdict
+inside a command's first minute and one requiring a worker the agent names to appear somewhere in
+the view. Higher reasoning effort was measured instead and bought 0.4 points, so the wording
+carries this, not thinking time.
 
 Measured against a replay oracle over two runs on a live 32-clone fleet (2955 scorable samples, 25
 real stalls), against the 5-minute token-idle rule this replaced:
@@ -313,6 +324,18 @@ real stalls), against the 5-minute token-idle rule this replaced:
 |---|---|---|---|---|---|
 | token idle | 90.9% | 250 | 20 | 331s | 1487s |
 | this | 96.7% | 44 | 54 | 31s | 92s |
+
+Deciding per session was measured against pooling a clone's sessions into one view, on 2303
+samples rebuilt from those same runs, with truth taken per session and a clone's truth the OR:
+
+| | accuracy | missed a stuck clone | false alarm |
+|---|---|---|---|
+| pooled into one view per clone | 97.8% | 12 | 38 |
+| one view per session | 98.2% | 14 | 27 |
+
+They disagree on 15 samples and per-session is right on 12 (sign test p=0.035). It costs nothing:
+the same number of calls, over 467 distinct questions rather than 517, because a view carries no
+session id and is therefore shared by every session in the same state.
 
 The known gap: a loop that ends when an external system reaches a state it never reaches (polling
 CI that stays pending) reads as `working`. The model's reasoning is right and the world does not

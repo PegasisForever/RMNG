@@ -7,19 +7,32 @@
 //! so is one that asked a question, and so is one that started a dev server and handed back,
 //! because the server runs forever and will never wake anybody.
 //!
-//! Three of the four branches are decided from files, with no model involved:
+//! **The unit of judgement is one session, never a clone.** A clone runs as many agent
+//! sessions as its operator opened, they are independent, and the clone is working when any
+//! single one of them is. So each session is decided on its own evidence and the clone takes
+//! the OR ([`resolve_fleet`]). Deciding a clone from the union of its sessions is what let one
+//! abandoned dialog mark a busy clone stuck, and one interrupted tool call mark it hung.
+//!
+//! Most sessions are decided from files, with no model involved:
 //!
 //! | condition | verdict |
 //! |---|---|
-//! | container down | `Offline` |
-//! | no live Claude session | `Stuck`, nothing is running to wake anything |
-//! | a live session says `waiting` | `Stuck`, a dialog is up and needs a person |
-//! | every live session says `idle` | `Stuck`, they are all sitting at the prompt |
+//! | container down | `Offline`, for the whole clone |
+//! | no live agent session | `Stuck`, for the whole clone: nothing is running to wake anything |
+//! | this session says `waiting` | `Stuck`, a dialog is up and needs a person |
+//! | this session says `idle` | `Stuck`, it is sitting at its prompt |
 //! | anything else | `Ask` |
 //!
 //! The `idle` shortcut is safe because Claude Code publishes `shell`, not `idle`, the moment
-//! a background task, dialog, or queued request exists. So an all-`idle` clone has nothing
-//! that could wake it, and that is the commonest state in a fleet: free and certain.
+//! a background task, dialog, or queued request exists. So an `idle` session has nothing that
+//! could wake it, and that is the commonest state in a fleet: free and certain.
+//!
+//! Every fold over the hook log is scoped to an owner, which is `(session, agent)`, and one
+//! rule retires all of them: a turn boundary on a session (`Stop`, `UserPromptSubmit`,
+//! `SessionEnd`) ends that session's main-agent evidence, and `SubagentStop` or `StopFailure`
+//! ends that subagent's. Evidence that outlives its owner is the failure this module has hit
+//! three separate times, most recently a tool call the operator interrupted that went on
+//! reading as in flight for three hours.
 //!
 //! The model gets the remaining case, and it is a narrow question: of the work still
 //! outstanding, will any of it finish without the operator doing something? That is mostly a
@@ -40,10 +53,26 @@
 //!
 //! Measured against a replay oracle over two runs on a live 32-clone fleet (2955 scorable
 //! samples, 25 real stalls): 96.7% accurate against token idle's 90.9%, 44 missed stuck
-//! clones against 250, and a median 31s to flag a stall against 331s.
+//! clones against 250, and a median 31s to flag a stall against 331s. That was the earlier
+//! design, which pooled a clone's sessions into one view and asked one question about the
+//! pool, and those figures were taken against clone-level truth.
 //!
-//! On the 1167 distinct views those runs recorded, `gpt-5.6-luna` at medium effort scores
-//! 94.5% with the prompt below (43 missed, 21 false alarms), at a median 1.8s per call.
+//! Deciding per session was then measured against pooling on 2303 samples rebuilt from those
+//! same two runs, with truth taken per session and a clone's truth the OR of its sessions'.
+//! Both arms ran `gpt-5.6-luna` at medium effort, each with its own prompt:
+//!
+//! | | accuracy | missed a stuck clone | false alarm |
+//! |---|---|---|---|
+//! | pooled | 97.8% | 12 | 38 |
+//! | per session | 98.2% | 14 | 27 |
+//!
+//! They disagree on 15 samples and the per-session answer is right on 12 (sign test p=0.035).
+//! It costs nothing: the same number of calls, over 467 distinct questions against 517,
+//! because a view carrying no session id is shared by every session in the same state.
+//!
+//! What that corpus cannot measure is the retirement rule below. It holds no interrupted tool
+//! call at all, so the fold change is worth exactly zero points there. It was found on a live
+//! clone instead, where one such call had been reading as an `ssh` hung for 3.4 hours.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -184,40 +213,50 @@ pub fn read_sessions(root: &Path) -> Vec<Session> {
     out
 }
 
-/// The whole decision, for everything that can be settled without asking anyone.
+/// One session's verdict, for everything that can be settled without asking anyone.
+///
+/// A session, never a clone. What the OTHER sessions in the same clone are doing is not an
+/// input here and must never become one: an operator who leaves one session at a dialog and
+/// works in another has a working clone.
+pub fn session_state(session: &Session) -> Verdict {
+    match session.status.as_deref() {
+        // A dialog is up, so this session needs a person however busy the rest of the clone is.
+        Some("waiting") => Verdict::Stuck,
+        // At its prompt with nothing pending. See the module docs for why `idle` is certain.
+        Some("idle") => Verdict::Stuck,
+        // `busy`, `shell`, and the statusless entrypoints all need the evidence read.
+        _ => Verdict::Ask,
+    }
+}
+
+/// Whether a clone needs the model at all, from its sessions' own verdicts.
+///
+/// This combines verdicts, never evidence. `Ask` as soon as one session needs asking, because
+/// that one session could still be working. `Stuck` only when every live session is stuck.
 pub fn clone_state(sessions: &[Session], container_up: bool) -> Verdict {
     if !container_up {
         return Verdict::Offline;
     }
-    let live: Vec<&Session> = sessions.iter().filter(|s| s.alive).collect();
-    if live.is_empty() {
+    let mut live = sessions.iter().filter(|s| s.alive).peekable();
+    if live.peek().is_none() {
         return Verdict::Stuck;
     }
-    // `Option<&str>`, not `&str`. A statusless session has to stay IN this set as a
-    // distinct member, or a clone running one idle cli session beside one Cursor session
-    // collapses to `{idle}` and gets called stuck while Cursor is mid-turn.
-    let statuses: HashSet<Option<&str>> = live.iter().map(|s| s.status.as_deref()).collect();
-    if statuses.contains(&Some("waiting")) {
-        return Verdict::Stuck;
+    match live.any(|s| session_state(s) == Verdict::Ask) {
+        true => Verdict::Ask,
+        false => Verdict::Stuck,
     }
-    if statuses.len() == 1 && statuses.contains(&Some("idle")) {
-        return Verdict::Stuck;
-    }
-    Verdict::Ask
 }
 
-/// What each dialog-blocked session is waiting on, for the notification text.
-pub fn blocked_reasons(sessions: &[Session]) -> Vec<(String, String)> {
-    sessions
-        .iter()
-        .filter(|s| s.alive && s.status.as_deref() == Some("waiting"))
-        .map(|s| {
-            (
-                s.session_id.chars().take(8).collect(),
-                s.waiting_for.clone().unwrap_or_else(|| "unknown".into()),
-            )
-        })
-        .collect()
+/// Why a file-decided session reads as stuck. An operator asking "why is this clone grey"
+/// deserves an answer better than silence, and a dialog nobody noticed is the most actionable.
+fn session_why(session: &Session) -> String {
+    match session.status.as_deref() {
+        Some("waiting") => format!(
+            "waiting on {}",
+            session.waiting_for.clone().unwrap_or_else(|| "unknown".into())
+        ),
+        _ => "idle at its prompt".to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -441,22 +480,39 @@ pub fn read_cursor_sessions(root: &Path, events: &[HookEvent]) -> Vec<Session> {
         .collect()
 }
 
-/// `PreToolUse` minus `PostToolUse`: the tool call each session is sitting inside.
+/// `PreToolUse` minus everything that ends it: the tool call each owner is sitting inside.
 ///
 /// This is the whole signal on the statusless entrypoints, which publish no `status` at all.
-/// It is also what keeps a busy clone from reading as finished: without it the judge sees no
+/// It is also what keeps a busy session from reading as finished: without it the judge sees no
 /// in-flight work and no background task and concludes "idle at its prompt". Measured on the
 /// 323 pilot views that carry one: 8 false alarms with this evidence, 41 without.
+///
+/// A matching `PostToolUse` is not the only thing that ends a call, and believing it was cost
+/// three hours of one clone reading as hung. **Interrupting a tool call fires no
+/// `PostToolUse`**: the operator presses escape, types something else, and the call is over
+/// with nothing to say so. Only the turn boundary that follows says it, which is why the
+/// retirement rule is stated in terms of owners rather than pairs.
 pub fn in_flight_tools(events: &[HookEvent]) -> Vec<&HookEvent> {
     let mut live: Vec<&HookEvent> = Vec::new();
     for e in events {
-        let Some(tid) = e.tool_use_id.as_deref() else {
-            continue;
-        };
         match e.hook_event_name.as_str() {
-            "PreToolUse" => live.push(e),
+            "PreToolUse" if e.tool_use_id.is_some() => live.push(e),
             "PostToolUse" | "PostToolUseFailure" => {
-                live.retain(|x| x.tool_use_id.as_deref() != Some(tid));
+                if let Some(tid) = e.tool_use_id.as_deref() {
+                    live.retain(|x| x.tool_use_id.as_deref() != Some(tid));
+                }
+            }
+            // A turn boundary ends that session's MAIN-AGENT calls: the agent cannot be
+            // inside a tool call and have finished its turn. Subagent calls are left alone
+            // here, because a background agent outlives the turn that launched it.
+            "Stop" | "UserPromptSubmit" | "SessionEnd" if e.agent_id.is_none() => {
+                live.retain(|x| !(x.agent_id.is_none() && x.session_id == e.session_id));
+            }
+            // A subagent's own close ends whatever it was sitting inside.
+            "SubagentStop" | "StopFailure" => {
+                if let Some(aid) = e.agent_id.as_deref() {
+                    live.retain(|x| x.agent_id.as_deref() != Some(aid));
+                }
             }
             _ => {}
         }
@@ -597,74 +653,80 @@ fn background_outputs(root: &Path, now: f64) -> HashMap<String, (u64, f64)> {
     out
 }
 
-/// Everything the model is told about one clone.
+/// Everything read or folded once per clone, whatever number of sessions then read from it.
 ///
-/// Scoping matters. A clone keeps every transcript it has ever written and every event it
-/// has ever fired, so an unscoped view hands the judge a graveyard of finished agents and
-/// reads it as live trouble. Only live sessions and still-open subagents get in.
-pub fn build_view(root: &Path, sessions: &[Session], events: &[HookEvent], now: f64) -> Value {
-    let live_ids: HashSet<&str> =
-        sessions.iter().filter(|s| s.alive).map(|s| s.session_id.as_str()).collect();
+/// The folds are clone-wide because the event log is: one file holds every session's stream.
+/// Scoping happens where the view is built, by owner, never here.
+pub struct CloneFacts<'a> {
+    /// How long each transcript has been untouched, keyed by session or conversation id.
+    silence: HashMap<String, f64>,
+    /// Size and staleness of each background task's output file, keyed by task id.
+    outputs: HashMap<String, (u64, f64)>,
+    /// Every tool call still open, each carrying the owner that will close it.
+    tools: Vec<&'a HookEvent>,
+    /// The newest live `Stop` per session.
+    stops: HashMap<&'a str, &'a HookEvent>,
+    /// The `StopFailure` each session is still sitting on, if any.
+    errors: HashMap<&'a str, &'a HookEvent>,
+}
 
-    let tools: Vec<&HookEvent> = in_flight_tools(events)
-        .into_iter()
-        .filter(|t| t.session_id.as_deref().is_some_and(|s| live_ids.contains(s)))
-        .collect();
-    // A session sitting inside a tool call is blocked in it, not generating. Both states
-    // publish `busy`, so the registry cannot tell them apart and this set is what does.
-    let blocked: HashSet<&str> = tools.iter().filter_map(|t| t.session_id.as_deref()).collect();
+impl<'a> CloneFacts<'a> {
+    pub fn read(root: &Path, events: &'a [HookEvent], now: f64) -> Self {
+        Self {
+            silence: transcript_silence(root, now),
+            outputs: background_outputs(root, now),
+            tools: in_flight_tools(events),
+            stops: latest_live_stop(events),
+            errors: current_api_errors(events),
+        }
+    }
+}
 
-    let stops = latest_live_stop(events);
-    let errors = current_api_errors(events);
-    let silence = transcript_silence(root, now);
-    let outputs = background_outputs(root, now);
+/// Everything the model is told about ONE session.
+///
+/// Scoping is the whole design. A clone keeps every transcript it has ever written and every
+/// event it has ever fired, and it runs several independent agents at once, so a view that
+/// pools them hands the judge evidence belonging to nobody. Asked one question over that pool,
+/// the model has no way to say "this session is working and that one is wedged", and any one
+/// stale item vetoes every live one. Only this session's own evidence gets in.
+///
+/// A subagent's work counts as its parent's, because the parent is what it reports back to.
+pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Value {
+    let sid = session.session_id.as_str();
+    let tools: Vec<&&HookEvent> =
+        facts.tools.iter().filter(|t| t.session_id.as_deref() == Some(sid)).collect();
+    // Sitting inside a tool call is blocked in it, not generating. Both states publish `busy`,
+    // so the registry cannot tell them apart and this is what does. A subagent's call does not
+    // block its parent: the parent is inside its own `Task` call, which is counted here.
+    let blocked = tools.iter().any(|t| t.agent_id.is_none());
 
-    let quiet = |id: &str| -> f64 { silence.get(id).copied().unwrap_or(f64::MAX) };
+    let quiet = facts.silence.get(sid).copied().unwrap_or(f64::MAX);
+    let stop = facts.stops.get(sid).copied();
 
-    let mut out_sessions = Vec::new();
-    let mut out_tasks = Vec::new();
-    let mut out_errors = Vec::new();
+    // A cli session publishes `status`, and `busy` minus "sitting in a tool call" is
+    // generation. A statusless entrypoint falls back to transcript mtime. Reading that
+    // fallback from the hook fold instead looks more principled and measured worse: over
+    // a Cursor-heavy run it changed four verdicts and was wrong on all four.
+    let generating = match session.status.as_deref() {
+        Some(status) => status == "busy" && !blocked,
+        None => quiet <= MOVING_WINDOW_S,
+    };
 
-    for s in sessions.iter().filter(|s| s.alive) {
-        let sid = s.session_id.as_str();
-        let stop = stops.get(sid);
-        // A cli session publishes `status`, and `busy` minus "sitting in a tool call" is
-        // generation. A statusless entrypoint falls back to transcript mtime. Reading that
-        // fallback from the hook fold instead looks more principled and measured worse: over
-        // a Cursor-heavy run it changed four verdicts and was wrong on all four.
-        let generating = match s.status.as_deref() {
-            Some(status) => status == "busy" && !blocked.contains(sid),
-            None => quiet(sid) <= MOVING_WINDOW_S,
-        };
-        out_sessions.push(json!({
-            "id": sid.chars().take(8).collect::<String>(),
-            "status": s.status,
-            "generating": generating,
-            "quiet_for_seconds": quiet(sid).min(1.0e9).round(),
-            "agent_last_said": stop.and_then(|e| e.last_assistant_message.clone()),
-            // Cursor reports how the turn ended on the stop itself. `aborted` means a person
-            // pressed stop and `error` means the turn died, and both are worth the model
-            // seeing: neither resumes on its own.
-            "turn_ended_with": stop.and_then(|e| e.status.clone()),
-        }));
-        for task in stop.iter().flat_map(|e| e.background_tasks.iter()) {
-            let got = outputs.get(&task.id);
-            out_tasks.push(json!({
+    let out_tasks: Vec<Value> = stop
+        .iter()
+        .flat_map(|e| e.background_tasks.iter())
+        .map(|task| {
+            let got = facts.outputs.get(&task.id);
+            json!({
                 "kind": task.kind,
                 "what": task.command.clone().or_else(|| task.agent_type.clone()),
                 "description": task.description,
                 "output_bytes": got.map(|(b, _)| *b),
                 "producing_output": got.is_some_and(|(_, age)| *age <= MOVING_WINDOW_S),
                 "output_still_for_seconds": got.map_or(0.0, |(_, age)| age.round()),
-            }));
-        }
-        if let Some(err) = errors.get(sid) {
-            out_errors.push(json!({
-                "session": sid.chars().take(8).collect::<String>(),
-                "detail": err.reason,
-            }));
-        }
-    }
+            })
+        })
+        .collect();
 
     let out_tools: Vec<Value> = tools
         .iter()
@@ -681,8 +743,26 @@ pub fn build_view(root: &Path, sessions: &[Session], events: &[HookEvent], now: 
         })
         .collect();
 
+    let out_errors: Vec<Value> = facts
+        .errors
+        .get(sid)
+        .map(|err| json!({"detail": err.reason}))
+        .into_iter()
+        .collect();
+
+    // No session id anywhere in here. It identifies nothing the judge can use, and it made
+    // every view unique, so two sessions in the same state never shared a cached answer.
     json!({
-        "sessions": out_sessions,
+        "session": {
+            "status": session.status,
+            "generating": generating,
+            "quiet_for_seconds": quiet.min(1.0e9).round(),
+            "agent_last_said": stop.and_then(|e| e.last_assistant_message.clone()),
+            // Cursor reports how the turn ended on the stop itself. `aborted` means a person
+            // pressed stop and `error` means the turn died, and both are worth the model
+            // seeing: neither resumes on its own.
+            "turn_ended_with": stop.and_then(|e| e.status.clone()),
+        },
         "background_tasks": out_tasks,
         "in_flight_tool_calls": out_tools,
         "api_errors": out_errors,
@@ -709,7 +789,7 @@ pub fn build_view(root: &Path, sessions: &[Session], events: &[HookEvent], now: 
 ///   clone sits there. One such stall accounted for 33 missed views.
 ///
 /// Those last two are what took `gpt-5.6-luna` at medium effort from 89.6% to 94.5% over the
-/// 1167 recorded views (misses 78 to 43, false alarms 43 to 21). Measured, not guessed: a
+/// 1167 recorded pooled views (misses 78 to 43, false alarms 43 to 21). Measured, not guessed: a
 /// dev/holdout split by situation, then confirmed on the whole set. Higher reasoning effort
 /// was tried instead and bought 0.4 points, so the wording is what matters here, not thinking
 /// time.
@@ -718,7 +798,8 @@ pub fn build_view(root: &Path, sessions: &[Session], events: &[HookEvent], now: 
 /// against all 1167 recorded views and rejected. Misses stayed at exactly 44 while false
 /// alarms rose from 35 to 47.
 const SYSTEM: &str = r#"You watch coding agents running unattended in containers. Answer one question
-about one container.
+about one agent session. Other sessions may be running beside it in the same container.
+Everything below belongs to this one and is all of what it has.
 
 Will this agent make any further progress WITHOUT a human giving it more input?
 
@@ -797,9 +878,13 @@ const BUCKETS: [f64; 9] = [30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0, 4800
 /// once per tick.
 ///
 /// The monitor ticks every 4s and a view carries elapsed seconds, so a naive cache would
-/// miss on every tick and ask ~900 times an hour per clone. Rounding every `*_seconds` field
-/// to a bucket means a clone is re-asked only when it crosses one or when something real
-/// changes. On the pilot fleet this held 32 clones to 381 calls over six hours.
+/// miss on every tick and ask ~900 times an hour per session. Rounding every `*_seconds`
+/// field to a bucket means a session is re-asked only when it crosses one or when something
+/// real changes. On the pilot fleet this held 32 clones to 381 calls over six hours.
+///
+/// Asking per session shares better rather than worse, because a view identifies no session:
+/// over the rebuilt corpus the same samples came to 467 distinct questions where the pooled
+/// design needed 517.
 ///
 /// Keyed on the view alone, never on who answered. Changing provider therefore keeps the
 /// answers already given until each clone's view moves, which is right: the question is about
@@ -1091,12 +1176,17 @@ pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bo
 
 /// Decide working-vs-stuck for every running clone, in one concurrent pass.
 ///
-/// Reading a clone is blocking file IO (a directory of session records, the hook log, and two
-/// shallow walks), so each clone's read happens on the blocking pool; the model calls that
-/// follow are ordinary concurrent futures.
+/// Each clone is the OR of its live sessions: working when any one of them is working, idle
+/// only when every one of them is. Sessions inside a clone are walked in order and the walk
+/// stops at the first working answer, so the common one-busy-session clone still costs one
+/// call. Clones run concurrently.
 ///
-/// With no judge configured this still runs, and every clone that the files cannot settle
-/// comes back `Idle`. That is the whole unconfigured behaviour: no guess, no model, and no
+/// Reading a clone is blocking file IO (a directory of session records, the hook log, and two
+/// shallow walks), so each clone's read happens on the blocking pool. The model calls that
+/// follow are ordinary futures.
+///
+/// With no judge configured this still runs, and every session that the files cannot settle
+/// comes back idle. That is the whole unconfigured behaviour: no guess, no model, and no
 /// clone ever reported as working. Per-clone token accounting is elsewhere and unaffected.
 pub async fn resolve_fleet(
     app: &crate::app::App,
@@ -1117,7 +1207,10 @@ pub async fn resolve_fleet(
     // Only now, and only if some clone actually needs asking: the Codex path refreshes an
     // access token to build this, which a fleet that settled from files alone should not pay
     // for every four seconds.
-    let asking = read.iter().any(|(_, s)| matches!(s, Some((Verdict::Ask, ..))));
+    let asking = read
+        .iter()
+        .flat_map(|(_, cases)| cases.iter().flatten())
+        .any(|c| c.verdict == Verdict::Ask);
     let backend = match asking {
         false => None,
         true => {
@@ -1135,37 +1228,50 @@ pub async fn resolve_fleet(
             // A clone whose home is not readable right now (restarting, or `homes` has not
             // repointed its symlink yet) tells us nothing. Leaving it Idle is the honest
             // reading: we cannot see anything that would wake it.
-            let Some((verdict, view, why)) = snapshot else {
+            let Some(cases) = snapshot else {
                 return (id, wire::MonitorState::Idle);
             };
-            match verdict {
-                Verdict::Offline => (id, wire::MonitorState::Idle),
-                Verdict::Stuck => {
-                    tracing::debug!(target: "stuck", "clone {id}: idle — {why}");
-                    (id, wire::MonitorState::Idle)
-                }
-                Verdict::Ask => match backend.as_ref() {
-                    None => (id, wire::MonitorState::Idle),
-                    Some(backend) => match app.stuck.resolve(&app.http, backend, &view).await {
-                        Ok((state, reason, asked)) => {
-                            if asked {
-                                tracing::debug!(
+            if cases.is_empty() {
+                tracing::debug!(target: "stuck", "clone {id}: idle — no live agent session");
+                return (id, wire::MonitorState::Idle);
+            }
+            // The clone is working when ANY of its sessions is. Walked in order and stopped at
+            // the first one that answers working, because no later answer could change the
+            // clone's, and each one costs a model call.
+            for case in &cases {
+                let sid = &case.id;
+                match case.verdict {
+                    Verdict::Offline | Verdict::Stuck => {
+                        tracing::debug!(target: "stuck", "clone {id} {sid}: idle — {}", case.why);
+                    }
+                    Verdict::Ask => {
+                        let Some(backend) = backend.as_ref() else { continue };
+                        match app.stuck.resolve(&app.http, backend, &case.view).await {
+                            Ok((state, reason, asked)) => {
+                                if asked {
+                                    tracing::debug!(
+                                        target: "stuck",
+                                        "clone {id} {sid}: {state:?} — {reason}"
+                                    );
+                                }
+                                if state == wire::MonitorState::Working {
+                                    return (id, wire::MonitorState::Working);
+                                }
+                            }
+                            Err(e) => {
+                                // An outage at the provider must not flip the fleet to
+                                // working. Idle is the same answer an unconfigured judge
+                                // gives, and it is the safe one.
+                                tracing::warn!(
                                     target: "stuck",
-                                    "clone {id}: {state:?} — {reason}"
+                                    "clone {id} {sid}: asking failed: {e:#}"
                                 );
                             }
-                            (id, state)
                         }
-                        Err(e) => {
-                            // An outage at the provider must not flip the fleet to working.
-                            // Idle is the same answer an unconfigured judge gives, and it is
-                            // the safe one.
-                            tracing::warn!(target: "stuck", "clone {id}: asking failed: {e:#}");
-                            (id, wire::MonitorState::Idle)
-                        }
-                    },
-                },
+                    }
+                }
             }
+            (id, wire::MonitorState::Idle)
         }
     });
     let out: HashMap<String, wire::MonitorState> =
@@ -1177,12 +1283,22 @@ pub async fn resolve_fleet(
     out
 }
 
-/// One clone's files, read on the blocking pool. `None` when its home is not reachable.
+/// One live session, decided as far as its files can decide it.
+struct SessionCase {
+    /// First eight characters of the session id, for the log line only. Never in the view.
+    id: String,
+    verdict: Verdict,
+    /// The judge's question, built only for [`Verdict::Ask`].
+    view: Value,
+    /// Why a file-decided session reads as stuck.
+    why: String,
+}
+
+/// Every live session in one clone, read on the blocking pool.
 ///
-/// The third element says why, for a file-decided verdict. An operator asking "why is this
-/// clone grey" deserves an answer better than silence, and a dialog nobody noticed is the
-/// most actionable of them.
-fn read_clone(data_dir: &str, id: &str) -> Option<(Verdict, Value, String)> {
+/// `None` when the home is not reachable. An empty vec when nothing is running in there,
+/// which is a decided clone rather than an unreadable one.
+fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     let root = clone_root(data_dir, id)?;
     let mut sessions = read_sessions(&root);
     // Cursor's conversations come out of the hook log, so a clone running Cursor has to read
@@ -1193,24 +1309,21 @@ fn read_clone(data_dir: &str, id: &str) -> Option<(Verdict, Value, String)> {
         events = read_hook_events(&root);
         sessions.extend(read_cursor_sessions(&root, &events));
     }
-    let verdict = clone_state(&sessions, true);
-    if verdict != Verdict::Ask {
-        // Nothing else is read: three quarters of a fleet settles here, and the cheapest
-        // request is the one not made.
-        let why = match blocked_reasons(&sessions).as_slice() {
-            [] if sessions.iter().all(|s| !s.alive) => "no live agent session".to_string(),
-            [] => "every session is idle at its prompt".to_string(),
-            waiting => format!(
-                "waiting on {}",
-                waiting
-                    .iter()
-                    .map(|(id, what)| format!("{id} ({what})"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
-        return Some((verdict, Value::Null, why));
+    let live: Vec<Session> = sessions.into_iter().filter(|s| s.alive).collect();
+
+    let settled = |s: &Session| SessionCase {
+        id: s.session_id.chars().take(8).collect(),
+        verdict: session_state(s),
+        view: Value::Null,
+        why: session_why(s),
+    };
+    // Nothing else is read when every session settles from its own status: three quarters of
+    // a fleet stops here, and the cheapest request is the one not made. An empty clone lands
+    // here too, as an empty vec.
+    if clone_state(&live, true) != Verdict::Ask {
+        return Some(live.iter().map(settled).collect());
     }
+
     if events.is_empty() {
         events = read_hook_events(&root);
     }
@@ -1222,7 +1335,21 @@ fn read_clone(data_dir: &str, id: &str) -> Option<(Verdict, Value, String)> {
     // pair came out negative. The model noticed before I did, calling a running_for_seconds
     // of -1 "invalid" and reading the clone as hung because of it.
     let now = events.iter().map(|e| e.ts).fold(now, f64::max);
-    Some((verdict, build_view(&root, &sessions, &events, now), String::new()))
+    // Read and folded once for the whole clone, however many sessions read from it.
+    let facts = CloneFacts::read(&root, &events, now);
+    Some(
+        live.iter()
+            .map(|s| match session_state(s) {
+                Verdict::Ask => SessionCase {
+                    id: s.session_id.chars().take(8).collect(),
+                    verdict: Verdict::Ask,
+                    view: build_session_view(s, &facts, now),
+                    why: String::new(),
+                },
+                _ => settled(s),
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -1236,6 +1363,11 @@ mod tests {
             alive,
             ..Default::default()
         }
+    }
+
+    /// One session's view, with the clone-wide reads and folds done for it.
+    fn view_of(root: &Path, s: &Session, events: &[HookEvent], now: f64) -> Value {
+        build_session_view(s, &CloneFacts::read(root, events, now), now)
     }
 
     #[test]
@@ -1253,9 +1385,23 @@ mod tests {
     }
 
     #[test]
-    fn a_dialog_needs_a_person_even_beside_a_busy_session() {
-        let sessions = [session(Some("busy"), true), session(Some("waiting"), true)];
-        assert_eq!(clone_state(&sessions, true), Verdict::Stuck);
+    fn a_dialog_stops_its_own_session_and_nobody_elses() {
+        // The regression this pins: one abandoned dialog used to mark the whole clone stuck,
+        // however busy the session next to it was. An operator working in one session with a
+        // permission prompt left up in another has a working clone.
+        let waiting = session(Some("waiting"), true);
+        let busy = session(Some("busy"), true);
+        assert_eq!(session_state(&waiting), Verdict::Stuck);
+        assert_eq!(session_state(&busy), Verdict::Ask);
+        assert_eq!(clone_state(&[busy, waiting], true), Verdict::Ask);
+    }
+
+    #[test]
+    fn a_clone_is_stuck_only_when_every_session_is() {
+        let idle = || session(Some("idle"), true);
+        let waiting = || session(Some("waiting"), true);
+        assert_eq!(clone_state(&[idle(), waiting()], true), Verdict::Stuck);
+        assert_eq!(clone_state(&[idle(), waiting(), session(None, true)], true), Verdict::Ask);
     }
 
     #[test]
@@ -1274,8 +1420,8 @@ mod tests {
 
     #[test]
     fn one_statusless_session_beside_an_idle_one_still_asks() {
-        // The bug this pins: dropping `None` from the status set collapses this to `{idle}`
-        // and calls a clone stuck while its Cursor session is mid-turn.
+        // A statusless session is a Cursor or wrapper session that may well be mid-turn. The
+        // idle one beside it settles for free and says nothing about it.
         let sessions = [session(Some("idle"), true), session(None, true)];
         assert_eq!(clone_state(&sessions, true), Verdict::Ask);
     }
@@ -1306,12 +1452,13 @@ mod tests {
     }
 
     #[test]
-    fn blocked_reasons_name_what_each_dialog_wants() {
+    fn a_dialog_says_what_it_wants() {
         let mut s = session(Some("waiting"), true);
-        s.session_id = "79650537-2a01-4479".into();
         s.waiting_for = Some("permission prompt".into());
-        let got = blocked_reasons(&[s, session(Some("busy"), true)]);
-        assert_eq!(got, vec![("79650537".to_string(), "permission prompt".to_string())]);
+        assert_eq!(session_why(&s), "waiting on permission prompt");
+        s.waiting_for = None;
+        assert_eq!(session_why(&s), "waiting on unknown");
+        assert_eq!(session_why(&session(Some("idle"), true)), "idle at its prompt");
     }
 
     // -- the hook fold ------------------------------------------------------------------
@@ -1323,6 +1470,67 @@ mod tests {
             agent_id: aid.map(str::to_string),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_interrupted_tool_call_is_over_at_the_next_turn_boundary() {
+        // Measured on a live clone: escape during a tool call fires no `PostToolUse`, and the
+        // prompt the operator types next is the only thing that says the call ended. Waiting
+        // for a matching post let one `ssh` age for 3.4 hours, and the judge read the session
+        // as hung for every one of them.
+        let mut pre = event("PreToolUse", "s", None);
+        pre.tool_use_id = Some("t1".into());
+        pre.ts = 100.0;
+        assert_eq!(in_flight_tools(std::slice::from_ref(&pre)).len(), 1);
+        for closer in ["UserPromptSubmit", "Stop", "SessionEnd"] {
+            let mut end = event(closer, "s", None);
+            end.ts = 114.0;
+            assert!(
+                in_flight_tools(&[pre.clone(), end]).is_empty(),
+                "{closer} ends the call the session was sitting inside"
+            );
+        }
+        // Another session's boundary says nothing about this call.
+        let mut elsewhere = event("Stop", "other", None);
+        elsewhere.ts = 114.0;
+        assert_eq!(in_flight_tools(&[pre, elsewhere]).len(), 1);
+    }
+
+    #[test]
+    fn a_subagents_call_outlives_the_parent_turn_and_ends_on_its_own_close() {
+        // A parent that launches background agents fires `Stop` at once and leaves them
+        // running. Sweeping them out with the parent would call a busy clone finished.
+        let mut sub = event("PreToolUse", "s", Some("a1"));
+        sub.tool_use_id = Some("t1".into());
+        sub.ts = 100.0;
+        let mut stop = event("Stop", "s", None);
+        stop.ts = 101.0;
+        assert_eq!(in_flight_tools(&[sub.clone(), stop.clone()]).len(), 1);
+        for closer in ["SubagentStop", "StopFailure"] {
+            let mut end = event(closer, "s", Some("a1"));
+            end.ts = 200.0;
+            assert!(in_flight_tools(&[sub.clone(), stop.clone(), end]).is_empty(), "{closer}");
+        }
+    }
+
+    #[test]
+    fn one_sessions_work_never_appears_in_anothers_view() {
+        let root = fake_clone("perview");
+        let mut mine = session(Some("busy"), true);
+        mine.session_id = "a".into();
+        let mut theirs = event("PreToolUse", "b", None);
+        theirs.tool_use_id = Some("t1".into());
+        theirs.tool_name = Some("Bash".into());
+        theirs.ts = 100.0;
+
+        let view = view_of(&root, &mine, &[theirs], 12_000.0);
+        // The regression this pins: a stale call belonging to the session next door used to
+        // land in this one's evidence, and 3.3 hours of it read as a hung command.
+        assert_eq!(view["in_flight_tool_calls"], json!([]));
+        assert_eq!(view["session"]["generating"], json!(true));
+        // No session id anywhere, so two sessions in one state share a cached answer.
+        assert!(!view.to_string().contains("\"id\""), "{view}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1533,18 +1741,18 @@ mod tests {
     #[test]
     fn the_view_reports_a_blocked_session_as_not_generating() {
         let root = fake_clone("view");
-        let mut sessions = vec![session(Some("busy"), true)];
-        sessions[0].session_id = "s".into();
+        let mut mine = session(Some("busy"), true);
+        mine.session_id = "s".into();
         let mut pre = event("PreToolUse", "s", None);
         pre.tool_use_id = Some("t1".into());
         pre.tool_name = Some("Bash".into());
         pre.tool_input = Some(r#"{"command":"curl -sS http://127.0.0.1:9099/health"}"#.into());
         pre.ts = 100.0;
 
-        let view = build_view(&root, &sessions, &[pre], 609.0);
+        let view = view_of(&root, &mine, &[pre], 609.0);
         // `busy` covers both writing tokens and sitting in a tool call. Reading it as
         // generating is what let a hung clone read as alive for as long as it hung.
-        assert_eq!(view["sessions"][0]["generating"], json!(false));
+        assert_eq!(view["session"]["generating"], json!(false));
         assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(509.0));
         assert_eq!(view["in_flight_tool_calls"][0]["by"], json!("main agent"));
         let _ = std::fs::remove_dir_all(&root);
@@ -1553,13 +1761,13 @@ mod tests {
     #[test]
     fn a_tool_call_stamped_after_collection_never_reports_a_negative_age() {
         let root = fake_clone("clockrace");
-        let mut sessions = vec![session(Some("busy"), true)];
-        sessions[0].session_id = "s".into();
+        let mut mine = session(Some("busy"), true);
+        mine.session_id = "s".into();
         let mut pre = event("PreToolUse", "s", None);
         pre.tool_use_id = Some("t1".into());
         pre.ts = 500.0;
         // The hook fired while the log was being read, so its stamp is ahead of `now`.
-        let view = build_view(&root, &sessions, &[pre], 499.0);
+        let view = view_of(&root, &mine, &[pre], 499.0);
         assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(0.0));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1667,8 +1875,8 @@ mod tests {
         // a statusless session gets would read a live generation as silence.
         assert_eq!(sessions[0].status.as_deref(), Some("busy"));
         assert!(sessions[0].alive);
-        let view = build_view(&root, &sessions, &events, soon() + 5.0);
-        assert_eq!(view["sessions"][0]["generating"], json!(true));
+        let view = view_of(&root, &sessions[0], &events, soon() + 5.0);
+        assert_eq!(view["session"]["generating"], json!(true));
         // A clone worked only through Cursor has no Claude session at all, and used to read
         // as stuck for that reason alone.
         assert_eq!(clone_state(&sessions, true), Verdict::Ask);
@@ -1775,10 +1983,10 @@ mod tests {
         );
         let events = read_hook_events(&root);
         let sessions = read_cursor_sessions(&root, &events);
-        let view = build_view(&root, &sessions, &events, t + 400.0);
+        let view = view_of(&root, &sessions[0], &events, t + 400.0);
         // `busy` covers generating and waiting on a command. The unmatched tool call is what
         // tells them apart, and the model needs the command itself to judge the second.
-        assert_eq!(view["sessions"][0]["generating"], json!(false));
+        assert_eq!(view["session"]["generating"], json!(false));
         assert_eq!(view["in_flight_tool_calls"][0]["tool"], json!("Shell"));
         assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(399.0));
         let _ = std::fs::remove_dir_all(&root);
