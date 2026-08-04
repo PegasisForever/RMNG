@@ -332,6 +332,19 @@ fn claude_name(cursor: &str) -> Option<&'static str> {
 /// spread between copies: under 20 ms.
 const DUPLICATE_WINDOW_S: f64 = 1.0;
 
+/// The owner a Cursor event gets when it arrives carrying no conversation id.
+///
+/// Cursor does that, and often. Measured on a live clone: 488 of 3804 events came through with
+/// `session_id: ""`, every one of them a tool call (156 reads, 38 greps, 38 writes, 12 shells),
+/// and every event in the ten minutes an operator watched it work was one of them. Nothing in
+/// this module could see any of it, because every fold below keys on the owner, so the clone
+/// read idle through the whole run and flipped to working only for the two and a half minutes
+/// between the one prompt Cursor did name and its stop.
+///
+/// Naming them here rather than at each fold is what keeps that a one-line problem: downstream
+/// they are an ordinary session with an unusual id.
+const CURSOR_UNOWNED: &str = "cursor-unattributed";
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct BackgroundTask {
     #[serde(default)]
@@ -367,6 +380,11 @@ pub fn read_hook_events(root: &Path) -> Vec<HookEvent> {
         if let Some(claude) = claude_name(&e.hook_event_name) {
             e.hook_event_name = claude.to_string();
             e.from_cursor = true;
+            // Cursor sends the field empty rather than omitting it, so both shapes land here.
+            // Named at the door, before any fold has a chance to skip it. See [`CURSOR_UNOWNED`].
+            if e.session_id.as_deref().unwrap_or_default().is_empty() {
+                e.session_id = Some(CURSOR_UNOWNED.to_string());
+            }
         }
         // The duplicate always lands within milliseconds of its twin, and two genuine events
         // that agree on session, name AND `tool_use_id` cannot: a tool use id is unique to
@@ -441,7 +459,14 @@ fn cursor_process(root: &Path) -> Option<(i64, f64)> {
 /// Events older than the current Cursor process belong to a previous one. Without that cut a
 /// Cursor killed mid-turn leaves a conversation that never sees its `Stop` and reads as
 /// working for as long as the log survives.
-pub fn read_cursor_sessions(root: &Path, events: &[HookEvent]) -> Vec<Session> {
+///
+/// The work Cursor does not name gets one session of its own, [`CURSOR_UNOWNED`], and that one
+/// is bounded by time rather than by a `Stop`, because nothing ever sends a `Stop` for a
+/// conversation that was never named. It exists only while its events keep arriving, so it
+/// cannot read busy forever the way an unbounded one would. `MOVING_WINDOW_S` is the bound and
+/// it is comfortable: across 3.3 hours of one clone's unowned stream, 2 of 487 gaps between
+/// consecutive events exceeded it, and both were real pauses between stretches of work.
+pub fn read_cursor_sessions(root: &Path, events: &[HookEvent], now: f64) -> Vec<Session> {
     let Some((pid, started)) = cursor_process(root) else {
         return Vec::new();
     };
@@ -465,9 +490,16 @@ pub fn read_cursor_sessions(root: &Path, events: &[HookEvent]) -> Vec<Session> {
             _ => {}
         }
     }
+    // Fresh enough to still be work. Same `stops` rule as a named conversation, so a `Stop`
+    // that ever does arrive unowned ends this one too.
+    let unowned = unowned_last_seen(events, started)
+        .filter(|at| now - at <= MOVING_WINDOW_S)
+        .map(|_| CURSOR_UNOWNED);
+
     order
         .into_iter()
         .filter(|sid| !ended.contains(sid))
+        .chain(unowned)
         .map(|sid| Session {
             pid,
             session_id: sid.to_string(),
@@ -478,6 +510,28 @@ pub fn read_cursor_sessions(root: &Path, events: &[HookEvent]) -> Vec<Session> {
             ..Default::default()
         })
         .collect()
+}
+
+/// The clone's clock for this pass: this server's, raised to the newest hook stamp.
+///
+/// Stamped AFTER the log is read, never before. A hook that fires during the read would
+/// otherwise carry a timestamp later than `now`, and the tool-call age computed from the pair
+/// came out negative. The model noticed before I did, calling a `running_for_seconds` of -1
+/// "invalid" and reading the clone as hung because of it.
+fn clone_now(events: &[HookEvent]) -> f64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    events.iter().map(|e| e.ts).fold(now, f64::max)
+}
+
+/// When the Cursor work nobody named was last seen, counting only this Cursor process's own.
+pub fn unowned_last_seen(events: &[HookEvent], started: f64) -> Option<f64> {
+    events
+        .iter()
+        .filter(|e| e.ts >= started && e.session_id.as_deref() == Some(CURSOR_UNOWNED))
+        .map(|e| e.ts)
+        .fold(None, |best: Option<f64>, ts| Some(best.map_or(ts, |b| b.max(ts))))
 }
 
 /// `PreToolUse` minus everything that ends it: the tool call each owner is sitting inside.
@@ -672,8 +726,15 @@ pub struct CloneFacts<'a> {
 
 impl<'a> CloneFacts<'a> {
     pub fn read(root: &Path, events: &'a [HookEvent], now: f64) -> Self {
+        let mut silence = transcript_silence(root, now);
+        // The work Cursor never named has no transcript to be silent for, and no entry here
+        // reads as `quiet_for_seconds: 1000000000`, which the judge is right to call a dead
+        // agent. How long since it last fired is the same quantity, so that is what it gets.
+        if let Some(at) = unowned_last_seen(events, f64::NEG_INFINITY) {
+            silence.insert(CURSOR_UNOWNED.to_string(), (now - at).max(0.0));
+        }
         Self {
-            silence: transcript_silence(root, now),
+            silence,
             outputs: background_outputs(root, now),
             tools: in_flight_tools(events),
             stops: latest_live_stop(events),
@@ -1307,7 +1368,8 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     let mut events = Vec::new();
     if cursor_process(&root).is_some() {
         events = read_hook_events(&root);
-        sessions.extend(read_cursor_sessions(&root, &events));
+        let now = clone_now(&events);
+        sessions.extend(read_cursor_sessions(&root, &events, now));
     }
     let live: Vec<Session> = sessions.into_iter().filter(|s| s.alive).collect();
 
@@ -1327,14 +1389,7 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     if events.is_empty() {
         events = read_hook_events(&root);
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64());
-    // Stamped AFTER the log is read, never before. A hook that fires during the read would
-    // otherwise carry a timestamp later than `now`, and the tool-call age computed from the
-    // pair came out negative. The model noticed before I did, calling a running_for_seconds
-    // of -1 "invalid" and reading the clone as hung because of it.
-    let now = events.iter().map(|e| e.ts).fold(now, f64::max);
+    let now = clone_now(&events);
     // Read and folded once for the whole clone, however many sessions read from it.
     let facts = CloneFacts::read(&root, &events, now);
     Some(
@@ -1859,6 +1914,78 @@ mod tests {
     }
 
     #[test]
+    fn cursor_work_with_no_conversation_id_is_still_a_live_session() {
+        // Measured on a live clone: Cursor fires tool calls carrying `session_id: ""`, 488 of
+        // 3804 events over 3.3 hours, and for ten minutes they were the ONLY evidence that
+        // clone was working. Every fold here keys on the owner, so all of it was skipped and
+        // the clone read idle throughout.
+        let root = fake_clone("cursorunowned");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let t = soon();
+        write_log(
+            &root,
+            &[
+                json!({"hook_event_name": "preToolUse", "session_id": "", "tool_name": "Write",
+                       "tool_use_id": "t1", "ts": t}),
+                json!({"hook_event_name": "postToolUse", "session_id": "", "tool_name": "Write",
+                       "tool_use_id": "t1", "ts": t + 1.0}),
+            ],
+        );
+        let events = read_hook_events(&root);
+        assert_eq!(events[0].session_id.as_deref(), Some(CURSOR_UNOWNED), "named at the door");
+
+        let sessions = read_cursor_sessions(&root, &events, t + 5.0);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, CURSOR_UNOWNED);
+        assert_eq!(sessions[0].status.as_deref(), Some("busy"));
+        assert_eq!(session_state(&sessions[0]), Verdict::Ask);
+
+        // And the judge is told how long since it last moved, not that it has been silent for
+        // an age: without an entry of its own it would inherit the no-transcript fallback.
+        let view = view_of(&root, &sessions[0], &events, t + 5.0);
+        assert_eq!(view["session"]["quiet_for_seconds"], json!(4.0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unnamed_cursor_work_stops_being_a_session_once_it_goes_quiet() {
+        // The bound that keeps it honest. Nothing ever sends a `Stop` for a conversation
+        // Cursor never named, so without this it would read busy for as long as the log lived,
+        // which is the exact failure a Cursor subagent used to cause.
+        let root = fake_clone("cursorunownedstale");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let t = soon();
+        write_log(
+            &root,
+            &[json!({"hook_event_name": "preToolUse", "session_id": "", "tool_use_id": "t1",
+                     "ts": t})],
+        );
+        let events = read_hook_events(&root);
+        assert_eq!(read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S).len(), 1);
+        assert!(read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S + 0.1).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_cursors_events_are_given_the_unnamed_owner() {
+        // Claude Code always names its session. An event of its own arriving without one is a
+        // torn read or something new, and inventing an owner for it would fold two unrelated
+        // things into one session.
+        let root = fake_clone("cursorunownedclaude");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let t = soon();
+        write_log(
+            &root,
+            &[json!({"hook_event_name": "PreToolUse", "session_id": "", "tool_use_id": "t1",
+                     "ts": t})],
+        );
+        let events = read_hook_events(&root);
+        assert_eq!(events[0].session_id.as_deref(), Some(""));
+        assert!(read_cursor_sessions(&root, &events, t + 1.0).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_cursor_turn_in_flight_is_a_busy_session() {
         let root = fake_clone("cursorlive");
         write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
@@ -1868,7 +1995,7 @@ mod tests {
             &[json!({"hook_event_name": "beforeSubmitPrompt", "session_id": "c1", "ts": t})],
         );
         let events = read_hook_events(&root);
-        let sessions = read_cursor_sessions(&root, &events);
+        let sessions = read_cursor_sessions(&root, &events, clone_now(&events));
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "c1");
         // Not statusless: Cursor writes a transcript only at turn end, so the mtime fallback
@@ -1899,7 +2026,7 @@ mod tests {
                 ],
             );
             let events = read_hook_events(&root);
-            let sessions = read_cursor_sessions(&root, &events);
+            let sessions = read_cursor_sessions(&root, &events, clone_now(&events));
             assert_eq!(sessions[0].status.as_deref(), Some("idle"), "{status}");
             assert_eq!(clone_state(&sessions, true), Verdict::Stuck, "{status}");
             let _ = std::fs::remove_dir_all(&root);
@@ -1927,7 +2054,7 @@ mod tests {
             ],
         );
         let events = read_hook_events(&root);
-        let sessions = read_cursor_sessions(&root, &events);
+        let sessions = read_cursor_sessions(&root, &events, clone_now(&events));
         assert_eq!(sessions[0].status.as_deref(), Some("idle"));
         assert_eq!(clone_state(&sessions, true), Verdict::Stuck);
         let _ = std::fs::remove_dir_all(&root);
@@ -1961,7 +2088,7 @@ mod tests {
             ],
         );
         let events = read_hook_events(&root);
-        let sessions = read_cursor_sessions(&root, &events);
+        let sessions = read_cursor_sessions(&root, &events, clone_now(&events));
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "parent");
         assert_eq!(clone_state(&sessions, true), Verdict::Stuck);
@@ -1982,7 +2109,7 @@ mod tests {
             ],
         );
         let events = read_hook_events(&root);
-        let sessions = read_cursor_sessions(&root, &events);
+        let sessions = read_cursor_sessions(&root, &events, clone_now(&events));
         let view = view_of(&root, &sessions[0], &events, t + 400.0);
         // `busy` covers generating and waiting on a command. The unmatched tool call is what
         // tells them apart, and the model needs the command itself to judge the second.
@@ -2007,7 +2134,7 @@ mod tests {
             ],
         );
         let events = read_hook_events(&root);
-        assert!(read_cursor_sessions(&root, &events).is_empty());
+        assert!(read_cursor_sessions(&root, &events, clone_now(&events)).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2021,15 +2148,15 @@ mod tests {
         );
         let events = read_hook_events(&root);
         // No lock file at all.
-        assert!(read_cursor_sessions(&root, &events).is_empty());
+        assert!(read_cursor_sessions(&root, &events, clone_now(&events)).is_empty());
 
         // A lock naming a pid that a different process now holds.
         write_cursor(&root, 901, &["/usr/bin/python3", "something.py"]);
-        assert!(read_cursor_sessions(&root, &events).is_empty());
+        assert!(read_cursor_sessions(&root, &events, clone_now(&events)).is_empty());
 
         // A lock naming one of Cursor's own renderer children rather than the main process.
         write_cursor(&root, 902, &["/usr/share/cursor/cursor", "--type=zygote"]);
-        assert!(read_cursor_sessions(&root, &events).is_empty());
+        assert!(read_cursor_sessions(&root, &events, clone_now(&events)).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2044,7 +2171,7 @@ mod tests {
         );
         let events = read_hook_events(&root);
         let mut sessions = vec![session(Some("idle"), true)];
-        sessions.extend(read_cursor_sessions(&root, &events));
+        sessions.extend(read_cursor_sessions(&root, &events, clone_now(&events)));
         assert_eq!(clone_state(&sessions, true), Verdict::Ask);
         let _ = std::fs::remove_dir_all(&root);
     }
