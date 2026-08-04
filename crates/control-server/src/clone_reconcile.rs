@@ -755,6 +755,22 @@ pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<T
         // The global agent prompt (a+c), one identical body per agent's rules location.
         guidance("home/rmng/.claude/CLAUDE.md"),
         guidance("home/rmng/.codex/AGENTS.md"),
+        // Cursor reads neither of those. Its own user-level rules are `.mdc` files under
+        // `~/.cursor/rules`, which is where it looks: `joinPath(userHome, ".cursor", "rules")`
+        // in its bundle, and nothing at the home level named AGENTS.md or CLAUDE.md is read at
+        // all (it recognises those two only at a workspace root). Without this a clone worked
+        // through Cursor ran with none of the operating memory every other agent gets.
+        //
+        // `alwaysApply: true` is what makes it unconditional rather than a rule the agent has
+        // to choose. Verified on a live clone: the file was written, and a fresh Cursor agent
+        // asked to quote a marker line out of its always-applied rules quoted it back.
+        TarEntry {
+            path: "home/rmng/.cursor/rules/rmng.mdc".to_string(),
+            data: cursor_rule(global_prompt).into_bytes(),
+            mode: 0o644,
+            uid: CLONE_UID,
+            gid: CLONE_GID,
+        },
         // The neutral MCP descriptor the node-agent (agent-wrapper) reads (single source of
         // truth: `managed_mcp`). Headless-filtered here so the wrapper needs no headless logic.
         TarEntry {
@@ -769,6 +785,17 @@ pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<T
     let mut entries = entries;
     entries.extend(rmng_cli_skill_entries());
     entries
+}
+
+/// The global prompt as one always-applied Cursor rule.
+///
+/// Cursor's `.mdc` is YAML front matter over a markdown body. `description` is what its Rules
+/// list shows, and `alwaysApply` is the only field that decides whether the body is in the
+/// agent's context at all.
+fn cursor_rule(global_prompt: &str) -> String {
+    format!(
+        "---\ndescription: RMNG fleet operating memory\nalwaysApply: true\n---\n\n{global_prompt}"
+    )
 }
 
 fn codex_parity_stamp_entry(hash: &str) -> TarEntry {
@@ -838,6 +865,7 @@ pub(crate) fn codex_prepare_script() -> &'static str {
 install -d -o rmng -g rmng -m700 /home/rmng/.codex
 install -d -o rmng -g rmng -m755 /home/rmng/.config /home/rmng/.config/rmng /home/rmng/.claude
 install -d -o rmng -g rmng -m755 /home/rmng/.claude/skills/rmng-cli /home/rmng/.agents/skills/rmng-cli
+install -d -o rmng -g rmng -m755 /home/rmng/.cursor /home/rmng/.cursor/rules
 install -d -o rmng -g rmng -m755 /home/rmng/.rmng
 mkdir -p /etc/rmng
 "#
@@ -2157,6 +2185,21 @@ mod tests {
             assert_eq!((e.uid, e.gid), (1000, 1000));
             assert_eq!(String::from_utf8(e.data.clone()).unwrap(), prompt);
         }
+        // Cursor takes the same body, wrapped as an always-applied rule, because it reads
+        // neither of the files above.
+        let rule = entries
+            .iter()
+            .find(|e| e.path == "home/rmng/.cursor/rules/rmng.mdc")
+            .expect("missing Cursor rule");
+        assert_eq!(rule.mode, 0o644);
+        assert_eq!((rule.uid, rule.gid), (1000, 1000));
+        let body = String::from_utf8(rule.data.clone()).unwrap();
+        assert!(body.starts_with("---\n"), "front matter first: {body}");
+        assert!(body.contains("\nalwaysApply: true\n"), "unconditional: {body}");
+        assert!(body.ends_with(prompt), "the prompt is the body, verbatim: {body}");
+        // And the directory it lands in is made ahead of it, or tar creates it root-owned.
+        assert!(codex_prepare_script().contains("/home/rmng/.cursor/rules"));
+
         // The node-agent MCP descriptor is part of the bundle.
         let desc = entries
             .iter()
