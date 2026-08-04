@@ -7,12 +7,53 @@
 //! access-token JWT `exp`) and the generalized `run_clone_op` (parameterized by guest
 //! script, so each provider runs its own import script).
 
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 
 use crate::app::App;
 use crate::docker::CLONE_USER;
+
+/// Says a poll is running, and says so again once it stops however it stops.
+///
+/// Both usage pollers keep a "one at a time" flag. Setting it, awaiting the poll, then
+/// clearing it reads as correct and is not: an async function can be *dropped* at an await
+/// and the line after it never runs. `poll_once` is awaited inside HTTP handlers
+/// (`/api/claude/import` and `/api/claude/refresh`, and the Codex pair), and axum drops a
+/// handler's future the moment the client disconnects. One import whose caller hung up left
+/// the flag set on CT 106 at 18:21 on 2026-08-04, and every poll after it returned
+/// "already polling" for the rest of the process's life.
+///
+/// That is not a poll being late. `fresh_access_token` has two callers and the poller is one
+/// of them; the other only fires when a clone changes account. So the stuck flag stopped
+/// every Claude token refresh on that host, silently, with nothing in any log.
+///
+/// Clearing on `Drop` is what makes the flag honest: cancelled, panicked, returned early or
+/// finished, the poll is over and the next one may start.
+pub(crate) struct PollGuard<'a> {
+    flag: &'a Mutex<bool>,
+}
+
+/// Claim `flag` for one poll, or `None` when a poll already holds it.
+pub(crate) fn try_poll(flag: &Mutex<bool>) -> Option<PollGuard<'_>> {
+    let mut held = flag.lock().unwrap_or_else(PoisonError::into_inner);
+    if *held {
+        return None;
+    }
+    *held = true;
+    drop(held);
+    Some(PollGuard { flag })
+}
+
+impl Drop for PollGuard<'_> {
+    fn drop(&mut self) {
+        // Poison is stepped over rather than unwrapped. A panic that happened while the flag
+        // was held would poison it, and panicking again here, during that unwind, aborts the
+        // process. Leaving the flag set would be worse than the panic that set it.
+        *self.flag.lock().unwrap_or_else(PoisonError::into_inner) = false;
+    }
+}
 
 /// Milliseconds since the Unix epoch (0 if the clock is before the epoch).
 pub(crate) fn now_ms() -> i64 {
@@ -178,6 +219,42 @@ mod tests {
     use super::*;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
+
+    #[test]
+    fn one_poll_at_a_time() {
+        let flag = Mutex::new(false);
+        let first = try_poll(&flag).expect("nothing was polling");
+        assert!(try_poll(&flag).is_none(), "a second poll started while the first ran");
+        drop(first);
+        assert!(try_poll(&flag).is_some(), "the flag outlived the poll that set it");
+    }
+
+    /// The regression. The flag used to be cleared on the line after `poll_inner(app).await`,
+    /// which an async cancellation never reaches: axum drops a handler's future when its
+    /// client disconnects. One import whose caller hung up stopped Claude usage polling, and
+    /// with it every token refresh, until the process was restarted.
+    #[tokio::test]
+    async fn a_cancelled_poll_releases_the_flag() {
+        let flag = Mutex::new(false);
+        let (started, mut wait) = tokio::sync::mpsc::channel::<()>(1);
+
+        let poll = async {
+            let Some(_guard) = try_poll(&flag) else { return };
+            started.send(()).await.unwrap();
+            // Never finishes, standing in for a poll still awaiting Anthropic when the
+            // client goes away.
+            std::future::pending::<()>().await;
+        };
+
+        // `select!` drops the losing branch, which is exactly what axum does to a handler.
+        tokio::select! {
+            _ = poll => unreachable!("the pending future cannot finish"),
+            _ = wait.recv() => {}
+        }
+
+        assert!(!*flag.lock().unwrap(), "a cancelled poll left the flag set");
+        assert!(try_poll(&flag).is_some(), "the next poll was locked out forever");
+    }
 
     #[test]
     fn replace_provider_views_preserves_other_provider() {

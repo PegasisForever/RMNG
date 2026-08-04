@@ -1488,16 +1488,13 @@ pub async fn run_rotator(app: App) {
 // --- poller ----------------------------------------------------------------
 
 pub async fn poll_once(app: &App) -> Result<bool> {
-    {
-        let mut p = app.codex.polling.lock().unwrap();
-        if *p {
-            return Ok(false);
-        }
-        *p = true;
-    }
-    let result = poll_inner(app).await;
-    *app.codex.polling.lock().unwrap() = false;
-    result
+    // Guarded, not set-and-clear. Same reason as the Claude poller: this is awaited inside
+    // HTTP handlers, and a dropped handler future skips the line after the await, leaving
+    // the flag set forever. See [`crate::clone_ops::PollGuard`].
+    let Some(_guard) = crate::clone_ops::try_poll(&app.codex.polling) else {
+        return Ok(false);
+    };
+    poll_inner(app).await
 }
 
 async fn poll_inner(app: &App) -> Result<bool> {

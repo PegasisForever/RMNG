@@ -2404,7 +2404,15 @@ async fn claude_import(State(app): State<App>, Json(req): Json<ImportReq>) -> Js
     let res = crate::claude::import_clone_account(&app, &host)
         .await
         .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
-    let _ = crate::claude::poll_once(&app).await;
+    // Detached, not awaited. The account is already stored by the line above, so this poll is
+    // only there to put its usage on screen — and awaiting it tied a job the server owes
+    // itself to a browser staying connected. A caller that gives up mid-import is normal:
+    // the poll takes seconds per account, and a fetch that answers after the client has gone
+    // still updates the view every other tab is reading.
+    let bg = app.clone();
+    tokio::spawn(async move {
+        let _ = crate::claude::poll_once(&bg).await;
+    });
     Ok(Json(
         json!({ "ok": true, "email": res.email, "cleared": res.cleared }),
     ))
@@ -2576,7 +2584,12 @@ async fn codex_import(State(app): State<App>, Json(req): Json<CodexImportReq>) -
     let res = crate::codex::import_clone_account(&app, &host)
         .await
         .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
-    let _ = crate::codex::poll_once(&app).await;
+    // Detached for the same reason as the Claude import above: the store is already written,
+    // and the usage poll behind it is the server's job rather than this request's.
+    let bg = app.clone();
+    tokio::spawn(async move {
+        let _ = crate::codex::poll_once(&bg).await;
+    });
     Ok(Json(
         json!({ "ok": true, "email": res.email, "cleared": res.cleared }),
     ))

@@ -671,16 +671,13 @@ fn claude_base(acct: &StoredClaudeAccount) -> ClaudeUsage {
 /// Refresh-if-needed + fetch usage for every account; publish a token-free view.
 /// Keeps last-good (marked `stale`) on per-account failure. Returns true on a 429.
 pub async fn poll_once(app: &App) -> Result<bool> {
-    {
-        let mut p = app.claude.polling.lock().unwrap();
-        if *p {
-            return Ok(false);
-        }
-        *p = true;
-    }
-    let result = poll_inner(app).await;
-    *app.claude.polling.lock().unwrap() = false;
-    result
+    // The guard, not a flag set here and cleared after the await. This function is awaited
+    // inside HTTP handlers, and a handler's future is dropped when its client disconnects,
+    // which skips every line after the await. See [`crate::clone_ops::PollGuard`].
+    let Some(_guard) = crate::clone_ops::try_poll(&app.claude.polling) else {
+        return Ok(false);
+    };
+    poll_inner(app).await
 }
 
 async fn poll_inner(app: &App) -> Result<bool> {
