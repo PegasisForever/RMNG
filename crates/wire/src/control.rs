@@ -491,6 +491,19 @@ pub struct ControlState {
     /// pass to keep this honest.
     #[serde(default)]
     pub ticket_order: Vec<String>,
+    /// Clones the operator has silenced. Purely a browser-notification filter: a muted clone
+    /// runs, reports and flags itself unread exactly as it did before, and only the desktop
+    /// notification for it is suppressed.
+    ///
+    /// Stored here rather than in a browser so one mute covers the desktop and the phone, which
+    /// is the whole point of muting a clone that notifies too often.
+    ///
+    /// A parent's mute covers its sub clones; that rule is applied where the notification is
+    /// raised, not here, so unmuting a parent restores its children without a second write.
+    /// An id for a clone that no longer exists is ignored rather than pruned, the same as
+    /// [`Self::ticket_order`].
+    #[serde(default)]
+    pub muted_clones: Vec<String>,
     #[serde(default)]
     pub operations: Vec<Operation>,
     /// Per-account usage view (no tokens). Despite the name it holds **both** providers'

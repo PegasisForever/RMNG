@@ -52,6 +52,9 @@ pub fn router(app: App) -> Router {
         .route("/api/activate", post(activate))
         .route("/api/board", put(board_put))
         .route("/api/tickets/order", put(ticket_order_put))
+        // Which clones the operator has silenced. A browser-notification filter, stored here so
+        // one mute covers every tab and the phone.
+        .route("/api/clones/muted", put(muted_put))
         .route("/api/clone", post(clone))
         .route("/api/layout/activate", post(layout_activate))
         .route("/api/delete", post(delete))
@@ -352,6 +355,34 @@ async fn ticket_order_put(
 ) -> Json<ControlState> {
     let order: Vec<String> = req.ticket_ids.iter().map(|id| id.to_lowercase()).collect();
     Json(app.store.mutate(|s| s.ticket_order = order))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MutedPutReq {
+    clone_ids: Vec<String>,
+}
+
+/// Replace the muted-clone set wholesale (`PUT /api/clones/muted`).
+///
+/// Muting is a browser-notification filter and nothing else: this server raises no
+/// notifications, so it stores the set and reports it back over SSE. Every open tab and phone
+/// then agrees on which clones are silent, which a per-browser store could not do.
+///
+/// Sorted and deduplicated, because the set has no order of its own and a client that sends one
+/// twice should not make `state.json` churn. Ids for clones that no longer exist are kept, the
+/// same bargain as [`ticket_order_put`]: an entry that matches nothing costs one string, and a
+/// clone recreated under the same name is the one the operator muted anyway.
+async fn muted_put(State(app): State<App>, Json(req): Json<MutedPutReq>) -> Json<ControlState> {
+    let mut ids: Vec<String> = req
+        .clone_ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    Json(app.store.mutate(|s| s.muted_clones = ids))
 }
 
 #[derive(Deserialize)]

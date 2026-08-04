@@ -24,6 +24,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
 | PUT | `/api/board` | Replace the board's columns | 200 `ControlState` |
 | PUT | `/api/tickets/order` | Replace the ticket column's arrangement | 200 `ControlState` |
+| PUT | `/api/clones/muted` | Replace the set of clones whose notifications are silenced | 200 `ControlState` |
 | POST | `/api/clone` | Start a clone from an image (resolved Linear ticket / plain / raw hostname) | 200 `{ok, op}` |
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
@@ -366,6 +367,19 @@ column is derived from each clone's `archived` flag, so a clone dropped there is
 through `/api/hosts/:id/archive` and never appears in a stored column. A clone that no
 column claims is drawn in the first one, which is how a newly created clone reaches the
 board. Ids of deleted clones are ignored on render and dropped by the next write.
+
+### `PUT /api/clones/muted` — body `{ "cloneIds": string[] }`
+Replace the muted-clone set wholesale, the same bargain as the two above. Answers the new
+`ControlState`, whose `mutedClones` is the set sorted and deduplicated.
+
+Muting is a browser-notification filter and nothing else. A muted clone runs, reports, and flags
+itself `unread` exactly as before; the only thing suppressed is the desktop notification the
+frontend raises when it stops working. This server raises no notifications, so it holds the set
+and broadcasts it, which is what lets one mute cover every open tab and the phone.
+
+A muted clone's sub clones are silent too. That rule is applied where the notification is raised
+(`frontend/app/lib/mute.ts`), not written into the stored set, so unmuting a parent restores its
+children with no second write. Ids for clones that no longer exist are kept, not pruned.
 
 ### `PUT /api/tickets/order` (body `{ "ticketIds": string[] }`)
 Replace `ticketOrder` wholesale. Returns the updated `ControlState`.

@@ -3,6 +3,8 @@ import {
   Archive,
   ArchiveRestore,
   ArrowRight,
+  Bell,
+  BellOff,
   ChevronDown,
   ChevronRight,
   ExternalLink,
@@ -270,6 +272,14 @@ export interface SidebarCloneProps {
    *  A clone made without a ticket has no URL, so the item is not drawn and this is never
    *  called. */
   onOpenInLinear: (url: string) => void;
+  /** This clone raises no desktop notification when it stops. */
+  muted?: boolean;
+  /** It is silent because a clone above it is muted, not because of its own setting. The menu
+   *  says so instead of offering a toggle that would leave it silent either way. */
+  mutedByParent?: boolean;
+  /** Flip this clone's own mute. Absent ⇒ no menu item, which is what a story that does not
+   *  care about muting gets. */
+  onToggleMute?: () => void;
   /** Live runtime status for this clone's forwards (from the `forwards` SSE event),
    *  merged into the compact forwards chips by rule id. */
   forwardRuntime?: ForwardRuntime[];
@@ -355,6 +365,9 @@ function CloneMenu({
   onCopySshCommand,
   linearUrl,
   onOpenInLinear,
+  muted,
+  mutedByParent,
+  onToggleMute,
 }: {
   cloneId: string;
   managed: boolean;
@@ -374,6 +387,9 @@ function CloneMenu({
    *  hides the item rather than opening a dead link. */
   linearUrl?: string;
   onOpenInLinear: (url: string) => void;
+  muted: boolean;
+  mutedByParent: boolean;
+  onToggleMute?: () => void;
 }) {
   return (
     <OverflowMenu label={`actions for ${cloneId}`} disabled={busy}>
@@ -405,6 +421,24 @@ function CloneMenu({
           <MenuDivider />
         </>
       ) : null}
+      {onToggleMute ? (
+        <>
+          {/* A sub clone silenced by its parent has nothing of its own to flip, so the row
+              says where the mute lives rather than offering a toggle that changes nothing. */}
+          <MenuItem
+            icon={muted || mutedByParent ? BellOff : Bell}
+            label={
+              mutedByParent
+                ? "Muted by its parent"
+                : muted
+                  ? "Unmute notifications"
+                  : "Mute notifications"
+            }
+            onClick={mutedByParent ? () => {} : onToggleMute}
+          />
+          <MenuDivider />
+        </>
+      ) : null}
       <MenuItem icon={Trash2} label={managed ? "Delete" : "Remove"} onClick={onDelete} danger />
     </OverflowMenu>
   );
@@ -426,6 +460,9 @@ export function SidebarClone({
   onUnarchive,
   onCopySshCommand,
   onOpenInLinear,
+  muted = false,
+  mutedByParent = false,
+  onToggleMute,
   forwardRuntime,
   sshPublicHost,
   bastionPort,
@@ -587,6 +624,9 @@ export function SidebarClone({
             onCopySshCommand={onCopySshCommand}
             linearUrl={linearUrl}
             onOpenInLinear={onOpenInLinear}
+            muted={muted}
+            mutedByParent={mutedByParent}
+            onToggleMute={onToggleMute}
           />
         </div>
 
@@ -612,6 +652,21 @@ export function SidebarClone({
                 title={status.label}
                 aria-label={status.label}
               />
+            ) : null}
+            {/* A mute is otherwise invisible until you open the menu, which is how a clone ends
+                up silently ignored for a week. The glyph sits with the status dot because that
+                is where the card already says what this clone is doing. */}
+            {muted || mutedByParent ? (
+              <BellOff
+                className="mr-1 inline-block size-3 align-middle text-slate-400 dark:text-slate-500"
+                aria-label={mutedByParent ? "muted by its parent" : "muted"}
+              >
+                <title>
+                  {mutedByParent
+                    ? "notifications muted by its parent clone"
+                    : "notifications muted"}
+                </title>
+              </BellOff>
             ) : null}
             {clone.linearWorkspace && clone.linearTicket ? (
               <span

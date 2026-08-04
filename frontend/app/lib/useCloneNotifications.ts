@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { cloneIndex, isMuted, mutedSet } from "./mute";
 import type { Clone } from "./types";
 
 /** Browser/OS notifications for clones that stop working.
@@ -17,8 +18,18 @@ import type { Clone } from "./types";
  *  Scope: top-level clones only. A sub clone is a helper its parent spawned, so it starts and
  *  stops on its own schedule many times per parent task, and one notification per stop buries
  *  the edges that matter. Sub clones are still baselined in `seen`, so promoting one back to
- *  top level (or losing sight of it and seeing it again) does not fire a stale edge. */
-export function useCloneNotifications(hosts: Clone[], onActivate?: (id: string) => void) {
+ *  top level (or losing sight of it and seeing it again) does not fire a stale edge.
+ *
+ *  Muting: `muted` is `ControlState.mutedClones`, and a clone in it raises nothing. A muted
+ *  clone is still baselined, so unmuting it does not fire for a stop that happened while it was
+ *  silent. The mute covers sub clones too (see `isMuted`), which today changes nothing on its
+ *  own — they are already out of scope — and keeps the two rules from disagreeing if that
+ *  scope ever widens. */
+export function useCloneNotifications(
+  hosts: Clone[],
+  muted: string[] = [],
+  onActivate?: (id: string) => void,
+) {
   const seen = useRef<Map<string, boolean>>(new Map());
   // Latest-ref for the activate callback so a notification's click handler (created in an
   // effect) always calls the current one, without re-running the effect on every render.
@@ -33,19 +44,26 @@ export function useCloneNotifications(hosts: Clone[], onActivate?: (id: string) 
     }
   }, []);
 
+  // Keyed on the serialized ids rather than the array, because `mutedClones` is a fresh array
+  // on every SSE frame and the effect would otherwise re-run for every unrelated state change.
+  const mutedKey = JSON.stringify(muted);
+
   useEffect(() => {
     const prev = seen.current;
     seen.current = new Map(hosts.map((h) => [h.id, !!h.unread]));
 
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
 
+    const silent = mutedSet(JSON.parse(mutedKey) as string[]);
+    const byId = cloneIndex(hosts);
     for (const h of hosts) {
       if (h.parent) continue;
+      if (isMuted(h, byId, silent)) continue;
       if (h.unread && prev.has(h.id) && !prev.get(h.id)) {
         notifyStopped(h, activateRef.current);
       }
     }
-  }, [hosts]);
+  }, [hosts, mutedKey]);
 }
 
 function notifyStopped(clone: Clone, onActivate?: (id: string) => void) {

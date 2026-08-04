@@ -36,6 +36,7 @@ import { BoardColumnPanel } from "~/components/BoardColumnPanel";
 import { SidebarClone } from "~/components/SidebarClone";
 import { TicketCardBody, TicketColumn, type TicketColumnProps } from "~/components/TicketColumn";
 import { archivesOnDrop, resolveColumns, subCloneTree, type BoardColumn } from "~/lib/board";
+import { cloneIndex, isMutedByParent, mutedSet } from "~/lib/mute";
 import {
   ticketIdFromDrag,
   TICKET_COLUMN_ID,
@@ -110,6 +111,11 @@ export interface BoardProps {
   /** A card menu asked to show its clone's Linear ticket, which leaves the app. The ticket
    *  column's menu asks the same way. */
   onOpenInLinear: (url: string) => void;
+  /** The clones the operator has silenced (`ControlState.mutedClones`). A muted clone raises
+   *  no desktop notification when it stops, and neither do its sub clones. */
+  mutedClones?: string[];
+  /** A card menu flipped its clone's own mute. Absent ⇒ the item is not offered. */
+  onToggleMuteClone?: (clone: Clone) => void;
 
   /** Create a clone and file it in this column. Every column offers this, archive columns
    *  included: the flag is a rule about the drop gesture, not a lock on the column. */
@@ -227,6 +233,8 @@ export function Board({
   onUnarchiveClone,
   onCopySshCommand,
   onOpenInLinear,
+  mutedClones = [],
+  onToggleMuteClone,
   onNewClone,
   onMoveCard,
   onRenameColumn,
@@ -287,6 +295,11 @@ export function Board({
   // One clone provisions at a time, so every column's button waits out the one in flight.
   const cloning = operations.some((op) => op.kind === "clone" && op.status === "running");
 
+  // Read once per render rather than per card: every card asks the same two questions of the
+  // same two collections.
+  const silenced = mutedSet(mutedClones);
+  const muteIndex = cloneIndex(clones);
+
   const cardProps = (clone: Clone) => ({
     clone,
     ticket: cloneTickets[clone.id],
@@ -306,6 +319,11 @@ export function Board({
     onUnarchive: () => onUnarchiveClone(clone),
     onCopySshCommand,
     onOpenInLinear,
+    muted: silenced.has(clone.id),
+    // A sub clone of a muted parent is silent with nothing of its own set, which the menu says
+    // rather than offering a toggle that would leave it silent either way.
+    mutedByParent: isMutedByParent(clone, muteIndex, silenced),
+    onToggleMute: onToggleMuteClone ? () => onToggleMuteClone(clone) : undefined,
   });
 
   /** A clone's sub-clone rows, or null when they are collapsed or it has none.

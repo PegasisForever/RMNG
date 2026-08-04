@@ -197,6 +197,10 @@ export interface ControlState {
    *  so it survives a reload. Ids are lowercased, which is how `orderTickets` compares them;
    *  an id whose ticket is gone is ignored rather than pruned. */
   ticketOrder: string[];
+  /** Clones the operator has silenced. Purely a notification filter: a muted clone runs and
+   *  flags itself unread exactly as before, and only its desktop notification is suppressed.
+   *  A mute covers the clone's sub clones, which `isMuted` resolves at the point of use. */
+  mutedClones: string[];
 }
 
 export function emptyState(): ControlState {
@@ -211,6 +215,7 @@ export function emptyState(): ControlState {
     cloneTokens: {},
     boardColumns: [],
     ticketOrder: [],
+    mutedClones: [],
   };
 }
 

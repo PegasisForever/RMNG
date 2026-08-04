@@ -133,6 +133,13 @@ export const putBoardColumns = (columns: BoardColumn[]) =>
 export const putTicketOrder = (ticketIds: string[]) =>
   putJson("/api/tickets/order", { ticketIds });
 
+/** Replace the muted-clone set. Same wholesale bargain as the two above.
+ *
+ *  Muting silences this clone's desktop notification and its sub clones'. The server raises no
+ *  notifications itself; it holds the set so every tab and the phone agree on it. */
+export const putMutedClones = (cloneIds: string[]) =>
+  putJson("/api/clones/muted", { cloneIds });
+
 // --- uploads ---------------------------------------------------------------
 
 /** Store a pasted or dropped image and answer with its URL.

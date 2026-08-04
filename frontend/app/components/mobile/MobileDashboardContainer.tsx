@@ -91,7 +91,7 @@ export function MobileDashboardContainer({
 
   // A clone that stops working while its screen is closed still notifies, and tapping the
   // notification opens it.
-  useCloneNotifications(state.hosts, open);
+  useCloneNotifications(state.hosts, state.mutedClones ?? [], open);
 
   // Every clone's own Linear ticket, read by this browser with the presets' keys. The phone
   // has no ticket column, so the open queue is nobody's business here and only the clones'

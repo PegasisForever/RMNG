@@ -53,6 +53,7 @@ import {
   putBoardColumns,
   putConfig,
   putForwards,
+  putMutedClones,
   putTicketOrder,
   refreshClaudeUsage,
   refreshCodexUsage,
@@ -77,6 +78,7 @@ import { copyText } from "~/lib/clipboard";
 import { browserLocale } from "~/lib/format";
 import { rememberSideWidth, SIDE_DEFAULT, storedSideWidth } from "~/lib/sidePanelWidth";
 import { type ControlState, type Clone } from "~/lib/types";
+import { toggleMuted } from "~/lib/mute";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
@@ -130,14 +132,6 @@ export function DashboardContainer({
   // The ticket whose panel has the side column, by id. Held as an id rather than the object
   // so a poll that rewrites the list keeps the panel on the current copy, not a stale one.
   const [openTicketId, setOpenTicketId] = useState<string | null>(null);
-
-  // OS notification whenever a clone transitions out of `working` (idle/offline) while
-  // it isn't the selected one — driven by the server's `unread` edge. Clicking it selects
-  // that clone, which closes an open ticket the same way a card click does.
-  useCloneNotifications(state.hosts, (id) => {
-    setOpenTicketId(null);
-    run(activate(id));
-  });
 
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
@@ -269,6 +263,30 @@ export function DashboardContainer({
     setTicketOrder(next);
     run(putTicketOrder(next));
   };
+
+  // The muted-clone set, same optimistic shape as the two above: a mute is a click on a menu
+  // that closes itself, so the card has to go quiet in that frame rather than a round trip
+  // later. The server sorts what it stores, and `toggleMuted` sorts too, so the frame that
+  // comes back is the identical array.
+  const serverMuted = JSON.stringify(state.mutedClones ?? []);
+  const [mutedClones, setMutedClones] = useState<string[]>(() => state.mutedClones ?? []);
+  useEffect(() => {
+    setMutedClones(JSON.parse(serverMuted) as string[]);
+  }, [serverMuted]);
+
+  const applyMuted = (next: string[]) => {
+    setMutedClones(next);
+    run(putMutedClones(next));
+  };
+
+  // OS notification whenever a clone transitions out of `working` (idle/offline) while
+  // it isn't the selected one — driven by the server's `unread` edge. Clicking it selects
+  // that clone, which closes an open ticket the same way a card click does. A muted clone
+  // (or one under a muted parent) raises nothing.
+  useCloneNotifications(state.hosts, mutedClones, (id) => {
+    setOpenTicketId(null);
+    run(activate(id));
+  });
 
   // Linear's own answer, asked for by this browser with the presets' keys. It is the one
   // piece of the board that does not come from the control server.
@@ -588,6 +606,8 @@ export function DashboardContainer({
           onUnarchiveClone: (clone) => archiveDrop(clone, false),
           onCopySshCommand: copyText,
           onOpenInLinear: openInLinear,
+          mutedClones,
+          onToggleMuteClone: (clone) => applyMuted(toggleMuted(mutedClones, clone.id)),
           tickets: {
             tickets: visibleTickets,
             // Nothing asked yet is not an empty queue. Without this the column claims every

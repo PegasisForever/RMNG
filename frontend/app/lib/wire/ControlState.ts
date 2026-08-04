@@ -40,7 +40,21 @@ boardColumns: Array<BoardColumn>,
  * pruned: a closed ticket costs one stale string, and no consumer has to run a cleanup
  * pass to keep this honest.
  */
-ticketOrder: Array<string>, operations: Array<Operation>, 
+ticketOrder: Array<string>, 
+/**
+ * Clones the operator has silenced. Purely a browser-notification filter: a muted clone
+ * runs, reports and flags itself unread exactly as it did before, and only the desktop
+ * notification for it is suppressed.
+ *
+ * Stored here rather than in a browser so one mute covers the desktop and the phone, which
+ * is the whole point of muting a clone that notifies too often.
+ *
+ * A parent's mute covers its sub clones; that rule is applied where the notification is
+ * raised, not here, so unmuting a parent restores its children without a second write.
+ * An id for a clone that no longer exists is ignored rather than pruned, the same as
+ * [`Self::ticket_order`].
+ */
+mutedClones: Array<string>, operations: Array<Operation>, 
 /**
  * Per-account usage view (no tokens). Despite the name it holds **both** providers'
  * rows, distinguished by [`ClaudeUsage::provider`]; `clone_ops::replace_provider_views`

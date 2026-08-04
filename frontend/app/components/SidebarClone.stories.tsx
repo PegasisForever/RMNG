@@ -55,6 +55,12 @@ const meta = {
     // show for. `fn()` logs the URL in the Actions panel, which is the whole of what there is
     // to see.
     onOpenInLinear: fn(),
+    // Muting is the container's to persist, so the story logs the flip and leaves the card as
+    // its args describe it. `muted` is a story arg for that reason: the Controls panel is where
+    // you see both halves of the toggle.
+    muted: false,
+    mutedByParent: false,
+    onToggleMute: fn(),
   },
 } satisfies Meta<typeof SidebarClone>;
 
@@ -169,4 +175,17 @@ export const WithForwards: Story = {
       // f5433 has no runtime entry → offline; f7000 is disabled → muted.
     ],
   },
+};
+
+/** Silenced by the operator. The bell sits where the status dot does, because a mute you can
+ *  only see by opening the menu is how a clone ends up ignored for a week. Its menu item reads
+ *  "Unmute notifications". */
+export const Muted: Story = {
+  args: { clone: cloneIdle, muted: true },
+};
+
+/** A sub clone silenced by its parent. It has nothing of its own to unmute, so the menu says
+ *  where the mute lives rather than offering a toggle that would leave it silent either way. */
+export const MutedByParent: Story = {
+  args: { clone: cloneIdle, mutedByParent: true, isChild: true },
 };
