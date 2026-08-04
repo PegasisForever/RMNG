@@ -54,6 +54,10 @@ pub struct App {
     /// Remembers what the model said about a clone, so one state is asked about once rather
     /// than once per four-second tick.
     pub stuck: Arc<crate::stuck::Judge>,
+    /// One durable line per activity verdict, under `<data_dir>/stuck/<date>.ndjson`. The
+    /// answer cache above forgets; this is what lets a verdict be scored later against what the
+    /// session actually went on to do. See [`crate::stucklog`].
+    pub stucklog: Arc<crate::stucklog::Recorder>,
     /// Volatile per-clone "operator last looked at this clone" timestamps. Set on selection
     /// changes (`web::activate`) and read by the monitor to suppress a `working → idle`
     /// notification for a clone whose latest output the operator has already seen.
@@ -112,6 +116,7 @@ impl App {
             forwards: Arc::new(crate::forward::ForwardBus::new()),
             activity: Arc::new(crate::monitor::ActivityBus::new()),
             stuck: Arc::new(crate::stuck::Judge::new()),
+            stucklog: Arc::new(crate::stucklog::Recorder::new()),
             views: Arc::new(crate::monitor::ViewTracker::new()),
             build_id: Arc::new(RwLock::new(boot_id())),
         }

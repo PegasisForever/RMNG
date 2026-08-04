@@ -351,6 +351,35 @@ never lifted, since that state is about the container. A sub clone the tick coul
 holding its parent by the state it is still displayed with. Parentage is one level deep
 (`Clone.parent`), so a single pass carries everything.
 
+**Every verdict is written down, so a wrong one can be scored later.** The decision itself is
+recomputed each tick and kept nowhere, and the transcript ledger records what a session went on to
+do without recording what the server believed while it did it. Those two halves together are what
+it takes to call a verdict wrong, so
+[stucklog.rs](../crates/control-server/src/stucklog.rs) appends one NDJSON line per decision to
+`<data_dir>/stuck/<date>.ndjson`. There is no endpoint: these are files on the server, kept 30
+days.
+
+A line is written only when the decision is news, meaning the session's state changed, the session
+went away, or the model was called for it. A fleet holding still writes nothing.
+
+| field | what it says |
+|---|---|
+| `ts`, `clone`, `session` | this SERVER's clock, and who the line is about |
+| `state`, `was` | `working`, `idle`, or `gone`, and what it replaced (`new` on a first sighting) |
+| `decidedBy`, `why` | `files`, `model`, `cache`, `no-judge`, or `ask-failed`, and the reason |
+| `status`, `waitingFor` | the registry status the verdict was read from |
+| `promptAgeSeconds` | the CLONE's clock: how long since this session's last `UserPromptSubmit` |
+| `view` | the exact JSON the model was asked, when it was asked anything |
+
+To score a verdict, find the line where a session went `idle` and then the next line for that same
+session. If it says `working`, the session resumed, and `promptAgeSeconds` on that line is how long
+it had gone without a human prompt at the moment it came back. An age larger than the gap between
+the two lines means nobody typed anything in between, so the earlier `idle` was wrong, and `view`
+on the same line is the question to replay against a changed prompt.
+
+The two clocks are never mixed. `ts` is the server's and every `*Seconds` field is the clone's,
+which is why the comparison above is stated as a gap against an age rather than as two instants.
+
 ---
 
 ## Clone selection & the board

@@ -47,9 +47,11 @@
 //! model's answer. That is what makes "no Codex account imported" behave correctly with no
 //! branch for it: with nothing to answer [`Verdict::Ask`], no clone is ever reported working.
 //!
-//! Nothing is stored between ticks except the answer cache. Every verdict is recomputed
-//! from the session registry, the hook log, and file mtimes, so there is no history to
-//! reconcile and nothing to race.
+//! Nothing here is read back between ticks except the answer cache. Every verdict is recomputed
+//! from the session registry, the hook log, and file mtimes, so there is no history to reconcile
+//! and nothing to race. [`crate::stucklog`] writes each decision down as it is made, which no
+//! tick ever reads: that file exists to tell an operator afterwards what this module believed at
+//! the time, which is the one thing recomputation can never recover.
 //!
 //! Measured against a replay oracle over two runs on a live 32-clone fleet (2955 scorable
 //! samples, 25 real stalls): 96.7% accurate against token idle's 90.9%, 44 missed stuck
@@ -593,6 +595,27 @@ fn latest_live_stop(events: &[HookEvent]) -> HashMap<&str, &HookEvent> {
                 out.remove(sid);
             }
             _ => {}
+        }
+    }
+    out
+}
+
+/// Seconds since each session's newest `UserPromptSubmit`, on the clone's own clock.
+///
+/// Nothing in the verdict uses this. It exists for [`crate::stucklog`], and it is the one number
+/// that separates "the agent carried on by itself" from "somebody typed something": a session
+/// that comes back to life carrying a prompt age older than the stretch it spent reported idle
+/// was never prompted, so whatever called it idle was wrong. Reconstructing that from the
+/// transcript alone is not possible after the clone is gone, and the hook log dies with it.
+///
+/// Both stamps are the clone's, so the difference is sound. Clamped at zero for the same reason
+/// [`build_session_view`] clamps its tool ages: a hook that fires during the read lands ahead of
+/// `now`, and a negative age is not a fact about anything.
+fn prompt_ages(events: &[HookEvent], now: f64) -> HashMap<&str, f64> {
+    let mut out = HashMap::new();
+    for e in events.iter().filter(|e| e.hook_event_name == "UserPromptSubmit") {
+        if let Some(sid) = e.session_id.as_deref() {
+            out.insert(sid, (now - e.ts).max(0.0));
         }
     }
     out
@@ -1285,6 +1308,7 @@ pub async fn resolve_fleet(
 
     let decided = read.into_iter().map(|(id, snapshot)| {
         let backend = backend.clone();
+        let log = app.stucklog.clone();
         async move {
             // A clone whose home is not readable right now (restarting, or `homes` has not
             // repointed its symlink yet) tells us nothing. Leaving it Idle is the honest
@@ -1292,21 +1316,44 @@ pub async fn resolve_fleet(
             let Some(cases) = snapshot else {
                 return (id, wire::MonitorState::Idle);
             };
+            // Only for a clone that was actually read: an unreachable home has no live set, and
+            // treating that as an empty one would close out every session the clone still has.
+            let live: Vec<String> = cases.iter().map(|c| c.session.clone()).collect();
+            log.retire(&id, &live);
             if cases.is_empty() {
                 tracing::debug!(target: "stuck", "clone {id}: idle — no live agent session");
                 return (id, wire::MonitorState::Idle);
             }
             // The clone is working when ANY of its sessions is. Walked in order and stopped at
             // the first one that answers working, because no later answer could change the
-            // clone's, and each one costs a model call.
+            // clone's, and each one costs a model call. Sessions after that one go unevaluated,
+            // so they get no decision line either, and their last one stands.
             for case in &cases {
-                let sid = &case.id;
+                let sid = short(&case.session);
                 match case.verdict {
                     Verdict::Offline | Verdict::Stuck => {
                         tracing::debug!(target: "stuck", "clone {id} {sid}: idle — {}", case.why);
+                        let why = case.why.clone();
+                        log.record(
+                            case.decision(&id, wire::MonitorState::Idle, "files", why),
+                            false,
+                        );
                     }
                     Verdict::Ask => {
-                        let Some(backend) = backend.as_ref() else { continue };
+                        let Some(backend) = backend.as_ref() else {
+                            log.record(
+                                case.decision(
+                                    &id,
+                                    wire::MonitorState::Idle,
+                                    "no-judge",
+                                    "nothing is configured to answer, so no clone reads as \
+                                     working"
+                                        .to_string(),
+                                ),
+                                false,
+                            );
+                            continue;
+                        };
                         match app.stuck.resolve(&app.http, backend, &case.view).await {
                             Ok((state, reason, asked)) => {
                                 if asked {
@@ -1315,6 +1362,11 @@ pub async fn resolve_fleet(
                                         "clone {id} {sid}: {state:?} — {reason}"
                                     );
                                 }
+                                // Forced on a live call even when the state held: that line is
+                                // the only record of a question the cache had not answered
+                                // already, and the prompt is tuned against exactly those.
+                                let by = if asked { "model" } else { "cache" };
+                                log.record(case.decision(&id, state, by, reason), asked);
                                 if state == wire::MonitorState::Working {
                                     return (id, wire::MonitorState::Working);
                                 }
@@ -1326,6 +1378,16 @@ pub async fn resolve_fleet(
                                 tracing::warn!(
                                     target: "stuck",
                                     "clone {id} {sid}: asking failed: {e:#}"
+                                );
+                                let why = format!("asking failed: {e:#}");
+                                log.record(
+                                    case.decision(
+                                        &id,
+                                        wire::MonitorState::Idle,
+                                        "ask-failed",
+                                        why,
+                                    ),
+                                    false,
                                 );
                             }
                         }
@@ -1341,18 +1403,69 @@ pub async fn resolve_fleet(
     // The cache is keyed by view content, not by clone, so it cannot be pruned per clone.
     // Clearing it wholesale once it outgrows the fleet costs one round of re-asking.
     app.stuck.prune(out.len().saturating_mul(16).max(256));
+
+    // One append for the whole pass, awaited rather than detached so two passes cannot be
+    // writing the same file at once. A pass that decided nothing new writes nothing at all.
+    let log = app.stucklog.clone();
+    log.retain(&out.keys().cloned().collect());
+    let _ = tokio::task::spawn_blocking(move || log.flush(&data_dir)).await;
     out
 }
 
 /// One live session, decided as far as its files can decide it.
 struct SessionCase {
-    /// First eight characters of the session id, for the log line only. Never in the view.
-    id: String,
+    /// The session's own id, in full. Abbreviated only where it is logged.
+    session: String,
     verdict: Verdict,
     /// The judge's question, built only for [`Verdict::Ask`].
     view: Value,
     /// Why a file-decided session reads as stuck.
     why: String,
+    /// The registry status this was read from, for the decision log. A file-settled session has
+    /// no view, so this and `waiting_for` are the whole of what decided it.
+    status: Option<String>,
+    waiting_for: Option<String>,
+    /// Seconds since this session's newest `UserPromptSubmit`, on the CLONE's clock. `None`
+    /// whenever the hook log was not read, which is every session the registry settled.
+    prompt_age: Option<f64>,
+}
+
+/// First eight characters, which is how a session appears in a `stuck` tracing line. The whole
+/// id goes to the decision log, so the two can be matched up.
+fn short(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+impl SessionCase {
+    /// This case as a decision-log line. `ts` and `was` are filled in by the recorder.
+    ///
+    /// The view is attached only when there was one. A file-settled session gets `status` and
+    /// `waiting_for` instead, and those really are everything [`session_state`] looked at.
+    fn decision(
+        &self,
+        clone: &str,
+        state: wire::MonitorState,
+        decided_by: &str,
+        why: String,
+    ) -> crate::stucklog::Decision {
+        crate::stucklog::Decision {
+            clone: clone.to_string(),
+            session: self.session.clone(),
+            state: match state {
+                wire::MonitorState::Working => "working",
+                wire::MonitorState::Idle => "idle",
+                wire::MonitorState::Offline => "offline",
+            }
+            .to_string(),
+            decided_by: decided_by.to_string(),
+            why,
+            status: self.status.clone(),
+            waiting_for: self.waiting_for.clone(),
+            prompt_age_seconds: self.prompt_age.map(f64::round),
+            view: (!self.view.is_null()).then(|| self.view.clone()),
+            ..Default::default()
+        }
+    }
 }
 
 /// Every live session in one clone, read on the blocking pool.
@@ -1374,10 +1487,13 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     let live: Vec<Session> = sessions.into_iter().filter(|s| s.alive).collect();
 
     let settled = |s: &Session| SessionCase {
-        id: s.session_id.chars().take(8).collect(),
+        session: s.session_id.clone(),
         verdict: session_state(s),
         view: Value::Null,
         why: session_why(s),
+        status: s.status.clone(),
+        waiting_for: s.waiting_for.clone(),
+        prompt_age: None,
     };
     // Nothing else is read when every session settles from its own status: three quarters of
     // a fleet stops here, and the cheapest request is the one not made. An empty clone lands
@@ -1392,14 +1508,18 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     let now = clone_now(&events);
     // Read and folded once for the whole clone, however many sessions read from it.
     let facts = CloneFacts::read(&root, &events, now);
+    let ages = prompt_ages(&events, now);
     Some(
         live.iter()
             .map(|s| match session_state(s) {
                 Verdict::Ask => SessionCase {
-                    id: s.session_id.chars().take(8).collect(),
+                    session: s.session_id.clone(),
                     verdict: Verdict::Ask,
                     view: build_session_view(s, &facts, now),
                     why: String::new(),
+                    status: s.status.clone(),
+                    waiting_for: s.waiting_for.clone(),
+                    prompt_age: ages.get(s.session_id.as_str()).copied(),
                 },
                 _ => settled(s),
             })
@@ -1525,6 +1645,33 @@ mod tests {
             agent_id: aid.map(str::to_string),
             ..Default::default()
         }
+    }
+
+    fn prompt(sid: &str, ts: f64) -> HookEvent {
+        HookEvent { ts, ..event("UserPromptSubmit", sid, None) }
+    }
+
+    #[test]
+    fn the_prompt_age_is_the_newest_prompt_per_session() {
+        // This is what a decision line carries so a later reader can tell an agent that carried
+        // on by itself from one somebody typed at. An older prompt must never win.
+        let events = [
+            prompt("s1", 100.0),
+            prompt("s2", 150.0),
+            prompt("s1", 200.0),
+            HookEvent { ts: 210.0, ..event("Stop", "s1", None) },
+        ];
+        let ages = prompt_ages(&events, 500.0);
+        assert_eq!(ages.get("s1").copied(), Some(300.0));
+        assert_eq!(ages.get("s2").copied(), Some(350.0));
+        assert_eq!(ages.get("s3"), None, "a session nobody prompted has no age");
+    }
+
+    #[test]
+    fn a_prompt_that_lands_during_the_read_ages_zero_rather_than_negative() {
+        // Same clamp `build_session_view` applies to tool ages, for the same reason: a hook
+        // fired while the log was being read sits ahead of `now`.
+        assert_eq!(prompt_ages(&[prompt("s1", 501.0)], 500.0).get("s1").copied(), Some(0.0));
     }
 
     #[test]
