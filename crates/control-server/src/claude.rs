@@ -411,9 +411,28 @@ struct RefreshResp {
     scope: Option<String>,
 }
 
+/// A short, non-reversible handle on a token, safe to write to a log.
+///
+/// A token value must never be logged, but without some handle on it there is no way to
+/// tell "the stored refresh token rotated" apart from "the store still holds the one we
+/// already spent". Those two look identical from outside and fail six hours apart.
+/// [`stable_hash`] is already here and costs no dependency.
+pub(crate) fn fingerprint(token: &str) -> String {
+    format!("{:016x}", stable_hash(token))
+}
+
 /// Refresh `acct`'s access token unconditionally (rotates the single-use refresh
 /// token). Mutates `acct` in place; the caller persists.
+///
+/// Every exit is logged with the refresh token's fingerprint, because a refresh has three
+/// distinct bad endings that all look the same later:
+///   - the request never reached Anthropic, so the token is untouched;
+///   - Anthropic rejected it, so the token was already dead;
+///   - Anthropic accepted and spent it, but the reply was unreadable or carried no
+///     replacement, so the store now holds a spent token and the account dies at the next
+///     refresh with `invalid_grant`.
 async fn refresh_account(http: &reqwest::Client, acct: &mut StoredClaudeAccount) -> Result<()> {
+    let before = fingerprint(&acct.refresh_token);
     let resp = http
         .post(OAUTH_TOKEN_URL)
         .timeout(FETCH_TIMEOUT)
@@ -425,17 +444,46 @@ async fn refresh_account(http: &reqwest::Client, acct: &mut StoredClaudeAccount)
             "client_id": OAUTH_CLIENT_ID,
         }))
         .send()
-        .await?;
+        .await
+        .with_context(|| {
+            format!(
+                "refresh {} (rt {before}) never got a reply, so the token may be spent",
+                acct.email
+            )
+        })?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        bail!("refresh {}{}", status.as_u16(), snippet(&text));
+        bail!(
+            "refresh {} (rt {before}){}",
+            status.as_u16(),
+            snippet(&text)
+        );
     }
-    let data: RefreshResp = resp.json().await?;
+    let data: RefreshResp = resp.json().await.with_context(|| {
+        format!(
+            "refresh {} (rt {before}) was accepted but its reply could not be read, \
+             so the token is spent and its replacement is lost",
+            acct.email
+        )
+    })?;
     acct.access_token = data.access_token;
     acct.expires_at = now_ms() + data.expires_in * 1000;
-    if let Some(r) = data.refresh_token {
-        acct.refresh_token = r;
+    match data.refresh_token {
+        Some(r) => {
+            let after = fingerprint(&r);
+            acct.refresh_token = r;
+            tracing::info!(
+                "refreshed {}: rt {before} -> {after}, access token valid {}s",
+                acct.email,
+                data.expires_in
+            );
+        }
+        None => tracing::warn!(
+            "refreshed {}: the reply carried NO refresh_token, so the store keeps the one \
+             it just spent (rt {before}). This account fails its next refresh.",
+            acct.email
+        ),
     }
     if let Some(s) = data.scope {
         acct.scopes = s.split(' ').map(str::to_string).collect();
@@ -458,7 +506,15 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(String, bool)
         return Ok((acct.access_token, false));
     }
     refresh_account(&app.http, &mut acct).await?;
-    app.claude.update_account(&acct)?;
+    // A failed write here is fatal to the account, not cosmetic: memory now holds the new
+    // token, the process runs on it for hours, and the next restart reads the spent one
+    // back off disk. Name it in the error so it is not mistaken for a network failure.
+    app.claude.update_account(&acct).with_context(|| {
+        format!(
+            "persisting {}'s refreshed token failed, so the rotation exists only in memory",
+            acct.email
+        )
+    })?;
     Ok((acct.access_token, true))
 }
 
@@ -671,6 +727,10 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 views.push(match prev {
                     Some(mut p) => {
                         p.stale = Some(true);
+                        // Carry the reason, not just the fact. Without it a dead refresh
+                        // token and a momentary 429 both read as "these numbers are old",
+                        // and the one that never recovers goes unnoticed for days.
+                        p.error = Some(msg);
                         p
                     }
                     None => {

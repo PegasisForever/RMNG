@@ -394,6 +394,7 @@ struct RefreshResp {
 /// The OAuth response carries no `expires_in`, so expiry is decoded from the new access
 /// token's JWT. Mutates `acct` in place; the caller persists.
 async fn refresh_account(http: &reqwest::Client, acct: &mut StoredCodexAccount) -> Result<()> {
+    let before = crate::claude::fingerprint(&acct.refresh_token);
     let resp = http
         .post(OAUTH_TOKEN_URL)
         .timeout(FETCH_TIMEOUT)
@@ -404,21 +405,48 @@ async fn refresh_account(http: &reqwest::Client, acct: &mut StoredCodexAccount) 
             "client_id": OAUTH_CLIENT_ID,
         }))
         .send()
-        .await?;
+        .await
+        .with_context(|| {
+            format!(
+                "refresh {} (rt {before}) never got a reply, so the token may be spent",
+                acct.email
+            )
+        })?;
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        bail!("refresh {}{}", status.as_u16(), snippet(&text));
+        bail!(
+            "refresh {} (rt {before}){}",
+            status.as_u16(),
+            snippet(&text)
+        );
     }
-    let data: RefreshResp = resp.json().await?;
+    let data: RefreshResp = resp.json().await.with_context(|| {
+        format!(
+            "refresh {} (rt {before}) was accepted but its reply could not be read, \
+             so the token is spent and its replacement is lost",
+            acct.email
+        )
+    })?;
     if let Some(a) = data.access_token {
         acct.access_token = a;
     }
     if let Some(i) = data.id_token {
         acct.id_token = i;
     }
-    if let Some(r) = data.refresh_token {
-        acct.refresh_token = r;
+    // Same single-use rule as Claude: a reply with no replacement leaves the store holding
+    // a spent token, and the account dies at the next refresh rather than at this one.
+    match data.refresh_token {
+        Some(r) => {
+            let after = crate::claude::fingerprint(&r);
+            acct.refresh_token = r;
+            tracing::info!("refreshed codex {}: rt {before} -> {after}", acct.email);
+        }
+        None => tracing::warn!(
+            "refreshed codex {}: the reply carried NO refresh_token, so the store keeps the \
+             one it just spent (rt {before}). This account fails its next refresh.",
+            acct.email
+        ),
     }
     set_expiry_from_access(acct);
     Ok(())
@@ -437,7 +465,12 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredCodexAc
         return Ok((acct, false));
     }
     refresh_account(&app.http, &mut acct).await?;
-    app.codex.update_account(&acct)?;
+    app.codex.update_account(&acct).with_context(|| {
+        format!(
+            "persisting {}'s refreshed token failed, so the rotation exists only in memory",
+            acct.email
+        )
+    })?;
     Ok((acct, true))
 }
 
