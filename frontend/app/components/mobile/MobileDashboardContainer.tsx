@@ -103,6 +103,7 @@ export function MobileDashboardContainer({
   } = useTickets(
     presets,
     state.hosts.flatMap((h) => (h.linearTicket ? [h.linearTicket] : [])),
+    { openIssues: false },
   );
 
   // Write a title or a body back to Linear and show it now, with Linear's own answer a round

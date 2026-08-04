@@ -2,7 +2,15 @@
 // identifiers get asked for by name, and what happens when two answers report the same issue.
 import { expect, test } from "bun:test";
 
-import { linearKeys, linkedIds, linkedOnly, mergeTickets, upsertTicket } from "./useTickets";
+import {
+  askablePresets,
+  dueForLookup,
+  linearKeys,
+  linkedIds,
+  linkedOnly,
+  mergeTickets,
+  upsertTicket,
+} from "./useTickets";
 import type { LinearTicket } from "./types";
 
 function preset(linearKey: string): { linearKey: string } {
@@ -102,4 +110,45 @@ test("a linked ticket survives a round that could not re-read it", () => {
 
 test("a linked ticket whose clone is gone is not carried forward", () => {
   expect(linkedOnly([ticket("WE-142")], [])).toEqual([]);
+});
+
+// --- the second, slower cadence ---------------------------------------------------------
+//
+// What the open queues do not carry gets asked for by identifier. Those tickets are finished,
+// filed, or somebody else's, so they are read on a long clock rather than every poll: on a
+// 39-clone fleet that was 11 of the 19 requests a minute the page spent.
+
+const TTL = 10 * 60_000;
+
+test("an identifier nothing has answered for yet is asked at once", () => {
+  const seen = new Map<string, { at: number }>();
+
+  expect(dueForLookup(["dev-330", "we-618"], seen, 1_000, TTL)).toEqual(["dev-330", "we-618"]);
+});
+
+test("a recent answer is reused rather than asked for again", () => {
+  const seen = new Map([["dev-330", { at: 1_000 }]]);
+
+  expect(dueForLookup(["dev-330"], seen, 1_000 + TTL - 1, TTL)).toEqual([]);
+});
+
+test("an answer that has aged past the window is read again", () => {
+  const seen = new Map([["dev-330", { at: 1_000 }]]);
+
+  expect(dueForLookup(["dev-330"], seen, 1_000 + TTL, TTL)).toEqual(["dev-330"]);
+});
+
+test("a clone made just now has its ticket on the next round, not one window later", () => {
+  const seen = new Map([["dev-330", { at: 1_000 }]]);
+
+  expect(dueForLookup(["dev-330", "dev-331"], seen, 2_000, TTL)).toEqual(["dev-331"]);
+});
+
+test("a preset with no key is not worth asking with, and labels default to none", () => {
+  const presets = [{ linearKey: " lin_a ", labels: ["DEV"] }, { linearKey: "" }, { linearKey: "lin_b" }];
+
+  expect(askablePresets(presets)).toEqual([
+    { labels: ["DEV"], linearKey: "lin_a" },
+    { labels: [], linearKey: "lin_b" },
+  ]);
 });
