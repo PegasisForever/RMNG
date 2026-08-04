@@ -6,6 +6,7 @@ import { TicketColumn } from "./TicketColumn";
 import { openTickets, orderTickets } from "~/lib/tickets";
 import { hosts } from "./__fixtures__/clones";
 import { linearTickets } from "./__fixtures__/tickets";
+import { linearWorkspaces } from "./__fixtures__/workspaces";
 
 const meta = {
   title: "Board/Components/TicketColumn",
@@ -23,6 +24,10 @@ const meta = {
     onOpenInLinear: fn(),
     onCopyBranchName: fn(),
     onCopyTicketLink: fn(),
+    // The title's workspace menu. Like "Open in Linear" it leaves for linear.app, so the
+    // Actions panel logging the workspace is the whole of what there is to see.
+    workspaces: linearWorkspaces,
+    onOpenWorkspace: fn(),
   },
   /** The cards are draggable, so they need a DndContext even when nothing can receive
    *  them. On the board that context is the board's own. */
@@ -73,4 +78,16 @@ export const PollFailed: Story = {
 /** No key configured and nothing cached: the empty state has to carry the message alone. */
 export const FailedAndEmpty: Story = {
   args: { tickets: [], error: "linear: no API key on any preset" },
+};
+
+/** One workspace, which is the ordinary fleet. The menu is still worth drawing: it is the
+ *  column's only link out to Linear itself, as opposed to a link to one issue. */
+export const OneWorkspace: Story = {
+  args: { workspaces: [linearWorkspaces[0]] },
+};
+
+/** No workspace has answered yet, or no preset carries a key. The chevron is absent rather
+ *  than disabled, because a menu with nothing in it explains nothing. */
+export const NoWorkspaces: Story = {
+  args: { workspaces: [] },
 };

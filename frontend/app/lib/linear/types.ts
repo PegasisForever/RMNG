@@ -34,6 +34,21 @@ export interface TicketLabel {
   color: string;
 }
 
+/** A Linear workspace, as its own API key describes it.
+ *
+ *  One per distinct configured key, so this is the operator's list of workspaces rather than
+ *  anything RMNG stores. `urlKey` is what Linear puts in its own URLs (`linear.app/pegasis`),
+ *  which is why the home link needs no lookup beyond this. */
+export interface LinearWorkspace {
+  /** Linear's organization UUID. Two presets holding two keys for one workspace collapse on
+   *  this, which no other field can do: the name is editable and the key is not the identity. */
+  id: string;
+  /** What the workspace calls itself, e.g. `Personal`. */
+  name: string;
+  /** The URL slug, e.g. `pegasis`. */
+  urlKey: string;
+}
+
 /** A Linear issue assigned to the owner of one of the configured preset API keys.
  *
  *  Each key is personal and answers only for its own owner, so the browser queries every

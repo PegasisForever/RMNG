@@ -25,6 +25,8 @@ import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
 import { issueSetState, issueUpdate, keysForTeam } from "~/lib/linear/mutations";
 import { useTickets } from "~/lib/linear/useTickets";
+import { useWorkspaces } from "~/lib/linear/useWorkspaces";
+import { workspaceHomeUrl } from "~/lib/linear/workspaces";
 import {
   cloneForTicket,
   cloneTickets,
@@ -284,6 +286,10 @@ export function DashboardContainer({
     presets,
     state.hosts.flatMap((h) => (h.linearTicket ? [h.linearTicket] : [])),
   );
+
+  // Which workspaces those same keys belong to, for the ticket column's title menu. Asked once
+  // rather than polled: a workspace's name and slug outlast every ticket in it.
+  const workspaces = useWorkspaces(presets);
 
   // Write a title or a body back to Linear, and put the new value on screen twice: once
   // straight away so the panel does not snap back to what it said before the edit, and again
@@ -591,6 +597,8 @@ export function DashboardContainer({
             selectedId: openTicket?.id ?? null,
             onSelectTicket: (ticket) => setOpenTicketId(ticket.id),
             onNewTicket: () => setNewTicketOpen(true),
+            workspaces,
+            onOpenWorkspace: (workspace) => openInLinear(workspaceHomeUrl(workspace)),
             onOpenInLinear: openInLinear,
             onCopyBranchName: copyText,
             onCopyTicketLink: copyText,

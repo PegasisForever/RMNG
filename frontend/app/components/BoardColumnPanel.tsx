@@ -22,10 +22,15 @@ export function ColumnHeader({ children }: { children: ReactNode }) {
   return <header className="flex shrink-0 items-center gap-2 px-1 pb-2">{children}</header>;
 }
 
+/** The title's own type, without the flex behavior that decides how much of the header row it
+ *  takes. A title with something beside it inside the header (the ticket column's workspace
+ *  menu) wraps the pair in the flexing box and styles the text with this. */
+export const COLUMN_TITLE_TEXT =
+  "min-w-0 truncate text-sm font-semibold text-slate-700 dark:text-slate-200";
+
 /** The header's title styling, as a class rather than a component: one column's title opens
  *  a rename on double-click and the other's does nothing, so the element itself differs. */
-export const COLUMN_TITLE =
-  "min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200";
+export const COLUMN_TITLE = `flex-1 ${COLUMN_TITLE_TEXT}`;
 
 /** The well the cards sit in, carved into the board rather than laid on it: a dark inner
  *  shadow across the top where a recess would fall into shadow, and a one-pixel light line

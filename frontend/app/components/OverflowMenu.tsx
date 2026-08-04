@@ -66,20 +66,31 @@ export function MenuItem({
   );
 }
 
+/** The trigger's own styling, which only a custom trigger sets. The ⋮ button brings its own. */
+const PLAIN_TRIGGER = "flex cursor-pointer items-center rounded disabled:opacity-50";
+
 export function OverflowMenu({
   label,
   disabled = false,
+  trigger,
+  align = "right",
   children,
 }: {
   /** What the trigger announces, e.g. `actions for WE-301`. */
   label: string;
   disabled?: boolean;
+  /** What the trigger draws, in place of the ⋮ glyph. Takes the open flag, so a trigger can
+   *  show that its own menu is up. The button and everything wired to it stay the same. */
+  trigger?: (open: boolean) => ReactNode;
+  /** Which edge the panel lines up with. A card's ⋮ sits at its right corner and the panel
+   *  hangs left off it; a menu under a column title hangs the other way. */
+  align?: "left" | "right";
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   // Where the panel goes, in viewport coordinates. Null until the trigger has been measured,
   // which is also what keeps the first frame from flashing it at the origin.
-  const [at, setAt] = useState<{ top: number; right: number } | null>(null);
+  const [at, setAt] = useState<{ top: number; left?: number; right?: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -122,14 +133,23 @@ export function OverflowMenu({
         onClick={(e) => {
           e.stopPropagation();
           const box = e.currentTarget.getBoundingClientRect();
-          setAt({ top: box.bottom + 4, right: window.innerWidth - box.right });
+          setAt({
+            top: box.bottom + 4,
+            ...(align === "left"
+              ? { left: box.left }
+              : { right: window.innerWidth - box.right }),
+          });
           setOpen((o) => !o);
         }}
-        className={`cursor-pointer rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 disabled:opacity-0 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300 ${
-          open ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300" : ""
-        }`}
+        className={
+          trigger
+            ? PLAIN_TRIGGER
+            : `cursor-pointer rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 disabled:opacity-0 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300 ${
+                open ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300" : ""
+              }`
+        }
       >
-        <EllipsisVertical className="size-4" />
+        {trigger ? trigger(open) : <EllipsisVertical className="size-4" />}
       </button>
       {open && at
         ? createPortal(
@@ -137,7 +157,7 @@ export function OverflowMenu({
               <div
                 ref={menuRef}
                 role="menu"
-                style={{ top: at.top, right: at.right }}
+                style={{ top: at.top, left: at.left, right: at.right }}
                 className={`fixed z-50 w-56 overflow-hidden rounded-md py-1 ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`}
                 onClick={(e) => e.stopPropagation()}
               >

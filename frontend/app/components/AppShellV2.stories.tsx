@@ -25,6 +25,7 @@ import { cloneOperation } from "./__fixtures__/operations";
 import { cloneTokens, lxcStats, stats } from "./__fixtures__/stats";
 import { makeStoryLink } from "./__fixtures__/storyLinks";
 import { linearTickets, ticketCloned, ticketDetailed } from "./__fixtures__/tickets";
+import { linearWorkspaces } from "./__fixtures__/workspaces";
 
 /** A clone that starts out in the archived column, so the fixed right column has something
  *  in it to drag back out. */
@@ -176,6 +177,10 @@ function makeTicketColumn(clones: Clone[]) {
     onCancel: fn(),
     onMoveToBacklog: fn(),
     onNewTicket: toTicketModal,
+    // The title's workspace menu, which is the column's only way out to Linear itself rather
+    // than to one issue. Two workspaces, because one is the case that proves nothing.
+    workspaces: linearWorkspaces,
+    onOpenWorkspace: fn(),
     // Leaving for Linear has no destination story, so it logs the URL instead. The two copies
     // log the string rather than writing it to the real clipboard.
     onOpenInLinear: fn(),

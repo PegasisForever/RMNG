@@ -15,7 +15,15 @@
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { CircleDashed, CircleX, ExternalLink, GitBranch, Link2, Plus } from "lucide-react";
+import {
+  ChevronDown,
+  CircleDashed,
+  CircleX,
+  ExternalLink,
+  GitBranch,
+  Link2,
+  Plus,
+} from "lucide-react";
 import type { CSSProperties } from "react";
 
 import { CardFrame } from "~/components/BoardCard";
@@ -24,8 +32,9 @@ import {
   ColumnHeader,
   ColumnShell,
   ColumnWell,
-  COLUMN_TITLE,
+  COLUMN_TITLE_TEXT,
 } from "~/components/BoardColumnPanel";
+import type { LinearWorkspace } from "~/lib/linear/types";
 import { branchNameOf, ticketDragId, TICKET_COLUMN_ID, type LinearTicket } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
 
@@ -420,6 +429,13 @@ export interface TicketColumnProps {
   /** Open the new-ticket dialog. Absent ⇒ no button, which is what a board with no Linear
    *  key configured gets. */
   onNewTicket?: () => void;
+  /** The workspaces the configured Linear keys belong to, for the title's menu. Empty while
+   *  the lookup is in flight, and forever on a board with no key. */
+  workspaces?: LinearWorkspace[];
+  /** The title menu's rows. Leaving the app is the container's call, the same as the card
+   *  menu's "Open in Linear", so this hands over the workspace and the container opens it.
+   *  Absent ⇒ no menu. */
+  onOpenWorkspace?: (workspace: LinearWorkspace) => void;
 }
 
 export function TicketColumn({
@@ -435,6 +451,8 @@ export function TicketColumn({
   onCancel,
   onMoveToBacklog,
   onNewTicket,
+  workspaces = [],
+  onOpenWorkspace,
 }: TicketColumnProps) {
   // The well takes drops so a ticket dragged back into the column lands, including on the
   // empty space below the last card.
@@ -452,7 +470,37 @@ export function TicketColumn({
   return (
     <ColumnShell>
       <ColumnHeader>
-        <h2 className={COLUMN_TITLE}>Tickets</h2>
+        <div className="flex min-w-0 flex-1 items-center gap-1">
+          <h2 className={COLUMN_TITLE_TEXT}>Tickets</h2>
+          {/* The way out to Linear itself. The column draws one merged queue across every
+              configured key, so which workspace a ticket came from is deliberately not on the
+              cards, and this is where that question gets answered instead. The chevron sits
+              beside the heading rather than replacing it, so the heading stays a heading. */}
+          {workspaces.length > 0 && onOpenWorkspace ? (
+            <OverflowMenu
+              label="Open a Linear workspace"
+              align="left"
+              trigger={(open) => (
+                <ChevronDown
+                  className={`size-4 rounded p-0.5 ${
+                    open
+                      ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300"
+                      : "text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300"
+                  }`}
+                />
+              )}
+            >
+              {workspaces.map((workspace) => (
+                <MenuItem
+                  key={workspace.id}
+                  icon={ExternalLink}
+                  label={workspace.name}
+                  onClick={() => onOpenWorkspace(workspace)}
+                />
+              ))}
+            </OverflowMenu>
+          ) : null}
+        </div>
         {/* The same button the clone columns carry, in the same place, for the same reason:
             the thing a column is for is the thing you make more of at the top of it. */}
         {onNewTicket ? (
