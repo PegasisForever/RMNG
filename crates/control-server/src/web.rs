@@ -555,16 +555,83 @@ fn is_desktop_user(user: &str) -> bool {
 /// `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus` survive intact.
 fn parse_env_lines(s: &str) -> Vec<String> {
     s.lines()
-        .filter(|line| match line.split_once('=') {
-            Some((k, _)) => {
-                !k.is_empty()
-                    && k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                    && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            }
-            None => false,
+        .filter_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            let named = !k.is_empty()
+                && k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            named.then(|| format!("{k}={}", unquote_shell_value(v)))
         })
-        .map(str::to_string)
         .collect()
+}
+
+/// One value as `systemctl show-environment` prints it, with systemd's shell quoting undone.
+///
+/// It prints through systemd's `shell_maybe_quote`, so a value carrying a bracket, a space, a
+/// quote, a dollar or a control byte comes back as `$'...'` with C escapes inside. Taking that
+/// verbatim put the quoting INTO the value: a clone whose session held
+/// `ANTHROPIC_MODEL=opus[1m]` handed every `rmng clone exec` `$'opus[1m]'`, and Claude Code
+/// refused to start against a model by that name.
+///
+/// The escape set is what systemd's own output was measured to produce, not what the shell
+/// grammar allows: `it's` comes back `$'it\'s'`, `back\slash` as `$'back\\slash'`, a tab as
+/// `\t`, BEL as `\a`, byte 1 as `\001`, and `café` is not quoted at all. Octal and hex escapes
+/// yield a BYTE, so this decodes into bytes and reads UTF-8 back out of them: `\303\251` is one
+/// `é`, never two characters of mojibake.
+fn unquote_shell_value(v: &str) -> String {
+    let Some(inner) = v.strip_prefix("$'").and_then(|rest| rest.strip_suffix('\'')) else {
+        return v.to_string();
+    };
+    let src = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] != b'\\' {
+            out.push(src[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let Some(&c) = src.get(i) else {
+            // A trailing backslash is not an escape of anything. Keep it.
+            out.push(b'\\');
+            break;
+        };
+        i += 1;
+        match c {
+            b'a' => out.push(0x07),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'v' => out.push(0x0b),
+            b'x' => {
+                let end = (i + 2).min(src.len());
+                let digits = &src[i..end];
+                let take = digits.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+                match take {
+                    0 => out.push(b'x'),
+                    n => {
+                        let hex = std::str::from_utf8(&src[i..i + n]).unwrap_or_default();
+                        out.push(u8::from_str_radix(hex, 16).unwrap_or(b'?'));
+                        i += n;
+                    }
+                }
+            }
+            b'0'..=b'7' => {
+                // Up to three octal digits, counting the one already taken.
+                let end = (i + 2).min(src.len());
+                let more = src[i..end].iter().take_while(|b| (b'0'..=b'7').contains(b)).count();
+                let oct = std::str::from_utf8(&src[i - 1..i + more]).unwrap_or_default();
+                out.push(u8::from_str_radix(oct, 8).unwrap_or(b'?'));
+                i += more;
+            }
+            // `\\`, `\'`, `\"`, and anything else: the character itself.
+            other => out.push(other),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Merge caller `overrides` (`KEY=VAL`) over a `base` env, caller-wins: any base entry whose key a
@@ -3720,10 +3787,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_env_lines_keeps_assignments_and_verbatim_values() {
+    fn parse_env_lines_keeps_assignments_and_unquoted_values() {
         // Real `systemctl --user show-environment` shape: one KEY=VALUE per line, values may
-        // themselves contain `=` (DBUS address) and are passed through untouched. Blank lines and
-        // any non-assignment noise are dropped.
+        // themselves contain `=` (DBUS address) and need no quoting. Blank lines and any
+        // non-assignment noise are dropped.
         let out = "\
 WAYLAND_DISPLAY=wayland-0
 DISPLAY=:0
@@ -3744,6 +3811,56 @@ not a var line
                 "PATH=/home/rmng/.local/bin:/usr/bin".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_shell_quoted_value_arrives_as_the_value_itself() {
+        // PER-58. Every form below was measured against `systemctl --user show-environment`
+        // inside a clone, not taken from the shell grammar.
+        let out = "\
+ANTHROPIC_MODEL=$'opus[1m]'
+SPACED=$'a b'
+APOSTROPHE=$'it\\'s'
+BACKSLASH=$'back\\\\slash'
+TABBED=$'tab\\there'
+BELL=$'bell\\a'
+CTRL=$'ctrl\\001byte'
+DOLLAR=$'dollar$x'
+UTF8=café
+PLAIN=plainvalue
+";
+        assert_eq!(
+            parse_env_lines(out),
+            vec![
+                "ANTHROPIC_MODEL=opus[1m]".to_string(),
+                "SPACED=a b".to_string(),
+                "APOSTROPHE=it's".to_string(),
+                "BACKSLASH=back\\slash".to_string(),
+                "TABBED=tab\there".to_string(),
+                "BELL=bell\u{7}".to_string(),
+                "CTRL=ctrl\u{1}byte".to_string(),
+                "DOLLAR=dollar$x".to_string(),
+                "UTF8=café".to_string(),
+                "PLAIN=plainvalue".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_octal_escape_is_one_byte_not_one_character() {
+        // `é` is two bytes, and systemd escapes each on its own. Decoding per character would
+        // hand the clone two characters of mojibake instead.
+        assert_eq!(unquote_shell_value("$'caf\\303\\251'"), "café");
+        assert_eq!(unquote_shell_value("$'caf\\xc3\\xa9'"), "café");
+    }
+
+    #[test]
+    fn a_value_that_only_looks_quoted_is_left_alone() {
+        // The opening `$'` is what marks systemd's quoting. Anything else is a value.
+        assert_eq!(unquote_shell_value("plain"), "plain");
+        assert_eq!(unquote_shell_value("'quoted'"), "'quoted'");
+        assert_eq!(unquote_shell_value("$'unterminated"), "$'unterminated");
+        assert_eq!(unquote_shell_value(""), "");
     }
 
     #[test]
