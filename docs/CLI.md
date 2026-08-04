@@ -225,7 +225,7 @@ Block until an operation reaches a terminal state (default timeout 600 s). Same 
 
 ### `rmng ledger search <PATTERN> [--clone <id>] [--since <when>] [--until <when>] [--limit <N>]`
 Search the distilled transcripts of every clone the ledger knows, retired clones included. The
-control-server tails each running clone's Claude Code transcripts and keeps a greppable copy
+control-server tails each running clone's Claude Code and Cursor transcripts and keeps a greppable copy
 under `data/ledger/<clone>/<session>.ndjson`, so this answers "how did we do this last time"
 even when the clone that did it is gone. See [API.md](API.md#transcript-ledger) for the record
 shape and what gets dropped.

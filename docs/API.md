@@ -605,7 +605,7 @@ stay readable and already load without a key.
 
 ## Transcript ledger
 
-A distilled copy of every clone's Claude Code transcripts, kept after the clone is gone. The
+A distilled copy of every clone's Claude Code and Cursor transcripts, kept after the clone is gone. The
 server tails `data/hosts/<id>/.claude/projects/<slug>/<session>.jsonl` every 30 seconds through
 the symlinks the clone-home reconciler maintains, and writes one NDJSON record per event to
 `data/ledger/<clone>/<session>.ndjson`. Nothing runs inside a clone and no model runs here.

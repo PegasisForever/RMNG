@@ -9,9 +9,15 @@
 //! the clone's home, so this is a plain file read from the server process. No daemon runs inside
 //! a clone, nothing is installed there, and it works on clones that are already running. Source
 //! shape is `<data_dir>/hosts/<id>/.claude/projects/<slug>/<session>.jsonl`, which is the CLI's
-//! main-session transcript. Subagent transcripts sit deeper in the same tree and are deliberately
-//! out of scope: on this machine's fleet they outnumber main sessions seven to one, and they
-//! record a delegated sub-task rather than the conversation the operator had.
+//! main-session transcript, and `.cursor/projects/<workspace>/agent-transcripts/<id>/<id>.jsonl`,
+//! which is Cursor's. Subagent transcripts sit deeper in both trees and are deliberately out of
+//! scope: on this machine's fleet they outnumber main sessions seven to one, and they record a
+//! delegated sub-task rather than the conversation the operator had.
+//!
+//! The two agents write the same content blocks under different line keys, so one distiller
+//! reads both. Cursor names a line `role` where Claude Code names it `type`, and stamps no line
+//! with a time, which is the only thing this module has to make up: a line carrying no timestamp
+//! anywhere takes the moment the pass read it.
 //!
 //! **What it writes.** One NDJSON record per event under
 //! `<data_dir>/ledger/<clone>/<session>.ndjson`. Every record repeats the clone, the session, the
@@ -195,7 +201,11 @@ fn save_offsets(dir: &Path, offsets: &Offsets) -> std::io::Result<()> {
 /// `agent-name`) is either noise or a duplicate of a record kept here.
 #[derive(Debug, Deserialize)]
 struct RawLine {
-    #[serde(rename = "type", default)]
+    /// `type` is what Claude Code names a line with. Cursor names the same thing `role`, and
+    /// carries no `type` on a message at all, so one field reads both. A Cursor line that does
+    /// carry a `type` (`turn_ended`) matches nothing below and contributes no record, which is
+    /// right: the turn boundary is already implied by what surrounds it.
+    #[serde(rename = "type", alias = "role", default)]
     kind: Option<String>,
     #[serde(default)]
     subtype: Option<String>,
@@ -312,7 +322,13 @@ fn tool_result_text(content: Option<&serde_json::Value>) -> String {
 ///
 /// `session` is the fallback session id for a line that names none, which is the transcript's own
 /// file stem.
-fn distill(clone: &str, session: &str, line: &str, st: &mut FileState) -> Vec<LedgerRecord> {
+fn distill(
+    clone: &str,
+    session: &str,
+    line: &str,
+    st: &mut FileState,
+    now: &str,
+) -> Vec<LedgerRecord> {
     let Ok(raw) = serde_json::from_str::<RawLine>(line) else { return Vec::new() };
     if let Some(ts) = raw.timestamp.as_deref().filter(|t| !t.is_empty()) {
         st.last_ts = ts.to_string();
@@ -323,7 +339,15 @@ fn distill(clone: &str, session: &str, line: &str, st: &mut FileState) -> Vec<Le
             .session_id
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| session.to_string()),
-        ts: st.last_ts.clone(),
+        // Claude Code stamps its lines and carries the stamp forward to the few that have none.
+        // Cursor stamps none of them, so those get the time this pass read them, which keeps
+        // `--since` working and is never off by more than one tail interval for a live clone.
+        // Deliberately not written back into `last_ts`: it would freeze at the first line the
+        // ledger ever saw and every later record would claim that time.
+        ts: match st.last_ts.is_empty() {
+            true => now.to_string(),
+            false => st.last_ts.clone(),
+        },
         sidechain: raw.sidechain.unwrap_or(false),
         ..Default::default()
     };
@@ -464,6 +488,41 @@ fn session_files(home: &Path, cap: usize) -> Vec<PathBuf> {
     out
 }
 
+/// Every Cursor conversation transcript under `home`, sorted, at most `cap` of them.
+///
+/// Cursor keeps one directory per conversation and names the transcript after it:
+/// `~/.cursor/projects/<workspace>/agent-transcripts/<conversation>/<conversation>.jsonl`. Taking
+/// only the file whose stem is its own directory's name is what skips the `subagents/` directory
+/// beside it, and skipping that matches what this module already does for Claude Code: the
+/// ledger keeps the conversation somebody had, not every worker it spawned.
+fn cursor_session_files(home: &Path, cap: usize) -> Vec<PathBuf> {
+    let root = home.join(".cursor/projects");
+    let mut out: Vec<PathBuf> = Vec::new();
+    let Ok(workspaces) = std::fs::read_dir(&root) else { return out };
+    for ws in workspaces.flatten() {
+        if !ws.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(convs) = std::fs::read_dir(ws.path().join("agent-transcripts")) else { continue };
+        for conv in convs.flatten() {
+            if out.len() >= cap {
+                out.sort_unstable();
+                return out;
+            }
+            if !conv.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = conv.file_name();
+            let path = conv.path().join(format!("{}.jsonl", name.to_string_lossy()));
+            if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 /// Append the ledger lines for whatever has been added to `src` since its cursor, returning the
 /// bytes of transcript consumed.
 ///
@@ -527,13 +586,19 @@ fn tail_file(clone: &str, src: &Path, dir: &Path, offsets: &mut Offsets) -> u64 
     let consumed = last_nl + 1;
 
     let session = name.trim_end_matches(".ndjson").to_string();
+    // One stamp for the pass, for the lines that carry none of their own. See `distill`.
+    let now = crate::docker::epoch_to_rfc3339(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64),
+    );
     let mut body = String::new();
     for line in buf[..consumed].split(|b| *b == b'\n') {
         let Ok(text) = std::str::from_utf8(line) else { continue };
         if text.trim().is_empty() {
             continue;
         }
-        for rec in distill(clone, &session, text, &mut st) {
+        for rec in distill(clone, &session, text, &mut st, &now) {
             if let Ok(json) = serde_json::to_string(&rec) {
                 body.push_str(&json);
                 body.push('\n');
@@ -570,7 +635,9 @@ fn tail_clone(clone: &str, home: &Path, dir: &Path) {
     let before = load_offsets(dir);
     let mut offsets = before.clone();
     let mut budget = MAX_READ_PER_CLONE;
-    for src in session_files(home, MAX_SESSION_FILES) {
+    let claude = session_files(home, MAX_SESSION_FILES);
+    let cursor = cursor_session_files(home, MAX_SESSION_FILES.saturating_sub(claude.len()));
+    for src in claude.into_iter().chain(cursor) {
         if budget == 0 {
             break; // Backlog drains over the next few passes.
         }
@@ -833,6 +900,71 @@ pub fn default_limit() -> usize {
 mod tests {
     use super::*;
 
+    /// The stamp a line with no timestamp of its own gets: the moment the ledger read it.
+    const READ_AT: &str = "2026-08-04T23:30:00Z";
+
+    #[test]
+    fn a_cursor_message_distills_the_same_way_a_claude_one_does() {
+        // Cursor names the line `role` where Claude Code names it `type`, and stamps nothing.
+        // Below that the two agree: the content blocks are the same shape.
+        let mut st = FileState::default();
+        let line = r#"{"role":"assistant","message":{"content":[
+            {"type":"text","text":"Done. The dropdown is gone."},
+            {"type":"tool_use","name":"Grep","input":{"pattern":"RegisteredDoctorSelect"}}]}}"#;
+        let recs = distill("pega-dev-262", "e52bd0c6", line, &mut st, READ_AT);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].kind, "assistant");
+        assert_eq!(recs[0].text, "Done. The dropdown is gone.");
+        assert_eq!(recs[1].kind, "toolUse");
+        // The transcript names no session and no time, so it takes the file's own id and the
+        // moment the pass read it.
+        assert_eq!(recs[0].session, "e52bd0c6");
+        assert_eq!(recs[0].ts, READ_AT);
+    }
+
+    #[test]
+    fn a_cursor_turn_boundary_contributes_nothing() {
+        // `{"type":"turn_ended"}` is the one Cursor line that does carry a `type`. It says
+        // nothing the surrounding records do not already say.
+        let mut st = FileState::default();
+        let line = r#"{"type":"turn_ended","status":"success"}"#;
+        assert!(distill("c", "s1", line, &mut st, READ_AT).is_empty());
+    }
+
+    #[test]
+    fn a_claude_line_still_wins_its_own_timestamp() {
+        // The read-time fallback must never displace a stamp the transcript supplies, nor the
+        // one carried forward to the lines that have none.
+        let mut st = FileState::default();
+        let stamped = r#"{"type":"user","timestamp":"2026-08-04T09:00:00Z",
+            "message":{"content":"hello"}}"#;
+        let recs = distill("c", "s1", stamped, &mut st, READ_AT);
+        assert_eq!(recs[0].ts, "2026-08-04T09:00:00Z");
+        let untimed = r#"{"type":"ai-title","aiTitle":"a title"}"#;
+        let recs = distill("c", "s1", untimed, &mut st, READ_AT);
+        assert_eq!(recs[0].ts, "2026-08-04T09:00:00Z", "carried, not the read time");
+    }
+
+    #[test]
+    fn cursor_transcripts_are_found_and_subagents_are_not() {
+        let home = std::env::temp_dir().join(format!("rmng-ledger-cursor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let conv = home.join(".cursor/projects/home-rmng-Dev/agent-transcripts/e52bd0c6");
+        std::fs::create_dir_all(conv.join("subagents")).unwrap();
+        std::fs::write(conv.join("e52bd0c6.jsonl"), "{}\n").unwrap();
+        std::fs::write(conv.join("subagents/853bf50b.jsonl"), "{}\n").unwrap();
+        // A directory whose transcript has not been written yet contributes nothing.
+        std::fs::create_dir_all(
+            home.join(".cursor/projects/home-rmng-Dev/agent-transcripts/empty"),
+        )
+        .unwrap();
+
+        let found = cursor_session_files(&home, 4096);
+        assert_eq!(found, vec![conv.join("e52bd0c6.jsonl")]);
+        assert!(cursor_session_files(&home, 0).is_empty(), "the cap is respected");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
@@ -870,7 +1002,7 @@ mod tests {
     fn a_typed_prompt_becomes_one_user_record() {
         let mut st = FileState::default();
         let line = r#"{"type":"user","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{"content":"implement PER-26"}}"#;
-        let recs = distill("pega-we-1", "s1", line, &mut st);
+        let recs = distill("pega-we-1", "s1", line, &mut st, READ_AT);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].clone, "pega-we-1");
         assert_eq!(recs[0].session, "s1");
@@ -888,7 +1020,7 @@ mod tests {
         let line = format!(
             r#"{{"type":"user","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_9","content":[{{"type":"image","source":{{"type":"base64","media_type":"image/jpeg","data":"{payload}"}}}}]}}]}}}}"#
         );
-        let recs = distill("c", "s1", &line, &mut st);
+        let recs = distill("c", "s1", &line, &mut st, READ_AT);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].kind, "toolResult");
         assert_eq!(recs[0].tool_id, "toolu_9");
@@ -904,7 +1036,7 @@ mod tests {
             {"type":"text","text":"Reading the config first."},
             {"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cat config.json"}}
         ]}}"#;
-        let recs = distill("c", "s1", line, &mut st);
+        let recs = distill("c", "s1", line, &mut st, READ_AT);
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].kind, "assistant");
         assert_eq!(recs[0].text, "Reading the config first.");
@@ -922,14 +1054,14 @@ mod tests {
         let line = format!(
             r#"{{"type":"assistant","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":[{{"type":"tool_use","id":"t","name":"Write","input":{{"content":"{big}"}}}}]}}}}"#
         );
-        let recs = distill("c", "s1", &line, &mut st);
+        let recs = distill("c", "s1", &line, &mut st, READ_AT);
         assert!(recs[0].text.chars().count() < MAX_TOOL_INPUT_CHARS + 40);
         assert!(recs[0].text.contains("clipped"));
 
         let line = format!(
             r#"{{"type":"user","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"t","content":"{big}"}}]}}}}"#
         );
-        let recs = distill("c", "s1", &line, &mut st);
+        let recs = distill("c", "s1", &line, &mut st, READ_AT);
         assert!(recs[0].text.chars().count() < MAX_TOOL_RESULT_CHARS + 40);
         assert!(recs[0].text.contains("clipped"));
     }
@@ -939,26 +1071,26 @@ mod tests {
         let mut st =
             FileState { last_ts: "2026-08-01T10:00:00.000Z".into(), ..Default::default() };
         let line = r#"{"type":"ai-title","sessionId":"s1","aiTitle":"Wire up the ledger"}"#;
-        let first = distill("c", "s1", line, &mut st);
+        let first = distill("c", "s1", line, &mut st, READ_AT);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].kind, "title");
         assert_eq!(first[0].ts, "2026-08-01T10:00:00.000Z");
         // The CLI rewrites the title on nearly every turn; only a change is news.
-        assert!(distill("c", "s1", line, &mut st).is_empty());
+        assert!(distill("c", "s1", line, &mut st, READ_AT).is_empty());
         let changed = r#"{"type":"ai-title","sessionId":"s1","aiTitle":"Ship the ledger"}"#;
-        assert_eq!(distill("c", "s1", changed, &mut st).len(), 1);
+        assert_eq!(distill("c", "s1", changed, &mut st, READ_AT).len(), 1);
     }
 
     #[test]
     fn a_compaction_boundary_is_kept_and_the_rest_of_system_is_not() {
         let mut st = FileState::default();
         let line = r#"{"type":"system","subtype":"compact_boundary","sessionId":"s1","timestamp":"2026-08-01T11:14:05.352Z","compactMetadata":{"trigger":"manual","preTokens":791517,"postTokens":11833}}"#;
-        let recs = distill("c", "s1", line, &mut st);
+        let recs = distill("c", "s1", line, &mut st, READ_AT);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].kind, "compact");
         assert_eq!(recs[0].text, "conversation compacted (manual): 791517 tokens before, 11833 after");
         let noise = r#"{"type":"system","subtype":"turn_duration","sessionId":"s1","timestamp":"2026-08-01T11:14:05.352Z","durationMs":12}"#;
-        assert!(distill("c", "s1", noise, &mut st).is_empty());
+        assert!(distill("c", "s1", noise, &mut st, READ_AT).is_empty());
     }
 
     #[test]
@@ -971,7 +1103,7 @@ mod tests {
             r#"{"type":"file-history-snapshot","messageId":"m"}"#,
             "not json at all",
         ] {
-            assert!(distill("c", "s1", line, &mut st).is_empty(), "kept {line}");
+            assert!(distill("c", "s1", line, &mut st, READ_AT).is_empty(), "kept {line}");
         }
     }
 
@@ -979,11 +1111,11 @@ mod tests {
     fn a_sidechain_turn_is_flagged() {
         let mut st = FileState::default();
         let line = r#"{"type":"assistant","sessionId":"s1","isSidechain":true,"timestamp":"2026-08-01T10:00:00.000Z","message":{"content":[{"type":"text","text":"subagent говорит"}]}}"#;
-        let recs = distill("c", "s1", line, &mut st);
+        let recs = distill("c", "s1", line, &mut st, READ_AT);
         assert!(recs[0].sidechain);
         // The flag is omitted rather than written as false on an ordinary turn.
         let plain = r#"{"type":"assistant","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{"content":[{"type":"text","text":"hi"}]}}"#;
-        let recs = distill("c", "s1", plain, &mut st);
+        let recs = distill("c", "s1", plain, &mut st, READ_AT);
         let json = serde_json::to_string(&recs[0]).unwrap();
         assert!(!json.contains("sidechain"), "{json}");
     }
@@ -992,7 +1124,7 @@ mod tests {
     fn every_record_names_its_clone_session_timestamp_and_kind() {
         let mut st = FileState::default();
         let line = r#"{"type":"user","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{"content":"hello"}}"#;
-        let recs = distill("pega-we-1", "s1", line, &mut st);
+        let recs = distill("pega-we-1", "s1", line, &mut st, READ_AT);
         let json = serde_json::to_string(&recs[0]).unwrap();
         // Leading fields, in this order, are what make a grep hit readable on its own.
         assert!(
