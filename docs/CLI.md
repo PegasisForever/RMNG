@@ -74,8 +74,8 @@ $RMNG_CONTROL_URL` hint.
 
 ## Commands
 
-The surface is **noun → verb**. Nouns: `clone`, `image`, `account`, `op`, `desktop`. The target
-is always a positional **clone id** (the first column of `rmng clone ls`).
+The surface is **noun → verb**. Nouns: `clone`, `image`, `account`, `op`, `ledger`, `desktop`.
+The target is always a positional **clone id** (the first column of `rmng clone ls`).
 
 ### `rmng clone ls`
 Clones table: `ID` (a `*` suffix marks the selected clone), `IP` (the current Docker bridge
@@ -222,6 +222,42 @@ commit/update jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are 
 ### `rmng op wait <op-id> [--timeout <N>]`
 Block until an operation reaches a terminal state (default timeout 600 s). Same semantics as
 `--wait` on the starting command.
+
+### `rmng ledger search <PATTERN> [--clone <id>] [--since <when>] [--until <when>] [--limit <N>]`
+Search the distilled transcripts of every clone the ledger knows, retired clones included. The
+control-server tails each running clone's Claude Code transcripts and keeps a greppable copy
+under `data/ledger/<clone>/<session>.ndjson`, so this answers "how did we do this last time"
+even when the clone that did it is gone. See [API.md](API.md#transcript-ledger) for the record
+shape and what gets dropped.
+
+`PATTERN` is a case-insensitive substring matched against the whole ledger line, so it reaches
+the text, the tool name and the kind alike. The search runs on the server: what comes back is
+the matching lines, not the corpus.
+
+Columns are `CLONE WHEN KIND SESSION OFFSET TEXT`. The session and offset are there because they
+are the two arguments `ledger read` takes, so a hit worth following up is already a command you
+can copy. A record's newlines show as `⏎` to keep one record on one row.
+
+`--since`/`--until` take a duration ago (`90m`, `6h`, `2d`, `3w`) or epoch milliseconds. Hits
+come back newest first, capped at `--limit` (default 50, server maximum 500); a search that
+stopped early says so on stderr.
+
+```
+rmng ledger search "va-api" --since 2d
+rmng ledger search "SignatureDoesNotMatch" --clone pega-we-142 --json | jq '.hits[].ts'
+```
+
+### `rmng ledger read <CLONE> <SESSION> [--offset <N>] [--len <N>]`
+Print a byte range of one session's ledger, for the conversation around a hit. Pass a hit's own
+offset to re-read that line, or less to read what led up to it. The range is snapped outward to
+line boundaries, so stdout is always whole NDJSON lines and never a fragment of one.
+
+Default `--offset 0`, `--len 65536`, server maximum 1 MiB. Stdout is the NDJSON alone and the
+`bytes A..B of C` envelope goes to stderr, so the pipe works with no flag:
+
+```
+rmng ledger read pega-we-142 793f5eac-bbe3-4d3c-b923-29980dcf570d --offset 4096 | jq -r '.kind + ": " + .text'
+```
 
 ### `rmng desktop <clone> <verb>`
 Drive any clone's desktop from an operator machine. The clone id is the first positional;

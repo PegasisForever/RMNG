@@ -9,7 +9,7 @@ use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
 use wire::{
     AppConfigRedacted, ContainerStats, ControlState, ExecRequest, ExecResult,
-    ImageInfo, Operation,
+    ImageInfo, LedgerRange, LedgerSearch, Operation,
 };
 
 /// A connected control-server client.
@@ -320,6 +320,63 @@ impl Client {
             &json!({ "tool": tool, "args": args }),
         )
         .await
+    }
+
+    /// Search every clone's distilled transcripts (`GET /api/ledger/search`), retired clones
+    /// included. `pattern` is a case-insensitive substring of the whole ledger line; `since`
+    /// and `until` are epoch milliseconds. The search runs server-side, so what comes back is
+    /// the matching lines rather than the corpus.
+    pub async fn ledger_search(
+        &self,
+        pattern: &str,
+        clone: Option<&str>,
+        since: Option<i64>,
+        until: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<LedgerSearch> {
+        let mut query: Vec<(&str, String)> = vec![("q", pattern.to_string())];
+        if let Some(id) = clone {
+            query.push(("clone", id.to_string()));
+        }
+        if let Some(ms) = since {
+            query.push(("since", ms.to_string()));
+        }
+        if let Some(ms) = until {
+            query.push(("until", ms.to_string()));
+        }
+        if let Some(n) = limit {
+            query.push(("limit", n.to_string()));
+        }
+        let resp = self
+            .http
+            .get(format!("{}/api/ledger/search", self.base))
+            .query(&query)
+            .send()
+            .await?;
+        Ok(Self::check(resp).await?.json().await?)
+    }
+
+    /// A byte range of one session's ledger (`GET /api/ledger/read`), snapped outward to whole
+    /// NDJSON lines. Pass an offset below a hit's own to read what led up to it.
+    pub async fn ledger_read(
+        &self,
+        clone: &str,
+        session: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<LedgerRange> {
+        let resp = self
+            .http
+            .get(format!("{}/api/ledger/read", self.base))
+            .query(&[
+                ("clone", clone.to_string()),
+                ("session", session.to_string()),
+                ("offset", offset.to_string()),
+                ("len", len.to_string()),
+            ])
+            .send()
+            .await?;
+        Ok(Self::check(resp).await?.json().await?)
     }
 
     /// Run a single non-interactive command inside a clone (`POST /api/hosts/:id/exec`).

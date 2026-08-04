@@ -47,6 +47,9 @@ pub enum Cmd {
     /// Operation (clone / delete / archive / pull / commit / update) inspection
     #[command(subcommand)]
     Op(OpCmd),
+    /// Search the distilled transcripts of every clone, retired clones included
+    #[command(subcommand)]
+    Ledger(LedgerCmd),
     /// Drive a clone's desktop via its daemon MCP (screenshot-on-every-action)
     Desktop {
         /// Clone id
@@ -310,6 +313,45 @@ pub enum OpCmd {
         /// Give up after this many seconds
         #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
         timeout: u64,
+    },
+}
+
+/// The transcript ledger: what every clone's agent actually did, kept after the clone is gone.
+///
+/// The server holds the corpus and runs the search, so both verbs return matches rather than
+/// transcripts. `search` finds the lines; `read` gives the conversation around one of them.
+#[derive(Subcommand, Debug)]
+pub enum LedgerCmd {
+    /// Find ledger lines matching a pattern
+    Search {
+        /// Case-insensitive substring, matched against the whole ledger line, so it reaches
+        /// the text, the tool name and the kind alike
+        pattern: String,
+        /// Only this clone (default: every clone the ledger knows, retired ones included)
+        #[arg(long)]
+        clone: Option<String>,
+        /// Oldest record to return: a duration ago (`90m`, `6h`, `2d`, `3w`) or epoch millis
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+        /// Newest record to return, same forms as `--since`
+        #[arg(long, value_name = "WHEN")]
+        until: Option<String>,
+        /// Most hits to return (server caps this at 500)
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Print a byte range of one session's ledger, as NDJSON
+    Read {
+        /// Clone id, as `search` reports it
+        clone: String,
+        /// Session id, as `search` reports it
+        session: String,
+        /// Where to start. Pass a hit's offset, or less to read what led up to it
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+        /// How many bytes to read (server caps this at 1 MiB)
+        #[arg(long, default_value_t = 64 * 1024)]
+        len: u64,
     },
 }
 
@@ -638,6 +680,42 @@ mod tests {
         assert!(matches!(
             cli.cmd,
             Cmd::Clone(CloneCmd::Rm { ref clone, yes: true, .. }) if clone == "w-cp"
+        ));
+    }
+
+    #[test]
+    fn ledger_search_needs_a_pattern_and_takes_its_filters() {
+        assert!(Cli::try_parse_from(["rmng", "ledger", "search"]).is_err());
+        let cli = Cli::parse_from([
+            "rmng", "ledger", "search", "va-api", "--clone", "pega-we-142", "--since", "2d",
+            "--limit", "5",
+        ]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Ledger(LedgerCmd::Search {
+                ref pattern, ref clone, ref since, until: None, limit: 5
+            }) if pattern == "va-api"
+                && clone.as_deref() == Some("pega-we-142")
+                && since.as_deref() == Some("2d")
+        ));
+        // Bare search: every clone, the server's own default window, 50 hits.
+        let bare = Cli::parse_from(["rmng", "ledger", "search", "encoder"]);
+        assert!(matches!(
+            bare.cmd,
+            Cmd::Ledger(LedgerCmd::Search { clone: None, since: None, limit: 50, .. })
+        ));
+    }
+
+    #[test]
+    fn ledger_read_takes_a_clone_a_session_and_a_range() {
+        assert!(Cli::try_parse_from(["rmng", "ledger", "read", "pega-we-142"]).is_err());
+        let cli = Cli::parse_from([
+            "rmng", "ledger", "read", "pega-we-142", "sess-1", "--offset", "4096",
+        ]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Ledger(LedgerCmd::Read { ref clone, ref session, offset: 4096, len: 65536 })
+                if clone == "pega-we-142" && session == "sess-1"
         ));
     }
 

@@ -38,6 +38,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::App;
 
+/// The record shape, the two answers, and nothing else: `wire` owns them, so the on-disk
+/// NDJSON line and what the `rmng` CLI parses out of the API are one definition.
+pub use wire::{LedgerHit as Hit, LedgerRange as Range, LedgerRecord, LedgerSearch as SearchResult};
+
 /// How often the fleet is tailed.
 ///
 /// Slower than [`crate::agentlog`]'s 15s walk because nothing waits on this: the ledger is read
@@ -182,38 +186,6 @@ fn save_offsets(dir: &Path, offsets: &Offsets) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::write(&tmp, body.as_bytes())?;
     std::fs::rename(&tmp, &path)
-}
-
-// --- the record ------------------------------------------------------------------------------
-
-/// One distilled event, as it appears on a ledger line.
-///
-/// The first four fields are what make a grep hit self-describing, so they are always written and
-/// always in this order.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LedgerRecord {
-    /// The clone whose transcript this came from.
-    pub clone: String,
-    /// The Claude Code session id, which is also this record's file name.
-    pub session: String,
-    /// RFC3339, as the CLI wrote it. A record with no timestamp of its own inherits the newest
-    /// one seen before it in the same transcript.
-    pub ts: String,
-    /// `user`, `assistant`, `toolUse`, `toolResult`, `title` or `compact`.
-    pub kind: String,
-    /// The tool's name, on a `toolUse` record.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub tool: String,
-    /// The `toolu_…` id, which ties a `toolResult` back to the `toolUse` that asked for it.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub tool_id: String,
-    /// True when the event belongs to a subagent running inside this session rather than to the
-    /// conversation itself.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sidechain: bool,
-    /// The distilled text: a message, a clipped tool input, a clipped tool result.
-    pub text: String,
 }
 
 // --- the transcript, as it is written ----------------------------------------------------------
@@ -671,30 +643,6 @@ pub async fn run(app: App) {
 
 // --- querying ------------------------------------------------------------------------------
 
-/// One matching ledger line, with what a caller needs to read around it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Hit {
-    pub clone: String,
-    pub session: String,
-    pub ts: String,
-    pub kind: String,
-    /// Byte offset of the line within `<clone>/<session>.ndjson`, for [`read_range`].
-    pub offset: u64,
-    /// Length of the line in bytes, its newline included.
-    pub len: u64,
-    pub line: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchResult {
-    pub hits: Vec<Hit>,
-    pub scanned_bytes: u64,
-    /// The search stopped early, on the hit limit or the byte budget. There are more matches.
-    pub truncated: bool,
-}
-
 /// What to look for. `pattern` is a case-insensitive substring, matched against the whole ledger
 /// line, so it reaches the text, the tool name and the kind alike.
 #[derive(Debug, Clone, Default)]
@@ -809,21 +757,6 @@ pub fn search(data_dir: &str, q: &SearchQuery) -> SearchResult {
     // Newest first across the whole result, not merely across the files it came from.
     hits.sort_by(|a, b| b.ts.cmp(&a.ts));
     SearchResult { hits, scanned_bytes: scanned, truncated }
-}
-
-/// A byte range of one session's ledger, for reading around a hit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Range {
-    pub clone: String,
-    pub session: String,
-    /// Where the returned text starts, snapped back to a line start.
-    pub offset: u64,
-    pub len: u64,
-    /// The whole file's size, so a caller can tell how much is left on either side.
-    pub size: u64,
-    /// Whole NDJSON lines, never a fragment of one.
-    pub text: String,
 }
 
 /// Read `len` bytes of `<clone>/<session>.ndjson` from `offset`, snapped outward to whole lines.

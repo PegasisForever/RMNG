@@ -608,6 +608,135 @@ pub async fn wait_cmd(client: &Client, op_id: &str, timeout: u64, json: bool) ->
     settle(client, op_id, timeout, json).await
 }
 
+// --- the transcript ledger ---------------------------------------------------
+
+/// Milliseconds since the Unix epoch, now.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// A `--since`/`--until` bound as epoch milliseconds.
+///
+/// Two forms, because the two questions are different. "What happened in the last two days" is
+/// a duration ago (`90m`, `6h`, `2d`, `3w`), which is what you actually type. An exact instant
+/// is epoch milliseconds, which is what a script already holds and what the API takes.
+///
+/// `now` is a parameter so the duration arithmetic is testable without a clock.
+fn parse_when(raw: &str, now: i64) -> Result<i64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        bail!("empty time bound");
+    }
+    let (digits, unit) = s.split_at(s.len() - 1);
+    let per_unit = match unit {
+        "m" => 60_000i64,
+        "h" => 60 * 60_000,
+        "d" => 24 * 60 * 60_000,
+        "w" => 7 * 24 * 60 * 60_000,
+        // No suffix: epoch milliseconds, verbatim.
+        _ => {
+            return s
+                .parse::<i64>()
+                .map_err(|_| anyhow!("'{raw}' is neither a duration (90m, 6h, 2d, 3w) nor epoch millis"));
+        }
+    };
+    let n: i64 = digits
+        .parse()
+        .map_err(|_| anyhow!("'{raw}' is neither a duration (90m, 6h, 2d, 3w) nor epoch millis"))?;
+    Ok(now - n.saturating_mul(per_unit))
+}
+
+/// `rmng ledger search <pattern>` — the matching lines, newest first.
+pub async fn ledger_search(
+    client: &Client,
+    pattern: &str,
+    clone: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+    json: bool,
+) -> Result<u8> {
+    let now = now_ms();
+    let since = since.map(|s| parse_when(s, now)).transpose()?;
+    let until = until.map(|s| parse_when(s, now)).transpose()?;
+    let found = client
+        .ledger_search(pattern, clone, since, until, Some(limit))
+        .await?;
+    if json {
+        emit_json(&found)?;
+        return Ok(0);
+    }
+    if found.hits.is_empty() {
+        eprintln!("no ledger line matches '{pattern}'");
+        return Ok(0);
+    }
+    // The session and offset are columns rather than a footnote: they are the two arguments
+    // `ledger read` takes, so a hit worth following up is already a command you can copy.
+    let rows: Vec<Vec<String>> = found
+        .hits
+        .iter()
+        .map(|h| {
+            vec![
+                h.clone.clone(),
+                h.ts.clone(),
+                h.kind.clone(),
+                h.session.clone(),
+                h.offset.to_string(),
+                truncate(&record_text(&h.line), 80),
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        table(&["CLONE", "WHEN", "KIND", "SESSION", "OFFSET", "TEXT"], &rows)
+    );
+    if found.truncated {
+        eprintln!(
+            "stopped at {} hits; there are more matches (raise --limit, or narrow with --clone/--since)",
+            found.hits.len()
+        );
+    }
+    Ok(0)
+}
+
+/// The `text` of a serialized ledger record, with its newlines flattened so one record stays
+/// one table row. A line that will not parse is shown raw rather than dropped.
+fn record_text(line: &str) -> String {
+    let text = serde_json::from_str::<wire::LedgerRecord>(line)
+        .map(|r| r.text)
+        .unwrap_or_else(|_| line.to_string());
+    text.replace('\n', " ⏎ ")
+}
+
+/// `rmng ledger read <clone> <session>` — the raw NDJSON, for piping into `jq`.
+pub async fn ledger_read(
+    client: &Client,
+    clone: &str,
+    session: &str,
+    offset: u64,
+    len: u64,
+    json: bool,
+) -> Result<u8> {
+    let range = client.ledger_read(clone, session, offset, len).await?;
+    if json {
+        emit_json(&range)?;
+        return Ok(0);
+    }
+    // The text is already whole NDJSON lines, which is the pipeable thing. The envelope goes to
+    // stderr so `rmng ledger read … | jq` works without a flag.
+    print!("{}", range.text);
+    eprintln!(
+        "{clone}/{session}: bytes {}..{} of {}",
+        range.offset,
+        range.offset + range.len,
+        range.size
+    );
+    Ok(0)
+}
+
 /// Shared tail for commands that start an operation: print it (or its id), then
 /// `--wait` rides SSE to the terminal state.
 async fn started(
@@ -1170,6 +1299,36 @@ fn _assert_state_is_wire(st: ControlState) -> ControlState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixed clock, so the duration arithmetic is checked rather than the machine's time.
+    const NOW: i64 = 1_785_600_000_000;
+
+    #[test]
+    fn a_time_bound_is_a_duration_ago_or_epoch_millis() {
+        assert_eq!(parse_when("90m", NOW).unwrap(), NOW - 90 * 60_000);
+        assert_eq!(parse_when("6h", NOW).unwrap(), NOW - 6 * 60 * 60_000);
+        assert_eq!(parse_when("2d", NOW).unwrap(), NOW - 2 * 24 * 60 * 60_000);
+        assert_eq!(parse_when("3w", NOW).unwrap(), NOW - 3 * 7 * 24 * 60 * 60_000);
+        // No suffix is an instant, verbatim, which is what a script already holds.
+        assert_eq!(parse_when("1785578400000", NOW).unwrap(), 1_785_578_400_000);
+        assert_eq!(parse_when(" 2d ", NOW).unwrap(), NOW - 2 * 24 * 60 * 60_000);
+    }
+
+    #[test]
+    fn a_time_bound_that_means_nothing_is_refused_rather_than_guessed() {
+        for bad in ["", "  ", "soon", "2y", "-d", "2 d"] {
+            assert!(parse_when(bad, NOW).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_hit_shows_its_records_text_on_one_row() {
+        let line = r#"{"clone":"c1","session":"s1","ts":"2026-08-01T10:00:00.000Z","kind":"user","text":"fix\nthe encoder"}"#;
+        assert_eq!(record_text(line), "fix ⏎ the encoder");
+        // A line that will not parse is shown as it is rather than dropped: a ledger the
+        // format has moved on from is still evidence.
+        assert_eq!(record_text("not json"), "not json");
+    }
 
     #[test]
     fn ssh_command_is_the_inline_jump_one_liner() {

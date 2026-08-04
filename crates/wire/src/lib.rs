@@ -9,6 +9,7 @@
 //! - [`viewer`] — the native viewer ⇄ control-server protocol (port 1).
 //! - [`mcp`] — desktop-tool DTOs + the `/api/hosts/:id/mcp` proxy request.
 //! - [`exec`] — the `rmng exec` request/result (`/api/hosts/:id/exec`).
+//! - [`ledger`] — the distilled transcript record and the two `/api/ledger/*` answers.
 //! - [`net`] — the one IO helper: keepalive tuning both ends of port 1 apply.
 //!
 //! Control-plane + config types derive `ts-rs::TS` and export TypeScript bindings
@@ -20,6 +21,7 @@ pub mod config;
 pub mod control;
 pub mod exec;
 pub mod forward;
+pub mod ledger;
 pub mod mcp;
 pub mod net;
 pub mod socket;
@@ -38,4 +40,5 @@ pub use control::{
     ScheduledMessage, UpdateStatus,
 };
 pub use exec::{ExecRequest, ExecResult};
+pub use ledger::{LedgerHit, LedgerRange, LedgerRecord, LedgerSearch};
 pub use mcp::McpCallRequest;

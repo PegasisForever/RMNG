@@ -576,6 +576,10 @@ the symlinks the clone-home reconciler maintains, and writes one NDJSON record p
 One more pass runs at the start of a delete and an archive. The `hosts/<id>` symlink disappears
 the moment the container stops, so anything not captured while the clone runs is unrecoverable.
 
+Both endpoints have a CLI front end: `rmng ledger search` and `rmng ledger read`
+(see [CLI.md](CLI.md)). The record shapes are `wire::ledger`, so the on-disk NDJSON line and
+what the CLI parses are one definition.
+
 **Record shape.** Every line names its clone, session, timestamp and kind first, so a grep hit
 reads without needing its file header.
 
