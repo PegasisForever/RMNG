@@ -336,7 +336,7 @@ chmod 600 "$f"
 /// demand to learn the `rmng` fleet CLI. Same delivery model as the global prompt / MCP config.
 const RMNG_CLI_SKILL_MD: &str = r#"---
 name: rmng-cli
-description: Use when you need to manage the RMNG clone fleet from inside a clone — list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, or manage clone-source images and agent accounts. Covers the `rmng` command-line tool.
+description: Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage clone-source images and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool.
 ---
 
 # Managing the fleet with `rmng`
@@ -460,6 +460,26 @@ running: if you are on `auto`, so is it, and it gets its own pick. `--top-level`
 - `rmng account swap <clone> <sel> [--codex]` — change a clone's account for one provider.
   Takes the same selection forms as the create flags. The token is written into the clone's
   credential file immediately; nothing restarts.
+
+## Search what other clones have already done
+
+The control-server keeps a greppable copy of every clone's Claude Code transcripts, and keeps
+it after the clone is gone. Search it before solving something from scratch: the odds are good
+that another clone hit the same wall, and its reasoning is still there.
+
+- `rmng ledger search <pattern> [--clone <id>] [--since <when>] [--until <when>] [--limit <N>]`
+  — case-insensitive substring over whole ledger lines, so it matches the text, the tool name
+  and the record kind alike. `--since`/`--until` take a duration ago (`90m`, `6h`, `2d`, `3w`)
+  or epoch milliseconds. Newest first, capped at `--limit` (default 50, server maximum 500).
+  Columns are `CLONE WHEN KIND SESSION OFFSET TEXT`, and the session and offset are the two
+  arguments the next command takes, so a hit worth following up is already a command.
+  Example: `rmng ledger search "va-api" --since 2d`.
+- `rmng ledger read <clone> <session> [--offset <N>] [--len <N>]` — the conversation around a
+  hit. Pass the hit's own offset to re-read that line, or less to read what led up to it. The
+  range snaps outward to line boundaries, so stdout is always whole NDJSON lines. Default
+  `--len 65536`, server maximum 1 MiB. The `bytes A..B of C` envelope goes to stderr, so
+  piping needs no flag:
+  `rmng ledger read pega-we-142 793f5eac-… --offset 4096 | jq -r '.kind + ": " + .text'`.
 
 ## Images & accounts
 
