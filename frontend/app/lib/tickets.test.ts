@@ -3,6 +3,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  adoptTickets,
   branchNameOf,
   cloneForTicket,
   cloneTickets,
@@ -201,4 +202,52 @@ test("a clone with no ticket, and one Linear did not answer for, are both absent
   const live = cloneTickets(clones, [ticket("WE-2")]);
 
   expect(live).toEqual({});
+});
+
+// --- adoption: what stops Linear from re-sorting the column -----------------
+
+test("a ticket the order has never seen is adopted at the top", () => {
+  expect(adoptTickets([ticket("WE-9"), ticket("WE-1")], ["we-1"])).toEqual(["we-9", "we-1"]);
+});
+
+test("adoption keeps the arrangement already stored, underneath the new ones", () => {
+  const drawn = [ticket("WE-9"), ticket("WE-3"), ticket("WE-1"), ticket("WE-2")];
+  // `orderTickets` has already put the new one on top; adoption pins exactly that.
+  expect(adoptTickets(drawn, ["we-3", "we-1", "we-2"])).toEqual(["we-9", "we-3", "we-1", "we-2"]);
+});
+
+test("adoption answers null once the order covers every ticket drawn", () => {
+  // The guard that stops the container writing on every poll, and that makes the effect
+  // converge after one pass.
+  expect(adoptTickets([ticket("WE-1"), ticket("WE-2")], ["we-1", "we-2"])).toBeNull();
+  expect(adoptTickets([], ["we-1"])).toBeNull();
+  expect(adoptTickets([], [])).toBeNull();
+});
+
+test("adoption is case-insensitive and lowercases what it stores", () => {
+  // The server lowercases what it stores, so producing anything else would make the
+  // optimistic list and the one that comes back over SSE two spellings of one order.
+  expect(adoptTickets([ticket("WE-1")], ["WE-1"])).toBeNull();
+  expect(adoptTickets([ticket("WE-9")], ["WE-1"])).toEqual(["we-9", "we-1"]);
+});
+
+test("a repeated id is adopted once", () => {
+  expect(adoptTickets([ticket("WE-9"), ticket("we-9")], [])).toEqual(["we-9"]);
+});
+
+test("an adopted ticket keeps its place when Linear re-sorts, which is the bug this fixes", () => {
+  const drawn = [ticket("WE-1"), ticket("WE-2"), ticket("WE-3")];
+  const order = adoptTickets(drawn, [])!;
+  expect(order).toEqual(["we-1", "we-2", "we-3"]);
+  // Linear now answers newest-updated first, having had WE-3 edited. The column does not move.
+  const reSorted = [ticket("WE-3"), ticket("WE-1"), ticket("WE-2")];
+  expect(ids(orderTickets(reSorted, order))).toEqual(["WE-1", "WE-2", "WE-3"]);
+  expect(adoptTickets(reSorted, order)).toBeNull();
+});
+
+test("a ticket that arrives after adoption still goes to the top", () => {
+  const order = adoptTickets([ticket("WE-1"), ticket("WE-2")], [])!;
+  const withNew = orderTickets([ticket("WE-2"), ticket("WE-9"), ticket("WE-1")], order);
+  expect(ids(withNew)).toEqual(["WE-9", "WE-1", "WE-2"]);
+  expect(adoptTickets(withNew, order)).toEqual(["we-9", "we-1", "we-2"]);
 });

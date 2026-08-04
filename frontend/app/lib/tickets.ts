@@ -133,8 +133,10 @@ export function openTickets(tickets: LinearTicket[], clones: Clone[]): LinearTic
  *  looked at, rather than to the bottom of a queue nobody scrolls.
  *
  *  Several new ones keep Linear's relative order among themselves, which is the only order
- *  anyone has expressed about them yet. Ids in `order` that no longer exist are ignored, so
- *  a stale entry costs nothing and needs no cleanup pass. */
+ *  anyone has expressed about them yet. That is a starting position, not a resting one: the
+ *  container adopts them through [`adoptTickets`] on the same pass, which is what stops a
+ *  later edit in Linear from re-sorting them. Ids in `order` that no longer exist are
+ *  ignored, so a stale entry costs nothing and needs no cleanup pass. */
 export function orderTickets(tickets: LinearTicket[], order: string[]): LinearTicket[] {
   const rank = new Map(order.map((id, i) => [id.toLowerCase(), i]));
   const fresh: LinearTicket[] = [];
@@ -145,4 +147,31 @@ export function orderTickets(tickets: LinearTicket[], order: string[]): LinearTi
   }
   placed.sort((a, b) => rank.get(a.id.toLowerCase())! - rank.get(b.id.toLowerCase())!);
   return [...fresh, ...placed];
+}
+
+/** `order` with every ticket it has never seen written in at the top, or null when it already
+ *  covers them all.
+ *
+ *  Without this the stored order only ever held the tickets somebody had dragged, and every
+ *  other card fell through to the order Linear sent. That query is `orderBy: updatedAt`, so
+ *  editing any ticket in Linear silently re-sorted every un-dragged card in the column. A
+ *  queue that rearranges itself when you touch something else is not a queue.
+ *
+ *  So a ticket takes its place the moment the column first draws it, not the first time it is
+ *  dragged. `tickets` arrives from [`orderTickets`], which has already put the new ones on top
+ *  in Linear's relative order, and this pins exactly that.
+ *
+ *  Lowercased, matching what the server stores, so the list this produces and the one that
+ *  comes back over SSE are the same array rather than two spellings of it. */
+export function adoptTickets(tickets: LinearTicket[], order: string[]): string[] | null {
+  const known = new Set(order.map((id) => id.toLowerCase()));
+  const fresh: string[] = [];
+  for (const t of tickets) {
+    const id = t.id.toLowerCase();
+    if (known.has(id)) continue;
+    known.add(id); // A repeated id is adopted once, however it got into the list.
+    fresh.push(id);
+  }
+  if (fresh.length === 0) return null;
+  return [...fresh, ...order.map((id) => id.toLowerCase())];
 }

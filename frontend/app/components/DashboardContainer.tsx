@@ -28,6 +28,7 @@ import { useTickets } from "~/lib/linear/useTickets";
 import { useWorkspaces } from "~/lib/linear/useWorkspaces";
 import { workspaceHomeUrl } from "~/lib/linear/workspaces";
 import {
+  adoptTickets,
   cloneForTicket,
   cloneTickets,
   findTicket,
@@ -352,6 +353,18 @@ export function DashboardContainer({
     openTickets(linearTickets, state.hosts),
     ticketOrder,
   );
+  // Pin a ticket's position the moment the column first draws it, rather than the first time
+  // somebody drags it. Until this ran, the stored order held only the dragged ones and every
+  // other card fell through to the order Linear sent, which is `orderBy: updatedAt` — so
+  // editing any ticket over there re-sorted the column here.
+  //
+  // Converges in one pass: the write lands in the same local state this reads, so the next
+  // render finds nothing left to adopt and the effect stops. `visibleTickets` is a fresh array
+  // every render, which is why the guard is the returned null rather than the dependency list.
+  useEffect(() => {
+    const adopted = adoptTickets(visibleTickets, ticketOrder);
+    if (adopted) applyTicketOrder(adopted);
+  });
   // Each clone's ticket as Linear has it now, which is what the cards draw their titles and
   // their "Open in Linear" from. Built off the whole list rather than `visibleTickets`: that
   // one has every cloned ticket filtered out of it by definition.
