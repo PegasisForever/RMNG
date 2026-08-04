@@ -24,7 +24,13 @@ import { makeNotesBlocks } from "./__fixtures__/notes";
 import { cloneOperation } from "./__fixtures__/operations";
 import { cloneTokens, lxcStats, stats } from "./__fixtures__/stats";
 import { makeStoryLink } from "./__fixtures__/storyLinks";
-import { linearTickets, ticketCloned, ticketDetailed } from "./__fixtures__/tickets";
+import {
+  linearTickets,
+  teamLabels,
+  teamStates,
+  ticketCloned,
+  ticketDetailed,
+} from "./__fixtures__/tickets";
 import { linearWorkspaces } from "./__fixtures__/workspaces";
 
 /** A clone that starts out in the archived column, so the fixed right column has something
@@ -135,6 +141,13 @@ function TicketFixture({
       onCopyBranchName={fn(async () => true)}
       onCreateClone={onCreateClone}
       onTitleChange={fn()}
+      // The header's two menus, on the same fixtures the panel's own stories use, so the
+      // shell shows the ticket the way the running app does rather than a read-only copy.
+      onStateChange={fn()}
+      stateOptions={teamStates}
+      labelOptions={teamLabels}
+      onAddLabel={fn()}
+      onRemoveLabel={fn()}
     />
   );
 }

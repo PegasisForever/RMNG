@@ -6,6 +6,7 @@ import { expect, test } from "bun:test";
 import {
   issueCreate,
   issueCreateInput,
+  issueSetLabel,
   issueSetState,
   issueUpdate,
   issueUpdateInput,
@@ -215,5 +216,21 @@ test("the workflow is looked up by the ticket's team, or by its identifier's own
 test("moving a ticket with no key says so rather than asking Linear", async () => {
   await expect(issueSetState([], { id: "WE-1" }, "canceled")).rejects.toThrow(
     /no Linear API key configured/,
+  );
+});
+
+// --- labelling ---------------------------------------------------------------
+
+test("labelling a ticket with no key says so rather than asking Linear", async () => {
+  await expect(issueSetLabel([], { id: "WE-1" }, "lab-bug", true)).rejects.toThrow(
+    /no Linear API key configured/,
+  );
+});
+
+/** A label the query answered without an id reaches the panel and draws, so the refusal has to
+ *  be here. Sending a blank `labelId` would be a request that can only fail. */
+test("a label with no id is refused before a key is even chosen", async () => {
+  await expect(issueSetLabel(["lin_w"], { id: "WE-1" }, " ", false)).rejects.toThrow(
+    /carries no Linear id/,
   );
 });

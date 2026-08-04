@@ -25,7 +25,7 @@ export const LABEL_FALLBACK_COLOR = "#94a3b8";
  *  card is drawn from the mutation's own answer instead of waiting out the poll. */
 export const OPEN_ISSUE_FIELDS =
   "id identifier title url branchName priority description " +
-  "team { key } state { type } labels { nodes { name color } } " +
+  "team { key } state { id name type } labels { nodes { id name color } } " +
   "parent { identifier title url state { type } } " +
   "children { nodes { identifier title url state { type } } }";
 
@@ -79,6 +79,15 @@ export function ticketFromNode(value: unknown): LinearTicket | null {
 
   const uuid = optStr(node, "id");
   if (uuid !== undefined) ticket.uuid = uuid;
+  // The state's own id and name, for the menu that changes it. Absent when the query asked
+  // only for the type, which is what every older caller did.
+  const stateNode = obj(node.state);
+  if (stateNode) {
+    const stateId = optStr(stateNode, "id");
+    if (stateId !== undefined) ticket.stateId = stateId;
+    const stateName = optStr(stateNode, "name");
+    if (stateName !== undefined) ticket.stateName = stateName;
+  }
   const team = obj(node.team);
   if (team && typeof team.key === "string") ticket.team = team.key;
   // Linear sends `0` for "no priority", and 1 to 4 for urgent through low. Zero is absence,
@@ -108,12 +117,15 @@ export function linkFromNode(value: unknown): TicketLink | null {
   return { id, title: str(node, "title"), url: str(node, "url"), state };
 }
 
-/** Linear's state *type* as ours. `triage`, and anything Linear adds later, answer null,
- *  which drops the issue rather than defaulting it: a ticket quietly showing up as Todo
- *  because its state was unrecognised is worse than one that does not show up at all. */
-export function stateOf(value: unknown): TicketState | null {
-  const state = obj(obj(value)?.state);
-  switch (state === null ? "" : str(state, "type")) {
+/** Linear's state *type* as ours, or null for one this app does not model.
+ *
+ *  Null drops the issue rather than defaulting it: a ticket quietly showing up as Todo
+ *  because its state was unrecognised is worse than one that does not show up at all. Every
+ *  type Linear currently has is here, so in practice only a type it adds later answers null. */
+export function stateFromType(type: string): TicketState | null {
+  switch (type) {
+    case "triage":
+      return "triage";
     case "backlog":
       return "backlog";
     case "unstarted":
@@ -124,16 +136,31 @@ export function stateOf(value: unknown): TicketState | null {
       return "done";
     case "canceled":
       return "canceled";
+    case "duplicate":
+      return "duplicate";
     default:
       return null;
   }
 }
 
-/** One label node, or null when it carries no name. */
-function labelFromNode(value: unknown): TicketLabel | null {
+/** The state type of a node carrying a `state { type }`, as ours. */
+export function stateOf(value: unknown): TicketState | null {
+  const state = obj(obj(value)?.state);
+  return state === null ? null : stateFromType(str(state, "type"));
+}
+
+/** One label node, or null when it carries no name.
+ *
+ *  A node with no `id` still maps. The identifier is what a write names, so a label without
+ *  one cannot be taken off the issue, but it is still a label the panel should draw. */
+export function labelFromNode(value: unknown): TicketLabel | null {
   const node = obj(value);
   if (!node || typeof node.name !== "string") return null;
-  return { name: node.name, color: optStr(node, "color") ?? LABEL_FALLBACK_COLOR };
+  return {
+    id: str(node, "id"),
+    name: node.name,
+    color: optStr(node, "color") ?? LABEL_FALLBACK_COLOR,
+  };
 }
 
 // --- reading an answer nothing type-checked ----------------------------------

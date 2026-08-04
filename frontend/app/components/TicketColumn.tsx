@@ -23,6 +23,7 @@ import {
   GitBranch,
   Link2,
   Plus,
+  X,
 } from "lucide-react";
 import type { CSSProperties } from "react";
 
@@ -38,31 +39,52 @@ import type { LinearWorkspace } from "~/lib/linear/types";
 import { branchNameOf, ticketDragId, TICKET_COLUMN_ID, type LinearTicket } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
 
+/** What each kind of state is called when the workspace's own name for it is not to hand.
+ *
+ *  Where it is, that name wins: the state menu lists a team's whole workflow by its real
+ *  names, and this is only what a card's tooltip and that menu's fallback read. */
 export const STATE_LABEL: Record<LinearTicket["state"], string> = {
+  triage: "Triage",
   backlog: "Backlog",
   todo: "Todo",
   in_progress: "In progress",
   done: "Done",
   canceled: "Cancelled",
+  duplicate: "Duplicate",
 };
 
 const STATE_COLOR: Record<LinearTicket["state"], string> = {
+  triage: "text-orange-500",
   backlog: "text-slate-400 dark:text-slate-500",
   todo: "text-slate-400 dark:text-slate-500",
   in_progress: "text-amber-500",
   done: "text-indigo-500",
   canceled: "text-slate-400 dark:text-slate-500",
+  duplicate: "text-slate-400 dark:text-slate-500",
 };
 
-/** Linear's state mark, redrawn: a ring that fills as the work moves. Backlog is dashed,
- *  Todo is the plain empty ring, In progress is half filled, Done is filled with a tick, and
- *  Cancelled is struck through. The same glyphs Linear puts on its own column headers.
+/** Linear's state mark, redrawn: a ring that fills as the work moves. Triage carries a dot,
+ *  Backlog is dashed, Todo is the plain empty ring, In progress is half filled, Done is
+ *  filled with a tick, and Cancelled and Duplicate are struck through. The same glyphs Linear
+ *  puts on its own column headers, and Duplicate reads as Cancelled there too.
  *
  *  A ring rather than the clone cards' solid dot. A clone's dot reports something changing
  *  while you watch it, and this reports a state somebody set in another tool, so drawing
- *  them the same way would claim they are the same kind of fact. */
-export function StateIcon({ state }: { state: LinearTicket["state"] }) {
-  const label = STATE_LABEL[state];
+ *  them the same way would claim they are the same kind of fact.
+ *
+ *  Our colour per kind, never Linear's own per state. Two states of one kind are told apart
+ *  by their names in the one place both appear, and a workspace is free to give a state a
+ *  near-white colour that would leave the glyph invisible on the card. */
+export function StateIcon({
+  state,
+  label = STATE_LABEL[state],
+}: {
+  state: LinearTicket["state"];
+  /** What it announces and shows on hover. Pass the workspace's own state name where it is
+   *  known; the kind's name is what it falls back to. */
+  label?: string;
+}) {
+  const struck = state === "canceled" || state === "duplicate";
   return (
     <svg
       viewBox="0 0 14 14"
@@ -96,7 +118,8 @@ export function StateIcon({ state }: { state: LinearTicket["state"] }) {
           />
         </>
       ) : null}
-      {state === "canceled" ? (
+      {state === "triage" ? <circle cx="7" cy="7" r="2" fill="currentColor" /> : null}
+      {struck ? (
         <path d="M4.6 4.6 L9.4 9.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
       ) : null}
     </svg>
@@ -161,15 +184,57 @@ export function PriorityIcon({ level }: { level: number }) {
 
 /** A Linear label: an outlined pill with the label's own colour as a dot. The colour is a
  *  `#rrggbb` string from Linear, so it rides an inline style; everything else is the same
- *  hairline the cards wear. */
-export function LabelPill({ name, color }: { name: string; color: string }) {
+ *  hairline the cards wear.
+ *
+ *  `onRemove` turns the dot into an X under the pointer. In its place rather than after it,
+ *  which is what Linear does and what keeps the pill exactly the width it was: a row of these
+ *  wraps, and one growing under the pointer would reflow the rest of the line. The dot is the
+ *  label's decoration and the X is the thing you want from it, so the swap costs nothing you
+ *  were reading.
+ *
+ *  Where there is no hover the X is simply always there, which is a phone and anything else the
+ *  browser reports `hover: none` for. Tailwind gates `group-hover` behind `@media (hover: hover)`,
+ *  so that query is the exact complement of the swap rather than a guess at which devices lack a
+ *  pointer: wherever the hover rule cannot fire, this one has already made the swap. It costs a
+ *  touch screen the colour, which is decoration, rather than the only way to take a label off. */
+export function LabelPill({
+  name,
+  color,
+  onRemove,
+}: {
+  name: string;
+  color: string;
+  /** Take the label off the ticket. Absent ⇒ the dot stays a dot, which is what every card
+   *  gets. */
+  onRemove?: () => void;
+}) {
+  // Both marks sit in one 10px slot, so which of them is showing never moves the text beside
+  // it. The dot keeps its own 8px: an X drawn at the dot's size is a smudge.
+  const swap = onRemove
+    ? "group-hover:opacity-0 group-focus-within:opacity-0 [@media(hover:none)]:opacity-0"
+    : "";
   return (
-    <span className="inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-slate-300 px-1.5 py-0.5 text-[11px] leading-none text-slate-600 dark:border-slate-600 dark:text-slate-300">
-      <span
-        aria-hidden
-        className="size-2 shrink-0 rounded-full"
-        style={{ backgroundColor: color }}
-      />
+    <span className="group inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-slate-300 px-1.5 py-0.5 text-[11px] leading-none text-slate-600 dark:border-slate-600 dark:text-slate-300">
+      <span className="relative flex size-2.5 shrink-0 items-center justify-center">
+        <span
+          aria-hidden
+          className={`size-2 rounded-full ${swap}`}
+          style={{ backgroundColor: color }}
+        />
+        {onRemove ? (
+          <button
+            type="button"
+            onClick={onRemove}
+            title={`Remove ${name}`}
+            aria-label={`Remove label ${name}`}
+            // `after:-inset-1` grows the hit area past the glyph without giving the button any
+            // size of its own, so a 10px target is comfortable to hit and the pill stays put.
+            className="absolute inset-0 flex cursor-pointer items-center justify-center rounded-full text-slate-500 opacity-0 after:absolute after:-inset-1 after:content-[''] hover:text-slate-800 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 dark:text-slate-400 dark:hover:text-slate-100"
+          >
+            <X aria-hidden className="size-2.5" />
+          </button>
+        ) : null}
+      </span>
       <span className="truncate">{name}</span>
     </span>
   );

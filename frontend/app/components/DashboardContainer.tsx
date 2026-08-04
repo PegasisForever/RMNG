@@ -23,7 +23,15 @@ import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
-import { issueSetState, issueUpdate, keysForTeam } from "~/lib/linear/mutations";
+import {
+  issueSetLabel,
+  issueSetState,
+  issueSetStateId,
+  issueUpdate,
+  keysForTeam,
+} from "~/lib/linear/mutations";
+import type { TicketLabel, TicketWorkflowState } from "~/lib/linear/types";
+import { useTeamMeta } from "~/lib/linear/useTeamMeta";
 import { useTickets } from "~/lib/linear/useTickets";
 import { useWorkspaces } from "~/lib/linear/useWorkspaces";
 import { workspaceHomeUrl } from "~/lib/linear/workspaces";
@@ -380,6 +388,47 @@ export function DashboardContainer({
     );
   };
 
+  // Move a ticket into a state the operator picked by name off its team's own workflow. Both
+  // halves of the optimistic write matter here: the kind is what redraws the ring, and the id
+  // and name are what keep the menu's tick and the glyph's tooltip on the state just chosen.
+  //
+  // Not `moveTicket`. That one names a state *type* and lands on the team's first state of it,
+  // which is the right answer for the column's Cancel item and the wrong one for a menu that
+  // just showed the operator two states of one kind and let them pick the second.
+  const setTicketState = (ticket: LinearTicket, state: TicketWorkflowState) => {
+    upsertTicket({ ...ticket, state: state.type, stateId: state.id, stateName: state.name });
+    run(
+      issueSetStateId(keysForTeam(presets, ticket.team ?? ""), ticket, state.id)
+        .catch((e: Error) => {
+          upsertTicket(ticket);
+          throw e;
+        })
+        .then(refetchTickets),
+    );
+  };
+
+  // Put one label on a ticket or take it off, on screen now and in Linear a round trip later.
+  // Same optimistic shape as the two writes above, and the same rollback: the pill has already
+  // gone by the time the refusal lands, so the error alone would leave the panel lying for a
+  // whole poll interval.
+  //
+  // The list is rebuilt rather than patched in place, which is what keeps the panel's own "+"
+  // menu right: it offers what the ticket does not carry, and it reads that off this list.
+  const setTicketLabel = (ticket: LinearTicket, label: TicketLabel, on: boolean) => {
+    const labels = on
+      ? [...ticket.labels, label]
+      : ticket.labels.filter((l) => l.id !== label.id);
+    upsertTicket({ ...ticket, labels });
+    run(
+      issueSetLabel(keysForTeam(presets, ticket.team ?? ""), ticket, label.id, on)
+        .catch((e: Error) => {
+          upsertTicket(ticket);
+          throw e;
+        })
+        .then(refetchTickets),
+    );
+  };
+
   const visibleTickets = orderTickets(
     openTickets(linearTickets, state.hosts),
     ticketOrder,
@@ -408,6 +457,11 @@ export function DashboardContainer({
   // Derived: a ticket that leaves the list (cloned, closed, moved in Linear) closes its
   // panel on its own, with no cleanup to run.
   const openTicket = visibleTickets.find((t) => t.id === openTicketId) ?? null;
+  // What each open panel's two menus offer: its team's labels and its workflow. Two lookups
+  // because two panels can be up at once on two different teams; one team asked for twice
+  // costs one request, the answers being cached for the session.
+  const openTicketMeta = useTeamMeta(presets, openTicket);
+  const cloneTicketMeta = useTeamMeta(presets, selectedTicket);
   useEffect(() => {
     if (!pendingColumn) return;
     const { columnId, target } = pendingColumn;
@@ -495,6 +549,13 @@ export function DashboardContainer({
           </ClientOnly>
         }
         onTitleChange={(title) => editTicket(selectedTicket, { title })}
+        onStateChange={(next) => setTicketState(selectedTicket, next)}
+        stateOptions={cloneTicketMeta.states}
+        statesLoading={cloneTicketMeta.loading}
+        labelOptions={cloneTicketMeta.labels}
+        labelsLoading={cloneTicketMeta.loading}
+        onAddLabel={(label) => setTicketLabel(selectedTicket, label, true)}
+        onRemoveLabel={(label) => setTicketLabel(selectedTicket, label, false)}
         // No "Create a clone" button: this panel is only ever drawn for a ticket that
         // already has one, and it is the clone you are looking at.
         resolveLink={resolveToClone}
@@ -563,6 +624,15 @@ export function DashboardContainer({
                 </ClientOnly>
               }
               onTitleChange={(title) => editTicket(openTicket, { title })}
+              // Marking it Done or Cancelled here takes the card out of the column, which
+              // takes this panel with it: `openTicket` is derived from the column's own list.
+              onStateChange={(next) => setTicketState(openTicket, next)}
+              stateOptions={openTicketMeta.states}
+              statesLoading={openTicketMeta.loading}
+              labelOptions={openTicketMeta.labels}
+              labelsLoading={openTicketMeta.loading}
+              onAddLabel={(label) => setTicketLabel(openTicket, label, true)}
+              onRemoveLabel={(label) => setTicketLabel(openTicket, label, false)}
               onCreateClone={() => {
                 setTicketPrefill(openTicket.url);
                 setCloneOpen(true);

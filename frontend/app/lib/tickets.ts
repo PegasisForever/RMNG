@@ -21,6 +21,7 @@ import type { LinearTicket } from "~/lib/linear/types";
 export type { LinearTicket } from "~/lib/linear/types";
 export type { TicketLabel } from "~/lib/linear/types";
 export type { TicketState } from "~/lib/linear/types";
+export type { TicketWorkflowState } from "~/lib/linear/types";
 
 /** Drag ids have to be unique across the whole board, and a ticket id could in principle
  *  collide with a clone id. Prefixing keeps the two namespaces apart and lets the drag

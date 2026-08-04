@@ -11,10 +11,34 @@
 /** Where a Linear issue sits in its workflow: its state *type*, not the workspace's own
  *  state name, so `Shipped` and `Done` both arrive here as `done`.
  *
- *  All five are modelled even though the ticket column only ever lists two of them. A
- *  sub-issue can be in any state, and drawing a completed one as Todo because the union could
- *  not say otherwise would be worse than carrying three extra variants. */
-export type TicketState = "backlog" | "todo" | "in_progress" | "done" | "canceled";
+ *  Every type Linear has is modelled even though the ticket column only ever lists two of
+ *  them. A sub-issue can be in any state, and drawing a completed one as Todo because the
+ *  union could not say otherwise would be worse than carrying the extra variants. The state
+ *  menu is the other reason: it lists a team's whole workflow by name, and a type missing
+ *  from here would be a row missing from there with nothing to say it had been dropped. */
+export type TicketState =
+  | "triage"
+  | "backlog"
+  | "todo"
+  | "in_progress"
+  | "done"
+  | "canceled"
+  | "duplicate";
+
+/** One state in a team's workflow, as that team spells it.
+ *
+ *  `Icebox`, `In Review`, `Shipped`: the names are the workspace's own, and the menu that
+ *  changes a ticket's state lists these rather than the five kinds above. Two states can share
+ *  a `type` (`In Progress` and `In Review` are both `in_progress`), which is exactly why the
+ *  name is needed: by type alone they are one choice, and they are not. */
+export interface TicketWorkflowState {
+  /** Linear's UUID, which is what a write names. */
+  id: string;
+  /** What the workspace calls it. */
+  name: string;
+  /** Which kind it is, for the glyph beside the name. */
+  type: TicketState;
+}
 
 /** A pointer to another issue: this one's parent, or one of its sub-issues. Carries only
  *  what a one-line row draws, because opening it is a click away in Linear. */
@@ -30,6 +54,10 @@ export interface TicketLink {
  *  operator's own scheme over there, so it travels with the label rather than being mapped
  *  onto a palette of ours. */
 export interface TicketLabel {
+  /** Linear's own UUID, which is what a write names. Empty on a label that reached the
+   *  browser without one, and then the panel offers no way to take it off: a mutation has
+   *  nothing to address. */
+  id: string;
   name: string;
   color: string;
 }
@@ -61,6 +89,13 @@ export interface LinearTicket {
   /** Canonical Linear URL, which is what a drop hands the clone dialog. */
   url: string;
   state: TicketState;
+  /** The workflow state's own UUID. What marks the current row in the state menu, since a
+   *  team can hold two states of one type and `state` cannot tell them apart. Absent on a
+   *  ticket nobody fetched from Linear, which is every fixture that does not set it. */
+  stateId?: string;
+  /** What the workspace calls the state the ticket is in, e.g. `In Review`. Absent for the
+   *  same reason as `stateId`, and then the glyph's tooltip falls back to the kind's name. */
+  stateName?: string;
   /** Linear's own UUID for the issue. A mutation addresses an issue by this and will not
    *  take the identifier. Absent on a ticket nobody fetched from Linear, which is every
    *  fixture. */

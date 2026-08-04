@@ -7,7 +7,7 @@
 //
 // Every trigger and item stops pointer propagation, so opening one neither selects the card
 // underneath nor starts dragging it.
-import { EllipsisVertical, type LucideIcon } from "lucide-react";
+import { Check, EllipsisVertical, type LucideIcon } from "lucide-react";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
@@ -66,6 +66,55 @@ export function MenuItem({
   );
 }
 
+/** The padding and text size every row shares, so a note lines up with the items above it. */
+const ROW = "flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs";
+
+/** One row of a menu that picks a value rather than running an action.
+ *
+ *  The mark is a slot instead of a Lucide icon, because the two menus that pick things pick
+ *  them by a mark this component could not draw: a workflow state's ring, and a label's own
+ *  colour out of Linear. The tick on the right is the current value, which is what makes the
+ *  list readable as a set of choices rather than a set of commands. */
+export function MenuChoice({
+  icon,
+  label,
+  selected = false,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  selected?: boolean;
+  onClick: () => void;
+}) {
+  const close = useMenuClose();
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={selected}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        close();
+        onClick();
+      }}
+      className={`${ROW} cursor-pointer text-slate-600 dark:text-slate-300 ${GLASS_HOVER}`}
+    >
+      <span className="flex size-4 shrink-0 items-center justify-center">{icon}</span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {selected ? (
+        <Check aria-hidden className="size-3.5 shrink-0 text-slate-400 dark:text-slate-500" />
+      ) : null}
+    </button>
+  );
+}
+
+/** A line of text where rows would be: the menu is loading, or has nothing to offer. Says so
+ *  rather than opening empty, which reads as a menu that is broken. */
+export function MenuNote({ children }: { children: ReactNode }) {
+  return <p className={`${ROW} text-slate-400 dark:text-slate-500`}>{children}</p>;
+}
+
 /** The trigger's own styling, which only a custom trigger sets. The ⋮ button brings its own. */
 const PLAIN_TRIGGER = "flex cursor-pointer items-center rounded disabled:opacity-50";
 
@@ -108,7 +157,15 @@ export function OverflowMenu({
     };
     // A fixed panel cannot follow its trigger, so scrolling the column out from under it
     // closes it rather than leaving it stranded mid-board.
-    const onScroll = () => setOpen(false);
+    //
+    // Its own scrolling is exempt. This listens in the capture phase, which is what catches a
+    // scrolling ancestor at all, and that also catches a menu long enough to scroll inside —
+    // so a list of labels would close itself the moment you reached for the one at the bottom.
+    // A resize passes `window` as its target, which is not a Node and so never matches.
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Node && menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);

@@ -25,7 +25,14 @@ import { activate, refreshClaudeUsage, refreshCodexUsage } from "~/lib/api";
 import { withDefaults } from "~/lib/board";
 import { copyText } from "~/lib/clipboard";
 import { browserLocale } from "~/lib/format";
-import { issueUpdate, keysForTeam } from "~/lib/linear/mutations";
+import {
+  issueSetLabel,
+  issueSetStateId,
+  issueUpdate,
+  keysForTeam,
+} from "~/lib/linear/mutations";
+import type { TicketLabel, TicketWorkflowState } from "~/lib/linear/types";
+import { useTeamMeta } from "~/lib/linear/useTeamMeta";
 import { useTickets } from "~/lib/linear/useTickets";
 import { cloneForTicket, cloneTickets, findTicket, type LinearTicket } from "~/lib/tickets";
 import type { ControlState } from "~/lib/types";
@@ -121,6 +128,36 @@ export function MobileDashboardContainer({
     );
   };
 
+  // Move a ticket into a state picked by name off its team's workflow, and put one label on or
+  // take it off. Both are the desktop's own writes, unchanged, because a ticket is the same
+  // ticket on a phone: show it now, ask Linear, put the old value back if Linear refuses.
+  const setTicketState = (ticket: LinearTicket, state: TicketWorkflowState) => {
+    upsertTicket({ ...ticket, state: state.type, stateId: state.id, stateName: state.name });
+    run(
+      issueSetStateId(keysForTeam(presets, ticket.team ?? ""), ticket, state.id)
+        .catch((e: Error) => {
+          upsertTicket(ticket);
+          throw e;
+        })
+        .then(refetchTickets),
+    );
+  };
+
+  const setTicketLabel = (ticket: LinearTicket, label: TicketLabel, on: boolean) => {
+    const labels = on
+      ? [...ticket.labels, label]
+      : ticket.labels.filter((l) => l.id !== label.id);
+    upsertTicket({ ...ticket, labels });
+    run(
+      issueSetLabel(keysForTeam(presets, ticket.team ?? ""), ticket, label.id, on)
+        .catch((e: Error) => {
+          upsertTicket(ticket);
+          throw e;
+        })
+        .then(refetchTickets),
+    );
+  };
+
   // Each clone's ticket as Linear has it now, which is where every row and every header on
   // this screen takes its title from.
   const liveCloneTickets = cloneTickets(state.hosts, linearTickets);
@@ -131,6 +168,9 @@ export function MobileDashboardContainer({
   const openTicket = openClone?.linearTicket
     ? findTicket(openClone.linearTicket, linearTickets)
     : null;
+  // What the open ticket's two menus offer. Above the early return below, because a hook that
+  // only runs on some renders is not a hook.
+  const ticketMeta = useTeamMeta(presets, openTicket);
 
   if (openClone) {
     return (
@@ -172,6 +212,13 @@ export function MobileDashboardContainer({
                 </ClientOnly>
               }
               onTitleChange={(title) => editTicket(openTicket, { title })}
+              onStateChange={(next) => setTicketState(openTicket, next)}
+              stateOptions={ticketMeta.states}
+              statesLoading={ticketMeta.loading}
+              labelOptions={ticketMeta.labels}
+              labelsLoading={ticketMeta.loading}
+              onAddLabel={(label) => setTicketLabel(openTicket, label, true)}
+              onRemoveLabel={(label) => setTicketLabel(openTicket, label, false)}
               // A sub-issue somebody already cloned is one tap away, so the row opens that
               // clone instead of leaving for Linear. Everything else leaves.
               resolveLink={(id) => {

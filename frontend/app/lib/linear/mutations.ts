@@ -1,7 +1,7 @@
-// The three writes the ticket column can start: open an issue, edit one, and move one to
-// another workflow state.
+// The four writes the board can start: open an issue, edit one, move one to another workflow
+// state, and put a label on one or take it off.
 //
-// All three used to be the server's, or nobody's. The browser holds the preset keys now, so it
+// All four used to be the server's, or nobody's. The browser holds the preset keys now, so it
 // addresses Linear itself and the control-server never sees a ticket body. What crossed over
 // unchanged is the part that is not obvious from the mutation names:
 //
@@ -317,6 +317,74 @@ export async function issueSetState(
       input: { stateId },
     });
     if (data.issueUpdate?.success !== true) throw new Error(refused);
+  });
+}
+
+/** Move an issue into the state `stateId` names.
+ *
+ *  The panel's own move, and the one the operator picked by name off the team's workflow. It
+ *  takes a state id rather than a type because that is the whole point of listing the real
+ *  states: a team with both "In Progress" and "In Review" has two `started` states, and
+ *  [`issueSetState`] can only ever reach the first of them.
+ *
+ *  One round trip instead of that function's two, the state having already been looked up when
+ *  the menu was filled. */
+export async function issueSetStateId(
+  keys: string[],
+  ticket: IssueRef,
+  stateId: string,
+): Promise<void> {
+  if (stateId.trim() === "") {
+    throw new Error(`that state carries no Linear id, so ${ticket.id} cannot be moved`);
+  }
+  const refused = `Linear refused the state change on ${ticket.id}`;
+  await withFirstKey(keys, refused, async (key) => {
+    const uuid = await issueUuid(key, ticket);
+    const data = await gql<{ issueUpdate?: { success?: boolean } }>(key, ISSUE_UPDATE_MUTATION, {
+      id: uuid,
+      input: { stateId },
+    });
+    if (data.issueUpdate?.success !== true) throw new Error(refused);
+  });
+}
+
+// --- issueAddLabel / issueRemoveLabel ----------------------------------------
+
+const ISSUE_ADD_LABEL_MUTATION =
+  "mutation($id: String!, $labelId: String!) { issueAddLabel(id: $id, labelId: $labelId) { success } }";
+
+const ISSUE_REMOVE_LABEL_MUTATION =
+  "mutation($id: String!, $labelId: String!) { issueRemoveLabel(id: $id, labelId: $labelId) { success } }";
+
+/** Put one label on an issue, or take it off.
+ *
+ *  Linear's own two mutations rather than an `issueUpdate { labelIds }`. That input replaces
+ *  the whole list, so using it would mean reading the list first and writing back a set that
+ *  silently drops anything labelled in Linear in between. These name the one label they touch.
+ *
+ *  Both are idempotent, which is what keeps the retry across keys safe: adding a label twice
+ *  is adding it once. */
+export async function issueSetLabel(
+  keys: string[],
+  ticket: IssueRef,
+  labelId: string,
+  on: boolean,
+): Promise<void> {
+  if (labelId.trim() === "") {
+    throw new Error(`that label carries no Linear id, so ${ticket.id} cannot be changed`);
+  }
+  const refused = `Linear refused the label change on ${ticket.id}`;
+  await withFirstKey(keys, refused, async (key) => {
+    const uuid = await issueUuid(key, ticket);
+    const data = await gql<{
+      issueAddLabel?: { success?: boolean };
+      issueRemoveLabel?: { success?: boolean };
+    }>(key, on ? ISSUE_ADD_LABEL_MUTATION : ISSUE_REMOVE_LABEL_MUTATION, {
+      id: uuid,
+      labelId,
+    });
+    const ok = on ? data.issueAddLabel?.success : data.issueRemoveLabel?.success;
+    if (ok !== true) throw new Error(refused);
   });
 }
 

@@ -5,7 +5,13 @@ import { TicketPanel } from "./TicketPanel";
 import TicketDescription from "./TicketDescription";
 // ticketDetailed is WE-301 (description, sub-issues, due date, estimate), ticketSubIssue is
 // WE-288 (a parent, no sub-issues of its own), and ticketBare is DEV-97 (nothing but a title).
-import { ticketBare, ticketDetailed, ticketSubIssue } from "./__fixtures__/tickets";
+import {
+  teamLabels,
+  teamStates,
+  ticketBare,
+  ticketDetailed,
+  ticketSubIssue,
+} from "./__fixtures__/tickets";
 
 /** The real editor, on a fixture. Edits go nowhere: the story spies on the save instead of
  *  writing to Linear. Stories run in the browser, so BlockNote needs no mount gate here —
@@ -38,6 +44,11 @@ const meta = {
     onCopyBranchName: fn(async () => true),
     onCreateClone: fn(),
     onTitleChange: fn(),
+    onStateChange: fn(),
+    stateOptions: teamStates,
+    labelOptions: teamLabels,
+    onAddLabel: fn(),
+    onRemoveLabel: fn(),
     resolveLink,
   },
   /** The panel fills a card in the shell's side column, so the story gives it one of the
@@ -75,9 +86,41 @@ export const NoDescriptionSlot: Story = {
   args: { ticket: ticketBare, description: undefined },
 };
 
-/** No clone action and no title editing: the title falls back to a plain heading. Without a
- *  resolver every referenced issue opens Linear, which is what a panel with no board behind
- *  it wants. */
+/** Neither lookup has answered yet. Open the state ring: the menu says it is still asking
+ *  rather than offering a workflow it has not read. */
+export const StatesLoading: Story = {
+  args: { stateOptions: [], statesLoading: true },
+};
+
+/** The label lookup has not answered yet. Open the "+" to see it: the menu says it is still
+ *  asking rather than claiming the team has no labels. */
+export const LabelsLoading: Story = {
+  args: { labelOptions: [], labelsLoading: true },
+};
+
+/** The lookup answered with nothing, which is either a team that has no labels or a key that
+ *  could not be asked. Open the "+" and the menu says so. */
+export const NoTeamLabels: Story = {
+  args: { labelOptions: [] },
+};
+
+/** Every label the team has is already on the ticket, so the "+" opens on a menu with nothing
+ *  left to offer, and the header wraps to a second line. */
+export const EveryLabelOn: Story = {
+  args: { ticket: { ...ticketDetailed, labels: teamLabels } },
+};
+
+/** No clone action, no title editing, and no writes: the title falls back to a plain heading,
+ *  the state mark to a glyph, and the pills lose their X. Without a resolver every referenced
+ *  issue opens Linear, which is what a panel with no board behind it wants. */
 export const ReadOnly: Story = {
-  args: { onCreateClone: undefined, onTitleChange: undefined, resolveLink: undefined },
+  args: {
+    onCreateClone: undefined,
+    onTitleChange: undefined,
+    onStateChange: undefined,
+    stateOptions: undefined,
+    onAddLabel: undefined,
+    onRemoveLabel: undefined,
+    resolveLink: undefined,
+  },
 };

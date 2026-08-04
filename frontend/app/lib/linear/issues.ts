@@ -301,6 +301,8 @@ export function cloneLinearMeta(issue: ResolvedIssue): CloneLinearMeta {
  *  the other way round, so a fresh issue is correctly seen as not yet started. */
 export function stateTypeOf(state: TicketState): string {
   switch (state) {
+    case "triage":
+      return "triage";
     case "backlog":
       return "backlog";
     case "todo":
@@ -311,6 +313,8 @@ export function stateTypeOf(state: TicketState): string {
       return "completed";
     case "canceled":
       return "canceled";
+    case "duplicate":
+      return "duplicate";
   }
 }
 

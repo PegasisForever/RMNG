@@ -50,18 +50,34 @@ test("a node maps to what the column draws, and empty fields are absent", () => 
 });
 
 test("every state type Linear models arrives as ours", () => {
+  expect(stateOf({ state: { type: "triage" } })).toBe("triage");
   expect(stateOf({ state: { type: "backlog" } })).toBe("backlog");
   expect(stateOf({ state: { type: "unstarted" } })).toBe("todo");
   expect(stateOf({ state: { type: "started" } })).toBe("in_progress");
   expect(stateOf({ state: { type: "completed" } })).toBe("done");
   expect(stateOf({ state: { type: "canceled" } })).toBe("canceled");
+  expect(stateOf({ state: { type: "duplicate" } })).toBe("duplicate");
 });
 
-// The rule that keeps a triage issue off the board instead of drawing it as Todo.
+// The rule that keeps an issue off the board instead of drawing it as Todo. Every type Linear
+// has today is modelled, so what this catches is a type it adds tomorrow.
 test("an issue whose state type we do not model is dropped, not defaulted", () => {
-  expect(ticketFromNode(node({ state: { type: "triage" } }))).toBeNull();
   expect(ticketFromNode(node({ state: { type: "somethingNew" } }))).toBeNull();
   expect(ticketFromNode(node({ state: null }))).toBeNull();
+});
+
+/** The state's own id and name ride along, for the menu that changes it. A ticket from an
+ *  answer that asked only for the type keeps neither rather than inventing them. */
+test("the state's id and name come through when the answer carried them", () => {
+  const t = ticketFromNode(node({ state: { id: "st-review", name: "In Review", type: "started" } }));
+
+  expect(t?.state).toBe("in_progress");
+  expect(t?.stateId).toBe("st-review");
+  expect(t?.stateName).toBe("In Review");
+
+  const bare = ticketFromNode(node({ state: { type: "started" } }));
+  expect(bare?.stateId).toBeUndefined();
+  expect(bare?.stateName).toBeUndefined();
 });
 
 test("an issue with no identifier is dropped", () => {
@@ -80,19 +96,33 @@ test("priority 0 is absence, and only 1 to 4 survive", () => {
 });
 
 test("a label with no colour of its own falls back to slate", () => {
-  const labels = { nodes: [{ name: "backend", color: null }, { name: "urgent" }] };
+  const labels = {
+    nodes: [{ id: "l1", name: "backend", color: null }, { id: "l2", name: "urgent" }],
+  };
 
   expect(ticketFromNode(node({ labels }))?.labels).toEqual([
-    { name: "backend", color: LABEL_FALLBACK_COLOR },
-    { name: "urgent", color: LABEL_FALLBACK_COLOR },
+    { id: "l1", name: "backend", color: LABEL_FALLBACK_COLOR },
+    { id: "l2", name: "urgent", color: LABEL_FALLBACK_COLOR },
   ]);
 });
 
 test("a label keeps the colour Linear stores for it, and a nameless one is dropped", () => {
-  const labels = { nodes: [{ name: "backend", color: "#bec2c8" }, { color: "#ff0000" }] };
+  const labels = {
+    nodes: [{ id: "l1", name: "backend", color: "#bec2c8" }, { id: "l2", color: "#ff0000" }],
+  };
 
   expect(ticketFromNode(node({ labels }))?.labels).toEqual([
-    { name: "backend", color: "#bec2c8" },
+    { id: "l1", name: "backend", color: "#bec2c8" },
+  ]);
+});
+
+/** A label the query answered without an id still draws. Nothing can take it off, which is
+ *  what the empty id says, and dropping it would lose a label the ticket really carries. */
+test("a label with no id keeps its place and carries an empty one", () => {
+  const labels = { nodes: [{ name: "backend", color: "#bec2c8" }] };
+
+  expect(ticketFromNode(node({ labels }))?.labels).toEqual([
+    { id: "", name: "backend", color: "#bec2c8" },
   ]);
 });
 
@@ -109,7 +139,7 @@ test("a sub-issue in any state is a link, and one we cannot model is dropped", (
   const children = {
     nodes: [
       { identifier: "WE-143", title: "Repro", url: "https://linear.app/x/WE-143", state: { type: "completed" } },
-      { identifier: "WE-144", title: "Triaged", url: "https://linear.app/x/WE-144", state: { type: "triage" } },
+      { identifier: "WE-144", title: "Unknown", url: "https://linear.app/x/WE-144", state: { type: "somethingNew" } },
     ],
   };
 
@@ -137,7 +167,11 @@ test("a parent is a link, and no parent is an absent field", () => {
 });
 
 test("the response's nodes map in order, and an unmappable one costs only itself", () => {
-  const data = response(node(), node({ identifier: "WE-9", state: { type: "triage" } }), node({ identifier: "WE-7" }));
+  const data = response(
+    node(),
+    node({ identifier: "WE-9", state: { type: "somethingNew" } }),
+    node({ identifier: "WE-7" }),
+  );
 
   expect(ticketsFromResponse(data).map((t) => t.id)).toEqual(["WE-142", "WE-7"]);
 });

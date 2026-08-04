@@ -200,7 +200,7 @@ test("a newly opened ticket resolves the same way a looked-up one does", () => {
     state: "todo",
     team: "WE",
     branchName: "pegasis/we-143-new-thing",
-    labels: [{ name: "backend", color: "#94a3b8" }],
+    labels: [{ id: "lab-backend", name: "backend", color: "#94a3b8" }],
     children: [],
   };
 

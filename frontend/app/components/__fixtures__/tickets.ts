@@ -4,7 +4,7 @@
 // appears twice as two presets sharing one key would return it. `openTickets` is what drops
 // all three, so a story that skips the filter shows the bug rather than hiding it.
 
-import type { LinearTicket } from "~/lib/tickets";
+import type { LinearTicket, TicketLabel, TicketWorkflowState } from "~/lib/tickets";
 
 export function makeTicket(overrides: Partial<LinearTicket> = {}): LinearTicket {
   return {
@@ -62,10 +62,15 @@ export function makeTicketDetailed(overrides: Partial<LinearTicket> = {}): Linea
       },
     ],
     labels: [
-      { name: "Bug", color: "#eb5757" },
-      { name: "Video", color: "#0f7488" },
+      { id: "lab-bug", name: "Bug", color: "#eb5757" },
+      { id: "lab-video", name: "Video", color: "#0f7488" },
     ],
     priority: 1,
+    // In Review, not In Progress: both are `in_progress` states, so this is what makes the
+    // state menu's tick visibly wrong if it ever goes back to matching on the kind.
+    stateId: "st-review",
+    stateName: "In Review",
+    state: "in_progress",
     ...overrides,
   });
 }
@@ -76,7 +81,7 @@ export function makeTicketSubIssue(overrides: Partial<LinearTicket> = {}): Linea
     id: "WE-288",
     title: "Board columns should remember their scroll position",
     url: "https://linear.app/pegasis/issue/WE-288/board-columns-scroll",
-    labels: [{ name: "Feature", color: "#bb87fc" }],
+    labels: [{ id: "lab-feature", name: "Feature", color: "#bb87fc" }],
     assignee: "Alex",
     description:
       "Scrolling a column, selecting a clone, and coming back puts you at the top again.\n\n" +
@@ -99,7 +104,7 @@ export function makeTicketBare(overrides: Partial<LinearTicket> = {}): LinearTic
     id: "DEV-97",
     title: "Document the bastion port in the SSH panel",
     url: "https://linear.app/pegasis/issue/DEV-97/document-bastion-port",
-    labels: [{ name: "Docs", color: "#5e6ad2" }],
+    labels: [{ id: "lab-docs", name: "Docs", color: "#5e6ad2" }],
     team: "DEV",
     ...overrides,
   });
@@ -113,8 +118,8 @@ export function makeTicketDuplicated(overrides: Partial<LinearTicket> = {}): Lin
     title: "Retry the usage poll on a 429 instead of dropping the window",
     url: "https://linear.app/pegasis/issue/DEV-104/retry-usage-poll",
     labels: [
-      { name: "Feature", color: "#bb87fc" },
-      { name: "Voice", color: "#4ea7fc" },
+      { id: "lab-feature", name: "Feature", color: "#bb87fc" },
+      { id: "lab-voice", name: "Voice", color: "#4ea7fc" },
     ],
     team: "DEV",
     priority: 3,
@@ -134,12 +139,40 @@ export function makeTicketCloned(overrides: Partial<LinearTicket> = {}): LinearT
       "The sidebar reports raw container CPU, so a clone pinned to two cores reads 200%.\n\n" +
       "Divide by the host's core count and show one figure that means the same thing on " +
       "every machine.",
-    labels: [{ name: "Frontend", color: "#4ea7fc" }],
+    labels: [{ id: "lab-frontend", name: "Frontend", color: "#4ea7fc" }],
     state: "in_progress",
+    stateId: "st-doing",
+    stateName: "In Progress",
     priority: 2,
     ...overrides,
   });
 }
+
+/** What the state menu offers: a team's workflow, in its own order and under its own names.
+ *
+ *  Deliberately not the five kinds. `Icebox` is a backlog that is not called Backlog, and
+ *  `In Review` sits beside `In Progress` as a second `in_progress` state, which is the case
+ *  that makes a menu of kinds wrong: by kind those two are one row, and they are two choices. */
+export const teamStates: TicketWorkflowState[] = [
+  { id: "st-icebox", name: "Icebox", type: "backlog" },
+  { id: "st-todo", name: "Todo", type: "todo" },
+  { id: "st-doing", name: "In Progress", type: "in_progress" },
+  { id: "st-review", name: "In Review", type: "in_progress" },
+  { id: "st-shipped", name: "Shipped", type: "done" },
+  { id: "st-cancelled", name: "Cancelled", type: "canceled" },
+];
+
+/** What the panel's "+" menu offers: every label the team can carry, sorted by name as
+ *  `labelsFromResponse` sorts them. Carries the two `ticketDetailed` already has, so a story
+ *  shows that the menu leaves those out rather than listing them twice. */
+export const teamLabels: TicketLabel[] = [
+  { id: "lab-bug", name: "Bug", color: "#eb5757" },
+  { id: "lab-docs", name: "Docs", color: "#5e6ad2" },
+  { id: "lab-feature", name: "Feature", color: "#bb87fc" },
+  { id: "lab-frontend", name: "Frontend", color: "#4ea7fc" },
+  { id: "lab-video", name: "Video", color: "#0f7488" },
+  { id: "lab-voice", name: "Voice", color: "#4ea7fc" },
+];
 
 export const ticketDetailed: LinearTicket = makeTicketDetailed();
 export const ticketSubIssue: LinearTicket = makeTicketSubIssue();
