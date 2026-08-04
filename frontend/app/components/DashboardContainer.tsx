@@ -134,6 +134,13 @@ export function DashboardContainer({
   // so a poll that rewrites the list keeps the panel on the current copy, not a stale one.
   const [openTicketId, setOpenTicketId] = useState<string | null>(null);
 
+  // The archived clone whose panels are open, by id. An archived clone can be selected, but
+  // the viewer cannot follow it: its container is stopped, so there is no stream to show and
+  // no input to deliver. So this is a dashboard focus and nothing more, the same shape as an
+  // open ticket, and it lives here rather than in `state.selected`, which is what the viewer
+  // streams. The viewer stays on the last non-archived clone the operator picked.
+  const [openArchivedId, setOpenArchivedId] = useState<string | null>(null);
+
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -192,7 +199,15 @@ export function DashboardContainer({
   }, [serverColumns]);
 
   const clonesById = new Map(state.hosts.map((h) => [h.id, h]));
-  const selectedClone = state.selected ? clonesById.get(state.selected) ?? null : null;
+  // Derived, so a clone that is restored or deleted while its panels are open drops the focus
+  // on its own: an id that no longer names an archived clone answers null here, and the panels
+  // fall back to whatever the viewer is on. The state is cleared below to match.
+  const openArchived = openArchivedId ? clonesById.get(openArchivedId) ?? null : null;
+  const focusedId = openArchived?.archived ? openArchivedId : state.selected;
+  const selectedClone = focusedId ? clonesById.get(focusedId) ?? null : null;
+  useEffect(() => {
+    if (openArchivedId && !openArchived?.archived) setOpenArchivedId(null);
+  }, [openArchivedId, openArchived?.archived]);
 
   // Refetch images when an image-mutating op (pull/commit/delete) leaves the
   // running set — that's when the image list changed. Keyed on the set of running
@@ -212,6 +227,22 @@ export function DashboardContainer({
 
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
+
+  /** Put a clone in the panels, and close any open ticket, because both want the same column.
+   *
+   *  A live clone is activated, so the viewer follows it. An archived one opens here only:
+   *  its container is stopped, so there is no stream to follow and no input to deliver, and
+   *  the server refuses to activate it anyway. Every path that lands on a clone goes through
+   *  this, so the rule is stated once rather than at each of them. */
+  const selectClone = (clone: Clone) => {
+    setOpenTicketId(null);
+    if (clone.archived) {
+      setOpenArchivedId(clone.id);
+      return;
+    }
+    setOpenArchivedId(null);
+    run(activate(clone.id));
+  };
 
   // The two things a card asks the browser for rather than the server. Both leave the cards
   // themselves pure: a menu item says what it wants done and this decides how.
@@ -285,8 +316,8 @@ export function DashboardContainer({
   // that clone, which closes an open ticket the same way a card click does. A muted clone
   // (or one under a muted parent) raises nothing.
   useCloneNotifications(state.hosts, mutedClones, (id) => {
-    setOpenTicketId(null);
-    run(activate(id));
+    const clone = clonesById.get(id);
+    if (clone) selectClone(clone);
   });
 
   // Linear's own answer, asked for by this browser with the presets' keys. It is the one
@@ -414,10 +445,13 @@ export function DashboardContainer({
       });
   };
 
-  // The selected clone, when it can actually parent a sub clone: managed, and top-level
-  // (sub clones are one level deep — the server rejects a sub clone as a parent).
+  // The selected clone, when it can actually parent a sub clone: managed, running, and
+  // top-level (sub clones are one level deep, and the server rejects a sub clone as a parent).
+  // An archived parent is refused too: provisioning a sub clone execs into the parent.
   const subCloneParent =
-    selectedClone?.managed && !selectedClone.parent ? selectedClone : null;
+    selectedClone?.managed && !selectedClone.parent && !selectedClone.archived
+      ? selectedClone
+      : null;
 
   // Clones per column, for the settings editor's counts (unfiled ones ride the first).
   const columnCounts = Object.fromEntries(
@@ -433,10 +467,7 @@ export function DashboardContainer({
     if (!clone) return null;
     return {
       title: `Show the clone for ${id}: ${clone.id}`,
-      open: () => {
-        setOpenTicketId(null);
-        run(activate(clone.id));
-      },
+      open: () => selectClone(clone),
     };
   };
 
@@ -584,9 +615,11 @@ export function DashboardContainer({
           cloneTokens: state.cloneTokens,
           forwards,
           operations: state.operations,
-          // A ticket takes the highlight while it is open; the clone stays activated
-          // underneath, so the viewer keeps its stream.
-          selectedId: openTicket ? null : state.selected,
+          // A ticket takes the highlight while it is open, and the clone stays activated
+          // underneath, so the viewer keeps its stream. An archived clone takes the highlight
+          // the same way, off the same rule: the highlight follows the panels, never the
+          // viewer.
+          selectedId: openTicket ? null : focusedId,
           // The card copies an `ssh -J` one-liner, and the jump target is this page's own
           // address whenever no public host is configured. That read is the browser's, so it
           // happens here and the card is handed the answer.
@@ -595,10 +628,11 @@ export function DashboardContainer({
           // Picking a clone always closes the ticket, the currently selected clone
           // included: that click means "back to this clone", and there is nothing else it
           // could mean once its own card is already the one activated.
-          onSelectClone: (clone) => {
-            setOpenTicketId(null);
-            run(activate(clone.id));
-          },
+          //
+          // An archived one opens its panels without activating anything. The server refuses
+          // to activate it anyway, and asking would only cost a round trip to be told the
+          // selection did not move.
+          onSelectClone: selectClone,
           onDeleteClone: (clone) => {
             // Deleting a parent cascades to its sub clones (server-side), so say so up front.
             const subCount = state.hosts.filter((h) => h.parent === clone.id).length;
@@ -705,10 +739,8 @@ export function DashboardContainer({
             // operation has settled, so by the time this runs the clone either exists or
             // the create failed — hence the check, so a failed create leaves the current
             // selection alone rather than pointing at a clone that never appeared.
-            if (newClone && state.hosts.some((h) => h.id === newClone)) {
-              setOpenTicketId(null);
-              run(activate(newClone));
-            }
+            const made = newClone ? clonesById.get(newClone) : null;
+            if (made) selectClone(made);
             setNewClone(null);
           }}
           // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's

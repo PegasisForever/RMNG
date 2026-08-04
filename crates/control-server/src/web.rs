@@ -281,10 +281,14 @@ struct ActivateReq {
 }
 
 async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<ControlState> {
-    // An archived clone cannot be selected. Selecting one points the viewer's input at a
-    // frozen daemon that will never read its socket, and every pointer move then fills a
-    // queue nobody drains. Clicking an archived card leaves the selection where it was
-    // rather than failing, since the click is a navigation, not a command.
+    // The viewer never follows an archived clone. Its container is stopped, so there is no
+    // stream to show and nothing to deliver its input to, and the selection would leave the
+    // viewer holding a still frame that looks live.
+    //
+    // The dashboard can still open an archived clone's chat and notes: that focus is the
+    // browser's own, alongside an open ticket, and it never reaches this endpoint. So the
+    // request keeps the selection where it was rather than failing, because the click that
+    // produced it is a navigation, not a command.
     let req = match req.id.as_deref() {
         Some(id)
             if app.store.get().hosts.iter().any(|h| h.id == id && h.archived) =>
