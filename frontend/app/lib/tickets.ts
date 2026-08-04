@@ -13,7 +13,7 @@
 // and then the same issue arrives twice.
 
 import type { Clone } from "~/lib/types";
-import type { LinearTicket } from "~/lib/linear/types";
+import type { LinearTicket, TicketState } from "~/lib/linear/types";
 
 /** The ticket shape belongs to `~/lib/linear/types`, next to the query that fills it in. It
  *  is re-exported here so every consumer imports tickets from one place, and so the fields
@@ -110,6 +110,28 @@ export function findTicket(ticketId: string, tickets: LinearTicket[]): LinearTic
   return tickets.find((t) => t.id.toLowerCase() === wanted) ?? null;
 }
 
+/** Whether a ticket in `state` is work the column shows. It shows what is queued or underway
+ *  and nothing else, so a ticket set to any other state leaves the column.
+ *
+ *  `openTickets` filters on this, and the dashboard asks it before a state write, to know
+ *  whether the card it is about to change is one that will still be there afterwards. */
+export function queued(state: TicketState): boolean {
+  return state === "todo" || state === "in_progress";
+}
+
+/** The ticket the column moves to when `ticketId` leaves it: the one below, or the one above
+ *  when it was last, or null when it was the only one.
+ *
+ *  Pass the list as it stands *before* the departure. Marking the open ticket Done is what
+ *  this is for: its card goes, and the panel would otherwise sit empty over a queue that
+ *  still has work in it. */
+export function ticketAfter(tickets: LinearTicket[], ticketId: string): LinearTicket | null {
+  const wanted = ticketId.toLowerCase();
+  const at = tickets.findIndex((t) => t.id.toLowerCase() === wanted);
+  if (at < 0) return null;
+  return tickets[at + 1] ?? tickets[at - 1] ?? null;
+}
+
 /** The tickets the column draws: open ones nobody has cloned yet, deduplicated, in the
  *  order given. Put `orderTickets` after this to apply the operator's own arrangement.
  *
@@ -118,7 +140,7 @@ export function findTicket(ticketId: string, tickets: LinearTicket[]): LinearTic
 export function openTickets(tickets: LinearTicket[], clones: Clone[]): LinearTicket[] {
   const seen = new Set<string>();
   return tickets.filter((t) => {
-    if (t.state !== "todo" && t.state !== "in_progress") return false;
+    if (!queued(t.state)) return false;
     const key = t.id.toLowerCase();
     if (seen.has(key) || cloneForTicket(t.id, clones)) return false;
     seen.add(key);

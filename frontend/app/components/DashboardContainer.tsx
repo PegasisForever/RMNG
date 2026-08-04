@@ -12,7 +12,8 @@
 // Dialogs are mounted beside the shell rather than inside it. Each one positions itself, so
 // the shell would only be passing them through, and a page story then shows the page with
 // nothing on top of it while each dialog's own stories cover every state it has.
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 
 import { AppShellV2, type SideFocus } from "~/components/AppShellV2";
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
@@ -42,6 +43,8 @@ import {
   findTicket,
   openTickets,
   orderTickets,
+  queued,
+  ticketAfter,
   type LinearTicket,
   type TicketState,
 } from "~/lib/tickets";
@@ -85,6 +88,7 @@ import {
 import { useAccountOrder } from "~/lib/accountOrder";
 import { copyText } from "~/lib/clipboard";
 import { browserLocale } from "~/lib/format";
+import { readSelection, sameSelection, withSelection, type Selection } from "~/lib/selection";
 import { rememberSideWidth, SIDE_DEFAULT, storedSideWidth } from "~/lib/sidePanelWidth";
 import { type ControlState, type Clone } from "~/lib/types";
 import { toggleMuted } from "~/lib/mute";
@@ -138,16 +142,24 @@ export function DashboardContainer({
   /** Configured presets (`config.presets`). Their labels are the ticket dialog's team keys. */
   presets: PresetRedacted[];
 }) {
-  // The ticket whose panel has the side column, by id. Held as an id rather than the object
-  // so a poll that rewrites the list keeps the panel on the current copy, not a stale one.
-  const [openTicketId, setOpenTicketId] = useState<string | null>(null);
+  // What the dashboard has open, held in the page's address rather than here, so the browser's
+  // own Back button returns to the last thing the operator picked. Two ids, because a ticket
+  // panel and a clone are open at the same time: see `~/lib/selection`.
+  //
+  // Both are ids rather than objects, so a poll that rewrites the ticket list and a frame that
+  // rewrites the clone list both keep the panels on the current copy, never a stale one.
+  const [params, setParams] = useSearchParams();
+  const selection = readSelection(params);
 
-  // The archived clone whose panels are open, by id. An archived clone can be selected, but
-  // the viewer cannot follow it: its container is stopped, so there is no stream to show and
-  // no input to deliver. So this is a dashboard focus and nothing more, the same shape as an
-  // open ticket, and it lives here rather than in `state.selected`, which is what the viewer
-  // streams. The viewer stays on the last non-archived clone the operator picked.
-  const [openArchivedId, setOpenArchivedId] = useState<string | null>(null);
+  /** Open something, and leave a history entry behind so Back returns to what was open before.
+   *
+   *  `replace` rewrites the current entry instead, for a move the operator did not ask for by
+   *  name: the entry it would leave points at something that is no longer on the board, and
+   *  Back onto it would open nothing. */
+  const select = (next: Selection, replace = false) => {
+    if (sameSelection(next, selection)) return;
+    setParams(withSelection(params, next), { replace, preventScrollReset: true });
+  };
 
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
@@ -207,15 +219,59 @@ export function DashboardContainer({
   }, [serverColumns]);
 
   const clonesById = new Map(state.hosts.map((h) => [h.id, h]));
+  // An archived clone can be selected, but the viewer cannot follow it: its container is
+  // stopped, so there is no stream to show and no input to deliver. So it is a dashboard focus
+  // and nothing more, read off the address instead of `state.selected`, which is what the
+  // viewer streams. The viewer stays on the last live clone the operator picked.
+  //
   // Derived, so a clone that is restored or deleted while its panels are open drops the focus
   // on its own: an id that no longer names an archived clone answers null here, and the panels
-  // fall back to whatever the viewer is on. The state is cleared below to match.
-  const openArchived = openArchivedId ? clonesById.get(openArchivedId) ?? null : null;
-  const focusedId = openArchived?.archived ? openArchivedId : state.selected;
+  // fall back to whatever the viewer is on, with no cleanup to run.
+  const urlClone = selection.clone ? clonesById.get(selection.clone) ?? null : null;
+  const openArchived = urlClone?.archived ? urlClone : null;
+  const focusedId = openArchived ? openArchived.id : state.selected;
   const selectedClone = focusedId ? clonesById.get(focusedId) ?? null : null;
+
+  // Which live clone the viewer streams is the server's state, not this page's, so an address
+  // that names one has to ask for it the way the click that first opened it did. That covers
+  // Back, Forward, a reload, and a pasted link alike.
+  //
+  // Applied once per value, which is what keeps this from fighting the server. A selection
+  // that moves for some other reason (a second tab, `rmng clone select`, a notification on
+  // another screen) leaves the address a step behind until the next click here, and dragging
+  // it back would take the viewer off whatever the operator just went to.
+  const appliedClone = useRef<string | null>(null);
   useEffect(() => {
-    if (openArchivedId && !openArchived?.archived) setOpenArchivedId(null);
-  }, [openArchivedId, openArchived?.archived]);
+    const id = selection.clone;
+    if (appliedClone.current === id) return;
+    if (id === null) {
+      appliedClone.current = null;
+      return;
+    }
+    // Not in `hosts` yet: either the first frame has not landed or the clone is gone. Leave
+    // the ref alone so the next frame gets another try.
+    const clone = clonesById.get(id);
+    if (!clone) return;
+    appliedClone.current = id;
+    if (!clone.archived && state.selected !== id) run(activate(id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection.clone, state.hosts]);
+
+  // The address this page opens on names nothing, and a Back that landed on it would be a step
+  // that changed nothing on screen. So the first frame's own selection is written into the
+  // current entry rather than a new one, and every entry after it names something.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current) return;
+    if (selection.clone || selection.ticket) {
+      seeded.current = true; // opened on a link that already names something
+      return;
+    }
+    if (!state.selected) return;
+    seeded.current = true;
+    select({ clone: state.selected, ticket: null }, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.selected, selection.clone, selection.ticket]);
 
   // Refetch images when an image-mutating op (pull/commit/delete) leaves the
   // running set — that's when the image list changed. Keyed on the set of running
@@ -238,18 +294,13 @@ export function DashboardContainer({
 
   /** Put a clone in the panels, and close any open ticket, because both want the same column.
    *
-   *  A live clone is activated, so the viewer follows it. An archived one opens here only:
-   *  its container is stopped, so there is no stream to follow and no input to deliver, and
-   *  the server refuses to activate it anyway. Every path that lands on a clone goes through
-   *  this, so the rule is stated once rather than at each of them. */
+   *  Writing the address is the whole of it. The effect above is what activates a live clone
+   *  so the viewer follows it, and what leaves an archived one alone: its container is
+   *  stopped, so there is no stream to follow and no input to deliver, and the server refuses
+   *  to activate it anyway. Every path that lands on a clone goes through this, so the rule is
+   *  stated once rather than at each of them. */
   const selectClone = (clone: Clone) => {
-    setOpenTicketId(null);
-    if (clone.archived) {
-      setOpenArchivedId(clone.id);
-      return;
-    }
-    setOpenArchivedId(null);
-    run(activate(clone.id));
+    select({ clone: clone.id, ticket: null });
   };
 
   // The two things a card asks the browser for rather than the server. Both leave the cards
@@ -377,6 +428,7 @@ export function DashboardContainer({
   // A refused write puts the old state back, the same rollback `editTicket` does and for the
   // same reason: sixty seconds of a card that is not there is worse than the error alone.
   const moveTicket = (ticket: LinearTicket, next: TicketState) => {
+    if (!queued(next)) advancePast(ticket);
     upsertTicket({ ...ticket, state: next });
     run(
       issueSetState(keysForTeam(presets, ticket.team ?? ""), ticket, next)
@@ -396,6 +448,7 @@ export function DashboardContainer({
   // which is the right answer for the column's Cancel item and the wrong one for a menu that
   // just showed the operator two states of one kind and let them pick the second.
   const setTicketState = (ticket: LinearTicket, state: TicketWorkflowState) => {
+    if (!queued(state.type)) advancePast(ticket);
     upsertTicket({ ...ticket, state: state.type, stateId: state.id, stateName: state.name });
     run(
       issueSetStateId(keysForTeam(presets, ticket.team ?? ""), ticket, state.id)
@@ -456,7 +509,22 @@ export function DashboardContainer({
     : null;
   // Derived: a ticket that leaves the list (cloned, closed, moved in Linear) closes its
   // panel on its own, with no cleanup to run.
-  const openTicket = visibleTickets.find((t) => t.id === openTicketId) ?? null;
+  const openTicket = selection.ticket ? findTicket(selection.ticket, visibleTickets) : null;
+
+  /** Move the panel off a ticket that is about to leave the column, onto the one below it.
+   *
+   *  Marking the open ticket Done is the case this is for. Its card goes, and without this the
+   *  panel would go with it and leave the side column empty over a queue that still has work
+   *  in it. Called by the two writes above, before their own optimistic update, so the ticket
+   *  it is handing over from is still in `visibleTickets` and still has a neighbour.
+   *
+   *  A refused write puts the card back but leaves the panel on the new ticket. The operator
+   *  moved on when they marked it, and the banner says the state did not stick. */
+  const advancePast = (ticket: LinearTicket) => {
+    if (!openTicket || openTicket.id !== ticket.id) return;
+    const next = ticketAfter(visibleTickets, ticket.id);
+    select({ ...selection, ticket: next?.id ?? null }, true);
+  };
   // What each open panel's two menus offer: its team's labels and its workflow. Two lookups
   // because two panels can be up at once on two different teams; one team asked for twice
   // costs one request, the answers being cached for the session.
@@ -644,7 +712,7 @@ export function DashboardContainer({
                 if (ticket) {
                   return {
                     title: `Show ${ticket.id} in this panel`,
-                    open: () => setOpenTicketId(ticket.id),
+                    open: () => select({ ...selection, ticket: ticket.id }),
                   };
                 }
                 return resolveToClone(id);
@@ -732,7 +800,7 @@ export function DashboardContainer({
             loading: ticketsLoading,
             error: ticketsError,
             selectedId: openTicket?.id ?? null,
-            onSelectTicket: (ticket) => setOpenTicketId(ticket.id),
+            onSelectTicket: (ticket) => select({ ...selection, ticket: ticket.id }),
             onNewTicket: () => setNewTicketOpen(true),
             workspaces,
             onOpenWorkspace: (workspace) => openInLinear(workspaceHomeUrl(workspace)),
@@ -787,7 +855,7 @@ export function DashboardContainer({
           // to work on, and the panel needs the ticket to be in the list to find it.
           onCreated={(created) => {
             upsertTicket(created);
-            setOpenTicketId(created.id);
+            select({ ...selection, ticket: created.id });
             refetchTickets();
           }}
         />

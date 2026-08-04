@@ -5,16 +5,18 @@
 // drag handlers, and every modal except account import stay on the desktop side and are
 // never imported here, so a phone downloads none of them.
 //
-// Navigation is one piece of state: `openId`. Null is the clone list, an id is that clone's
-// screen. Selecting a clone activates it server-side the same way a board card does, which
-// is what clears its unread flag and stops the monitor from notifying about output the
-// operator is looking at.
+// Navigation is one id, and it lives in the page's address rather than in state: no `?clone=`
+// is the clone list, an id is that clone's screen. So the phone's own Back gesture is what
+// returns to the list, and to the clone before that. Selecting a clone activates it
+// server-side the same way a board card does, which is what clears its unread flag and stops
+// the monitor from notifying about output the operator is looking at.
 //
 // Opening the import dialog is navigation too, even though the phone has one route: the home
 // screen reports the tap through `onImportAccount` and the dialog is mounted here, beside the
 // screen rather than inside it. That is what lets a story render the home screen without a
 // modal on top of it, and the dialog's own stories cover every state it has.
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
@@ -34,6 +36,7 @@ import {
 import type { TicketLabel, TicketWorkflowState } from "~/lib/linear/types";
 import { useTeamMeta } from "~/lib/linear/useTeamMeta";
 import { useTickets } from "~/lib/linear/useTickets";
+import { readSelection, sameSelection, withSelection } from "~/lib/selection";
 import { cloneForTicket, cloneTickets, findTicket, type LinearTicket } from "~/lib/tickets";
 import type { ControlState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
@@ -74,7 +77,10 @@ export function MobileDashboardContainer({
    *  ticket, which is the one thing on this screen the control server does not send. */
   presets: PresetRedacted[];
 }) {
-  const [openId, setOpenId] = useState<string | null>(null);
+  // Which clone's screen is up, read off the address. The desktop writes the same parameter,
+  // so the two shells agree on what a link to this page means.
+  const [params, setParams] = useSearchParams();
+  const openId = readSelection(params).clone;
   const [tab, setTab] = useState<CloneTab>("chat");
   const [usageOpen, setUsageOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -88,17 +94,32 @@ export function MobileDashboardContainer({
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
 
-  /** Open a clone's screen and tell the server it is on view. Always lands on the chat:
-   *  the notes are where you were last time, the chat is where the news is. */
-  const open = (id: string) => {
-    setOpenId(id);
-    setTab("chat");
-    run(activate(id));
+  /** Show a clone's screen, or the clone list when `id` is null. Leaves a history entry, so
+   *  the phone's Back gesture goes back a screen. */
+  const show = (id: string | null) => {
+    const next = { clone: id, ticket: null };
+    if (sameSelection(readSelection(params), next)) return;
+    setParams(withSelection(params, next), { preventScrollReset: true });
   };
+
+  // Tell the server which clone is on view, once per address. Back and Forward have to reach
+  // it the way the tap that first opened the screen did, and null is a real value here: the
+  // clone list is nothing on view, so the viewer stops following.
+  //
+  // Always lands on the chat, because the notes are where you were last time and the chat is
+  // where the news is.
+  const applied = useRef<string | null>(null);
+  useEffect(() => {
+    if (applied.current === openId) return;
+    applied.current = openId;
+    setTab("chat");
+    run(activate(openId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openId]);
 
   // A clone that stops working while its screen is closed still notifies, and tapping the
   // notification opens it.
-  useCloneNotifications(state.hosts, state.mutedClones ?? [], open);
+  useCloneNotifications(state.hosts, state.mutedClones ?? [], show);
 
   // Every clone's own Linear ticket, read by this browser with the presets' keys. The phone
   // has no ticket column, so the open queue is nobody's business here and only the clones'
@@ -179,10 +200,7 @@ export function MobileDashboardContainer({
         ticket={liveCloneTickets[openClone.id]}
         tab={tab}
         onTabChange={setTab}
-        onBack={() => {
-          setOpenId(null);
-          run(activate(null));
-        }}
+        onBack={() => show(null)}
         error={error}
         // A clone made from a ticket shows the ticket where its notes would be, and the tab
         // says so. The notes file stays on disk; nothing on this screen opens it.
@@ -226,7 +244,7 @@ export function MobileDashboardContainer({
                 if (!clone) return null;
                 return {
                   title: `Show the clone for ${id}: ${clone.id}`,
-                  open: () => open(clone.id),
+                  open: () => show(clone.id),
                 };
               }}
             />
@@ -265,7 +283,7 @@ export function MobileDashboardContainer({
         columns={withDefaults(state.boardColumns ?? [])}
         clones={state.hosts}
         cloneTickets={liveCloneTickets}
-        onSelectClone={(clone) => open(clone.id)}
+        onSelectClone={(clone) => show(clone.id)}
         error={error}
       />
       {importOpen ? (

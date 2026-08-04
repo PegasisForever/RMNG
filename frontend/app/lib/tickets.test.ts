@@ -10,6 +10,8 @@ import {
   findTicket,
   openTickets,
   orderTickets,
+  queued,
+  ticketAfter,
   ticketDragId,
   ticketIdFromDrag,
   type LinearTicket,
@@ -250,4 +252,35 @@ test("a ticket that arrives after adoption still goes to the top", () => {
   const withNew = orderTickets([ticket("WE-2"), ticket("WE-9"), ticket("WE-1")], order);
   expect(ids(withNew)).toEqual(["WE-9", "WE-1", "WE-2"]);
   expect(adoptTickets(withNew, order)).toEqual(["we-9", "we-1", "we-2"]);
+});
+
+test("the column shows queued and started work, and nothing else", () => {
+  expect(queued("todo")).toBe(true);
+  expect(queued("in_progress")).toBe(true);
+  for (const gone of ["done", "canceled", "backlog", "triage", "duplicate"] as const) {
+    expect(queued(gone)).toBe(false);
+  }
+});
+
+test("the ticket below takes the place of one marked Done", () => {
+  const drawn = [ticket("WE-1"), ticket("WE-2"), ticket("WE-3")];
+  expect(ticketAfter(drawn, "WE-2")?.id).toBe("WE-3");
+});
+
+test("the last ticket hands over to the one above it", () => {
+  const drawn = [ticket("WE-1"), ticket("WE-2")];
+  expect(ticketAfter(drawn, "WE-2")?.id).toBe("WE-1");
+});
+
+test("the only ticket hands over to nothing", () => {
+  expect(ticketAfter([ticket("WE-1")], "WE-1")).toBeNull();
+});
+
+test("a ticket the column does not draw hands over to nothing", () => {
+  expect(ticketAfter([ticket("WE-1")], "WE-9")).toBeNull();
+});
+
+test("the handover matches an identifier whatever its case", () => {
+  const drawn = [ticket("WE-1"), ticket("WE-2")];
+  expect(ticketAfter(drawn, "we-1")?.id).toBe("WE-2");
 });
