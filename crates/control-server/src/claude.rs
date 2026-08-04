@@ -302,6 +302,39 @@ pub async fn check_clone_auth(app: &App, host: &RmngClone) -> Result<AuthStatus>
     }
 }
 
+/// The pair to store, or the sentence saying why this clone has none to give.
+///
+/// A blank string is a missing token, not a token, and that distinction is the whole of this
+/// check. [`credentials_json`] writes `"refreshToken":""` with a year-2100 expiry into every
+/// clone the server installs a token on, so a clone already running on a server-installed
+/// token would otherwise import as an account that can never be refreshed: the stored expiry
+/// says it is good until 2100, so [`is_expired`] never asks Anthropic for a replacement, and
+/// every clone the account reaches keeps getting the access token it was imported with until
+/// that one dies eight hours later. The 401s that follow name the clones, never the import.
+///
+/// That case gets its own sentence, because "no refresh token beside a real access token" is
+/// this server's own handiwork and the operator needs to be told to sign in again rather than
+/// to look for a broken file.
+fn importable_tokens(
+    host_id: &str,
+    access: Option<String>,
+    refresh: Option<String>,
+) -> Result<(String, String)> {
+    let access = access.unwrap_or_default();
+    let refresh = refresh.unwrap_or_default();
+    if refresh.trim().is_empty() && !access.trim().is_empty() {
+        bail!(
+            "'{host_id}' runs on a token this server installed, so its credentials file holds \
+             no refresh token to import. Set the clone's Claude account to `none`, sign in \
+             inside it with `claude /login`, then import."
+        );
+    }
+    if access.trim().is_empty() || refresh.trim().is_empty() {
+        bail!("the clone's credentials file is missing its access/refresh tokens");
+    }
+    Ok((access, refresh))
+}
+
 /// Import a Claude account from a signed-in clone: read the OAuth pair (access +
 /// refresh token) off the clone's credentials file, upsert it into the secret
 /// store (by id), then **delete that file from the clone** so it can't rotate /
@@ -330,9 +363,7 @@ pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportR
         .ok()
         .and_then(|c| c.claude_ai_oauth)
         .context("the clone's credentials file has no claudeAiOauth block")?;
-    let (Some(access), Some(refresh)) = (oauth.access_token, oauth.refresh_token) else {
-        bail!("the clone's credentials file is missing its access/refresh tokens");
-    };
+    let (access, refresh) = importable_tokens(&host.id, oauth.access_token, oauth.refresh_token)?;
 
     // 3. Upsert into the 0600 secret store (by id).
     let id = format!("{email}|{org_uuid}");
@@ -1724,6 +1755,49 @@ mod tests {
         assert_eq!(oauth.refresh_token.as_deref(), Some("sk-ant-ort01-BBB"));
         assert_eq!(oauth.expires_at, Some(1782865752191));
         assert_eq!(oauth.scopes.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_real_login_imports() {
+        let (a, r) = importable_tokens(
+            "pega-we-1",
+            Some("sk-ant-oat01-AAA".into()),
+            Some("sk-ant-ort01-BBB".into()),
+        )
+        .unwrap();
+        assert_eq!(a, "sk-ant-oat01-AAA");
+        assert_eq!(r, "sk-ant-ort01-BBB");
+    }
+
+    // The bug this guard exists for: re-importing a clone the server already pushed a token
+    // to stored a blank refresh token beside a year-2100 expiry, so the account was never
+    // refreshed again and handed out a dead access token until somebody noticed the 401s.
+    #[test]
+    fn a_server_installed_token_is_refused_by_name() {
+        let creds = credentials_json("sk-ant-oat01-AAA");
+        let oauth = serde_json::from_str::<ClaudeCreds>(&creds)
+            .unwrap()
+            .claude_ai_oauth
+            .unwrap();
+        // The file the server writes parses as a *present* empty string, never as absent.
+        assert_eq!(oauth.refresh_token.as_deref(), Some(""));
+
+        let err = importable_tokens("pega-we-1", oauth.access_token, oauth.refresh_token)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pega-we-1"), "{err}");
+        assert!(err.contains("no refresh token"), "{err}");
+    }
+
+    #[test]
+    fn a_whitespace_refresh_token_is_no_token() {
+        assert!(importable_tokens("h", Some("sk-ant-oat01-A".into()), Some("  ".into())).is_err());
+    }
+
+    #[test]
+    fn a_file_with_neither_token_says_so() {
+        let err = importable_tokens("h", None, None).unwrap_err().to_string();
+        assert!(err.contains("missing its access/refresh tokens"), "{err}");
     }
 
     #[test]
