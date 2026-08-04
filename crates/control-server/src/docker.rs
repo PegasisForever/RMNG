@@ -1719,8 +1719,9 @@ impl DockerCtl {
     /// `State.Running = true` for one. Every caller uses this to decide whether the clone can
     /// be talked to, and a paused clone cannot: the daemon refuses `exec` against it and its
     /// processes are frozen, so a monitor fetch or an SSH hop would hang rather than fail.
-    /// Archiving pauses, so this is what keeps an archived clone invisible to the rest of the
-    /// server exactly as a stopped one was.
+    /// Nothing pauses a clone any more, but a container frozen by the build that archived
+    /// them that way outlives an upgrade, and it must stay invisible until the reconciler
+    /// clears it.
     pub async fn is_running(&self, id: &str) -> Result<bool> {
         match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
             Ok(info) => {
@@ -1734,27 +1735,14 @@ impl DockerCtl {
         }
     }
 
-    /// Whether a container exists and is paused. Distinguishes "archived the new way" from
-    /// "archived before pausing existed, so it is stopped", which is what lets
-    /// [`DockerCtl::resume_container`] pick the right verb.
+    /// Whether a container exists and is paused. Archiving stops a clone rather than freezing
+    /// it, so the only paused containers left are ones an older build archived, and this is
+    /// what lets [`DockerCtl::resume_container`] and the reconciler clear them.
     pub async fn is_paused(&self, id: &str) -> Result<bool> {
         match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
             Ok(info) => Ok(info.state.and_then(|s| s.paused).unwrap_or(false)),
             Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
             Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
-        }
-    }
-
-    /// Freeze a container's processes with the cgroup freezer. Nothing exits, so the inner
-    /// Docker daemon, its own containers, and every GPU buffer the clone holds survive
-    /// untouched — which is what makes resuming instant instead of a fresh boot.
-    ///
-    /// A container that is already stopped cannot be paused; the caller falls back to a stop
-    /// so archiving still means something for a clone that had already exited.
-    pub async fn pause_container(&self, id: &str) -> Result<()> {
-        match self.daemon()?.pause_container(id).await {
-            Ok(()) => Ok(()),
-            Err(e) => Err(anyhow!("pausing container {id}: {e}")),
         }
     }
 
@@ -1777,9 +1765,9 @@ impl DockerCtl {
         }
     }
 
-    /// Bring an archived container back, whichever way it was archived: unpause a paused one,
-    /// start a stopped one. Clones archived before pausing existed are stopped, and they must
-    /// keep restoring correctly after an upgrade.
+    /// Bring an archived container back, whichever way it was archived: start a stopped one,
+    /// and thaw a paused one first. Archiving stops the clone, but one frozen by an older
+    /// build must keep restoring correctly after an upgrade.
     pub async fn resume_container(&self, id: &str) -> Result<()> {
         if self.is_paused(id).await? {
             self.unpause_container(id).await?;

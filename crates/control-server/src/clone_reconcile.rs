@@ -1476,17 +1476,20 @@ async fn ensure_payload_current(app: &App, clone_id: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Make each managed clone's container agree with its `archived` flag: archived means
-/// paused, not archived means not paused.
+/// Make each managed clone's container agree with its `archived` flag: archived means the
+/// container is not up, and not archived means it is not frozen.
 ///
-/// The drift this exists for is a daemon restart. Docker SIGKILLs a frozen container on
-/// shutdown and `--restart unless-stopped` then brings it back **running**, so every
-/// archived clone silently resumes on a reboot while the UI still shows it archived. Nothing
-/// else notices: every sweep filters archived clones out, so the clone would run its agent,
-/// burn CPU, and lose its `/dev/shm` sizing with no path back short of a human spotting it.
+/// Two drifts, both of which leave a clone nothing else would ever notice, because every
+/// other sweep filters archived clones out.
 ///
-/// The other direction covers the crash window inside `run_archive`, between the pause and
-/// the state write, which would otherwise leave a paused clone that no endpoint can restore.
+/// An archived clone that is up again. A container the daemon SIGKILLs on shutdown is not one
+/// `docker stop` stopped, so `--restart unless-stopped` brings it back on the next boot: the
+/// clone runs its agent and burns CPU while the UI still shows it archived. That is the shape
+/// a clone archived by the build that froze them instead lands in.
+///
+/// A clone that is paused and not archived. Nothing pauses a container any more, so this only
+/// clears leftovers from that same build, but a frozen clone answers no exec and no sweep
+/// would ever reach it.
 async fn reconcile_archived_state(app: &App, warned: &mut HashSet<String>) {
     for h in app.store.get().hosts {
         if !h.managed || !is_safe_id(&h.id) {
@@ -1497,27 +1500,10 @@ async fn reconcile_archived_state(app: &App, warned: &mut HashSet<String>) {
             Ok(p) => p,
             Err(_) => continue, // gone or the daemon is unreachable; not this loop's problem
         };
-        if h.archived == paused {
-            continue;
-        }
-        if h.archived {
-            // Only re-pause something that is actually running. An archived clone sitting
-            // exited is the pre-pause shape and is perfectly valid.
-            if !app.docker.is_running(id).await.unwrap_or(false) {
+        if !h.archived {
+            if !paused {
                 continue;
             }
-            match app.docker.pause_container(id).await {
-                Ok(()) => tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: archived but running, re-paused it"
-                ),
-                Err(e) => {
-                    if warned.insert(format!("{id}:repause")) {
-                        tracing::warn!(target: "clone_reconcile", "clone {id}: re-pause failed: {e:#}");
-                    }
-                }
-            }
-        } else {
             match app.docker.unpause_container(id).await {
                 Ok(()) => tracing::info!(
                     target: "clone_reconcile",
@@ -1527,6 +1513,23 @@ async fn reconcile_archived_state(app: &App, warned: &mut HashSet<String>) {
                     if warned.insert(format!("{id}:unpause")) {
                         tracing::warn!(target: "clone_reconcile", "clone {id}: thaw failed: {e:#}");
                     }
+                }
+            }
+            continue;
+        }
+        // Archived, so it has to be down. `is_running` answers false for a paused container,
+        // which is why a frozen leftover needs the separate check to be caught here.
+        if !paused && !app.docker.is_running(id).await.unwrap_or(false) {
+            continue;
+        }
+        match app.docker.stop_even_if_paused(id).await {
+            Ok(()) => tracing::info!(
+                target: "clone_reconcile",
+                "clone {id}: archived but up, stopped it"
+            ),
+            Err(e) => {
+                if warned.insert(format!("{id}:restop")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: stop failed: {e:#}");
                 }
             }
         }

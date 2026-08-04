@@ -1002,30 +1002,20 @@ pub fn start_archive(app: &App, host_id: &str) -> Result<Operation, JobError> {
 }
 
 async fn run_archive(app: App, op_id: String, host_id: String) {
-    // Same last chance as a delete. An archived clone refuses exec with a 409 and `homes` drops
-    // its symlink, so its transcripts are unreachable from the moment it freezes even though the
+    // Same last chance as a delete. An archived clone refuses exec and `homes` drops its
+    // symlink, so its transcripts are unreachable from the moment it stops even though the
     // files themselves survive.
     crate::ledger::tail_once(&app, &host_id).await;
     let mut progress = op_progress(&app, &op_id, OperationKind::Archive);
-    // Freeze rather than shut down. The clone's processes stop where they stand, so the inner
-    // Docker daemon and its containers, the agent's session, and every GPU buffer the clone
-    // holds are all still there when it comes back — restoring is a thaw, not a boot.
+    // Shut the clone down. Its memory goes back to the host, and restoring is a boot: systemd,
+    // the desktop session, the inner Docker daemon and the agent all start again.
     //
-    // The cost is that a paused clone keeps its memory resident. Archiving no longer hands
-    // the host back its RAM; it hands back its CPU.
-    progress("pause", "freezing the clone");
-    if let Err(e) = app.docker.pause_container(&host_id).await {
-        // A clone that had already exited cannot be paused. Falling back to a stop keeps
-        // archiving meaningful for it rather than failing the operation outright.
-        tracing::info!(target: "jobs", "{host_id}: pause failed ({e}), falling back to stop");
-        progress("stop", "the clone was not running; stopping it instead");
-        // `stop_even_if_paused`, because the commonest reason a pause fails is that the
-        // container is paused already — the daemon answers 409. A plain stop would then
-        // signal frozen processes that can never handle it, waiting out the full 20s
-        // before killing them.
-        if let Err(e) = app.docker.stop_even_if_paused(&host_id).await {
-            return fail_op(&app, &op_id, e.to_string());
-        }
+    // `stop_even_if_paused` rather than a plain stop, because a clone archived by the build
+    // that froze them instead is still paused, and a stop signal sent to frozen processes is
+    // one nobody can handle: the daemon waits out the full timeout and then kills.
+    progress("stop", "stopping the clone (SIGRTMIN+3, up to 20s)");
+    if let Err(e) = app.docker.stop_even_if_paused(&host_id).await {
+        return fail_op(&app, &op_id, e.to_string());
     }
 
     app.store.mutate(|s| {
@@ -1036,9 +1026,9 @@ async fn run_archive(app: App, op_id: String, host_id: String) {
             host.unread = false;
         }
         // Archiving the clone the operator is watching has to move them off it. A selection
-        // left pointing at a frozen clone aims the viewer's input at a daemon that will
-        // never read it, and leaves a still frame on screen that looks live. `activate`
-        // refuses to select an archived clone, so nothing else would ever clear this.
+        // left pointing at a stopped clone aims the viewer at something that will never send
+        // another frame, and leaves a still one on screen that looks live. `activate` refuses
+        // to select an archived clone, so nothing else would ever clear this.
         if s.selected.as_deref() == Some(host_id.as_str()) {
             s.selected = s
                 .hosts
@@ -1095,8 +1085,9 @@ pub fn start_unarchive(app: &App, host_id: &str) -> Result<Operation, JobError> 
 
 async fn run_unarchive(app: App, op_id: String, host_id: String) {
     let mut progress = op_progress(&app, &op_id, OperationKind::Unarchive);
-    // Thaw a paused clone, start a stopped one. Clones archived before pausing existed are
-    // stopped, and an upgrade must not strand them.
+    // Start a stopped clone, and thaw a paused one first. Archiving stops the container, but a
+    // clone archived by the build that froze them instead is still paused, and an upgrade must
+    // not strand it.
     progress("start", "restoring the archived clone");
     if let Err(e) = app.docker.resume_container(&host_id).await {
         return fail_op(&app, &op_id, e.to_string());

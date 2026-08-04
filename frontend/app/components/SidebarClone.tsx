@@ -491,7 +491,7 @@ export function SidebarClone({
   // clone that has not been scanned yet is idle, not unknowable, and a row that gains its
   // numbers a moment later reads as the card changing shape.
   //
-  // An archived clone has no figures at all — not blank ones. Its container is frozen, so
+  // An archived clone has no figures at all, not blank ones. Its container is stopped, so
   // there is nothing to report and no later sample coming, and holding the space open would
   // promise otherwise.
   const usage = clone.archived ? null : (formatCloneUsage(stats) ?? { cpu: "0%", mem: "0.0GB" });
