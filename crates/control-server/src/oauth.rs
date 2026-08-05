@@ -1,9 +1,9 @@
 //! Import an agent account by signing in here, with no clone in the loop.
 //!
-//! The other way in is [`crate::claude::import_clone_account`]: sign a clone in, then have
-//! this server read the credentials off its disk and take ownership. That needs a running
-//! clone, a provider CLI installed in it, and an operator willing to log in twice. This is
-//! the same OAuth pair obtained directly.
+//! This is the only way in. The one it replaced signed a clone in, then had this server
+//! read the credentials off that clone's disk and take ownership, which needed a running
+//! clone, a provider CLI inside it, and an operator willing to log in twice. This gets the
+//! same OAuth pair directly.
 //!
 //! **Why it is a paste and not a redirect.** Both providers pin their redirect URI to a
 //! port on `localhost`, and neither accepts another:
@@ -443,6 +443,8 @@ async fn store_claude(app: &App, tokens: TokenResp) -> Result<String> {
             .split_whitespace()
             .map(str::to_string)
             .collect(),
+        // A sign-in is not a refresh. The first one to run writes the record.
+        last_refresh: None,
     };
     crate::claude::upsert_account(app, stored)?;
     tracing::info!("imported Claude account {email} by sign-in");
@@ -485,6 +487,8 @@ fn store_codex(app: &App, tokens: TokenResp) -> Result<String> {
         id_token: tokens.id_token,
         refresh_token: tokens.refresh_token,
         expires_at: crate::clone_ops::now_ms() + tokens.expires_in.max(0) * 1000,
+        // A sign-in is not a refresh. The first one to run writes the record.
+        last_refresh: None,
     };
     crate::codex::upsert_account(app, stored)?;
     tracing::info!("imported Codex account {email} by sign-in");

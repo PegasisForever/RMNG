@@ -66,6 +66,8 @@ pub struct StoredCodexAccount {
     pub refresh_token: String,
     #[serde(default)]
     pub expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh: Option<crate::claude::RefreshRecord>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -268,8 +270,32 @@ struct RefreshResp {
 /// Refresh `acct`'s access token unconditionally (rotates the single-use refresh token).
 /// The OAuth response carries no `expires_in`, so expiry is decoded from the new access
 /// token's JWT. Mutates `acct` in place; the caller persists.
+/// Refresh `acct` in place. Every exit is logged AND written to `acct.last_refresh`, for
+/// the reason given on [`crate::claude::RefreshRecord`]: the log dies with the container,
+/// and the line that says whether the token rotated is the whole diagnosis six hours later.
 async fn refresh_account(http: &reqwest::Client, acct: &mut StoredCodexAccount) -> Result<()> {
     let before = crate::claude::fingerprint(&acct.refresh_token);
+    let out = refresh_inner(http, acct, &before).await;
+    acct.last_refresh = Some(crate::claude::RefreshRecord {
+        at: now_ms(),
+        ok: out.is_ok(),
+        rt_before: before,
+        rt_after: match &out {
+            Ok(after) => after.clone(),
+            Err(_) => String::new(),
+        },
+        error: out.as_ref().err().map(|e| format!("{e:#}")),
+    });
+    out.map(|_| ())
+}
+
+/// The refresh itself. Returns the fingerprint of the token the reply carried, empty when
+/// it carried none.
+async fn refresh_inner(
+    http: &reqwest::Client,
+    acct: &mut StoredCodexAccount,
+    before: &str,
+) -> Result<String> {
     let resp = http
         .post(OAUTH_TOKEN_URL)
         .timeout(FETCH_TIMEOUT)
@@ -311,20 +337,24 @@ async fn refresh_account(http: &reqwest::Client, acct: &mut StoredCodexAccount) 
     }
     // Same single-use rule as Claude: a reply with no replacement leaves the store holding
     // a spent token, and the account dies at the next refresh rather than at this one.
-    match data.refresh_token {
+    let after = match data.refresh_token {
         Some(r) => {
             let after = crate::claude::fingerprint(&r);
             acct.refresh_token = r;
             tracing::info!("refreshed codex {}: rt {before} -> {after}", acct.email);
+            after
         }
-        None => tracing::warn!(
-            "refreshed codex {}: the reply carried NO refresh_token, so the store keeps the \
-             one it just spent (rt {before}). This account fails its next refresh.",
-            acct.email
-        ),
-    }
+        None => {
+            tracing::error!(
+                "refreshed codex {}: the reply carried NO refresh_token, so the store keeps \
+                 the one it just spent (rt {before}). This account fails its next refresh.",
+                acct.email
+            );
+            String::new()
+        }
+    };
     set_expiry_from_access(acct);
-    Ok(())
+    Ok(after)
 }
 
 /// `email`'s current account, refreshed (and persisted) first if within
@@ -339,7 +369,14 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredCodexAc
     if !is_expired(&acct.email, acct.expires_at) {
         return Ok((acct, false));
     }
-    refresh_account(&app.http, &mut acct).await?;
+    if let Err(e) = refresh_account(&app.http, &mut acct).await {
+        // Persist the attempt even though it failed: every failing path leaves the tokens
+        // untouched, so this writes back the record and nothing else.
+        if let Err(w) = app.codex.update_account(&acct) {
+            tracing::warn!("recording {}'s failed codex refresh: {w:#}", acct.email);
+        }
+        return Err(e);
+    }
     app.codex.update_account(&acct).with_context(|| {
         format!(
             "persisting {}'s refreshed token failed, so the rotation exists only in memory",
@@ -1610,6 +1647,7 @@ mod tests {
             id_token: "eyJid".into(),
             refresh_token: "rt-1".into(),
             expires_at: 0,
+            last_refresh: None,
         }
     }
 

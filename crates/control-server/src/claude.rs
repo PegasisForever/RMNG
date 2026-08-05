@@ -87,6 +87,35 @@ pub struct StoredClaudeAccount {
     pub expires_at: i64,
     #[serde(default)]
     pub scopes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh: Option<RefreshRecord>,
+}
+
+/// What this account's last refresh attempt did.
+///
+/// It lives in the store because the log does not survive the question being asked. Docker
+/// keeps a container's log with the container, a server update replaces the container, and
+/// the line that says whether a refresh rotated the token or silently handed back the one
+/// it had just spent is gone before anyone notices the account is dead. That line six
+/// hours before an `invalid_grant` is the whole diagnosis, so it is written next to the
+/// token instead of only to stdout.
+///
+/// Fingerprints only ([`fingerprint`]), never a token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshRecord {
+    /// When the attempt finished, epoch ms.
+    pub at: i64,
+    pub ok: bool,
+    /// The refresh token the attempt was made with.
+    pub rt_before: String,
+    /// The refresh token the reply carried. Empty on failure, and empty on the one success
+    /// that dooms the account: a reply with no `refresh_token` leaves the store holding a
+    /// token it has already spent, and the next refresh six hours later is rejected.
+    #[serde(default)]
+    pub rt_after: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -316,15 +345,39 @@ pub(crate) fn fingerprint(token: &str) -> String {
 /// Refresh `acct`'s access token unconditionally (rotates the single-use refresh
 /// token). Mutates `acct` in place; the caller persists.
 ///
-/// Every exit is logged with the refresh token's fingerprint, because a refresh has three
+/// Every exit is logged AND written to `acct.last_refresh`, because a refresh has three
 /// distinct bad endings that all look the same later:
 ///   - the request never reached Anthropic, so the token is untouched;
 ///   - Anthropic rejected it, so the token was already dead;
 ///   - Anthropic accepted and spent it, but the reply was unreadable or carried no
 ///     replacement, so the store now holds a spent token and the account dies at the next
 ///     refresh with `invalid_grant`.
+///
+/// The record is the same evidence as the log line, in a place a container replace cannot
+/// take with it. See [`RefreshRecord`].
 async fn refresh_account(http: &reqwest::Client, acct: &mut StoredClaudeAccount) -> Result<()> {
     let before = fingerprint(&acct.refresh_token);
+    let out = refresh_inner(http, acct, &before).await;
+    acct.last_refresh = Some(RefreshRecord {
+        at: now_ms(),
+        ok: out.is_ok(),
+        rt_before: before,
+        rt_after: match &out {
+            Ok(after) => after.clone(),
+            Err(_) => String::new(),
+        },
+        error: out.as_ref().err().map(|e| format!("{e:#}")),
+    });
+    out.map(|_| ())
+}
+
+/// The refresh itself. Returns the fingerprint of the token the reply carried, empty when
+/// it carried none.
+async fn refresh_inner(
+    http: &reqwest::Client,
+    acct: &mut StoredClaudeAccount,
+    before: &str,
+) -> Result<String> {
     let resp = http
         .post(OAUTH_TOKEN_URL)
         .timeout(FETCH_TIMEOUT)
@@ -361,7 +414,7 @@ async fn refresh_account(http: &reqwest::Client, acct: &mut StoredClaudeAccount)
     })?;
     acct.access_token = data.access_token;
     acct.expires_at = now_ms() + data.expires_in * 1000;
-    match data.refresh_token {
+    let after = match data.refresh_token {
         Some(r) => {
             let after = fingerprint(&r);
             acct.refresh_token = r;
@@ -370,17 +423,21 @@ async fn refresh_account(http: &reqwest::Client, acct: &mut StoredClaudeAccount)
                 acct.email,
                 data.expires_in
             );
+            after
         }
-        None => tracing::warn!(
-            "refreshed {}: the reply carried NO refresh_token, so the store keeps the one \
-             it just spent (rt {before}). This account fails its next refresh.",
-            acct.email
-        ),
-    }
+        None => {
+            tracing::error!(
+                "refreshed {}: the reply carried NO refresh_token, so the store keeps the \
+                 one it just spent (rt {before}). This account fails its next refresh.",
+                acct.email
+            );
+            String::new()
+        }
+    };
     if let Some(s) = data.scope {
         acct.scopes = s.split(' ').map(str::to_string).collect();
     }
-    Ok(())
+    Ok(after)
 }
 
 /// `email`'s current access token, refreshed (and persisted) first if within
@@ -397,7 +454,15 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(String, bool)
     if !is_expired(&acct.email, acct.expires_at) {
         return Ok((acct.access_token, false));
     }
-    refresh_account(&app.http, &mut acct).await?;
+    if let Err(e) = refresh_account(&app.http, &mut acct).await {
+        // Persist the attempt even though it failed. `refresh_account` leaves the tokens
+        // untouched on every failing path, so this writes back the record and nothing
+        // else, and it is the only way the account's own file says why it stopped working.
+        if let Err(w) = app.claude.update_account(&acct) {
+            tracing::warn!("recording {}'s failed refresh: {w:#}", acct.email);
+        }
+        return Err(e);
+    }
     // A failed write here is fatal to the account, not cosmetic: memory now holds the new
     // token, the process runs on it for hours, and the next restart reads the spent one
     // back off disk. Name it in the error so it is not mistaken for a network failure.
@@ -1624,6 +1689,7 @@ mod tests {
             refresh_token: String::new(),
             expires_at: 0,
             scopes: vec![],
+            last_refresh: None,
         };
         let u = to_usage(&acct, raw);
         assert_eq!(u.five_hour.unwrap().pct, 7.0);
@@ -1658,6 +1724,7 @@ mod tests {
             refresh_token: String::new(),
             expires_at: 0,
             scopes: vec![],
+            last_refresh: None,
         };
         let fable = to_usage(&acct, raw).fable.expect("fable window present");
         assert_eq!(fable.pct, 8.0);
@@ -1865,6 +1932,7 @@ mod tests {
             // Far-future so `fresh_access_token` never attempts a (network) refresh in tests.
             expires_at: 4_102_444_800_000,
             scopes: Vec::new(),
+            last_refresh: None,
         }
     }
 
