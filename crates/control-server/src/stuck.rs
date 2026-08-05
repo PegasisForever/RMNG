@@ -807,7 +807,10 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
                 "description": task.description,
                 "output_bytes": got.map(|(b, _)| *b),
                 "producing_output": got.is_some_and(|(_, age)| *age <= MOVING_WINDOW_S),
-                "output_still_for_seconds": got.map_or(0.0, |(_, age)| age.round()),
+                // Null, never zero, when there is no output file to age. Zero reads as
+                // "it wrote something a moment ago", which is the opposite of what an
+                // absent file means, and it reads that way in the direction of `working`.
+                "output_still_for_seconds": got.map(|(_, age)| age.round()),
             })
         })
         .collect();
@@ -846,6 +849,14 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
             // pressed stop and `error` means the turn died, and both are worth the model
             // seeing: neither resumes on its own.
             "turn_ended_with": stop.and_then(|e| e.status.clone()),
+            // How long the agent has been parked on whatever the turn left outstanding, from
+            // the `Stop` itself rather than from a file. `quiet_for_seconds` is transcript
+            // mtime and answers a different question badly here: a clone parked on three dead
+            // wait loops for 2h23m reported 303 seconds of quiet, because something else in
+            // the tree was still being touched. Named to end in `_seconds` so [`cache_key`]
+            // buckets it; an unbucketed duration would miss the cache on every four-second
+            // tick and ask the model ~900 times an hour per session.
+            "turn_over_for_seconds": stop.map(|e| (now - e.ts).max(0.0).round()),
         },
         "background_tasks": out_tasks,
         "in_flight_tool_calls": out_tools,
@@ -857,7 +868,7 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
 // Asking the model
 // ---------------------------------------------------------------------------------------
 
-/// The question, arrived at over two fleet pilots. Five passages in here are load-bearing and
+/// The question, arrived at over two fleet pilots. Six passages in here are load-bearing and
 /// were each added to fix a measured failure, so read the git history before trimming:
 ///
 /// - "read the WHOLE command" fixes calling `tail -c 120 file` non-terminating because the
@@ -871,12 +882,27 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
 /// - "that writer has to show up in the rest of the view" stops the opposite failure, where
 ///   an agent says it dispatched a worker, nothing in the view corresponds to it, and the
 ///   clone sits there. One such stall accounted for 33 missed views.
+/// - "a polling wait finishes only if the thing it waits for actually happens" is the newest,
+///   and unlike the five above it comes from one logged failure rather than a corpus. See
+///   below.
 ///
-/// Those last two are what took `gpt-5.6-luna` at medium effort from 89.6% to 94.5% over the
-/// 1167 recorded pooled views (misses 78 to 43, false alarms 43 to 21). Measured, not guessed: a
-/// dev/holdout split by situation, then confirmed on the whole set. Higher reasoning effort
-/// was tried instead and bought 0.4 points, so the wording is what matters here, not thinking
-/// time.
+/// The fourth and fifth are what took `gpt-5.6-luna` at medium effort from 89.6% to 94.5% over
+/// the 1167 recorded pooled views (misses 78 to 43, false alarms 43 to 21). Measured, not
+/// guessed: a dev/holdout split by situation, then confirmed on the whole set. Higher reasoning
+/// effort was tried instead and bought 0.4 points, so the wording is what matters here, not
+/// thinking time.
+///
+/// The polling passage has no such backing, because the corpus predates it and holds no case of
+/// the kind. What it has instead is one fully recorded failure, from [`crate::stucklog`] on
+/// CT 105 on 2026-08-05. Clone `pega-rmng-development-3` sat on three shells of the form
+/// `until ! pgrep -f "publish-server.sh"; do sleep 20; done`, each of which matched its own
+/// command line through `pgrep -f` and so was waiting for itself to exit. All three had
+/// produced zero bytes, for between 3.9 and 5.1 hours. The model did not miss the evidence: on
+/// the same view minutes apart it answered "only self-matching pgrep wait loops remain, so they
+/// will not finish" and then "background watcher tasks are still running and will wake the
+/// agent". It was a coin flip, and the answer cache pinned whichever came up. The passage
+/// exists to settle that flip, and `turn_over_for_seconds` was added to the view with it,
+/// because nothing in the view had said how long the agent had actually been parked.
 ///
 /// One thing deliberately absent: any elapsed-time rule for background tasks. It was tested
 /// against all 1167 recorded views and rejected. Misses stayed at exactly 44 while false
@@ -897,6 +923,7 @@ Say false when nothing will. The common shapes:
   - it asked a question and stopped.
   - the only thing still running never terminates: a dev server, a file watcher, a REPL.
     The agent left it running on purpose and it will never wake anyone.
+  - the only thing still running polls for a condition that is not coming. See below.
   - the only thing still running can only be completed by the operator themselves, such
     as reading a pipe that the person is expected to write into by hand.
   - something it was waiting on already finished and it was never woken.
@@ -937,6 +964,20 @@ prints and exits, `tail -f file` never does. Same program, opposite answers. `ca
 returns. `npm run dev` does not. A pipe read returns if a scheduled job or another process
 feeds it, not if a person has to. If a command would return on its own, say true even if
 it is slow.
+
+A polling wait finishes only if the thing it waits for actually happens. `until <test>; do
+sleep N; done`, `while ! <test>; do sleep N; done`, and any loop around a pgrep, a lock
+file, a pid, or an HTTP probe all have this shape, and every one of them prints nothing
+until it exits. So output_bytes of 0 is what a healthy one looks like too, and that number
+settles nothing on its own. turn_over_for_seconds is what settles it: that is how long the
+agent has been parked waiting for exactly these. A polling wait still outstanding hours
+after the turn ended is waiting on something that already happened or that never will, and
+nothing is coming: false.
+
+One trap in particular, because it has cost hours of a clone reading as working. `pgrep -f`
+matches the full command line of every process, the shell running the loop included, so
+`until ! pgrep -f "deploy.sh"; do sleep 20; done` matches itself and waits forever. If a
+pgrep pattern appears in the loop's own command, that loop can never end: false.
 
 producing_output tells you whether a task is emitting right now. generating tells you
 whether the agent itself is writing tokens, which is false while it waits inside a tool
@@ -1971,6 +2012,73 @@ mod tests {
         // The hook fired while the log was being read, so its stamp is ahead of `now`.
         let view = view_of(&root, &mine, &[pre], 499.0);
         assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(0.0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `Stop` carrying one background task, with no output file written for it.
+    fn stop_with_task(command: &str, at: f64) -> HookEvent {
+        HookEvent {
+            ts: at,
+            background_tasks: vec![BackgroundTask {
+                id: "task-1".into(),
+                kind: "shell".into(),
+                command: Some(command.into()),
+                ..Default::default()
+            }],
+            ..event("Stop", "s", None)
+        }
+    }
+
+    #[test]
+    fn a_task_with_no_output_file_reports_an_unknown_age_not_a_fresh_one() {
+        // Zero read as "it wrote something a moment ago", which is the opposite of what a
+        // missing file means, and it read that way in the direction of `working`.
+        let root = fake_clone("nooutputfile");
+        let mut mine = session(Some("shell"), true);
+        mine.session_id = "s".into();
+        let view = view_of(&root, &mine, &[stop_with_task("sleep 30", 100.0)], 200.0);
+        let task = &view["background_tasks"][0];
+        assert_eq!(task["output_bytes"], json!(null));
+        assert_eq!(task["output_still_for_seconds"], json!(null));
+        assert_eq!(task["producing_output"], json!(false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_view_says_how_long_the_turn_has_been_over() {
+        // The number that settles a polling wait. Transcript mtime answers a different
+        // question and answered it badly: a clone parked on three dead wait loops for 2h23m
+        // reported 303 seconds of quiet, because something else in the tree was still moving.
+        let root = fake_clone("turnover");
+        let mut mine = session(Some("shell"), true);
+        mine.session_id = "s".into();
+        let view = view_of(&root, &mine, &[stop_with_task("until ! pgrep -f x; do sleep 20; done", 100.0)], 8680.0);
+        assert_eq!(view["session"]["turn_over_for_seconds"], json!(8580.0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_session_that_never_stopped_has_no_turn_over_age() {
+        let root = fake_clone("turnovernone");
+        let mut mine = session(Some("busy"), true);
+        mine.session_id = "s".into();
+        let view = view_of(&root, &mine, &[], 200.0);
+        assert_eq!(view["session"]["turn_over_for_seconds"], json!(null));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_turn_over_age_is_bucketed_by_the_cache_key() {
+        // It has to end in `_seconds` or every four-second tick mints a fresh question, which
+        // is ~900 model calls an hour per session.
+        let root = fake_clone("turnoverbucket");
+        let mut mine = session(Some("shell"), true);
+        mine.session_id = "s".into();
+        let stop = stop_with_task("until ! pgrep -f x; do sleep 20; done", 100.0);
+        let a = view_of(&root, &mine, std::slice::from_ref(&stop), 5000.0);
+        let b = view_of(&root, &mine, &[stop], 5004.0);
+        assert_ne!(a, b, "the raw views differ by the four seconds between ticks");
+        assert_eq!(cache_key(&a), cache_key(&b), "one bucket, so one question");
         let _ = std::fs::remove_dir_all(&root);
     }
 

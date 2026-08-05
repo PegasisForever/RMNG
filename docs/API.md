@@ -338,9 +338,19 @@ They disagree on 15 samples and per-session is right on 12 (sign test p=0.035). 
 the same number of calls, over 467 distinct questions rather than 517, because a view carries no
 session id and is therefore shared by every session in the same state.
 
-The known gap: a loop that ends when an external system reaches a state it never reaches (polling
-CI that stays pending) reads as `working`. The model's reasoning is right and the world does not
-cooperate.
+The known gap is a loop that ends when an external system reaches a state it never reaches. The
+prompt now names that shape and the view carries `turn_over_for_seconds`, which is how long the
+agent has been parked since its turn ended, so a polling wait still outstanding hours later reads
+as false. This narrows the gap rather than closing it, because the model still judges.
+
+That passage came from one recorded failure rather than from the corpus, which holds no case of
+the kind. On 2026-08-05 clone `pega-rmng-development-3` sat on three shells of the form
+`until ! pgrep -f "publish-server.sh"; do sleep 20; done`. `pgrep -f` matches the whole command
+line, so each loop matched the shell running it and was waiting for itself to exit. All three had
+produced zero bytes for between 3.9 and 5.1 hours. The model saw the evidence and split on it,
+answering "only self-matching pgrep wait loops remain, so they will not finish" and, minutes
+later on the same view, "background watcher tasks are still running and will wake the agent".
+The answer cache then pinned whichever came up.
 
 **A parent clone is only `idle` when its sub clones are too.** State is decided per clone, so a
 parent that handed work to a sub clone and is waiting on it looks quiet, and would read `idle`
