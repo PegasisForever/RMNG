@@ -357,6 +357,14 @@ Counted from the two decision logs, over every decision taken while a dead loop 
 The second arm is a reproduction rather than a found case, driven through a real interactive
 `claude` in a tmux pane. Seven samples is small.
 
+**A dev server is not progress.** The prompt used to say both that a dev server wakes nobody and
+that `producing_output` being true means true. A dev server emits request logs forever, so both
+rules applied and the model picked one at random. Over a day on CT 105, across 4,877 views whose
+only live thing was an emitting background task, it answered `working` 3,457 times and `idle`
+1,420, with 3,295 reasons naming both rules in one sentence. Two thirds of every state change
+that day reversed inside 30 seconds. `producing_output` now reads as "this task is alive", never
+as "the agent is going to be woken", and only a task that ends wakes anyone.
+
 **A parent clone is only `idle` when its sub clones are too.** State is decided per clone, so a
 parent that handed work to a sub clone and is waiting on it looks quiet, and would read `idle`
 while the work it started is still running. After each tick's states are computed, a working sub

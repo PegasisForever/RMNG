@@ -918,6 +918,16 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
 /// nothing, because that entrypoint publishes no `status` and never reaches the `shell` state
 /// this failure lives in. Seven samples is small and says so.
 ///
+/// The "read producing_output only for a task that is going to end" passage comes from the same
+/// log, a day later, and settles a contradiction this prompt carried from the start. It said a
+/// dev server wakes nobody, and it also said `producing_output` being true means true. A dev
+/// server emits request logs forever, so both applied and the model picked one at random: over
+/// 4,877 views whose only live thing was an emitting background task, it answered `working`
+/// 3,457 times and `idle` 1,420, and 3,295 of its reasons named BOTH rules in one sentence. One
+/// clone, one session and one unchanged pair of `yarn dev` servers accounted for 3,294 working
+/// against 1,258 idle, flipping every 20 to 40 seconds while its agent sat at a finished prompt.
+/// Two thirds of every state change in that day reversed inside 30 seconds.
+///
 /// One thing deliberately absent: any elapsed-time rule for background tasks. It was tested
 /// against all 1167 recorded views and rejected. Misses stayed at exactly 44 while false
 /// alarms rose from 35 to 47.
@@ -993,9 +1003,15 @@ matches the full command line of every process, the shell running the loop inclu
 `until ! pgrep -f "deploy.sh"; do sleep 20; done` matches itself and waits forever. If a
 pgrep pattern appears in the loop's own command, that loop can never end: false.
 
-producing_output tells you whether a task is emitting right now. generating tells you
-whether the agent itself is writing tokens, which is false while it waits inside a tool
-call. Either one being true means true.
+generating tells you whether the agent itself is writing tokens, which is false while it
+waits inside a tool call. If generating is true, that alone means true.
+
+producing_output tells you whether a task wrote something recently. It says the task is
+alive. It never says the task is going to finish, and only finishing wakes anybody. A dev
+server, a file watcher, and a mock server all emit steadily and forever, so a task you have
+already decided is non-terminating stays false however much output it is producing. Read
+producing_output only for a task that is going to end, and there it tells you the
+difference between one still working and one that died without waking the agent.
 
 A background task that finishes wakes the agent by itself and it takes its next turn. So
 a background task that is going to finish is true, even though the agent is doing nothing
@@ -1025,6 +1041,12 @@ const BUCKETS: [f64; 9] = [30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0, 4800
 /// over the rebuilt corpus the same samples came to 467 distinct questions where the pooled
 /// design needed 517.
 ///
+/// Rounding has to cover every field that moves on its own, which byte counts do. A day of
+/// CT 105's decision log put 7,199 questions to the model and produced 6,373 distinct keys, so
+/// the cache could serve 11% of them; one clone running two dev servers accounted for 5,290 of
+/// those calls by itself. Collapsing `*_bytes` alongside `*_seconds` takes the same day to
+/// 1,489 keys.
+///
 /// Keyed on the view alone, never on who answered. Changing provider therefore keeps the
 /// answers already given until each clone's view moves, which is right: the question is about
 /// the clone, and the two providers are answering the same one. A failed call is not cached
@@ -1052,6 +1074,15 @@ fn cache_key(view: &Value) -> String {
                     .map(|(k, v)| {
                         let v = match v.as_f64() {
                             Some(n) if k.ends_with("_seconds") => json!(bucket(n)),
+                            // A byte count is a running total, so any task that emits at
+                            // all moves it every tick and mints a key nothing can ever
+                            // match. Over one day on CT 105 that held the cache to 11% of
+                            // 7,199 questions; collapsing the count to "has it written
+                            // anything" takes the same day to 1,489 distinct questions.
+                            // The answer never turned on the exact number: whether it is
+                            // emitting NOW is `producing_output`, and whether it has ever
+                            // emitted is all this is asked for.
+                            Some(n) if k.ends_with("_bytes") => json!(n > 0.0),
                             _ => walk(v),
                         };
                         (k.clone(), v)
@@ -1857,6 +1888,30 @@ mod tests {
         assert_eq!(bucket(29.9), 0);
         assert_eq!(bucket(30.0), 1);
         assert_eq!(bucket(1.0e9), BUCKETS.len());
+    }
+
+    #[test]
+    fn a_growing_byte_count_does_not_mint_a_fresh_question() {
+        // The regression this pins: a `yarn dev` writing request logs moved `output_bytes`
+        // on every four-second tick, so the key never repeated and one clone alone put 5,290
+        // questions to the model in fifteen hours.
+        let at = |bytes: u64| {
+            json!({"background_tasks": [{"what": "yarn dev", "output_bytes": bytes,
+                                         "producing_output": true, "output_still_for_seconds": 2}]})
+        };
+        assert_eq!(cache_key(&at(10_450)), cache_key(&at(2_000_000)));
+    }
+
+    #[test]
+    fn a_task_that_has_written_nothing_is_still_its_own_question() {
+        // The three states that matter stay apart: no output file, an empty one, a used one.
+        let at = |bytes: Value| json!({"background_tasks": [{"output_bytes": bytes}]});
+        let none = cache_key(&at(json!(null)));
+        let empty = cache_key(&at(json!(0)));
+        let some = cache_key(&at(json!(1)));
+        assert_ne!(none, empty);
+        assert_ne!(empty, some);
+        assert_ne!(none, some);
     }
 
     // -- parsing the reply --------------------------------------------------------------
