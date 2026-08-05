@@ -189,6 +189,19 @@ export const updateServer = () => postJson("/api/server/update", {}) as Promise<
  *  disconnects and reconnects. */
 export const restartServer = () => postJson("/api/server/restart", {}) as Promise<{ ok: boolean }>;
 
+/** Start an account sign-in here rather than in a clone: returns the provider URL to open.
+ *  Nothing is stored yet, and the sign-in expires if the callback is never pasted back. */
+export const beginLogin = (provider: "claude" | "codex") =>
+  postJson("/api/login/begin", { provider }) as Promise<{ url: string }>;
+/** Finish that sign-in with whatever the browser landed on. Both redirect URIs point at a
+ *  port on the operator's own machine, so the page fails to load and its address bar is the
+ *  only place the authorization code exists. */
+export const completeLogin = (provider: "claude" | "codex", pasted: string) =>
+  postJson("/api/login/complete", { provider, pasted }) as Promise<{
+    ok: boolean;
+    email: string;
+  }>;
+
 /** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */
 export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
 /** Confirm a clone is signed in to Claude Code via claude.ai; returns its identity. */

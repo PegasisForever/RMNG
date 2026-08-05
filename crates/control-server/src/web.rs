@@ -96,6 +96,10 @@ pub fn router(app: App) -> Router {
         // (`cloneGroups`/`codexGroups`) and are saved wholesale through `PUT /api/config`.
         .route("/api/claude/import/check", post(claude_import_check))
         .route("/api/claude/import", post(claude_import))
+        // Sign in here instead of in a clone: begin hands back a URL, complete takes the
+        // callback URL the browser landed on. See `crate::oauth`.
+        .route("/api/login/begin", post(login_begin))
+        .route("/api/login/complete", post(login_complete))
         .route("/api/claude/refresh", post(claude_refresh))
         .route("/api/claude/swap", post(claude_swap))
         .route("/api/claude/delete", post(claude_delete))
@@ -2432,6 +2436,55 @@ struct ImportCheckReq {
 /// `POST /api/claude/import/check` — confirm a clone is signed in to Claude Code via
 /// claude.ai and report the account identity (so the UI can show it before the
 /// operator mints + pastes a long-lived token).
+#[derive(Deserialize)]
+struct LoginBeginReq {
+    /// `"claude"` or `"codex"`.
+    provider: String,
+}
+
+/// `POST /api/login/begin` — start an account sign-in and return the URL to open.
+///
+/// Nothing is stored against an account yet. What is held is the PKCE verifier, keyed by
+/// the `state` that will come back in the callback, until the paste or the timeout.
+async fn login_begin(State(app): State<App>, Json(req): Json<LoginBeginReq>) -> JsonResult {
+    let provider = crate::oauth::Provider::parse(&req.provider).ok_or_else(|| {
+        err_json(StatusCode::BAD_REQUEST, format!("unknown provider '{}'", req.provider))
+    })?;
+    let url = crate::oauth::begin(&app, provider)
+        .map_err(|e| err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok(Json(serde_json::json!({ "url": url })))
+}
+
+#[derive(Deserialize)]
+struct LoginCompleteReq {
+    provider: String,
+    /// Whatever the operator copied: the callback URL, its query, or `code=…&state=…`.
+    pasted: String,
+}
+
+/// `POST /api/login/complete` — redeem the pasted callback and store the account.
+///
+/// A 400 covers everything the operator can fix by pasting again; the provider refusing the
+/// code is one of those, so it is not a 502.
+async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq>) -> JsonResult {
+    let provider = crate::oauth::Provider::parse(&req.provider).ok_or_else(|| {
+        err_json(StatusCode::BAD_REQUEST, format!("unknown provider '{}'", req.provider))
+    })?;
+    let email = crate::oauth::complete(&app, provider, &req.pasted)
+        .await
+        .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+    // Put its usage on screen without making the browser wait, exactly as the clone import
+    // does. The account is already stored by the line above.
+    let app2 = app.clone();
+    tokio::spawn(async move {
+        match provider {
+            crate::oauth::Provider::Claude => crate::claude::poll_once(&app2).await,
+            crate::oauth::Provider::Codex => crate::codex::poll_once(&app2).await,
+        }
+    });
+    Ok(Json(serde_json::json!({ "ok": true, "email": email })))
+}
+
 async fn claude_import_check(
     State(app): State<App>,
     Json(req): Json<ImportCheckReq>,

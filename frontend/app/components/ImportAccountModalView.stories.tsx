@@ -29,6 +29,11 @@ const meta = {
     onCloneIdChange: fn(),
     onClose: fn(),
     onImport: fn(),
+    mode: "clone" as const,
+    loginUrl: null,
+    pasted: "",
+    onModeChange: fn(),
+    onPastedChange: fn(),
   },
 } satisfies Meta<typeof ImportAccountModalView>;
 
@@ -137,5 +142,40 @@ export const Interactive: Story = {
         }}
       />
     );
+  },
+};
+
+/** The sign-in path, waiting for its URL. Nothing to copy yet. */
+export const SigningInPreparing: Story = {
+  args: { mode: "login", loginUrl: null },
+};
+
+/** The sign-in path with the URL in hand: open it, land on a dead port, paste the address
+ *  back. The dead page is the expected outcome, so the copy says so. */
+export const SigningIn: Story = {
+  args: {
+    mode: "login",
+    loginUrl:
+      "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&scope=user%3Aprofile%20user%3Ainference&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256&state=Ny0kZDh",
+  },
+};
+
+/** Pasted, ready to finish. */
+export const SigningInPasted: Story = {
+  args: {
+    mode: "login",
+    loginUrl: "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a",
+    pasted: "http://localhost:54545/callback?code=ac_01H8x9#Ny0kZDh",
+  },
+};
+
+/** The provider refused the code, which is the one error this path produces often: the code
+ *  is single-use and expires within minutes. */
+export const SigningInRefused: Story = {
+  args: {
+    mode: "login",
+    loginUrl: "https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a",
+    pasted: "http://localhost:54545/callback?code=ac_01H8x9",
+    error: "the provider refused the code: 400: {\"error\":\"invalid_grant\"}",
   },
 };

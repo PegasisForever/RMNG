@@ -47,6 +47,8 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET | `/api/setup/env` | Setup wizard environment preflight rows | 200 `SetupEnv` |
 | POST | `/api/{claude,codex}/import/check` | Report the account a clone is signed in to, before importing | 200 identity |
 | POST | `/api/{claude,codex}/import` | Take ownership of a signed-in clone's OAuth pair | 200 `{ok,email,cleared}` |
+| POST | `/api/login/begin` | Start an account sign-in here and get the URL to open | 200 `{url}` |
+| POST | `/api/login/complete` | Redeem the pasted callback URL and store the account | 200 `{ok,email}` |
 | POST | `/api/{claude,codex}/refresh` | Force one usage poll (+ rotation pass) now | 200 `{ok,rateLimited,rotated}` |
 | POST | `/api/{claude,codex}/swap` | Change a clone's account selection, hot | 200 `{ok,account,group,selection}` |
 | POST | `/api/{claude,codex}/delete` | Remove an imported account by email | 200 `{ok,moved}` |

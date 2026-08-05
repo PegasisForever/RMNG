@@ -378,16 +378,7 @@ pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportR
         expires_at: oauth.expires_at.unwrap_or(0),
         scopes: oauth.scopes.unwrap_or_default(),
     };
-    {
-        let mut accts = app.claude.accounts.lock().unwrap();
-        let mut by_id: HashMap<String, StoredClaudeAccount> =
-            accts.drain(..).map(|a| (a.id.clone(), a)).collect();
-        by_id.insert(stored.id.clone(), stored);
-        let mut next: Vec<_> = by_id.into_values().collect();
-        next.sort_by(|a, b| a.email.cmp(&b.email));
-        app.claude.save(&next)?;
-        *accts = next;
-    }
+    upsert_account(app, stored)?;
 
     // 4. Clear the clone's credentials so its Claude Code can't rotate the refresh
     //    token we just took ownership of. Best-effort: the account is already stored.
@@ -407,6 +398,23 @@ pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportR
         host.id
     );
     Ok(ImportResult { email, cleared })
+}
+
+/// Write one account into the 0600 store, replacing whatever shared its id.
+///
+/// Both ways in end here: taking a signed-in clone's credentials, and signing in against
+/// the provider directly ([`crate::oauth`]). An account is the same record either way, so
+/// nothing downstream can tell which door it came through.
+pub fn upsert_account(app: &App, stored: StoredClaudeAccount) -> Result<()> {
+    let mut accts = app.claude.accounts.lock().unwrap();
+    let mut by_id: HashMap<String, StoredClaudeAccount> =
+        accts.drain(..).map(|a| (a.id.clone(), a)).collect();
+    by_id.insert(stored.id.clone(), stored);
+    let mut next: Vec<_> = by_id.into_values().collect();
+    next.sort_by(|a, b| a.email.cmp(&b.email));
+    app.claude.save(&next)?;
+    *accts = next;
+    Ok(())
 }
 
 // --- token refresh + usage fetch ------------------------------------------

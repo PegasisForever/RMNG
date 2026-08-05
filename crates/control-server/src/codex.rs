@@ -301,6 +301,22 @@ pub async fn check_clone_auth(app: &App, host: &RmngClone) -> Result<CodexAuth> 
 /// Import a Codex account from a signed-in clone: harvest the OAuth triple, upsert into
 /// the 0600 store (by id), then delete the clone's auth.json so its CLI can't rotate the
 /// refresh token the server now owns.
+/// Write one account into the 0600 store, replacing whatever shared its id.
+///
+/// Shared by both ways in: taking a signed-in clone's `auth.json`, and signing in against
+/// the provider directly ([`crate::oauth`]).
+pub fn upsert_account(app: &App, stored: StoredCodexAccount) -> Result<()> {
+    let mut accts = app.codex.accounts.lock().unwrap();
+    let mut by_id: HashMap<String, StoredCodexAccount> =
+        accts.drain(..).map(|a| (a.id.clone(), a)).collect();
+    by_id.insert(stored.id.clone(), stored);
+    let mut next: Vec<_> = by_id.into_values().collect();
+    next.sort_by(|a, b| a.email.cmp(&b.email));
+    app.codex.save(&next)?;
+    *accts = next;
+    Ok(())
+}
+
 pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportResult> {
     if !host.managed {
         bail!(
@@ -320,16 +336,7 @@ pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportR
         refresh_token: auth.refresh_token,
         expires_at: 0,
     };
-    {
-        let mut accts = app.codex.accounts.lock().unwrap();
-        let mut by_id: HashMap<String, StoredCodexAccount> =
-            accts.drain(..).map(|a| (a.id.clone(), a)).collect();
-        by_id.insert(stored.id.clone(), stored);
-        let mut next: Vec<_> = by_id.into_values().collect();
-        next.sort_by(|a, b| a.email.cmp(&b.email));
-        app.codex.save(&next)?;
-        *accts = next;
-    }
+    upsert_account(app, stored)?;
     let cleared = match run_clone_op(app, &host.id, IMPORT_SCRIPT, "clear", &[]).await {
         Ok(_) => true,
         Err(e) => {

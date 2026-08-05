@@ -13,8 +13,10 @@ import {
   type ImportCandidate,
 } from "~/components/ImportAccountModalView";
 import {
+  beginLogin,
   checkClaudeImport,
   checkCodexImport,
+  completeLogin,
   importClaudeAccount,
   importCodexAccount,
 } from "~/lib/api";
@@ -32,14 +34,35 @@ export function ImportAccountModalContainer({
   // Only managed containers can be imported from.
   const managed = clones.filter((h) => h.managed);
   const [provider, setProvider] = useState<"claude" | "codex">("claude");
+  const [mode, setMode] = useState<"clone" | "login">("clone");
+  const [loginUrl, setLoginUrl] = useState<string | null>(null);
+  const [pasted, setPasted] = useState("");
   const [hostId, setHostId] = useState(() => managed[0]?.id ?? "");
   const [info, setInfo] = useState<ImportCandidate | null>(null);
   const [checking, setChecking] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Ask for a sign-in URL whenever this dialog is on the sign-in path. Re-asked on a
+  // provider change, since the two flows are separate logins with separate verifiers, and
+  // the one already waiting is simply abandoned: it expires on its own.
+  useEffect(() => {
+    if (mode !== "login") return;
+    let cancelled = false;
+    setLoginUrl(null);
+    setPasted("");
+    setError(null);
+    beginLogin(provider)
+      .then((r) => !cancelled && setLoginUrl(r.url))
+      .catch((e: Error) => !cancelled && setError(e.message));
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, provider]);
+
   // Re-check the selected clone's login whenever it or the provider changes.
   useEffect(() => {
+    if (mode !== "clone") return;
     if (!hostId) return;
     let cancelled = false;
     setInfo(null);
@@ -57,10 +80,23 @@ export function ImportAccountModalContainer({
     return () => {
       cancelled = true;
     };
-  }, [hostId, provider]);
+  }, [hostId, provider, mode]);
 
   function submit() {
-    if (!info || importing) return;
+    if (importing) return;
+    if (mode === "login") {
+      if (!pasted.trim()) return;
+      setImporting(true);
+      setError(null);
+      completeLogin(provider, pasted.trim())
+        .then((r) => onImported(r.email))
+        .catch((e: Error) => {
+          setError(e.message);
+          setImporting(false);
+        });
+      return;
+    }
+    if (!info) return;
     setImporting(true);
     setError(null);
     const doImport = provider === "codex" ? importCodexAccount : importClaudeAccount;
@@ -75,6 +111,9 @@ export function ImportAccountModalContainer({
   return (
     <ImportAccountModalView
       provider={provider}
+      mode={mode}
+      loginUrl={loginUrl}
+      pasted={pasted}
       clones={managed}
       cloneId={hostId}
       info={info}
@@ -82,7 +121,9 @@ export function ImportAccountModalContainer({
       importing={importing}
       error={error}
       onProviderChange={setProvider}
+      onModeChange={setMode}
       onCloneIdChange={setHostId}
+      onPastedChange={setPasted}
       onClose={onClose}
       onImport={submit}
     />

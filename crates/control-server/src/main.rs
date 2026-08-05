@@ -30,6 +30,7 @@ mod shm;
 mod smb;
 mod ssh;
 mod state;
+mod oauth;
 mod stuck;
 mod stucklog;
 mod termplane;
