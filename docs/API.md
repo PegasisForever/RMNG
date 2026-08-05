@@ -352,6 +352,11 @@ answering "only self-matching pgrep wait loops remain, so they will not finish" 
 later on the same view, "background watcher tasks are still running and will wake the agent".
 The answer cache then pinned whichever came up.
 
+Counted from the two decision logs, over every decision taken while a dead loop was outstanding:
+21 decisions before the change, 3 of them `working`, against 7 decisions after, none `working`.
+The second arm is a reproduction rather than a found case, driven through a real interactive
+`claude` in a tmux pane. Seven samples is small.
+
 **A parent clone is only `idle` when its sub clones are too.** State is decided per clone, so a
 parent that handed work to a sub clone and is waiting on it looks quiet, and would read `idle`
 while the work it started is still running. After each tick's states are computed, a working sub

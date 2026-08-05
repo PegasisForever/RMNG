@@ -904,6 +904,20 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
 /// exists to settle that flip, and `turn_over_for_seconds` was added to the view with it,
 /// because nothing in the view had said how long the agent had actually been parked.
 ///
+/// Both arms were then counted on their own decision logs, over every decision taken while a
+/// dead loop was outstanding:
+///
+/// | | decisions | said working |
+/// |---|---|---|
+/// | before, CT 105, one session over 2h23m | 21 | 3 |
+/// | after, CT 120, one session over 10m | 7 | 0 |
+///
+/// The second arm is a deliberate reproduction rather than a found case: a real interactive
+/// `claude` in a tmux pane, told to leave `until ! pgrep -f rmng-judge-probe; do sleep 20; done`
+/// running and then stop. Driving it through the agent-wrapper instead would have proved
+/// nothing, because that entrypoint publishes no `status` and never reaches the `shell` state
+/// this failure lives in. Seven samples is small and says so.
+///
 /// One thing deliberately absent: any elapsed-time rule for background tasks. It was tested
 /// against all 1167 recorded views and rejected. Misses stayed at exactly 44 while false
 /// alarms rose from 35 to 47.
