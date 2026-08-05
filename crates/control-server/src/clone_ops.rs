@@ -60,13 +60,6 @@ pub(crate) fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// The `{…}` substring of `s` (login-shell noise can wrap the JSON), else trimmed `s`.
-pub(crate) fn extract_json(s: &str) -> &str {
-    match (s.find('{'), s.rfind('}')) {
-        (Some(a), Some(b)) if b >= a => &s[a..=b],
-        _ => s.trim(),
-    }
-}
 
 /// A short `: <prefix>` of an error body for log lines (empty stays empty).
 pub(crate) fn snippet(s: &str) -> String {
@@ -307,11 +300,6 @@ mod tests {
         assert!(st2.claude_accounts.iter().all(|u| u.provider == Some(Provider::Claude)));
     }
 
-    #[test]
-    fn extract_json_strips_shell_noise() {
-        assert_eq!(extract_json("noise {\"a\":1} tail"), "{\"a\":1}");
-        assert_eq!(extract_json("  bare text  "), "bare text");
-    }
 
     #[test]
     fn b64url_roundtrip_via_standard_encoder() {

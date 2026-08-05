@@ -20,7 +20,7 @@ use wire::{ClaudeUsage, ClaudeUsageWindow, CloneGroup, RmngClone};
 
 use crate::app::App;
 use crate::clone_ops::{
-    extract_json, jwt_claims, now_ms, rand_u64, run_clone_op, shuffle, snippet,
+    now_ms, rand_u64, run_clone_op, shuffle, snippet,
 };
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
@@ -192,119 +192,11 @@ impl CodexStore {
     }
 }
 
-// --- import from a signed-in clone ----------------------------------------
+// --- the account store ----------------------------------------------------
 
-/// The on-disk `~/.codex/auth.json` shape.
-#[derive(Deserialize)]
-struct CodexAuthFile {
-    #[serde(rename = "OPENAI_API_KEY", default)]
-    openai_api_key: Option<String>,
-    #[serde(default)]
-    tokens: Option<CodexTokens>,
-}
-
-#[derive(Deserialize)]
-struct CodexTokens {
-    #[serde(default)]
-    id_token: Option<String>,
-    #[serde(default)]
-    access_token: Option<String>,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    account_id: Option<String>,
-}
-
-/// The identity + tokens harvested from a signed-in clone.
-pub struct CodexAuth {
-    pub email: String,
-    pub plan: String,
-    pub account_id: String,
-    pub id_token: String,
-    pub access_token: String,
-    pub refresh_token: String,
-}
-
-pub struct ImportResult {
-    pub email: String,
-    pub cleared: bool,
-}
-
-/// Parse + validate a `~/.codex/auth.json` body into a [`CodexAuth`]. Requires a
-/// ChatGPT login (`OPENAI_API_KEY` null/absent) with a full `tokens` block, and decodes
-/// the id_token JWT for email / plan / account_id (account_id falls back to the JWT claim
-/// when absent from `tokens`).
-fn parse_codex_auth(raw: &str) -> Result<CodexAuth> {
-    let file: CodexAuthFile = serde_json::from_str(extract_json(raw))
-        .map_err(|_| anyhow::anyhow!("couldn't parse ~/.codex/auth.json"))?;
-    if file
-        .openai_api_key
-        .as_deref()
-        .is_some_and(|k| !k.is_empty())
-    {
-        bail!("this clone is signed in to Codex with an API key, not a ChatGPT subscription");
-    }
-    let tokens = file
-        .tokens
-        .context("~/.codex/auth.json has no tokens block (not signed in?)")?;
-    let (Some(id_token), Some(access_token), Some(refresh_token)) =
-        (tokens.id_token, tokens.access_token, tokens.refresh_token)
-    else {
-        bail!("~/.codex/auth.json is missing its id/access/refresh tokens");
-    };
-    let claims = jwt_claims(&id_token).context("codex id_token is not a decodable JWT")?;
-    let auth_ns = claims.get("https://api.openai.com/auth");
-    let email = claims
-        .get("email")
-        .and_then(|v| v.as_str())
-        .context("codex id_token has no email claim")?
-        .to_string();
-    let plan = auth_ns
-        .and_then(|a| a.get("chatgpt_plan_type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let account_id = tokens
-        .account_id
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            auth_ns
-                .and_then(|a| a.get("chatgpt_account_id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .context("codex auth has no account_id (in tokens or id_token claim)")?;
-    Ok(CodexAuth {
-        email,
-        plan,
-        account_id,
-        id_token,
-        access_token,
-        refresh_token,
-    })
-}
-
-/// Confirm clone `host` is signed in to Codex via ChatGPT and return its identity +
-/// tokens. Reads `~/.codex/auth.json` (codex has no clean JSON `login status`).
-pub async fn check_clone_auth(app: &App, host: &RmngClone) -> Result<CodexAuth> {
-    if !host.managed {
-        bail!(
-            "host '{}' is not a managed clone; only clones can be imported",
-            host.id
-        );
-    }
-    let raw = run_clone_op(app, &host.id, IMPORT_SCRIPT, "status", &[]).await?;
-    parse_codex_auth(&raw)
-        .map_err(|e| anyhow::anyhow!("{e} — is codex installed and signed in on '{}'?", host.id))
-}
-
-/// Import a Codex account from a signed-in clone: harvest the OAuth triple, upsert into
-/// the 0600 store (by id), then delete the clone's auth.json so its CLI can't rotate the
-/// refresh token the server now owns.
 /// Write one account into the 0600 store, replacing whatever shared its id.
 ///
-/// Shared by both ways in: taking a signed-in clone's `auth.json`, and signing in against
-/// the provider directly ([`crate::oauth`]).
+/// Accounts arrive one way: signing in to the provider at this server ([`crate::oauth`]).
 pub fn upsert_account(app: &App, stored: StoredCodexAccount) -> Result<()> {
     let mut accts = app.codex.accounts.lock().unwrap();
     let mut by_id: HashMap<String, StoredCodexAccount> =
@@ -315,45 +207,6 @@ pub fn upsert_account(app: &App, stored: StoredCodexAccount) -> Result<()> {
     app.codex.save(&next)?;
     *accts = next;
     Ok(())
-}
-
-pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportResult> {
-    if !host.managed {
-        bail!(
-            "host '{}' is not a managed clone; only clones can be imported",
-            host.id
-        );
-    }
-    let auth = check_clone_auth(app, host).await?;
-    let stored = StoredCodexAccount {
-        id: format!("codex:{}", auth.account_id),
-        email: auth.email.clone(),
-        account_id: auth.account_id,
-        plan: auth.plan,
-        active: false,
-        access_token: auth.access_token,
-        id_token: auth.id_token,
-        refresh_token: auth.refresh_token,
-        expires_at: 0,
-    };
-    upsert_account(app, stored)?;
-    let cleared = match run_clone_op(app, &host.id, IMPORT_SCRIPT, "clear", &[]).await {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!("codex import: clearing '{}' auth.json failed: {e}", host.id);
-            false
-        }
-    };
-    app.codex.forget_pushed(&host.id);
-    tracing::info!(
-        "imported Codex account {} from '{}' (cleared={cleared})",
-        auth.email,
-        host.id
-    );
-    Ok(ImportResult {
-        email: auth.email,
-        cleared,
-    })
 }
 
 // --- token refresh + push -------------------------------------------------
@@ -1756,30 +1609,7 @@ mod tests {
         assert!(pick_judge_account(&accounts, "deleted@openai.com").is_none());
     }
 
-    #[test]
-    fn parses_codex_auth_identity() {
-        let id_token = jwt_with(
-            r#"{"email":"z@openai.com","exp":2000000000,"https://api.openai.com/auth":{"chatgpt_plan_type":"plus","chatgpt_account_id":"acc-1"}}"#,
-        );
-        let file = format!(
-            r#"{{"OPENAI_API_KEY":null,"tokens":{{"id_token":"{id_token}","access_token":"eyJaccess","refresh_token":"rt-1","account_id":"acc-1"}},"last_refresh":"2026-07-01T00:00:00Z"}}"#
-        );
-        let auth = parse_codex_auth(&file).unwrap();
-        assert_eq!(auth.email, "z@openai.com");
-        assert_eq!(auth.plan, "plus");
-        assert_eq!(auth.account_id, "acc-1");
-        assert_eq!(auth.refresh_token, "rt-1");
-        assert_eq!(auth.access_token, "eyJaccess");
-    }
 
-    #[test]
-    fn rejects_api_key_login() {
-        // A codex CLI signed in with an API key has OPENAI_API_KEY set — not importable.
-        let file = r#"{"OPENAI_API_KEY":"sk-proj-xxx","tokens":null}"#;
-        assert!(parse_codex_auth(file).is_err());
-        // Missing tokens block is also an error.
-        assert!(parse_codex_auth(r#"{"OPENAI_API_KEY":null}"#).is_err());
-    }
 
     #[test]
     fn store_upsert_roundtrip() {

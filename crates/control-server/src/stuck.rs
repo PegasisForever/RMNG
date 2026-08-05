@@ -2108,8 +2108,11 @@ mod tests {
                      "ts": t})],
         );
         let events = read_hook_events(&root);
-        assert_eq!(read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S).len(), 1);
-        assert!(read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S + 0.1).is_empty());
+        // Either side of the window, not exactly on it: `t` is a real epoch stamp, where the
+        // f64 spacing is about 2.4e-7, so `(t + 60.0) - t` is not reliably 60.0 and a test
+        // written on the boundary flickers.
+        assert_eq!(read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S - 1.0).len(), 1);
+        assert!(read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S + 1.0).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

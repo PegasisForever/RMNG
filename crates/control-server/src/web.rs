@@ -94,8 +94,6 @@ pub fn router(app: App) -> Router {
         // pushes only short-lived access tokens into clones; these twelve are symmetric across
         // the two providers. Account POOLS are not edited here — they live in `config.json`
         // (`cloneGroups`/`codexGroups`) and are saved wholesale through `PUT /api/config`.
-        .route("/api/claude/import/check", post(claude_import_check))
-        .route("/api/claude/import", post(claude_import))
         // Sign in here instead of in a clone: begin hands back a URL, complete takes the
         // callback URL the browser landed on. See `crate::oauth`.
         .route("/api/login/begin", post(login_begin))
@@ -104,8 +102,6 @@ pub fn router(app: App) -> Router {
         .route("/api/claude/swap", post(claude_swap))
         .route("/api/claude/delete", post(claude_delete))
         .route("/api/claude/rotate", post(claude_rotate))
-        .route("/api/codex/import/check", post(codex_import_check))
-        .route("/api/codex/import", post(codex_import))
         .route("/api/codex/refresh", post(codex_refresh))
         .route("/api/codex/swap", post(codex_swap))
         .route("/api/codex/delete", post(codex_delete))
@@ -2428,10 +2424,6 @@ fn err_json(code: StatusCode, msg: impl ToString) -> (StatusCode, Json<serde_jso
 
 type JsonResult = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
 
-#[derive(Deserialize)]
-struct ImportCheckReq {
-    host: String,
-}
 
 /// `POST /api/claude/import/check` — confirm a clone is signed in to Claude Code via
 /// claude.ai and report the account identity (so the UI can show it before the
@@ -2460,6 +2452,9 @@ struct LoginCompleteReq {
     provider: String,
     /// Whatever the operator copied: the callback URL, its query, or `code=…&state=…`.
     pasted: String,
+    /// The pool to join, or empty for none. Must already exist.
+    #[serde(default)]
+    group: String,
 }
 
 /// `POST /api/login/complete` — redeem the pasted callback and store the account.
@@ -2470,7 +2465,7 @@ async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq
     let provider = crate::oauth::Provider::parse(&req.provider).ok_or_else(|| {
         err_json(StatusCode::BAD_REQUEST, format!("unknown provider '{}'", req.provider))
     })?;
-    let email = crate::oauth::complete(&app, provider, &req.pasted)
+    let email = crate::oauth::complete(&app, provider, &req.pasted, &req.group)
         .await
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
     // Put its usage on screen without making the browser wait, exactly as the clone import
@@ -2485,58 +2480,8 @@ async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq
     Ok(Json(serde_json::json!({ "ok": true, "email": email })))
 }
 
-async fn claude_import_check(
-    State(app): State<App>,
-    Json(req): Json<ImportCheckReq>,
-) -> JsonResult {
-    let host = clone_by_id(&app, &req.host).ok_or_else(|| {
-        err_json(
-            StatusCode::BAD_REQUEST,
-            format!("unknown host '{}'", req.host),
-        )
-    })?;
-    let st = crate::claude::check_clone_auth(&app, &host)
-        .await
-        .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
-    Ok(Json(json!({
-        "ok": true,
-        "email": st.email,
-        "orgName": st.org_name,
-        "subscriptionType": st.subscription_type,
-    })))
-}
 
-#[derive(Deserialize)]
-struct ImportReq {
-    host: String,
-}
 
-/// `POST /api/claude/import` — import a Claude account from a signed-in clone: store
-/// the clone's OAuth pair (the server owns its refresh lifecycle from here on), then
-/// clear the clone's credentials file. Kicks an immediate usage poll so it shows at once.
-async fn claude_import(State(app): State<App>, Json(req): Json<ImportReq>) -> JsonResult {
-    let host = clone_by_id(&app, &req.host).ok_or_else(|| {
-        err_json(
-            StatusCode::BAD_REQUEST,
-            format!("unknown host '{}'", req.host),
-        )
-    })?;
-    let res = crate::claude::import_clone_account(&app, &host)
-        .await
-        .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
-    // Detached, not awaited. The account is already stored by the line above, so this poll is
-    // only there to put its usage on screen — and awaiting it tied a job the server owes
-    // itself to a browser staying connected. A caller that gives up mid-import is normal:
-    // the poll takes seconds per account, and a fetch that answers after the client has gone
-    // still updates the view every other tab is reading.
-    let bg = app.clone();
-    tokio::spawn(async move {
-        let _ = crate::claude::poll_once(&bg).await;
-    });
-    Ok(Json(
-        json!({ "ok": true, "email": res.email, "cleared": res.cleared }),
-    ))
-}
 
 /// `POST /api/claude/refresh` — force one usage poll now.
 async fn claude_refresh(State(app): State<App>) -> Json<serde_json::Value> {
@@ -2668,52 +2613,8 @@ async fn claude_rotate(State(app): State<App>) -> Json<serde_json::Value> {
 
 // --- Codex accounts --------------------------------------------------------
 
-#[derive(Deserialize)]
-struct CodexImportReq {
-    host: String,
-}
 
-/// `POST /api/codex/import/check` — confirm a clone is signed in to Codex via ChatGPT and
-/// report its identity so the UI can show it before importing.
-async fn codex_import_check(State(app): State<App>, Json(req): Json<CodexImportReq>) -> JsonResult {
-    let host = clone_by_id(&app, &req.host).ok_or_else(|| {
-        err_json(
-            StatusCode::BAD_REQUEST,
-            format!("unknown host '{}'", req.host),
-        )
-    })?;
-    let auth = crate::codex::check_clone_auth(&app, &host)
-        .await
-        .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
-    Ok(Json(json!({
-        "ok": true,
-        "email": auth.email,
-        "plan": auth.plan,
-        "accountId": auth.account_id,
-    })))
-}
 
-/// `POST /api/codex/import` — import a Codex account from a signed-in clone.
-async fn codex_import(State(app): State<App>, Json(req): Json<CodexImportReq>) -> JsonResult {
-    let host = clone_by_id(&app, &req.host).ok_or_else(|| {
-        err_json(
-            StatusCode::BAD_REQUEST,
-            format!("unknown host '{}'", req.host),
-        )
-    })?;
-    let res = crate::codex::import_clone_account(&app, &host)
-        .await
-        .map_err(|e| err_json(StatusCode::BAD_GATEWAY, e))?;
-    // Detached for the same reason as the Claude import above: the store is already written,
-    // and the usage poll behind it is the server's job rather than this request's.
-    let bg = app.clone();
-    tokio::spawn(async move {
-        let _ = crate::codex::poll_once(&bg).await;
-    });
-    Ok(Json(
-        json!({ "ok": true, "email": res.email, "cleared": res.cleared }),
-    ))
-}
 
 /// `POST /api/codex/refresh` — force one usage poll now.
 async fn codex_refresh(State(app): State<App>) -> Json<serde_json::Value> {

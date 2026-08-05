@@ -196,7 +196,8 @@ the config. `PUT /api/config` returns
 - **`ClaudeConfig`**: `poll_secs` (`600`, floored 15), `pinned_email?`.
 - <a id="claude-accounts"></a>**Claude accounts** live outside config, in the server's 0600
   secret store `claude-accounts.json`: per account an OAuth pair (`access_token` +
-  single-use `refresh_token`, both **secret**), harvested from a signed-in clone at import.
+  single-use `refresh_token`, both **secret**), obtained by signing in to the provider at
+  the server (`POST /api/login/begin` then `/api/login/complete`).
   The server owns the whole refresh lifecycle; a clone gets **only the current short-lived
   access token** written into its `~/.claude/.credentials.json` (refresh emptied, far-future
   expiry), re-pushed to every assigned clone whenever a refresh rotates it — so a *running*

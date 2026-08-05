@@ -45,10 +45,8 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET/PUT | `/api/config` | Read redacted config or merge a partial update | 200 `AppConfigRedacted` / `{config,restartRequired,networkWarning?}` |
 | POST | `/api/config/test` | Test a setting (`"docker"`, `"judge"`) | 200 `{ok,message}` |
 | GET | `/api/setup/env` | Setup wizard environment preflight rows | 200 `SetupEnv` |
-| POST | `/api/{claude,codex}/import/check` | Report the account a clone is signed in to, before importing | 200 identity |
-| POST | `/api/{claude,codex}/import` | Take ownership of a signed-in clone's OAuth pair | 200 `{ok,email,cleared}` |
-| POST | `/api/login/begin` | Start an account sign-in here and get the URL to open | 200 `{url}` |
-| POST | `/api/login/complete` | Redeem the pasted callback URL and store the account | 200 `{ok,email}` |
+| POST | `/api/login/begin` | Start an account sign-in and get the URL to open | 200 `{url}` |
+| POST | `/api/login/complete` | Redeem the pasted callback URL, store the account, join a pool | 200 `{ok,email}` |
 | POST | `/api/{claude,codex}/refresh` | Force one usage poll (+ rotation pass) now | 200 `{ok,rateLimited,rotated}` |
 | POST | `/api/{claude,codex}/swap` | Change a clone's account selection, hot | 200 `{ok,account,group,selection}` |
 | POST | `/api/{claude,codex}/delete` | Remove an imported account by email | 200 `{ok,moved}` |
@@ -786,9 +784,8 @@ sets differ only in which store and credential file they touch.
 
 | Endpoint | Body | Returns | Does |
 |---|---|---|---|
-| `POST /api/claude/import/check` | `{host}` | `{ok, email, orgName, subscriptionType}` | Confirm a clone is signed in to Claude Code via claude.ai and report whose account it is, before importing |
-| `POST /api/codex/import/check` | `{host}` | `{ok, email, plan, accountId}` | The Codex twin (rejects an API-key login — a ChatGPT subscription is required) |
-| `POST /api/{claude,codex}/import` | `{host}` | `{ok, email, cleared}` | Read the OAuth pair off the signed-in clone, store it, then **delete the clone's credential file** so its CLI can't rotate the refresh token the server now owns. `cleared` reports whether that delete succeeded (best-effort — the account is already stored). Kicks an immediate usage poll |
+| `POST /api/login/begin` | `{provider}` | `{url}` | Mint a PKCE verifier and return the provider's authorize URL. Nothing is stored against an account yet, and the sign-in expires after 15 minutes if its callback never comes back |
+| `POST /api/login/complete` | `{provider, pasted, group}` | `{ok, email}` | Redeem the pasted callback, store the account, and add it to `group` (empty for none). Kicks an immediate usage poll |
 | `POST /api/{claude,codex}/refresh` | — | `{ok, rateLimited, rotated}` | Force one usage poll now, then a rotation pass. `rateLimited` is true if any account hit a 429 |
 | `POST /api/{claude,codex}/swap` | `{host, account}` | `{ok, account, group, selection}` | Change a clone's selection. `account` is the verbatim selection; the reply echoes the resolved account + pool + normalized selection |
 | `POST /api/{claude,codex}/delete` | `{account}` | `{ok, moved}` | Remove an imported account by email. `moved` is the ids of clones reassigned off it |
@@ -806,7 +803,7 @@ change. Clones merely *running* it via `auto`/a pool are not blockers: they are 
 rotation pass the delete triggers, and any that can't be placed (the account was a pool's only
 member) have the dangling reference cleared rather than being left pointed at a deleted account.
 
-Errors from `import/check`, `import`, `delete`, and `rotate` are `{error}` JSON bodies (what the
+Errors from `login/*`, `delete`, and `rotate` are `{error}` JSON bodies (what the
 frontend's `postJson` reads); `swap` returns a plain string, like the clone-lifecycle routes.
 
 ---

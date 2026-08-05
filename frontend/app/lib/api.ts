@@ -196,25 +196,15 @@ export const beginLogin = (provider: "claude" | "codex") =>
 /** Finish that sign-in with whatever the browser landed on. Both redirect URIs point at a
  *  port on the operator's own machine, so the page fails to load and its address bar is the
  *  only place the authorization code exists. */
-export const completeLogin = (provider: "claude" | "codex", pasted: string) =>
-  postJson("/api/login/complete", { provider, pasted }) as Promise<{
+export const completeLogin = (provider: "claude" | "codex", pasted: string, group: string) =>
+  postJson("/api/login/complete", { provider, pasted, group }) as Promise<{
     ok: boolean;
     email: string;
   }>;
 
 /** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */
 export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
-/** Confirm a clone is signed in to Claude Code via claude.ai; returns its identity. */
-export const checkClaudeImport = (clone: string) =>
-  postJson("/api/claude/import/check", { host: clone }) as Promise<{
-    email: string;
-    orgName: string | null;
-    subscriptionType: string | null;
-  }>;
-/** Import a Claude account from a signed-in clone: the server harvests the clone's
- *  OAuth pair (and owns its refresh lifecycle), then clears the clone's credentials file. */
-export const importClaudeAccount = (clone: string) =>
-  postJson("/api/claude/import", { host: clone }) as Promise<{ email: string; cleared: boolean }>;
+
 /** Change a clone's Claude account/group. `account` is "auto", "none", an email, or
  *  "group:<name>". `account` in the reply is null when set to "none". */
 export const swapClaudeAccount = (clone: string, account: string) =>
@@ -232,15 +222,6 @@ export const deleteClaudeAccount = (account: string) =>
 
 export const refreshCodexUsage = () => postJson("/api/codex/refresh", {});
 
-export const checkCodexImport = (clone: string) =>
-  postJson("/api/codex/import/check", { host: clone }) as Promise<{
-    email: string;
-    plan: string | null;
-    accountId: string;
-  }>;
-
-export const importCodexAccount = (clone: string) =>
-  postJson("/api/codex/import", { host: clone }) as Promise<{ email: string; cleared: boolean }>;
 
 export const swapCodexAccount = (clone: string, account: string) =>
   postJson("/api/codex/swap", { host: clone, account }) as Promise<{

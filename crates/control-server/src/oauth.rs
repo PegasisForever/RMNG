@@ -263,8 +263,17 @@ struct TokenResp {
     scope: Option<String>,
 }
 
-/// Finish a login and store the account. Returns the email it belongs to.
-pub async fn complete(app: &App, provider: Provider, pasted: &str) -> Result<String> {
+/// Finish a login and store the account, optionally joining it to a pool. Returns the email.
+///
+/// The pool is part of the import because an account nobody put in one is an account no
+/// clone will ever be handed by the rotator: it can still be pinned by name, but the pools
+/// are how clones get accounts without anybody choosing.
+pub async fn complete(
+    app: &App,
+    provider: Provider,
+    pasted: &str,
+    group: &str,
+) -> Result<String> {
     let (code, state) = parse_callback(pasted)?;
     let state = state.context("that URL carries no `state` parameter")?;
 
@@ -286,10 +295,46 @@ pub async fn complete(app: &App, provider: Provider, pasted: &str) -> Result<Str
     if tokens.refresh_token.is_empty() {
         bail!("the provider returned no refresh token, so the account could not be kept");
     }
-    match provider {
-        Provider::Claude => store_claude(app, tokens).await,
-        Provider::Codex => store_codex(app, tokens),
+    let email = match provider {
+        Provider::Claude => store_claude(app, tokens).await?,
+        Provider::Codex => store_codex(app, tokens)?,
+    };
+    if !group.is_empty() {
+        join_group(app, provider, &email, group)?;
     }
+    Ok(email)
+}
+
+/// Add `email` to the named pool, leaving every other pool alone.
+///
+/// An unknown name is an error rather than a silently created pool: pools are config the
+/// operator maintains, and inventing one here would put an account somewhere no clone is
+/// bound to. Already being a member is not an error, and does not duplicate the entry.
+fn join_group(app: &App, provider: Provider, email: &str, group: &str) -> Result<()> {
+    let mut cfg = app.config();
+    let pools = match provider {
+        Provider::Claude => &mut cfg.clone_groups,
+        Provider::Codex => &mut cfg.codex_groups,
+    };
+    add_to_pool(pools, email, group)?;
+    crate::config::save(&cfg).context("saving the pool membership")?;
+    *app.cfg.write().unwrap() = cfg;
+    tracing::info!("added {email} to the {group} pool");
+    Ok(())
+}
+
+/// Put `email` in the named pool. The decision, separated from reading and writing config so
+/// it can be tested without a config file: `crate::config::save` writes a fixed relative
+/// path, so a test that called it would drop a `config.json` in whatever directory it ran in.
+fn add_to_pool(pools: &mut [wire::CloneGroup], email: &str, group: &str) -> Result<()> {
+    let pool = pools
+        .iter_mut()
+        .find(|g| g.name == group)
+        .with_context(|| format!("no pool named '{group}'"))?;
+    if !pool.accounts.iter().any(|a| a == email) {
+        pool.accounts.push(email.to_string());
+    }
+    Ok(())
 }
 
 /// Redeem the code. Claude takes JSON, Codex takes a form body, and each is what its own
@@ -498,6 +543,23 @@ mod tests {
         assert!(err.contains("access_denied"), "{err}");
         assert!(parse_callback("http://localhost:54545/callback").is_err());
         assert!(parse_callback("   ").is_err());
+    }
+
+    #[test]
+    fn joining_a_pool_is_idempotent_and_refuses_a_pool_that_is_not_there() {
+        let mut pools = vec![
+            wire::CloneGroup { name: "Personal".into(), accounts: vec!["x@y.z".into()] },
+            wire::CloneGroup { name: "Medi".into(), accounts: vec![] },
+        ];
+        add_to_pool(&mut pools, "a@b.c", "Personal").unwrap();
+        add_to_pool(&mut pools, "a@b.c", "Personal").unwrap();
+        assert_eq!(pools[0].accounts, vec!["x@y.z".to_string(), "a@b.c".to_string()]);
+        assert!(pools[1].accounts.is_empty(), "no other pool is touched");
+
+        // A name that is not a pool is a mistake worth reporting: creating it here would put
+        // the account somewhere no clone is bound to.
+        let err = add_to_pool(&mut pools, "a@b.c", "Nope").unwrap_err().to_string();
+        assert!(err.contains("Nope"), "{err}");
     }
 
     #[test]

@@ -12,15 +12,15 @@
 //! Clones select an account via `"auto"` (rotated across all imported accounts by
 //! [`rotate_once`]), a named group, or a pinned email.
 //!
-//! **Importing an account** ([`check_clone_auth`] / [`import_clone_account`]) harvests
-//! the OAuth pair from a clone that's already signed in to Claude Code via `claude.ai`:
-//! we read `claude auth status` to confirm the login + identity, read the pair straight
-//! off the clone's `~/.claude/.credentials.json`, then **delete that file from the
-//! clone** so its Claude Code can never rotate (and thus invalidate) the refresh token
-//! the server now owns. All clone commands run over `docker exec` (via
-//! [`crate::provision::run_clone_op`]), replacing the retired Proxmox `pct exec` path — the
-//! clone is addressed by its container name (== host id). (Codex accounts are out of scope
-//! here — TODO if needed.)
+//! **Importing an account** happens at this server, by signing in to Anthropic through
+//! [`crate::oauth`]. Harvesting the pair out of a clone that was already signed in is gone:
+//! it needed a clone standing, Claude Code installed in it, and a second login for an
+//! account the provider will hand over directly.
+//!
+//! What the server writes INTO a clone is unchanged. Each clone gets a short-lived access
+//! token in its `~/.claude/.credentials.json` with an empty refresh token, so its Claude
+//! Code can never rotate the pair this server owns. Those writes go over `docker exec`
+//! ([`crate::provision::run_clone_op`]), addressing the clone by container name.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use wire::{ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, CloneGroup, RmngClone};
 
 use crate::app::App;
-use crate::clone_ops::{extract_json, now_ms, rand_u64, shuffle, snippet};
+use crate::clone_ops::{now_ms, rand_u64, shuffle, snippet};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -222,189 +222,13 @@ impl ClaudeStore {
     }
 }
 
-// --- import from a signed-in clone ----------------------------------------
-
-/// Parsed `claude auth status` output. Clean JSON when Claude Code is signed in;
-/// `loggedIn` is false (or the parse fails) otherwise.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthStatus {
-    #[serde(default)]
-    pub logged_in: bool,
-    #[serde(default)]
-    pub auth_method: Option<String>,
-    #[serde(default)]
-    pub email: Option<String>,
-    #[serde(default)]
-    pub org_id: Option<String>,
-    #[serde(default)]
-    pub org_name: Option<String>,
-    #[serde(default)]
-    pub subscription_type: Option<String>,
-}
-
-/// The on-disk `~/.claude/.credentials.json` shape (Claude Code's OAuth store).
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeCreds {
-    #[serde(default)]
-    claude_ai_oauth: Option<ClaudeOauth>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeOauth {
-    #[serde(default)]
-    access_token: Option<String>,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    expires_at: Option<i64>,
-    #[serde(default)]
-    scopes: Option<Vec<String>>,
-}
-
-/// What [`import_clone_account`] returns to the caller / UI.
-pub struct ImportResult {
-    pub email: String,
-    /// Whether the clone's credentials file was successfully removed.
-    pub cleared: bool,
-}
-
-/// Confirm clone `host` is signed in to Claude Code via **claude.ai** (not an API
-/// key) and return its account identity. Used both to validate up front (so the UI
-/// can show the account before the operator mints a token) and inside import.
-pub async fn check_clone_auth(app: &App, host: &RmngClone) -> Result<AuthStatus> {
-    if !host.managed {
-        bail!(
-            "host '{}' is not a managed clone; only clones can be imported",
-            host.id
-        );
-    }
-    let raw = crate::provision::run_clone_op(app, &host.id, "status", &[]).await?;
-    let status: AuthStatus = serde_json::from_str(extract_json(&raw)).map_err(|_| {
-        anyhow::anyhow!(
-            "couldn't read `claude auth status` on '{}' — is Claude Code installed and the clone running? (got: {})",
-            host.id,
-            extract_json(&raw).chars().take(140).collect::<String>()
-        )
-    })?;
-    if !status.logged_in {
-        bail!("'{}' is not signed in to Claude Code", host.id);
-    }
-    match status.auth_method.as_deref() {
-        Some("claude.ai") => Ok(status),
-        other => bail!(
-            "'{}' is signed in via '{}', but import needs a claude.ai subscription login (not an API key)",
-            host.id,
-            other.unwrap_or("unknown"),
-        ),
-    }
-}
-
-/// The pair to store, or the sentence saying why this clone has none to give.
-///
-/// A blank string is a missing token, not a token, and that distinction is the whole of this
-/// check. [`credentials_json`] writes `"refreshToken":""` with a year-2100 expiry into every
-/// clone the server installs a token on, so a clone already running on a server-installed
-/// token would otherwise import as an account that can never be refreshed: the stored expiry
-/// says it is good until 2100, so [`is_expired`] never asks Anthropic for a replacement, and
-/// every clone the account reaches keeps getting the access token it was imported with until
-/// that one dies eight hours later. The 401s that follow name the clones, never the import.
-///
-/// That case gets its own sentence, because "no refresh token beside a real access token" is
-/// this server's own handiwork and the operator needs to be told to sign in again rather than
-/// to look for a broken file.
-fn importable_tokens(
-    host_id: &str,
-    access: Option<String>,
-    refresh: Option<String>,
-) -> Result<(String, String)> {
-    let access = access.unwrap_or_default();
-    let refresh = refresh.unwrap_or_default();
-    if refresh.trim().is_empty() && !access.trim().is_empty() {
-        bail!(
-            "'{host_id}' runs on a token this server installed, so its credentials file holds \
-             no refresh token to import. Set the clone's Claude account to `none`, sign in \
-             inside it with `claude /login`, then import."
-        );
-    }
-    if access.trim().is_empty() || refresh.trim().is_empty() {
-        bail!("the clone's credentials file is missing its access/refresh tokens");
-    }
-    Ok((access, refresh))
-}
-
-/// Import a Claude account from a signed-in clone: read the OAuth pair (access +
-/// refresh token) off the clone's credentials file, upsert it into the secret
-/// store (by id), then **delete that file from the clone** so it can't rotate /
-/// invalidate the refresh token the server now owns.
-pub async fn import_clone_account(app: &App, host: &RmngClone) -> Result<ImportResult> {
-    if !host.managed {
-        bail!(
-            "host '{}' is not a managed clone; only clones can be imported",
-            host.id
-        );
-    }
-
-    // 1. Confirm the login + learn the account identity (email / org).
-    let status = check_clone_auth(app, host).await?;
-    let email = status
-        .email
-        .clone()
-        .context("`claude auth status` returned no email")?;
-    let org_uuid = status.org_id.clone().unwrap_or_default();
-
-    // 2. Read the OAuth pair straight off the clone's disk.
-    let raw = crate::provision::run_clone_op(app, &host.id, "read", &[])
-        .await
-        .with_context(|| format!("reading '{}' Claude credentials", host.id))?;
-    let oauth = serde_json::from_str::<ClaudeCreds>(extract_json(&raw))
-        .ok()
-        .and_then(|c| c.claude_ai_oauth)
-        .context("the clone's credentials file has no claudeAiOauth block")?;
-    let (access, refresh) = importable_tokens(&host.id, oauth.access_token, oauth.refresh_token)?;
-
-    // 3. Upsert into the 0600 secret store (by id).
-    let id = format!("{email}|{org_uuid}");
-    let stored = StoredClaudeAccount {
-        id: id.clone(),
-        email: email.clone(),
-        org_uuid,
-        org_name: status.org_name.clone().unwrap_or_default(),
-        active: false,
-        access_token: access,
-        refresh_token: refresh,
-        expires_at: oauth.expires_at.unwrap_or(0),
-        scopes: oauth.scopes.unwrap_or_default(),
-    };
-    upsert_account(app, stored)?;
-
-    // 4. Clear the clone's credentials so its Claude Code can't rotate the refresh
-    //    token we just took ownership of. Best-effort: the account is already stored.
-    //    Forget the clone's pushed record too — if it has an assigned account, the
-    //    next reconcile pass restores that token over the file we just deleted.
-    let cleared = match crate::provision::run_clone_op(app, &host.id, "clear", &[]).await {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!("import: clearing '{}' credentials failed: {e}", host.id);
-            false
-        }
-    };
-    app.claude.forget_pushed(&host.id);
-
-    tracing::info!(
-        "imported Claude account {email} from '{}' (cleared={cleared})",
-        host.id
-    );
-    Ok(ImportResult { email, cleared })
-}
+// --- the account store ----------------------------------------------------
 
 /// Write one account into the 0600 store, replacing whatever shared its id.
 ///
-/// Both ways in end here: taking a signed-in clone's credentials, and signing in against
-/// the provider directly ([`crate::oauth`]). An account is the same record either way, so
-/// nothing downstream can tell which door it came through.
+/// Accounts arrive one way: signing in to the provider at this server ([`crate::oauth`]).
+/// Reading credentials back out of a signed-in clone was the other, and it is gone: it
+/// needed a clone standing, the CLI installed in it, and a second login.
 pub fn upsert_account(app: &App, stored: StoredClaudeAccount) -> Result<()> {
     let mut accts = app.claude.accounts.lock().unwrap();
     let mut by_id: HashMap<String, StoredClaudeAccount> =
@@ -1734,79 +1558,15 @@ mod tests {
 
     // The exact shapes Claude Code v2 emits — `claude auth status` (camelCase JSON)
     // and `~/.claude/.credentials.json` (camelCase, nested under `claudeAiOauth`).
-    const AUTH_STATUS: &str = r#"{
-        "loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty",
-        "email": "a@b.com", "orgId": "org-uuid", "orgName": "A's Org",
-        "subscriptionType": "max"
-    }"#;
-    const CREDS: &str = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-AAA",
-        "refreshToken":"sk-ant-ort01-BBB","expiresAt":1782865752191,
-        "scopes":["user:inference","user:profile"],"subscriptionType":"max"}}"#;
 
-    #[test]
-    fn parses_auth_status() {
-        let s: AuthStatus = serde_json::from_str(extract_json(AUTH_STATUS)).unwrap();
-        assert!(s.logged_in);
-        assert_eq!(s.auth_method.as_deref(), Some("claude.ai"));
-        assert_eq!(s.email.as_deref(), Some("a@b.com"));
-        assert_eq!(s.org_id.as_deref(), Some("org-uuid"));
-    }
 
-    #[test]
-    fn parses_credentials_camelcase() {
-        // Regression: `claudeAiOauth` (camelCase) must map onto `claude_ai_oauth`.
-        let oauth = serde_json::from_str::<ClaudeCreds>(CREDS)
-            .unwrap()
-            .claude_ai_oauth
-            .unwrap();
-        assert_eq!(oauth.access_token.as_deref(), Some("sk-ant-oat01-AAA"));
-        assert_eq!(oauth.refresh_token.as_deref(), Some("sk-ant-ort01-BBB"));
-        assert_eq!(oauth.expires_at, Some(1782865752191));
-        assert_eq!(oauth.scopes.unwrap().len(), 2);
-    }
 
-    #[test]
-    fn a_real_login_imports() {
-        let (a, r) = importable_tokens(
-            "pega-we-1",
-            Some("sk-ant-oat01-AAA".into()),
-            Some("sk-ant-ort01-BBB".into()),
-        )
-        .unwrap();
-        assert_eq!(a, "sk-ant-oat01-AAA");
-        assert_eq!(r, "sk-ant-ort01-BBB");
-    }
 
     // The bug this guard exists for: re-importing a clone the server already pushed a token
     // to stored a blank refresh token beside a year-2100 expiry, so the account was never
     // refreshed again and handed out a dead access token until somebody noticed the 401s.
-    #[test]
-    fn a_server_installed_token_is_refused_by_name() {
-        let creds = credentials_json("sk-ant-oat01-AAA");
-        let oauth = serde_json::from_str::<ClaudeCreds>(&creds)
-            .unwrap()
-            .claude_ai_oauth
-            .unwrap();
-        // The file the server writes parses as a *present* empty string, never as absent.
-        assert_eq!(oauth.refresh_token.as_deref(), Some(""));
 
-        let err = importable_tokens("pega-we-1", oauth.access_token, oauth.refresh_token)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("pega-we-1"), "{err}");
-        assert!(err.contains("no refresh token"), "{err}");
-    }
 
-    #[test]
-    fn a_whitespace_refresh_token_is_no_token() {
-        assert!(importable_tokens("h", Some("sk-ant-oat01-A".into()), Some("  ".into())).is_err());
-    }
-
-    #[test]
-    fn a_file_with_neither_token_says_so() {
-        let err = importable_tokens("h", None, None).unwrap_err().to_string();
-        assert!(err.contains("missing its access/refresh tokens"), "{err}");
-    }
 
     #[test]
     fn parses_usage_with_null_extra_fields() {
@@ -1869,18 +1629,6 @@ mod tests {
         assert_eq!(fable.resets_at.as_deref(), Some("2026-07-24T22:00:00.469890+00:00"));
     }
 
-    #[test]
-    fn extract_json_strips_login_shell_noise() {
-        // A login shell may wrap the JSON in MOTD/profile chatter on either side.
-        let noisy = format!("Welcome to Ubuntu\n{AUTH_STATUS}\nLast login: today");
-        let s: AuthStatus = serde_json::from_str(extract_json(&noisy)).unwrap();
-        assert!(s.logged_in);
-        // No JSON at all → falls back to the trimmed input (which then fails to parse).
-        assert_eq!(
-            extract_json("  claude: command not found  "),
-            "claude: command not found"
-        );
-    }
 
     // --- groups: rotation assignment ---------------------------------------
 

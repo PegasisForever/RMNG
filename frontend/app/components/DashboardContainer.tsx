@@ -967,7 +967,8 @@ export function DashboardContainer({
 
       {importOpen ? (
         <ImportAccountModalContainer
-          clones={state.hosts}
+          claudeGroups={cloneGroups.map((g) => g.name)}
+          codexGroups={codexGroups.map((g) => g.name)}
           onClose={() => setImportOpen(false)}
           onImported={() => {
             setImportOpen(false);

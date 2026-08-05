@@ -1,56 +1,49 @@
-// Import a Claude or Codex account from a clone that's already signed in to its agent CLI.
-// Flow: pick a clone → the server runs `claude auth status` to confirm it's a claude.ai login
-// and shows the account → the server harvests the clone's OAuth pair (it owns the refresh
-// lifecycle from then on) and clears the clone's credentials file so its Claude Code can't
-// rotate the refresh token.
+// Add a Claude or Codex account by signing in to the provider from this page.
 //
-// Both server calls live here, one per step, and nothing below knows there is a server at
-// all. The markup is ImportAccountModalView.
+// Two server calls, one per step. `begin` mints a PKCE verifier and hands back the URL to
+// open; `complete` takes whatever the browser landed on, redeems the code, stores the
+// account and joins it to the chosen pool. Nothing below knows there is a server at all.
+//
+// Switching provider starts a fresh sign-in, because the two are separate logins with
+// separate verifiers. The one already waiting is simply abandoned: it expires on its own,
+// and it names no account, so nothing is left behind by walking away from it.
+//
+// The markup is ImportAccountModalView.
 import { useEffect, useState } from "react";
 
-import {
-  ImportAccountModalView,
-  type ImportCandidate,
-} from "~/components/ImportAccountModalView";
-import {
-  beginLogin,
-  checkClaudeImport,
-  checkCodexImport,
-  completeLogin,
-  importClaudeAccount,
-  importCodexAccount,
-} from "~/lib/api";
-import type { Clone } from "~/lib/types";
+import { ImportAccountModalView } from "~/components/ImportAccountModalView";
+import { beginLogin, completeLogin } from "~/lib/api";
 
 export function ImportAccountModalContainer({
-  clones,
+  claudeGroups,
+  codexGroups,
   onClose,
   onImported,
 }: {
-  clones: Clone[];
+  /** Pool names from `config.cloneGroups`. */
+  claudeGroups: string[];
+  /** Pool names from `config.codexGroups`. */
+  codexGroups: string[];
   onClose: () => void;
   onImported: (email: string) => void;
 }) {
-  // Only managed containers can be imported from.
-  const managed = clones.filter((h) => h.managed);
   const [provider, setProvider] = useState<"claude" | "codex">("claude");
-  const [mode, setMode] = useState<"clone" | "login">("clone");
   const [loginUrl, setLoginUrl] = useState<string | null>(null);
   const [pasted, setPasted] = useState("");
-  const [hostId, setHostId] = useState(() => managed[0]?.id ?? "");
-  const [info, setInfo] = useState<ImportCandidate | null>(null);
-  const [checking, setChecking] = useState(false);
+  const [group, setGroup] = useState("");
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Ask for a sign-in URL whenever this dialog is on the sign-in path. Re-asked on a
-  // provider change, since the two flows are separate logins with separate verifiers, and
-  // the one already waiting is simply abandoned: it expires on its own.
+  const groups = provider === "codex" ? codexGroups : claudeGroups;
+
+  // A URL per provider, asked for on open and again on a provider switch. The pool resets
+  // with it: the two providers keep separate pools, so one picked for Claude means nothing
+  // to Codex.
   useEffect(() => {
-    if (mode !== "login") return;
     let cancelled = false;
     setLoginUrl(null);
     setPasted("");
+    setGroup("");
     setError(null);
     beginLogin(provider)
       .then((r) => !cancelled && setLoginUrl(r.url))
@@ -58,49 +51,13 @@ export function ImportAccountModalContainer({
     return () => {
       cancelled = true;
     };
-  }, [mode, provider]);
-
-  // Re-check the selected clone's login whenever it or the provider changes.
-  useEffect(() => {
-    if (mode !== "clone") return;
-    if (!hostId) return;
-    let cancelled = false;
-    setInfo(null);
-    setError(null);
-    setChecking(true);
-    const check = provider === "codex" ? checkCodexImport : checkClaudeImport;
-    check(hostId)
-      .then((r) => {
-        // codex returns { email, plan }, claude returns { email, subscriptionType }.
-        const plan = "plan" in r ? r.plan : (r as { subscriptionType: string | null }).subscriptionType;
-        if (!cancelled) setInfo({ email: r.email, plan });
-      })
-      .catch((e: Error) => !cancelled && setError(e.message))
-      .finally(() => !cancelled && setChecking(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [hostId, provider, mode]);
+  }, [provider]);
 
   function submit() {
-    if (importing) return;
-    if (mode === "login") {
-      if (!pasted.trim()) return;
-      setImporting(true);
-      setError(null);
-      completeLogin(provider, pasted.trim())
-        .then((r) => onImported(r.email))
-        .catch((e: Error) => {
-          setError(e.message);
-          setImporting(false);
-        });
-      return;
-    }
-    if (!info) return;
+    if (importing || !pasted.trim()) return;
     setImporting(true);
     setError(null);
-    const doImport = provider === "codex" ? importCodexAccount : importClaudeAccount;
-    doImport(hostId)
+    completeLogin(provider, pasted.trim(), group)
       .then((r) => onImported(r.email))
       .catch((e: Error) => {
         setError(e.message);
@@ -111,19 +68,15 @@ export function ImportAccountModalContainer({
   return (
     <ImportAccountModalView
       provider={provider}
-      mode={mode}
       loginUrl={loginUrl}
       pasted={pasted}
-      clones={managed}
-      cloneId={hostId}
-      info={info}
-      checking={checking}
+      groups={groups}
+      group={group}
       importing={importing}
       error={error}
       onProviderChange={setProvider}
-      onModeChange={setMode}
-      onCloneIdChange={setHostId}
       onPastedChange={setPasted}
+      onGroupChange={setGroup}
       onClose={onClose}
       onImport={submit}
     />

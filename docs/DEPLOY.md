@@ -116,7 +116,7 @@ The wizard walks four things:
 
 Afterward, use **Settings** to create presets (Linear key + labels + env vars), Claude and Codex
 settings and account pools, monitor defaults, and the ports. Accounts themselves are imported from
-a signed-in clone, not entered here. Secrets are write-only and redacted on read. The one-time fields
+signing in to the provider, not entered here. Secrets are write-only and redacted on read. The one-time fields
 (`dataDir`, `cloneSocket`, `docker.subnet`) lock once the wizard latches. See
 [SCRIPTS.md](SCRIPTS.md) for the in-container guest scripts and [API.md](API.md) for every
 endpoint.
@@ -155,9 +155,10 @@ Consequences worth knowing before you deploy:
   features. The keys likewise still live in their original `data/` file for the same reason:
   pointing at a fresh path would mint new keys and invalidate every clone's identity at once.
 
-Accounts are imported **from a clone that is already signed in** (Settings → the account panels,
-or `rmng account`), which is also when the server takes ownership: it copies the OAuth pair out
-and deletes the clone's own credential file. Named **pools** (`cloneGroups` / `codexGroups` in
+Accounts are added by **signing in to the provider from the dashboard** (Settings → the account
+panels). The server owns the OAuth pair from that moment and hands each clone a short-lived
+access token with an empty refresh token, so no clone can rotate what the server holds. An
+account can join a pool as it is added. Named **pools** (`cloneGroups` / `codexGroups` in
 `config.json`) are edited in Settings and balanced by a 10-minute sticky rotator. Full endpoint
 reference: [API.md](API.md#accounts-claude--codex).
 
@@ -652,7 +653,8 @@ inherits it (there's no per-install control-server payload any more; see
 - **Hot-swap an account**: `POST /api/claude/swap {host, account}` (or `/api/codex/swap`) —
   writes the clone's `~/.claude/.credentials.json` / `~/.codex/auth.json` live via `docker exec`.
   No restart: the agents re-read those files per request.
-- **Import an account** off a clone that is already signed in: `POST /api/claude/import {host}`
+- **Add an account** by signing in: `POST /api/login/begin {provider}`, open the URL, then
+  `POST /api/login/complete {provider, pasted, group}`
   (or `/api/codex/import`). The server takes ownership of the OAuth pair and clears the clone's
   copy.
 - **Delete**: `POST /api/delete {id}` (stops + removes the container and its
