@@ -112,9 +112,10 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 Despite its name `claudeAccounts` is provider-agnostic: the Claude and Codex pollers each
 replace only their own rows (`clone_ops::replace_provider_views`), so a reader filters on
 `provider` rather than assuming a list is one provider's. A row written before that field
-existed has none, which means Claude. `ClaudeUsage` carries no tokens — only `email`, `active`,
-the `fiveHour`/`sevenDay` windows, Claude's model-scoped `fable` window, `spend`, and Codex's
-`resetCredits`.
+existed has none, which means Claude. `ClaudeUsage` carries no tokens, only `email`, `active`,
+`assignable` (whether the account can run a clone right now, see
+[Accounts](#accounts-claude--codex)), the `fiveHour`/`sevenDay` windows, Claude's model-scoped
+`fable` window, `spend`, and Codex's `resetCredits`.
 
 `Clone` carries connection info (`id`, `host`, `port`, `username`, …), the `managed` flag
 (true = a Docker container named after the clone id backs it; false = a plain unmanaged
@@ -796,9 +797,21 @@ doesn't pin its children to whatever it happens to be running.
 (each `{name, accounts: [email]}`), edited **wholesale** through `PUT /api/config` like any other
 setting — the editor always sends the full list, so a plain array replace is the merge rule and an
 empty array clears the pools. There are no dedicated group endpoints. A clone bound to a pool
-sticks to its account (preserving its Anthropic prompt cache — an account switch cold-starts it)
-until that account is exhausted or leaves the pool; the 10-minute rotator then moves it to the
+sticks to its account (preserving its Anthropic prompt cache, since an account switch cold-starts
+it) until that account is exhausted or leaves the pool. The 10-minute rotator then moves it to the
 least-loaded member.
+
+**An account leaves the rotation when its token dies.** `ClaudeUsage.assignable` is true while the
+token the server holds has not expired, and `expires_at` moves forward only when a refresh
+succeeds. So a refresh chain the provider has rejected (a spent single-use token, a revoked grant)
+drops the account out once its last access token expires, and every pool, the `auto` pool, and the
+recommendation for a new clone skip it from then on. Clones already on it are moved to a surviving
+member, stickiness included, because a clone on a dead token has no prompt cache left to protect.
+A failed usage poll does not do this: a 429 or a dropped connection leaves a working token behind,
+which is why the test is the expiry and not the last error. The account stays imported and stays
+pinnable by name, and it becomes assignable again by itself the moment one refresh succeeds. The
+transition is logged once in each direction, and the accounts panel marks the account
+"sign in again".
 
 ### The twelve account endpoints
 

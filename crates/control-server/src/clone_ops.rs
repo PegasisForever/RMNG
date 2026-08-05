@@ -116,13 +116,53 @@ pub(crate) fn replace_provider_views(
         }
         a.email.cmp(&b.email)
     });
+    let mut changes = Vec::new();
     app.store.mutate(|s| {
         let mut merged: Vec<wire::ClaudeUsage> =
             s.claude_accounts.iter().filter(|u| u.provider != Some(provider)).cloned().collect();
+        let was: Vec<&wire::ClaudeUsage> =
+            s.claude_accounts.iter().filter(|u| u.provider == Some(provider)).collect();
+        changes = usability_changes(&was, &views);
         merged.extend(views.iter().cloned());
         merged.sort_by_key(|u| provider_rank(u.provider));
         s.claude_accounts = merged;
     });
+    for (email, reason) in changes {
+        match reason {
+            Some(why) => tracing::error!(
+                "{provider:?} account {email} can no longer run a clone and is out of the \
+                 rotation until it is signed in again: {why}"
+            ),
+            None => tracing::info!("{provider:?} account {email} is usable again"),
+        }
+    }
+}
+
+/// Accounts whose usability flipped between two published view sets, as
+/// `(email, Some(reason))` for one that just went dark and `(email, None)` for one that
+/// recovered. An account seen for the first time counts as a change only when it arrives
+/// unusable, so a restart still reports a dead account instead of inheriting silence.
+///
+/// Edge-triggered on purpose: a poller that logged the state would print the same line
+/// every pass, and a line printed every pass is one nobody reads.
+fn usability_changes(
+    was: &[&wire::ClaudeUsage],
+    now: &[wire::ClaudeUsage],
+) -> Vec<(String, Option<String>)> {
+    let usable = |u: &wire::ClaudeUsage| u.assignable.unwrap_or(true);
+    let mut out = Vec::new();
+    for v in now {
+        let before = was.iter().find(|u| u.email == v.email).map(|u| usable(u));
+        match (before, usable(v)) {
+            (Some(true) | None, false) => out.push((
+                v.email.clone(),
+                Some(v.error.clone().unwrap_or_else(|| "no reason recorded".into())),
+            )),
+            (Some(false), true) => out.push((v.email.clone(), None)),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Run one import-script op (`status`|`read`|`clear`|`apply`) inside clone `container`
@@ -212,6 +252,50 @@ mod tests {
     use super::*;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
+
+    fn usage_view(email: &str, assignable: bool, error: Option<&str>) -> wire::ClaudeUsage {
+        wire::ClaudeUsage {
+            id: email.into(),
+            email: email.into(),
+            provider: Some(wire::Provider::Claude),
+            active: false,
+            assignable: Some(assignable),
+            error: error.map(str::to_string),
+            stale: None,
+            last_updated: 0,
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            spend: None,
+            reset_credits: None,
+        }
+    }
+
+    #[test]
+    fn a_dead_account_is_reported_once_and_again_when_it_comes_back() {
+        let live = usage_view("a@x", true, None);
+        let dead = usage_view("a@x", false, Some("refresh 400: invalid_grant"));
+
+        // Falling over reports the reason.
+        let out = usability_changes(&[&live], std::slice::from_ref(&dead));
+        assert_eq!(out, vec![("a@x".to_string(), Some("refresh 400: invalid_grant".to_string()))]);
+        // Every pass after that is silent: the poller runs every few minutes, and a line
+        // printed every pass is one nobody reads.
+        assert!(usability_changes(&[&dead], std::slice::from_ref(&dead)).is_empty());
+        // Recovery is one line too.
+        assert_eq!(usability_changes(&[&dead], vec![live.clone()].as_slice()), vec![("a@x".to_string(), None)]);
+        assert!(usability_changes(&[&live], std::slice::from_ref(&live)).is_empty());
+    }
+
+    #[test]
+    fn an_account_that_is_dead_the_first_time_it_is_seen_is_reported() {
+        // A restart publishes into an empty set. Treating "unseen" as usable would swallow
+        // the one line that says the fleet lost an account while the server was down.
+        let dead = usage_view("a@x", false, Some("refresh 400: invalid_grant"));
+        assert_eq!(usability_changes(&[], std::slice::from_ref(&dead)).len(), 1);
+        let live = usage_view("a@x", true, None);
+        assert!(usability_changes(&[], std::slice::from_ref(&live)).is_empty());
+    }
 
     #[test]
     fn one_poll_at_a_time() {

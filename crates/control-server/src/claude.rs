@@ -181,12 +181,26 @@ impl ClaudeStore {
             .cloned()
     }
 
-    /// Emails of every imported account (the assignable universe).
+    /// Emails of every imported account. Membership, not usability: an account whose
+    /// refresh chain is dead is still imported. Use [`Self::usable_emails`] to pick one
+    /// for a clone.
     fn emails(&self) -> Vec<String> {
         self.accounts
             .lock()
             .unwrap()
             .iter()
+            .map(|a| a.email.clone())
+            .collect()
+    }
+
+    /// Emails whose stored token still works: the accounts a clone may be handed.
+    fn usable_emails(&self) -> Vec<String> {
+        let now = now_ms();
+        self.accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| token_alive(a.expires_at, now))
             .map(|a| a.email.clone())
             .collect()
     }
@@ -262,6 +276,21 @@ fn refresh_lead_ms(email: &str) -> i64 {
 
 fn is_expired(email: &str, expires_at: i64) -> bool {
     now_ms() + refresh_lead_ms(email) >= expires_at
+}
+
+/// Whether the token the store holds for an account still works.
+///
+/// `expires_at` moves forward only when a refresh succeeds, so this is the one test that
+/// separates "a poll pass failed" from "this account can no longer run a clone". A 429 or
+/// a dropped connection on the usage fetch leaves a perfectly good token behind and must
+/// not evict an account. A refresh chain that Anthropic has rejected cannot mint another
+/// token, so the account goes dark the moment its last one expires, and comes back by
+/// itself the moment a refresh succeeds.
+///
+/// The account keeps its full refresh lead (2 hours plus its own offset) of grace, which
+/// is four to five poll passes of failure before anything moves.
+pub(crate) fn token_alive(expires_at: i64, now: i64) -> bool {
+    now < expires_at
 }
 
 #[derive(Deserialize)]
@@ -570,7 +599,9 @@ async fn poll_inner(app: &App) -> Result<bool> {
         }
         .await;
         match outcome {
-            Ok(u) => {
+            Ok(mut u) => {
+                // The fetch above ran on this account's own token, so the token works.
+                u.assignable = Some(true);
                 app.claude
                     .last_good
                     .lock()
@@ -583,6 +614,12 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 if msg.contains("429") {
                     any429 = true;
                 }
+                // Re-read the account: a refresh that succeeded earlier in this same pass
+                // moved `expires_at`, and the snapshot taken at the top has not.
+                let alive = app
+                    .claude
+                    .get_by_email(&acct.email)
+                    .is_some_and(|a| token_alive(a.expires_at, now_ms()));
                 let prev = app.claude.last_good.lock().unwrap().get(&acct.id).cloned();
                 views.push(match prev {
                     Some(mut p) => {
@@ -591,11 +628,13 @@ async fn poll_inner(app: &App) -> Result<bool> {
                         // token and a momentary 429 both read as "these numbers are old",
                         // and the one that never recovers goes unnoticed for days.
                         p.error = Some(msg);
+                        p.assignable = Some(alive);
                         p
                     }
                     None => {
                         let mut b = claude_base(acct);
                         b.error = Some(msg);
+                        b.assignable = Some(alive);
                         b
                     }
                 });
@@ -603,10 +642,6 @@ async fn poll_inner(app: &App) -> Result<bool> {
         }
     }
 
-    // Every imported account can run a clone (the server owns its token lifecycle).
-    for v in &mut views {
-        v.assignable = Some(true);
-    }
     let cfg = app.config();
     crate::clone_ops::replace_provider_views(
         app,
@@ -664,7 +699,7 @@ fn score_accounts(app: &App) -> Vec<Scored> {
         }
     }
     app.claude
-        .emails()
+        .usable_emails()
         .into_iter()
         .map(|email| {
             let u = usage.get(email.as_str());
@@ -896,7 +931,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 }
 
 fn rotation_candidates(app: &App, members: &[String]) -> Vec<RotationCandidate> {
-    let known = app.claude.emails();
+    let known = app.claude.usable_emails();
     let st = app.store.get();
     members
         .iter()
@@ -935,10 +970,10 @@ fn exhausted(app: &App, email: &str) -> bool {
     is_exhausted(five_hour_pct(app, email), seven_day_pct(app, email))
 }
 
-/// Imported accounts among `members` that aren't exhausted — the usable rotation
-/// targets for a pool. (Non-imported members have no token, so they're dropped.)
+/// Accounts among `members` that can take work: imported, holding a token that still
+/// works, and not exhausted. (A member with no token, or with a dead one, is dropped.)
 fn eligible_members(app: &App, members: &[String]) -> Vec<String> {
-    let known = app.claude.emails();
+    let known = app.claude.usable_emails();
     members
         .iter()
         .filter(|email| known.iter().any(|k| &k == email))
@@ -1250,10 +1285,10 @@ pub async fn rotate_once(app: &App) {
         };
         rotate_pool(app, &gname, &group.accounts, &clones).await;
     }
-    // "auto" == a live group of all imported accounts.
+    // "auto" == a live group of every account that can still run a clone.
     let auto = auto_pool_clones(&hosts);
     if !auto.is_empty() {
-        rotate_pool(app, "auto", &app.claude.emails(), &auto).await;
+        rotate_pool(app, "auto", &app.claude.usable_emails(), &auto).await;
     }
 }
 
@@ -1937,6 +1972,48 @@ mod tests {
         // without a live clone/daemon in the test, so the dangling ref is cleared to None.)
         let c1 = app.store.get().hosts.into_iter().find(|h| h.id == "c1").unwrap();
         assert_ne!(c1.claude_account_email.as_deref(), Some("a@x"));
+    }
+
+    /// Mark `email`'s last access token as long expired, which is what a refresh chain
+    /// Anthropic has rejected leaves behind: nothing can move `expires_at` forward again.
+    fn kill_token(app: &App, email: &str) {
+        let mut acct = app.claude.get_by_email(email).unwrap();
+        acct.expires_at = now_ms() - 60 * 60 * 1000;
+        app.claude.update_account(&acct).unwrap();
+    }
+
+    #[test]
+    fn an_expired_token_leaves_the_rotation_but_stays_imported() {
+        let app = app_with_group(&["live@x", "dead@x"]);
+        kill_token(&app, "dead@x");
+
+        assert_eq!(app.claude.usable_emails(), vec!["live@x".to_string()]);
+        let members = vec!["live@x".to_string(), "dead@x".to_string()];
+        assert_eq!(eligible_members(&app, &members), vec!["live@x".to_string()]);
+        // Still imported. Deleting it is the operator's call, and a clone pinned to it by
+        // name still resolves, so the pin reports a real error instead of silently moving.
+        assert!(app.claude.emails().contains(&"dead@x".to_string()));
+    }
+
+    #[test]
+    fn a_clone_holding_a_dead_account_is_moved_off_it() {
+        // Stickiness normally keeps a clone on its current account, because switching
+        // cold-starts the prompt cache. A dead token beats stickiness: the clone is
+        // already broken, so there is no cache worth protecting.
+        let app = app_with_group(&["live@x", "dead@x"]);
+        kill_token(&app, "dead@x");
+
+        assert_eq!(pick_group_account(&app, "team", Some("dead@x")).unwrap(), "live@x");
+    }
+
+    #[test]
+    fn a_token_that_has_not_expired_survives_a_failing_poll() {
+        // The whole point of keying on expiry rather than on the last error: a 429 or a
+        // dropped usage fetch leaves a working token, and evicting on it would rotate the
+        // fleet over a blip.
+        let now = 1_000_000_000_000;
+        assert!(token_alive(now + 1, now));
+        assert!(!token_alive(now, now), "expired to the millisecond is expired");
     }
 
     fn rotation_candidate(

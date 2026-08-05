@@ -139,6 +139,18 @@ function Row({ a, now, locale }: { a: ClaudeUsage; now: number | null; locale: s
         <span className="min-w-0 flex-1 truncate text-[11px] text-slate-700 dark:text-slate-200">
           {a.email}
         </span>
+        {/* The account holds no token that still works, so the rotator has taken it out and
+            no clone can run on it until someone signs in again. Dimmed bars and a tooltip
+            were the only sign of this before, which is how one dead account ran a third of
+            the fleet on an expired token for ten hours. */}
+        {a.assignable === false ? (
+          <span
+            className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 dark:bg-rose-950/60 dark:text-rose-400"
+            title={a.error ?? "the stored token expired and could not be refreshed"}
+          >
+            sign in again
+          </span>
+        ) : null}
         {a.spend ? (
           <span className="shrink-0 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
             {spendLine(a.spend)}

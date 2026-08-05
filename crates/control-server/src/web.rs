@@ -2544,7 +2544,9 @@ async fn claude_swap(
             .ok_or_else(|| {
                 (
                     StatusCode::BAD_REQUEST,
-                    "no imported Claude accounts".into(),
+                    "no Claude account can take this clone: none is imported, or every one \
+                     that could has a token that expired and cannot be refreshed"
+                        .into(),
                 )
             })?;
     let selection = crate::claude::normalize_selection(Some(&req.account));
@@ -2658,7 +2660,14 @@ async fn codex_swap(
         ));
     }
     let assignment = crate::codex::resolve_assignment(&app, Some(&req.account), host.codex_account_email.as_deref())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "no imported Codex accounts".into()))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "no Codex account can take this clone: none is imported, or every one that \
+                 could has a token that expired and cannot be refreshed"
+                    .into(),
+            )
+        })?;
     let selection = crate::codex::normalize_selection(Some(&req.account));
     let (group, email) = match assignment {
         crate::codex::Assignment::None => {

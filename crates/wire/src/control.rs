@@ -382,8 +382,11 @@ pub struct ClaudeUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
     pub active: bool,
-    /// Whether the account can run a clone: true for every imported account of either
-    /// provider (the server owns each account's token lifecycle).
+    /// Whether the account can run a clone right now: true while the token the server
+    /// holds for it has not expired, false once a broken refresh chain has outlived the
+    /// last token it minted. The rotator hands clones only to assignable accounts, so an
+    /// account that goes false is one the fleet moves off by itself. A failed usage poll
+    /// alone does not change it (see `stale`/`error` for that).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

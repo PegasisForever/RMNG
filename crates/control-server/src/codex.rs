@@ -156,11 +156,26 @@ impl CodexStore {
             .cloned()
     }
 
+    /// Emails of every imported account. Membership, not usability: an account whose
+    /// refresh chain is dead is still imported. Use [`Self::usable_emails`] to pick one
+    /// for a clone.
     fn emails(&self) -> Vec<String> {
         self.accounts
             .lock()
             .unwrap()
             .iter()
+            .map(|a| a.email.clone())
+            .collect()
+    }
+
+    /// Emails whose stored token still works: the accounts a clone may be handed.
+    fn usable_emails(&self) -> Vec<String> {
+        let now = now_ms();
+        self.accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| crate::claude::token_alive(a.expires_at, now))
             .map(|a| a.email.clone())
             .collect()
     }
@@ -806,7 +821,7 @@ fn score_accounts(app: &App) -> Vec<Scored> {
         }
     }
     app.codex
-        .emails()
+        .usable_emails()
         .into_iter()
         .map(|email| {
             let u = usage.get(email.as_str());
@@ -1005,7 +1020,7 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
 }
 
 fn rotation_candidates(app: &App, members: &[String]) -> Vec<RotationCandidate> {
-    let known = app.codex.emails();
+    let known = app.codex.usable_emails();
     let st = app.store.get();
     members
         .iter()
@@ -1036,8 +1051,10 @@ fn exhausted(app: &App, email: &str) -> bool {
     is_exhausted(seven_day_pct(app, email))
 }
 
+/// Accounts among `members` that can take work: imported, holding a token that still
+/// works, and not exhausted.
 fn eligible_members(app: &App, members: &[String]) -> Vec<String> {
-    let known = app.codex.emails();
+    let known = app.codex.usable_emails();
     members
         .iter()
         .filter(|email| known.iter().any(|k| &k == email))
@@ -1285,7 +1302,7 @@ pub async fn rotate_once(app: &App) {
     }
     let auto = auto_pool_clones(&hosts);
     if !auto.is_empty() {
-        rotate_pool(app, "auto", &app.codex.emails(), &auto).await;
+        rotate_pool(app, "auto", &app.codex.usable_emails(), &auto).await;
     }
 }
 
@@ -1393,7 +1410,9 @@ async fn poll_inner(app: &App) -> Result<bool> {
         }
         .await;
         match outcome {
-            Ok((u, facts)) => {
+            Ok((mut u, facts)) => {
+                // The refresh above ran on this account's own token, so the token works.
+                u.assignable = Some(true);
                 app.codex
                     .last_good
                     .lock()
@@ -1409,24 +1428,31 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 if msg.contains("429") {
                     any429 = true;
                 }
+                // Re-read the account: a refresh that succeeded earlier in this same pass
+                // moved `expires_at`, and the snapshot taken at the top has not.
+                let alive = app
+                    .codex
+                    .get_by_email(&acct.email)
+                    .is_some_and(|a| crate::claude::token_alive(a.expires_at, now_ms()));
                 let prev = app.codex.last_good.lock().unwrap().get(&acct.id).cloned();
                 views.push(match prev {
                     Some(mut p) => {
                         p.stale = Some(true);
+                        // Carry the reason, not just the fact. Without it a dead refresh
+                        // token and a momentary 429 both read as "these numbers are old".
+                        p.error = Some(msg);
+                        p.assignable = Some(alive);
                         p
                     }
                     None => {
                         let mut b = codex_base(acct);
                         b.error = Some(msg);
+                        b.assignable = Some(alive);
                         b
                     }
                 });
             }
         }
-    }
-
-    for v in &mut views {
-        v.assignable = Some(true);
     }
 
     // --- fleet auto-reset gate ---------------------------------------------
