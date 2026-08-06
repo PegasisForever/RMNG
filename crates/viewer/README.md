@@ -79,6 +79,10 @@ Headless mode (`viewer --headless …`):
 - **Scripted input**: drive `ViewerInput` from a script/stdin/flags (move, click, type,
   scroll, keysyms) and exercise the clipboard — so a test can assert input round-trips
   without a human.
+- **Clipboard mirror**: receive-only, since there is no local clipboard to own. Every offer
+  is fetched with the same MIME choice the GUI makes and logged under the `clip` target, so a
+  test can assert what a copy inside a clone put on the wire. `RMNG_CLIP_ECHO=1` logs the
+  first 120 characters of each text payload.
 - **CI-friendly**: runs over SSH / in a container with no `WAYLAND_DISPLAY`; the obvious way
   to write end-to-end tests (spin up control-server + a clone or stub → run the headless
   viewer → assert frames + input). It is how *this crate itself* is tested.

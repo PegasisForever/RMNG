@@ -6,6 +6,12 @@
 //! `ForwardsMsg` is reconciled into the shared [`crate::forward::ForwardManager`], and
 //! status is reported back as port-1 tag-2 frames — the same wiring the GUI uses, so a
 //! headless viewer is a full forward endpoint even with no clone selected (no video).
+//!
+//! The clipboard is a **receive-only** endpoint here: there is no local clipboard to own,
+//! so it never offers, and each incoming offer is fetched with the same MIME choice the
+//! GUI makes ([`crate::pick_mimes`]) and logged as `clip` debug. That is what makes a copy
+//! inside a clone assertable from a test. `RMNG_CLIP_ECHO=1` adds the first 120 characters
+//! of each text payload to that line; without it only the MIME and byte count are logged.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -20,6 +26,7 @@ use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSrc};
 use wire::ChromaMode;
 use wire::forward::{ForwardStatusMsg, ForwardsMsg};
+use wire::socket::{ClipboardMsg, ClipboardRequest};
 use wire::viewer::ModeMsg;
 
 use crate::forward::{ForwardManager, StatusReport};
@@ -120,9 +127,37 @@ fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) 
     Ok(appsrc)
 }
 
+/// Mirror one clipboard message: fetch the bytes an offer advertises, log what arrives.
+/// A `Request` cannot happen (this endpoint never offers), so it is only logged.
+fn handle_clipboard(writer: &crate::Writer, msg: ClipboardMsg, echo: bool) {
+    match msg {
+        ClipboardMsg::Offer(o) => {
+            let wanted = crate::pick_mimes(&o.mime_types);
+            tracing::debug!(target: "clip", "remote offer serial={} mimes={:?} -> requesting {wanted:?}", o.serial, o.mime_types);
+            for mime_type in wanted {
+                let req = ClipboardRequest { serial: o.serial, mime_type };
+                if let Ok(json) = serde_json::to_string(&ClipboardMsg::Request(req)) {
+                    crate::send_tagged(writer, 1, json);
+                }
+            }
+        }
+        ClipboardMsg::Data(d) => {
+            let preview = match (echo, std::str::from_utf8(&d.bytes)) {
+                (true, Ok(text)) => format!(": {:?}", text.chars().take(120).collect::<String>()),
+                _ => String::new(),
+            };
+            tracing::debug!(target: "clip", "data serial={} mime={} ({} bytes){preview}", d.serial, d.mime_type, d.bytes.len());
+        }
+        ClipboardMsg::Request(r) => {
+            tracing::debug!(target: "clip", "ignoring request serial={} mime={}: headless owns no selection", r.serial, r.mime_type);
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     let addr = std::env::var("RMNG_VIDEO").unwrap_or_else(|_| "127.0.0.1:9001".into());
     let dump = std::env::var("RMNG_DUMP").ok();
+    let echo = std::env::var("RMNG_CLIP_ECHO").is_ok_and(|v| v == "1");
     let counters: Counters = Arc::new(Mutex::new(HashMap::new()));
 
     // Port-forward manager (shared across reconnects). Its status closure frames each
@@ -167,11 +202,11 @@ pub fn run() -> Result<()> {
                 let mut tag = [0u8; 1];
                 while stream.read_exact(&mut tag).is_ok() {
                     // tags 1 (clipboard) + 2 (cursor) + 3 (view spec) + 4 (mode) + 5 (forwards)
-                    // + 6 (audio) + 7 (term data) are all [u32 len][json]. Tag 4 (chroma) arrives
-                    // before the first AU; tag 5 drives the forward listeners; the rest are
-                    // discarded. Must match the GUI loop's range in `main.rs` — a tag that lands
-                    // here and isn't length-skipped is read as a video AU header and desyncs the
-                    // stream for good.
+                    // + 6 (audio) + 7 (term data) are all [u32 len][json]. Tag 1 mirrors the
+                    // clipboard; tag 4 (chroma) arrives before the first AU; tag 5 drives the
+                    // forward listeners; the rest are discarded. Must match the GUI loop's range
+                    // in `main.rs` — a tag that lands here and isn't length-skipped is read as a
+                    // video AU header and desyncs the stream for good.
                     if matches!(tag[0], 1..=7) {
                         let mut lb = [0u8; 4];
                         if stream.read_exact(&mut lb).is_err() {
@@ -181,7 +216,11 @@ pub fn run() -> Result<()> {
                         if stream.read_exact(&mut body).is_err() {
                             break;
                         }
-                        if tag[0] == 4 {
+                        if tag[0] == 1 {
+                            if let Ok(m) = serde_json::from_slice::<ClipboardMsg>(&body) {
+                                handle_clipboard(&writer, m, echo);
+                            }
+                        } else if tag[0] == 4 {
                             if let Ok(m) = serde_json::from_slice::<ModeMsg>(&body) {
                                 CHROMA.store(matches!(m.chroma, ChromaMode::Yuv444) as u8, Ordering::Relaxed);
                                 tracing::info!("server chroma mode: {:?}", m.chroma);

@@ -276,7 +276,9 @@ instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NU
 
 **viewer:** `RMNG_VIDEO` (`host:port` of the control-server video port, default
 `127.0.0.1:9001`), `RMNG_DUMP=frame.png` (headless: dump one decoded frame and exit),
-`RMNG_NO_GRAB` (disable pointer grab), `RMNG_NO_POINTER_LOCK` (disable pointer-lock).
+`RMNG_CLIP_ECHO=1` (headless: log the first 120 characters of each text clipboard payload,
+not just its size), `RMNG_NO_GRAB` (disable pointer grab), `RMNG_NO_POINTER_LOCK` (disable
+pointer-lock).
 
 ---
 
