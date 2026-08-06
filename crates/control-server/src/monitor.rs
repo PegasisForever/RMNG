@@ -372,6 +372,65 @@ fn lift_sub_clone_activity(next: &mut HashMap<String, MonitorState>, clones: &[R
     }
 }
 
+/// How long a new activity state has to stand before it is published.
+const DEBOUNCE: Duration = Duration::from_secs(60);
+
+/// Hold every `working`/`idle` change back until it has stood for [`DEBOUNCE`].
+///
+/// This sits outside every rule that decides a state: per-session verdicts, the model, the
+/// first-minute floor, the blind-home hold, and [`lift_sub_clone_activity`] have all run by the
+/// time it sees a clone. It knows nothing about why a state changed, only that it did, so a
+/// change that reverses inside the window is never shown at all. Over a recent 15.5 hours across
+/// CT 105 and CT 106, 36% of changes reversed inside 30 seconds.
+///
+/// Both directions are held, which is what makes it a debounce rather than a one-sided delay,
+/// and the cost is real: a clone that starts working lights up a minute late. Holding only the
+/// slide into idle would keep that responsiveness, and is a one-line change here.
+///
+/// `offline` is never held, in or out. That state is about whether the container exists, not
+/// about what an agent is doing, and an operator watching a clone die should not wait a minute
+/// to see it. Neither is a clone's first reading, which has nothing to be a change from.
+fn debounce(
+    next: &mut HashMap<String, MonitorState>,
+    clones: &[RmngClone],
+    pending: &mut HashMap<String, (MonitorState, Instant)>,
+    now: Instant,
+) {
+    let shown: HashMap<&str, Option<MonitorState>> =
+        clones.iter().map(|c| (c.id.as_str(), c.monitor_state)).collect();
+    for (id, proposed) in next.iter_mut() {
+        // Nothing to hold against: a clone we do not show, one with no state yet, a move in or
+        // out of `offline`, or a tick that proposed what is already up.
+        let settled = match shown.get(id.as_str()).copied().flatten() {
+            None => true,
+            Some(shown) => {
+                shown == *proposed
+                    || shown == MonitorState::Offline
+                    || *proposed == MonitorState::Offline
+            }
+        };
+        if settled {
+            pending.remove(id);
+            continue;
+        }
+        let shown = shown[id.as_str()].expect("settled covers the None case");
+        match pending.get(id) {
+            // It has stood long enough. Let it through and stop tracking it.
+            Some((held, since)) if held == proposed && now.duration_since(*since) >= DEBOUNCE => {
+                pending.remove(id);
+            }
+            // Same change, still too new: keep showing what is up.
+            Some((held, _)) if held == proposed => *proposed = shown,
+            // A new change, or one that replaced a different pending change. Start its clock.
+            _ => {
+                pending.insert(id.clone(), (*proposed, now));
+                *proposed = shown;
+            }
+        }
+    }
+    pending.retain(|id, _| next.contains_key(id));
+}
+
 /// Whether a `working → not-working` transition should raise the unread badge + browser
 /// notification for a clone. Suppressed when the clone is currently selected (the operator is
 /// already looking at it), or — for an **idle** slide specifically — when the operator has
@@ -400,6 +459,7 @@ fn should_flag_unread(
 async fn poll_once(
     app: &App, previous_lxc_cpu: &mut Option<CpuSample>,
     previous_clone_cpu: &mut HashMap<String, CpuSample>,
+    pending_state: &mut HashMap<String, (MonitorState, Instant)>,
 ) {
     let hosts: Vec<RmngClone> = app
         .store
@@ -512,6 +572,8 @@ async fn poll_once(
     let active_ids: HashSet<String> = active_clones.iter().map(|host| host.id.clone()).collect();
     next.retain(|id, _| active_ids.contains(id));
     lift_sub_clone_activity(&mut next, &active_clones);
+    // Last of all, so a change that reverses inside a minute is never shown. See [`debounce`].
+    debounce(&mut next, &active_clones, pending_state, Instant::now());
     stats_map.retain(|id, _| active_ids.contains(id));
     ip_updates.retain(|id, _| active_ids.contains(id));
     // Bound the CPU-sample map to the live fleet, so archived and deleted clones cannot
@@ -587,8 +649,9 @@ pub async fn run(app: App) {
     tracing::info!("monitor poller started (every {}s)", POLL_INTERVAL.as_secs());
     let mut previous_lxc_cpu = None;
     let mut previous_clone_cpu = HashMap::new();
+    let mut pending_state = HashMap::new();
     loop {
-        poll_once(&app, &mut previous_lxc_cpu, &mut previous_clone_cpu).await;
+        poll_once(&app, &mut previous_lxc_cpu, &mut previous_clone_cpu, &mut pending_state).await;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -667,6 +730,113 @@ mod tests {
             monitor_state: stored,
             ..Default::default()
         }
+    }
+
+    /// One debounce pass: what `next` says after a tick at `now`.
+    fn settle(
+        proposed: MonitorState,
+        shown: Option<MonitorState>,
+        pending: &mut HashMap<String, (MonitorState, Instant)>,
+        now: Instant,
+    ) -> MonitorState {
+        let mut next = HashMap::from([("c1".to_string(), proposed)]);
+        debounce(&mut next, &[clone_row("c1", None, shown)], pending, now);
+        next["c1"]
+    }
+
+    #[test]
+    fn a_change_is_held_until_it_has_stood_for_a_minute() {
+        let t0 = Instant::now();
+        let mut pending = HashMap::new();
+        // Proposed idle against a shown working: keep showing working while the clock runs.
+        for at in [t0, t0 + Duration::from_secs(30), t0 + DEBOUNCE - Duration::from_millis(1)] {
+            assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending, at),
+                       MonitorState::Working);
+        }
+        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending, t0 + DEBOUNCE),
+                   MonitorState::Idle);
+        assert!(pending.is_empty(), "once through, it stops being tracked");
+    }
+
+    #[test]
+    fn a_change_that_reverses_inside_the_window_is_never_shown() {
+        // The whole point. 36% of changes reversed inside 30 seconds on the live fleet.
+        let t0 = Instant::now();
+        let mut pending = HashMap::new();
+        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending, t0),
+                   MonitorState::Working);
+        // It comes back before the minute is up, so the pending change is dropped...
+        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Working), &mut pending,
+                          t0 + Duration::from_secs(20)), MonitorState::Working);
+        assert!(pending.is_empty());
+        // ...and a later idle starts its own fresh minute rather than inheriting the old clock.
+        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending,
+                          t0 + Duration::from_secs(30)), MonitorState::Working);
+        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending,
+                          t0 + Duration::from_secs(89)), MonitorState::Working);
+        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending,
+                          t0 + Duration::from_secs(90)), MonitorState::Idle);
+    }
+
+    #[test]
+    fn both_directions_are_held() {
+        let t0 = Instant::now();
+        let mut pending = HashMap::new();
+        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Idle), &mut pending, t0),
+                   MonitorState::Idle);
+        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Idle), &mut pending, t0 + DEBOUNCE),
+                   MonitorState::Working);
+    }
+
+    #[test]
+    fn offline_is_never_held_in_either_direction() {
+        // Container existence is not activity, and an operator watching a clone die should not
+        // wait a minute to see it.
+        let t0 = Instant::now();
+        let mut pending = HashMap::new();
+        assert_eq!(settle(MonitorState::Offline, Some(MonitorState::Working), &mut pending, t0),
+                   MonitorState::Offline);
+        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Offline), &mut pending, t0),
+                   MonitorState::Working);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_clones_first_reading_is_shown_at_once() {
+        // Nothing to be a change from, so nothing to hold.
+        let mut pending = HashMap::new();
+        assert_eq!(settle(MonitorState::Working, None, &mut pending, Instant::now()),
+                   MonitorState::Working);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_clone_that_left_the_fleet_stops_being_tracked() {
+        let t0 = Instant::now();
+        let mut pending = HashMap::new();
+        settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending, t0);
+        assert_eq!(pending.len(), 1);
+        let mut empty = HashMap::new();
+        debounce(&mut empty, &[], &mut pending, t0);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn one_clone_being_held_does_not_hold_another() {
+        let t0 = Instant::now();
+        let mut pending = HashMap::new();
+        let clones = [
+            clone_row("held", None, Some(MonitorState::Working)),
+            clone_row("free", None, Some(MonitorState::Working)),
+        ];
+        let mut next = HashMap::from([
+            ("held".to_string(), MonitorState::Idle),
+            ("free".to_string(), MonitorState::Working),
+        ]);
+        debounce(&mut next, &clones, &mut pending, t0);
+        assert_eq!(next["held"], MonitorState::Working, "its change is still young");
+        assert_eq!(next["free"], MonitorState::Working, "it proposed no change at all");
+        assert_eq!(pending.keys().collect::<Vec<_>>(), vec!["held"]);
     }
 
     #[test]
