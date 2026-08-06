@@ -349,11 +349,17 @@ covers `AskUserQuestion` or `ExitPlanMode`, since being inside those is the defi
 It only ever lifts `idle`, and only where a model answered, so a rig with no judge still reports
 nothing as working. Those lines read `decidedBy: "floor"` in the decision log.
 
-The same failure had a second half in the prompt. The rule that a writer the agent names must
-appear somewhere in the view was being applied to commands the agent was currently inside, so a
-`curl` polling a build running on another machine read as waiting on nobody. That check now says
-it covers `agent_last_said` and nothing else, and the polling-wait passage says in as many words
-that it is about background tasks rather than about a command in `in_flight_tool_calls`.
+The same failure had a second half in the prompt, above the 60-second floor. The rule that a
+writer the agent names must appear somewhere in the view was being applied to commands the agent
+was currently inside, so a poll waiting on a build running on another machine read as waiting on
+nobody. Saying the check covers `agent_last_said` and nothing else did not fix it: reproduced
+against a real interactive `claude` blocked in `until [ -f /tmp/rmng-marker ]; do sleep 2; done`,
+the verdict was still `idle` at 61 and 120 seconds. Naming the blind spot did fix it. The prompt
+now tells the judge it is shown one clone and nothing else, and that for a command in
+`in_flight_tool_calls`, "I cannot see what would satisfy this" is never a reason to answer false.
+The same reproduction then read `working` at 4, 30, 63 and 122 seconds, with its reasoning
+changed from "no process shown that will create it" to "will return when the machine-created
+marker appears".
 
 **A subagent's tool call ends when the parent stops reporting it.** `SubagentStop` cannot be
 relied on to say a subagent finished: on `haoran-dev-329` over two days, 112 of about 119

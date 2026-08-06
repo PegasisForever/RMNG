@@ -983,6 +983,21 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
 /// nothing, because that entrypoint publishes no `status` and never reaches the `shell` state
 /// this failure lives in. Seven samples is small and says so.
 ///
+/// The "you are shown one clone and nothing else" passage is the newest, and it took two tries.
+/// A clone read idle while its operator worked without pause, every time inside a foreground
+/// poll waiting on something the view cannot see: a build on another machine, a file another
+/// process writes. The model kept answering "no process shown that will create it", which is the
+/// writer check leaking off `agent_last_said` and onto a command the agent is sitting inside.
+///
+/// The first attempt said the writer check covers `agent_last_said` and nothing else. Reproduced
+/// on CT 120 against a real interactive `claude` blocked in `until [ -f /tmp/rmng-marker ]; do
+/// sleep 2; done`, it changed nothing: still `idle` at 61s and at 120s. What worked was naming
+/// the blind spot instead of the rule, telling the judge it can see one clone and that "I cannot
+/// see what would satisfy this" is never a reason to answer false for a command in flight. The
+/// same reproduction then read `working` at 4s, 30s, 63s and 122s, and its reasoning changed
+/// from "no process shown that will create it" to "will return when the machine-created marker
+/// appears". Two runs of one shape, so it is evidence, not a corpus.
+///
 /// The "read producing_output only for a task that is going to end" passage comes from the same
 /// log, a day later, and settles a contradiction this prompt carried from the start. It said a
 /// dev server wakes nobody, and it also said `producing_output` being true means true. A dev
@@ -1021,6 +1036,14 @@ Say false when nothing will. The common shapes:
 in_flight_tool_calls is what the agent is sitting inside right now, with the command and
 how long it has been running. The agent can do nothing at all until it returns, so the
 whole answer for that session is whether the command itself will return.
+
+You are shown one clone and nothing else. A command it is inside can be waiting on a build,
+a job, a queue, a download, or another machine entirely, and not one of those ever appears
+in this view. So for a command in in_flight_tool_calls, "I cannot see what would satisfy
+this" is never a reason to answer false. That is the commonest way this question gets
+answered wrongly. Decide it on the command itself: a wait for something a machine produces
+is true until the command has plainly hung, and only a wait for something a person has to
+do by hand is false.
 
 A command hangs. That is the case you must not wave through. Ask how long this command
 takes when it works, then compare it to running_for_seconds. A command that normally
