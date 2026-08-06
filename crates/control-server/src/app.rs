@@ -58,6 +58,9 @@ pub struct App {
     /// answer cache above forgets; this is what lets a verdict be scored later against what the
     /// session actually went on to do. See [`crate::stucklog`].
     pub stucklog: Arc<crate::stucklog::Recorder>,
+    /// What each clone last really read as, so a tick that cannot read its home at all holds
+    /// that answer instead of asserting idle. See [`crate::stuck::LastSeen`].
+    pub last_seen: Arc<crate::stuck::LastSeen>,
     /// Agent sign-ins waiting for their pasted callback (see [`crate::oauth`]).
     pub logins: Arc<crate::oauth::Logins>,
     /// Volatile per-clone "operator last looked at this clone" timestamps. Set on selection
@@ -119,6 +122,7 @@ impl App {
             activity: Arc::new(crate::monitor::ActivityBus::new()),
             stuck: Arc::new(crate::stuck::Judge::new()),
             stucklog: Arc::new(crate::stucklog::Recorder::new()),
+            last_seen: Arc::new(crate::stuck::LastSeen::new()),
             logins: Arc::new(crate::oauth::Logins::new()),
             views: Arc::new(crate::monitor::ViewTracker::new()),
             build_id: Arc::new(RwLock::new(boot_id())),

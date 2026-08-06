@@ -135,6 +135,59 @@ pub enum Verdict {
     Ask,
 }
 
+/// How many consecutive ticks a clone keeps its last answer while its home cannot be read.
+///
+/// [`crate::homes`] links an ordinary uid-1000 pid inside the clone and repoints only every 15
+/// seconds, so an exited process blinds every read under that root until the next reconcile. At
+/// the monitor's 4-second tick this covers that gap with room to spare, and it is deliberately
+/// short: holding a stale `Working` is the one failure this module must never produce, so a home
+/// that stays unreadable falls back to `Idle` inside half a minute.
+const BLIND_TICKS: u8 = 6;
+
+/// What each clone last actually read as, for the ticks when its home cannot be read at all.
+///
+/// Without this an unreadable home asserts `Idle`, which on a working clone is a false alarm
+/// that also clears its notification. Measured over 15.5 hours on CT 105 and CT 106: 75
+/// `working` to `idle` and back inside a minute, and 53 sessions closed while their last answer
+/// had been `working`.
+#[derive(Default)]
+pub struct LastSeen {
+    /// clone id -> (what it last really read as, consecutive blind ticks since).
+    seen: StdRwLock<HashMap<String, (wire::MonitorState, u8)>>,
+}
+
+impl LastSeen {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an answer this tick actually reached, clearing any blind streak.
+    pub fn settled(&self, id: &str, state: wire::MonitorState) {
+        self.seen.write().unwrap().insert(id.to_string(), (state, 0));
+    }
+
+    /// What to report for a clone whose home could not be read, and count the tick.
+    ///
+    /// Holds the last real answer while the streak is short, then gives up and says `Idle`. A
+    /// clone nobody has ever settled has nothing to hold and reads `Idle` from the first tick.
+    pub fn blind(&self, id: &str) -> wire::MonitorState {
+        let mut seen = self.seen.write().unwrap();
+        let Some((state, blind)) = seen.get_mut(id) else {
+            return wire::MonitorState::Idle;
+        };
+        *blind = blind.saturating_add(1);
+        match *blind <= BLIND_TICKS {
+            true => *state,
+            false => wire::MonitorState::Idle,
+        }
+    }
+
+    /// Drop clones that left the fleet, mirroring [`crate::monitor::ActivityBus::retain`].
+    pub fn retain(&self, clones: &HashSet<String>) {
+        self.seen.write().unwrap().retain(|id, _| clones.contains(id));
+    }
+}
+
 /// The model's one boolean. Anything that is not a clear yes reads as stuck, so a malformed
 /// or missing answer never invents progress that is not happening.
 pub fn apply_verdict(will_progress: Option<bool>) -> wire::MonitorState {
@@ -189,7 +242,18 @@ pub fn clone_root(data_dir: &str, id: &str) -> Option<PathBuf> {
     let s = target.to_str()?;
     // `/proc/<pid>/root/home/rmng` -> `/proc/<pid>/root`
     let cut = s.find("/root/")? + "/root".len();
-    Some(PathBuf::from(&s[..cut]))
+    let root = PathBuf::from(&s[..cut]);
+    // `read_link` answers from the link, never from what it points at, so it keeps succeeding
+    // long after that pid has exited. [`crate::homes`] links the lowest uid-1000 pid in the
+    // clone, which is an ordinary process that can end at any time, and repoints only every 15
+    // seconds. In between, every read under this root fails.
+    //
+    // Without this check that window reads as a clone with no agent session at all, which is a
+    // confident `Stuck` for the whole clone rather than "I cannot see it". Over 15.5 hours on
+    // CT 105 and CT 106 it closed 523 sessions that were still running, and the two clones worst
+    // affected spent 91% and 81% of their decision log on the churn.
+    std::fs::metadata(root.join("home/rmng")).ok()?;
+    Some(root)
 }
 
 /// Field 22 of `<proc>/<pid>/stat`. The token after the last `)` is field 3, so field 22 is
@@ -1528,12 +1592,17 @@ pub async fn resolve_fleet(
     let decided = read.into_iter().map(|(id, snapshot)| {
         let backend = backend.clone();
         let log = app.stucklog.clone();
+        let last = app.last_seen.clone();
         async move {
             // A clone whose home is not readable right now (restarting, or `homes` has not
             // repointed its symlink yet) tells us nothing. Leaving it Idle is the honest
             // reading: we cannot see anything that would wake it.
             let Some(cases) = snapshot else {
-                return (id, wire::MonitorState::Idle);
+                // Nothing is readable under this clone's root right now, which says nothing
+                // about what it is doing. Asserting idle here is a false alarm on a working
+                // clone, so its last real answer stands for a few ticks. See [`LastSeen`].
+                let held = last.blind(&id);
+                return (id, held);
             };
             // Only for a clone that was actually read: an unreachable home has no live set, and
             // treating that as an empty one would close out every session the clone still has.
@@ -1541,6 +1610,7 @@ pub async fn resolve_fleet(
             log.retire(&id, &live);
             if cases.is_empty() {
                 tracing::debug!(target: "stuck", "clone {id}: idle — no live agent session");
+                last.settled(&id, wire::MonitorState::Idle);
                 return (id, wire::MonitorState::Idle);
             }
             // The clone is working when ANY of its sessions is. Walked in order and stopped at
@@ -1597,6 +1667,7 @@ pub async fn resolve_fleet(
                                 };
                                 log.record(case.decision(&id, state, by, reason), asked);
                                 if state == wire::MonitorState::Working {
+                                    last.settled(&id, wire::MonitorState::Working);
                                     return (id, wire::MonitorState::Working);
                                 }
                             }
@@ -1623,6 +1694,7 @@ pub async fn resolve_fleet(
                     }
                 }
             }
+            last.settled(&id, wire::MonitorState::Idle);
             (id, wire::MonitorState::Idle)
         }
     });
@@ -1636,7 +1708,9 @@ pub async fn resolve_fleet(
     // One append for the whole pass, awaited rather than detached so two passes cannot be
     // writing the same file at once. A pass that decided nothing new writes nothing at all.
     let log = app.stucklog.clone();
-    log.retain(&out.keys().cloned().collect());
+    let live: HashSet<String> = out.keys().cloned().collect();
+    log.retain(&live);
+    app.last_seen.retain(&live);
     let _ = tokio::task::spawn_blocking(move || log.flush(&data_dir)).await;
     out
 }
@@ -2251,6 +2325,75 @@ mod tests {
         assert!(live[0].alive);
         assert_eq!(clone_state(&live, true), Verdict::Ask);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_blind_tick_holds_the_last_answer_rather_than_asserting_idle() {
+        let seen = LastSeen::new();
+        seen.settled("c1", wire::MonitorState::Working);
+        for tick in 1..=BLIND_TICKS {
+            assert_eq!(seen.blind("c1"), wire::MonitorState::Working, "tick {tick}");
+        }
+        // Holding a stale `working` is the one thing this must never do for long.
+        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
+    }
+
+    #[test]
+    fn reading_the_home_again_clears_the_blind_streak() {
+        // The repoint lands, one real answer arrives, and the whole budget is available again
+        // for the next gap.
+        let seen = LastSeen::new();
+        seen.settled("c1", wire::MonitorState::Working);
+        for _ in 0..BLIND_TICKS {
+            seen.blind("c1");
+        }
+        seen.settled("c1", wire::MonitorState::Working);
+        assert_eq!(seen.blind("c1"), wire::MonitorState::Working);
+    }
+
+    #[test]
+    fn a_clone_nobody_has_settled_has_nothing_to_hold() {
+        assert_eq!(LastSeen::new().blind("never-seen"), wire::MonitorState::Idle);
+    }
+
+    #[test]
+    fn holding_never_invents_working_out_of_idle() {
+        let seen = LastSeen::new();
+        seen.settled("c1", wire::MonitorState::Idle);
+        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
+    }
+
+    #[test]
+    fn a_clone_that_left_the_fleet_is_forgotten() {
+        let seen = LastSeen::new();
+        seen.settled("gone", wire::MonitorState::Working);
+        seen.retain(&["kept".to_string()].into_iter().collect());
+        assert_eq!(seen.blind("gone"), wire::MonitorState::Idle);
+    }
+
+    #[test]
+    fn a_link_whose_pid_has_gone_reads_as_unreachable_not_as_empty() {
+        // `read_link` answers from the link, so it survives the pid it names. Believing it cost
+        // 523 sessions being closed while they were still running, over 15.5 hours.
+        let data = std::env::temp_dir().join(format!("rmng-stuck-dangle-{}", std::process::id()));
+        let hosts = data.join("hosts");
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&hosts).unwrap();
+
+        let live = data.join("proc/4242/root");
+        std::fs::create_dir_all(live.join("home/rmng")).unwrap();
+        std::os::unix::fs::symlink(live.join("home/rmng"), hosts.join("here")).unwrap();
+        assert_eq!(clone_root(data.to_str().unwrap(), "here"), Some(live));
+
+        // Same shape, but the pid has exited and taken its whole `/proc` entry with it.
+        std::os::unix::fs::symlink(
+            data.join("proc/9999/root/home/rmng"),
+            hosts.join("gone"),
+        )
+        .unwrap();
+        assert_eq!(clone_root(data.to_str().unwrap(), "gone"), None);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
