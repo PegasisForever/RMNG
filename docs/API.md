@@ -361,6 +361,21 @@ The same reproduction then read `working` at 4, 30, 63 and 122 seconds, with its
 changed from "no process shown that will create it" to "will return when the machine-created
 marker appears".
 
+**A home that cannot be read is not a clone with nothing running.** `read_link` answers from the
+symlink rather than from what it points at, so `<data_dir>/hosts/<id>` keeps resolving after the
+pid it names has exited. [homes.rs](../crates/control-server/src/homes.rs) links an ordinary
+uid-1000 pid inside the clone and repoints every 15 seconds, so an exited process blinds every
+read under that root for a few ticks. That window used to read as a clone with no agent session,
+which is a confident verdict rather than an absent one: over 15.5 hours on CT 105 and CT 106 it
+closed 523 sessions that were still running, 53 of them last seen `working`, and produced 75
+`working` to `idle` and back round trips inside a minute. Two clones spent 91% and 81% of their
+decision log on the churn.
+
+`clone_root` now proves the home is readable before returning it, and a clone it cannot reach
+holds its last real answer for six ticks, about 24 seconds against a 15-second repoint, before
+falling back to `idle`. The bound is short on purpose, since holding a stale `working` is the one
+thing this must never do.
+
 **A subagent's tool call ends when the parent stops reporting it.** `SubagentStop` cannot be
 relied on to say a subagent finished: on `haoran-dev-329` over two days, 112 of about 119
 subagents ended without ever firing it. A subagent that dies mid-call therefore leaves its
