@@ -933,8 +933,16 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
 // Asking the model
 // ---------------------------------------------------------------------------------------
 
-/// The question, arrived at over two fleet pilots. Six passages in here are load-bearing and
-/// were each added to fix a measured failure, so read the git history before trimming:
+/// The question, arrived at over two fleet pilots. 1,538 tokens, which is most of what each call
+/// sends: a view is 375 at the median. Nearly all of it earns its place, and the way to find out
+/// is to ask both versions the same real views rather than to read it and guess. The last such
+/// pass took out 104 tokens, two passages superseded by later wording and never deleted, and
+/// scored 66/67 against 65/67 over 49 labelled views from the decision logs plus 36 repeats of
+/// the one shape they disagreed on. That difference is one sample and the repeat put both arms
+/// level, so it is noise. `scratchpad/ab.ts` in the session that did it is the harness.
+///
+/// Six passages in here are load-bearing and were each added to fix a measured failure, so read
+/// the git history before trimming:
 ///
 /// - "read the WHOLE command" fixes calling `tail -c 120 file` non-terminating because the
 ///   examples mentioned `tail -f`.
@@ -1077,20 +1085,15 @@ returns. `npm run dev` does not. A pipe read returns if a scheduled job or anoth
 feeds it, not if a person has to. If a command would return on its own, say true even if
 it is slow.
 
-The next two paragraphs are about a BACKGROUND task the agent left running while it sat at
-its prompt. They do not apply to a command in in_flight_tool_calls. An agent inside one of
-those is not parked waiting, it is blocked in the call, and the call returns or fails on
-its own and wakes it either way. Judge that one by the hang rules above, first minute and
-all, however much it looks like a poll.
-
-A polling wait finishes only if the thing it waits for actually happens. `until <test>; do
-sleep N; done`, `while ! <test>; do sleep N; done`, and any loop around a pgrep, a lock
-file, a pid, or an HTTP probe all have this shape, and every one of them prints nothing
-until it exits. So output_bytes of 0 is what a healthy one looks like too, and that number
-settles nothing on its own. turn_over_for_seconds is what settles it: that is how long the
-agent has been parked waiting for exactly these. A polling wait still outstanding hours
-after the turn ended is waiting on something that already happened or that never will, and
-nothing is coming: false.
+A BACKGROUND task that polls finishes only if the thing it waits for actually happens.
+`until <test>; do sleep N; done`, `while ! <test>; do sleep N; done`, and any loop around a
+pgrep, a lock file, a pid, or an HTTP probe all have this shape, and every one of them
+prints nothing until it exits. So output_bytes of 0 is what a healthy one looks like too,
+and that number settles nothing on its own. turn_over_for_seconds is what settles it: that
+is how long the agent has been parked waiting for exactly these. A polling task still
+outstanding hours after the turn ended is waiting on something that already happened or
+that never will, and nothing is coming: false. None of this applies to a poll in
+in_flight_tool_calls: the agent is blocked in that one, not parked beside it.
 
 One trap in particular, because it has cost hours of a clone reading as working. `pgrep -f`
 matches the full command line of every process, the shell running the loop included, so
@@ -1112,12 +1115,10 @@ a background task that is going to finish is true, even though the agent is doin
 while it waits. The agent being at its prompt with a task still running is not the same
 as the agent being done.
 
-One check on the writer it names. That writer has to show up in the rest of the view, as a
-background task, an in-flight tool call, or a subagent. If the agent says it dispatched
-something and nothing here corresponds to it, then whatever it started is already over and
-it was not woken: false. This checks what agent_last_said claims, and nothing else. A
-command the agent is currently inside needs no writer in the view: plenty of real work is
-done by something this view never sees, and the command returns regardless.
+One check on what agent_last_said claims, and on nothing else. A writer it names has to show
+up in the rest of the view, as a background task, an in-flight tool call, or a subagent. If
+the agent says it dispatched something and nothing here corresponds to it, then whatever it
+started is already over and it was not woken: false.
 
 Reply with only a JSON object:
 {"will_progress": true, "reason": "one short sentence"}"#;
