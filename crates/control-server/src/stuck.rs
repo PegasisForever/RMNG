@@ -48,6 +48,14 @@
 //! model's answer. That is what makes "no Codex account imported" behave correctly with no
 //! branch for it: with nothing to answer [`Verdict::Ask`], no clone is ever reported working.
 //!
+//! The model's answer is taken as given with one exception, [`overruled`]. An agent inside a
+//! tool call four seconds old has not hung, whatever the model says, and the prompt has
+//! forbidden that reading since the first pilot without stopping it. So it is enforced instead:
+//! over the 6,661 idle verdicts logged so far the floor overrules 13, all of them a `Bash`
+//! between 1 and 39 seconds old, and it leaves every one of the 145 verdicts that were sitting
+//! in an `AskUserQuestion` alone. It only ever lifts `Idle`, and only where a model answered,
+//! so an unconfigured rig still reports nothing as working.
+//!
 //! Nothing here is read back between ticks except the answer cache. Every verdict is recomputed
 //! from the session registry, the hook log, and file mtimes, so there is no history to reconcile
 //! and nothing to race. [`crate::stucklog`] writes each decision down as it is made, which no
@@ -89,6 +97,24 @@ use serde_json::{Value, json};
 /// How fresh a file has to be to count as still producing. The sample window for "is it
 /// moving right now", not a policy about how long anything may take.
 const MOVING_WINDOW_S: f64 = 60.0;
+
+/// How long a tool call gets before anyone may call it hung.
+///
+/// The prompt has said this since the first pilot, where it was worth 24 of 43 false alarms, and
+/// the model still breaks it: over 3,392 views whose main agent sat inside a call younger than
+/// this, 13 came back `idle` on a `Bash` seen as briefly as four seconds old. Under a minute
+/// there is nothing to tell a slow command from a hung one, so this is enforced rather than
+/// asked, and [`overruled`] is where.
+const HANG_GRACE_S: f64 = 60.0;
+
+/// Tools that ARE the agent asking a person, so being inside one is the definition of stuck
+/// rather than evidence against it. [`HANG_GRACE_S`] must never cover these.
+///
+/// `AskUserQuestion` is the measured one: of 42 views called idle inside the grace window, 29
+/// were sitting in it, every one correctly. `ExitPlanMode` is here by inspection rather than
+/// measurement, never having appeared in flight in the logs read so far. Both wait on the
+/// operator and on nothing else.
+const HUMAN_WAITS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 
 /// Bounded so one slow provider cannot stall a monitor tick.
 const ASK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1028,6 +1054,12 @@ returns. `npm run dev` does not. A pipe read returns if a scheduled job or anoth
 feeds it, not if a person has to. If a command would return on its own, say true even if
 it is slow.
 
+The next two paragraphs are about a BACKGROUND task the agent left running while it sat at
+its prompt. They do not apply to a command in in_flight_tool_calls. An agent inside one of
+those is not parked waiting, it is blocked in the call, and the call returns or fails on
+its own and wakes it either way. Judge that one by the hang rules above, first minute and
+all, however much it looks like a poll.
+
 A polling wait finishes only if the thing it waits for actually happens. `until <test>; do
 sleep N; done`, `while ! <test>; do sleep N; done`, and any loop around a pgrep, a lock
 file, a pid, or an HTTP probe all have this shape, and every one of them prints nothing
@@ -1060,7 +1092,9 @@ as the agent being done.
 One check on the writer it names. That writer has to show up in the rest of the view, as a
 background task, an in-flight tool call, or a subagent. If the agent says it dispatched
 something and nothing here corresponds to it, then whatever it started is already over and
-it was not woken: false.
+it was not woken: false. This checks what agent_last_said claims, and nothing else. A
+command the agent is currently inside needs no writer in the view: plenty of real work is
+done by something this view never sees, and the command returns regardless.
 
 Reply with only a JSON object:
 {"will_progress": true, "reason": "one short sentence"}"#;
@@ -1347,6 +1381,42 @@ fn snippet(s: &str) -> String {
     s.chars().take(200).collect()
 }
 
+/// The age of the youngest machine-answered tool call the MAIN agent is sitting inside, when
+/// that call is too young for anyone to call it hung.
+///
+/// A subagent's call is not counted: the parent is inside its own `Task` call whenever a
+/// subagent is really blocking it, and that call is counted here.
+fn inside_a_fresh_call(view: &Value) -> Option<f64> {
+    view["in_flight_tool_calls"]
+        .as_array()?
+        .iter()
+        .filter(|t| t["by"] == "main agent")
+        .filter(|t| !HUMAN_WAITS.contains(&t["tool"].as_str().unwrap_or_default()))
+        .filter_map(|t| t["running_for_seconds"].as_f64())
+        .filter(|age| *age < HANG_GRACE_S)
+        .fold(None, |best: Option<f64>, age| Some(best.map_or(age, |b| b.min(age))))
+}
+
+/// The model's answer, with the one rule it is not allowed to break applied over the top.
+///
+/// Everything else in this module asks rather than decides, and this is the exception, because
+/// "a command that started four seconds ago has hung" is not a judgement call that went the
+/// wrong way. It is a claim about the world with nothing behind it. The prompt has forbidden it
+/// since the first pilot and the model does it anyway, so it is taken away here.
+///
+/// Only ever turns `Idle` into `Working`, and only on the model path, so a rig with no judge
+/// still reports nothing as working.
+fn overruled(state: wire::MonitorState, view: &Value) -> Option<(wire::MonitorState, String)> {
+    if state != wire::MonitorState::Idle {
+        return None;
+    }
+    let age = inside_a_fresh_call(view)?;
+    Some((
+        wire::MonitorState::Working,
+        format!("a tool call {age:.0}s old cannot be called hung yet"),
+    ))
+}
+
 /// Does the GPT path work end to end? Used by `POST /api/config/test`.
 ///
 /// Asks the real question against a fixture view rather than pinging something cheaper, which
@@ -1491,6 +1561,16 @@ pub async fn resolve_fleet(
                                 // the only record of a question the cache had not answered
                                 // already, and the prompt is tuned against exactly those.
                                 let by = if asked { "model" } else { "cache" };
+                                let (state, by, reason) = match overruled(state, &case.view) {
+                                    Some((state, floor)) => {
+                                        tracing::debug!(
+                                            target: "stuck",
+                                            "clone {id} {sid}: overruling idle — {floor}"
+                                        );
+                                        (state, "floor", format!("{floor} (the model said: {reason})"))
+                                    }
+                                    None => (state, by, reason),
+                                };
                                 log.record(case.decision(&id, state, by, reason), asked);
                                 if state == wire::MonitorState::Working {
                                     return (id, wire::MonitorState::Working);
@@ -2222,6 +2302,56 @@ mod tests {
             }]),
             ..event("Stop", "s", None)
         }
+    }
+
+    /// A view of a session sitting inside one main-agent tool call.
+    fn inside(tool: &str, age: f64) -> Value {
+        json!({"in_flight_tool_calls": [
+            {"tool": tool, "by": "main agent", "running_for_seconds": age}]})
+    }
+
+    #[test]
+    fn a_command_inside_its_first_minute_is_never_hung() {
+        // The model called a four-second `Bash` hung 13 times over the logs read so far, which
+        // the prompt has forbidden since the first pilot. Under a minute there is nothing that
+        // separates a slow command from a stuck one.
+        let (state, why) = overruled(wire::MonitorState::Idle, &inside("Bash", 4.0)).unwrap();
+        assert_eq!(state, wire::MonitorState::Working);
+        assert!(why.contains("4s"), "{why}");
+        assert!(overruled(wire::MonitorState::Idle, &inside("Bash", 59.9)).is_some());
+        assert!(overruled(wire::MonitorState::Idle, &inside("Bash", 60.0)).is_none());
+    }
+
+    #[test]
+    fn asking_a_person_is_the_definition_of_stuck_not_an_exception_to_it() {
+        // 29 of the 42 idle verdicts inside the grace window sat in `AskUserQuestion`, every
+        // one of them right. A floor that covered these would bury exactly the case the whole
+        // module exists to catch.
+        for tool in HUMAN_WAITS {
+            assert!(overruled(wire::MonitorState::Idle, &inside(tool, 4.0)).is_none(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn the_floor_only_ever_lifts_idle_and_only_for_the_main_agent() {
+        // Never touches a working answer, so it cannot mask a stall.
+        assert!(overruled(wire::MonitorState::Working, &inside("Bash", 4.0)).is_none());
+        // A subagent's own call does not lift the parent: whenever a subagent really blocks it,
+        // the parent is inside its own `Task` call and that one counts.
+        let theirs = json!({"in_flight_tool_calls": [
+            {"tool": "Bash", "by": "subagent", "running_for_seconds": 4.0}]});
+        assert!(overruled(wire::MonitorState::Idle, &theirs).is_none());
+        // Nothing in flight at all is the ordinary idle case and must stay idle.
+        assert!(overruled(wire::MonitorState::Idle, &json!({"in_flight_tool_calls": []})).is_none());
+    }
+
+    #[test]
+    fn the_youngest_call_is_the_one_that_decides() {
+        // An agent issuing calls in parallel is working if any of them is still fresh.
+        let mixed = json!({"in_flight_tool_calls": [
+            {"tool": "Bash", "by": "main agent", "running_for_seconds": 4000.0},
+            {"tool": "Bash", "by": "main agent", "running_for_seconds": 5.0}]});
+        assert_eq!(inside_a_fresh_call(&mixed), Some(5.0));
     }
 
     #[test]

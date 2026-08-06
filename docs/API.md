@@ -339,6 +339,22 @@ They disagree on 15 samples and per-session is right on 12 (sign test p=0.035). 
 the same number of calls, over 467 distinct questions rather than 517, because a view carries no
 session id and is therefore shared by every session in the same state.
 
+**A command in its first minute is never hung, and that one is enforced rather than asked.** The
+prompt has said so since the first pilot, where it was worth 24 of 43 false alarms, and the model
+breaks it anyway: across the decision logs, 13 idle verdicts rest on a `Bash` between 1 and 39
+seconds old, seven of them on one clone whose operator was working the whole time. Under a minute
+nothing separates a slow command from a stuck one, so an `idle` answer is overruled to `working`
+whenever the main agent sits inside a machine-answered call younger than 60 seconds. It never
+covers `AskUserQuestion` or `ExitPlanMode`, since being inside those is the definition of stuck.
+It only ever lifts `idle`, and only where a model answered, so a rig with no judge still reports
+nothing as working. Those lines read `decidedBy: "floor"` in the decision log.
+
+The same failure had a second half in the prompt. The rule that a writer the agent names must
+appear somewhere in the view was being applied to commands the agent was currently inside, so a
+`curl` polling a build running on another machine read as waiting on nobody. That check now says
+it covers `agent_last_said` and nothing else, and the polling-wait passage says in as many words
+that it is about background tasks rather than about a command in `in_flight_tool_calls`.
+
 **A subagent's tool call ends when the parent stops reporting it.** `SubagentStop` cannot be
 relied on to say a subagent finished: on `haoran-dev-329` over two days, 112 of about 119
 subagents ended without ever firing it. A subagent that dies mid-call therefore leaves its
