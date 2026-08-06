@@ -29,10 +29,11 @@
 //!
 //! Every fold over the hook log is scoped to an owner, which is `(session, agent)`, and one
 //! rule retires all of them: a turn boundary on a session (`Stop`, `UserPromptSubmit`,
-//! `SessionEnd`) ends that session's main-agent evidence, and `SubagentStop` or `StopFailure`
-//! ends that subagent's. Evidence that outlives its owner is the failure this module has hit
-//! three separate times, most recently a tool call the operator interrupted that went on
-//! reading as in flight for three hours.
+//! `SessionEnd`) ends that session's main-agent evidence, and a subagent's evidence ends at its
+//! own `SubagentStop` or `StopFailure`, or as soon as a `Stop` of its session lists what is
+//! still running and leaves it out. Evidence that outlives its owner is the failure this module
+//! has hit four separate times, most recently a subagent that died mid-call without firing
+//! `SubagentStop` and left a `Bash` reading as in flight for 40 hours.
 //!
 //! The model gets the remaining case, and it is a narrow question: of the work still
 //! outstanding, will any of it finish without the operator doing something? That is mostly a
@@ -274,11 +275,13 @@ pub struct HookEvent {
     pub session_id: Option<String>,
     /// Set when the event belongs to a subagent rather than the session itself.
     ///
-    /// Worth knowing if you ever fold these into an open-subagent set: a parent's `Stop` does
-    /// NOT retire its agents. Background agents outlive the turn that launched them, and one
-    /// parent was observed firing `Stop` immediately after spawning two and leaving both
-    /// running for eight minutes. Only their own `SubagentStop` (or a `StopFailure` carrying
-    /// their `agent_id`) ends them.
+    /// Worth knowing if you ever fold these into an open-subagent set: reaching a parent's
+    /// `Stop` does NOT on its own retire its agents. Background agents outlive the turn that
+    /// launched them, and one parent was observed firing `Stop` immediately after spawning two
+    /// and leaving both running for eight minutes. What retires them is their own
+    /// `SubagentStop` (or a `StopFailure` carrying their `agent_id`), or a `Stop` whose
+    /// [`HookEvent::background_tasks`] names what is still running without naming them. Do not
+    /// rely on `SubagentStop` alone: 112 of about 119 subagents on one clone never fired it.
     #[serde(default)]
     pub agent_id: Option<String>,
     #[serde(default)]
@@ -289,8 +292,13 @@ pub struct HookEvent {
     pub tool_input: Option<String>,
     #[serde(default)]
     pub last_assistant_message: Option<String>,
+    /// Everything the agent still had outstanding when it stopped, as Claude Code itself
+    /// reports it. `None` and `Some([])` are different answers and both matter: the probe
+    /// writes this key only when the payload carried a list, so `None` is "nobody said" and
+    /// `Some([])` is "nothing is running". [`in_flight_tools`] retires subagents off the
+    /// difference, so collapsing the two would retire live work.
     #[serde(default)]
-    pub background_tasks: Vec<BackgroundTask>,
+    pub background_tasks: Option<Vec<BackgroundTask>>,
     #[serde(default)]
     pub reason: Option<String>,
     /// How a Cursor turn ended: `completed`, `aborted`, or `error`. Claude Code splits these
@@ -536,6 +544,28 @@ pub fn unowned_last_seen(events: &[HookEvent], started: f64) -> Option<f64> {
         .fold(None, |best: Option<f64>, ts| Some(best.map_or(ts, |b| b.max(ts))))
 }
 
+/// The subagents a `Stop` reports as still running, or `None` when it reported nothing at all.
+///
+/// This is Claude Code's own answer to "what is still going", and it is the only reliable one
+/// for a subagent. `SubagentStop` is not: on `haoran-dev-329` over two days, 112 of about 119
+/// subagents ended without ever firing it. Measured against that log, the report separates the
+/// two cases perfectly. Every subagent a `Stop` named went on to fire again, all 112 of them,
+/// and every subagent it left out never fired again, also all 112.
+///
+/// `None` and an empty list are different answers, which is why [`HookEvent::background_tasks`]
+/// keeps them apart. An empty list says nothing is running and retires the lot. `None` says the
+/// payload carried no list, so it settles nothing and retires nobody.
+fn still_running(stop: &HookEvent) -> Option<HashSet<&str>> {
+    Some(
+        stop.background_tasks
+            .as_ref()?
+            .iter()
+            .filter(|t| t.kind == "subagent")
+            .map(|t| t.id.as_str())
+            .collect(),
+    )
+}
+
 /// `PreToolUse` minus everything that ends it: the tool call each owner is sitting inside.
 ///
 /// This is the whole signal on the statusless entrypoints, which publish no `status` at all.
@@ -559,10 +589,19 @@ pub fn in_flight_tools(events: &[HookEvent]) -> Vec<&HookEvent> {
                 }
             }
             // A turn boundary ends that session's MAIN-AGENT calls: the agent cannot be
-            // inside a tool call and have finished its turn. Subagent calls are left alone
-            // here, because a background agent outlives the turn that launched it.
+            // inside a tool call and have finished its turn. A subagent is not retired by the
+            // boundary itself, because a background agent outlives the turn that launched it.
             "Stop" | "UserPromptSubmit" | "SessionEnd" if e.agent_id.is_none() => {
                 live.retain(|x| !(x.agent_id.is_none() && x.session_id == e.session_id));
+                // A `Stop` also carries what the agent still has running, and that list is
+                // the only thing that ever reports a subagent which died without firing
+                // `SubagentStop`. Anything of this session's that it does not name is over.
+                if let Some(running) = still_running(e) {
+                    live.retain(|x| match x.agent_id.as_deref() {
+                        Some(aid) if x.session_id == e.session_id => running.contains(aid),
+                        _ => true,
+                    });
+                }
             }
             // A subagent's own close ends whatever it was sitting inside.
             "SubagentStop" | "StopFailure" => {
@@ -798,7 +837,7 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
 
     let out_tasks: Vec<Value> = stop
         .iter()
-        .flat_map(|e| e.background_tasks.iter())
+        .flat_map(|e| e.background_tasks.iter().flatten())
         .map(|task| {
             let got = facts.outputs.get(&task.id);
             json!({
@@ -1801,6 +1840,93 @@ mod tests {
         }
     }
 
+    /// A parent `Stop` reporting exactly `agents` as its still-running subagents.
+    fn stop_reporting(session: &str, agents: &[&str], at: f64) -> HookEvent {
+        HookEvent {
+            ts: at,
+            background_tasks: Some(
+                agents
+                    .iter()
+                    .map(|id| BackgroundTask {
+                        id: (*id).to_string(),
+                        kind: "subagent".into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            ..event("Stop", session, None)
+        }
+    }
+
+    /// One subagent of session `s` sitting inside a tool call.
+    fn subagent_call(agent: &str, tool_use_id: &str, at: f64) -> HookEvent {
+        HookEvent {
+            ts: at,
+            tool_use_id: Some(tool_use_id.to_string()),
+            ..event("PreToolUse", "s", Some(agent))
+        }
+    }
+
+    #[test]
+    fn a_subagent_that_died_without_saying_so_is_retired_by_the_parents_own_report() {
+        // The regression this pins. On `haoran-dev-329`, 112 of about 119 subagents ended
+        // without ever firing `SubagentStop`, and two of them died mid-call. Nothing could
+        // retire those calls, so one read as a Bash running for 40 hours and the judge
+        // called the whole session hung while its other subagents were working.
+        let call = subagent_call("a1", "t1", 100.0);
+        let alive = stop_reporting("s", &["a1"], 101.0);
+        assert_eq!(
+            in_flight_tools(&[call.clone(), alive.clone()]).len(),
+            1,
+            "a subagent the parent still reports is still working"
+        );
+        let gone = stop_reporting("s", &[], 200.0);
+        assert!(
+            in_flight_tools(&[call, alive, gone]).is_empty(),
+            "the parent stopped reporting it, so its call is over"
+        );
+    }
+
+    #[test]
+    fn a_stop_that_reports_nothing_at_all_retires_no_subagent() {
+        // `None` is "nobody said", not "nothing is running". An older CLI that sends no list
+        // must not sweep out live work.
+        let call = subagent_call("a1", "t1", 100.0);
+        let mut silent = event("Stop", "s", None);
+        silent.ts = 300.0;
+        assert!(silent.background_tasks.is_none());
+        assert_eq!(in_flight_tools(&[call, silent]).len(), 1);
+    }
+
+    #[test]
+    fn a_parents_report_only_speaks_for_its_own_session() {
+        // Two sessions in one clone run independent agents, and one finishing says nothing
+        // about the other's.
+        let mine = subagent_call("a1", "t1", 100.0);
+        let mut theirs = subagent_call("a2", "t2", 100.0);
+        theirs.session_id = Some("other".into());
+        let elsewhere = stop_reporting("other", &[], 200.0);
+        let events = [mine, theirs, elsewhere];
+        let live = in_flight_tools(&events);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].agent_id.as_deref(), Some("a1"));
+    }
+
+    #[test]
+    fn the_report_retires_only_the_subagents_it_leaves_out() {
+        let one = subagent_call("a1", "t1", 100.0);
+        let two = subagent_call("a2", "t2", 100.0);
+        let mut mine = event("PreToolUse", "s", None);
+        mine.tool_use_id = Some("t3".into());
+        mine.ts = 100.0;
+        // The parent's own call ends at the boundary; of its two subagents only `a2` is still
+        // reported, so only `a1` goes with it.
+        let events = [mine, one, two, stop_reporting("s", &["a2"], 200.0)];
+        let live = in_flight_tools(&events);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].agent_id.as_deref(), Some("a2"));
+    }
+
     #[test]
     fn one_sessions_work_never_appears_in_anothers_view() {
         let root = fake_clone("perview");
@@ -2088,12 +2214,12 @@ mod tests {
     fn stop_with_task(command: &str, at: f64) -> HookEvent {
         HookEvent {
             ts: at,
-            background_tasks: vec![BackgroundTask {
+            background_tasks: Some(vec![BackgroundTask {
                 id: "task-1".into(),
                 kind: "shell".into(),
                 command: Some(command.into()),
                 ..Default::default()
-            }],
+            }]),
             ..event("Stop", "s", None)
         }
     }

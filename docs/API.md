@@ -339,6 +339,20 @@ They disagree on 15 samples and per-session is right on 12 (sign test p=0.035). 
 the same number of calls, over 467 distinct questions rather than 517, because a view carries no
 session id and is therefore shared by every session in the same state.
 
+**A subagent's tool call ends when the parent stops reporting it.** `SubagentStop` cannot be
+relied on to say a subagent finished: on `haoran-dev-329` over two days, 112 of about 119
+subagents ended without ever firing it. A subagent that dies mid-call therefore leaves its
+`PreToolUse` in flight with nothing able to retire it, because a subagent is deliberately exempt
+from the parent's turn boundary. One such call read as a `Bash` running for 40 hours, and the
+judge kept calling the whole session hung while its other subagents worked. Across CT 106 that
+poisoned 5,829 views on four clones, 1,858 of which came back `idle`.
+
+Every `Stop` carries what the agent still has running, and that list is exact: measured over the
+same log, all 112 subagents a `Stop` named went on to fire again, and all 112 it left out never
+fired again. So a `Stop` naming what is still running also retires any subagent of that session
+it omits. A `Stop` carrying no list at all retires nobody, since that says nothing rather than
+nothing-is-running.
+
 The known gap is a loop that ends when an external system reaches a state it never reaches. The
 prompt now names that shape and the view carries `turn_over_for_seconds`, which is how long the
 agent has been parked since its turn ended, so a polling wait still outstanding hours later reads
