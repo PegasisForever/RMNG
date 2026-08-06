@@ -361,16 +361,17 @@ The same reproduction then read `working` at 4, 30, 63 and 122 seconds, with its
 changed from "no process shown that will create it" to "will return when the machine-created
 marker appears".
 
-**Every change is debounced by one minute, outside all of the above.** After the per-session
-verdicts, the model, the first-minute floor, the blind-home hold and the sub-clone lift have all
-run, a `working`/`idle` change is held back until it has stood for 60 seconds
-([monitor.rs](../crates/control-server/src/monitor.rs) `debounce`). A change that reverses inside
+**A slide out of `working` is debounced by one minute, outside all of the above.** After the
+per-session verdicts, the model, the first-minute floor, the blind-home hold and the sub-clone
+lift have all run, a `working → idle` change is held back until it has stood for 60 seconds
+([monitor.rs](../crates/control-server/src/monitor.rs) `debounce`). A slide that reverses inside
 that window is never published at all, so it raises no notification and writes no state. On a
 recent 15.5 hours across CT 105 and CT 106, 36% of changes reversed inside 30 seconds.
 
-Both directions are held, so a clone that starts working also lights up a minute late. `offline`
-is never held in either direction, since that is about whether the container exists rather than
-what an agent is doing, and neither is a clone's first reading.
+One direction only. A clone that starts working shows it on the next tick, so a turn shorter than
+a minute is still visible. `offline` is never held in either direction, since that is about
+whether the container exists rather than what an agent is doing, and neither is a clone's first
+reading.
 
 **A home that cannot be read is not a clone with nothing running.** `read_link` answers from the
 symlink rather than from what it points at, so `<data_dir>/hosts/<id>` keeps resolving after the

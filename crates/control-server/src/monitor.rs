@@ -372,20 +372,21 @@ fn lift_sub_clone_activity(next: &mut HashMap<String, MonitorState>, clones: &[R
     }
 }
 
-/// How long a new activity state has to stand before it is published.
+/// How long a clone has to keep reading idle before that is published.
 const DEBOUNCE: Duration = Duration::from_secs(60);
 
-/// Hold every `working`/`idle` change back until it has stood for [`DEBOUNCE`].
+/// Hold a `working → idle` slide back until it has stood for [`DEBOUNCE`].
 ///
 /// This sits outside every rule that decides a state: per-session verdicts, the model, the
 /// first-minute floor, the blind-home hold, and [`lift_sub_clone_activity`] have all run by the
 /// time it sees a clone. It knows nothing about why a state changed, only that it did, so a
-/// change that reverses inside the window is never shown at all. Over a recent 15.5 hours across
+/// slide that reverses inside the window is never shown at all. Over a recent 15.5 hours across
 /// CT 105 and CT 106, 36% of changes reversed inside 30 seconds.
 ///
-/// Both directions are held, which is what makes it a debounce rather than a one-sided delay,
-/// and the cost is real: a clone that starts working lights up a minute late. Holding only the
-/// slide into idle would keep that responsiveness, and is a one-line change here.
+/// One direction only. A clone that starts working shows it on the next tick, because that is
+/// news an operator wants at once and a late-lit dot would make short turns invisible. Only the
+/// slide out of `working` waits, which is the direction that raises the unread badge and the
+/// browser notification, and the one a flapping verdict makes noisy.
 ///
 /// `offline` is never held, in or out. That state is about whether the container exists, not
 /// about what an agent is doing, and an operator watching a clone die should not wait a minute
@@ -399,21 +400,16 @@ fn debounce(
     let shown: HashMap<&str, Option<MonitorState>> =
         clones.iter().map(|c| (c.id.as_str(), c.monitor_state)).collect();
     for (id, proposed) in next.iter_mut() {
-        // Nothing to hold against: a clone we do not show, one with no state yet, a move in or
-        // out of `offline`, or a tick that proposed what is already up.
-        let settled = match shown.get(id.as_str()).copied().flatten() {
-            None => true,
-            Some(shown) => {
-                shown == *proposed
-                    || shown == MonitorState::Offline
-                    || *proposed == MonitorState::Offline
-            }
-        };
-        if settled {
+        // Only a working clone going idle waits. A clone we do not show, one with no state yet,
+        // one that is not currently working, anything touching `offline`, and a tick that
+        // proposed what is already up all go straight through.
+        let held = matches!(shown.get(id.as_str()).copied().flatten(), Some(MonitorState::Working))
+            && *proposed == MonitorState::Idle;
+        if !held {
             pending.remove(id);
             continue;
         }
-        let shown = shown[id.as_str()].expect("settled covers the None case");
+        let shown = MonitorState::Working;
         match pending.get(id) {
             // It has stood long enough. Let it through and stop tracking it.
             Some((held, since)) if held == proposed && now.duration_since(*since) >= DEBOUNCE => {
@@ -779,13 +775,13 @@ mod tests {
     }
 
     #[test]
-    fn both_directions_are_held() {
-        let t0 = Instant::now();
+    fn a_clone_that_starts_working_shows_it_at_once() {
+        // One direction only. Waiting here would make every turn shorter than a minute
+        // invisible, and starting work is news an operator wants immediately.
         let mut pending = HashMap::new();
-        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Idle), &mut pending, t0),
-                   MonitorState::Idle);
-        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Idle), &mut pending, t0 + DEBOUNCE),
+        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Idle), &mut pending, Instant::now()),
                    MonitorState::Working);
+        assert!(pending.is_empty());
     }
 
     #[test]
