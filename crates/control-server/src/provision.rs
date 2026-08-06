@@ -712,6 +712,42 @@ async fn clone_container_after_create(
         );
     }
 
+    // Cursor reads neither of those files, so it gets the same managed servers through
+    // `~/.cursor/mcp.json`. Its Linear bearer is resolved from the clone's env here, because
+    // Cursor does not expand an environment reference in that file.
+    on_progress("inject", "configuring ~/.cursor/mcp.json MCP servers");
+    let linear_key = crate::clone_reconcile::env_value(env, "LINEAR_API_KEY");
+    let code = docker
+        .exec_script(
+            container,
+            &crate::clone_reconcile::cursor_mcp_script(headless, &linear_key),
+            &[],
+            &[],
+            |_stream, line| {
+                tracing::debug!(target: "provision", "cursor-mcp: {line}");
+            },
+        )
+        .await
+        .unwrap_or(1);
+    if code == 0 {
+        if let Err(e) = docker
+            .upload_tar(
+                container,
+                vec![crate::clone_reconcile::cursor_mcp_stamp_entry_for(
+                    headless,
+                    &linear_key,
+                )],
+            )
+            .await
+        {
+            tracing::warn!("clone {hostname}: writing cursor mcp stamp failed: {e:#} (non-fatal)");
+        }
+    } else {
+        tracing::warn!(
+            "clone {hostname}: ~/.cursor/mcp.json MCP configure exited {code} (reconciler will retry)"
+        );
+    }
+
     // The activity probe, so the new clone reports working-vs-stuck from its first turn
     // rather than from the reconciler's first pass 30s later. Stamped the same way, and
     // best-effort for the same reason: the reconciler is the backstop.

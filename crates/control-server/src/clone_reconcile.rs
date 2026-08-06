@@ -26,8 +26,8 @@ const CLONE_GID: u64 = 1000;
 //
 // The `desktop` + `linear` set every clone agent gets, defined ONCE here and rendered into
 // each agent's own format by the emitters below (Claude `~/.claude.json` jq-merge, Codex
-// `config.toml` and the neutral `~/.config/rmng/mcp.json` the
-// node-agent reads). Change a URL / add a server here and all agents pick it up.
+// `config.toml`, Cursor `~/.cursor/mcp.json` jq-merge, and the neutral `~/.config/rmng/mcp.json`
+// the node-agent reads). Change a URL / add a server here and all agents pick it up.
 
 /// One managed MCP server. All fields are static — the list is compile-time constant.
 #[derive(Clone, Copy)]
@@ -130,6 +130,107 @@ fn mcp_descriptor_json(headless: bool) -> String {
         })
         .collect();
     serde_json::to_string_pretty(&serde_json::json!(servers)).unwrap_or_else(|_| "[]".into())
+}
+
+/// The `mcpServers` object Cursor should hold, and the names it must not.
+///
+/// Cursor recognizes `command`/`args`/`env`/`url`/`headers`/`auth` per server and derives the
+/// transport itself (a `url` server becomes `streamableHttp`), so no `type` is written. It does
+/// **not** expand environment references anywhere in this file, which is why the bearer is
+/// resolved here instead of being left as `${LINEAR_API_KEY}` the way Claude Code takes it. A
+/// server the clone cannot authenticate is dropped rather than written headerless: Cursor shows
+/// a broken server as "Needs attention" until someone clears it.
+fn cursor_mcp_sets(headless: bool, linear_key: &str) -> (serde_json::Value, Vec<String>) {
+    let mut want = serde_json::Map::new();
+    let mut drop = Vec::new();
+    for m in managed_mcp() {
+        let bearer = match m.bearer_env {
+            Some(_) if linear_key.is_empty() => {
+                drop.push(m.name.to_string());
+                continue;
+            }
+            Some(_) => Some(format!("Bearer {linear_key}")),
+            None => None,
+        };
+        if headless && m.headless_only {
+            drop.push(m.name.to_string());
+            continue;
+        }
+        let mut server = serde_json::json!({ "url": m.url });
+        if let Some(b) = bearer {
+            server["headers"] = serde_json::json!({ "Authorization": b });
+        }
+        want.insert(m.name.to_string(), server);
+    }
+    (serde_json::Value::Object(want), drop)
+}
+
+/// Point Cursor at the managed MCP servers through `~/.cursor/mcp.json`, its user-level MCP
+/// config (`joinPath(userHome, ".cursor", "mcp.json")`). Cursor watches that file and connects
+/// without a restart.
+///
+/// A merge, not a rewrite: the operator's own servers live in the same file. The desired set and
+/// the names to delete travel base64-encoded into temp files, so the Linear key never reaches an
+/// argument vector another process in the clone could read. Runs as root via docker exec, so the
+/// file is re-chowned to rmng at 600.
+pub(crate) fn cursor_mcp_script(headless: bool, linear_key: &str) -> String {
+    let (want, drop) = cursor_mcp_sets(headless, linear_key);
+    let want_b64 = B64.encode(want.to_string());
+    let drop_b64 = B64.encode(serde_json::Value::from(drop).to_string());
+    format!(
+        r#"set -e
+f=/home/rmng/.cursor/mcp.json
+install -d -o rmng -g rmng -m755 /home/rmng/.cursor
+[ -s "$f" ] || printf '{{}}' > "$f"
+want="$(mktemp)"
+drop="$(mktemp)"
+tmp="$(mktemp)"
+printf %s '{want_b64}' | base64 -d > "$want"
+printf %s '{drop_b64}' | base64 -d > "$drop"
+jq --slurpfile want "$want" --slurpfile drop "$drop" \
+   '.mcpServers = (((.mcpServers // {{}}) + $want[0]) | delpaths([$drop[0][] | [.]]))' "$f" > "$tmp"
+cat "$tmp" > "$f"
+rm -f "$tmp" "$want" "$drop"
+chown rmng:rmng "$f"
+chmod 600 "$f"
+"#
+    )
+}
+
+fn cursor_mcp_stamp_path() -> &'static str {
+    "etc/rmng/cursor-mcp"
+}
+
+/// Hash of the script itself, so the headless bit, a rotated Linear key, and any future change
+/// to the managed set all re-apply on the next pass. The key is never in the stamp.
+fn cursor_mcp_desired(headless: bool, linear_key: &str) -> String {
+    desired_payload_hash(&[TarEntry {
+        path: "cursor-mcp".into(),
+        data: cursor_mcp_script(headless, linear_key).into_bytes(),
+        mode: 0,
+        uid: 0,
+        gid: 0,
+    }])
+}
+
+pub(crate) fn cursor_mcp_stamp_entry_for(headless: bool, linear_key: &str) -> TarEntry {
+    TarEntry {
+        path: cursor_mcp_stamp_path().to_string(),
+        data: format!("{}\n", cursor_mcp_desired(headless, linear_key)).into_bytes(),
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+    }
+}
+
+/// The value `/etc/environment` will end up with for `key`, or `""`. Last duplicate wins, the
+/// same precedence [`crate::provision::etc_environment_conf`] applies when it writes the file.
+pub(crate) fn env_value(vars: &[wire::EnvVar], key: &str) -> String {
+    vars.iter()
+        .rev()
+        .find(|v| v.key == key)
+        .map(|v| v.value.clone())
+        .unwrap_or_default()
 }
 
 fn payload_stamp_path() -> &'static str {
@@ -1376,6 +1477,40 @@ async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<
     Ok(true)
 }
 
+/// Keep Cursor's `~/.cursor/mcp.json` pointed at the same managed servers, so the agent a person
+/// drives in the clone's IDE has the tools the CLI agents already have. Stamped on a hash of the
+/// script, so a headless flip or a rotated Linear key re-applies on the next pass.
+async fn ensure_cursor_mcp(
+    app: &App,
+    clone_id: &str,
+    headless: bool,
+    linear_key: &str,
+) -> Result<bool> {
+    let desired = cursor_mcp_desired(headless, linear_key);
+    if read_stamp(app, clone_id, cursor_mcp_stamp_path(), "cursor mcp")
+        .await?
+        .as_deref()
+        == Some(desired.as_str())
+    {
+        return Ok(false);
+    }
+    exec_ok(
+        app,
+        clone_id,
+        &cursor_mcp_script(headless, linear_key),
+        "sync ~/.cursor/mcp.json MCP",
+    )
+    .await?;
+    app.docker
+        .upload_tar(
+            clone_id,
+            vec![cursor_mcp_stamp_entry_for(headless, linear_key)],
+        )
+        .await
+        .with_context(|| format!("{clone_id}: writing cursor mcp stamp"))?;
+    Ok(true)
+}
+
 /// Install the activity probe and register it in Claude Code's settings.
 ///
 /// Claude Code reloads `settings.json` live, so an already-running agent picks the hooks up
@@ -1634,6 +1769,9 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         // from the same helper, so a fresh clone already has it and this pass is a no-op
         // content-compare rather than a 30 s-late rewrite.
         desired_env.push(claude_model_env_var());
+        // Read before the render below shadows the list: Cursor cannot expand an environment
+        // reference in its MCP config, so its `linear` server needs the value itself.
+        let linear_key = env_value(&desired_env, "LINEAR_API_KEY");
         let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
         // Clear the retired inference vars from the agent-wrapper's unit environment. Stamped
         // and independent of the env-change gate below: the vars this removes come from the
@@ -1784,6 +1922,29 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                     tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile failed: {e:#}");
                 } else {
                     tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile still failing: {e:#}");
+                }
+            }
+        }
+
+        // Cursor's `~/.cursor/mcp.json`, the same managed set the CLI agents get. Merged, not
+        // rewritten: the operator's own servers share that file.
+        match ensure_cursor_mcp(app, id, h.headless, &linear_key).await {
+            Ok(true) => {
+                warned.remove(&format!("{id}:cursor-mcp"));
+                tracing::info!(
+                    target: "clone_reconcile",
+                    "clone {id}: synced ~/.cursor/mcp.json MCP servers (headless={})",
+                    h.headless
+                );
+            }
+            Ok(false) => {
+                warned.remove(&format!("{id}:cursor-mcp"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:cursor-mcp")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile still failing: {e:#}");
                 }
             }
         }
@@ -2160,6 +2321,8 @@ mod tests {
             ("tmp_mount_mask", tmp_mount_mask_script().to_string()),
             ("claude_mcp", claude_mcp_script(false)),
             ("claude_mcp_headless", claude_mcp_script(true)),
+            ("cursor_mcp", cursor_mcp_script(false, "lin_key")),
+            ("cursor_mcp_headless", cursor_mcp_script(true, "lin_key")),
             ("etc_environment_sync", etc_environment_sync_script("A=1\n")),
             ("claude_hook", claude_hook_script()),
         ];
@@ -2829,6 +2992,112 @@ mod hook_tests {
         // endless churn of writes into a file Cursor watches and reloads on every change.
         assert_eq!(run_both(&settings).1, body, "second identical pass rewrote the file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Run the real Cursor MCP script against a real file, for the same reason the hook merge
+    /// runs its own: the jq program is where this can be wrong, and asserting on script text
+    /// would not notice.
+    fn run_cursor_mcp(path: &std::path::Path, headless: bool, linear_key: &str) -> String {
+        let script = cursor_mcp_script(headless, linear_key)
+            .replace("/home/rmng/.cursor/mcp.json", path.to_str().unwrap())
+            .replace("chown rmng:rmng", "true")
+            // Ownership needs root; the directory still has to be created.
+            .replace(
+                "install -d -o rmng -g rmng -m755 /home/rmng/.cursor",
+                &format!("mkdir -p {}", path.parent().unwrap().display()),
+            );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run the cursor mcp script");
+        assert!(
+            out.status.success(),
+            "script failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn cursor_gets_both_servers_with_the_bearer_already_resolved() {
+        let dir = tmpdir("cursormcp");
+        let path = dir.join("mcp.json");
+        let body = run_cursor_mcp(&path, false, "lin_api_key_xyz");
+        let got: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(got["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
+        assert_eq!(got["mcpServers"]["linear"]["url"], "https://mcp.linear.app/mcp");
+        // Cursor expands nothing in this file, so an env reference would be sent verbatim as
+        // the token and every Linear call would 401.
+        assert_eq!(
+            got["mcpServers"]["linear"]["headers"]["Authorization"],
+            "Bearer lin_api_key_xyz"
+        );
+        assert!(!body.contains("${"), "no unexpanded reference may survive: {body}");
+
+        // A second identical pass must be byte-identical: Cursor watches this file and
+        // reconnects every server when it changes.
+        assert_eq!(run_cursor_mcp(&path, false, "lin_api_key_xyz"), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_headless_clone_loses_the_desktop_server_and_a_keyless_one_loses_linear() {
+        let dir = tmpdir("cursordrop");
+        let path = dir.join("mcp.json");
+
+        let headless: serde_json::Value =
+            serde_json::from_str(&run_cursor_mcp(&path, true, "lin_api_key_xyz")).unwrap();
+        assert!(headless["mcpServers"]["desktop"].is_null(), "no daemon on a headless clone");
+        assert!(headless["mcpServers"]["linear"].is_object());
+
+        // Flipping to headed on the same file brings desktop back and drops linear, since a
+        // headerless linear would sit in Cursor's "Needs attention" list forever.
+        let keyless: serde_json::Value =
+            serde_json::from_str(&run_cursor_mcp(&path, false, "")).unwrap();
+        assert!(keyless["mcpServers"]["desktop"].is_object());
+        assert!(keyless["mcpServers"]["linear"].is_null(), "no key means no server");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_operators_own_cursor_servers_survive_the_merge() {
+        let dir = tmpdir("cursorkeepmcp");
+        let path = dir.join("mcp.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"theirs":{"command":"npx","args":["-y","their-server"]}}}"#,
+        )
+        .unwrap();
+
+        let got: serde_json::Value = serde_json::from_str(&run_cursor_mcp(&path, false, "k")).unwrap();
+        assert_eq!(got["mcpServers"]["theirs"]["command"], "npx");
+        assert_eq!(got["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cursor_stamp_tracks_the_key_without_carrying_it() {
+        let a = cursor_mcp_desired(false, "key-one");
+        let b = cursor_mcp_desired(false, "key-two");
+        assert_ne!(a, b, "a rotated key must re-apply");
+        assert_eq!(a, cursor_mcp_desired(false, "key-one"), "and be stable otherwise");
+        assert_ne!(a, cursor_mcp_desired(true, "key-one"), "as must a headless flip");
+        for stamp in [a, b] {
+            assert!(!stamp.contains("key-"), "the stamp file must not carry the key: {stamp}");
+        }
+    }
+
+    #[test]
+    fn env_value_takes_the_last_duplicate() {
+        let vars = vec![
+            wire::EnvVar { key: "LINEAR_API_KEY".into(), value: "first".into() },
+            wire::EnvVar { key: "OTHER".into(), value: "x".into() },
+            wire::EnvVar { key: "LINEAR_API_KEY".into(), value: "second".into() },
+        ];
+        assert_eq!(env_value(&vars, "LINEAR_API_KEY"), "second");
+        assert_eq!(env_value(&vars, "ABSENT"), "");
     }
 
     fn shell_quote(s: &str) -> String {

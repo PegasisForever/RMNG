@@ -555,6 +555,14 @@ and `[mcp_servers.linear]` tables it manages and appends them, leaving every oth
 the same courtesy `~/.claude.json` already got (jq-merged, because Claude Code accumulates
 project state there). A hand-edit to any other setting survives every reconcile pass.
 
+**Cursor gets the same two servers** through `~/.cursor/mcp.json`, its user-level MCP config,
+also jq-merged so the operator's own servers stay. Two differences from the files above follow
+from what Cursor reads. It expands no environment reference there, so the Linear bearer is
+resolved into the file (`0600`, owned by the clone user) instead of being written as
+`${LINEAR_API_KEY}`, and a clone whose preset carries no Linear key gets no `linear` server at
+all rather than one that cannot authenticate. Cursor watches the file, so servers connect
+without a restart.
+
 > There is no `/api/clone/redeploy` endpoint any more. Clone binaries (`clone-daemon`,
 > `agent-wrapper`, the `rmng` CLI) are installed by the control-server at create time, before
 > the container boots, and refreshed on running managed clones by the clone reconciler after
