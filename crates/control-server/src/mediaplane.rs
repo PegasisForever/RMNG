@@ -577,20 +577,35 @@ fn broker_offer(handle: &MediaHandle, viewers: &Viewers, offer: ClipboardOffer, 
     }
 }
 
+/// Record `requester` as wanting `req`, and say whether the owner has to be asked.
+/// `Some(owner)` starts a fetch; `None` means either there is nothing to fetch or an
+/// identical fetch is already in flight and this requester joins its reply.
+///
+/// Joining matters because one copy fans out to every clone and every viewer, and each
+/// asks for the same `(serial, mime)` at once. The clone-daemon can only run one
+/// `SelectionRead` at a time, so N identical requests would be N-1 failures.
+fn clip_fetch_owner(
+    clip: &Mutex<ClipState>,
+    req: &ClipboardRequest,
+    requester: &str,
+) -> Option<String> {
+    let mut clip = clip.lock().unwrap();
+    let (_, owner) = clip.offer.clone()?;
+    if owner == requester {
+        return None; // don't ask the owner to fetch from itself
+    }
+    let key = (req.serial, req.mime_type.clone());
+    let in_flight = clip.pending.contains_key(&key);
+    clip.pending.entry(key).or_default().push(requester.to_string());
+    (!in_flight).then_some(owner)
+}
+
 /// Broker: `requester` wants the current owner's bytes for a MIME — record it and
-/// forward the request to the owner (lazy fetch).
+/// forward the request to the owner (lazy fetch), unless that fetch is already running.
 fn broker_request(handle: &MediaHandle, viewers: &Viewers, req: ClipboardRequest, requester: &str) {
-    let owner = {
-        let mut clip = handle.clip.lock().unwrap();
-        let Some((_, owner)) = clip.offer.clone() else {
-            tracing::debug!(target: "clip", "request serial={} mime={} from {requester:?} dropped: no offer", req.serial, req.mime_type);
-            return;
-        };
-        if owner == requester {
-            return; // don't ask the owner to fetch from itself
-        }
-        clip.pending.entry((req.serial, req.mime_type.clone())).or_default().push(requester.to_string());
-        owner
+    let Some(owner) = clip_fetch_owner(&handle.clip, &req, requester) else {
+        tracing::debug!(target: "clip", "request serial={} mime={} from {requester:?} not forwarded (no offer, self, or already in flight)", req.serial, req.mime_type);
+        return;
     };
     tracing::debug!(target: "clip", "request serial={} mime={} from {requester:?} -> owner {owner:?}", req.serial, req.mime_type);
     send_clip_to(handle, viewers, &owner, ClipboardMsg::Request(req));
@@ -1395,5 +1410,53 @@ mod tests {
         clip.lock().unwrap().pending.insert((7, "image/png".into()), vec![only.clone()]);
         clip_forget_source(&clip, &only);
         assert!(clip.lock().unwrap().pending.is_empty(), "emptied requester list should be removed");
+    }
+
+    #[test]
+    fn a_second_requester_joins_the_running_fetch_instead_of_starting_another() {
+        use wire::socket::{ClipboardOffer, ClipboardRequest};
+        let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
+        clip.lock().unwrap().offer =
+            Some((ClipboardOffer { serial: 4, mime_types: vec!["text/plain".into()] }, "clone-a".into()));
+        let req = ClipboardRequest { serial: 4, mime_type: "text/plain".into() };
+
+        let first = clip_fetch_owner(&clip, &req, &viewer_src(1));
+        let second = clip_fetch_owner(&clip, &req, &viewer_src(2));
+
+        assert_eq!(first.as_deref(), Some("clone-a"), "the first request starts the fetch");
+        assert_eq!(second, None, "the second must not start a parallel SelectionRead");
+        // Both still get the bytes: the reply fans out over the pending list.
+        assert_eq!(
+            clip.lock().unwrap().pending.get(&(4, "text/plain".into())),
+            Some(&vec![viewer_src(1), viewer_src(2)])
+        );
+    }
+
+    #[test]
+    fn a_different_mime_or_serial_starts_its_own_fetch() {
+        use wire::socket::{ClipboardOffer, ClipboardRequest};
+        let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
+        clip.lock().unwrap().offer = Some((
+            ClipboardOffer { serial: 4, mime_types: vec!["text/plain".into(), "text/html".into()] },
+            "clone-a".into(),
+        ));
+        let text = ClipboardRequest { serial: 4, mime_type: "text/plain".into() };
+        let html = ClipboardRequest { serial: 4, mime_type: "text/html".into() };
+        let newer = ClipboardRequest { serial: 5, mime_type: "text/plain".into() };
+
+        assert!(clip_fetch_owner(&clip, &text, &viewer_src(1)).is_some());
+        assert!(clip_fetch_owner(&clip, &html, &viewer_src(1)).is_some(), "html is a separate transfer");
+        assert!(clip_fetch_owner(&clip, &newer, &viewer_src(1)).is_some(), "a new offer is a separate transfer");
+    }
+
+    #[test]
+    fn the_owner_is_never_asked_to_fetch_from_itself() {
+        use wire::socket::{ClipboardOffer, ClipboardRequest};
+        let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
+        clip.lock().unwrap().offer =
+            Some((ClipboardOffer { serial: 1, mime_types: vec!["text/plain".into()] }, "clone-a".into()));
+        let req = ClipboardRequest { serial: 1, mime_type: "text/plain".into() };
+        assert_eq!(clip_fetch_owner(&clip, &req, "clone-a"), None);
+        assert!(clip.lock().unwrap().pending.is_empty(), "the owner must not be recorded as a requester");
     }
 }

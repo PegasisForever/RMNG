@@ -55,7 +55,9 @@ connection (1-byte tag framing: video / clipboard / cursor / layout — see
 monitor set, and forces an IDR. Viewer input is relayed to the selected clone. control-server
 is also the **clipboard broker**: it tracks the current owner and fans each `ClipboardOffer`
 to the viewer **and every other clone** (remote↔local + remote↔remote), routing requests to
-the owner and bytes back to the requester, re-binding as `selected` changes.
+the owner and bytes back to the requester, re-binding as `selected` changes. Endpoints asking
+for the same `(serial, mime_type)` share one fetch: the first request goes to the owner, the
+rest join its reply, because a clone can only run one selection read at a time.
 
 ## Port 2 — web API
 

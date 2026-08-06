@@ -67,6 +67,11 @@ pub async fn run(
     let remote: Arc<Mutex<Option<ClipboardOffer>>> = Arc::new(Mutex::new(None));
     // SelectionTransfers awaiting broker data, keyed by MIME → Mutter serials.
     let pending: Arc<Mutex<HashMap<String, Vec<u32>>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Mutter runs ONE SelectionRead per session: a second read started while a transfer is
+    // open fails instantly with `LimitsExceeded: Tried to read in parallel`, and that
+    // requester gets empty bytes. Requests arrive in bursts (one per MIME per endpoint, and
+    // Chromium advertises a copy twice), so every read takes this gate first.
+    let read_gate: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     // Flow 1: a clone app copied → advertise its MIME types (lazy, no bytes). Wrapped in a
     // re-subscribe loop: on a session swap the old session's signal stream ends, so we
@@ -156,18 +161,27 @@ pub async fn run(
                     Err(e) => tracing::warn!("SetSelection: {e}"),
                 }
             }
-            // Flow 2: a remote wants our clone's data for `mime` — read + ship it.
-            // Spawned: a slow source app must not wedge this loop (Chromium can sit on
-            // a SelectionRead), and the fd read gets a hard timeout. ALWAYS reply, with
-            // empty bytes on failure — a dropped reply leaves the broker's pending entry
-            // and the requester's clipboard silently stale.
+            // Flow 2: a remote wants our clone's data for `mime` — read + ship it, one
+            // read at a time (`read_gate`). Spawned: a slow source app must not wedge this
+            // loop (Chromium can sit on a SelectionRead), and the fd read gets a hard
+            // timeout. ALWAYS reply, with empty bytes on failure — a dropped reply leaves
+            // the broker's pending entry and the requester's clipboard silently stale.
             FromServer::Request(r) => {
-                let (rd, transport) = (rd.clone(), transport.clone());
+                let (rd, transport, gate) = (rd.clone(), transport.clone(), read_gate.clone());
                 tokio::spawn(async move {
                     let started = std::time::Instant::now();
-                    let bytes = match rd.selection_read(&r.mime_type).await {
+                    let guard = gate.lock_owned().await;
+                    let bytes = match selection_read_retrying(&rd, &r.mime_type).await {
                         Ok(fd) => {
-                            let read = tokio::task::spawn_blocking(move || read_all(fd));
+                            // The guard rides into the blocking read and is released only when
+                            // the transfer really ends. On a timeout we answer empty, but
+                            // Mutter's transfer is still open, so the next read must keep
+                            // waiting rather than collide with it.
+                            let read = tokio::task::spawn_blocking(move || {
+                                let out = read_all(fd);
+                                drop(guard);
+                                out
+                            });
                             match tokio::time::timeout(std::time::Duration::from_secs(5), read).await {
                                 Ok(Ok(Ok(bytes))) => bytes,
                                 Ok(Ok(Err(e))) => {
@@ -217,6 +231,36 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Open the selection fd for `mime_type`, waiting out a refusal from Mutter's previous
+/// transfer.
+///
+/// `read_gate` already keeps this daemon to one read at a time, but reaching EOF and closing
+/// the fd does not clear Mutter's in-flight flag: that happens later on its own main loop, so
+/// a read started right after a fast one is still refused with `LimitsExceeded`. Retrying for
+/// up to 200 ms turns that into a few milliseconds of delay instead of empty bytes.
+async fn selection_read_retrying(
+    rd: &crate::mutter::RemoteDesktopSessionProxy<'static>,
+    mime_type: &str,
+) -> zbus::Result<zbus::zvariant::OwnedFd> {
+    let mut left = 10;
+    loop {
+        match rd.selection_read(mime_type).await {
+            Err(e) if left > 0 && is_transfer_busy(&e) => {
+                left -= 1;
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            done => return done,
+        }
+    }
+}
+
+/// Mutter's "Tried to read in parallel" refusal. It is the only `LimitsExceeded` the
+/// selection API raises.
+fn is_transfer_busy(e: &zbus::Error) -> bool {
+    matches!(e, zbus::Error::MethodError(name, _, _)
+        if name.as_str() == "org.freedesktop.DBus.Error.LimitsExceeded")
 }
 
 /// Mutter delivers `SelectionOwnerChanged` `a{sv}` values wrapped in a 1-field D-Bus

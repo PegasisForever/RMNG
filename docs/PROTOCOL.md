@@ -125,6 +125,13 @@ viewer + every other clone, routes a paste's request to the owner, and routes by
 the requester. The clone-daemon bridges via Mutter `RemoteDesktop` selection
 (`SelectionRead`/`SelectionWrite`); the viewer via the GTK clipboard.
 
+**One read at a time.** Mutter runs a single `SelectionRead` per session and fails a second
+one with `LimitsExceeded: Tried to read in parallel`, which reaches the requester as empty
+bytes. One copy fans out to every endpoint, and each asks per MIME, so two rules keep the
+reads sequential. The broker forwards only the first request for a `(serial, mime_type)` and
+adds later requesters to the same pending list, and the clone-daemon holds a gate across the
+whole transfer, from `SelectionRead` to the end of the fd read.
+
 ---
 
 ## Config schema
