@@ -73,7 +73,7 @@ What each piece is for:
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
 | `-p 9000:9000` and `-p 9001:9001` | the web API and video ports |
 | `-p 9005:9005` | the port-forward data plane (viewer↔clone TCP splice) |
-| `-p 445:445` | the `clones` SMB share for browsing every running clone's `/home/rmng` from `smb://<host>/clones` |
+| `-p 445:445` | the two SMB shares: `clones` browses every running clone's `/home/rmng`, and `shared` is the one pool every clone sees at `/home/rmng/shared` |
 | `-p 2222:2222` | the SSH bastion — jump host for `ssh`/`scp`/`rsync`/VSCode Remote-SSH into any clone's own `sshd` (see [SSH into clones](#ssh-into-clones)) |
 
 **There are zero `-e` configuration flags, by design.** `config.json` (edited via the
@@ -407,6 +407,40 @@ Reach it three ways:
 
 Omit `--pid host` and this feature is simply off (the server logs a one-time hint per clone);
 nothing else is affected.
+
+## The shared folder
+
+One directory that every clone and every SMB client sees at once. Drop a file in and it is in
+front of the whole fleet.
+
+| Where | Path |
+|---|---|
+| Over SMB | `smb://<docker-host>/shared`, same `rmng`/`rmng` credential as `clones` |
+| Inside every clone | `/home/rmng/shared` |
+| On the control-server | `data/shared` (`/data/data/shared` in the container) |
+| On the Docker host | `/var/lib/docker/volumes/rmng-data/_data/data/shared` |
+
+Read-write from every side. The pool's root is owned by the clone user (uid **1000**), so a
+clone writes to it as itself and the `shared` SMB share acts as the same user.
+
+It reaches clones that already exist. Docker cannot add a mount to a live container, and
+recreating one would destroy the clone's writable layer, so the server mounts the pool into each
+running clone in place: `open_tree` detaches a copy of the directory, `setns` enters the clone's
+mount namespace by host PID, and `move_mount` attaches the copy at `/home/rmng/shared`. A 15
+second reconciler does this for every running managed clone, including new ones and ones that
+just restarted, so nothing needs a rebuild or a restart to pick it up.
+
+Three consequences worth knowing:
+
+1. It needs `--pid host`, like the clone-home links above. Without it the server warns once per
+   clone and mounts nothing.
+2. It appears under the `clones` share too, at `smb://<host>/clones/<id>/shared`, because it
+   genuinely sits inside each clone's home. A recursive copy of `clones` will read it once per
+   clone.
+3. A clone's own `/home/rmng/shared` is empty for up to 15 seconds after that clone starts,
+   until the reconciler re-applies the mount.
+4. Anything a clone already kept at `~/shared` is hidden while the pool is mounted over it. The
+   files are untouched and come back if the mount goes away, but they are not in the pool.
 
 ## SSH into clones
 

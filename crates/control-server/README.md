@@ -2,7 +2,7 @@
 
 The backend binary — one tokio service that is the **control plane**, the **media plane**,
 and the **fleet-automation plane**. It exposes three service ports (9000 web, 9001 video,
-9005 forward) plus the clone-home SMB share on 445, and ships as a Docker image; the frontend
+9005 forward) plus the clone-home and shared-folder SMB shares on 445, and ships as a Docker image; the frontend
 and the `clone-daemon`/`agent-wrapper`/`rmng-cli` binaries are plain on-disk payloads under
 `/usr/local/share/rmng/` (read at runtime, injected into clones at create time) — nothing is
 compiled into the binary. Clones themselves are created from a separately-published **template**
@@ -16,7 +16,7 @@ control-server payload at all. Full references: [API](../../docs/API.md) ·
 | **1 — video** | 9001 | framed H.264/JSON over TCP | the native [viewer](../viewer/README.md): selected clone's monitors out; input/clipboard/cursor |
 | **2 — web API** | 9000 | `axum` HTTP + SSE + embedded frontend | the [frontend](../../frontend/README.md): `/events`, all `/api/*`, the SPA |
 | **4 — forward** | 9005 | framed TCP over TCP | the viewer's port-forward data plane: one TCP connection per accepted local socket, spliced to the clone |
-| **SMB** | 445 | SMB (smbd) | the `clones` share (fixed cred `rmng`/`rmng`) browses each running clone's `/home/rmng` at `smb://<host>/clones` |
+| **SMB** | 445 | SMB (smbd) | two shares, fixed cred `rmng`/`rmng`: `clones` browses each running clone's `/home/rmng` at `smb://<host>/clones`, and `shared` is the pool every clone sees at `/home/rmng/shared` |
 
 **No clone model traffic passes through this process.** Agents dial their providers directly and
 authenticate from credential files this server writes into each clone (see
@@ -42,8 +42,9 @@ provider-scoped view replacement) · `token_unmigrate` (the one-shot startup mig
 retired routed model) · `chat` (agent-wrapper proxy +
 per-clone SSE + the activity stream behind working/idle) · `monitor` (Docker maintenance,
 CPU/RAM sampling, the activity bus and lifecycle writer) · `homes`
-(clone-home symlinks under `data/hosts/`) · `smb` (smbd supervisor + read-write `clones` share
-over `data/hosts`) · `files` (notes/uploads) · `assets` (on-disk clone-daemon/agent-wrapper
+(clone-home symlinks under `data/hosts/`) · `shared` (mounts `data/shared` into every running
+clone at `/home/rmng/shared`) · `smb` (smbd supervisor + the read-write `clones` and `shared`
+shares) · `files` (notes/uploads) · `assets` (on-disk clone-daemon/agent-wrapper
 payloads + the served frontend).
 
 ## Port 1 — media plane (`mediaplane` → [media](../media/README.md))
@@ -134,8 +135,8 @@ clones), reachable *from* the control-server (the agent-wrapper chat proxy + the
 `rmng desktop` → daemon-MCP proxy + `rmng exec`); media/input cross the shared
 `/srv/rmng-sock` named-volume unix socket (SCM_RIGHTS), not the network. Ports 1 and 2 are
 operator-facing; the clone daemon MCP (9004) is localhost/token-protected; the forward data
-plane (9005) and the `clones` SMB share (445) are published for the viewer and clone-home
-browsing.
+plane (9005) and the SMB shares (445) are published for the viewer, clone-home browsing, and
+the shared folder.
 
 ## Dependencies
 

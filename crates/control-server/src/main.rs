@@ -26,6 +26,7 @@ mod mediaplane;
 mod monitor;
 mod naming;
 mod provision;
+mod shared;
 mod shm;
 mod smb;
 mod ssh;
@@ -267,6 +268,10 @@ async fn main() -> Result<()> {
             // used, which is what stops a new clone inheriting a retired one's history.
             tokio::spawn(ledger::run(app_for_bg.clone()));
             tokio::spawn(shm::run(app_for_bg.clone()));
+            // The shared folder: one pool at data/shared, mounted live into every running clone
+            // at /home/rmng/shared and served as the `shared` SMB share. Also needs `pid: "host"`,
+            // because the mount enters the clone's namespace by host PID.
+            tokio::spawn(shared::run(app_for_bg.clone()));
             tokio::spawn(buildinfra::run(app_for_bg.clone()));
             // Scheduled chat delivery: fires operator-queued messages once their time passes.
             // Disk-backed, so anything that came due during a restart goes out on the first tick.

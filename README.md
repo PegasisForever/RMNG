@@ -58,6 +58,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 - Docker + lxcfs clone isolation
 - Full GNOME in each clone
 - Central SMB share for clone file systems
+- Shared folder every clone sees at `/home/rmng/shared`
 - SSH bastion for clone access
 
 **Agent Native**
@@ -112,6 +113,6 @@ docker run -d --name rmng --privileged --init --pid host --restart unless-stoppe
   -p 9000:9000 -p 9001:9001 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
-Ports: `9000` web UI/API · `9001` video · `9005` port-forward data plane · `445` SMB clone-home share (host `445` must be free) · `2222` SSH bastion (jump into clones). The clone-local desktop MCP remains on internal port `9004`.
+Ports: `9000` web UI/API · `9001` video · `9005` port-forward data plane · `445` SMB, serving both the clone-home share and the shared folder (host `445` must be free) · `2222` SSH bastion (jump into clones). The clone-local desktop MCP remains on internal port `9004`.
 
 Open `http://<host>:9000`. The **first-run setup wizard** walks through the environment checklist, server settings, clone-template download, and setup completion. Full flow, image build, template publishing, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).

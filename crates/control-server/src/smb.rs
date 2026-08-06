@@ -1,7 +1,13 @@
-//! `smbd` supervisor for the `clones` SMB share. Its root is `data/hosts` — the symlink
-//! directory the clone-home reconciler (`homes.rs`) maintains, one link per running clone
-//! pointing at that clone's `/home/rmng`. So an SMB client browsing `\\<host>\clones` sees
-//! every clone's home side by side.
+//! `smbd` supervisor for the two SMB shares.
+//!
+//! `clones` is rooted at `data/hosts`, the symlink directory the clone-home reconciler
+//! (`homes.rs`) maintains, one link per running clone pointing at that clone's `/home/rmng`. So
+//! an SMB client browsing `\\<host>\clones` sees every clone's home side by side.
+//!
+//! `shared` is rooted at `data/shared`, the one pool `shared.rs` mounts into every clone at
+//! `/home/rmng/shared`. Writing there over SMB puts the file in front of every clone at once,
+//! and a clone writing to its own `/home/rmng/shared` puts it back on this share. It is a plain
+//! directory, so it needs none of the `/proc` traversal machinery below.
 //!
 //! `force user = root` makes smbd *traverse* those `/proc/<pid>/root` symlinks: the clone's
 //! uid-1000 session process is non-dumpable (it setuid'd from root at login), so following
@@ -40,8 +46,12 @@ const BASE_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 const STABLE_RUN: Duration = Duration::from_secs(60);
 
-/// Render `smb.conf` for the clone-home share. Pure (no I/O) so it is unit-testable.
-pub fn render_smb_conf(hosts_root: &Path) -> String {
+/// Render `smb.conf` for the two shares. Pure (no I/O) so it is unit-testable.
+///
+/// `clones` needs `force user = root` to traverse its `/proc/<pid>/root` links (see the module
+/// doc). `shared` is a plain directory owned by uid 1000, so it acts as `rmng` directly and
+/// every file it writes is one the clones can edit through their own mount.
+pub fn render_smb_conf(hosts_root: &Path, shared_root: &Path) -> String {
     format!(
         "[global]
    server min protocol = SMB2
@@ -56,7 +66,7 @@ pub fn render_smb_conf(hosts_root: &Path) -> String {
    log level = 1
 
 [clones]
-   path = {}
+   path = {hosts}
    read only = no
    wide links = yes
    follow symlinks = yes
@@ -64,16 +74,24 @@ pub fn render_smb_conf(hosts_root: &Path) -> String {
    force group = rmng
    valid users = rmng
    inherit owner = unix only
+
+[shared]
+   path = {shared}
+   read only = no
+   force user = rmng
+   force group = rmng
+   valid users = rmng
 ",
-        hosts_root.display()
+        hosts = hosts_root.display(),
+        shared = shared_root.display(),
     )
 }
 
-/// The share root as an absolute path. `homes::hosts_root` is `data/hosts` relative to the
-/// WORKDIR (`/data` → `/data/data/hosts`); smb.conf needs it absolute. Lexical only (no
-/// symlink resolution). Sourced from `homes` so the reconciler and the share never diverge.
-fn absolute_hosts_root(data_dir: &str) -> PathBuf {
-    let root = homes::hosts_root(data_dir);
+/// A share root as an absolute path. Both roots come back relative to the WORKDIR (`/data` →
+/// `/data/data/hosts`), and smb.conf needs them absolute. Lexical only (no symlink resolution).
+/// Each root is sourced from the module that maintains it, so a share and its reconciler can
+/// never point at different directories.
+fn absolute(root: PathBuf) -> PathBuf {
     std::path::absolute(&root).unwrap_or(root)
 }
 
@@ -232,11 +250,20 @@ async fn supervise() {
 /// startup from `main` alongside `homes::run`.
 pub async fn run(app: App) {
     let cfg = app.config();
-    let root = absolute_hosts_root(&cfg.data_dir);
-    let _ = std::fs::create_dir_all(&root); // harmless if homes already made it
+    let hosts = absolute(homes::hosts_root(&cfg.data_dir));
+    let shared = absolute(crate::shared::shared_root(&cfg.data_dir));
+    // Harmless if `homes` and `shared` already made them, and required when they have not:
+    // smbd refuses to serve a share whose path is missing.
+    let _ = std::fs::create_dir_all(&hosts);
+    let _ = std::fs::create_dir_all(&shared);
 
-    match std::fs::write(SMB_CONF, render_smb_conf(&root)) {
-        Ok(()) => tracing::info!(target: "smb", "wrote {SMB_CONF} (clones {})", root.display()),
+    match std::fs::write(SMB_CONF, render_smb_conf(&hosts, &shared)) {
+        Ok(()) => tracing::info!(
+            target: "smb",
+            "wrote {SMB_CONF} (clones {}, shared {})",
+            hosts.display(),
+            shared.display()
+        ),
         Err(e) => tracing::error!(target: "smb", "writing {SMB_CONF}: {e}"),
     }
 
@@ -250,7 +277,7 @@ mod tests {
 
     #[test]
     fn render_smb_conf_has_load_bearing_lines() {
-        let out = render_smb_conf(Path::new("/data/data/hosts"));
+        let out = render_smb_conf(Path::new("/data/data/hosts"), Path::new("/data/data/shared"));
         for needle in [
             "[global]",
             "server min protocol = SMB2",
@@ -270,12 +297,26 @@ mod tests {
     }
 
     #[test]
-    fn render_smb_conf_interpolates_the_share_path() {
-        // The clones share root must be exactly where the reconciler links, else the share is
-        // silently empty — so `path` tracks the argument, not a hardcoded default.
-        let out = render_smb_conf(Path::new("/srv/rmng/data/hosts"));
+    fn render_smb_conf_interpolates_both_share_paths() {
+        // Each root must be exactly where its reconciler works, or the share is silently empty.
+        // So both paths track their arguments rather than a hardcoded default.
+        let out = render_smb_conf(
+            Path::new("/srv/rmng/data/hosts"),
+            Path::new("/srv/rmng/data/shared"),
+        );
         assert!(out.contains("path = /srv/rmng/data/hosts"), "{out}");
-        assert!(!out.contains("/data/data/hosts"), "{out}");
+        assert!(out.contains("path = /srv/rmng/data/shared"), "{out}");
+        assert!(!out.contains("/data/data/"), "{out}");
+    }
+
+    #[test]
+    fn the_shared_share_acts_as_the_clone_user() {
+        // `force user = root` would leave every SMB-written file owned by root, and a clone
+        // writing through its own mount could then neither edit nor delete it.
+        let out = render_smb_conf(Path::new("/data/data/hosts"), Path::new("/data/data/shared"));
+        let shared = out.split("[shared]").nth(1).expect("a [shared] section");
+        assert!(shared.contains("force user = rmng"), "{shared}");
+        assert!(shared.contains("read only = no"), "{shared}");
     }
 
     #[test]
