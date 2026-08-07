@@ -267,6 +267,14 @@ that session's main-agent evidence, and `SubagentStop` or `StopFailure` ends tha
 matching `PostToolUse` is not the only thing that ends a tool call: interrupting one fires no hook
 at all, and only the next turn boundary says it is over.
 
+An operator who presses escape and then types nothing reaches no boundary, so the event log alone
+holds those calls open forever. The last record of the owner's transcript is read for that one
+case: a user record starting with `[Request interrupted by user` retires every call that owner
+was inside. It is the only place a transcript's contents are read, and it is read from the end,
+so a large transcript costs the same as a small one. Measured on clone `pega-dev-351` on
+2026-08-07: two `Agent` calls interrupted at 08:52:40 still read as in flight 24 minutes later,
+and the clone reported `working` on every four-second tick over two subagents already dead.
+
 **Cursor feeds the same table.** It publishes no registry, so a conversation is rebuilt from the
 probe's own event stream instead: a turn that has ended reads `idle`, and one still open reads
 `busy`. Two details are load-bearing. A Cursor subagent runs under its own conversation id, never

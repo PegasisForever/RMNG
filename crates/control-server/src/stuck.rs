@@ -84,6 +84,12 @@
 //! What that corpus cannot measure is the retirement rule below. It holds no interrupted tool
 //! call at all, so the fold change is worth exactly zero points there. It was found on a live
 //! clone instead, where one such call had been reading as an `ssh` hung for 3.4 hours.
+//!
+//! An interrupt with no turn after it was found the same way, on `pega-dev-351` on 2026-08-07.
+//! Escape during two `Agent` calls fires no hook whatever, and nobody typed again, so the fold
+//! had no boundary to retire them at and the judge answered `working` for 24 minutes over two
+//! subagents that were already dead. The transcript is the only record of that interrupt, and
+//! [`ends_interrupted`] is where this module reads one.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -666,8 +672,12 @@ fn still_running(stop: &HookEvent) -> Option<HashSet<&str>> {
 /// A matching `PostToolUse` is not the only thing that ends a call, and believing it was cost
 /// three hours of one clone reading as hung. **Interrupting a tool call fires no
 /// `PostToolUse`**: the operator presses escape, types something else, and the call is over
-/// with nothing to say so. Only the turn boundary that follows says it, which is why the
-/// retirement rule is stated in terms of owners rather than pairs.
+/// with nothing to say so. The turn boundary that follows says it, which is why the retirement
+/// rule is stated in terms of owners rather than pairs.
+///
+/// An operator who presses escape and then types nothing reaches no boundary at all, and this
+/// fold holds those calls open forever. [`drop_interrupted`] closes that gap from the
+/// transcript, which is where the interrupt is actually written down.
 pub fn in_flight_tools(events: &[HookEvent]) -> Vec<&HookEvent> {
     let mut live: Vec<&HookEvent> = Vec::new();
     for e in events {
@@ -776,10 +786,24 @@ fn current_api_errors(events: &[HookEvent]) -> HashMap<&str, &HookEvent> {
 // The view handed to the model
 // ---------------------------------------------------------------------------------------
 
-/// How long each transcript has been untouched. Contents are never read: everything the
-/// judge used to get by parsing JSONL now arrives on a hook payload instead.
-fn transcript_silence(root: &Path, now: f64) -> HashMap<String, f64> {
-    let mut out = HashMap::new();
+/// One owner's transcript: how long it has been untouched, and where it is.
+///
+/// The age is what nearly every reader wants. The path is here for the one question mtime
+/// cannot answer, which is whether the turn was interrupted (see [`ends_interrupted`]).
+struct Transcript {
+    /// Seconds since the file was last written.
+    quiet: f64,
+    /// `None` on the synthetic entry standing in for work Cursor never named, which has no
+    /// file behind it.
+    path: Option<PathBuf>,
+}
+
+/// Every transcript under `root`, keyed by the session or conversation id it belongs to.
+///
+/// Contents are read for one line and no more: everything else the judge used to get by
+/// parsing JSONL now arrives on a hook payload instead.
+fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
+    let mut out: HashMap<String, Transcript> = HashMap::new();
     // Cursor files its transcripts under `~/.cursor/projects/<workspace>/agent-transcripts/
     // <conversation>/<conversation>.jsonl`, so the stem is the conversation id and the same
     // stem-keyed walk covers both agents.
@@ -812,10 +836,107 @@ fn transcript_silence(root: &Path, now: f64) -> HashMap<String, f64> {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
             // A subagent transcript is named `agent-<id>.jsonl` under a `subagents/` dir.
             let id = stem.strip_prefix("agent-").unwrap_or(stem).to_string();
-            out.entry(id).and_modify(|v| *v = f64::min(*v, age)).or_insert(age);
+            // Newest wins on both fields together: one id can appear under two projects, and a
+            // path taken from the older copy would answer for a transcript nobody is writing.
+            match out.get(&id) {
+                Some(prev) if prev.quiet <= age => {}
+                _ => {
+                    out.insert(id, Transcript { quiet: age, path: Some(path) });
+                }
+            }
         }
     }
     out
+}
+
+/// The text Claude Code writes into a transcript when a person stops the agent mid-turn.
+///
+/// Two forms, `[Request interrupted by user]` and `[Request interrupted by user for tool use]`,
+/// so the prefix is what matches.
+const INTERRUPT_MARKER: &str = "[Request interrupted by user";
+
+/// Whether this transcript's last record is an interrupt.
+///
+/// **Why a file is read at all here.** An interrupt is the one turn ending that fires no hook.
+/// The operator presses escape, every tool call the agent and its subagents were inside is
+/// cancelled, and the event log gets nothing: no `PostToolUse`, no `SubagentStop`, no `Stop`.
+/// [`in_flight_tools`] can then only retire those calls at the next turn boundary, and if
+/// nobody types again there is no next boundary. Measured on clone `pega-dev-351` on
+/// 2026-08-07: two `Agent` calls interrupted at 08:52:40 still read as in flight 24 minutes
+/// later, and the judge answered `working` on every four-second tick because two subagents
+/// appeared to be running. The transcript is the only place that interrupt is written down.
+///
+/// Read from the end, so a 200 MB transcript costs the same as a small one. A last record too
+/// large for the window, or one that will not parse, reads as no interrupt: the failure has to
+/// fall on the side of leaving a live call alone.
+fn ends_interrupted(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    /// Comfortably past an interrupt record, which is about 500 bytes.
+    const WINDOW: u64 = 16 * 1024;
+
+    let Ok(mut file) = std::fs::File::open(path) else { return false };
+    let Ok(len) = file.metadata().map(|m| m.len()) else { return false };
+    let from = len.saturating_sub(WINDOW);
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return false;
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    if file.take(len - from).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    // The window can open mid-line, and that leading fragment is dropped by taking the last.
+    let Some(last) = text.lines().rfind(|l| !l.trim().is_empty()) else { return false };
+    let Ok(raw) = serde_json::from_str::<Value>(last) else { return false };
+    // A user-role record, so an assistant merely quoting the marker is not mistaken for one.
+    // Cursor names this key `role` where Claude Code names it `type`.
+    let role = raw.get("type").or_else(|| raw.get("role")).and_then(Value::as_str);
+    if role != Some("user") {
+        return false;
+    }
+    let content = raw.pointer("/message/content");
+    let said = match content.and_then(Value::as_str) {
+        Some(s) => s.to_string(),
+        None => content
+            .and_then(Value::as_array)
+            .and_then(|blocks| blocks.first())
+            .and_then(|b| b.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    };
+    said.trim_start().starts_with(INTERRUPT_MARKER)
+}
+
+/// Drop every call whose owner's transcript ends on an interrupt.
+///
+/// Owner is the subagent when there is one and the session's main agent otherwise, which is
+/// exactly how transcripts are filed, so one owner is one file. At most one file is read per
+/// owner holding a live call, which on a healthy clone is nothing at all.
+fn drop_interrupted<'a>(
+    tools: Vec<&'a HookEvent>,
+    transcripts: &HashMap<String, Transcript>,
+) -> Vec<&'a HookEvent> {
+    let mut seen: HashMap<&str, bool> = HashMap::new();
+    let mut kept: Vec<&'a HookEvent> = Vec::new();
+    for t in tools {
+        let owner = t.agent_id.as_deref().or(t.session_id.as_deref()).unwrap_or_default();
+        let interrupted = match seen.get(owner) {
+            Some(known) => *known,
+            None => {
+                let verdict = transcripts
+                    .get(owner)
+                    .and_then(|t| t.path.as_deref())
+                    .is_some_and(ends_interrupted);
+                seen.insert(owner, verdict);
+                verdict
+            }
+        };
+        if !interrupted {
+            kept.push(t);
+        }
+    }
+    kept
 }
 
 /// Size and staleness of each background task's output file. These live under `/tmp`, not
@@ -864,8 +985,8 @@ fn background_outputs(root: &Path, now: f64) -> HashMap<String, (u64, f64)> {
 /// The folds are clone-wide because the event log is: one file holds every session's stream.
 /// Scoping happens where the view is built, by owner, never here.
 pub struct CloneFacts<'a> {
-    /// How long each transcript has been untouched, keyed by session or conversation id.
-    silence: HashMap<String, f64>,
+    /// Each owner's transcript, keyed by session or conversation id.
+    silence: HashMap<String, Transcript>,
     /// Size and staleness of each background task's output file, keyed by task id.
     outputs: HashMap<String, (u64, f64)>,
     /// Every tool call still open, each carrying the owner that will close it.
@@ -883,12 +1004,19 @@ impl<'a> CloneFacts<'a> {
         // reads as `quiet_for_seconds: 1000000000`, which the judge is right to call a dead
         // agent. How long since it last fired is the same quantity, so that is what it gets.
         if let Some(at) = unowned_last_seen(events, f64::NEG_INFINITY) {
-            silence.insert(CURSOR_UNOWNED.to_string(), (now - at).max(0.0));
+            silence.insert(
+                CURSOR_UNOWNED.to_string(),
+                Transcript { quiet: (now - at).max(0.0), path: None },
+            );
         }
+        // The hook fold first, then the one ending it cannot see. An interrupt fires nothing,
+        // so a call it cancelled stays open in the fold until the next turn boundary, and a
+        // session nobody types into again never reaches one.
+        let tools = drop_interrupted(in_flight_tools(events), &silence);
         Self {
             silence,
             outputs: background_outputs(root, now),
-            tools: in_flight_tools(events),
+            tools,
             stops: latest_live_stop(events),
             errors: current_api_errors(events),
         }
@@ -913,7 +1041,7 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
     // block its parent: the parent is inside its own `Task` call, which is counted here.
     let blocked = tools.iter().any(|t| t.agent_id.is_none());
 
-    let quiet = facts.silence.get(sid).copied().unwrap_or(f64::MAX);
+    let quiet = facts.silence.get(sid).map_or(f64::MAX, |t| t.quiet);
     let stop = facts.stops.get(sid).copied();
 
     // A cli session publishes `status`, and `busy` minus "sitting in a tool call" is
@@ -2001,6 +2129,124 @@ mod tests {
         assert_eq!(in_flight_tools(&[pre, elsewhere]).len(), 1);
     }
 
+    /// A transcript at `<root>/home/rmng/.claude/projects/p/<name>.jsonl`, holding `lines`.
+    fn write_transcript(root: &Path, name: &str, lines: &[&str]) {
+        let dir = root.join("home/rmng/.claude/projects/p");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut body = String::new();
+        for l in lines {
+            body.push_str(l);
+            body.push('\n');
+        }
+        std::fs::write(dir.join(format!("{name}.jsonl")), body).unwrap();
+    }
+
+    /// The record Claude Code writes when a person stops the agent, verbatim from clone
+    /// `pega-dev-351` on 2026-08-07, minus the fields this module never reads.
+    fn interrupt_line(said: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":"{said}"}}]}},"timestamp":"2026-08-07T08:52:40.967Z","sessionId":"s"}}"#
+        )
+    }
+
+    #[test]
+    fn an_interrupt_with_no_turn_after_it_still_ends_the_call() {
+        // Measured on clone `pega-dev-351`, 2026-08-07. Escape during two `Agent` calls fired
+        // no hook of any kind: 2 `SubagentStart` and 0 `SubagentStop`, 99 `PreToolUse` against
+        // 95 `PostToolUse`, and nothing at all after 08:52:38. Nobody typed again, so no turn
+        // boundary ever came, and 24 minutes later the judge still read two subagents as
+        // running and answered `working` on every four-second tick.
+        let root = fake_clone("interrupt");
+        write_transcript(&root, "s", &[&interrupt_line("[Request interrupted by user for tool use]")]);
+        write_transcript(&root, "agent-a1", &[&interrupt_line("[Request interrupted by user]")]);
+        write_transcript(&root, "agent-a2", &[r#"{"type":"assistant","message":{"content":[]}}"#]);
+
+        let mut main = event("PreToolUse", "s", None);
+        main.tool_use_id = Some("t1".into());
+        let mut stopped = event("PreToolUse", "s", Some("a1"));
+        stopped.tool_use_id = Some("t2".into());
+        let mut alive = event("PreToolUse", "s", Some("a2"));
+        alive.tool_use_id = Some("t3".into());
+        let events = [main, stopped, alive];
+        assert_eq!(in_flight_tools(&events).len(), 3, "the hook fold alone sees all three");
+
+        let facts = CloneFacts::read(&root, &events, 2000.0);
+        let owners: Vec<Option<&str>> = facts.tools.iter().map(|t| t.agent_id.as_deref()).collect();
+        assert_eq!(owners, vec![Some("a2")], "only the agent that was not interrupted is left");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_quoted_interrupt_marker_does_not_retire_a_live_call() {
+        // The marker is ordinary text, and an agent discussing one of its own interrupts must
+        // not read as being interrupted. Only a user record that starts with it counts.
+        let root = fake_clone("quoted");
+        write_transcript(
+            &root,
+            "s",
+            &[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[Request interrupted by user] is what I saw"}]}}"#],
+        );
+        let mut pre = event("PreToolUse", "s", None);
+        pre.tool_use_id = Some("t1".into());
+        let events = [pre];
+        assert_eq!(CloneFacts::read(&root, &events, 2000.0).tools.len(), 1);
+
+        // A transcript that stops mid-turn is not an interrupt either.
+        write_transcript(&root, "s", &[r#"{"type":"user","message":{"content":"do the thing"}}"#]);
+        assert_eq!(CloneFacts::read(&root, &events, 2000.0).tools.len(), 1);
+
+        // Nor is a session with no transcript at all, which is a Cursor conversation the
+        // extension has not named yet.
+        let bare = fake_clone("quoted-bare");
+        assert_eq!(CloneFacts::read(&bare, &events, 2000.0).tools.len(), 1);
+        let _ = std::fs::remove_dir_all(&bare);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_interrupt_the_session_resumed_from_leaves_the_next_call_alone() {
+        // The marker only counts as the last record. Anything after it means the session came
+        // back to life, and a call opened since is genuinely in flight.
+        let root = fake_clone("resumed");
+        write_transcript(
+            &root,
+            "s",
+            &[
+                &interrupt_line("[Request interrupted by user]"),
+                r#"{"type":"user","message":{"content":"carry on"}}"#,
+            ],
+        );
+        let mut pre = event("PreToolUse", "s", None);
+        pre.tool_use_id = Some("t1".into());
+        assert_eq!(CloneFacts::read(&root, &[pre], 2000.0).tools.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_last_record_is_found_without_reading_the_whole_transcript() {
+        // Transcripts reach hundreds of megabytes, and this runs per tick per clone.
+        let root = fake_clone("bigtail");
+        let filler = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+            "x".repeat(200_000)
+        );
+        write_transcript(
+            &root,
+            "s",
+            &[&filler, &filler, &interrupt_line("[Request interrupted by user]")],
+        );
+        let path = root.join("home/rmng/.claude/projects/p/s.jsonl");
+        assert!(std::fs::metadata(&path).unwrap().len() > 400_000);
+        assert!(ends_interrupted(&path));
+
+        // A final record larger than the read window reads as no interrupt, which is the safe
+        // direction: it leaves a live call alone rather than calling a busy session finished.
+        write_transcript(&root, "s", &[&filler]);
+        assert!(!ends_interrupted(&path));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_subagents_call_outlives_the_parent_turn_and_ends_on_its_own_close() {
         // A parent that launches background agents fires `Stop` at once and leaves them
@@ -3025,3 +3271,4 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
     }
 
 }
+
