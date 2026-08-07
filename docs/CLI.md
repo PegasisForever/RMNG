@@ -223,7 +223,7 @@ commit/update jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are 
 Block until an operation reaches a terminal state (default timeout 600 s). Same semantics as
 `--wait` on the starting command.
 
-### `rmng ledger search <PATTERN> [--clone <id>] [--since <when>] [--until <when>] [--limit <N>]`
+### `rmng ledger search <PATTERN> [--clone <id>] [--since <when>] [--until <when>] [--sidechain | --no-sidechain] [--agent <id>] [--limit <N>]`
 Search the distilled transcripts of every clone the ledger knows, retired clones included. The
 control-server tails each running clone's Claude Code and Cursor transcripts and keeps a greppable copy
 under `data/ledger/<clone>/<session>.ndjson`, so this answers "how did we do this last time"
@@ -242,9 +242,15 @@ can copy. A record's newlines show as `⏎` to keep one record on one row.
 come back newest first, capped at `--limit` (default 50, server maximum 500); a search that
 stopped early says so on stderr.
 
+The ledger holds a session's subagent turns alongside the conversation, and on a session that
+delegates heavily the subagents are most of it. `--sidechain` keeps only those, `--no-sidechain`
+only the conversation, and `--agent <id>` reads back one subagent's whole run. The id is the
+`agentId` on a hit, which `--json` shows.
+
 ```
 rmng ledger search "va-api" --since 2d
 rmng ledger search "SignatureDoesNotMatch" --clone pega-we-142 --json | jq '.hits[].ts'
+rmng ledger search "Here is my review" --sidechain --json | jq -r '.hits[].line | fromjson.agentId'
 ```
 
 ### `rmng ledger read <CLONE> <SESSION> [--offset <N>] [--len <N>]`

@@ -782,6 +782,17 @@ the symlinks the clone-home reconciler maintains, and writes one NDJSON record p
 One more pass runs at the start of a delete and an archive. The `hosts/<id>` symlink disappears
 the moment the container stops, so anything not captured while the clone runs is unrecoverable.
 
+**Subagents are tailed too**, from `<session>/subagents/agent-<id>.jsonl` beside the transcript
+that spawned them (and `agent-transcripts/<conversation>/subagents/` for Cursor). On four measured
+clones those files held between 16.6 and 96.7 percent of all transcript bytes, because a session
+running a review loop or a judge panel puts almost everything there. Their records land in the
+spawning session's ledger file, carry `sidechain: true` and name their `agentId`, so a session
+reads as one story and either half can be asked for on its own.
+
+A first pass over a clone with a large backlog drains 64 MB per tick, which is about eleven ticks
+for the 645 MB clone measured. Main transcripts are walked before subagent ones, so the
+conversation an operator had is never the part left waiting.
+
 Both endpoints have a CLI front end: `rmng ledger search` and `rmng ledger read`
 (see [CLI.md](CLI.md)). The record shapes are `wire::ledger`, so the on-disk NDJSON line and
 what the CLI parses are one definition.
@@ -793,14 +804,24 @@ reads without needing its file header.
 {"clone":"pega-we-142","session":"49a5…","ts":"2026-08-01T10:00:00.000Z","kind":"user","text":"implement PER-26"}
 {"clone":"pega-we-142","session":"49a5…","ts":"…","kind":"toolUse","tool":"Bash","toolId":"toolu_1","text":"{\"command\":\"cargo test\"}"}
 {"clone":"pega-we-142","session":"49a5…","ts":"…","kind":"toolResult","toolId":"toolu_1","text":"412 passed"}
+{"clone":"pega-we-142","session":"49a5…","ts":"…","kind":"assistant","agentId":"a18ea28…","sidechain":true,"text":"# Independent review …"}
 ```
 
 `kind` is one of `user`, `assistant`, `toolUse`, `toolResult`, `title` (the CLI's own session
 title, written only when it changes) or `compact` (a compaction boundary, which the CLI appends
-in place rather than rewriting the file). `sidechain: true` marks a subagent's turn. What never
-reaches a record: base64 image data, replaced by `[image/jpeg, 373332 base64 bytes dropped]`,
-and the model's thinking. Tool inputs are clipped at 800 characters, tool results at 2000, and
-message text at 20000, each with the dropped byte count spelled out.
+in place rather than rewriting the file). `sidechain: true` marks a subagent's turn and `agentId`
+says which subagent, so one delegated task reads back on its own. Both come from the file the
+record was distilled out of, not from what the line claims about itself.
+
+What never reaches a record: base64 image data, replaced by `[image/jpeg, 373332 base64 bytes
+dropped]`, and the model's thinking. Tool inputs are clipped at 800 characters and message text
+at 100000, each with the dropped byte count spelled out.
+
+A tool result keeps its first 2000 characters, the dropped byte count, and then its last 500.
+A result is long exactly when something happened, and what happened is usually last: the counts
+a test runner prints after its log, the error a build finishes on. Over 38,396 tool results on
+one clone, 13,149 ran past the head cap, and the tail brings an outcome word into 992 more of
+them at no cost to what the head already held.
 
 Measured on one three-day session: 132,486,201 raw bytes distil to 2,875,456, which is 2.2
 percent, in 3,879 records.
@@ -817,6 +838,8 @@ Reusing a name would file two unrelated histories in one bucket.
 | `q` | Required. A case-insensitive substring, matched against the whole ledger line, so it reaches the text, the tool name and the kind alike |
 | `clone` | One clone id. Absent searches every clone the ledger knows, live or retired |
 | `since` / `until` | Epoch milliseconds, both inclusive. A record whose timestamp will not parse passes both bounds |
+| `sidechain` | `true` keeps only subagent turns, `false` only the conversation. Absent keeps both, which on a delegating session is mostly subagents |
+| `agent` | One subagent id, matched against a record's `agentId`. Reads back a single delegated task |
 | `limit` | Hits to return. Default 50, capped at 500 |
 
 Each hit is `{clone, session, ts, kind, offset, len, line}`. `offset` and `len` locate the line

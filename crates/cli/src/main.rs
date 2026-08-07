@@ -10,7 +10,7 @@ mod linear;
 mod output;
 mod wait;
 
-use args::{Cli, CloneCmd, Cmd, LedgerCmd, OpCmd, resolve_server};
+use args::{Cli, CloneCmd, Cmd, OpCmd, resolve_server};
 use clap::Parser;
 use control_client::Client;
 
@@ -148,23 +148,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 commands::wait_cmd(client, op_id, *timeout, json).await
             }
         },
-        Cmd::Ledger(cmd) => match cmd {
-            LedgerCmd::Search { pattern, clone, since, until, limit } => {
-                commands::ledger_search(
-                    client,
-                    pattern,
-                    clone.as_deref(),
-                    since.as_deref(),
-                    until.as_deref(),
-                    *limit,
-                    json,
-                )
-                .await
-            }
-            LedgerCmd::Read { clone, session, offset, len } => {
-                commands::ledger_read(client, clone, session, *offset, *len, json).await
-            }
-        },
+        Cmd::Ledger(cmd) => commands::ledger(client, cmd, json).await,
         Cmd::Desktop { clone, cmd } => commands::desktop(client, clone, cmd, json).await,
     }
 }

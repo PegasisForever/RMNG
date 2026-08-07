@@ -336,6 +336,15 @@ pub enum LedgerCmd {
         /// Newest record to return, same forms as `--since`
         #[arg(long, value_name = "WHEN")]
         until: Option<String>,
+        /// Only subagent turns, which is the delegated work rather than the conversation
+        #[arg(long, conflicts_with = "no_sidechain")]
+        sidechain: bool,
+        /// Only the conversation, hiding every subagent turn
+        #[arg(long)]
+        no_sidechain: bool,
+        /// Only this subagent, by the id a hit reports as `agentId`
+        #[arg(long, value_name = "ID")]
+        agent: Option<String>,
         /// Most hits to return (server caps this at 500)
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -693,17 +702,37 @@ mod tests {
         assert!(matches!(
             cli.cmd,
             Cmd::Ledger(LedgerCmd::Search {
-                ref pattern, ref clone, ref since, until: None, limit: 5
+                ref pattern, ref clone, ref since, until: None, limit: 5, ..
             }) if pattern == "va-api"
                 && clone.as_deref() == Some("pega-we-142")
                 && since.as_deref() == Some("2d")
         ));
-        // Bare search: every clone, the server's own default window, 50 hits.
+        // Bare search: every clone, both halves of every session, 50 hits.
         let bare = Cli::parse_from(["rmng", "ledger", "search", "encoder"]);
         assert!(matches!(
             bare.cmd,
-            Cmd::Ledger(LedgerCmd::Search { clone: None, since: None, limit: 50, .. })
+            Cmd::Ledger(LedgerCmd::Search {
+                clone: None, since: None, limit: 50, sidechain: false, no_sidechain: false, ..
+            })
         ));
+
+        // One subagent's run, and the conversation without any of them.
+        let one = Cli::parse_from(["rmng", "ledger", "search", "x", "--agent", "a7", "--sidechain"]);
+        assert!(matches!(
+            one.cmd,
+            Cmd::Ledger(LedgerCmd::Search { ref agent, sidechain: true, .. })
+                if agent.as_deref() == Some("a7")
+        ));
+        let main_only = Cli::parse_from(["rmng", "ledger", "search", "x", "--no-sidechain"]);
+        assert!(matches!(
+            main_only.cmd,
+            Cmd::Ledger(LedgerCmd::Search { no_sidechain: true, sidechain: false, .. })
+        ));
+        // The two are opposites, so asking for both is an error rather than a silent winner.
+        assert!(
+            Cli::try_parse_from(["rmng", "ledger", "search", "x", "--sidechain", "--no-sidechain"])
+                .is_err()
+        );
     }
 
     #[test]

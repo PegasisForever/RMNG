@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use control_client::{Client, CloneOpts};
+use control_client::{Client, CloneOpts, LedgerFilter};
 use serde_json::{Value, json};
 use wire::{ContainerStats, ControlState, MonitorState, Operation, Provider};
 
 use crate::args::{
-    AccountCmd, CreateArgs, DesktopCmd, ImageCmd, Provider as CliProvider, WaitArgs,
+    AccountCmd, CreateArgs, DesktopCmd, ImageCmd, LedgerCmd, Provider as CliProvider, WaitArgs,
 };
 use crate::output::{human_size, pct, short_id, table};
 use crate::wait::{WaitOutcome, wait_for_op};
@@ -649,22 +649,45 @@ fn parse_when(raw: &str, now: i64) -> Result<i64> {
     Ok(now - n.saturating_mul(per_unit))
 }
 
+/// `rmng ledger` — the two verbs over the distilled transcripts.
+pub async fn ledger(client: &Client, cmd: &LedgerCmd, json: bool) -> Result<u8> {
+    match cmd {
+        LedgerCmd::Search {
+            pattern,
+            clone,
+            since,
+            until,
+            sidechain,
+            no_sidechain,
+            agent,
+            limit,
+        } => {
+            let now = now_ms();
+            let filter = LedgerFilter {
+                clone: clone.as_deref(),
+                since: since.as_deref().map(|s| parse_when(s, now)).transpose()?,
+                until: until.as_deref().map(|s| parse_when(s, now)).transpose()?,
+                // The two flags conflict, so at most one is set.
+                sidechain: sidechain.then_some(true).or_else(|| no_sidechain.then_some(false)),
+                agent: agent.as_deref(),
+                limit: Some(*limit),
+            };
+            ledger_search(client, pattern, &filter, json).await
+        }
+        LedgerCmd::Read { clone, session, offset, len } => {
+            ledger_read(client, clone, session, *offset, *len, json).await
+        }
+    }
+}
+
 /// `rmng ledger search <pattern>` — the matching lines, newest first.
-pub async fn ledger_search(
+async fn ledger_search(
     client: &Client,
     pattern: &str,
-    clone: Option<&str>,
-    since: Option<&str>,
-    until: Option<&str>,
-    limit: usize,
+    filter: &LedgerFilter<'_>,
     json: bool,
 ) -> Result<u8> {
-    let now = now_ms();
-    let since = since.map(|s| parse_when(s, now)).transpose()?;
-    let until = until.map(|s| parse_when(s, now)).transpose()?;
-    let found = client
-        .ledger_search(pattern, clone, since, until, Some(limit))
-        .await?;
+    let found = client.ledger_search(pattern, filter).await?;
     if json {
         emit_json(&found)?;
         return Ok(0);
@@ -712,7 +735,7 @@ fn record_text(line: &str) -> String {
 }
 
 /// `rmng ledger read <clone> <session>` — the raw NDJSON, for piping into `jq`.
-pub async fn ledger_read(
+async fn ledger_read(
     client: &Client,
     clone: &str,
     session: &str,

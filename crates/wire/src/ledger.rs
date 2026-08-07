@@ -31,6 +31,10 @@ pub struct LedgerRecord {
     /// The `toolu_…` id, which ties a `toolResult` back to the `toolUse` that asked for it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_id: String,
+    /// The subagent that produced the event, on a `sidechain` record. One subagent's whole run
+    /// carries one id, so this is how a delegated task is read back as a unit.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_id: String,
     /// True when the event belongs to a subagent running inside this session rather than to
     /// the conversation itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

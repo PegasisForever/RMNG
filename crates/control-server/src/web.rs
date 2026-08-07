@@ -2006,6 +2006,12 @@ struct LedgerSearchQuery {
     since: Option<i64>,
     #[serde(default)]
     until: Option<i64>,
+    /// `true` keeps only subagent turns, `false` only the conversation, absent keeps both.
+    #[serde(default)]
+    sidechain: Option<bool>,
+    /// One subagent's id, as a record's `agentId`.
+    #[serde(default)]
+    agent: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -2030,6 +2036,8 @@ async fn ledger_search(
         clone: q.clone.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
         since_ms: q.since,
         until_ms: q.until,
+        sidechain: q.sidechain,
+        agent: q.agent.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()),
         limit: q.limit.unwrap_or_else(crate::ledger::default_limit),
     };
     // Blocking: one search can read every ledger file on disk.
@@ -2850,7 +2858,8 @@ mod tests {
         std::fs::write(
             dir.join("sess-1.ndjson"),
             "{\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:00:00.000Z\",\"kind\":\"user\",\"text\":\"swap the encoder to VA-API\"}\n\
-             {\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:05:00.000Z\",\"kind\":\"assistant\",\"text\":\"done, the encoder is VA-API now\"}\n",
+             {\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:05:00.000Z\",\"kind\":\"assistant\",\"text\":\"done, the encoder is VA-API now\"}\n\
+             {\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:04:00.000Z\",\"kind\":\"assistant\",\"agentId\":\"a7\",\"sidechain\":true,\"text\":\"the VA-API path builds\"}\n",
         )
         .unwrap();
 
@@ -2873,13 +2882,26 @@ mod tests {
             .await
             .unwrap();
         let hits = found["hits"].as_array().unwrap();
-        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.len(), 3);
         // Newest first, and the clone is named even though it no longer exists in state.
         assert_eq!(hits[0]["kind"], "assistant");
         assert_eq!(hits[0]["clone"], "pega-we-142");
 
+        // `sidechain` and `agent` split the conversation from the subagents it spawned.
+        for (query, want) in [("sidechain=true", 1), ("sidechain=false", 2), ("agent=a7", 1)] {
+            let got: serde_json::Value = http
+                .get(format!("{base}/api/ledger/search?q=VA-API&{query}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(got["hits"].as_array().unwrap().len(), want, "{query}");
+        }
+
         // The hit's own offset reads back as exactly that line.
-        let hit = &hits[1];
+        let hit = &hits[2];
         let range: serde_json::Value = http
             .get(format!(
                 "{base}/api/ledger/read?clone=pega-we-142&session=sess-1&offset={}&len={}",
@@ -2895,7 +2917,7 @@ mod tests {
         assert_eq!(text.lines().count(), 1);
         assert!(text.contains("swap the encoder"));
 
-        // Reading from 0 picks up both lines, and `size` says how much there is.
+        // Reading from 0 picks up every line, and `size` says how much there is.
         let whole: serde_json::Value = http
             .get(format!("{base}/api/ledger/read?clone=pega-we-142&session=sess-1"))
             .send()
@@ -2904,7 +2926,7 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(whole["text"].as_str().unwrap().lines().count(), 2);
+        assert_eq!(whole["text"].as_str().unwrap().lines().count(), 3);
         assert_eq!(whole["size"], whole["len"]);
 
         // A time bound cuts the earlier half.

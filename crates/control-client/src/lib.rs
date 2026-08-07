@@ -42,6 +42,22 @@ pub struct CloneOpts<'a> {
     pub claude_instructions: Option<&'a str>,
 }
 
+/// What narrows a ledger search beside its pattern. Every field absent searches the whole corpus.
+#[derive(Debug, Default, Clone)]
+pub struct LedgerFilter<'a> {
+    /// One clone id. Absent searches every clone the ledger knows, live or retired.
+    pub clone: Option<&'a str>,
+    /// Epoch milliseconds, both inclusive.
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    /// `Some(true)` keeps only subagent turns, `Some(false)` only the conversation.
+    pub sidechain: Option<bool>,
+    /// One subagent's id, as a hit's `agentId`.
+    pub agent: Option<&'a str>,
+    /// Hits to return. Absent takes the server's default of 50.
+    pub limit: Option<usize>,
+}
+
 impl Client {
     /// `base` is the web-API origin, e.g. `http://rmng-control:9000` (no trailing slash).
     pub fn new(base: impl Into<String>) -> Self {
@@ -323,28 +339,30 @@ impl Client {
     }
 
     /// Search every clone's distilled transcripts (`GET /api/ledger/search`), retired clones
-    /// included. `pattern` is a case-insensitive substring of the whole ledger line; `since`
-    /// and `until` are epoch milliseconds. The search runs server-side, so what comes back is
-    /// the matching lines rather than the corpus.
+    /// included. `pattern` is a case-insensitive substring of the whole ledger line. The search
+    /// runs server-side, so what comes back is the matching lines rather than the corpus.
     pub async fn ledger_search(
         &self,
         pattern: &str,
-        clone: Option<&str>,
-        since: Option<i64>,
-        until: Option<i64>,
-        limit: Option<usize>,
+        filter: &LedgerFilter<'_>,
     ) -> Result<LedgerSearch> {
         let mut query: Vec<(&str, String)> = vec![("q", pattern.to_string())];
-        if let Some(id) = clone {
+        if let Some(id) = filter.clone {
             query.push(("clone", id.to_string()));
         }
-        if let Some(ms) = since {
+        if let Some(ms) = filter.since {
             query.push(("since", ms.to_string()));
         }
-        if let Some(ms) = until {
+        if let Some(ms) = filter.until {
             query.push(("until", ms.to_string()));
         }
-        if let Some(n) = limit {
+        if let Some(want) = filter.sidechain {
+            query.push(("sidechain", want.to_string()));
+        }
+        if let Some(id) = filter.agent {
+            query.push(("agent", id.to_string()));
+        }
+        if let Some(n) = filter.limit {
             query.push(("limit", n.to_string()));
         }
         let resp = self

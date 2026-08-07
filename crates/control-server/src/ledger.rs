@@ -10,9 +10,14 @@
 //! a clone, nothing is installed there, and it works on clones that are already running. Source
 //! shape is `<data_dir>/hosts/<id>/.claude/projects/<slug>/<session>.jsonl`, which is the CLI's
 //! main-session transcript, and `.cursor/projects/<workspace>/agent-transcripts/<id>/<id>.jsonl`,
-//! which is Cursor's. Subagent transcripts sit deeper in both trees and are deliberately out of
-//! scope: on this machine's fleet they outnumber main sessions seven to one, and they record a
-//! delegated sub-task rather than the conversation the operator had.
+//! which is Cursor's.
+//!
+//! **Subagents count too.** Both agents write a delegated task to `subagents/` beside the session
+//! that spawned it, and on this fleet that is where most of the work is: on four live clones the
+//! subagent files held 16.6, 70.2, 73.8 and 96.7 percent of all transcript bytes. A clone running
+//! a review loop or a judge panel puts almost everything there. Those records are distilled into
+//! the spawning session's ledger file, carry `sidechain: true` and name their `agentId`, so a
+//! search can ask for the conversation alone, for one subagent's whole run, or for both.
 //!
 //! The two agents write the same content blocks under different line keys, so one distiller
 //! reads both. Cursor names a line `role` where Claude Code names it `type`, and stamps no line
@@ -68,23 +73,55 @@ const MAX_READ_PER_FILE: u64 = 8 * 1024 * 1024;
 /// [`MAX_READ_PER_FILE`] alone bounds nothing useful on first run, when a clone with a hundred
 /// retained transcripts would read eight hundred megabytes in a single pass. Backlog is drained
 /// over several ticks instead.
+///
+/// Subagent transcripts made that backlog several times larger: the largest clone measured holds
+/// 645 MB of them, which is about eleven passes, or five and a half minutes, before a first sight
+/// of it is caught up. That is the intended trade. Raising the budget would let one clone's
+/// history block the fleet's live tail, and the pass walks main transcripts before subagent ones
+/// (see [`session_files`]) so the conversation an operator had is never the part left waiting.
 const MAX_READ_PER_CLONE: u64 = 64 * 1024 * 1024;
 
 /// Longest tool input kept, in characters. Enough for a command line, a file path plus a small
 /// patch, or the first screen of a query.
 const MAX_TOOL_INPUT_CHARS: usize = 800;
 
-/// Longest tool result kept, in characters. Results are the bulkiest thing worth keeping at all:
-/// a file read, a test run, a `git log`. The head is where the answer usually is.
+/// Longest head of a tool result kept, in characters. Results are the bulkiest thing worth keeping
+/// at all: a file read, a test run, a `git log`. The head is where the answer usually is.
 const MAX_TOOL_RESULT_CHARS: usize = 2000;
 
-/// Longest message text kept, in characters. Human prompts and model replies are the point of the
-/// ledger, so this is generous and only ever fires on something pathological.
-const MAX_TEXT_CHARS: usize = 20_000;
+/// Characters kept from the end of a tool result that ran past [`MAX_TOOL_RESULT_CHARS`].
+///
+/// A tool result is long exactly when something happened, and what happened is usually last: a
+/// test runner prints its counts after the log, a build prints the error after the output. The
+/// head alone cannot reach that at any cap, because the end moves with the length.
+///
+/// Measured over 38,396 tool results on one clone, of which 13,149 ran past the head cap. Scoring
+/// the kept text for an outcome word (`fail`, `passed`, `traceback`, `exit code N` and the like),
+/// the head alone carries one for 5,799 of those and head plus a 500-character tail for 6,791.
+/// Nothing is lost, because the head is untouched. Per character spent it beats doubling the head,
+/// which recovers 1.01 records per 100 characters against this scheme's 1.98.
+const MAX_TOOL_RESULT_TAIL_CHARS: usize = 500;
+
+/// Longest message text kept, in characters.
+///
+/// Sized for a subagent's final report, which arrives as a single message rather than as a
+/// conversation. On two measured clones the p99 assistant message is 15,717 and 16,453 characters
+/// inside subagent transcripts against 2,791 and 3,023 in the main loop, and the longest is
+/// 81,564. The old 20,000 was sized against main-loop chat and clipped those reports at p99.
+///
+/// The ceiling on this is [`MAX_LINE_BYTES`]: a record longer than that is skipped by every
+/// search, so a cap that no longer fits well under it would quietly make the report unfindable
+/// rather than merely truncated.
+const MAX_TEXT_CHARS: usize = 100_000;
 
 /// Most transcripts enumerated for one clone in one pass. A clone is root in its own sandbox and
 /// can create as many files as it likes under that path.
-const MAX_SESSION_FILES: usize = 4096;
+///
+/// Subagent transcripts are what this now bounds: a session's main transcript is one file, and one
+/// measured clone had 1,077 subagent files against it. The cost of the cap is one `offsets.json`
+/// entry per file, rewritten whenever any file in the clone advances, so a few hundred kilobytes
+/// at the numbers seen and a few megabytes at this limit.
+const MAX_SESSION_FILES: usize = 16_384;
 
 /// How long one clone's tail may take before the pass abandons it.
 ///
@@ -217,6 +254,10 @@ struct RawLine {
     ai_title: Option<String>,
     #[serde(rename = "isSidechain", default)]
     sidechain: Option<bool>,
+    /// The subagent this line belongs to. Written on every line of a subagent transcript and on
+    /// nothing in a main one.
+    #[serde(rename = "agentId", default)]
+    agent_id: Option<String>,
     #[serde(default)]
     message: Option<RawMessage>,
     #[serde(rename = "compactMetadata", default)]
@@ -281,10 +322,27 @@ struct ImageSource {
 /// Cutting on a character boundary rather than a byte one, so the result is still valid UTF-8 and
 /// still serializes.
 fn clip(s: &str, max: usize) -> String {
-    match s.char_indices().nth(max) {
-        None => s.to_string(),
-        Some((at, _)) => format!("{} [clipped, +{} bytes]", &s[..at], s.len() - at),
+    clip_ends(s, max, 0)
+}
+
+/// `s` cut to its first `head` characters and its last `tail`, with the dropped byte count spelled
+/// out between them. A `tail` of zero is [`clip`].
+///
+/// The tail is what makes a long tool result searchable for its verdict (see
+/// [`MAX_TOOL_RESULT_TAIL_CHARS`]). A string short enough that the two ends would meet is kept
+/// whole, which is never more than the budget the two caps already allow.
+fn clip_ends(s: &str, head: usize, tail: usize) -> String {
+    let Some((cut, _)) = s.char_indices().nth(head) else { return s.to_string() };
+    if tail == 0 {
+        return format!("{} [clipped, +{} bytes]", &s[..cut], s.len() - cut);
     }
+    // Walking back from the end rather than counting the whole string, which is megabytes on the
+    // results this fires for.
+    let Some((from, _)) = s.char_indices().nth_back(tail - 1) else { return s.to_string() };
+    if from <= cut {
+        return s.to_string();
+    }
+    format!("{} [clipped, +{} bytes] {}", &s[..cut], from - cut, &s[from..])
 }
 
 /// What an image block leaves behind: its type, never its bytes.
@@ -296,12 +354,14 @@ fn image_marker(src: Option<&ImageSource>) -> String {
 
 /// The text of a `tool_result`'s content, which is a string or a list of blocks.
 fn tool_result_text(content: Option<&serde_json::Value>) -> String {
+    let clip_result =
+        |s: &str| clip_ends(s, MAX_TOOL_RESULT_CHARS, MAX_TOOL_RESULT_TAIL_CHARS);
     let Some(value) = content else { return String::new() };
     if let Some(s) = value.as_str() {
-        return clip(s, MAX_TOOL_RESULT_CHARS);
+        return clip_result(s);
     }
     let Ok(blocks) = serde_json::from_value::<Vec<Block>>(value.clone()) else {
-        return clip(&value.to_string(), MAX_TOOL_RESULT_CHARS);
+        return clip_result(&value.to_string());
     };
     let mut parts: Vec<String> = Vec::new();
     for b in &blocks {
@@ -314,7 +374,7 @@ fn tool_result_text(content: Option<&serde_json::Value>) -> String {
             }
         }
     }
-    clip(&parts.join("\n"), MAX_TOOL_RESULT_CHARS)
+    clip_result(&parts.join("\n"))
 }
 
 /// Turn one raw transcript line into the records it contributes, updating the transcript's
@@ -348,6 +408,7 @@ fn distill(
             true => now.to_string(),
             false => st.last_ts.clone(),
         },
+        agent_id: raw.agent_id.unwrap_or_default(),
         sidechain: raw.sidechain.unwrap_or(false),
         ..Default::default()
     };
@@ -452,74 +513,158 @@ fn distill_message(
 
 // --- tailing -----------------------------------------------------------------------------------
 
-/// Every main-session transcript under `home`, sorted, at most `cap` of them.
+/// One transcript file the pass will tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Transcript {
+    path: PathBuf,
+    /// This file's cursor key, unique within the clone. It has to stay stable for the life of the
+    /// file: a key that changes re-reads the transcript from byte 0 and appends a second copy of
+    /// everything already in the ledger.
+    key: String,
+    /// The ledger file the records land in. A subagent's records land in the session that spawned
+    /// it, which is the directory its own file sits under, so one session reads as one story.
+    name: String,
+    /// This file is a subagent's, whatever its lines say about themselves.
+    sidechain: bool,
+    /// The subagent's id, from the file name. The lines carry it too, and theirs wins.
+    agent: String,
+}
+
+/// The subagent id a transcript file name stands for: `agent-a1b2c3.jsonl` is `a1b2c3`.
+fn agent_id_of(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.strip_prefix("agent-").unwrap_or(s).to_string())
+        .unwrap_or_default()
+}
+
+/// A directory entry's name, or `None` when it is not UTF-8.
+fn entry_name(entry: &std::fs::DirEntry) -> Option<String> {
+    entry.file_name().to_str().map(str::to_string)
+}
+
+/// Every subagent transcript under `dir/subagents`, filed against session `name`.
 ///
-/// One level below `.claude/projects`, which is where the CLI writes the session the operator is
-/// actually talking to. `entry.file_type()` reports a symlink as a symlink, so a symlinked
-/// directory is not descended into.
-fn session_files(home: &Path, cap: usize) -> Vec<PathBuf> {
+/// Both agents write a delegated task here, next to the transcript of the session that spawned it.
+/// A directory with none, or one that is not a session directory at all, reads as empty.
+fn subagent_files(dir: &Path, prefix: &str, name: &str, out: &mut Vec<Transcript>, cap: usize) {
+    let Ok(files) = std::fs::read_dir(dir.join("subagents")) else { return };
+    for f in files.flatten() {
+        if out.len() >= cap {
+            return;
+        }
+        let path = f.path();
+        let Some(file) = entry_name(&f) else { continue };
+        if !f.file_type().map(|t| t.is_file()).unwrap_or(false)
+            || path.extension().is_none_or(|e| e != "jsonl")
+        {
+            continue;
+        }
+        out.push(Transcript {
+            key: format!("{prefix}/subagents/{file}"),
+            name: name.to_string(),
+            agent: agent_id_of(&path),
+            path,
+            sidechain: true,
+        });
+    }
+}
+
+/// Every Claude Code transcript under `home`, at most `cap` of them.
+///
+/// One level below `.claude/projects` is the session the operator is talking to, and
+/// `<session>/subagents/` beside it holds what that session delegated. `entry.file_type()` reports
+/// a symlink as a symlink, so a symlinked directory is not descended into.
+///
+/// Main transcripts sort first, subagent ones after, and by path within each. That ordering is
+/// what [`MAX_READ_PER_CLONE`] spends its budget in, so a clone whose backlog is mostly delegated
+/// work still gets the operator's own conversation into the ledger on the first pass.
+fn session_files(home: &Path, cap: usize) -> Vec<Transcript> {
     let root = home.join(".claude/projects");
-    let mut out: Vec<PathBuf> = Vec::new();
+    let mut out: Vec<Transcript> = Vec::new();
     let Ok(slugs) = std::fs::read_dir(&root) else { return out };
-    for slug in slugs.flatten() {
+    'walk: for slug in slugs.flatten() {
         if !slug.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        let Ok(files) = std::fs::read_dir(slug.path()) else { continue };
-        for f in files.flatten() {
+        let Some(slug_name) = entry_name(&slug) else { continue };
+        let Ok(entries) = std::fs::read_dir(slug.path()) else { continue };
+        for e in entries.flatten() {
             if out.len() >= cap {
-                tracing::warn!(
-                    target: "ledger",
-                    "{} holds more than {cap} transcripts; the rest are not being tailed",
-                    root.display()
-                );
-                out.sort_unstable();
-                return out;
+                break 'walk;
             }
-            let path = f.path();
-            if f.file_type().map(|t| t.is_file()).unwrap_or(false)
-                && path.extension().is_some_and(|e| e == "jsonl")
-            {
-                out.push(path);
+            let path = e.path();
+            let Ok(kind) = e.file_type() else { continue };
+            let Some(file) = entry_name(&e) else { continue };
+            let Some(name) = ledger_name(&path) else { continue };
+            if kind.is_file() {
+                if path.extension().is_some_and(|x| x == "jsonl") {
+                    out.push(Transcript {
+                        key: format!("{slug_name}/{file}"),
+                        path,
+                        name,
+                        sidechain: false,
+                        agent: String::new(),
+                    });
+                }
+            } else if kind.is_dir() {
+                // `<session>/subagents/`. A directory holding no such child (`memory/`, say)
+                // contributes nothing.
+                let prefix = format!("{slug_name}/{file}");
+                subagent_files(&path, &prefix, &name, &mut out, cap);
             }
         }
     }
-    out.sort_unstable();
+    if out.len() >= cap {
+        tracing::warn!(
+            target: "ledger",
+            "{} holds more than {cap} transcripts; the rest are not being tailed",
+            root.display()
+        );
+    }
+    out.sort_unstable_by(|a, b| (a.sidechain, &a.path).cmp(&(b.sidechain, &b.path)));
     out
 }
 
-/// Every Cursor conversation transcript under `home`, sorted, at most `cap` of them.
+/// Every Cursor transcript under `home`, at most `cap` of them.
 ///
 /// Cursor keeps one directory per conversation and names the transcript after it:
-/// `~/.cursor/projects/<workspace>/agent-transcripts/<conversation>/<conversation>.jsonl`. Taking
-/// only the file whose stem is its own directory's name is what skips the `subagents/` directory
-/// beside it, and skipping that matches what this module already does for Claude Code: the
-/// ledger keeps the conversation somebody had, not every worker it spawned.
-fn cursor_session_files(home: &Path, cap: usize) -> Vec<PathBuf> {
+/// `~/.cursor/projects/<workspace>/agent-transcripts/<conversation>/<conversation>.jsonl`, with
+/// that conversation's delegated work in `subagents/` beside it. Same two levels as Claude Code
+/// under different names, and kept the same way, so a search reads one corpus rather than two.
+fn cursor_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
     let root = home.join(".cursor/projects");
-    let mut out: Vec<PathBuf> = Vec::new();
+    let mut out: Vec<Transcript> = Vec::new();
     let Ok(workspaces) = std::fs::read_dir(&root) else { return out };
-    for ws in workspaces.flatten() {
+    'walk: for ws in workspaces.flatten() {
         if !ws.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         let Ok(convs) = std::fs::read_dir(ws.path().join("agent-transcripts")) else { continue };
         for conv in convs.flatten() {
             if out.len() >= cap {
-                out.sort_unstable();
-                return out;
+                break 'walk;
             }
             if !conv.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let name = conv.file_name();
-            let path = conv.path().join(format!("{}.jsonl", name.to_string_lossy()));
+            let Some(id) = entry_name(&conv) else { continue };
+            let dir = conv.path();
+            let path = dir.join(format!("{id}.jsonl"));
+            let Some(name) = ledger_name(&path) else { continue };
             if path.is_file() {
-                out.push(path);
+                out.push(Transcript {
+                    key: format!("{id}/{id}.jsonl"),
+                    path,
+                    name: name.clone(),
+                    sidechain: false,
+                    agent: String::new(),
+                });
             }
+            subagent_files(&dir, &id, &name, &mut out, cap);
         }
     }
-    out.sort_unstable();
+    out.sort_unstable_by(|a, b| (a.sidechain, &a.path).cmp(&(b.sidechain, &b.path)));
     out
 }
 
@@ -529,14 +674,11 @@ fn cursor_session_files(home: &Path, cap: usize) -> Vec<PathBuf> {
 /// The cursor advances only after the append succeeds, so a full disk costs a retry rather than a
 /// hole. Only whole lines are consumed: a partial trailing line means the CLI is mid-append, and
 /// it is read complete on the next pass.
-fn tail_file(clone: &str, src: &Path, dir: &Path, offsets: &mut Offsets) -> u64 {
+fn tail_file(clone: &str, t: &Transcript, dir: &Path, offsets: &mut Offsets) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    let Some(name) = ledger_name(src) else { return 0 };
-    let Some(key) = src.file_name().and_then(|n| n.to_str()).map(str::to_string) else { return 0 };
-    let key = match src.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
-        Some(slug) => format!("{slug}/{key}"),
-        None => key,
-    };
+    let src = t.path.as_path();
+    let name = t.name.clone();
+    let key = t.key.clone();
     let Ok(meta) = std::fs::metadata(src) else { return 0 };
     // Regular files only. A clone can point one of these paths at a FIFO, and opening a FIFO with
     // no writer blocks forever inside the serial pass.
@@ -598,7 +740,16 @@ fn tail_file(clone: &str, src: &Path, dir: &Path, offsets: &mut Offsets) -> u64 
         if text.trim().is_empty() {
             continue;
         }
-        for rec in distill(clone, &session, text, &mut st, &now) {
+        for mut rec in distill(clone, &session, text, &mut st, &now) {
+            // Where the file sits is the authority on whose turn this is. A subagent transcript
+            // carries `isSidechain` on every line, but nothing forces it to, and the file name is
+            // the only place the agent id is guaranteed.
+            if t.sidechain {
+                rec.sidechain = true;
+                if rec.agent_id.is_empty() {
+                    rec.agent_id.clone_from(&t.agent);
+                }
+            }
             if let Ok(json) = serde_json::to_string(&rec) {
                 body.push_str(&json);
                 body.push('\n');
@@ -637,11 +788,11 @@ fn tail_clone(clone: &str, home: &Path, dir: &Path) {
     let mut budget = MAX_READ_PER_CLONE;
     let claude = session_files(home, MAX_SESSION_FILES);
     let cursor = cursor_session_files(home, MAX_SESSION_FILES.saturating_sub(claude.len()));
-    for src in claude.into_iter().chain(cursor) {
+    for src in claude.iter().chain(cursor.iter()) {
         if budget == 0 {
             break; // Backlog drains over the next few passes.
         }
-        budget = budget.saturating_sub(tail_file(clone, &src, dir, &mut offsets));
+        budget = budget.saturating_sub(tail_file(clone, src, dir, &mut offsets));
     }
     if offsets != before {
         if let Err(e) = save_offsets(dir, &offsets) {
@@ -721,6 +872,11 @@ pub struct SearchQuery {
     /// dropping it would hide real work over a formatting detail.
     pub since_ms: Option<i64>,
     pub until_ms: Option<i64>,
+    /// `Some(true)` keeps only subagent turns, `Some(false)` only the conversation. Absent keeps
+    /// both, which on a delegating session is mostly subagents.
+    pub sidechain: Option<bool>,
+    /// One subagent's id, as the record's `agentId`. Reads back a single delegated task.
+    pub agent: Option<String>,
     pub limit: usize,
 }
 
@@ -794,6 +950,12 @@ pub fn search(data_dir: &str, q: &SearchQuery) -> SearchResult {
                 continue;
             }
             let Ok(rec) = serde_json::from_str::<LedgerRecord>(text.trim_end()) else { continue };
+            if q.sidechain.is_some_and(|want| rec.sidechain != want) {
+                continue;
+            }
+            if q.agent.as_ref().is_some_and(|id| rec.agent_id != *id) {
+                continue;
+            }
             let at = ts_ms(&rec.ts);
             if let (Some(at), Some(since)) = (at, q.since_ms) {
                 if at < since {
@@ -946,23 +1108,102 @@ mod tests {
     }
 
     #[test]
-    fn cursor_transcripts_are_found_and_subagents_are_not() {
+    fn cursor_transcripts_and_their_subagents_are_both_found() {
         let home = std::env::temp_dir().join(format!("rmng-ledger-cursor-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let conv = home.join(".cursor/projects/home-rmng-Dev/agent-transcripts/e52bd0c6");
         std::fs::create_dir_all(conv.join("subagents")).unwrap();
         std::fs::write(conv.join("e52bd0c6.jsonl"), "{}\n").unwrap();
         std::fs::write(conv.join("subagents/853bf50b.jsonl"), "{}\n").unwrap();
-        // A directory whose transcript has not been written yet contributes nothing.
+        // A directory whose transcript has not been written yet still gives up its subagents.
         std::fs::create_dir_all(
             home.join(".cursor/projects/home-rmng-Dev/agent-transcripts/empty"),
         )
         .unwrap();
 
         let found = cursor_session_files(&home, 4096);
-        assert_eq!(found, vec![conv.join("e52bd0c6.jsonl")]);
+        let paths: Vec<&Path> = found.iter().map(|t| t.path.as_path()).collect();
+        assert_eq!(paths, vec![conv.join("e52bd0c6.jsonl"), conv.join("subagents/853bf50b.jsonl")]);
+        // The conversation first, and the subagent filed under the conversation it belongs to.
+        assert!(!found[0].sidechain && found[1].sidechain);
+        assert!(found.iter().all(|t| t.name == "e52bd0c6.ndjson"));
+        assert_eq!(found[1].agent, "853bf50b");
         assert!(cursor_session_files(&home, 0).is_empty(), "the cap is respected");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_claude_session_gives_up_its_transcript_and_its_subagents() {
+        let root = temp_dir("walk");
+        let home = root.join("home");
+        write_transcript(&home, "-home-rmng-RMNG", "aaaa-bbbb", &["{}"]);
+        let subs = home.join(".claude/projects/-home-rmng-RMNG/aaaa-bbbb/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        std::fs::write(subs.join("agent-a18ea2842ca67cf6e.jsonl"), "{}\n").unwrap();
+        std::fs::write(subs.join("notes.txt"), "not a transcript\n").unwrap();
+        // A sibling directory that is not a session, which is what `~/.claude/projects/<slug>`
+        // holds beside its sessions.
+        std::fs::create_dir_all(home.join(".claude/projects/-home-rmng-RMNG/memory")).unwrap();
+
+        let found = session_files(&home, MAX_SESSION_FILES);
+        assert_eq!(found.len(), 2, "{found:#?}");
+        // The conversation first: it is what a bounded pass must not leave waiting.
+        assert_eq!(found[0].key, "-home-rmng-RMNG/aaaa-bbbb.jsonl");
+        assert!(!found[0].sidechain);
+        assert_eq!(found[1].key, "-home-rmng-RMNG/aaaa-bbbb/subagents/agent-a18ea2842ca67cf6e.jsonl");
+        assert!(found[1].sidechain);
+        assert_eq!(found[1].agent, "a18ea2842ca67cf6e");
+        // Both land in the session's own ledger file.
+        assert!(found.iter().all(|t| t.name == "aaaa-bbbb.ndjson"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_subagents_turn_is_filed_under_the_session_that_spawned_it() {
+        let root = temp_dir("sidechain");
+        let home = root.join("home");
+        let dir = root.join("ledger/c1");
+        write_transcript(
+            &home,
+            "p",
+            "sess",
+            &[r#"{"type":"user","sessionId":"sess","timestamp":"2026-08-07T10:00:00.000Z","message":{"content":"review the diff"}}"#],
+        );
+        let subs = home.join(".claude/projects/p/sess/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        // The file's own lines name the session that spawned it, not the subagent.
+        std::fs::write(
+            subs.join("agent-a1d14cec3da0aa973.jsonl"),
+            "{\"type\":\"assistant\",\"sessionId\":\"sess\",\"isSidechain\":true,\"agentId\":\"a1d14cec3da0aa973\",\"timestamp\":\"2026-08-07T10:01:00.000Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"the encoder path is fine\"}]}}\n",
+        )
+        .unwrap();
+        // A line that forgot to flag itself is still a subagent's: the file says so.
+        std::fs::write(
+            subs.join("agent-unflagged.jsonl"),
+            "{\"type\":\"assistant\",\"sessionId\":\"sess\",\"timestamp\":\"2026-08-07T10:02:00.000Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"second opinion\"}]}}\n",
+        )
+        .unwrap();
+
+        tail_clone("c1", &home, &dir);
+        let body = std::fs::read_to_string(dir.join("sess.ndjson")).unwrap();
+        let recs: Vec<LedgerRecord> =
+            body.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(recs.len(), 3, "{body}");
+        assert!(recs.iter().all(|r| r.session == "sess"));
+        assert!(!recs[0].sidechain, "the operator's own turn");
+
+        let review = recs.iter().find(|r| r.text.contains("encoder path")).unwrap();
+        assert!(review.sidechain);
+        assert_eq!(review.agent_id, "a1d14cec3da0aa973");
+
+        let second = recs.iter().find(|r| r.text.contains("second opinion")).unwrap();
+        assert!(second.sidechain, "the file's location decides, not the line");
+        assert_eq!(second.agent_id, "unflagged", "the id falls back to the file name");
+
+        // A second pass repeats nothing, which is the cursor keying by full path working.
+        tail_clone("c1", &home, &dir);
+        assert_eq!(std::fs::read_to_string(dir.join("sess.ndjson")).unwrap().lines().count(), 3);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -996,6 +1237,18 @@ mod tests {
         assert_eq!(clip("hello", 5), "hello");
         // Multi-byte input: cutting at byte 3 would split the character.
         assert_eq!(clip("héllo", 2), "hé [clipped, +3 bytes]");
+    }
+
+    #[test]
+    fn a_clipped_result_keeps_its_last_line_as_well_as_its_first() {
+        // What a long tool result is worth finding for is usually at the end: the counts a test
+        // runner prints, the error a build finishes on.
+        assert_eq!(clip_ends("abcdefghij", 2, 3), "ab [clipped, +5 bytes] hij");
+        // Short enough that the two ends would meet: keep the whole thing rather than mark it.
+        assert_eq!(clip_ends("abcde", 2, 3), "abcde");
+        assert_eq!(clip_ends("abcdef", 2, 3), "ab [clipped, +1 bytes] def");
+        // Both ends land on character boundaries.
+        assert_eq!(clip_ends("héllo wörld", 2, 2), "hé [clipped, +8 bytes] ld");
     }
 
     #[test]
@@ -1055,6 +1308,7 @@ mod tests {
             r#"{{"type":"assistant","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":[{{"type":"tool_use","id":"t","name":"Write","input":{{"content":"{big}"}}}}]}}}}"#
         );
         let recs = distill("c", "s1", &line, &mut st, READ_AT);
+        // A tool input is a command line or a path, so the head really is the whole of it.
         assert!(recs[0].text.chars().count() < MAX_TOOL_INPUT_CHARS + 40);
         assert!(recs[0].text.contains("clipped"));
 
@@ -1062,8 +1316,40 @@ mod tests {
             r#"{{"type":"user","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"t","content":"{big}"}}]}}}}"#
         );
         let recs = distill("c", "s1", &line, &mut st, READ_AT);
-        assert!(recs[0].text.chars().count() < MAX_TOOL_RESULT_CHARS + 40);
+        let budget = MAX_TOOL_RESULT_CHARS + MAX_TOOL_RESULT_TAIL_CHARS;
+        assert!(recs[0].text.chars().count() < budget + 40);
         assert!(recs[0].text.contains("clipped"));
+    }
+
+    #[test]
+    fn a_long_tool_result_keeps_the_verdict_it_ends_on() {
+        // The shape this is for: a test runner that logs for pages and prints its counts last.
+        let mut st = FileState::default();
+        let noise = "compiling crate\\n".repeat(500);
+        let line = format!(
+            r#"{{"type":"user","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"t","content":"{noise}test result: FAILED. 411 passed; 1 failed"}}]}}}}"#
+        );
+        let recs = distill("c", "s1", &line, &mut st, READ_AT);
+        assert!(recs[0].text.starts_with("compiling crate"), "the head is untouched");
+        assert!(recs[0].text.contains("clipped"));
+        assert!(recs[0].text.ends_with("411 passed; 1 failed"), "{}", recs[0].text);
+    }
+
+    #[test]
+    fn a_subagents_whole_report_fits_in_one_record() {
+        // A subagent's output arrives as one message rather than as a conversation, and the
+        // longest measured is 81,564 characters.
+        let mut st = FileState::default();
+        let report = "R".repeat(60_000);
+        let line = format!(
+            r#"{{"type":"assistant","sessionId":"s1","isSidechain":true,"agentId":"a1","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":[{{"type":"text","text":"{report}"}}]}}}}"#
+        );
+        let recs = distill("c", "s1", &line, &mut st, READ_AT);
+        assert_eq!(recs[0].text.chars().count(), 60_000);
+        assert!(!recs[0].text.contains("clipped"));
+        assert_eq!(recs[0].agent_id, "a1");
+        // The record still has to fit the longest line a search will look at.
+        assert!(serde_json::to_string(&recs[0]).unwrap().len() < MAX_LINE_BYTES);
     }
 
     #[test]
@@ -1327,6 +1613,49 @@ mod tests {
     }
 
     #[test]
+    fn search_separates_the_conversation_from_the_subagents_it_spawned() {
+        let root = temp_dir("sidechain-search");
+        let data = root.to_string_lossy().into_owned();
+        let home = root.join("home");
+        write_transcript(
+            &home,
+            "p",
+            "sess",
+            &[r#"{"type":"user","sessionId":"sess","timestamp":"2026-08-07T10:00:00.000Z","message":{"content":"review the encoder"}}"#],
+        );
+        let subs = home.join(".claude/projects/p/sess/subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        for (agent, verdict) in [("a1", "the encoder is fine"), ("a2", "the encoder leaks")] {
+            std::fs::write(
+                subs.join(format!("agent-{agent}.jsonl")),
+                format!(
+                    "{{\"type\":\"assistant\",\"sessionId\":\"sess\",\"isSidechain\":true,\"agentId\":\"{agent}\",\"timestamp\":\"2026-08-07T10:01:00.000Z\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{verdict}\"}}]}}}}\n"
+                ),
+            )
+            .unwrap();
+        }
+        tail_clone("c1", &home, &clone_dir(&data, "c1").unwrap());
+
+        let find = |q: SearchQuery| search(&data, &q).hits;
+        let base = SearchQuery { pattern: "encoder".into(), limit: 50, ..Default::default() };
+        assert_eq!(find(base.clone()).len(), 3, "unfiltered, both halves");
+
+        // The mirror of the old problem: a delegating session's own words, without the fan-out.
+        let main_only = find(SearchQuery { sidechain: Some(false), ..base.clone() });
+        assert_eq!(main_only.len(), 1);
+        assert!(main_only[0].line.contains("review the encoder"));
+
+        assert_eq!(find(SearchQuery { sidechain: Some(true), ..base.clone() }).len(), 2);
+
+        // One subagent's run, read back on its own.
+        let one = find(SearchQuery { agent: Some("a2".into()), ..base.clone() });
+        assert_eq!(one.len(), 1);
+        assert!(one[0].line.contains("leaks"));
+        assert!(find(SearchQuery { agent: Some("a9".into()), ..base }).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn search_reports_that_it_stopped_at_the_limit() {
         let root = temp_dir("limit");
         let data = root.to_string_lossy().into_owned();
@@ -1344,3 +1673,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
