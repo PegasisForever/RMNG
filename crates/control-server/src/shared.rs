@@ -254,6 +254,21 @@ async fn reconcile(app: &App, warned: &mut HashSet<String>) {
     warned.retain(|id| managed.contains(id));
 }
 
+/// Mount the pool into one clone right now, best-effort. The create job calls this before it
+/// reports the clone ready, so `/home/rmng/shared` is there for the clone's first command
+/// instead of appearing up to [`RECONCILE_INTERVAL`] later. The loop still owns re-applying it
+/// after a container restart.
+///
+/// Needs only the container's own pid, which exists as soon as the container runs, so this
+/// answers on the first try whenever the clone is up.
+pub async fn ensure_now(app: &App, id: &str) {
+    if !is_safe_id(id) {
+        return;
+    }
+    let src = shared_root(&app.config().data_dir);
+    let _ = ensure_for(app, id, &src).await;
+}
+
 /// Create the pool, then reconcile it into every clone forever. Spawned once at startup
 /// alongside [`crate::homes::run`].
 pub async fn run(app: App) {

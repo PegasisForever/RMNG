@@ -596,6 +596,42 @@ without a restart.
 > server upgrades. The reconciler also refreshes the Codex parity files above on old running
 > clones. See [DEPLOY.md#upgrades](DEPLOY.md#upgrades).
 
+#### Nothing is still pending when the operation reaches 100%
+
+A clone appears in `hosts` only at the instant its operation is marked `done`, and that presence
+is the client's "ready to connect" signal. Everything a clone needs is therefore applied before
+that write, not left to a reconcile loop.
+
+Seven things used to arrive late. Each has a loop that owns it, each loop reads `hosts`, and a
+clone reaches `hosts` only at the end of its create job, so the wait started exactly when the
+operator opened the clone.
+
+| What | Was late by | Symptom |
+|---|---|---|
+| `/home/rmng/shared`, the shared folder | up to 15 s | the folder is missing, then appears |
+| `data/hosts/<id>`, the home symlink | up to 15 s | no SMB browse, no file API, no token counts, no activity signal |
+| The bastion's `PermitOpen` entry | up to 10 s | `ssh -J` to the clone is refused |
+| The `~/.codex/config.toml` MCP tables | up to 30 s | Codex starts with no managed servers |
+| The `tmp.mount` mask | up to 30 s | `/tmp` is a tmpfs the clone did not ask for |
+| The polkit `sudo` rule | up to 30 s | a `sudo` through polkit fails on "No session for cookie" |
+| The agent-wrapper env drop-in | up to 30 s | the wrapper restarts about 30 s in, through the first turn |
+
+The last four are container-local and run during `inject`, each writing the same stamp the
+reconciler reads, so its first pass finds them done. The first three live outside the container
+and run in a `settle` step at 97%: `shared::ensure_now`, `homes::ensure_now`, then
+`ssh::allow_clone_now`.
+
+Three details are load-bearing, all of them consequences of the clone not being in the store
+yet. The bastion allowlist is rendered from `hosts` plus the id being created, because
+`PermitOpen` is matched literally against the clone id. The home reconciler deletes links for
+ids the store cannot account for, so a linked-but-unregistered clone is held back from one prune
+pass. And the home symlink needs a process running as the clone user, so `homes::ensure_now`
+waits up to 10 seconds for one. A clone whose daemon has registered already has one and answers
+on the first probe.
+
+Nothing here is fatal. A step that fails is logged, left unstamped, and picked up by its loop,
+which is what the loops were for.
+
 ### `POST /api/layout/activate` — body `{ "name": string }`
 Make the named layout preset the active one and live-apply it to every running clone — no
 session restart, no app loss. Validates `name` against `config.layoutPresets` (`400` if
@@ -624,6 +660,12 @@ clones return `400`.
 ### `POST /api/hosts/:id/unarchive`
 Restart a retained archived clone. Returns an `unarchive` `Operation`; the clone's account
 selections are retained, and the reconcile pass re-pushes its tokens once it is up.
+
+Restarting rebuilds the container's mount table and gives it a new pid, so `/dev/shm`, the
+shared folder and the home symlink are all gone even though the clone itself is intact. The
+operation re-applies those three plus the bastion allowlist entry before it finishes, the same
+set the create job settles (see
+[Nothing is still pending](#nothing-is-still-pending-when-the-operation-reaches-100)).
 
 ---
 

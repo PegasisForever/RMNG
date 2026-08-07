@@ -27,7 +27,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use wire::RmngClone;
 
@@ -36,6 +37,12 @@ use crate::docker::CLONE_USER;
 use crate::files::is_safe_id;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long [`ensure_now`] waits for a newly-created clone to open a uid-1000 session, and how
+/// often it re-checks. A clone whose daemon has registered already has one, so the common case
+/// costs a single probe.
+const SESSION_WAIT: Duration = Duration::from_secs(10);
+const SESSION_POLL: Duration = Duration::from_millis(500);
 
 /// The clone user's uid (see `docker::CLONE_USER`). The SMB share acts as this uid, so the
 /// browse link must point at a uid-1000 process's proc-root.
@@ -173,6 +180,90 @@ fn prune_stale(root: &Path, desired: &HashSet<String>) {
     }
 }
 
+/// Ids [`ensure_now`] has linked that the store does not hold yet.
+///
+/// A create job links its clone a few hundred milliseconds before it registers it, and
+/// [`prune_stale`] deletes the link for any id the store cannot account for. A tick landing
+/// inside that window would delete the link the create job had just made, and the clone would
+/// wait a whole [`RECONCILE_INTERVAL`] for it after all, which is the bug `ensure_now` exists to
+/// remove. Ids are protected for exactly one pass, which is all that window ever needs, so a
+/// create that dies before registering still gets its link swept on the pass after.
+static PENDING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+
+/// Protect one id from the next pass's prune.
+fn protect(id: &str) {
+    PENDING.lock().unwrap().insert(id.to_string());
+}
+
+/// Take the protected ids, clearing them.
+fn take_protected() -> HashSet<String> {
+    std::mem::take(&mut *PENDING.lock().unwrap())
+}
+
+/// What maintaining one clone's link produced. The caller decides from it whether to prune the
+/// link, warn about a missing `pid: "host"`, or wait.
+enum Outcome {
+    /// The link now points at a live uid-1000 proc-root.
+    Linked,
+    /// No container pid: the clone is stopped or gone, so its link is stale.
+    Gone,
+    /// The clone's pid is not visible in our `/proc` (the operator left out `pid: "host"`).
+    ProcInvisible,
+    /// A daemon error, or a clone with no uid-1000 session yet. Keep any existing link.
+    Waiting,
+}
+
+/// Point `hosts/<id>` at one clone's home. Best-effort: every failure is a retry next tick.
+async fn ensure_for(app: &App, root: &Path, id: &str) -> Outcome {
+    let pid = match app.docker.container_pid(id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return Outcome::Gone,
+        // Daemon down / dev mode → quiet, retry next tick.
+        Err(e) => {
+            tracing::debug!(target: "homes", "pid probe for {id} failed: {e:#}");
+            return Outcome::Waiting;
+        }
+    };
+    if !proc_dir(pid).exists() {
+        return Outcome::ProcInvisible;
+    }
+    // Link a uid-1000 process's proc-root (not the root-owned main pid), so the SMB share
+    // (smbd → force user=rmng) can follow it.
+    let Some(home) = home_pid(pid) else {
+        return Outcome::Waiting;
+    };
+    ensure_symlink(&root.join(id), &clone_home(home), id);
+    Outcome::Linked
+}
+
+/// Link one clone's home right now, waiting up to [`SESSION_WAIT`] for its uid-1000 session.
+///
+/// The create job calls this before it reports the clone ready. Home browsing, the SMB `clones`
+/// share, token accounting, the transcript ledger and activity detection all read through this
+/// link, so without it a clone is connectable but unreadable for up to [`RECONCILE_INTERVAL`].
+///
+/// The wait is what makes it reliable rather than merely likely: the link needs a process
+/// running as the clone user, and on a clone whose daemon has only just registered there may be
+/// none for another second or two. The loop is still the backstop, so a clone that never opens
+/// a session costs [`SESSION_WAIT`] here and links later.
+pub async fn ensure_now(app: &App, id: &str) {
+    if !is_safe_id(id) {
+        return;
+    }
+    let root = hosts_root(&app.config().data_dir);
+    let _ = std::fs::create_dir_all(&root);
+    protect(id);
+    let deadline = Instant::now() + SESSION_WAIT;
+    loop {
+        match ensure_for(app, &root, id).await {
+            Outcome::Waiting if Instant::now() < deadline => {
+                tokio::time::sleep(SESSION_POLL).await
+            }
+            _ => return,
+        }
+    }
+}
+
 /// One reconcile pass. `warned` tracks clone ids we've already logged a missing-`/proc`
 /// warning for, so the "add `pid: host`" hint fires once, not every tick.
 async fn reconcile(app: &App, warned: &mut HashSet<String>) {
@@ -193,47 +284,38 @@ async fn reconcile(app: &App, warned: &mut HashSet<String>) {
     let mut desired: HashSet<String> = HashSet::new();
 
     for h in &hosts {
-        let pid = match app.docker.container_pid(&h.id).await {
-            Ok(Some(p)) => p,
-            Ok(None) => continue, // stopped / gone → no link (prune removes any stale one)
-            Err(e) => {
-                // Daemon down / dev mode → quiet, retry next tick. Keep any existing link
-                // so a transient blip doesn't thrash it.
-                tracing::debug!(target: "homes", "pid probe for {} failed: {e:#}", h.id);
+        match ensure_for(app, &root, &h.id).await {
+            Outcome::Linked => {
+                warned.remove(&h.id); // resolved → allow a fresh warning if it ever recurs
+                desired.insert(h.id.clone());
+            }
+            // Stopped / gone → no link (prune removes any stale one).
+            Outcome::Gone => {
+                warned.remove(&h.id);
+            }
+            Outcome::ProcInvisible => {
+                if warned.insert(h.id.clone()) {
+                    tracing::warn!(
+                        target: "homes",
+                        "clone {} pid not visible in /proc — add `pid: \"host\"` to the \
+                         control-server service (compose.yaml) to browse clone homes under data/hosts",
+                        h.id
+                    );
+                }
+            }
+            // Keep any existing link, so a transient blip doesn't thrash it.
+            Outcome::Waiting => {
+                warned.remove(&h.id);
                 if root.join(&h.id).exists() {
                     desired.insert(h.id.clone());
                 }
-                continue;
             }
-        };
-
-        // `pid: "host"` missing → the clone's PID isn't in our namespace. Warn once, skip.
-        if !proc_dir(pid).exists() {
-            if warned.insert(h.id.clone()) {
-                tracing::warn!(
-                    target: "homes",
-                    "clone {} pid {pid} not visible in /proc — add `pid: \"host\"` to the \
-                     control-server service (compose.yaml) to browse clone homes under data/hosts",
-                    h.id
-                );
-            }
-            continue;
         }
-        warned.remove(&h.id); // resolved → allow a fresh warning if it ever recurs
-
-        // Link a uid-1000 process's proc-root (not the root-owned main pid), so the SMB
-        // share (smbd → force user=rmng) can follow it. No uid-1000 session yet (clone
-        // still booting) → keep any existing link and retry next tick.
-        let Some(home) = home_pid(pid) else {
-            if root.join(&h.id).exists() {
-                desired.insert(h.id.clone());
-            }
-            continue;
-        };
-        ensure_symlink(&root.join(&h.id), &clone_home(home), &h.id);
-        desired.insert(h.id.clone());
     }
 
+    // A clone a create job has linked but not registered yet. Unioned here, with no await
+    // between it and the prune below. See [`PENDING`].
+    desired.extend(take_protected());
     prune_stale(&root, &desired);
 
     // Keep the once-warned set bounded to clones that still exist + are managed.
@@ -254,6 +336,22 @@ pub async fn run(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clone_linked_before_it_was_registered_survives_one_prune() {
+        // The create job's own window: `ensure_now` has linked the clone, the store does not
+        // hold it yet, and a pass runs in between.
+        protect("fresh-clone");
+        let mut desired: HashSet<String> = HashSet::new();
+        desired.extend(take_protected());
+        assert!(desired.contains("fresh-clone"));
+        assert_eq!(
+            entries_to_remove(&["fresh-clone".to_string()], &desired),
+            Vec::<String>::new()
+        );
+        // One pass only, so a create that died before registering gets swept on the next.
+        assert!(take_protected().is_empty());
+    }
 
     #[test]
     fn hosts_root_joins_hosts() {

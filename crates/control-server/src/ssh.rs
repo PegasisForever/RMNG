@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -219,15 +220,50 @@ pub fn managed_clone_ids(hosts: &[wire::RmngClone]) -> Vec<String> {
     ids
 }
 
+/// The running bastion `sshd`'s pid, so [`reload_sshd`] can signal it from outside the
+/// supervisor task. Zero while no `sshd` is up.
+static SSHD_PID: AtomicU32 = AtomicU32::new(0);
+
+/// SIGHUP the bastion `sshd` so it re-reads `PermitOpen` without dropping live tunnels.
+/// A no-op when no `sshd` is running (dev box, or one crashed mid-backoff).
+async fn reload_sshd() {
+    let pid = SSHD_PID.load(Ordering::Relaxed);
+    if pid == 0 {
+        return;
+    }
+    let _ = Command::new("kill")
+        .args(["-HUP", &pid.to_string()])
+        .status()
+        .await;
+    tracing::info!(target: "ssh", "reloaded bastion sshd (fleet changed)");
+}
+
+/// [`managed_clone_ids`] plus one clone the store does not hold yet, sorted and deduped. An
+/// `extra` that is already in the fleet, unsafe as a path segment, or `None` leaves the list
+/// exactly as the store gives it. Pure, so it is unit-tested.
+pub fn allowlist_ids(hosts: &[wire::RmngClone], extra: Option<&str>) -> Vec<String> {
+    let mut ids = managed_clone_ids(hosts);
+    if let Some(id) = extra.filter(|id| crate::files::is_safe_id(id)) {
+        ids.push(id.to_string());
+        ids.sort_unstable();
+        ids.dedup();
+    }
+    ids
+}
+
 /// Write the bastion `authorized_keys` + `sshd_config` from current state. Returns whether
 /// the `sshd_config` content changed (⇒ caller should reload). Best-effort file writes.
-fn render_bastion_files(app: &App, data_dir: &str) -> bool {
+///
+/// `extra` names a clone that is not in the store yet. A clone is registered only at the very
+/// end of its create job, so without it the new clone's `PermitOpen` entry would appear on the
+/// next reconcile tick and `ssh -J … rmng@<clone>` would be refused until then.
+fn render_bastion_files(app: &App, data_dir: &str, extra: Option<&str>) -> bool {
     let cfg = app.config();
     let keys = render_authorized_keys(&cfg.ssh.authorized_keys);
     let _ = std::fs::create_dir_all("/etc/rmng/ssh");
     let _ = std::fs::write(BASTION_AUTHORIZED_KEYS, keys);
 
-    let ids = managed_clone_ids(&app.store.get().hosts);
+    let ids = allowlist_ids(&app.store.get().hosts, extra);
     // Absolute HostKey path: on SIGHUP sshd re-execs and re-resolves relative paths from
     // its CWD, so a relative HostKey makes a reload die with "no hostkeys available --
     // exiting" (found in live E2E). `std::path::absolute` is lexical (no I/O), mirroring
@@ -291,9 +327,24 @@ async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<Str
 /// (read fresh by sshd per connection — no reload needed) and pushes to running clones.
 pub async fn apply_now(app: &App) {
     let data_dir = app.config().data_dir.clone();
-    render_bastion_files(app, &data_dir);
+    if render_bastion_files(app, &data_dir, None) {
+        reload_sshd().await;
+    }
     let mut once = std::collections::HashMap::new();
     push_keys_to_clones(app, &data_dir, &mut once).await;
+}
+
+/// Let `ssh -J` reach a clone that the create job has not registered yet.
+///
+/// The bastion forwards only to the clone ids in its `PermitOpen` list, and that list is
+/// rendered from the store. The create job calls this just before it registers the clone, so
+/// the allowlist and the "clone is ready" signal land together instead of a reconcile tick
+/// apart. The reconcile loop re-renders from the store thereafter and keeps the same entry.
+pub async fn allow_clone_now(app: &App, id: &str) {
+    let data_dir = app.config().data_dir.clone();
+    if render_bastion_files(app, &data_dir, Some(id)) {
+        reload_sshd().await;
+    }
 }
 
 fn spawn_sshd() -> std::io::Result<Child> {
@@ -322,7 +373,8 @@ async fn log_lines<R: AsyncRead + Unpin>(reader: R) {
 async fn run_sshd(mut child: Child, app: &App, data_dir: &str, pushed: &mut HashMap<String, u64>) {
     let out = child.stdout.take();
     let err = child.stderr.take();
-    let pid = child.id();
+    // Published so `allow_clone_now` can reload this same sshd from the create job's task.
+    SSHD_PID.store(child.id().unwrap_or(0), Ordering::Relaxed);
     let logs = async {
         tokio::join!(
             async { if let Some(r) = out { log_lines(r).await } },
@@ -332,13 +384,9 @@ async fn run_sshd(mut child: Child, app: &App, data_dir: &str, pushed: &mut Hash
     let reconcile = async {
         loop {
             tokio::time::sleep(RECONCILE_INTERVAL).await;
-            let changed = render_bastion_files(app, data_dir);
-            if changed {
-                if let Some(pid) = pid {
-                    // Reload PermitOpen without dropping live tunnels.
-                    let _ = Command::new("kill").args(["-HUP", &pid.to_string()]).status().await;
-                    tracing::info!(target: "ssh", "reloaded bastion sshd (fleet changed)");
-                }
+            if render_bastion_files(app, data_dir, None) {
+                // Reload PermitOpen without dropping live tunnels.
+                reload_sshd().await;
             }
             push_keys_to_clones(app, data_dir, pushed).await;
         }
@@ -382,7 +430,7 @@ pub async fn run(app: App) {
     let mut failures: u32 = 0;
     let mut spawn_error_logged = false;
     loop {
-        render_bastion_files(&app, &data_dir);
+        render_bastion_files(&app, &data_dir, None);
         push_keys_to_clones(&app, &data_dir, &mut pushed).await;
         let started = Instant::now();
         match spawn_sshd() {
@@ -593,5 +641,39 @@ mod tests {
         archived.archived = true;
         let ids = managed_clone_ids(&[h1, unmanaged, h2, archived]);
         assert_eq!(ids, vec!["a-clone".to_string(), "b-clone".to_string()]);
+    }
+
+    /// A clone that exists but is not in the store yet. That is every clone, for the last few seconds
+    /// of its create job.
+    fn managed(id: &str) -> wire::RmngClone {
+        wire::RmngClone {
+            id: id.into(),
+            managed: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_clone_missing_from_the_store_still_reaches_the_allowlist() {
+        let ids = allowlist_ids(&[managed("b-clone")], Some("a-clone"));
+        assert_eq!(ids, vec!["a-clone".to_string(), "b-clone".to_string()]);
+    }
+
+    #[test]
+    fn a_clone_already_in_the_store_is_not_listed_twice() {
+        let ids = allowlist_ids(&[managed("a-clone")], Some("a-clone"));
+        assert_eq!(ids, vec!["a-clone".to_string()]);
+    }
+
+    #[test]
+    fn an_unsafe_id_never_reaches_the_allowlist() {
+        let ids = allowlist_ids(&[managed("a-clone")], Some("../etc"));
+        assert_eq!(ids, vec!["a-clone".to_string()]);
+    }
+
+    #[test]
+    fn no_extra_leaves_the_fleet_list_alone() {
+        let ids = allowlist_ids(&[managed("a-clone")], None);
+        assert_eq!(ids, vec!["a-clone".to_string()]);
     }
 }

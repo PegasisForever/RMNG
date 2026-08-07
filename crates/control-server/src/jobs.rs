@@ -554,6 +554,20 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         }
     }
 
+    // Everything a clone needs that lives OUTSIDE its container. Each of the three has a
+    // reconcile loop that would apply it 10 to 15 s after the clone lands in `s.hosts`, and
+    // those loops read `s.hosts`, so the wait would start only once the op says ready. That is
+    // exactly when the operator opens the clone and finds the shared folder missing.
+    //
+    // The home symlink is the one with reach: SMB browsing, the file API, token accounting, the
+    // transcript ledger and activity detection all read a clone through it.
+    progress("settle", "attaching the shared folder, home link and SSH access");
+    crate::shared::ensure_now(&app, &spec.new_hostname).await;
+    crate::homes::ensure_now(&app, &spec.new_hostname).await;
+    // Before the store write below, so the bastion's forward allowlist and the clone's own
+    // "ready" signal land together. It takes the id explicitly for that reason.
+    crate::ssh::allow_clone_now(&app, &spec.new_hostname).await;
+
     // Register the fully-provisioned clone and mark the op done — the clone is now genuinely
     // connectable. A clone's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
     // it is added HERE, at the same instant the bar reaches 100%. `host` is display-only for
@@ -1109,7 +1123,13 @@ async fn run_unarchive(app: App, op_id: String, host_id: String) {
         }
     });
     drop(progress);
+    // A restart rebuilds the container's mount table and gives it a new pid, so the three
+    // out-of-container resources are gone even though the clone itself is intact. Re-apply them
+    // here for the same reason the create path does: an unarchived clone is presented as ready.
     crate::shm::ensure_now(&app, &host_id).await;
+    crate::shared::ensure_now(&app, &host_id).await;
+    crate::homes::ensure_now(&app, &host_id).await;
+    crate::ssh::allow_clone_now(&app, &host_id).await;
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
 }
 

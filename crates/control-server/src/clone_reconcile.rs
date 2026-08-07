@@ -1058,7 +1058,7 @@ fi
 /// inherited one, and Claude Code treats an empty `ANTHROPIC_BASE_URL` as unset, falling back to
 /// the credentials file the server injects. `UnsetEnvironment=` would be cleaner but is systemd
 /// ≥ 248 and applies after `Environment=`, so this form is both older-safe and unambiguous.
-fn agent_wrapper_env_dropin_script() -> String {
+pub(crate) fn agent_wrapper_env_dropin_script() -> String {
     let unsets = RETIRED_ENV_KEYS
         .iter()
         .map(|k| format!("Environment={k}=\n"))
@@ -1110,6 +1110,19 @@ fn wrapper_env_desired() -> String {
     format!("v2 {}", RETIRED_ENV_KEYS.join(","))
 }
 
+/// The stamp that marks the drop-in applied. `pub(crate)` so the create path can write it after
+/// running the same script, which stops the reconciler restarting a brand-new clone's
+/// agent-wrapper 30 s in, right through the first turn the kickoff started.
+pub(crate) fn wrapper_env_stamp_entry() -> TarEntry {
+    TarEntry {
+        path: wrapper_env_stamp_path().to_string(),
+        data: format!("{}\n", wrapper_env_desired()).into_bytes(),
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+    }
+}
+
 /// Apply the drop-in once per clone, stamped.
 ///
 /// Deliberately NOT gated on `/etc/environment` having changed. That gate is right for the
@@ -1134,16 +1147,7 @@ async fn ensure_wrapper_env_dropin(app: &App, clone_id: &str) -> Result<bool> {
     )
     .await?;
     app.docker
-        .upload_tar(
-            clone_id,
-            vec![TarEntry {
-                path: wrapper_env_stamp_path().to_string(),
-                data: format!("{desired}\n").into_bytes(),
-                mode: 0o644,
-                uid: 0,
-                gid: 0,
-            }],
-        )
+        .upload_tar(clone_id, vec![wrapper_env_stamp_entry()])
         .await
         .with_context(|| format!("{clone_id}: writing wrapper env stamp"))?;
     Ok(true)
@@ -1178,7 +1182,7 @@ echo "moved stale PATH-shadowing rmng CLI to $backup"
 "#
 }
 
-fn tmp_mount_mask_script() -> &'static str {
+pub(crate) fn tmp_mount_mask_script() -> &'static str {
     r#"set -e
 systemctl mask tmp.mount >/dev/null 2>&1 || {
   mkdir -p /etc/systemd/system
@@ -1209,7 +1213,7 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 ///
 /// Idempotent by content compare, so a clone that already has the rule is a no-op and produces
 /// no log line.
-fn polkit_sudo_rule_script() -> &'static str {
+pub(crate) fn polkit_sudo_rule_script() -> &'static str {
     r#"set -e
 dest=/etc/polkit-1/rules.d/49-rmng-sudo-nopasswd.rules
 tmp="$(mktemp)"
@@ -1554,7 +1558,7 @@ fn codex_mcp_desired(headless: bool) -> String {
     format!("v1 headless={headless}")
 }
 
-fn codex_mcp_stamp_entry_for(headless: bool) -> TarEntry {
+pub(crate) fn codex_mcp_stamp_entry_for(headless: bool) -> TarEntry {
     TarEntry {
         path: codex_mcp_stamp_path().to_string(),
         data: format!("{}\n", codex_mcp_desired(headless)).into_bytes(),

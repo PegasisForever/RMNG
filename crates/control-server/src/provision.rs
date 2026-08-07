@@ -362,6 +362,7 @@ fn clone_pct(step: &str) -> Option<f64> {
         "ready" => 80.0,
         "monitors" => 85.0,
         "accounts" => 95.0,
+        "settle" => 97.0,
         "done" => 100.0,
         _ => return None,
     })
@@ -485,6 +486,38 @@ pub async fn clone_container(
                 .ok();
             Err(e)
         }
+    }
+}
+
+/// Apply one per-clone configuration step at create time, best-effort.
+///
+/// Every step here is also a step the per-clone reconciler owns, and each one runs here purely
+/// so a fresh clone has it from its first second rather than up to one reconcile pass later.
+/// A failure is therefore never fatal: it is logged, the stamp is withheld, and the reconciler
+/// finds the step outstanding on its first pass. Withholding the stamp IS the retry, so a step
+/// whose script exited non-zero must not be stamped. `stamp` is `None` for a step the
+/// reconciler re-runs unconditionally (those scripts are content-idempotent).
+async fn seed_step(
+    docker: &crate::docker::DockerCtl,
+    container: &str,
+    hostname: &str,
+    label: &str,
+    script: &str,
+    stamp: Option<TarEntry>,
+) {
+    let code = docker
+        .exec_script(container, script, &[], &[], |_stream, line| {
+            tracing::debug!(target: "provision", "{label}: {line}");
+        })
+        .await
+        .unwrap_or(1);
+    if code != 0 {
+        tracing::warn!("clone {hostname}: {label} exited {code} (reconciler will retry)");
+        return;
+    }
+    let Some(stamp) = stamp else { return };
+    if let Err(e) = docker.upload_tar(container, vec![stamp]).await {
+        tracing::warn!("clone {hostname}: writing the {label} stamp failed: {e:#} (non-fatal)");
     }
 }
 
@@ -684,69 +717,87 @@ async fn clone_container_after_create(
     // desktop server is removed on headless clones. Stamp it so the reconciler skips re-running
     // this within its first 30s pass. Best-effort — the reconciler retries on failure.
     on_progress("inject", "configuring ~/.claude.json MCP servers");
-    let code = docker
-        .exec_script(
-            container,
-            &crate::clone_reconcile::claude_mcp_script(headless),
-            &[],
-            &[],
-            |_stream, line| {
-                tracing::debug!(target: "provision", "claude-mcp: {line}");
-            },
-        )
-        .await
-        .unwrap_or(1);
-    if code == 0 {
-        if let Err(e) = docker
-            .upload_tar(
-                container,
-                vec![crate::clone_reconcile::claude_mcp_stamp_entry_for(headless)],
-            )
-            .await
-        {
-            tracing::warn!("clone {hostname}: writing claude mcp stamp failed: {e:#} (non-fatal)");
-        }
-    } else {
-        tracing::warn!(
-            "clone {hostname}: ~/.claude.json MCP configure exited {code} (reconciler will retry)"
-        );
-    }
+    seed_step(
+        docker,
+        container,
+        hostname,
+        "~/.claude.json MCP servers",
+        &crate::clone_reconcile::claude_mcp_script(headless),
+        Some(crate::clone_reconcile::claude_mcp_stamp_entry_for(headless)),
+    )
+    .await;
 
     // Cursor reads neither of those files, so it gets the same managed servers through
     // `~/.cursor/mcp.json`. Its Linear bearer is resolved from the clone's env here, because
     // Cursor does not expand an environment reference in that file.
     on_progress("inject", "configuring ~/.cursor/mcp.json MCP servers");
     let linear_key = crate::clone_reconcile::env_value(env, "LINEAR_API_KEY");
-    let code = docker
-        .exec_script(
-            container,
-            &crate::clone_reconcile::cursor_mcp_script(headless, &linear_key),
-            &[],
-            &[],
-            |_stream, line| {
-                tracing::debug!(target: "provision", "cursor-mcp: {line}");
-            },
-        )
-        .await
-        .unwrap_or(1);
-    if code == 0 {
-        if let Err(e) = docker
-            .upload_tar(
-                container,
-                vec![crate::clone_reconcile::cursor_mcp_stamp_entry_for(
-                    headless,
-                    &linear_key,
-                )],
-            )
-            .await
-        {
-            tracing::warn!("clone {hostname}: writing cursor mcp stamp failed: {e:#} (non-fatal)");
-        }
-    } else {
-        tracing::warn!(
-            "clone {hostname}: ~/.cursor/mcp.json MCP configure exited {code} (reconciler will retry)"
-        );
-    }
+    seed_step(
+        docker,
+        container,
+        hostname,
+        "~/.cursor/mcp.json MCP servers",
+        &crate::clone_reconcile::cursor_mcp_script(headless, &linear_key),
+        Some(crate::clone_reconcile::cursor_mcp_stamp_entry_for(
+            headless,
+            &linear_key,
+        )),
+    )
+    .await;
+
+    // Codex keeps its MCP servers in `~/.codex/config.toml`, which the parity tar above does not
+    // touch (that file is the operator's, so the servers go in by merge). Seeded here for the
+    // same reason as the two above: without it a clone's Codex runs with no managed servers
+    // until the reconciler's first pass.
+    on_progress("inject", "merging ~/.codex/config.toml MCP servers");
+    seed_step(
+        docker,
+        container,
+        hostname,
+        "~/.codex/config.toml MCP servers",
+        &crate::clone_reconcile::codex_mcp_merge_script(headless),
+        Some(crate::clone_reconcile::codex_mcp_stamp_entry_for(headless)),
+    )
+    .await;
+
+    // Mask `tmp.mount` and authorize the `sudo` group in polkit. Both are template-parity steps
+    // the reconciler applies to every clone; running them now means a clone's first `sudo` and
+    // its first `/tmp` write behave like an old clone's, not like an unreconciled one's.
+    // Content-idempotent rather than stamped, so there is nothing to record.
+    on_progress("inject", "masking tmp.mount + installing the polkit sudo rule");
+    seed_step(
+        docker,
+        container,
+        hostname,
+        "tmp.mount mask",
+        crate::clone_reconcile::tmp_mount_mask_script(),
+        None,
+    )
+    .await;
+    seed_step(
+        docker,
+        container,
+        hostname,
+        "polkit sudo rule",
+        crate::clone_reconcile::polkit_sudo_rule_script(),
+        None,
+    )
+    .await;
+
+    // The agent-wrapper drop-in that clears retired inference vars. Its script RESTARTS the
+    // wrapper, which is free now and disruptive later: unstamped, the reconciler would run it
+    // about 30 s in and restart the wrapper straight through the first turn the create job's
+    // kickoff had just started.
+    on_progress("inject", "applying the agent-wrapper env drop-in");
+    seed_step(
+        docker,
+        container,
+        hostname,
+        "agent-wrapper env drop-in",
+        &crate::clone_reconcile::agent_wrapper_env_dropin_script(),
+        Some(crate::clone_reconcile::wrapper_env_stamp_entry()),
+    )
+    .await;
 
     // The activity probe, so the new clone reports working-vs-stuck from its first turn
     // rather than from the reconciler's first pass 30s later. Stamped the same way, and
