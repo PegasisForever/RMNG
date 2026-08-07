@@ -562,6 +562,9 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // The home symlink is the one with reach: SMB browsing, the file API, token accounting, the
     // transcript ledger and activity detection all read a clone through it.
     progress("settle", "attaching the shared folder, home link and SSH access");
+    // Needs the clone's user manager, which is why it is here and not with the other
+    // container-local steps in `inject`. See [`crate::provision::seed_wrapper_env`].
+    crate::provision::seed_wrapper_env(&app, &spec.new_hostname).await;
     crate::shared::ensure_now(&app, &spec.new_hostname).await;
     crate::homes::ensure_now(&app, &spec.new_hostname).await;
     // Before the store write below, so the bastion's forward allowlist and the clone's own

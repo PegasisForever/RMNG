@@ -612,14 +612,17 @@ operator opened the clone.
 | `data/hosts/<id>`, the home symlink | up to 15 s | no SMB browse, no file API, no token counts, no activity signal |
 | The bastion's `PermitOpen` entry | up to 10 s | `ssh -J` to the clone is refused |
 | The `~/.codex/config.toml` MCP tables | up to 30 s | Codex starts with no managed servers |
-| The `tmp.mount` mask | up to 30 s | `/tmp` is a tmpfs the clone did not ask for |
-| The polkit `sudo` rule | up to 30 s | a `sudo` through polkit fails on "No session for cookie" |
 | The agent-wrapper env drop-in | up to 30 s | the wrapper restarts about 30 s in, through the first turn |
+| The `tmp.mount` mask, the polkit `sudo` rule | up to 30 s | only on a clone from a template older than those two steps |
 
-The last four are container-local and run during `inject`, each writing the same stamp the
-reconciler reads, so its first pass finds them done. The first three live outside the container
-and run in a `settle` step at 97%: `shared::ensure_now`, `homes::ensure_now`, then
-`ssh::allow_clone_now`.
+The Codex MCP merge, the `tmp.mount` mask and the polkit rule are container-local and run during
+`inject`, each writing the same stamp the reconciler reads, so its first pass finds them done.
+The last two are no-ops on a current template, which already carries both.
+
+The rest run in a `settle` step at 97%, after the clone is up: `provision::seed_wrapper_env`,
+then `shared::ensure_now`, `homes::ensure_now` and `ssh::allow_clone_now`. The wrapper drop-in
+is there rather than in `inject` because its script drives `systemctl --user`, and a container
+that started a second ago has no user manager to talk to.
 
 Three details are load-bearing, all of them consequences of the clone not being in the store
 yet. The bastion allowlist is rendered from `hosts` plus the id being created, because

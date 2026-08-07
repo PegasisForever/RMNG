@@ -521,6 +521,26 @@ async fn seed_step(
     }
 }
 
+/// The agent-wrapper drop-in that clears the retired inference vars, applied once the clone is
+/// up rather than during `inject`.
+///
+/// Its script drives `systemctl --user`, so it needs the clone's user manager, and during
+/// `inject` there is none: the container started a second earlier. Measured on a live create,
+/// the inject-time attempt exited 1 and the reconciler then ran it 26 s later, restarting the
+/// agent-wrapper right through the first turn the kickoff had started. That restart is what the
+/// create-time run exists to avoid, so it belongs after wait-ready.
+pub(crate) async fn seed_wrapper_env(app: &App, id: &str) {
+    seed_step(
+        &app.docker,
+        id,
+        id,
+        "agent-wrapper env drop-in",
+        &crate::clone_reconcile::agent_wrapper_env_dropin_script(),
+        Some(crate::clone_reconcile::wrapper_env_stamp_entry()),
+    )
+    .await;
+}
+
 /// The inject → start → wait-ready tail of [`clone_container`], factored out so the caller
 /// can run it under a cleanup trap.
 async fn clone_container_after_create(
@@ -784,20 +804,6 @@ async fn clone_container_after_create(
     )
     .await;
 
-    // The agent-wrapper drop-in that clears retired inference vars. Its script RESTARTS the
-    // wrapper, which is free now and disruptive later: unstamped, the reconciler would run it
-    // about 30 s in and restart the wrapper straight through the first turn the create job's
-    // kickoff had just started.
-    on_progress("inject", "applying the agent-wrapper env drop-in");
-    seed_step(
-        docker,
-        container,
-        hostname,
-        "agent-wrapper env drop-in",
-        &crate::clone_reconcile::agent_wrapper_env_dropin_script(),
-        Some(crate::clone_reconcile::wrapper_env_stamp_entry()),
-    )
-    .await;
 
     // The activity probe, so the new clone reports working-vs-stuck from its first turn
     // rather than from the reconciler's first pass 30s later. Stamped the same way, and
