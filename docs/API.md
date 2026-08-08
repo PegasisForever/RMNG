@@ -275,6 +275,40 @@ so a large transcript costs the same as a small one. Measured on clone `pega-dev
 2026-08-07: two `Agent` calls interrupted at 08:52:40 still read as in flight 24 minutes later,
 and the clone reported `working` on every four-second tick over two subagents already dead.
 
+**Codex feeds the same table, out of its own transcript.** It fires no hooks and publishes no
+registry, but it writes everything the probe would have: one JSONL "rollout" per session under
+`~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<start>-<session>.jsonl`. Four record types map onto
+the four folds above, measured against Codex CLI 0.144.4:
+
+| Claude Code hook | Codex rollout record |
+|---|---|
+| `UserPromptSubmit` | `event_msg` / `user_message` |
+| `PreToolUse` | `response_item` / `custom_tool_call`, `function_call`, `local_shell_call` |
+| `PostToolUse` | the matching `…_call_output`, paired on `call_id` |
+| `Stop` + `last_assistant_message` | `event_msg` / `task_complete` + `last_agent_message` |
+
+A turn still open reads `busy` and a closed one `idle`, decided by which boundary came last in the
+file rather than by which carries the later stamp. Codex sitting on its "Would you like to run the
+following command?" prompt writes the call and no output, which is the same shape as a `PreToolUse`
+nobody posted, so it lands in the in-flight set with no special case.
+
+Codex publishes no `waiting` status the way Claude Code does, so an approval prompt is not flagged
+outright. It does not need to be: the request travels inside the call's own input, as
+`"sandbox_permissions":"require_escalated"` plus a `"justification"` string, and the judge reads it
+there. Measured on clone `claude-test2` on 2026-08-08, on a real prompt awaiting approval: held at
+`working` by the one-minute floor with the model already answering "the agent is waiting for human
+approval of the escalated command, so the echo will not proceed autonomously", then `idle` at 61
+seconds for the same reason. What this does not cover is an approval prompt on a command that
+would legitimately run for minutes, where nothing separates waiting from working.
+
+**Liveness comes from the file descriptor.** Codex holds its own rollout open for append for as
+long as the session lives, so `/proc/<pid>/fd` is an exact map from process to session. A rollout
+no live `codex` holds is over, whatever its last record says, which is what keeps one killed
+mid-turn from reading as working. The two alternatives are both worse: mtime cannot tell a
+finished session from a killed one, and `cwd` cannot separate two sessions started in the same
+directory. `argv[0]`'s basename is matched whole, because a clone named `w-s4-codex-rev` runs an
+`avahi-daemon [w-s4-codex-rev.local]` that a substring match reads as a live agent.
+
 **Cursor feeds the same table.** It publishes no registry, so a conversation is rebuilt from the
 probe's own event stream instead: a turn that has ended reads `idle`, and one still open reads
 `busy`. Two details are load-bearing. A Cursor subagent runs under its own conversation id, never
@@ -782,10 +816,27 @@ stay readable and already load without a key.
 
 ## Transcript ledger
 
-A distilled copy of every clone's Claude Code and Cursor transcripts, kept after the clone is gone. The
-server tails `data/hosts/<id>/.claude/projects/<slug>/<session>.jsonl` every 30 seconds through
-the symlinks the clone-home reconciler maintains, and writes one NDJSON record per event to
-`data/ledger/<clone>/<session>.ndjson`. Nothing runs inside a clone and no model runs here.
+A distilled copy of every clone's Claude Code, Cursor and Codex transcripts, kept after the clone
+is gone. The server tails `data/hosts/<id>/.claude/projects/<slug>/<session>.jsonl` every 30
+seconds through the symlinks the clone-home reconciler maintains, and writes one NDJSON record per
+event to `data/ledger/<clone>/<session>.ndjson`. Nothing runs inside a clone and no model runs here.
+
+**Codex writes a different shape and lands in the same records.** Its transcript is one JSONL
+"rollout" per session under `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<start>-<session>.jsonl`,
+and every record is wrapped in a `{type, timestamp, payload}` envelope. A rollout says the same
+turn twice, once as an `event_msg` (what the operator saw) and once as a `response_item` (what the
+model was sent, plus the developer preamble and a workspace dump). So the words come from
+`event_msg` / `user_message` and `agent_message`, the tool calls from `response_item` /
+`custom_tool_call`, `function_call` and `local_shell_call`, and their results from the matching
+`…_call_output` paired on `call_id`. Dropped for the same reason their Claude Code counterparts
+are: `reasoning`, which is the model's scratch work and arrives as encrypted bytes, and
+`world_state`, `turn_context` and `token_count`, which describe the request rather than the work.
+Measured on one probe session: 76,275 raw bytes in 37 records distil to 2,801 bytes in 11.
+
+Codex has no `subagents/` directory. A thread it spawns gets a rollout of its own beside every
+other, and which thread spawned it is recorded only in `~/.codex/state_5.sqlite`, in neither file,
+so a spawned thread is filed as its own session rather than under a parent that cannot be seen
+from the transcript.
 
 One more pass runs at the start of a delete and an archive. The `hosts/<id>` symlink disappears
 the moment the container stops, so anything not captured while the clone runs is unrecoverable.

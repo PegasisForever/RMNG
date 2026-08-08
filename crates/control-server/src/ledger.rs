@@ -254,6 +254,10 @@ struct RawLine {
     ai_title: Option<String>,
     #[serde(rename = "isSidechain", default)]
     sidechain: Option<bool>,
+    /// Codex wraps every record in an envelope and puts the record itself here. Claude Code
+    /// and Cursor write no such key, so its presence is what selects the Codex reading.
+    #[serde(default)]
+    payload: Option<serde_json::Value>,
     /// The subagent this line belongs to. Written on every line of a subagent transcript and on
     /// nothing in a main one.
     #[serde(rename = "agentId", default)]
@@ -305,6 +309,9 @@ struct Block {
     /// The base64 payload of an `image`, which is exactly what never reaches the ledger.
     #[serde(default)]
     source: Option<ImageSource>,
+    /// Codex writes an image as one `data:` URI under this key instead of as a typed block.
+    #[serde(default)]
+    image_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,7 +353,20 @@ fn clip_ends(s: &str, head: usize, tail: usize) -> String {
 }
 
 /// What an image block leaves behind: its type, never its bytes.
-fn image_marker(src: Option<&ImageSource>) -> String {
+fn image_marker(block: &Block) -> String {
+    // Claude Code types the block and carries the payload under `source`. Codex writes one
+    // `data:<media>;base64,<payload>` URI, so the same two facts are split by the comma.
+    if let Some(uri) = block.image_url.as_deref() {
+        let (head, data) = uri.split_once(',').unwrap_or((uri, ""));
+        let media = head.strip_prefix("data:").unwrap_or(head);
+        let media = media.strip_suffix(";base64").unwrap_or(media);
+        let media = match media.is_empty() {
+            true => "image",
+            false => media,
+        };
+        return format!("[{media}, {} base64 bytes dropped]", data.len());
+    }
+    let src = block.source.as_ref();
     let media = src.and_then(|s| s.media_type.as_deref()).unwrap_or("image");
     let bytes = src.and_then(|s| s.data.as_deref()).map_or(0, str::len);
     format!("[{media}, {bytes} base64 bytes dropped]")
@@ -366,7 +386,7 @@ fn tool_result_text(content: Option<&serde_json::Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
     for b in &blocks {
         match b.kind.as_deref() {
-            Some("image") => parts.push(image_marker(b.source.as_ref())),
+            Some("image") | Some("input_image") => parts.push(image_marker(b)),
             _ => {
                 if let Some(t) = b.text.as_deref().filter(|t| !t.is_empty()) {
                     parts.push(t.to_string());
@@ -418,6 +438,13 @@ fn distill(
         ..base.clone()
     };
 
+    // Codex puts the record inside an envelope, so the envelope is what says which agent
+    // wrote this line. Checked before the Claude Code arms because its outer `type` names the
+    // envelope (`event_msg`, `response_item`) rather than anything those arms know.
+    if let Some(payload) = raw.payload {
+        return distill_codex(raw.kind.as_deref().unwrap_or_default(), payload, &emit);
+    }
+
     match raw.kind.as_deref() {
         // The title the CLI keeps refining as the session goes on. It is rewritten on almost
         // every turn, so only a change is worth a record.
@@ -448,6 +475,73 @@ fn distill(
         Some(role @ ("user" | "assistant")) => {
             let Some(content) = raw.message.and_then(|m| m.content) else { return Vec::new() };
             distill_message(role, content, &emit)
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The tool-call payloads Codex writes, each closed by an output carrying the same `call_id`.
+///
+/// Codex names a call after how the model addressed it. Reading only one of these would keep
+/// the call and drop the answer, or the reverse.
+const CODEX_TOOL_CALLS: [&str; 4] =
+    ["custom_tool_call", "function_call", "local_shell_call", "web_search_call"];
+
+/// The records one Codex rollout line contributes.
+///
+/// **Which records, and why so few.** A rollout writes the same turn twice: once as an
+/// `event_msg`, which is what the operator saw, and once as a `response_item`, which is what
+/// the model was sent. The second copy also carries the developer preamble, the workspace
+/// dump and the base instructions, tens of thousands of characters repeated at every session
+/// start. So the words come from `event_msg` and the tool calls from `response_item`, which is
+/// the only place they appear, and nothing is recorded twice.
+///
+/// | Ledger kind | Codex record |
+/// |---|---|
+/// | `user` | `event_msg` / `user_message` |
+/// | `assistant` | `event_msg` / `agent_message` |
+/// | `toolUse` | `response_item` / `custom_tool_call`, `function_call`, `local_shell_call` |
+/// | `toolResult` | the matching `…_call_output` |
+///
+/// Dropped for the same reason their Claude Code counterparts are: `reasoning`, which is the
+/// model's scratch work and arrives as a wall of encrypted bytes, and `world_state`,
+/// `turn_context` and `token_count`, which describe the request rather than the work.
+fn distill_codex(
+    envelope: &str,
+    payload: serde_json::Value,
+    emit: &impl Fn(&str, String) -> LedgerRecord,
+) -> Vec<LedgerRecord> {
+    let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else { return Vec::new() };
+    let text_at = |key: &str| {
+        payload.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    };
+    match (envelope, kind) {
+        ("event_msg", role @ ("user_message" | "agent_message")) => {
+            let said = text_at("message");
+            if said.is_empty() {
+                return Vec::new();
+            }
+            let named = match role {
+                "user_message" => "user",
+                _ => "assistant",
+            };
+            vec![emit(named, clip(&said, MAX_TEXT_CHARS))]
+        }
+        ("response_item", call) if CODEX_TOOL_CALLS.contains(&call) => {
+            // `input` on a custom tool call, `arguments` on a function call.
+            let asked = match text_at("input") {
+                s if s.is_empty() => text_at("arguments"),
+                s => s,
+            };
+            let mut rec = emit("toolUse", clip(&asked, MAX_TOOL_INPUT_CHARS));
+            rec.tool = text_at("name");
+            rec.tool_id = text_at("call_id");
+            vec![rec]
+        }
+        ("response_item", out) if out.ends_with("_call_output") => {
+            let mut rec = emit("toolResult", tool_result_text(payload.get("output")));
+            rec.tool_id = text_at("call_id");
+            vec![rec]
         }
         _ => Vec::new(),
     }
@@ -486,7 +580,7 @@ fn distill_message(
                     said.push(t);
                 }
             }
-            Some("image") => said.push(image_marker(b.source.as_ref())),
+            Some("image") | Some("input_image") => said.push(image_marker(&b)),
             // The model's own scratch work. It is the bulk of an assistant line and it describes
             // what was considered rather than what was done.
             Some("thinking") | Some("redacted_thinking") => {}
@@ -668,6 +762,61 @@ fn cursor_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
     out
 }
 
+/// Every Codex transcript under `home`, at most `cap` of them.
+///
+/// Codex calls a transcript a rollout and files one per session under a dated path:
+/// `~/.codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-<session>.jsonl`. The date levels
+/// carry nothing this module needs, so they are walked and thrown away, and the file name is
+/// what names the session.
+///
+/// Codex has no `subagents/` directory. A thread it spawns gets a rollout of its own beside
+/// every other, and the only record of which thread spawned it lives in `~/.codex/state_5.
+/// sqlite`, not in either file. So a spawned thread is filed as its own session here rather
+/// than under a parent this module cannot see, and `sidechain` is set from the rollout's own
+/// `thread_source` instead (see [`session_files`] for what the Claude Code side can do with a
+/// directory to read it out of).
+fn codex_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
+    let root = home.join(".codex/sessions");
+    let mut out: Vec<Transcript> = Vec::new();
+    // Three dated levels, so a bounded walk rather than a recursive one.
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if out.len() >= cap {
+                out.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+                return out;
+            }
+            let path = e.path();
+            let Ok(kind) = e.file_type() else { continue };
+            if kind.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Some(file) = entry_name(&e) else { continue };
+            if !kind.is_file() || !file.starts_with("rollout-") || !file.ends_with(".jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Some(id) = crate::stuck::codex_session_id(stem) else { continue };
+            out.push(Transcript {
+                // The dated directories are part of the key: two days can hold a file of the
+                // same name only if Codex reuses a session id, and the key must not merge them.
+                key: match path.parent().and_then(|p| p.strip_prefix(home).ok()) {
+                    Some(rel) => format!("{}/{file}", rel.display()),
+                    None => file,
+                },
+                name: format!("{id}.ndjson"),
+                path,
+                sidechain: false,
+                agent: String::new(),
+            });
+        }
+    }
+    out.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
 /// Append the ledger lines for whatever has been added to `src` since its cursor, returning the
 /// bytes of transcript consumed.
 ///
@@ -787,8 +936,11 @@ fn tail_clone(clone: &str, home: &Path, dir: &Path) {
     let mut offsets = before.clone();
     let mut budget = MAX_READ_PER_CLONE;
     let claude = session_files(home, MAX_SESSION_FILES);
-    let cursor = cursor_session_files(home, MAX_SESSION_FILES.saturating_sub(claude.len()));
-    for src in claude.iter().chain(cursor.iter()) {
+    let mut left = MAX_SESSION_FILES.saturating_sub(claude.len());
+    let cursor = cursor_session_files(home, left);
+    left = left.saturating_sub(cursor.len());
+    let codex = codex_session_files(home, left);
+    for src in claude.iter().chain(cursor.iter()).chain(codex.iter()) {
         if budget == 0 {
             break; // Backlog drains over the next few passes.
         }
@@ -1130,6 +1282,161 @@ mod tests {
         assert_eq!(found[1].agent, "853bf50b");
         assert!(cursor_session_files(&home, 0).is_empty(), "the cap is respected");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A Codex rollout, at the dated path the CLI files one under.
+    fn write_rollout(home: &Path, day: &str, id: &str, lines: &[&str]) -> PathBuf {
+        let dir = home.join(".codex/sessions").join(day);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-2026-08-08T02-59-54-{id}.jsonl"));
+        let mut body = String::new();
+        for l in lines {
+            body.push_str(l);
+            body.push('\n');
+        }
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_codex_rollout_is_found_by_its_session_id_under_its_dated_path() {
+        let root = temp_dir("codex-walk");
+        let home = root.join("home");
+        let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
+        write_rollout(&home, "2026/08/08", id, &["{}"]);
+        // Codex writes other things beside the rollouts, and none of them are transcripts.
+        std::fs::write(home.join(".codex/sessions/2026/08/08/notes.jsonl"), "{}\n").unwrap();
+
+        let found = codex_session_files(&home, MAX_SESSION_FILES);
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(found[0].name, format!("{id}.ndjson"), "the ledger file is the session");
+        // The dated directories are in the key, so one id reused on two days stays two files.
+        assert_eq!(
+            found[0].key,
+            format!(".codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-{id}.jsonl")
+        );
+        assert!(!found[0].sidechain);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_codex_turn_distills_to_the_same_records_a_claude_one_does() {
+        // Verbatim shapes from Codex CLI 0.144.4, clone `claude-test2`, 2026-08-08.
+        let mut st = FileState::default();
+        let say = |line: &str| {
+            let mut st2 = FileState::default();
+            distill("c", "019fe02b", line, &mut st2, READ_AT)
+        };
+
+        let asked = r#"{"timestamp":"2026-08-08T07:00:15.962Z","type":"event_msg","payload":{"type":"user_message","message":"Run the shell command: echo PROBE-MARKER-ALPHA.","images":[]}}"#;
+        let recs = distill("c", "019fe02b", asked, &mut st, READ_AT);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, "user");
+        assert_eq!(recs[0].session, "019fe02b", "the file names the session, no line does");
+        assert_eq!(recs[0].ts, "2026-08-08T07:00:15.962Z");
+        assert!(recs[0].text.starts_with("Run the shell command"));
+
+        let said = r#"{"timestamp":"2026-08-08T07:02:21.177Z","type":"event_msg","payload":{"type":"agent_message","message":"done","phase":"final_answer"}}"#;
+        assert_eq!(say(said)[0].kind, "assistant");
+        assert_eq!(say(said)[0].text, "done");
+
+        let call = r#"{"timestamp":"2026-08-08T07:00:20.293Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"call_7q2","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"echo PROBE-MARKER-ALPHA\"})"}}"#;
+        let recs = say(call);
+        assert_eq!(recs[0].kind, "toolUse");
+        assert_eq!(recs[0].tool, "exec");
+        assert_eq!(recs[0].tool_id, "call_7q2");
+        assert!(recs[0].text.contains("PROBE-MARKER-ALPHA"));
+
+        // A function call names its arguments differently and pairs the same way.
+        let func = r#"{"timestamp":"2026-08-08T07:02:19.697Z","type":"response_item","payload":{"type":"function_call","name":"wait","arguments":"{\"cell_id\":\"2\"}","call_id":"call_1JS"}}"#;
+        assert_eq!(say(func)[0].tool, "wait");
+        assert!(say(func)[0].text.contains("cell_id"));
+
+        // An output arrives as a string on one call and as blocks on another. Both are text.
+        let out_blocks = r#"{"timestamp":"2026-08-08T07:02:19.712Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1JS","output":[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"PROBE-MARKER-ALPHA"}]}}"#;
+        let recs = say(out_blocks);
+        assert_eq!(recs[0].kind, "toolResult");
+        assert_eq!(recs[0].tool_id, "call_1JS");
+        assert_eq!(recs[0].text, "Script completed\nPROBE-MARKER-ALPHA");
+        let out_string = r#"{"timestamp":"2026-08-08T07:02:16.117Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_eDx","output":"Wall time 111.7 seconds"}}"#;
+        assert_eq!(say(out_string)[0].text, "Wall time 111.7 seconds");
+    }
+
+    #[test]
+    fn what_a_codex_rollout_repeats_or_never_meant_is_dropped() {
+        let mut st = FileState::default();
+        let gone = |line: &str| distill("c", "s", line, &mut FileState::default(), READ_AT);
+
+        // The model's scratch work, which arrives as a wall of encrypted bytes.
+        let thinking = r#"{"timestamp":"2026-08-08T07:02:19.267Z","type":"response_item","payload":{"type":"reasoning","id":"rs_0d3","summary":[],"encrypted_content":"gAAAAABqdtR7ybEdlyw8INXHCedhkhRJ"}}"#;
+        assert!(gone(thinking).is_empty());
+        assert!(!format!("{:?}", gone(thinking)).contains("gAAAAAB"));
+
+        // The second copy of every message, the one the model was sent. It repeats what
+        // `event_msg` already said and carries the developer preamble besides.
+        let echoed = r#"{"timestamp":"2026-08-08T07:00:15.920Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions> …"}]}}"#;
+        assert!(gone(echoed).is_empty());
+        let assistant_copy = r#"{"timestamp":"2026-08-08T07:02:21.179Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#;
+        assert!(gone(assistant_copy).is_empty());
+
+        // Records about the request rather than about the work.
+        for line in [
+            r#"{"timestamp":"2026-08-08T07:00:15.826Z","type":"session_meta","payload":{"session_id":"019fe02b","cwd":"/","originator":"codex-tui"}}"#,
+            r#"{"timestamp":"2026-08-08T07:00:15.922Z","type":"world_state","payload":{"full":true,"state":{"agents_md":{"text":"…"}}}}"#,
+            r#"{"timestamp":"2026-08-08T07:00:15.922Z","type":"turn_context","payload":{"turn_id":"019fe02c","cwd":"/"}}"#,
+            r#"{"timestamp":"2026-08-08T07:00:20.635Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":18621}}}}"#,
+            r#"{"timestamp":"2026-08-08T07:00:15.828Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019fe02c"}}"#,
+        ] {
+            assert!(distill("c", "s", line, &mut st, READ_AT).is_empty(), "kept {line}");
+        }
+    }
+
+    #[test]
+    fn a_codex_image_leaves_its_type_and_not_its_bytes() {
+        // Codex writes one `data:` URI where Claude Code writes a typed block. Both have to
+        // leave the same thing behind, which is the fact that a picture was there.
+        let payload = "A".repeat(400_000);
+        let line = format!(
+            r#"{{"timestamp":"2026-08-08T07:00:20.635Z","type":"response_item","payload":{{"type":"custom_tool_call_output","call_id":"c1","output":[{{"type":"input_image","image_url":"data:image/png;base64,{payload}"}}]}}}}"#
+        );
+        let recs = distill("c", "s", &line, &mut FileState::default(), READ_AT);
+        assert_eq!(recs[0].kind, "toolResult");
+        assert_eq!(recs[0].text, "[image/png, 400000 base64 bytes dropped]");
+        assert!(!recs[0].text.contains("AAAA"));
+    }
+
+    #[test]
+    fn a_codex_session_tails_into_one_ledger_file_named_for_it() {
+        let root = temp_dir("codex-tail");
+        let home = root.join("home");
+        let dir = root.join("ledger/c1");
+        let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
+        let src = write_rollout(
+            &home,
+            "2026/08/08",
+            id,
+            &[
+                r#"{"timestamp":"2026-08-08T07:00:15.962Z","type":"event_msg","payload":{"type":"user_message","message":"map the encoder"}}"#,
+            ],
+        );
+        tail_clone("c1", &home, &dir);
+        let out = dir.join(format!("{id}.ndjson"));
+        let body = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(body.lines().count(), 1);
+        assert!(body.contains("map the encoder"));
+
+        // The tail resumes rather than repeating, the same as every other transcript.
+        append(
+            &src,
+            br#"{"timestamp":"2026-08-08T07:02:21.177Z","type":"event_msg","payload":{"type":"agent_message","message":"the encoder is at src/enc.rs:40"}}"#,
+        )
+        .unwrap();
+        append(&src, b"\n").unwrap();
+        tail_clone("c1", &home, &dir);
+        let body = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(body.lines().count(), 2);
+        assert!(body.contains("src/enc.rs:40"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1673,4 +1980,5 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
 

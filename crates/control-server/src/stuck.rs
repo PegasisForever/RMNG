@@ -618,6 +618,207 @@ pub fn read_cursor_sessions(root: &Path, events: &[HookEvent], now: f64) -> Vec<
         .collect()
 }
 
+// ---------------------------------------------------------------------------------------
+// Codex
+// ---------------------------------------------------------------------------------------
+
+/// Where the Codex CLI files a session's transcript, under the clone's home.
+///
+/// One JSONL "rollout" per session, in dated directories:
+/// `~/.codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-<session-id>.jsonl`. The name
+/// carries both the start time and the id, and the id is its last 36 characters.
+const CODEX_SESSIONS: &str = "home/rmng/.codex/sessions";
+
+/// The session id inside a rollout's file name, which is the trailing UUID.
+///
+/// `rollout-2026-08-08T02-59-54-019fe02b-cb2c-7ec0-8a48-77d87c7f057f` is one id, not five
+/// dash-separated fields, so this counts characters from the end rather than splitting.
+pub fn codex_session_id(stem: &str) -> Option<&str> {
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    let shaped = id.len() == 36
+        && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        && [8, 13, 18, 23].iter().all(|i| id.as_bytes()[*i] == b'-');
+    shaped.then_some(id)
+}
+
+/// Every rollout a running `codex` has open, as `(pid, path)`.
+///
+/// **Why the file descriptor.** Codex publishes no registry: there is no `~/.claude/sessions`
+/// equivalent and no lock file naming the running process. What it does do is hold its own
+/// rollout open for append for as long as the session lives, so `/proc/<pid>/fd` is an exact
+/// map from process to session. It is better evidence than the two heuristics available
+/// otherwise: a rollout's mtime cannot tell a finished session from a killed one, and matching
+/// on `cwd` cannot separate two sessions started in the same directory.
+///
+/// A rollout no live process holds is over, whatever its last record says. That is what keeps
+/// a Codex killed mid-turn from reading as working until the file is deleted.
+///
+/// The container's own `/proc` is read, never this host's, for the reason [`read_sessions`]
+/// gives. `argv[0]`'s basename is matched whole: a clone named `w-s4-codex-rev` runs an
+/// `avahi-daemon [w-s4-codex-rev.local]` that any substring match reads as a live agent.
+fn codex_rollouts(root: &Path) -> Vec<(i64, PathBuf)> {
+    let proc = root.join("proc");
+    let Ok(entries) = std::fs::read_dir(&proc) else { return Vec::new() };
+    let mut out: Vec<(i64, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<i64>().ok()) else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else { continue };
+        let argv0 = raw.split(|b| *b == 0).next().unwrap_or_default();
+        let argv0 = String::from_utf8_lossy(argv0);
+        if Path::new(argv0.as_ref()).file_name().is_none_or(|n| n != "codex") {
+            continue;
+        }
+        // A process that exits mid-walk takes its whole fd directory with it, which is an
+        // ordinary close rather than an error.
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else { continue };
+            let named = target
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"));
+            if named {
+                // The link is the path INSIDE the container. Re-root it to reach the file.
+                let rooted = root.join(target.strip_prefix("/").unwrap_or(&target));
+                out.push((pid, rooted));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// One rollout line. Codex wraps everything in `{type, timestamp, payload}` and the payload
+/// carries its own `type`, so the pair is what identifies a record.
+#[derive(Debug, Deserialize)]
+struct CodexLine {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
+    payload: Option<Value>,
+}
+
+/// The tool-call payload names, and the output that closes each one.
+///
+/// Codex calls a tool three ways depending on how the model addressed it, and the pairing is
+/// `call_id` in every case. Anything here that is not the whole set degrades the same way a
+/// missing `PostToolUse` does: the call reads as in flight forever.
+const CODEX_TOOL_CALLS: [&str; 4] =
+    ["custom_tool_call", "function_call", "local_shell_call", "web_search_call"];
+
+/// Whether this payload type closes a tool call.
+fn codex_tool_output(kind: &str) -> bool {
+    kind.ends_with("_call_output")
+}
+
+/// One rollout, folded into the same events the hook probe writes for Claude Code.
+///
+/// The mapping is exact rather than approximate, which is why one set of folds serves both
+/// agents. Measured against Codex CLI 0.144.4 on 2026-08-08:
+///
+/// | Claude Code hook | Codex rollout record |
+/// |---|---|
+/// | `UserPromptSubmit` | `event_msg` / `user_message` |
+/// | `PreToolUse` | `response_item` / `custom_tool_call`, `function_call`, `local_shell_call` |
+/// | `PostToolUse` | the matching `…_call_output`, paired on `call_id` |
+/// | `Stop` + `last_assistant_message` | `event_msg` / `task_complete` + `last_agent_message` |
+///
+/// A call still open is the whole reason this is read at all: a Codex sitting on its "Would
+/// you like to run the following command?" prompt writes the call and no output, which is the
+/// same shape as a `PreToolUse` nobody posted, and [`in_flight_tools`] already knows what that
+/// means.
+///
+/// The stamps are the clone's own, taken from each line rather than from the file, so they
+/// difference against each other exactly as hook stamps do.
+fn codex_events(path: &Path, session: &str) -> Vec<HookEvent> {
+    let Ok(body) = std::fs::read_to_string(path) else { return Vec::new() };
+    let mut out: Vec<HookEvent> = Vec::new();
+    for line in body.lines() {
+        let Ok(raw) = serde_json::from_str::<CodexLine>(line) else { continue };
+        let Some(payload) = raw.payload else { continue };
+        let Some(kind) = payload.get("type").and_then(Value::as_str) else { continue };
+        let ts = raw
+            .timestamp
+            .as_deref()
+            .and_then(crate::claude::parse_rfc3339_utc_secs)
+            .map_or(0.0, |secs| secs as f64);
+        let str_at = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_string);
+        let base = HookEvent { session_id: Some(session.to_string()), ts, ..Default::default() };
+        let named = match (raw.kind.as_deref(), kind) {
+            (Some("event_msg"), "user_message") => {
+                HookEvent { hook_event_name: "UserPromptSubmit".into(), ..base }
+            }
+            (Some("event_msg"), "task_complete") => HookEvent {
+                hook_event_name: "Stop".into(),
+                last_assistant_message: str_at("last_agent_message"),
+                ..base
+            },
+            (Some("response_item"), call) if CODEX_TOOL_CALLS.contains(&call) => HookEvent {
+                hook_event_name: "PreToolUse".into(),
+                tool_name: str_at("name"),
+                tool_use_id: str_at("call_id"),
+                // `input` on a custom tool call, `arguments` on a function call. Both are the
+                // whole of what the tool was asked to do.
+                tool_input: str_at("input").or_else(|| str_at("arguments")),
+                ..base
+            },
+            (Some("response_item"), out_kind) if codex_tool_output(out_kind) => HookEvent {
+                hook_event_name: "PostToolUse".into(),
+                tool_use_id: str_at("call_id"),
+                ..base
+            },
+            _ => continue,
+        };
+        out.push(named);
+    }
+    out
+}
+
+/// Codex's sessions, shaped so one resolver covers every agent.
+///
+/// Like Cursor, Codex publishes no status of its own, so the turn state is read off the
+/// stream instead: a session whose newest turn has a `task_complete` is `idle`, and one whose
+/// newest turn has not is `busy`. `busy` carries the same two states it does everywhere else,
+/// generating or blocked inside a tool call, and [`build_session_view`] separates them with
+/// the in-flight tool set.
+///
+/// Liveness comes from [`codex_rollouts`] rather than from the file, so a session is listed
+/// only while a process actually holds it open.
+pub fn read_codex_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>) {
+    let mut sessions = Vec::new();
+    let mut events = Vec::new();
+    for (pid, path) in codex_rollouts(root) {
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()).and_then(codex_session_id) else {
+            continue;
+        };
+        let mine = codex_events(&path, id);
+        // Whether the newest turn is still open, decided by which boundary came last in the
+        // file rather than by which carries the later stamp. A rollout is appended to in
+        // order, so its order is the fact; a stamp comparison would additionally be betting
+        // on the clock never stepping back. A rollout with no prompt in it at all is a
+        // session sitting at its first prompt, which is idle.
+        let open = mine.iter().fold(false, |open, e| match e.hook_event_name.as_str() {
+            "UserPromptSubmit" => true,
+            "Stop" => false,
+            _ => open,
+        });
+        sessions.push(Session {
+            pid,
+            session_id: id.to_string(),
+            status: Some(if open { "busy" } else { "idle" }.to_string()),
+            alive: true,
+            ..Default::default()
+        });
+        events.extend(mine);
+    }
+    (sessions, events)
+}
+
 /// The clone's clock for this pass: this server's, raised to the newest hook stamp.
 ///
 /// Stamped AFTER the log is read, never before. A hook that fires during the read would
@@ -810,6 +1011,7 @@ fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
     let mut stack = vec![
         root.join("home/rmng/.claude/projects"),
         root.join("home/rmng/.cursor/projects"),
+        root.join(CODEX_SESSIONS),
     ];
     // Bounded walk: a clone keeps every project it has ever opened, and the tree is shallow.
     let mut budget = 20_000;
@@ -834,8 +1036,11 @@ fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
             let Ok(mtime) = meta.modified() else { continue };
             let age = now - mtime.duration_since(std::time::UNIX_EPOCH).map_or(now, |d| d.as_secs_f64());
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-            // A subagent transcript is named `agent-<id>.jsonl` under a `subagents/` dir.
-            let id = stem.strip_prefix("agent-").unwrap_or(stem).to_string();
+            // A subagent transcript is named `agent-<id>.jsonl` under a `subagents/` dir, and
+            // a Codex rollout carries its start time before its id.
+            let id = codex_session_id(stem)
+                .unwrap_or_else(|| stem.strip_prefix("agent-").unwrap_or(stem))
+                .to_string();
             // Newest wins on both fields together: one id can appear under two projects, and a
             // path taken from the older copy would answer for a transcript nobody is writing.
             match out.get(&id) {
@@ -1910,11 +2115,19 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     // it before the verdict rather than after. Gated on Cursor actually running, which is two
     // small file reads, so a clone without it keeps the fast path below untouched.
     let mut events = Vec::new();
+    let mut hooks_read = false;
     if cursor_process(&root).is_some() {
         events = read_hook_events(&root);
+        hooks_read = true;
         let now = clone_now(&events);
         sessions.extend(read_cursor_sessions(&root, &events, now));
     }
+    // Codex brings its own evidence rather than the hook log's: it fires no hooks, and its
+    // rollout carries the same four records the probe would have written. Gated on a rollout
+    // being held open, which is one `/proc` walk, so a clone without Codex reads nothing.
+    let (codex, codex_events) = read_codex_sessions(&root);
+    sessions.extend(codex);
+    events.extend(codex_events);
     let live: Vec<Session> = sessions.into_iter().filter(|s| s.alive).collect();
 
     let settled = |s: &Session| SessionCase {
@@ -1933,8 +2146,10 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
         return Some(live.iter().map(settled).collect());
     }
 
-    if events.is_empty() {
-        events = read_hook_events(&root);
+    // On the flag, never on the vec being empty: Codex fills it without the hook log having
+    // been opened, and a clone running both agents would then lose every Claude Code event.
+    if !hooks_read {
+        events.extend(read_hook_events(&root));
     }
     let now = clone_now(&events);
     // Read and folded once for the whole clone, however many sessions read from it.
@@ -3054,6 +3269,159 @@ mod tests {
         assert_eq!(sessions[0].status.as_deref(), Some("idle"));
         assert_eq!(clone_state(&sessions, true), Verdict::Stuck);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A clone root holding one Codex rollout, held open by a process the way Codex holds it.
+    ///
+    /// The `fd` link is written with the path as it reads INSIDE the container, which is what
+    /// [`codex_rollouts`] has to re-root, so the fake has to be wrong in the same way the real
+    /// one is.
+    fn fake_codex(tag: &str, pid: i64, id: &str, lines: &[&str]) -> PathBuf {
+        let root = fake_clone(tag);
+        let inside = format!(
+            "/home/rmng/.codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-{id}.jsonl"
+        );
+        let path = root.join(inside.trim_start_matches('/'));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut body = String::new();
+        for l in lines {
+            body.push_str(l);
+            body.push('\n');
+        }
+        std::fs::write(&path, body).unwrap();
+
+        let fds = root.join("proc").join(pid.to_string()).join("fd");
+        std::fs::create_dir_all(&fds).unwrap();
+        std::fs::write(
+            root.join("proc").join(pid.to_string()).join("cmdline"),
+            b"/home/rmng/.local/bin/codex\0",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&inside, fds.join("42")).unwrap();
+        root
+    }
+
+    const CODEX_PROMPT: &str = r#"{"timestamp":"2026-08-08T07:00:15.962Z","type":"event_msg","payload":{"type":"user_message","message":"echo PROBE-MARKER-ALPHA"}}"#;
+    const CODEX_CALL: &str = r#"{"timestamp":"2026-08-08T07:00:20.293Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_7q2","name":"exec","input":"tools.exec_command({\"cmd\":\"echo PROBE-MARKER-ALPHA\"})"}}"#;
+    const CODEX_OUTPUT: &str = r#"{"timestamp":"2026-08-08T07:00:20.635Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_7q2","output":"PROBE-MARKER-ALPHA"}}"#;
+    const CODEX_DONE: &str = r#"{"timestamp":"2026-08-08T07:02:21.281Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"019fe02c","last_agent_message":"done"}}"#;
+
+    #[test]
+    fn a_codex_session_is_found_through_the_rollout_its_process_holds_open() {
+        // Codex publishes no registry and writes no lock file. The rollout it keeps open for
+        // append is the only exact map from a running process to the session it is running.
+        let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
+        let root = fake_codex("codex-live", 4242, id, &[CODEX_PROMPT, CODEX_DONE]);
+        let (sessions, events) = read_codex_sessions(&root);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, id, "the file name carries the id");
+        assert_eq!(sessions[0].pid, 4242);
+        assert!(sessions[0].alive);
+        assert_eq!(events.len(), 2);
+
+        // A rollout nobody holds open is over, whatever it says. That is what keeps a Codex
+        // killed mid-turn from reading as working until somebody deletes the file.
+        std::fs::remove_dir_all(root.join("proc")).unwrap();
+        assert!(read_codex_sessions(&root).0.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_codex_turn_reads_busy_until_the_record_that_closes_it() {
+        let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
+        let open = fake_codex("codex-open", 1, id, &[CODEX_PROMPT]);
+        assert_eq!(read_codex_sessions(&open).0[0].status.as_deref(), Some("busy"));
+
+        let closed = fake_codex("codex-closed", 1, id, &[CODEX_PROMPT, CODEX_DONE]);
+        assert_eq!(read_codex_sessions(&closed).0[0].status.as_deref(), Some("idle"));
+
+        // A prompt after that close opens a new turn. The order in the file decides it, so
+        // this holds even though the reopening prompt carries the earlier stamp of the two.
+        let again = fake_codex("codex-again", 1, id, &[CODEX_PROMPT, CODEX_DONE, CODEX_PROMPT]);
+        let (sessions, _) = read_codex_sessions(&again);
+        assert_eq!(sessions[0].status.as_deref(), Some("busy"), "a later prompt reopens it");
+
+        // A session sitting at its very first prompt has nothing outstanding.
+        let fresh = fake_codex("codex-fresh", 1, id, &[]);
+        assert_eq!(read_codex_sessions(&fresh).0[0].status.as_deref(), Some("idle"));
+        for r in [open, closed, again, fresh] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    #[test]
+    fn a_codex_call_waiting_on_a_person_is_the_call_the_session_sits_inside() {
+        // Measured on `claude-test2`, 2026-08-08. Codex asking "Would you like to run the
+        // following command?" writes the call and no output, which is the same shape as a
+        // `PreToolUse` nobody posted, and the existing fold already knows what it means.
+        let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
+        let waiting = fake_codex("codex-waiting", 1, id, &[CODEX_PROMPT, CODEX_CALL]);
+        let (_, events) = read_codex_sessions(&waiting);
+        let live = in_flight_tools(&events);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].tool_name.as_deref(), Some("exec"));
+        assert_eq!(live[0].tool_use_id.as_deref(), Some("call_7q2"));
+        assert!(live[0].tool_input.as_deref().is_some_and(|i| i.contains("PROBE-MARKER-ALPHA")));
+
+        // Approving it writes the output, and the pairing is `call_id` on both.
+        let answered =
+            fake_codex("codex-answered", 1, id, &[CODEX_PROMPT, CODEX_CALL, CODEX_OUTPUT]);
+        assert!(in_flight_tools(&read_codex_sessions(&answered).1).is_empty());
+        for r in [waiting, answered] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    #[test]
+    fn a_finished_codex_turn_hands_the_judge_what_the_agent_last_said() {
+        let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
+        let root = fake_codex("codex-view", 7, id, &[CODEX_PROMPT, CODEX_CALL, CODEX_OUTPUT, CODEX_DONE]);
+        let (sessions, events) = read_codex_sessions(&root);
+        let now = 1786172541.0 + 30.0;
+        let view = view_of(&root, &sessions[0], &events, now);
+        assert_eq!(view["session"]["status"], "idle");
+        assert_eq!(view["session"]["agent_last_said"], "done");
+        assert_eq!(view["session"]["generating"], false);
+        assert_eq!(view["in_flight_tool_calls"].as_array().unwrap().len(), 0);
+        assert_eq!(view["session"]["turn_over_for_seconds"], 30.0);
+        // The rollout's own name is not a session id, so the silence map has to strip it back
+        // to one or every Codex session reads as never having been written to.
+        assert!(view["session"]["quiet_for_seconds"].as_f64().unwrap() < 1.0e9);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_process_that_merely_mentions_codex_is_not_one() {
+        // A clone named `w-s4-codex-rev` runs `avahi-daemon [w-s4-codex-rev.local]`, and any
+        // substring match reads that as a live agent.
+        let root = fake_clone("codex-lookalike");
+        let fds = root.join("proc/9/fd");
+        std::fs::create_dir_all(&fds).unwrap();
+        std::fs::write(root.join("proc/9/cmdline"), b"avahi-daemon\0[w-s4-codex-rev.local]\0")
+            .unwrap();
+        std::os::unix::fs::symlink(
+            "/home/rmng/.codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-019fe02b-cb2c-7ec0-8a48-77d87c7f057f.jsonl",
+            fds.join("42"),
+        )
+        .unwrap();
+        assert!(read_codex_sessions(&root).0.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_rollouts_name_gives_up_the_session_id_and_nothing_else_does() {
+        assert_eq!(
+            codex_session_id("rollout-2026-08-08T02-59-54-019fe02b-cb2c-7ec0-8a48-77d87c7f057f"),
+            Some("019fe02b-cb2c-7ec0-8a48-77d87c7f057f")
+        );
+        // A Claude Code transcript is already a bare id, and reading it here changes nothing.
+        assert_eq!(
+            codex_session_id("019fe02b-cb2c-7ec0-8a48-77d87c7f057f"),
+            Some("019fe02b-cb2c-7ec0-8a48-77d87c7f057f")
+        );
+        // Too short to hold one, and long enough but not shaped like one.
+        assert_eq!(codex_session_id("agent-a18ea2842ca67cf6e"), None);
+        assert_eq!(codex_session_id("rollout-2026-08-08T02-59-54-not-a-uuid-at-all-xx"), None);
     }
 
     #[test]
