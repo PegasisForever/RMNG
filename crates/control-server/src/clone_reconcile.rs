@@ -437,7 +437,7 @@ chmod 600 "$f"
 /// demand to learn the `rmng` fleet CLI. Same delivery model as the global prompt / MCP config.
 const RMNG_CLI_SKILL_MD: &str = r#"---
 name: rmng-cli
-description: Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage clone-source images and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool.
+description: "Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage clone-source images and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool."
 ---
 
 # Managing the fleet with `rmng`
@@ -2463,6 +2463,14 @@ mod tests {
             assert_eq!((e.uid, e.gid), (1000, 1000));
             let body = String::from_utf8(e.data.clone()).unwrap();
             assert!(body.starts_with("---\nname: rmng-cli\n"), "SKILL.md needs skill frontmatter");
+            let description = body
+                .lines()
+                .find(|line| line.starts_with("description: "))
+                .expect("SKILL.md needs a description");
+            assert!(
+                description.starts_with("description: \""),
+                "SKILL.md description must quote YAML punctuation"
+            );
             assert!(body.contains("rmng clone ls") && body.contains("rmng clone exec"));
             // A flag the CLI takes and the skill omits is a flag no agent in a clone will ever
             // use. These three are the ones that make a delegating session's history readable.
