@@ -564,9 +564,10 @@ running: if you are on `auto`, so is it, and it gets its own pick. `--top-level`
 
 ## Search what other clones have already done
 
-The control-server keeps a greppable copy of every clone's Claude Code transcripts, and keeps
-it after the clone is gone. Search it before solving something from scratch: the odds are good
-that another clone hit the same wall, and its reasoning is still there.
+The control-server keeps a greppable copy of every clone's Claude Code, Cursor and Codex
+transcripts, and keeps it after the clone is gone. Subagent turns are in there too, which on a
+session that delegates heavily is most of it. Search it before solving something from scratch:
+the odds are good that another clone hit the same wall, and its reasoning is still there.
 
 - `rmng ledger search <pattern> [--clone <id>] [--since <when>] [--until <when>] [--limit <N>]`
   — case-insensitive substring over whole ledger lines, so it matches the text, the tool name
@@ -575,6 +576,12 @@ that another clone hit the same wall, and its reasoning is still there.
   Columns are `CLONE WHEN KIND SESSION OFFSET TEXT`, and the session and offset are the two
   arguments the next command takes, so a hit worth following up is already a command.
   Example: `rmng ledger search "va-api" --since 2d`.
+- Three flags split a session in two. `--sidechain` keeps only subagent turns, `--no-sidechain`
+  only the conversation somebody had, and `--agent <id>` reads back one subagent's whole run.
+  Reach for `--no-sidechain` when a fan-out is burying the answer, and `--sidechain` when the
+  thing you want is a reviewer's or researcher's report rather than the chat around it. The id
+  `--agent` takes is the `agentId` on a hit, which `--json` shows:
+  `rmng ledger search "Here is my review" --sidechain --json | jq -r '.hits[].line | fromjson.agentId'`.
 - `rmng ledger read <clone> <session> [--offset <N>] [--len <N>]` — the conversation around a
   hit. Pass the hit's own offset to re-read that line, or less to read what led up to it. The
   range snaps outward to line boundaries, so stdout is always whole NDJSON lines. Default
@@ -2457,6 +2464,11 @@ mod tests {
             let body = String::from_utf8(e.data.clone()).unwrap();
             assert!(body.starts_with("---\nname: rmng-cli\n"), "SKILL.md needs skill frontmatter");
             assert!(body.contains("rmng clone ls") && body.contains("rmng clone exec"));
+            // A flag the CLI takes and the skill omits is a flag no agent in a clone will ever
+            // use. These three are the ones that make a delegating session's history readable.
+            for flag in ["--sidechain", "--no-sidechain", "--agent <id>"] {
+                assert!(body.contains(flag), "the ledger section has to name {flag}");
+            }
         }
         // The prepare script creates both skill directories.
         let prep = codex_prepare_script();
