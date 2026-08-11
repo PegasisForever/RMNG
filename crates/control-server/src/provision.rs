@@ -45,14 +45,15 @@ const WAIT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// Poll interval while waiting for readiness.
 const WAIT_READY_POLL: Duration = Duration::from_secs(2);
 
-/// Headless clone: guarantee neither the desktop (`gnome-headless.service`) nor the capture
-/// daemon (`rmng-clone-daemon.service`) ever runs. Just removing the `default.target.wants`
-/// symlinks is not enough: `rmng-clone-daemon` carries `Wants=gnome-headless.service`, so the
-/// daemon pulls the desktop up as a runtime dependency independent of `[Install]`, and the
-/// lingering user manager starts both at first boot before this script can win the race — which
-/// is exactly why headless clones were observed still running gnome-shell + the daemon on :9004.
+/// Headless clone: guarantee neither the desktop (`gnome-headless.service`), the capture daemon
+/// (`rmng-clone-daemon.service`), nor the session holder (`rmng-session-holder.service`) ever
+/// runs. Just removing the `default.target.wants` symlinks is not enough: `rmng-clone-daemon`
+/// carries `Wants=gnome-headless.service` and `Wants=rmng-session-holder.service`, so it pulls
+/// both up as runtime dependencies independent of `[Install]`, and the lingering user manager
+/// starts them at first boot before this script can win the race — which is exactly why headless
+/// clones were observed still running gnome-shell + the daemon on :9004.
 ///
-/// A headless clone has no desktop, so the clean fix is to simply **delete both unit files** (real
+/// A headless clone has no desktop, so the clean fix is to simply **delete the unit files** (real
 /// files the template ships in `~/.config/systemd/user`). With no fragment on disk systemd has
 /// nothing to start by any path — the `[Install]` want, the `Wants=` pull, or a manual start — and
 /// there is no leftover mask symlink to reason about. `daemon-reload` then makes the (possibly
@@ -62,8 +63,9 @@ const WAIT_READY_POLL: Duration = Duration::from_secs(2);
 /// ever starting — either way it ends up dead. `agent-wrapper.service` is deliberately left enabled.
 const HEADLESS_DISABLE_SCRIPT: &str = r#"set -e
 u=/home/rmng/.config/systemd/user
-rm -f "$u/gnome-headless.service" "$u/rmng-clone-daemon.service" \
-      "$u/default.target.wants/gnome-headless.service" "$u/default.target.wants/rmng-clone-daemon.service"
+rm -f "$u/gnome-headless.service" "$u/rmng-clone-daemon.service" "$u/rmng-session-holder.service" \
+      "$u/default.target.wants/gnome-headless.service" "$u/default.target.wants/rmng-clone-daemon.service" \
+      "$u/default.target.wants/rmng-session-holder.service"
 runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload 2>/dev/null || true
 pkill -u 1000 -f '/opt/rmng/bin/rmng-clone-daemon' 2>/dev/null || true
 pkill -u 1000 -f 'gnome-shell --headless' 2>/dev/null || true
@@ -585,6 +587,11 @@ async fn clone_container_after_create(
     } else {
         on_progress("inject", "installing clone binaries (pre-boot)");
         if bins.len() == CLONE_BINARIES.len() {
+            // Same set the reconcile loop hashes, in the same order, so a fresh clone's stamp
+            // already matches and the first pass does not re-push everything it just got.
+            if !headless {
+                bins.push(crate::clone_reconcile::session_holder_unit_entry());
+            }
             bins.push(crate::clone_reconcile::payload_stamp_entry_for(&bins));
         }
         docker.upload_tar(container, bins).await?;
@@ -601,7 +608,7 @@ async fn clone_container_after_create(
     // the lingering user manager already started in the boot race (see `HEADLESS_DISABLE_SCRIPT`).
     // `agent-wrapper` is left enabled. Runs before the ~seconds of Codex/env injects below.
     if headless {
-        on_progress("inject", "headless: removing desktop units (gnome-headless + clone-daemon)");
+        on_progress("inject", "headless: removing desktop units (gnome-headless + clone-daemon + session-holder)");
         let code = docker
             .exec_script(container, HEADLESS_DISABLE_SCRIPT, &[], &[], |_stream, line| {
                 tracing::debug!(target: "provision", "headless-disable: {line}");

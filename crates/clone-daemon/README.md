@@ -1,11 +1,13 @@
 # clone-daemon
 
-`rmng-clone-daemon` runs inside each clone's headless GNOME session. It owns the desktop-facing half of RMNG:
+`rmng-clone-daemon` runs inside each clone's headless GNOME session, as two processes from one binary. It owns the desktop-facing half of RMNG:
 
 1. Captures virtual Mutter monitors as dmabufs and ships them to the control-server over the bind-mounted Unix socket with per-monitor acknowledgement back-pressure.
 2. Injects viewer input through Mutter `RemoteDesktop`.
 3. Serves the clone-local desktop automation MCP on `:9004` (`RMNG_DAEMON_MCP_PORT`).
 4. Bridges rich clipboard data and client-drawn cursor metadata.
+
+The Mutter sessions and the virtual monitors live in the second process, the session holder (`--session-holder`, `rmng-session-holder.service`), because Mutter destroys a session when its creating D-Bus connection drops and gnome-shell remaps every window when the monitor set empties. The daemon restarts on every payload push; the holder does not, so window positions survive an update.
 
 The control server derives clone lifecycle from Docker liveness and the agent-wrapper's activity frames; the daemon's only management surface is its clone-local desktop MCP.
 
@@ -19,11 +21,14 @@ The control server derives clone lifecycle from Docker liveness and the agent-wr
 | `mcp.rs` | local desktop JSON-RPC MCP on `:9004` |
 | `windows.rs` | gnome-shell `Eval` window-management tools |
 | `keysym.rs` | key chord and Unicode keysym parsing |
-| `clipboard.rs` | rich/lazy clipboard bridge |
+| `clipboard.rs` | rich/lazy clipboard bridge (runs in the holder) |
+| `holder.rs` | session-holder mode: sessions, monitors, layout, input, clipboard |
+| `ipc.rs` | `SOCK_SEQPACKET` socket between the daemon and the holder |
+| `session.rs` | the daemon's client handle on the holder |
 
 ## Runtime modes
 
-With `RMNG_SOCKET` set, the daemon captures, ships frames, receives input, and serves the local MCP. Without it, it runs its capture frames-per-second self-test. `RMNG_MONITORS` provides the pre-connect monitor layout in `WxH+X+Y[*]` form; the control server replaces it with the active layout once the daemon connects.
+`--session-holder` runs the holder. Otherwise, with `RMNG_SOCKET` set, the daemon captures, ships frames, relays input, and serves the local MCP; without it, it runs its capture frames-per-second self-test on a session of its own. `RMNG_MONITORS` provides the boot monitor layout in `WxH+X+Y[*]` form, used only when the holder has no remembered layout in `~/.rmng/monitors`; the control server pushes the active layout once the daemon connects.
 
 ## Capture and socket model
 

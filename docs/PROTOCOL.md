@@ -19,6 +19,7 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 | daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agent-wrapper + `rmng desktop` proxy (via web API) | HTTP JSON-RPC |
 | agent-wrapper | `4096` | `agent_port` (config) / `AGENT_PORT` | agent-wrapper (in clone) | control-server chat proxy | HTTP + SSE |
 | clone socket | `/srv/rmng-sock/clones.sock` | `cloneSocket` config (server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
+| holder socket | `$XDG_RUNTIME_DIR/rmng-session-holder.sock` | `RMNG_HOLDER_SOCKET` | session holder (in clone) | clone-daemon | unix `SOCK_SEQPACKET` |
 
 ---
 
@@ -154,6 +155,63 @@ bytes. One copy fans out to every endpoint, and each asks per MIME, so two rules
 reads sequential. The broker forwards only the first request for a `(serial, mime_type)` and
 adds later requesters to the same pending list, and the clone-daemon holds a gate across the
 whole transfer, from `SelectionRead` to the end of the fd read.
+
+---
+
+## Holder socket protocol (clone-daemon ⇄ session holder)
+
+Two processes inside each headed clone. `rmng-session-holder.service` owns the Mutter
+RemoteDesktop and ScreenCast sessions, the virtual monitors, `ApplyMonitorsConfig`, input
+injection and the clipboard bridge. `rmng-clone-daemon.service` owns capture, encode,
+shipping, and the MCP on `:9004`. Both are the same binary, the holder started with
+`--session-holder`. Source: [holder.rs](../crates/wire/src/holder.rs).
+
+**Why they are split.** Mutter destroys a RemoteDesktop session when the D-Bus connection
+that created it drops, and gnome-shell remaps every window when the monitor set empties. The
+daemon restarts on every payload push, so a daemon that owned the session reset every window
+position on each update: measured on a 1920x1080 clone, a window at (100,100) came back at
+(63,57), and on a two-monitor layout every floating window collapsed onto monitor 0. The
+holder does not restart on a payload push, so the monitors never go away and nothing moves.
+
+**Why input and the clipboard cross the socket.** Mutter answers session methods only for the
+connection that created the session: the same call from another connection returns
+`org.freedesktop.DBus.Error.AccessDenied`. `org.gnome.Shell.Eval` has no such check, so the
+window tools (`list_windows`, `move_window`) stay in the daemon on its own bus connection.
+Capture stays there too: a PipeWire node is reachable by id from any client on the clone's
+socket, verified against a node another process created.
+
+**Messages**, one JSON object per datagram, chunked over 64 KiB exactly as the clone socket
+is. No file descriptors cross.
+
+| Direction | Message | Meaning |
+|---|---|---|
+| daemon → holder | `hello{proto}` | First message. Answered by `hello_ok`. |
+| daemon → holder | `input` | One `InputMsg` to inject. Fire-and-forget, ordered. |
+| daemon → holder | `set_layout{monitors}` | Apply a layout, make-before-break. No-op if unchanged. |
+| daemon → holder | `capture_ready{generation}` | Capture is live on that generation's nodes. |
+| daemon → holder | `clipboard_offer` / `clipboard_request` / `clipboard_data` | Relayed from the broker. |
+| holder → daemon | `hello_ok{proto, generation, monitors}` | The monitor set already held. |
+| holder → daemon | `monitors{generation, monitors}` | A new set exists and is capturable. |
+| holder → daemon | `swap_done{generation}` | The old monitors are gone; drop their capture. |
+| holder → daemon | `clipboard_offer` / `clipboard_request` / `clipboard_data` | Relayed to the broker. |
+
+**A layout swap is a three-step handshake**, so no frame gap opens in the middle of it. The
+holder builds the new session alongside the old and sends `monitors`. The daemon starts
+capture on the new nodes and answers `capture_ready`. The holder stops the old session, waits
+for its connectors to actually disappear, applies the layout, and sends `swap_done`, at which
+point the daemon drops the old captures. Waiting for the connectors is not optional: applying
+a config against dying ones is silently ignored by Mutter at best and crashed gnome-shell
+fleet-wide once.
+
+**Version skew.** The daemon compares `PROTO_VERSION` with the holder's and restarts the
+holder exactly once on a mismatch, which costs one window reset on that release and nothing
+on the others. Nothing else restarts the holder: the reconcile pass starts and enables it,
+never restarts it.
+
+**The layout the holder boots on** comes from `~/.rmng/monitors`, written after every applied
+layout, and falls back to `RMNG_MONITORS` on a clone that has never run one. A value baked
+into a clone image goes stale the first time the operator switches presets, and booting on it
+costs a session build and a swap that the control-server's push then has to undo.
 
 ---
 
@@ -309,15 +367,21 @@ pointer-lock).
 
 Source: [clone-daemon/src/main.rs](../crates/clone-daemon/src/main.rs).
 
-**Shipping mode (default, no subcommand):** if `RMNG_SOCKET` is set, connect to the media
-socket, RecordVirtual the `RMNG_MONITORS` boot layout, ship dmabuf frames + cursor, inject
-input, and serve the daemon MCP on `:9004`. With no socket it runs a capture-fps self-test.
+**Shipping mode (default, no argument):** if `RMNG_SOCKET` is set, connect to the media
+socket, connect to the session holder, capture the monitors it holds, ship dmabuf frames +
+cursor, relay input to the holder, and serve the daemon MCP on `:9004`. With no socket it
+runs a capture-fps self-test on a session of its own.
+
+**`--session-holder`:** run as the session holder instead. It RecordVirtuals the boot layout,
+holds it open across the daemon's restarts, and injects input and clipboard on the daemon's
+behalf. See the holder socket protocol above.
 
 **`RMNG_MONITORS` format:** comma-separated `WxH+X+Y[*]` (offset optional; trailing `*` =
 primary; first is primary if none marked). E.g. `1920x1080+0+0*,1280x1024+1920+0`. Empty →
 one 1920×1080 primary. The unique `WxH` sizes also seed `MUTTER_DEBUG_DUMMY_MODE_SPECS`. This
-env var is now only a **pre-connect boot default** baked into the clone template — it is not
-re-read or hot-reloaded after that. As soon as the daemon's first `Hello` reaches the server,
+env var is now only a **boot default** baked into the clone template, read by the session
+holder and only when `~/.rmng/monitors` has no remembered layout. As soon as the daemon's
+first `Hello` reaches the server,
 the server replies with `ServerMsg::SetMonitors` carrying `config.effective_monitors()` (the
 active layout preset), live-correcting a stale baked layout without a restart. Every
 subsequent `POST /api/layout/activate` pushes a fresh `SetMonitors` the same way.

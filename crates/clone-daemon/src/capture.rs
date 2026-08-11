@@ -10,8 +10,6 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
 
-use crate::mutter::VirtualMonitor;
-
 /// One captured frame: dmabuf fd(s) + everything needed to import it elsewhere.
 /// (The monitor is identified by the capture pipeline, one per monitor — the shipper
 /// already knows it, so it isn't carried on the frame.)
@@ -26,10 +24,15 @@ pub struct CapturedFrame {
     pub fds: Vec<OwnedFd>,
 }
 
-/// Build + start a capture pipeline for one monitor. `on_frame` is called from a
+/// Build + start a capture pipeline for one PipeWire node. `on_frame` is called from a
 /// GStreamer streaming thread for every captured dmabuf. Returns the running
 /// pipeline (keep it alive; drop to stop).
-pub fn start_capture<F>(mon: &VirtualMonitor, mut on_frame: F) -> Result<gst::Pipeline>
+///
+/// The node belongs to the session holder's ScreenCast session, not to this process. A
+/// PipeWire node is reachable by id from any client on the clone's socket, so the ownership
+/// split costs nothing here (verified live: a separate client negotiates the same DMABuf
+/// caps against a node another process created).
+pub fn start_capture<F>(node_id: u32, mut on_frame: F) -> Result<gst::Pipeline>
 where
     F: FnMut(CapturedFrame) + Send + 'static,
 {
@@ -46,7 +49,7 @@ where
          video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={drm} ! \
          queue max-size-buffers=1 leaky=downstream ! \
          appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false",
-        node = mon.node_id,
+        node = node_id,
         drm = drm_format
     );
     let pipeline = gst::parse::launch(&desc)?

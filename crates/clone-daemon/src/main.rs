@@ -1,18 +1,23 @@
 //! `clone-daemon` (Phase 3) — the thin in-clone capture + input pipe.
 //!
-//! Two run modes:
+//! Three run modes:
+//!   - `--session-holder` → **holder**: own the clone's Mutter sessions, virtual monitors,
+//!     input injection and clipboard, and hold them across daemon restarts (see [`holder`]).
 //!   - `RMNG_SOCKET=<path>` → **shipping**: connect to control-server's media
 //!     socket, ship each monitor's dmabuf (FrameMsg + fds via SCM_RIGHTS), and
-//!     inject incoming input via Mutter RemoteDesktop.
+//!     relay incoming input to the holder.
 //!   - otherwise → **capture self-test**: log fourcc/modifier/size + fps (cursor
 //!     nudge generates damage on the static headless desktop).
 
 mod capture;
 mod capture_pw;
 mod clipboard;
+mod holder;
+mod ipc;
 mod keysym;
 mod mcp;
 mod mutter;
+mod session;
 mod transport;
 mod windows;
 
@@ -23,39 +28,22 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use wire::holder::{FromHolder, HolderMonitor, ToHolder};
 use wire::socket::{
-    CursorMeta, CursorShape, DaemonMsg, FrameMsg, InputMsg, MonitorPlacement, PlaneLayout,
-    ServerMsg,
+    CursorMeta, CursorShape, DaemonMsg, FrameMsg, MonitorPlacement, PlaneLayout, ServerMsg,
 };
 
 use crate::mutter::Session;
-
-/// The session-bound state the input/clipboard/MCP tasks need, swapped atomically by the
-/// reconfigure controller. `rd` injects input; `streams` maps monitor_id → stream path
-/// for absolute-pointer motion (`notify_pointer_motion_absolute(stream, x, y)`); `conn` is
-/// the session bus (shared with Mutter) the MCP window tools eval against.
-///
-/// Input reads this per event, clipboard reads it per selection op, and the MCP snapshots
-/// it per request, so a make-before-break swap (see `reconfigure`) re-points them all at
-/// the new session by mutating this one handle. NB: replacing `conn` here does NOT close
-/// the old connection — the clipboard signal tasks hold proxy clones of it while parked in
-/// `sig.next()` — so `reconfigure` close()es it explicitly to end those streams and trigger
-/// their re-subscribe. `pub(crate)` so `clipboard::run` + `mcp` share the same handle.
-pub(crate) struct SessionRuntime {
-    pub(crate) rd: mutter::RemoteDesktopSessionProxy<'static>,
-    pub(crate) conn: zbus::Connection,
-    pub(crate) streams: std::collections::HashMap<u32, String>,
-}
-pub(crate) type ActiveSession = std::sync::Arc<tokio::sync::Mutex<SessionRuntime>>;
+use crate::session::Holder;
 
 /// One configured monitor: size, position (unified-desktop px) + primary flag.
-#[derive(Clone, Copy, PartialEq)]
-struct MonitorCfg {
-    w: u32,
-    h: u32,
-    x: i32,
-    y: i32,
-    primary: bool,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MonitorCfg {
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) primary: bool,
 }
 
 /// Parse `RMNG_MONITORS` = `WxH+X+Y[*]` comma-separated (X/Y default 0, trailing `*` =
@@ -108,6 +96,28 @@ fn parse_monitors(spec: Option<String>) -> Vec<MonitorCfg> {
     mons
 }
 
+/// The layout the server pushed, as monitor slots. Guarantees at least one monitor and
+/// exactly one primary, the same two invariants [`parse_monitors`] enforces.
+pub(crate) fn monitors_from_specs(specs: &[wire::control::MonitorSpec]) -> Vec<MonitorCfg> {
+    let mut mons: Vec<MonitorCfg> = specs
+        .iter()
+        .map(|m| MonitorCfg {
+            w: m.width,
+            h: m.height,
+            x: m.x as i32,
+            y: m.y as i32,
+            primary: m.primary,
+        })
+        .collect();
+    if mons.is_empty() {
+        mons.push(MonitorCfg { w: 1920, h: 1080, x: 0, y: 0, primary: true });
+    }
+    if !mons.iter().any(|m| m.primary) {
+        mons[0].primary = true;
+    }
+    mons
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -123,6 +133,7 @@ async fn main() -> Result<()> {
     let monitors = parse_monitors(std::env::var("RMNG_MONITORS").ok());
     let sizes: Vec<(u32, u32)> = monitors.iter().map(|m| (m.w, m.h)).collect();
     let socket = std::env::var("RMNG_SOCKET").ok();
+    let holder_mode = std::env::args().any(|a| a == "--session-holder");
 
     // Client-drawn cursor is the default for shipping: capture in cursor-mode
     // METADATA (cursor out-of-band via SPA_META_Cursor, read by the raw-PW path)
@@ -135,24 +146,19 @@ async fn main() -> Result<()> {
     } else {
         mutter::CURSOR_MODE_METADATA
     };
+    if holder_mode {
+        tracing::info!(?sizes, "clone-daemon: session-holder mode");
+        return holder::run(monitors, cursor_mode).await;
+    }
     match socket {
         Some(path) => {
             // Connect to the media socket FIRST (retrying while it's unavailable), THEN
-            // build the expensive Mutter session — so a down/restarting control-server
-            // doesn't churn sessions on every retry. On a later disconnect we exit and
-            // systemd restarts us back into this cheap connect-retry loop.
+            // reach the holder — so a down/restarting control-server costs nothing but this
+            // cheap retry loop. On a later disconnect we exit and systemd restarts us back
+            // into it.
             let transport = connect_retry(&path).await;
-            tracing::info!(?sizes, embedded, "clone-daemon: setting up Mutter session");
-            let session = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
-            tracing::info!(
-                "session ready: {} virtual monitor(s)",
-                session.monitors.len()
-            );
-            // A fast restart can race the PREVIOUS daemon's session teardown (its
-            // monitors die when our old D-Bus connection dropped, but asynchronously).
-            wait_monitors_settle(monitors.len()).await;
-            apply_layout(&monitors).await;
-            run_shipping(session, transport, &path, &monitors, embedded).await
+            let holder = Holder::connect().await?;
+            run_shipping(holder, transport, &path, embedded).await
         }
         None => {
             tracing::info!(?sizes, embedded, "clone-daemon: setting up Mutter session");
@@ -187,239 +193,19 @@ async fn connect_retry(socket_path: &str) -> Arc<transport::Transport> {
     }
 }
 
-/// Apply the configured monitor layout (positions + primary) to Mutter via
-/// `DisplayConfig.ApplyMonitorsConfig`. Uses `gdbus` (the nested ApplyMonitorsConfig
-/// GVariant types are painful via zbus). Best-effort: logs + continues on failure (the
-/// monitors still capture, just in Mutter's default left-to-right order). Connector names
-/// are read back from `GetCurrentState` (Task 3.2) rather than assumed `Meta-<i>`, since
-/// after a session-swap reconfiguration Mutter may hand out connectors in a different
-/// order (or reuse different ones) than creation order.
-/// Wait until exactly `expected` monitors remain in `GetCurrentState` (the new session's).
+
+/// Shipping mode: capture the holder's monitors, ship dmabufs, relay input and clipboard.
 ///
-/// Stopping a Mutter session tears its virtual monitors down ASYNCHRONOUSLY —
-/// `session.stop()` returning does NOT mean the old connectors are gone. Calling
-/// `apply_layout` while they linger matches desired slots against DYING connectors
-/// (guaranteed when old and new sizes coincide, e.g. two same-size presets): Mutter
-/// then either rejects the config as "stale information" (layout silently not applied)
-/// or, if the teardown lands mid-apply, crashes gnome-shell outright — both found live
-/// on GNOME 48 (fleet-wide shell crash on a position-swapped same-size preset switch).
-/// The same race hits the boot path when a restarted daemon's predecessor session is
-/// still collapsing. On timeout, warn and proceed: apply_layout stays best-effort.
-async fn wait_monitors_settle(expected: usize) {
-    for _ in 0..40 {
-        if let Some((_, stdout)) = get_current_state().await {
-            if parse_connectors(&stdout).len() == expected {
-                return;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    tracing::warn!("stale monitors still present after ~2s; applying layout anyway");
-}
-
-async fn apply_layout(monitors: &[MonitorCfg]) {
-    let Some((serial, stdout)) = get_current_state().await else {
-        tracing::warn!(
-            "layout: couldn't read DisplayConfig state; leaving Mutter's default layout"
-        );
-        return;
-    };
-    let mut available = parse_connectors(&stdout);
-    let mut lm = String::from("[");
-    let mut first = true;
-    for m in monitors {
-        // Pick (and consume) the first available connector whose current mode matches
-        // this monitor's (w, h). `parse_connectors` returns creation order (ascending
-        // Meta-N), and slots were RecordVirtual'd in order, so duplicate sizes map 1:1:
-        // slot i's connector IS the one whose stream ships as monitor_id i.
-        let Some(idx) = available
-            .iter()
-            .position(|(_, w, h)| *w == m.w && *h == m.h)
-        else {
-            tracing::warn!(
-                "layout: no Mutter connector currently at {}x{}; skipping that monitor",
-                m.w,
-                m.h
-            );
-            continue;
-        };
-        let (connector, w, h) = available.remove(idx);
-        if !first {
-            lm.push_str(", ");
-        }
-        first = false;
-        // (x, y, scale, transform, primary, [(connector, mode_id, props)])
-        lm.push_str(&format!(
-            "({}, {}, 1.0, uint32 0, {}, [('{}', '{}x{}@60.000', @a{{sv}} {{}})])",
-            m.x, m.y, m.primary, connector, w, h
-        ));
-    }
-    lm.push(']');
-    let out = tokio::process::Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.gnome.Mutter.DisplayConfig",
-            "--object-path",
-            "/org/gnome/Mutter/DisplayConfig",
-            "--method",
-            "org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig",
-            &serial.to_string(),
-            "1",
-            &lm,
-            "@a{sv} {}",
-        ])
-        .output()
-        .await;
-    match out {
-        Ok(o) if o.status.success() => {
-            tracing::info!("applied monitor layout ({} monitor(s))", monitors.len())
-        }
-        Ok(o) => tracing::warn!(
-            "ApplyMonitorsConfig failed: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => tracing::warn!("ApplyMonitorsConfig spawn failed (gdbus missing?): {e}"),
-    }
-}
-
-/// Call `DisplayConfig.GetCurrentState` and return `(serial, stdout)`. Used by
-/// `apply_layout` to read back connector names from the current Mutter state.
-async fn get_current_state() -> Option<(u32, String)> {
-    let out = tokio::process::Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.gnome.Mutter.DisplayConfig",
-            "--object-path",
-            "/org/gnome/Mutter/DisplayConfig",
-            "--method",
-            "org.gnome.Mutter.DisplayConfig.GetCurrentState",
-        ])
-        .output()
-        .await
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).into_owned();
-    let idx = s.find("uint32 ")?;
-    let serial = s[idx + 7..]
-        .split(|c: char| !c.is_ascii_digit())
-        .find(|t| !t.is_empty())?
-        .parse()
-        .ok()?;
-    Some((serial, s))
-}
-
-/// Parse the text form of `DisplayConfig.GetCurrentState`'s stdout (as printed by
-/// `gdbus call`) into `(connector, width, height)` for each monitor's *current* mode.
-///
-/// Shape (scales list length varies, `...` elided):
-/// ```text
-/// (uint32 3, [(('Meta-0', 'MetaVendor', 'Virtual remote monitor', '0x000001'),
-///   [('2560x1440@60.000', 2560, 1440, 60.0, 1.0, [1.0, 1.25],
-///     {'is-current': <true>, 'is-preferred': <true>})],
-///   {'is-builtin': <false>, ...}), (('Meta-1', ...), [...], {...})], [...], {...})
-/// ```
-/// Each monitor group starts at a `('Meta-` (or other connector-prefixed) tuple; we split
-/// the monitor-list on that boundary. Within a group, the connector is the first
-/// single-quoted string; the current mode is whichever mode tuple's props contain
-/// `'is-current': <true>`, and its `WxH` are the two integers immediately following that
-/// mode's `'WxH@rate'` id string.
-fn parse_connectors(get_current_state_stdout: &str) -> Vec<(String, u32, u32)> {
-    let mut out = Vec::new();
-    // Split into per-monitor chunks on `(('` (the start of each monitor's connector
-    // tuple), which only occurs at monitor-group boundaries in this shape.
-    for chunk in get_current_state_stdout.split("((").skip(1) {
-        // The connector name is the first single-quoted string in the chunk.
-        let Some(connector) = first_quoted(chunk) else {
-            continue;
-        };
-        // Find the mode tuple containing `'is-current': <true>`; walk each
-        // `'<mode-id>', <w>, <h>` occurrence and keep the one whose nearby props (up to
-        // the next mode/group) mention is-current.
-        let Some(current_mode_end) = chunk.find("'is-current': <true>") else {
-            continue;
-        };
-        // The mode id governing that is-current marker is the *last* mode-id string
-        // (`'WxH@rate'`) appearing before it.
-        let mut best: Option<(usize, u32, u32)> = None;
-        let mut rest = chunk;
-        let mut base = 0usize;
-        while let Some(rel) = rest.find('\'') {
-            let abs = base + rel;
-            if abs >= current_mode_end {
-                break;
-            }
-            let after_quote = &rest[rel + 1..];
-            let Some(end_quote) = after_quote.find('\'') else {
-                break;
-            };
-            let id = &after_quote[..end_quote];
-            // A mode id looks like `WxH@rate`; parse w/h if it matches, else skip (e.g.
-            // connector/vendor/product/serial strings).
-            if let Some((w, h)) = parse_mode_id(id) {
-                best = Some((abs, w, h));
-            }
-            let consumed = rel + 1 + end_quote + 1;
-            rest = &rest[consumed..];
-            base = abs + 1 + end_quote + 1;
-        }
-        if let Some((_, w, h)) = best {
-            out.push((connector, w, h));
-        }
-    }
-    // Creation order, not enumeration order: apply_layout consumes the first size match
-    // per slot, so duplicate sizes only map 1:1 to slots if this list ascends in creation
-    // order. Mutter allocates virtual connector names `Meta-N` lowest-free, so sequential
-    // RecordVirtual calls always get ascending N (verified live on GNOME 48) — while
-    // GetCurrentState's enumeration order carries no such contract. Stable sort keeps
-    // suffix-less names (never seen for virtual monitors) in enumeration order at the end.
-    out.sort_by_key(|(c, _, _)| connector_index(c));
-    out
-}
-
-/// The numeric suffix of a connector name (`"Meta-10"` → 10), recovering creation order
-/// for [`parse_connectors`]. Names without one sort last.
-fn connector_index(name: &str) -> u64 {
-    name.rsplit_once('-')
-        .and_then(|(_, n)| n.parse().ok())
-        .unwrap_or(u64::MAX)
-}
-
-/// The first single-quoted string in `s`, e.g. `"'Meta-0', 'MetaVendor'"` → `"Meta-0"`.
-fn first_quoted(s: &str) -> Option<String> {
-    let start = s.find('\'')? + 1;
-    let end = s[start..].find('\'')? + start;
-    Some(s[start..end].to_string())
-}
-
-/// Parse a mode id like `2560x1440@60.000` into `(2560, 1440)`; `None` if `s` isn't of
-/// that shape (e.g. a connector/vendor/product/serial string encountered along the way).
-fn parse_mode_id(s: &str) -> Option<(u32, u32)> {
-    let (wh, _rate) = s.split_once('@')?;
-    let (w, h) = wh.split_once('x')?;
-    Some((w.parse().ok()?, h.parse().ok()?))
-}
-
-/// Shipping mode: capture → ship dmabuf; recv input → inject. `transport` is already
-/// connected (see `connect_retry`); `socket_path` is kept for logging.
+/// Owns nothing session-bound. The monitor set arrives from the holder and changes under us
+/// when a layout is pushed or Mutter closes the session, so capture is (re)built from
+/// whatever generation the holder last announced.
 async fn run_shipping(
-    session: Session,
+    holder: Holder,
     transport: Arc<transport::Transport>,
     socket_path: &str,
-    monitors: &[MonitorCfg],
     embedded: bool,
 ) -> Result<()> {
-    // We rebuild the session on each live layout change, so own it mutably. `cursor_mode`
-    // mirrors `main`: embedded composites the cursor, metadata ships it out-of-band.
-    let mut session = session;
-    let cursor_mode = if embedded {
-        mutter::CURSOR_MODE_EMBEDDED
-    } else {
-        mutter::CURSOR_MODE_METADATA
-    };
-
+    let holder = Arc::new(holder);
     let clone_id = std::env::var("RMNG_CLONE_ID")
         .ok()
         .or_else(|| {
@@ -434,180 +220,48 @@ async fn run_shipping(
         }),
         &[],
     )?;
-    // Report the actual layout (configured positions, applied above) so the viewer routes
-    // cross-window drags against it instead of assuming left-to-right.
-    let layout: Vec<MonitorPlacement> = monitors
-        .iter()
-        .enumerate()
-        .map(|(i, m)| MonitorPlacement {
-            id: i as u32,
-            x: m.x,
-            y: m.y,
-            width: m.w,
-            height: m.h,
-            primary: m.primary,
-        })
-        .collect();
-    transport.send(&DaemonMsg::Layout { monitors: layout }, &[])?;
     tracing::info!("connected to media socket {socket_path} as clone '{clone_id}'");
-
-    // The session-bound runtime (rd + monitor_id→stream map) the input and clipboard tasks
-    // read per event. A make-before-break swap re-points both at the NEW session by
-    // mutating this one handle (see `reconfigure`).
-    let active: ActiveSession = Arc::new(tokio::sync::Mutex::new(SessionRuntime {
-        rd: session.rd.clone(),
-        conn: session.conn.clone(),
-        streams: session
-            .monitors
-            .iter()
-            .map(|m| (m.monitor_id, m.stream_path.clone()))
-            .collect(),
-    }));
-    // The live monitor set for the MCP task, refreshed by `reconfigure`. `mcp::serve` reads
-    // this (plus `active`) per request so screenshots/geometry follow a live layout swap.
-    let live_monitors: Arc<std::sync::Mutex<Vec<mutter::VirtualMonitor>>> =
-        Arc::new(std::sync::Mutex::new(session.monitors.clone()));
 
     // Latest captured dmabuf per monitor, refreshed by the capture callbacks below; the
     // MCP `screenshot` tool dups the fd and GPU-encodes it to PNG.
     let latest: mcp::LatestFrames = Arc::new(std::sync::Mutex::new(HashMap::new()));
-
-    // Input injection task: a blocking reader thread forwards ServerMsg::Input here. Each
-    // event reads the CURRENT session from `active`, so input follows a live layout swap.
-    let (in_tx, mut in_rx) = tokio::sync::mpsc::unbounded_channel::<InputMsg>();
-    {
-        let active = active.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = in_rx.recv().await {
-                // Snapshot the CURRENT session's `rd` (plus this event's stream, for
-                // PointerMove) under a SHORT lock, then drop the guard BEFORE the D-Bus
-                // await — so a slow `notify_*` never holds the `active` lock that
-                // `reconfigure` needs to swap the session. Mirrors mcp.rs's `session_snapshot`.
-                let (rd, stream) = {
-                    let rt = active.lock().await;
-                    let stream = match &msg {
-                        InputMsg::PointerMove { monitor_id, .. } => {
-                            rt.streams.get(monitor_id).cloned()
-                        }
-                        _ => None,
-                    };
-                    (rt.rd.clone(), stream)
-                };
-                let r = match msg {
-                    InputMsg::PointerMove { x, y, .. } => match stream {
-                        Some(s) => rd.notify_pointer_motion_absolute(&s, x, y).await,
-                        None => Ok(()),
-                    },
-                    InputMsg::PointerRelative { dx, dy } => {
-                        rd.notify_pointer_motion_relative(dx, dy).await
-                    }
-                    InputMsg::Button { button, pressed } => {
-                        rd.notify_pointer_button(button, pressed).await
-                    }
-                    InputMsg::Axis { axis, step } => {
-                        rd.notify_pointer_axis_discrete(axis, step).await
-                    }
-                    InputMsg::AxisContinuous { dx, dy, flags } => {
-                        rd.notify_pointer_axis(dx, dy, flags).await
-                    }
-                    InputMsg::Key { keysym, pressed } => {
-                        rd.notify_keyboard_keysym(keysym, pressed).await
-                    }
-                    InputMsg::KeyCode { keycode, pressed } => {
-                        rd.notify_keyboard_keycode(keycode, pressed).await
-                    }
-                };
-                if let Err(e) = r {
-                    tracing::warn!("input inject failed: {e}");
-                }
-            }
-        });
-    }
-
-    // Clipboard (rich + lazy): broker offers/requests/data drive the clone's selection. It
-    // reads the CURRENT rd from `active` per op so it follows a swap (the old session's rd
-    // is stopped afterwards).
-    let (clip_tx, clip_rx) = tokio::sync::mpsc::unbounded_channel::<clipboard::FromServer>();
-    tokio::spawn(clipboard::run(active.clone(), transport.clone(), clip_rx));
-
+    // The live monitor set for the MCP task, refreshed on every generation. `mcp::serve`
+    // reads this per request so screenshots and geometry follow a layout swap.
+    let live_monitors: Arc<std::sync::Mutex<Vec<HolderMonitor>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     // Per-monitor 1-deep flow control: ship a frame, then wait for its Ack before the next
     // (a slow receiver makes us drop frames here, not queue on the wire). Shared with the
-    // reader thread (clears a gate on Ack) AND `reconfigure` (swaps the whole set), so Acks
-    // reach the CURRENT session's gates after a swap.
+    // reader thread, which clears a gate on Ack.
     let in_flight: Arc<std::sync::Mutex<HashMap<u32, Arc<AtomicBool>>>> =
-        Arc::new(std::sync::Mutex::new(
-            session
-                .monitors
-                .iter()
-                .map(|m| (m.monitor_id, Arc::new(AtomicBool::new(false))))
-                .collect(),
-        ));
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
 
-    // Reconfigure channel: the reader thread below hands each pushed `SetMonitors` layout to
-    // the control loop at the bottom of this fn via `blocking_send`. The reader thread moves
-    // in its own sender clone, which lives for the daemon's whole run, so `reconfig_rx.recv()`
-    // blocks between layout changes instead of returning `None` and exiting the control loop.
-    let (reconfig_tx, mut reconfig_rx) = tokio::sync::mpsc::channel::<Vec<MonitorCfg>>(4);
-
-    // Reader thread: ServerMsg in (Input → inject; Ack → gate; ClipboardData → selection;
-    // SetMonitors → live reconfigure).
+    // Reader thread, control-server side: Input and clipboard go straight to the holder,
+    // Ack clears a gate, SetMonitors becomes a layout the holder applies.
     {
-        let (transport, flags, reconfig_tx) = (transport.clone(), in_flight.clone(), reconfig_tx);
+        let (transport, flags, holder) = (transport.clone(), in_flight.clone(), holder.clone());
         std::thread::spawn(move || {
             loop {
                 match transport.recv() {
-                    Ok(ServerMsg::Input(im)) => {
-                        let _ = in_tx.send(im);
-                    }
+                    Ok(ServerMsg::Input(im)) => holder.send(ToHolder::Input(im)),
                     Ok(ServerMsg::Ack(a)) => {
                         if let Some(f) = flags.lock().unwrap().get(&a.monitor_id) {
                             f.store(false, Ordering::Relaxed);
                         }
                     }
-                    Ok(ServerMsg::ClipboardOffer(o)) => {
-                        let _ = clip_tx.send(clipboard::FromServer::Offer(o));
-                    }
+                    Ok(ServerMsg::ClipboardOffer(o)) => holder.send(ToHolder::ClipboardOffer(o)),
                     Ok(ServerMsg::ClipboardRequest(r)) => {
-                        let _ = clip_tx.send(clipboard::FromServer::Request(r));
+                        holder.send(ToHolder::ClipboardRequest(r))
                     }
-                    Ok(ServerMsg::ClipboardData(d)) => {
-                        let _ = clip_tx.send(clipboard::FromServer::Data(d));
-                    }
+                    Ok(ServerMsg::ClipboardData(d)) => holder.send(ToHolder::ClipboardData(d)),
                     Ok(ServerMsg::SetMonitors { monitors }) => {
-                        // Convert wire MonitorSpec → daemon MonitorCfg and hand to the
-                        // async reconfigure controller. Guarantees exactly one primary.
-                        let mut mons: Vec<MonitorCfg> = monitors
-                            .iter()
-                            .map(|m| MonitorCfg {
-                                w: m.width,
-                                h: m.height,
-                                x: m.x as i32,
-                                y: m.y as i32,
-                                primary: m.primary,
-                            })
-                            .collect();
-                        if mons.is_empty() {
-                            mons.push(MonitorCfg {
-                                w: 1920,
-                                h: 1080,
-                                x: 0,
-                                y: 0,
-                                primary: true,
-                            });
-                        }
-                        if !mons.iter().any(|m| m.primary) {
-                            mons[0].primary = true;
-                        }
-                        if reconfig_tx.blocking_send(mons).is_err() {
-                            tracing::warn!("reconfigure channel closed; ignoring SetMonitors");
-                        }
+                        holder.send(ToHolder::SetLayout { monitors })
                     }
                     Ok(_) => {} // Subscribe/FrameRequest — not used by the daemon
                     Err(e) => {
                         // The control-server went away (e.g. it restarted). Exit so systemd
-                        // restarts us and we reconnect — capture/ship + input injection are
-                        // useless without the socket, and the control loop otherwise blocks
-                        // forever on `reconfig_rx.recv()` with a dead connection.
+                        // restarts us and we reconnect — capture and shipping are useless
+                        // without the socket. The holder keeps the monitors open meanwhile,
+                        // so this costs no window positions.
                         tracing::warn!("media socket closed ({e}); exiting to reconnect");
                         std::process::exit(1);
                     }
@@ -616,30 +270,9 @@ async fn run_shipping(
         });
     }
 
-    // Capture → ship. Two backends (embedded GStreamer vs raw-PipeWire), chosen per
-    // `embedded` by `spawn_capture_for`, which hands back a `CaptureHandle` we keep alive
-    // in `capture` (and stop on swap). monitor_id → handle.
-    let mut capture: HashMap<u32, CaptureHandle> = HashMap::new();
-    for mon in &session.monitors {
-        let gate = in_flight.lock().unwrap()[&mon.monitor_id].clone();
-        capture.insert(
-            mon.monitor_id,
-            spawn_capture_for(mon, embedded, transport.clone(), latest.clone(), gate)?,
-        );
-    }
-
-    // In production the viewer's input (server → daemon) drives frame damage, so the
-    // cursor must NOT be auto-moved — it would fight the operator's pointer (yanking it
-    // back to centre every 16 ms). Only nudge when explicitly testing without a viewer
-    // (`RMNG_NUDGE=1`), which also exercises the METADATA cursor channel.
-    if std::env::var_os("RMNG_NUDGE").is_some() {
-        nudge_cursor(&session);
-    }
-
     // Per-node computer-use MCP over HTTP: the in-clone agent connects directly and the
-    // control-server's fleet MCP proxies to it. Reads the CURRENT session (`active`) + live
-    // monitor set per request, so input/screenshots follow a live layout swap AND the old
-    // session's D-Bus conn drops once `active` is repointed (it's the sole long-lived owner).
+    // control-server's fleet MCP proxies to it. Reads the live monitor set per request, so
+    // screenshots and input follow a layout swap.
     {
         let port: u16 = std::env::var("RMNG_DAEMON_MCP_PORT")
             .ok()
@@ -652,15 +285,15 @@ async fn run_shipping(
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(1080);
-        let (active_mcp, live_mons_mcp, latest_mcp, transport_mcp) = (
-            active.clone(),
+        let (holder_mcp, live_mons_mcp, latest_mcp, transport_mcp) = (
+            holder.clone(),
             live_monitors.clone(),
             latest.clone(),
             transport.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) =
-                mcp::serve(active_mcp, live_mons_mcp, latest_mcp, transport_mcp, port, virt_height)
+                mcp::serve(holder_mcp, live_mons_mcp, latest_mcp, transport_mcp, port, virt_height)
                     .await
             {
                 tracing::error!("clone-daemon MCP exited: {e:#}");
@@ -669,45 +302,103 @@ async fn run_shipping(
     }
 
     tracing::info!(
-        "shipping {} monitor(s) ({}) …",
-        session.monitors.len(),
-        if embedded {
-            "embedded cursor"
-        } else {
-            "client cursor / raw-PW"
-        }
+        "shipping from the session holder ({}) …",
+        if embedded { "embedded cursor" } else { "client cursor / raw-PW" }
     );
 
-    // Control loop: apply each pushed layout via a make-before-break session swap. The
-    // sender side (`reconfig_tx`) is wired into the ServerMsg reader thread above (its
-    // SetMonitors arm); that thread's sender clone keeps this channel open for the
-    // daemon's whole run, so `recv()` blocks between layout changes instead of returning
-    // `None` and exiting the control loop.
-    let mut current_cfg = monitors.to_vec();
-    while let Some(desired) = reconfig_rx.recv().await {
-        if desired == current_cfg {
-            continue; // idempotent (e.g. a Hello push matching the boot layout)
+    // Control loop: each generation the holder announces gets its own capture set. The
+    // previous one keeps running until the holder confirms its monitors are gone, so no
+    // frame gap opens in the middle of a swap.
+    let mut capture: HashMap<u32, CaptureHandle> = HashMap::new();
+    let mut retiring: Vec<CaptureHandle> = Vec::new();
+    let mut generation = 0u64;
+    let mut inbox = holder.inbox();
+    while let Some(msg) = inbox.recv().await {
+        let (announced, monitors) = match msg {
+            FromHolder::HelloOk { generation, monitors, .. } => (generation, monitors),
+            FromHolder::Monitors { generation, monitors } => (generation, monitors),
+            FromHolder::SwapDone { generation: done } => {
+                // The old monitors are gone, so their capture threads have nothing left to
+                // read. Anything newer than what we are capturing is not ours to act on.
+                if done == generation {
+                    for h in retiring.drain(..) {
+                        stop_capture(h);
+                    }
+                }
+                continue;
+            }
+            FromHolder::ClipboardOffer(o) => {
+                let _ = transport.send(&DaemonMsg::ClipboardOffer(o), &[]);
+                continue;
+            }
+            FromHolder::ClipboardRequest(r) => {
+                let _ = transport.send(&DaemonMsg::ClipboardRequest(r), &[]);
+                continue;
+            }
+            FromHolder::ClipboardData(d) => {
+                let _ = transport.send(&DaemonMsg::ClipboardData(d), &[]);
+                continue;
+            }
+            FromHolder::Unknown => continue,
+        };
+        if announced <= generation {
+            continue; // a generation we already captured
         }
-        if let Err(e) = reconfigure(
-            &mut session,
-            &mut capture,
-            &in_flight,
-            &active,
-            &live_monitors,
-            &transport,
-            &latest,
-            cursor_mode,
-            embedded,
-            &desired,
-        )
-        .await
-        {
-            tracing::warn!("reconfigure failed: {e:#}");
+        generation = announced;
+
+        // Start capture on the new nodes with fresh gates, then publish both in one breath.
+        //
+        // Ack routing keys off `in_flight`: the new capture ships frames keyed by the NEW
+        // monitor_ids, and each frame's Ack must find that monitor's gate there to clear its
+        // 1-deep gate. Publishing late would leave a grown monitor's id absent from the map,
+        // its Ack dropped, and that monitor frozen after one frame.
+        let mut new_capture: HashMap<u32, CaptureHandle> = HashMap::new();
+        let mut new_flags: HashMap<u32, Arc<AtomicBool>> = HashMap::new();
+        let mut failed = None;
+        for mon in &monitors {
+            let gate = Arc::new(AtomicBool::new(false));
+            new_flags.insert(mon.monitor_id, gate.clone());
+            match spawn_capture_for(mon, embedded, transport.clone(), latest.clone(), gate) {
+                Ok(h) => {
+                    new_capture.insert(mon.monitor_id, h);
+                }
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+        if let Some(e) = failed {
+            tracing::error!("capture failed to start for generation {announced}: {e:#}");
+            for (_, h) in new_capture.drain() {
+                stop_capture(h);
+            }
             continue;
         }
-        current_cfg = desired;
+        {
+            let mut gates = in_flight.lock().unwrap();
+            for (_, f) in gates.drain() {
+                f.store(true, Ordering::Relaxed); // close old gates → old capture stops shipping
+            }
+            *gates = new_flags;
+            *live_monitors.lock().unwrap() = monitors.clone();
+        }
+        // Hold the previous captures until the holder says the old monitors are gone.
+        retiring.extend(std::mem::take(&mut capture).into_values());
+        capture = new_capture;
+        {
+            let live: std::collections::HashSet<u32> =
+                monitors.iter().map(|m| m.monitor_id).collect();
+            latest.lock().unwrap().retain(|id, _| live.contains(id));
+        }
+        holder.send(ToHolder::CaptureReady { generation: announced });
+        // Report the applied layout so the viewer routes cross-window drags against it.
+        let layout: Vec<MonitorPlacement> = monitors.iter().map(|m| m.placement()).collect();
+        transport.send(&DaemonMsg::Layout { monitors: layout }, &[])?;
+        tracing::info!("capturing {} monitor(s), generation {announced}", monitors.len());
     }
-    Ok(())
+    // The holder connection ended. Exit so systemd restarts us into the reconnect path.
+    anyhow::bail!("the session holder disconnected")
 }
 
 /// A running capture for one monitor, in whichever backend `embedded` selects. Held so it
@@ -734,7 +425,7 @@ fn stop_capture(h: CaptureHandle) {
 /// Spawn the capture for one monitor on the backend `embedded` selects, gated by `gate`
 /// (1-deep ack flow control). Used at startup and by `reconfigure` for the new session.
 fn spawn_capture_for(
-    mon: &mutter::VirtualMonitor,
+    mon: &HolderMonitor,
     embedded: bool,
     transport: Arc<transport::Transport>,
     latest: mcp::LatestFrames,
@@ -743,7 +434,7 @@ fn spawn_capture_for(
     if embedded {
         let (mid, (mw, mh)) = (mon.monitor_id, (mon.width, mon.height));
         let seq = Arc::new(AtomicU64::new(0));
-        let p = capture::start_capture(mon, move |frame| {
+        let p = capture::start_capture(mon.node_id, move |frame| {
             if gate.swap(true, Ordering::Relaxed) {
                 return;
             }
@@ -778,143 +469,6 @@ fn spawn_capture_for(
             mon, transport, gate, latest,
         )))
     }
-}
-
-/// Make-before-break session swap: build a fresh Mutter session with the full `desired`
-/// monitor set, start capture on it, re-point input/clipboard at it, THEN stop the OLD
-/// session (apps survive — Phase 0). Because the new outputs exist alongside the old until
-/// the stop, gnome-shell never sees zero monitors, so windows don't collapse.
-#[allow(clippy::too_many_arguments)]
-async fn reconfigure(
-    session: &mut mutter::Session,
-    capture: &mut HashMap<u32, CaptureHandle>,
-    in_flight: &Arc<std::sync::Mutex<HashMap<u32, Arc<AtomicBool>>>>,
-    active: &ActiveSession,
-    live_monitors: &Arc<std::sync::Mutex<Vec<mutter::VirtualMonitor>>>,
-    transport: &Arc<transport::Transport>,
-    latest: &mcp::LatestFrames,
-    cursor_mode: u32,
-    embedded: bool,
-    desired: &[MonitorCfg],
-) -> Result<()> {
-    // 1. Build the NEW full session — its outputs appear ALONGSIDE the old
-    //    (make-before-break). monitor_id == slot index.
-    let sizes: Vec<(u32, u32)> = desired.iter().map(|m| (m.w, m.h)).collect();
-    let new = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
-    // Enable the clipboard on the new session so post-swap selection ops (set/read/write)
-    // work; the clipboard task then uses this rd via the `active` handle updated below.
-    if let Err(e) = new.rd.enable_clipboard(HashMap::new()).await {
-        tracing::warn!("reconfigure: EnableClipboard on new session failed: {e}");
-    }
-
-    // 2. Start capture on the NEW nodes with fresh gates. If any capture fails to spawn,
-    //    tear down `new` (Session has no Drop → orphaned virtual monitors otherwise) and any
-    //    captures already started before propagating the error — we haven't committed yet, so
-    //    nothing shared (active/in_flight/session) has been repointed at `new`.
-    let mut new_capture: HashMap<u32, CaptureHandle> = HashMap::new();
-    let mut new_flags: HashMap<u32, Arc<AtomicBool>> = HashMap::new();
-    for mon in &new.monitors {
-        let gate = Arc::new(AtomicBool::new(false));
-        new_flags.insert(mon.monitor_id, gate.clone());
-        match spawn_capture_for(mon, embedded, transport.clone(), latest.clone(), gate) {
-            Ok(h) => {
-                new_capture.insert(mon.monitor_id, h);
-            }
-            Err(e) => {
-                for (_, h) in new_capture.drain() {
-                    stop_capture(h);
-                }
-                let _ = new.stop().await; // best-effort; drops the new virtual monitors
-                return Err(e);
-            }
-        }
-    }
-
-    // 3. Point input + clipboard + MCP at the new session BEFORE dropping the old. Setting
-    //    `conn` here makes this handle the sole long-lived owner of the old conn, so the old
-    //    connection drops when this scope replaces it (unblocking the clipboard re-subscribe).
-    //    Also update `live_monitors` here (same critical section) to pair with the new `active`,
-    //    preventing MCP requests from pairing NEW rd/conn with OLD monitor paths during the
-    //    .await calls in steps 4-6.
-    //
-    //    CRITICAL: publish `in_flight = new_flags` HERE too, in the SAME breath as `active`
-    //    — because ack routing keys off `in_flight`. The new capture (spawned in step 2)
-    //    ships frames keyed by the NEW monitor_ids; each frame's `Ack` must find that
-    //    monitor's gate in `in_flight` to clear its 1-deep gate. If we deferred this publish
-    //    until AFTER the step-4 awaits (`session.stop` + `apply_layout` spawn gdbus
-    //    subprocesses, ~100-400ms), a new/grown monitor's id would be ABSENT from the old
-    //    gate map → its Ack is dropped → its gate (set true by its first shipped frame) never
-    //    clears → that monitor ships ONE frame then FREEZES for the whole stop/apply window.
-    //    The old gate Arcs leave `in_flight` here, but the old capture threads hold their own
-    //    clones; we still stop those via `stop_capture` in step 5 (and set the old gates true
-    //    below so they can't ship during the stop window).
-    {
-        let mut rt = active.lock().await;
-        rt.rd = new.rd.clone();
-        rt.conn = new.conn.clone();
-        rt.streams = new
-            .monitors
-            .iter()
-            .map(|m| (m.monitor_id, m.stream_path.clone()))
-            .collect();
-        *live_monitors.lock().unwrap() = new.monitors.clone();
-        let mut gates = in_flight.lock().unwrap();
-        for (_, f) in gates.drain() {
-            f.store(true, Ordering::Relaxed); // close old gates → old capture can't ship in the window
-        }
-        *gates = new_flags;
-    }
-
-    // 4. Stop the OLD session, WAIT for its monitors to actually disappear (stop is
-    //    asynchronous — see wait_monitors_settle: applying against lingering dying
-    //    connectors crashed gnome-shell live), then position the new monitors. Only
-    //    after settle do just the new connectors exist, making the match unambiguous.
-    let _ = session.stop().await;
-    // Explicitly CLOSE the old session's bus connection. Refcount-drop can never close
-    //    it: the clipboard signal tasks are parked in `sig.next()` holding proxy clones
-    //    of this very connection, so without close() their streams never end, they never
-    //    re-subscribe against the NEW session in `active`, and both signal-driven flows
-    //    (clone copy → offer, clone paste → transfer) stay wired to the dead session's
-    //    object path forever (found live: bus match rules pinned to .../Session/u1 while
-    //    the current session was u2). close() ends those streams (→ `None`) and reclaims
-    //    the old fd + bus match rules.
-    let _ = session.conn.clone().close().await;
-    wait_monitors_settle(desired.len()).await;
-    apply_layout(desired).await;
-
-    // 5. Stop old capture (old nodes already gone; deterministic backstop). The shared gate
-    //    set was already swapped to `new_flags` in step 3 for correct ack routing, so nothing
-    //    to do here beyond tearing down the old handles.
-    for (_, h) in capture.drain() {
-        stop_capture(h);
-    }
-
-    // 6. Swap in the new session/capture + prune `latest` frames for monitors that no
-    //    longer exist (a shrink), so stale dmabuf fds for removed monitors don't linger.
-    //    (`live_monitors` and `in_flight` were already updated in step 3 to pair with `active`.)
-    *session = new;
-    *capture = new_capture;
-    {
-        let live: std::collections::HashSet<u32> =
-            session.monitors.iter().map(|m| m.monitor_id).collect();
-        latest.lock().unwrap().retain(|id, _| live.contains(id));
-    }
-
-    // 7. Report the applied layout (id == slot) so the viewer re-routes cross-window drags.
-    let layout: Vec<MonitorPlacement> = desired
-        .iter()
-        .enumerate()
-        .map(|(i, m)| MonitorPlacement {
-            id: i as u32,
-            x: m.x,
-            y: m.y,
-            width: m.w,
-            height: m.h,
-            primary: m.primary,
-        })
-        .collect();
-    transport.send(&DaemonMsg::Layout { monitors: layout }, &[])?;
-    Ok(())
 }
 
 /// Ship one captured dmabuf frame as `DaemonMsg::Frame` + its fds (SCM_RIGHTS).
@@ -993,7 +547,7 @@ fn store_latest(
 /// (belt-and-suspenders — the capture also self-ends when the old node vanishes on
 /// `Session::stop`).
 fn spawn_pw_monitor(
-    mon: &mutter::VirtualMonitor,
+    mon: &HolderMonitor,
     transport: Arc<transport::Transport>,
     gate: Arc<AtomicBool>,
     latest: mcp::LatestFrames,
@@ -1092,7 +646,7 @@ async fn run_capture_test(session: Session) -> Result<()> {
         let counter = Arc::new(AtomicU64::new(0));
         let first = Arc::new(AtomicBool::new(true));
         let (c, f, mid) = (counter.clone(), first.clone(), mon.monitor_id);
-        let pipeline = capture::start_capture(mon, move |frame| {
+        let pipeline = capture::start_capture(mon.node_id, move |frame| {
             c.fetch_add(1, Ordering::Relaxed);
             if f.swap(false, Ordering::Relaxed) {
                 tracing::info!(
@@ -1110,7 +664,7 @@ async fn run_capture_test(session: Session) -> Result<()> {
         pipelines.push(pipeline);
         counters.push((mon.monitor_id, counter));
     }
-    nudge_cursor(&session);
+    holder::nudge_cursor(&session);
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1122,80 +676,4 @@ async fn run_capture_test(session: Session) -> Result<()> {
     tracing::info!("capturing (Ctrl-C to stop) …");
     futures::future::pending::<()>().await;
     Ok(())
-}
-
-/// Oscillate the pointer on **every** monitor so the damage-driven capture emits
-/// frames (test-only; in production the viewer/agent input creates the damage).
-fn nudge_cursor(session: &Session) {
-    for m in &session.monitors {
-        let rd = session.rd.clone();
-        let stream = m.stream_path.clone();
-        let (w, h) = (m.width as f64, m.height as f64);
-        tokio::spawn(async move {
-            let mut t = 0u32;
-            loop {
-                t = t.wrapping_add(1);
-                let x = w / 2.0 + if t % 2 == 0 { 20.0 } else { -20.0 };
-                let _ = rd.notify_pointer_motion_absolute(&stream, x, h / 2.0).await;
-                tokio::time::sleep(Duration::from_millis(16)).await;
-            }
-        });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_connectors_and_current_modes() {
-        // Real GetCurrentState shape from Phase 0 (CT 113, GNOME 48), scales trimmed.
-        let blob = "(uint32 3, [(('Meta-0', 'MetaVendor', 'Virtual remote monitor', '0x000001'), \
-[('2560x1440@60.000', 2560, 1440, 60.0, 1.0, [1.0, 1.25], {'is-current': <true>, 'is-preferred': <true>})], \
-{'is-builtin': <false>}), (('Meta-1', 'MetaVendor', 'Virtual remote monitor', '0x000002'), \
-[('1920x1080@60.000', 1920, 1080, 60.0, 1.0, [1.0], {'is-current': <true>, 'is-preferred': <true>})], \
-{'is-builtin': <false>})], [(2560, 0, 1.0, uint32 0, true, [('Meta-0', 'x', 'y', '0x1')], @a{sv} {}), \
-(0, 0, 1.0, 0, false, [('Meta-1', 'x', 'y', '0x2')], {})], {'layout-mode': <uint32 1>})";
-        let conns = parse_connectors(blob);
-        assert_eq!(conns.len(), 2);
-        assert_eq!(conns[0], ("Meta-0".to_string(), 2560, 1440));
-        assert_eq!(conns[1], ("Meta-1".to_string(), 1920, 1080));
-    }
-
-    #[test]
-    fn parse_connectors_orders_by_creation_not_enumeration() {
-        // Two monitors at the SAME size: slot→connector matching in apply_layout consumes
-        // the first size match, so parse_connectors must return connectors in creation
-        // order (ascending numeric suffix — Mutter allocates Meta-N lowest-free, so
-        // sequential RecordVirtual calls always yield ascending N; verified live on
-        // GNOME 48). Enumeration order in GetCurrentState is NOT a contract, so this blob
-        // lists Meta-10 before Meta-2; numeric order must win (lexicographic would too).
-        let blob = "(uint32 3, [(('Meta-10', 'MetaVendor', 'Virtual remote monitor', '0x00000b'), \
-[('1920x1080@60.000', 1920, 1080, 60.0, 1.0, [1.0], {'is-current': <true>, 'is-preferred': <true>})], \
-{'is-builtin': <false>}), (('Meta-2', 'MetaVendor', 'Virtual remote monitor', '0x000003'), \
-[('1920x1080@60.000', 1920, 1080, 60.0, 1.0, [1.0], {'is-current': <true>, 'is-preferred': <true>})], \
-{'is-builtin': <false>})], [(0, 0, 1.0, uint32 0, true, [('Meta-10', 'x', 'y', '0xb')], @a{sv} {}), \
-(1920, 0, 1.0, 0, false, [('Meta-2', 'x', 'y', '0x3')], {})], {'layout-mode': <uint32 1>})";
-        let conns = parse_connectors(blob);
-        assert_eq!(conns.len(), 2);
-        assert_eq!(
-            conns[0],
-            ("Meta-2".to_string(), 1920, 1080),
-            "created first (lower N) must come first"
-        );
-        assert_eq!(conns[1], ("Meta-10".to_string(), 1920, 1080));
-    }
-
-    #[test]
-    fn parse_connectors_picks_is_current_mode() {
-        // Monitor with two modes: first (3840x2160) is NOT current, second (1920x1080) IS current.
-        // Ensures parser selects the is-current mode rather than blindly taking the first mode.
-        let blob = "(uint32 5, [(('Meta-0', 'MetaVendor', 'Virtual remote monitor', '0x000001'), \
-[('3840x2160@60.000', 3840, 2160, 60.0, 1.0, [1.0], {'is-preferred': <true>}), \
-('1920x1080@60.000', 1920, 1080, 60.0, 1.0, [1.0], {'is-current': <true>})], \
-{'is-builtin': <false>})], [(0, 0, 1.0, uint32 0, true, [('Meta-0', 'x', 'y', '0x1')], @a{sv} {})], {'layout-mode': <uint32 1>})";
-        let conns = parse_connectors(blob);
-        assert_eq!(conns.len(), 1);
-        assert_eq!(conns[0], ("Meta-0".to_string(), 1920, 1080));
-    }
 }

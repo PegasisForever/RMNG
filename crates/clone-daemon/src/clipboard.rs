@@ -25,42 +25,38 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
-use wire::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, DaemonMsg};
+use wire::holder::FromHolder;
+use wire::socket::{ClipboardData, ClipboardOffer, ClipboardRequest};
 use zbus::zvariant::{OwnedValue, Value};
 
-use crate::ActiveSession;
-use crate::transport::Transport;
+use crate::holder::{ActiveSession, Out};
 
-/// A clipboard message arriving from control-server (routed by `main`'s reader).
+/// A clipboard message arriving from control-server, relayed by the daemon.
 pub enum FromServer {
     Offer(ClipboardOffer),
     Request(ClipboardRequest),
     Data(ClipboardData),
 }
 
-/// Wire up the four clipboard flows. Runs for the process lifetime.
+/// Wire up the four clipboard flows. Runs for the holder's lifetime.
 ///
 /// Reads the CURRENT Mutter session from `active` per selection op (and re-subscribes its
 /// signal streams when they end), so it follows the make-before-break session swap: after
 /// a swap the old session's rd is stopped, and all ops must target the new one. The new
-/// session's clipboard is enabled by `reconfigure` (`EnableClipboard` on the new rd).
+/// session's clipboard is enabled when that session is built (`EnableClipboard` on its rd).
 ///
-/// The signal streams (flows 1 & 4) only end because `reconfigure` explicitly close()es
-/// the old session's bus connection — these tasks hold proxy clones of it, so it can never
-/// die by refcount while they're parked in `sig.next()`.
+/// The signal streams (flows 1 & 4) only end because the swap explicitly close()es the old
+/// session's bus connection — these tasks hold proxy clones of it, so it can never die by
+/// refcount while they're parked in `sig.next()`.
 pub async fn run(
     active: ActiveSession,
-    transport: Arc<Transport>,
+    out: Out,
     mut from_server: UnboundedReceiver<FromServer>,
 ) {
-    {
-        let rd = active.lock().await.rd.clone();
-        if let Err(e) = rd.enable_clipboard(HashMap::new()).await {
-            tracing::warn!("EnableClipboard failed (clipboard sync off): {e}");
-            return;
-        }
-    }
-    tracing::info!("clipboard sync enabled (rich + lazy)");
+    // `EnableClipboard` is not called here: the holder enables it on every session it builds,
+    // including the ones a layout swap replaces it with. Calling it again would fail with
+    // `Already enabled` and take this whole bridge down with it.
+    tracing::info!("clipboard bridge running (rich + lazy)");
 
     let local_serial = Arc::new(AtomicU64::new(1));
     // The remote selection we currently own in the clone (to request on transfer).
@@ -77,7 +73,7 @@ pub async fn run(
     // re-subscribe loop: on a session swap the old session's signal stream ends, so we
     // re-lock `active` for the new rd and subscribe afresh.
     {
-        let (active, transport, local_serial) = (active.clone(), transport.clone(), local_serial.clone());
+        let (active, out, local_serial) = (active.clone(), out.clone(), local_serial.clone());
         tokio::spawn(async move {
             loop {
                 let rd = active.lock().await.rd.clone();
@@ -102,7 +98,7 @@ pub async fn run(
                     }
                     let serial = local_serial.fetch_add(1, Ordering::Relaxed);
                     tracing::debug!(target: "clip", "clone copied: offering {mimes:?} serial={serial}");
-                    let _ = transport.send(&DaemonMsg::ClipboardOffer(ClipboardOffer { serial, mime_types: mimes }), &[]);
+                    let _ = out.send(FromHolder::ClipboardOffer(ClipboardOffer { serial, mime_types: mimes }));
                 }
                 // Stream ended (session swapped/closed): re-subscribe against the current rd.
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -113,7 +109,7 @@ pub async fn run(
     // Flow 4: a clone app pastes the remote selection → request its bytes lazily. Same
     // re-subscribe loop as flow 1 so it follows a session swap.
     {
-        let (active, transport, remote, pending) = (active.clone(), transport.clone(), remote.clone(), pending.clone());
+        let (active, out, remote, pending) = (active.clone(), out.clone(), remote.clone(), pending.clone());
         tokio::spawn(async move {
             loop {
                 let rd = active.lock().await.rd.clone();
@@ -137,7 +133,7 @@ pub async fn run(
                     };
                     pending.lock().await.entry(mime.clone()).or_default().push(mutter_serial);
                     fail_paste_if_unanswered(&pending, &rd, &mime, mutter_serial);
-                    let _ = transport.send(&DaemonMsg::ClipboardRequest(ClipboardRequest { serial, mime_type: mime }), &[]);
+                    let _ = out.send(FromHolder::ClipboardRequest(ClipboardRequest { serial, mime_type: mime }));
                 }
                 // Stream ended (session swapped/closed): re-subscribe against the current rd.
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -168,7 +164,7 @@ pub async fn run(
             // timeout. ALWAYS reply, with empty bytes on failure — a dropped reply leaves
             // the broker's pending entry and the requester's clipboard silently stale.
             FromServer::Request(r) => {
-                let (rd, transport, gate) = (rd.clone(), transport.clone(), read_gate.clone());
+                let (rd, out, gate) = (rd.clone(), out.clone(), read_gate.clone());
                 tokio::spawn(async move {
                     let started = std::time::Instant::now();
                     let guard = gate.lock_owned().await;
@@ -208,10 +204,11 @@ pub async fn run(
                         "read {} -> {} bytes in {:?}",
                         r.mime_type, bytes.len(), started.elapsed()
                     );
-                    let _ = transport.send(
-                        &DaemonMsg::ClipboardData(ClipboardData { serial: r.serial, mime_type: r.mime_type, bytes }),
-                        &[],
-                    );
+                    let _ = out.send(FromHolder::ClipboardData(ClipboardData {
+                        serial: r.serial,
+                        mime_type: r.mime_type,
+                        bytes,
+                    }));
                 });
             }
             // Flow 4 reply: bytes for a pending paste — write them to Mutter's fd.

@@ -303,11 +303,29 @@ Restart=on-failure
 [Install]
 WantedBy=default.target
 UNIT
+cat > "$UDIR/rmng-session-holder.service" <<UNIT
+[Unit]
+Description=rmng session holder (Mutter session + virtual monitors)
+After=gnome-headless.service
+Wants=gnome-headless.service
+[Service]
+Type=simple
+Environment=WAYLAND_DISPLAY=wayland-0
+${MONITORS:+Environment=RMNG_MONITORS=$MONITORS}
+ExecStart=$BINDIR/rmng-clone-daemon --session-holder
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=default.target
+UNIT
 cat > "$UDIR/rmng-clone-daemon.service" <<UNIT
 [Unit]
 Description=rmng clone-daemon (capture + input)
-After=gnome-headless.service
-Wants=gnome-headless.service
+# The holder owns the Mutter session this daemon captures and injects through, and stays up
+# across the daemon's restarts so window positions survive an update. Wants, never BindsTo:
+# restarting the daemon must NOT take the holder (and the clone's monitors) with it.
+After=gnome-headless.service rmng-session-holder.service
+Wants=gnome-headless.service rmng-session-holder.service
 [Service]
 Type=simple
 Environment=WAYLAND_DISPLAY=wayland-0
@@ -369,7 +387,7 @@ chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config"
 # so the symlinks are what carry over into the image; they take effect on the first boot of a
 # real clone (linger, marked above, starts the user manager then).
 WANTS="$UDIR/default.target.wants"; install -d -o "$USERNAME" -g "$USERNAME" "$WANTS"
-for u in gnome-headless rmng-clone-daemon agent-wrapper; do
+for u in gnome-headless rmng-session-holder rmng-clone-daemon agent-wrapper; do
   ln -sf "../$u.service" "$WANTS/$u.service"
 done
 chown -h "$USERNAME:$USERNAME" "$WANTS"/*.service

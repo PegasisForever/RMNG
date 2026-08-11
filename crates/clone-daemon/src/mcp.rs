@@ -33,9 +33,11 @@ use axum::{Json, Router, extract::State, routing::post};
 use serde_json::{Value, json};
 use wire::socket::{CursorMeta, DaemonMsg};
 
-use crate::ActiveSession;
+use wire::holder::HolderMonitor;
+use wire::socket::InputMsg;
+
 use crate::keysym;
-use crate::mutter::{RemoteDesktopSessionProxy, VirtualMonitor};
+use crate::session::Holder;
 use crate::transport::Transport;
 use crate::windows;
 
@@ -71,20 +73,23 @@ pub type LatestFrames = Arc<Mutex<HashMap<u32, LatestFrame>>>;
 #[derive(Clone)]
 struct Mon {
     id: u32,
-    stream: String,
     width: u32,
     height: u32,
 }
 
 #[derive(Clone)]
 struct McpState {
-    /// The live session (input `rd` + session `conn`), swapped by `reconfigure`. Each
-    /// handler snapshots `rd`/`conn` under a short-lived lock so it follows a swap — and,
-    /// crucially, never pins the OLD `zbus::Connection` past a swap (holding it would block
-    /// the clipboard signal-stream re-subscribe).
-    active: ActiveSession,
-    /// The live virtual-monitor set, refreshed by `reconfigure`. Snapshotted per request.
-    live_monitors: Arc<Mutex<Vec<VirtualMonitor>>>,
+    /// Input goes to the session holder, which owns the only connection Mutter accepts it
+    /// from. Queued, not awaited: the calls it replaces were `no_reply` D-Bus messages, and
+    /// a connected `SOCK_SEQPACKET` keeps a press ahead of its release just as the bus did.
+    holder: Arc<Holder>,
+    /// The live monitor set, refreshed on every generation the holder announces.
+    /// Snapshotted per request.
+    live_monitors: Arc<Mutex<Vec<HolderMonitor>>>,
+    /// The session bus, for the window tools. `org.gnome.Shell.Eval` is a plain gnome-shell
+    /// method with no per-connection check, so this is the daemon's own connection rather
+    /// than anything belonging to the holder's session.
+    shell: zbus::Connection,
     latest: LatestFrames,
     transport: Arc<Transport>,
     /// Last injected pointer position per monitor (for eased `mouse_move`). **Native** pixels,
@@ -94,19 +99,21 @@ struct McpState {
     virt_height: u32,
 }
 
-/// Serve the MCP over HTTP, reading the daemon's CURRENT Mutter session (`active`) + live
-/// monitor set per request so it follows a live layout swap.
+/// Serve the MCP over HTTP, reading the live monitor set per request so it follows a layout
+/// swap.
 pub async fn serve(
-    active: ActiveSession,
-    live_monitors: Arc<Mutex<Vec<VirtualMonitor>>>,
+    holder: Arc<Holder>,
+    live_monitors: Arc<Mutex<Vec<HolderMonitor>>>,
     latest: LatestFrames,
     transport: Arc<Transport>,
     port: u16,
     virt_height: u32,
 ) -> anyhow::Result<()> {
+    let shell = zbus::Connection::session().await?;
     let state = McpState {
-        active,
+        holder,
         live_monitors,
+        shell,
         latest,
         transport,
         last_pos: Arc::new(Mutex::new(HashMap::new())),
@@ -118,14 +125,6 @@ pub async fn serve(
     tracing::info!("clone-daemon MCP on http://{addr}");
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
-}
-
-/// Snapshot the CURRENT session's `rd` + `conn` under a short-lived lock, then drop the
-/// guard — so the long `notify_*` / `windows::call` awaits never hold the session lock, and
-/// the OLD conn is free to drop once `reconfigure` repoints `active`.
-async fn session_snapshot(st: &McpState) -> (RemoteDesktopSessionProxy<'static>, zbus::Connection) {
-    let rt = st.active.lock().await;
-    (rt.rd.clone(), rt.conn.clone())
 }
 
 // --- virtual coordinate space ------------------------------------------------
@@ -196,7 +195,7 @@ fn mons_snapshot(st: &McpState) -> Vec<Mon> {
         .lock()
         .unwrap()
         .iter()
-        .map(|m| Mon { id: m.monitor_id, stream: m.stream_path.clone(), width: m.width, height: m.height })
+        .map(|m| Mon { id: m.monitor_id, width: m.width, height: m.height })
         .collect()
 }
 
@@ -327,9 +326,8 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
             // One `call_dims` for both the move and the settle shot, so a per-call
             // `resolution` and the image it returns can never disagree.
             let (vw, vh) = call_dims(st, &m, &args);
-            let (rd, _) = session_snapshot(st).await;
             let (x, y) = (n("x").ok_or("x required")?, n("y").ok_or("y required")?);
-            ease_move(st, &rd, &m, vw, vh, x, y).await?;
+            ease_move(st, &m, vw, vh, x, y).await?;
             Ok(settle_shot(st, &m, vw, vh).await)
         }
         "left_click" => click(st, &args, BTN_LEFT, 1).await,
@@ -339,27 +337,25 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
         "scroll" => {
             let m = resolve_mon(&mons_snapshot(st), &args)?;
             let (vw, vh) = call_dims(st, &m, &args);
-            let (rd, _) = session_snapshot(st).await;
             if n("x").is_some() && n("y").is_some() {
-                ease_move(st, &rd, &m, vw, vh, n("x").unwrap(), n("y").unwrap()).await?;
+                ease_move(st, &m, vw, vh, n("x").unwrap(), n("y").unwrap()).await?;
             }
             let amount = args.get("amount").and_then(Value::as_i64).unwrap_or(0).clamp(-15, 15);
             let step = if amount >= 0 { 1 } else { -1 };
             for _ in 0..amount.abs() {
-                rd.notify_pointer_axis_discrete(0, step as i32).await.map_err(e)?;
+                st.holder.input(InputMsg::Axis { axis: 0, step });
                 sleep(SCROLL_STEP_MS).await;
             }
             Ok(settle_shot(st, &m, vw, vh).await)
         }
         "key" => {
-            let (rd, _) = session_snapshot(st).await;
             let combo = args.get("keys").and_then(Value::as_str).ok_or("keys required")?;
             let syms = keysym::parse_key_combo(combo).map_err(|e| e.to_string())?;
             for &s in &syms {
-                rd.notify_keyboard_keysym(s, true).await.map_err(e)?;
+                st.holder.input(InputMsg::Key { keysym: s, pressed: true });
             }
             for &s in syms.iter().rev() {
-                rd.notify_keyboard_keysym(s, false).await.map_err(e)?;
+                st.holder.input(InputMsg::Key { keysym: s, pressed: false });
             }
             let first = mons_snapshot(st).into_iter().next().ok_or("no monitors")?;
             // No coordinates involved, so the settle shot just uses the default space.
@@ -367,20 +363,18 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
             Ok(settle_shot(st, &first, vw, vh).await)
         }
         "type" => {
-            let (rd, _) = session_snapshot(st).await;
             let txt = args.get("text").and_then(Value::as_str).ok_or("text required")?;
             for ch in txt.chars() {
                 let Some(ks) = keysym::char_to_keysym(ch) else { continue };
-                rd.notify_keyboard_keysym(ks, true).await.map_err(e)?;
-                rd.notify_keyboard_keysym(ks, false).await.map_err(e)?;
+                st.holder.input(InputMsg::Key { keysym: ks, pressed: true });
+                st.holder.input(InputMsg::Key { keysym: ks, pressed: false });
                 sleep(TYPE_KEY_MS).await;
             }
             Ok(text(format!("typed {} chars", txt.chars().count())))
         }
         // Window management (gnome-shell Eval).
         "list_windows" | "move_window" => {
-            let (_, conn) = session_snapshot(st).await;
-            windows::call(&conn, name, &args).await
+            windows::call(&st.shell, name, &args).await
         }
         other => Err(format!("unknown tool '{other}'")),
     }
@@ -393,17 +387,16 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
 async fn click(st: &McpState, args: &Value, button: i32, count: u32) -> Result<Value, String> {
     let m = resolve_mon(&mons_snapshot(st), args)?;
     let (vw, vh) = call_dims(st, &m, args);
-    let (rd, _) = session_snapshot(st).await;
     if let (Some(x), Some(y)) = (args.get("x").and_then(Value::as_f64), args.get("y").and_then(Value::as_f64)) {
-        ease_move(st, &rd, &m, vw, vh, x, y).await?;
+        ease_move(st, &m, vw, vh, x, y).await?;
     }
     for i in 0..count {
         if i > 0 {
             sleep(DOUBLE_GAP_MS).await;
         }
-        rd.notify_pointer_button(button, true).await.map_err(e)?;
+        st.holder.input(InputMsg::Button { button, pressed: true });
         sleep(CLICK_PRESS_MS).await;
-        rd.notify_pointer_button(button, false).await.map_err(e)?;
+        st.holder.input(InputMsg::Button { button, pressed: false });
     }
     Ok(settle_shot(st, &m, vw, vh).await)
 }
@@ -417,7 +410,6 @@ async fn click(st: &McpState, args: &Value, button: i32, count: u32) -> Result<V
 /// the single conversion point for all three callers (`mouse_move`, `click`, `scroll`).
 async fn ease_move(
     st: &McpState,
-    rd: &RemoteDesktopSessionProxy<'static>,
     m: &Mon,
     vw: u32,
     vh: u32,
@@ -431,7 +423,7 @@ async fn ease_move(
         let t = i as f64 / MOVE_STEPS as f64;
         let ease = if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 }; // ease-in-out quad
         let (x, y) = (sx + (tx - sx) * ease, sy + (ty - sy) * ease);
-        rd.notify_pointer_motion_absolute(&m.stream, x, y).await.map_err(e)?;
+        st.holder.input(InputMsg::PointerMove { monitor_id: m.id, x, y });
         emit_warp(st, m.id, x, y);
         sleep(MOVE_STEP_MS).await;
     }
@@ -484,10 +476,6 @@ fn resolve_mon(mons: &[Mon], args: &Value) -> Result<Mon, String> {
 async fn sleep(ms: u64) {
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
-/// zbus error → String (for `.map_err`).
-fn e(err: zbus::Error) -> String {
-    err.to_string()
-}
 fn dup(fd: &OwnedFd) -> Option<OwnedFd> {
     let raw = nix::unistd::dup(fd.as_raw_fd()).ok()?;
     Some(unsafe { OwnedFd::from_raw_fd(raw) })
@@ -498,7 +486,6 @@ fn text(s: impl Into<String>) -> Value {
 fn image_content(jpeg: &[u8]) -> Value {
     json!([{ "type": "image", "mimeType": "image/jpeg", "data": base64(jpeg) }])
 }
-
 /// Minimal standard base64 encode (screenshot image content).
 fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -574,7 +561,7 @@ mod tests {
 
     #[test]
     fn to_native_maps_the_full_range_per_axis() {
-        let m = Mon { id: 0, stream: String::new(), width: 2560, height: 1440 };
+        let m = Mon { id: 0, width: 2560, height: 1440 };
         // Origin is fixed, centre maps to centre, and the far edge reaches the far edge.
         assert_eq!(to_native(&m, 1920, 1080, 0.0, 0.0), (0.0, 0.0));
         assert_eq!(to_native(&m, 1920, 1080, 960.0, 540.0), (1280.0, 720.0));

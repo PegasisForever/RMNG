@@ -6,6 +6,7 @@
 //!   current `control-server/app/lib/types.ts` so the React frontend is unchanged.
 //! - [`config`] — `AppConfig` (+ a redacted view) edited via the Settings UI.
 //! - [`socket`] — the clone-daemon ⇄ control-server unix-socket protocol.
+//! - [`holder`] — the clone-daemon ⇄ session-holder protocol, inside one clone.
 //! - [`viewer`] — the native viewer ⇄ control-server protocol (port 1).
 //! - [`mcp`] — desktop-tool DTOs + the `/api/hosts/:id/mcp` proxy request.
 //! - [`exec`] — the `rmng exec` request/result (`/api/hosts/:id/exec`).
@@ -21,6 +22,7 @@ pub mod config;
 pub mod control;
 pub mod exec;
 pub mod forward;
+pub mod holder;
 pub mod ledger;
 pub mod mcp;
 pub mod net;

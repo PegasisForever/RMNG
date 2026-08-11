@@ -257,7 +257,7 @@ pub(crate) fn desired_payload_hash(entries: &[TarEntry]) -> String {
     format!("{:016x}", h.finish())
 }
 
-fn binary_payload_entries() -> Result<Vec<TarEntry>> {
+fn binary_payload_entries(headless: bool) -> Result<Vec<TarEntry>> {
     let mut entries = Vec::new();
     for b in crate::provision::CLONE_BINARIES {
         let data = crate::assets::payload(b.payload)
@@ -270,8 +270,46 @@ fn binary_payload_entries() -> Result<Vec<TarEntry>> {
             gid: 0,
         });
     }
+    // A headless clone has no desktop for the holder to hold: `provision.rs` deletes the
+    // gnome-headless and clone-daemon units there, and a holder unit would restart-loop
+    // against a Mutter that is never coming up.
+    if !headless {
+        entries.push(session_holder_unit_entry());
+    }
     Ok(entries)
 }
+
+/// The `rmng-session-holder.service` unit, shipped with the binaries so a clone created
+/// before the holder existed picks it up without being recreated.
+///
+/// It carries no `RMNG_MONITORS`. The holder remembers the last layout it applied in
+/// `~/.rmng/monitors` and boots on that, which is current in a way a value baked into an
+/// image never is. Only a clone that has never run a holder falls back to the unit's
+/// environment, and there the control-server's push a second later is the correction.
+pub(crate) fn session_holder_unit_entry() -> TarEntry {
+    TarEntry {
+        path: "home/rmng/.config/systemd/user/rmng-session-holder.service".to_string(),
+        data: SESSION_HOLDER_UNIT.as_bytes().to_vec(),
+        mode: 0o644,
+        uid: CLONE_UID,
+        gid: CLONE_GID,
+    }
+}
+
+const SESSION_HOLDER_UNIT: &str = "\
+[Unit]
+Description=rmng session holder (Mutter session + virtual monitors)
+After=gnome-headless.service
+Wants=gnome-headless.service
+[Service]
+Type=simple
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/opt/rmng/bin/rmng-clone-daemon --session-holder
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=default.target
+";
 
 fn payload_stamp_entry(hash: &str) -> TarEntry {
     TarEntry {
@@ -1040,10 +1078,21 @@ systemctl restart ssh
 /// whole payload reconcile before the agent-wrapper restart + payload stamp ever run — permanently
 /// wedging binary refreshes on headless clones. Guard on `systemctl cat`: present ⇒ restart (a real
 /// restart failure still surfaces under `set -e` on headed clones); absent ⇒ skip cleanly.
+///
+/// The session holder is neither started nor restarted here, only enabled so it comes back on the
+/// next boot. It holds the clone's Mutter session and virtual monitors, and restarting it is
+/// exactly what resets every window position: gnome-shell remaps them the moment the monitor set
+/// empties. Starting it is left to the daemon, which does it after connecting to the media socket
+/// and finding no holder. That ordering matters on the release that introduces the holder, where
+/// starting it here would raise a second set of monitors alongside the outgoing daemon's and give
+/// `apply_layout` two identical connectors to choose between.
 fn restart_clone_daemon_script() -> &'static str {
     r#"set -e
-if runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user cat rmng-clone-daemon.service >/dev/null 2>&1; then
-  runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart rmng-clone-daemon.service
+run_user() { runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 "$@"; }
+if run_user systemctl --user cat rmng-clone-daemon.service >/dev/null 2>&1; then
+  run_user systemctl --user daemon-reload
+  run_user systemctl --user enable rmng-session-holder.service >/dev/null 2>&1 || true
+  run_user systemctl --user restart rmng-clone-daemon.service
 else
   echo "rmng-clone-daemon.service absent (headless clone) — skipping restart"
 fi
@@ -1620,8 +1669,8 @@ async fn ensure_codex_cli(app: &App, clone_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_payload_current(app: &App, clone_id: &str) -> Result<bool> {
-    let entries = binary_payload_entries()?;
+async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Result<bool> {
+    let entries = binary_payload_entries(headless)?;
     let desired = desired_payload_hash(&entries);
     if read_stamp(app, clone_id, payload_stamp_path(), "payload")
         .await?
@@ -2006,7 +2055,7 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
-        match ensure_payload_current(app, id).await {
+        match ensure_payload_current(app, id, h.headless).await {
             Ok(true) => {
                 warned.remove(&format!("{id}:payload"));
                 tracing::info!(target: "clone_reconcile", "clone {id}: refreshed clone binaries and restarted rmng-clone-daemon");
@@ -2726,6 +2775,49 @@ mod tests {
         assert!(printed, "a changed env must announce it");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Restarting the holder is what resets every window position, so the payload refresh only
+    /// enables it and leaves starting it to the daemon.
+    #[test]
+    fn the_payload_restart_enables_the_holder_without_touching_a_live_one() {
+        let script = restart_clone_daemon_script();
+        assert!(script.contains("systemctl --user enable rmng-session-holder.service"));
+        assert!(
+            !script.contains("restart rmng-session-holder"),
+            "the reconcile pass must not restart the session holder:\n{script}"
+        );
+        assert!(
+            !script.contains("start rmng-session-holder"),
+            "starting the holder here races the outgoing daemon's monitors:\n{script}"
+        );
+        // The daemon still restarts, and still only when its unit exists (headless clones
+        // delete it, and an unconditional restart would abort the whole reconcile there).
+        assert!(script.contains("systemctl --user restart rmng-clone-daemon.service"));
+        assert!(script.contains("cat rmng-clone-daemon.service"));
+    }
+
+    /// A headless clone has no Mutter for the holder to hold, and its unit would restart-loop
+    /// against a desktop that is never coming up.
+    #[test]
+    fn the_holder_unit_ships_to_headed_clones_only() {
+        let unit = |headless| {
+            binary_payload_entries(headless)
+                .map(|es| es.iter().any(|e| e.path.ends_with("rmng-session-holder.service")))
+        };
+        // In a checkout with nothing staged the binaries are missing and this errors; the
+        // assertion is only meaningful when the payloads are there.
+        if let (Ok(headed), Ok(headless)) = (unit(false), unit(true)) {
+            assert!(headed, "a headed clone needs the session holder unit");
+            assert!(!headless, "a headless clone must not get the session holder unit");
+        }
+        let entry = session_holder_unit_entry();
+        assert_eq!(entry.path, "home/rmng/.config/systemd/user/rmng-session-holder.service");
+        assert_eq!((entry.uid, entry.gid, entry.mode), (CLONE_UID, CLONE_GID, 0o644));
+        let body = String::from_utf8(entry.data).unwrap();
+        assert!(body.contains("ExecStart=/opt/rmng/bin/rmng-clone-daemon --session-holder"));
+        // No baked layout: the holder boots on the one it remembers in ~/.rmng/monitors.
+        assert!(!body.contains("RMNG_MONITORS"), "the shipped unit must not bake a layout");
     }
 
     #[test]
