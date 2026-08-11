@@ -218,6 +218,124 @@ pub enum ServerMsg {
     Unknown,
 }
 
+/// Splitting one oversized message across several `SOCK_SEQPACKET` datagrams.
+///
+/// **Why this exists.** The media socket is `SOCK_SEQPACKET`, and the kernel refuses any
+/// datagram larger than the sending socket's `SO_SNDBUF - 32`. That buffer defaults to
+/// `net.core.wmem_default`, 212,992 bytes on this fleet, so the real ceiling is about 208 KB
+/// of JSON. Every message this transport carried until now was far below it: an input event
+/// is bytes, a video access unit is handed over as a dmabuf fd rather than inline, and
+/// clipboard text is a line or two.
+///
+/// A pasted image is not. Measured: a 256 KB payload serializes to 349,596 bytes of JSON and
+/// `sendmsg` fails outright with `EMSGSIZE`, and everything above it fails the same way. The
+/// clipboard broker discarded that error, so the bytes never reached the clone, the daemon
+/// never answered Mutter's pending `SelectionWrite`, and the pasting application sat on a pipe
+/// nobody was going to write to until it gave up and pasted whatever it had. Slow, then
+/// corrupt, from one dropped datagram.
+///
+/// **The frame.** A chunk is `\0RMC` then the message id, the chunk index and the chunk count,
+/// each big-endian, then the slice. The magic starts with a NUL, which no JSON document can,
+/// so a receiver tells a chunk from a whole message by looking at four bytes and old peers
+/// are not silently fed a fragment they would parse as truth.
+pub mod chunk {
+    /// Marks a datagram as one piece of a larger message. A NUL first byte cannot start JSON.
+    const MAGIC: [u8; 4] = [0, b'R', b'M', b'C'];
+    /// `MAGIC` + id + index + count.
+    const HEADER: usize = 4 + 8 + 4 + 4;
+
+    /// Payload bytes per chunk.
+    ///
+    /// Fixed rather than derived from `SO_SNDBUF`, because the limit that matters is the
+    /// smaller of the two peers' buffers and neither can see the other's. 64 KiB is comfortably
+    /// under the 208 KB default at both ends, leaves room for a peer that has tuned its buffer
+    /// down, and costs one datagram per 64 KiB: a 5 MB screenshot crosses in 80 of them.
+    pub const CHUNK_BYTES: usize = 64 * 1024;
+
+    /// Most bytes one reassembly will hold before it is abandoned.
+    ///
+    /// The sender is the control-server or a clone-daemon, not an attacker, but a peer that
+    /// dies mid-message must not leave the other side holding its partial copy forever.
+    pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+
+    /// The datagrams to send for one encoded message, in order.
+    ///
+    /// A message that already fits is returned whole and unwrapped, so the common case stays
+    /// exactly the bytes it was before this existed.
+    pub fn split(payload: &[u8], id: u64) -> Vec<Vec<u8>> {
+        if payload.len() <= CHUNK_BYTES {
+            return vec![payload.to_vec()];
+        }
+        let count = payload.len().div_ceil(CHUNK_BYTES);
+        payload
+            .chunks(CHUNK_BYTES)
+            .enumerate()
+            .map(|(i, slice)| {
+                let mut out = Vec::with_capacity(HEADER + slice.len());
+                out.extend_from_slice(&MAGIC);
+                out.extend_from_slice(&id.to_be_bytes());
+                out.extend_from_slice(&(i as u32).to_be_bytes());
+                out.extend_from_slice(&(count as u32).to_be_bytes());
+                out.extend_from_slice(slice);
+                out
+            })
+            .collect()
+    }
+
+    /// Whether this datagram is a chunk rather than a whole message.
+    pub fn is_chunk(datagram: &[u8]) -> bool {
+        datagram.len() >= HEADER && datagram[..4] == MAGIC
+    }
+
+    /// Puts a split message back together.
+    ///
+    /// One message at a time, which is all a connected `SOCK_SEQPACKET` needs: it delivers in
+    /// order and never interleaves two `sendmsg` calls from one sender. A chunk that does not
+    /// continue the message in progress starts a new one, so a peer that died mid-message
+    /// costs the partial copy and nothing after it.
+    #[derive(Debug, Default)]
+    pub struct Reassembler {
+        id: u64,
+        next: u32,
+        count: u32,
+        buf: Vec<u8>,
+    }
+
+    impl Reassembler {
+        /// Feed one datagram. `Some` when a whole message is ready, which for an unchunked
+        /// datagram is immediately.
+        pub fn push(&mut self, datagram: &[u8]) -> Option<Vec<u8>> {
+            if !is_chunk(datagram) {
+                return Some(datagram.to_vec());
+            }
+            let id = u64::from_be_bytes(datagram[4..12].try_into().ok()?);
+            let index = u32::from_be_bytes(datagram[12..16].try_into().ok()?);
+            let count = u32::from_be_bytes(datagram[16..20].try_into().ok()?);
+            let body = &datagram[HEADER..];
+
+            let continues = id == self.id && index == self.next && count == self.count;
+            if !continues {
+                if index != 0 {
+                    self.buf.clear(); // A tail whose head we never saw is not a message.
+                    self.count = 0;
+                    return None;
+                }
+                self.id = id;
+                self.count = count;
+                self.buf.clear();
+            }
+            if self.buf.len() + body.len() > MAX_MESSAGE_BYTES {
+                self.buf.clear();
+                self.count = 0;
+                return None;
+            }
+            self.buf.extend_from_slice(body);
+            self.next = index + 1;
+            (self.next == self.count).then(|| std::mem::take(&mut self.buf))
+        }
+    }
+}
+
 /// Base64 (de)serialization for binary blobs in JSON framing. Swap for raw bytes
 /// if/when the framing goes binary.
 pub(crate) mod serde_bytes_b64 {
@@ -277,6 +395,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_message_that_fits_is_sent_exactly_as_it_was() {
+        // The common case must not gain a header: an input event and a cursor update are the
+        // hot path, and every byte of envelope on them buys nothing.
+        let small = b"{\"t\":\"input\"}".to_vec();
+        let out = chunk::split(&small, 1);
+        assert_eq!(out, vec![small.clone()]);
+        assert!(!chunk::is_chunk(&small));
+        assert_eq!(chunk::Reassembler::default().push(&small), Some(small));
+    }
+
+    #[test]
+    fn an_oversized_message_splits_and_comes_back_identical() {
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let parts = chunk::split(&payload, 7);
+        assert_eq!(parts.len(), payload.len().div_ceil(chunk::CHUNK_BYTES));
+        assert!(parts.iter().all(|p| chunk::is_chunk(p)), "every piece is marked");
+        assert!(parts.iter().all(|p| p.len() <= chunk::CHUNK_BYTES + 20));
+
+        let mut join = chunk::Reassembler::default();
+        let last = parts.len() - 1;
+        for (i, part) in parts.iter().enumerate() {
+            let got = join.push(part);
+            assert_eq!(got.is_some(), i == last, "only the last chunk completes it");
+            if let Some(whole) = got {
+                assert_eq!(whole, payload);
+            }
+        }
+    }
+
+    #[test]
+    fn a_message_cut_short_never_becomes_a_shorter_one() {
+        // A sender that gives up mid-message must not leave the receiver holding a prefix it
+        // will later staple to something else. The next message starts at chunk 0, and that is
+        // what resets it.
+        let first: Vec<u8> = vec![b'a'; 200_000];
+        let second: Vec<u8> = vec![b'b'; 200_000];
+        let mut join = chunk::Reassembler::default();
+        for part in chunk::split(&first, 1).iter().take(2) {
+            assert_eq!(join.push(part), None);
+        }
+        let mut done = None;
+        for part in chunk::split(&second, 2) {
+            done = join.push(&part).or(done);
+        }
+        assert_eq!(done, Some(second), "the abandoned prefix is gone, not prepended");
+    }
+
+    #[test]
+    fn a_tail_with_no_head_is_dropped_rather_than_kept() {
+        // What a receiver sees when it connects mid-message, or when chunk 0 was the one the
+        // sender failed on. There is no message here, and inventing a short one would hand a
+        // truncated image to whoever pasted.
+        let payload: Vec<u8> = vec![b'z'; 200_000];
+        let parts = chunk::split(&payload, 3);
+        let mut join = chunk::Reassembler::default();
+        assert_eq!(join.push(&parts[1]), None);
+        assert_eq!(join.push(&parts[2]), None);
+        // And it recovers on the next whole message.
+        assert_eq!(join.push(b"{}"), Some(b"{}".to_vec()));
+    }
+
+    #[test]
     fn input_msg_tagged_roundtrip() {
         let m = InputMsg::PointerMove { monitor_id: 0, x: 12.0, y: 34.0 };
         let s = serde_json::to_string(&m).unwrap();
@@ -326,6 +506,15 @@ mod tests {
             let s = serde_json::to_string(&data).unwrap();
             let back: ClipboardData = serde_json::from_str(&s).unwrap();
             assert_eq!(back.bytes, case);
+        }
+        // Every length modulo 4, so both padded tails are exercised at a size where an
+        // off-by-one in the tail would show as a corrupt image rather than a failed decode.
+        for len in 4_093..4_100 {
+            let case: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let data = ClipboardData { serial: 1, mime_type: "image/png".into(), bytes: case.clone() };
+            let s = serde_json::to_string(&data).unwrap();
+            let back: ClipboardData = serde_json::from_str(&s).unwrap();
+            assert_eq!(back.bytes, case, "length {len}");
         }
     }
 

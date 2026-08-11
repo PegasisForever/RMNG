@@ -19,7 +19,7 @@ gstreamer-base = "0.23"
 gstreamer-video = { version = "0.23", features = ["v1_24"] }
 gstreamer-allocators = "0.23"
 gstreamer-gl = { version = "0.23", features = ["v1_24"] }
-nix = { version = "0.29", features = ["socket", "uio", "fs"] }
+nix = { version = "0.29", features = ["socket", "uio", "fs", "poll"] }
 libc = "0.2"
 
 [[bin]]

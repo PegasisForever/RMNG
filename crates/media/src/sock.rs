@@ -99,7 +99,11 @@ impl Listener {
     pub fn accept(&self) -> Result<Conn> {
         let fd = accept(self.fd.as_raw_fd()).context("accept")?;
         // SAFETY: accept() returns a fresh owned fd.
-        Ok(Conn { fd: unsafe { OwnedFd::from_raw_fd(fd) } })
+        Ok(Conn {
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            joiner: std::sync::Mutex::new(Default::default()),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        })
     }
 }
 
@@ -131,32 +135,45 @@ impl std::error::Error for SendError {}
 
 pub struct Conn {
     fd: OwnedFd,
+    /// Puts a chunked message back together. `recv` takes `&self`, and one connection is read
+    /// by exactly one thread, so the state lives behind a mutex rather than in the signature.
+    joiner: std::sync::Mutex<wire::socket::chunk::Reassembler>,
+    /// Message ids for [`chunk::split`], unique within this connection.
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl Conn {
     /// Receive one `DaemonMsg` + any dmabuf fds (as owned fds).
+    ///
+    /// Blocks until a whole message has arrived, which for one split across chunks means
+    /// reading every one of them (see [`wire::socket::chunk`]).
     pub fn recv(&self) -> Result<(DaemonMsg, Vec<OwnedFd>)> {
-        let packet_len = recv_packet_len(self.fd.as_raw_fd())?;
-        let mut buf = vec![0u8; packet_len];
-        let mut iov = [IoSliceMut::new(&mut buf)];
-        let mut cmsg = nix::cmsg_space!([RawFd; 8]);
-        let msg: nix::sys::socket::RecvMsg<()> =
-            recvmsg(self.fd.as_raw_fd(), &mut iov, Some(&mut cmsg), MsgFlags::empty()).context("recvmsg")?;
         let mut fds = Vec::new();
-        if let Ok(cmsgs) = msg.cmsgs() {
-            for c in cmsgs {
-                if let ControlMessageOwned::ScmRights(raw) = c {
-                    // SAFETY: SCM_RIGHTS handed us fresh owned fds.
-                    fds.extend(raw.into_iter().map(|f| unsafe { OwnedFd::from_raw_fd(f) }));
+        loop {
+            let packet_len = recv_packet_len(self.fd.as_raw_fd())?;
+            let mut buf = vec![0u8; packet_len];
+            let mut iov = [IoSliceMut::new(&mut buf)];
+            let mut cmsg = nix::cmsg_space!([RawFd; 8]);
+            let msg: nix::sys::socket::RecvMsg<()> =
+                recvmsg(self.fd.as_raw_fd(), &mut iov, Some(&mut cmsg), MsgFlags::empty()).context("recvmsg")?;
+            if let Ok(cmsgs) = msg.cmsgs() {
+                for c in cmsgs {
+                    if let ControlMessageOwned::ScmRights(raw) = c {
+                        // SAFETY: SCM_RIGHTS handed us fresh owned fds.
+                        fds.extend(raw.into_iter().map(|f| unsafe { OwnedFd::from_raw_fd(f) }));
+                    }
                 }
             }
+            let n = msg.bytes;
+            if n == 0 {
+                return Err(anyhow!("peer closed"));
+            }
+            let Some(whole) = self.joiner.lock().unwrap().push(&buf[..n]) else {
+                continue; // A chunk, and not the last one.
+            };
+            let dm = serde_json::from_slice(&whole).context("decode DaemonMsg")?;
+            return Ok((dm, fds));
         }
-        let n = msg.bytes;
-        if n == 0 {
-            return Err(anyhow!("peer closed"));
-        }
-        let dm = serde_json::from_slice(&buf[..n]).context("decode DaemonMsg")?;
-        Ok((dm, fds))
     }
 
     /// Send a `ServerMsg` (no fds).
@@ -169,16 +186,64 @@ impl Conn {
     ///
     /// A full queue surfaces as [`SendError::WouldBlock`] so the caller can decide. Input
     /// events are worthless late and should be dropped; a control message should not be.
+    ///
+    /// A message past the datagram ceiling goes as several chunks (see
+    /// [`wire::socket::chunk`]). They are written back to back on one connection, and
+    /// `SOCK_SEQPACKET` delivers in order, so the receiver sees them contiguously.
     pub fn send(&self, msg: &ServerMsg) -> std::result::Result<(), SendError> {
+        use std::sync::atomic::Ordering;
         let json = serde_json::to_vec(msg).map_err(|e| SendError::Encode(e.to_string()))?;
-        let iov = [IoSlice::new(&json)];
-        let cmsgs: &[ControlMessage] = &[];
-        match sendmsg::<()>(self.fd.as_raw_fd(), &iov, cmsgs, MsgFlags::MSG_DONTWAIT, None) {
-            Ok(_) => Ok(()),
-            Err(nix::errno::Errno::EAGAIN) => Err(SendError::WouldBlock),
-            Err(e) => Err(SendError::Io(e.to_string())),
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let datagrams = wire::socket::chunk::split(&json, id);
+        // One datagram keeps the old contract exactly: try once, never wait.
+        let single = datagrams.len() == 1;
+        let deadline = std::time::Instant::now() + CHUNKED_SEND_TIMEOUT;
+        for datagram in datagrams {
+            loop {
+                let iov = [IoSlice::new(&datagram)];
+                let cmsgs: &[ControlMessage] = &[];
+                match sendmsg::<()>(self.fd.as_raw_fd(), &iov, cmsgs, MsgFlags::MSG_DONTWAIT, None) {
+                    Ok(_) => break,
+                    // A full queue mid-message is the normal case, not an error: the receive
+                    // queue holds about three chunks and a 4 MiB image is sixty-four of them,
+                    // so the peer has to drain while this writes. Half a message is worse than
+                    // none, and the receiver would discard the fragment anyway, so wait for
+                    // room rather than abandon it.
+                    Err(nix::errno::Errno::EAGAIN) if !single => {
+                        if !wait_writable(self.fd.as_raw_fd(), deadline) {
+                            return Err(SendError::WouldBlock);
+                        }
+                    }
+                    Err(nix::errno::Errno::EAGAIN) => return Err(SendError::WouldBlock),
+                    Err(e) => return Err(SendError::Io(e.to_string())),
+                }
+            }
         }
+        Ok(())
     }
+}
+
+/// Longest a chunked send waits for the peer to drain, in total across every chunk.
+///
+/// Bounded for the reason [`Conn::send`] is non-blocking at all: a paused clone keeps its
+/// socket open and never reads, and the thread doing the sending owns viewer teardown. Waiting
+/// forever there costs more than the message. Ten seconds is far longer than a live peer ever
+/// needs and still returns control on a dead one.
+const CHUNKED_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait until `fd` can take another datagram, or `deadline` passes. `false` means it timed out.
+fn wait_writable(fd: RawFd, deadline: std::time::Instant) -> bool {
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+        return false;
+    };
+    // SAFETY: the fd outlives this call; `Conn` owns it.
+    let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+    let mut fds = [PollFd::new(borrowed, PollFlags::POLLOUT)];
+    // Clamped rather than cast: at least a millisecond so this cannot spin, and never past
+    // what the timeout can hold, whatever the deadline was set from.
+    let ms = left.as_millis().clamp(1, u16::MAX as u128) as u16;
+    matches!(poll(&mut fds, PollTimeout::from(ms)), Ok(n) if n > 0)
 }
 
 fn recv_packet_len(fd: RawFd) -> Result<usize> {
@@ -311,4 +376,72 @@ mod tests {
         assert!(fds.is_empty());
         assert_eq!(got, sent);
     }
+
+    /// Send the way the clone-daemon's transport does, chunking anything too large.
+    fn send_chunked(path: &str, msg: &DaemonMsg) -> Result<()> {
+        let fd = socket(AddressFamily::Unix, SockType::SeqPacket, SockFlag::empty(), None)?;
+        connect(fd.as_raw_fd(), &UnixAddr::new(path).unwrap()).context("connect")?;
+        let json = serde_json::to_vec(msg)?;
+        for datagram in wire::socket::chunk::split(&json, 1) {
+            let iov = [IoSlice::new(&datagram)];
+            sendmsg::<()>(fd.as_raw_fd(), &iov, &[], MsgFlags::empty(), None).context("sendmsg")?;
+        }
+        Ok(())
+    }
+
+    /// The bug: a pasted image never crossed this socket at all.
+    ///
+    /// `SOCK_SEQPACKET` refuses any datagram over `SO_SNDBUF - 32`, which is 212,960 bytes at
+    /// this fleet's default. A 256 KB clipboard payload serializes to 349,596 bytes of JSON, so
+    /// `sendmsg` failed with `EMSGSIZE` and the broker dropped the error. The bytes never
+    /// arrived, the daemon never answered Mutter's open `SelectionWrite`, and the pasting app
+    /// sat on the pipe until it gave up and pasted what it had.
+    #[test]
+    fn an_image_sized_paste_crosses_the_socket_whole() {
+        let path = tmp_sock_path("paste-image");
+        let listener = Listener::bind(&path).unwrap();
+        // Not a uniform fill: a run of one byte would survive a reassembly that duplicated or
+        // dropped a chunk, which is the failure this is here to catch.
+        let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let sent = DaemonMsg::ClipboardData(ClipboardData {
+            serial: 9,
+            mime_type: "image/png".into(),
+            bytes: payload.clone(),
+        });
+
+        // Sent from another thread because it cannot all be in flight at once: the receive
+        // queue holds about three chunks, so the reader has to drain while the writer writes.
+        let (sender, path2) = (sent.clone(), path.clone());
+        let writer = std::thread::spawn(move || send_chunked(&path2, &sender).unwrap());
+        let conn = listener.accept().unwrap();
+        let (got, fds) = conn.recv().unwrap();
+        writer.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+
+        assert!(fds.is_empty());
+        assert_eq!(got, sent, "4 MiB of image has to arrive byte for byte");
+    }
+
+    /// The kernel limit that forced chunking, asserted so it cannot be quietly forgotten.
+    ///
+    /// If this ever stops failing, the ceiling moved and the reason for [`chunk`] moved with
+    /// it. It is a fact about the socket, not about this code.
+    #[test]
+    fn one_datagram_still_cannot_carry_an_image() {
+        let path = tmp_sock_path("emsgsize");
+        let listener = Listener::bind(&path).unwrap();
+        let fd = socket(AddressFamily::Unix, SockType::SeqPacket, SockFlag::empty(), None).unwrap();
+        connect(fd.as_raw_fd(), &UnixAddr::new(path.as_str()).unwrap()).unwrap();
+
+        let big = vec![0u8; 4 * 1024 * 1024];
+        let iov = [IoSlice::new(&big)];
+        let sent = sendmsg::<()>(fd.as_raw_fd(), &iov, &[], MsgFlags::empty(), None);
+        assert_eq!(sent, Err(nix::errno::Errno::EMSGSIZE), "one datagram must still refuse 4 MiB");
+
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}.lock"));
+    }
 }
+

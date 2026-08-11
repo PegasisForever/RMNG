@@ -136,6 +136,7 @@ pub async fn run(
                         }
                     };
                     pending.lock().await.entry(mime.clone()).or_default().push(mutter_serial);
+                    fail_paste_if_unanswered(&pending, &rd, &mime, mutter_serial);
                     let _ = transport.send(&DaemonMsg::ClipboardRequest(ClipboardRequest { serial, mime_type: mime }), &[]);
                 }
                 // Stream ended (session swapped/closed): re-subscribe against the current rd.
@@ -231,6 +232,55 @@ pub async fn run(
             }
         }
     }
+}
+
+/// How long a paste waits for bytes that were asked for before it is failed.
+///
+/// Nothing else ends a paste. Mutter opens the pipe and the pasting application blocks on it
+/// until somebody writes and calls `SelectionWriteDone`, so a reply that never comes is not a
+/// dropped paste, it is a frozen one, and what the application eventually shows is whatever it
+/// had rather than an error. That is the shape a too-large clipboard message had before the
+/// transport learned to chunk: the bytes were dropped in silence and the paste hung.
+///
+/// Generous on purpose. The reply crosses two hops and the far end has to read the host's
+/// clipboard first, which for a large image is not instant. This is the outer bound on a
+/// transfer that is not coming, not a budget for one that is.
+const PASTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Fail one pending paste if [`PASTE_TIMEOUT`] passes with no bytes for it.
+///
+/// Answering `false` is what unblocks the pasting application: it turns a wait with no end into
+/// an empty paste it can report. Dropping the serial also keeps it from being written later
+/// with some unrelated transfer's bytes, since `pending` is keyed by MIME and a stale serial
+/// would be swept up by the next reply for the same type.
+fn fail_paste_if_unanswered(
+    pending: &Arc<Mutex<HashMap<String, Vec<u32>>>>,
+    rd: &crate::mutter::RemoteDesktopSessionProxy<'static>,
+    mime_type: &str,
+    mutter_serial: u32,
+) {
+    let (pending, rd, mime_type) = (pending.clone(), rd.clone(), mime_type.to_string());
+    tokio::spawn(async move {
+        tokio::time::sleep(PASTE_TIMEOUT).await;
+        let unanswered = {
+            let mut held = pending.lock().await;
+            let Some(serials) = held.get_mut(&mime_type) else { return };
+            let Some(at) = serials.iter().position(|s| *s == mutter_serial) else { return };
+            serials.remove(at);
+            if serials.is_empty() {
+                held.remove(&mime_type);
+            }
+            true
+        };
+        if unanswered {
+            tracing::warn!(
+                target: "clip",
+                "no clipboard data for {mime_type} after {}s; failing the paste",
+                PASTE_TIMEOUT.as_secs()
+            );
+            let _ = rd.selection_write_done(mutter_serial, false).await;
+        }
+    });
 }
 
 /// Open the selection fd for `mime_type`, waiting out a refusal from Mutter's previous

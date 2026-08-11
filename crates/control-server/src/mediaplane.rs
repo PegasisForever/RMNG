@@ -548,7 +548,12 @@ fn send_clip_to(handle: &MediaHandle, viewers: &Viewers, dest: &str, msg: Clipbo
             ClipboardMsg::Request(r) => ServerMsg::ClipboardRequest(r),
             ClipboardMsg::Data(d) => ServerMsg::ClipboardData(d),
         };
-        let _ = c.send(&server_msg);
+        // Said out loud rather than dropped. A clipboard send that fails is a paste that
+        // hangs in the clone until the daemon's own timeout fires, and the whole reason a
+        // pasted image took forever and arrived corrupt was this error going unlogged.
+        if let Err(e) = c.send(&server_msg) {
+            tracing::warn!(target: "clip", "sending clipboard to {dest:?}: {e}");
+        }
     }
 }
 
@@ -1021,7 +1026,23 @@ fn read_viewer_input(
             break;
         }
         let len = u32::from_be_bytes(hdr) as usize;
-        if len > 1 << 20 {
+        // A clipboard frame carries whatever was copied, and an image is megabytes. Every
+        // other tag is an event or a status line and has no business being large.
+        //
+        // The old ceiling was one megabyte for all three, and passing it does not skip the
+        // frame, it breaks out of this loop and tears the viewer down: this thread owns the
+        // viewer's teardown. So pasting a screenshot from the host dropped the viewer's whole
+        // input channel, which is the loudest half of "pasting an image is broken".
+        let cap = match tag[0] {
+            T_CLIPBOARD => wire::socket::chunk::MAX_MESSAGE_BYTES,
+            _ => 1 << 20,
+        };
+        if len > cap {
+            tracing::warn!(
+                target: "clip",
+                "viewer {id} sent a {len}-byte frame of type {} (cap {cap}); dropping the viewer",
+                tag[0]
+            );
             break;
         }
         let mut body = vec![0u8; len];

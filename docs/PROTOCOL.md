@@ -125,6 +125,29 @@ viewer + every other clone, routes a paste's request to the owner, and routes by
 the requester. The clone-daemon bridges via Mutter `RemoteDesktop` selection
 (`SelectionRead`/`SelectionWrite`); the viewer via the GTK clipboard.
 
+**An image does not fit in one message, on either hop.** Both had a ceiling sized for text,
+and a pasted screenshot crossed neither.
+
+The clone socket is `SOCK_SEQPACKET`, and the kernel refuses a datagram over `SO_SNDBUF - 32`,
+about 208 KB at the default `net.core.wmem_default`. A 256 KB payload is 349,596 bytes of JSON,
+so `sendmsg` returned `EMSGSIZE` and the broker discarded the error. A message past the ceiling
+is now split into 64 KiB chunks framed `\0RMC | id | index | count | slice` and rejoined by the
+receiver. The magic starts with a NUL, which no JSON document can, so a whole message is still
+sent exactly as it was and needs no envelope. The receive queue holds about three chunks, so a
+chunked send waits for the peer to drain between datagrams, bounded at 10 s.
+
+The viewer connection framed everything with a 1 MiB cap, and passing it did not skip the frame,
+it dropped the viewer: that reader owns the viewer's teardown. Pasting a 1.5 MB image sent a
+2,000,065-byte frame and killed the whole input channel. Clipboard frames now allow 32 MiB and
+every other tag keeps the old 1 MiB, because an input event and a status line have no business
+being large.
+
+**A paste that gets no bytes fails after 10 s** rather than hanging. Mutter opens the pipe and
+the pasting application blocks on it until somebody writes and calls `SelectionWriteDone`, so a
+reply that never arrives is not a dropped paste, it is a frozen one, and what the application
+eventually shows is whatever it had. That is what made a too-large image read as slow and then
+corrupt instead of as an error.
+
 **One read at a time.** Mutter runs a single `SelectionRead` per session and fails a second
 one with `LimitsExceeded: Tried to read in parallel`, which reaches the requester as empty
 bytes. One copy fans out to every endpoint, and each asks per MIME, so two rules keep the
