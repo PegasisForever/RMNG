@@ -30,7 +30,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
 | PUT | `/api/hosts/:id/forwards` | Replace a clone's port-forward rules | 200 `ControlState` |
-| POST | `/api/layout/activate` | Make a layout preset active and live-apply it to all running clones | 200 `{ok,applied,errors}` |
+| POST | `/api/layout/activate` | Make a layout preset active and live-apply it to the selected clone | 200 `{ok,applied,errors}` |
 | GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
 | POST | `/api/images/pull` | Pull the clone template from a registry (keeps its own `repo:tag`) | 200 `Operation` |
 | POST | `/api/images/commit` | Commit a running clone to a new image | 200 `Operation` |
@@ -517,6 +517,12 @@ which is why the comparison above is stated as a gap against an age rather than 
 Set `selected` (or clear with `null`). Returns the updated `ControlState`. The media plane
 re-targets port 1 to the newly selected clone.
 
+A clone coming on screen also gets a `ServerMsg::SetMonitors` carrying the active layout
+preset, which is where a preset activated while the operator was elsewhere reaches it. The
+clone's session holder ignores a layout equal to the one it already holds, so a clone already
+on the active preset does not move a window. Deleting or archiving the selected clone moves
+the selection on its own, and pushes the layout to the clone it lands on the same way.
+
 ### `PUT /api/board` — body `{ "columns": BoardColumn[] }`
 Replace `boardColumns` wholesale. Returns the updated `ControlState`.
 
@@ -678,19 +684,24 @@ Nothing here is fatal. A step that fails is logged, left unstamped, and picked u
 which is what the loops were for.
 
 ### `POST /api/layout/activate` — body `{ "name": string }`
-Make the named layout preset the active one and live-apply it to every running clone — no
+Make the named layout preset the active one and live-apply it to the clone on screen. No
 session restart, no app loss. Validates `name` against `config.layoutPresets` (`400` if
 unknown), persists it as `config.activeLayout`, mirrors `activeLayout` +
 `layoutPresetNames` into `ControlState` (SSE), then pushes `ServerMsg::SetMonitors` with the
-preset's monitors to every connected clone-daemon over the clone socket. Each daemon does a
+preset's monitors to the selected clone's daemon over the clone socket. That daemon does a
 make-before-break session swap (builds a fresh Mutter session with the new monitors, switches
-capture + input to it, stops the old one) — running apps never close. Returns
-`{ "ok": bool, "applied": string[], "errors": string[] }`. `ok` is currently always `true`
-(the activation itself succeeded; per-clone results are in `applied`/`errors`). `applied`/
-`errors` cover only clones whose daemon is currently connected: a daemon whose connection has
-already dropped is silently skipped (absent from both lists), since the server only pushes to
-currently-connected daemons. `errors` captures an immediate socket-send failure only (there is
-no ack).
+capture + input to it, stops the old one), so running apps never close.
+
+Every other clone keeps the layout it was last viewed with and takes the new one on the switch
+to it, through `POST /api/activate`. Rebuilding the whole fleet's Mutter sessions at once
+stalls the board for as long as the slowest clone takes, and only the visible clone's layout
+is being looked at.
+
+Returns `{ "ok": bool, "applied": string[], "errors": string[] }`. `ok` is currently always
+`true` (the activation itself succeeded; the push result is in `applied`/`errors`). Both lists
+hold at most the selected clone, and both are empty when nothing is selected or the selection
+has no connected daemon (headless, archived, still booting). `errors` captures an immediate
+socket-send failure only (there is no ack).
 
 ### `POST /api/delete` — body `{ "id": string }`
 Destroy a managed clone (stops it with `SIGRTMIN+3`, removes the container and its
@@ -949,6 +960,11 @@ posts the full list, so an omitted pool is a deletion and `[]` clears them — t
 lists are independent). `docker.subnet` is validated as an IPv4 `/16`–`/24` CIDR. One-time fields
 (`dataDir`, `cloneSocket`, `docker.subnet`) are locked once `setupComplete` latches (which
 itself is a one-way latch).
+
+An edit that changes `effectiveMonitors()`, whether it moves the active preset's geometry or
+names a different `activeLayout`, pushes `ServerMsg::SetMonitors` to the selected clone, the
+same one-clone push `POST /api/layout/activate` does. Every other clone takes the new geometry
+when the operator switches to it.
 
 ### `POST /api/config/test` (body `{ "what", "value"?, "model"? }`) → `{ ok, message }`
 Synchronously test a setting. `value` and `model` carry what the operator has typed but not saved,

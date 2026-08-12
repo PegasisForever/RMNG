@@ -260,7 +260,8 @@ export const testConfig = (what: string, value?: string, model?: string) =>
     ok: boolean;
     message: string;
   }>;
-/** Make `name` the active layout preset and live-apply it to all running clones. */
+/** Make `name` the active layout preset and live-apply it to the clone on screen. The rest of
+ * the fleet keeps its current monitors until the operator switches to it. */
 export const activateLayout = (name: string) =>
   postJson("/api/layout/activate", { name }) as Promise<{
     ok: boolean;

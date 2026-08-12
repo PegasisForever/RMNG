@@ -672,18 +672,19 @@ inherits it (there's no per-install control-server payload any more; see
 ## Day-2 operations (from the dashboard / API / `rmng` CLI)
 
 - **Clone**: `POST /api/clone` — Linear ticket / new ticket / plain, from a chosen image. The
-  new clone is always brought to `config.effective_monitors()` (the active layout preset, or
-  the built-in default when no presets exist) as soon as its clone-daemon connects — the
-  control-server pushes the active layout via `SetMonitors` on the daemon's first `Hello`, so
-  the template's baked-in `RMNG_MONITORS` boot value is corrected immediately and never
-  actually persists.
+  new clone is brought to `config.effective_monitors()` (the active layout preset, or the
+  built-in default when no presets exist) as soon as its clone-daemon registers, which
+  corrects the template's baked-in `RMNG_MONITORS` boot value before anyone opens the clone.
+  Existing clones are not touched: each keeps the layout it was last viewed with until the
+  operator switches to it.
 - **Pull a template**: `POST /api/images/pull {reference?}` — from the Images panel, any
   time (not just first-run setup).
 - **Commit a clone → image**: `POST /api/images/commit {host, name}`.
-- **Activate a layout preset** on already-running clones: `POST /api/layout/activate {name}`
-  — pushes `ServerMsg::SetMonitors` to every connected clone-daemon, which live-swaps to a
-  fresh Mutter session with the new monitors (make-before-break — no GNOME restart, no app
-  loss).
+- **Activate a layout preset** with `POST /api/layout/activate {name}`: pushes
+  `ServerMsg::SetMonitors` to the selected clone's daemon, which live-swaps to a fresh Mutter
+  session with the new monitors (make-before-break, no GNOME restart, no app loss). Every
+  other clone keeps its current monitors until the operator switches to it, so activating a
+  preset costs one session rebuild rather than one per clone.
 - **Hot-swap an account**: `POST /api/claude/swap {host, account}` (or `/api/codex/swap`) —
   writes the clone's `~/.claude/.credentials.json` / `~/.codex/auth.json` live via `docker exec`.
   No restart: the agents re-read those files per request.

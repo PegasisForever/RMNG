@@ -176,28 +176,31 @@ impl MediaHandle {
         }
     }
 
-    /// Push a live layout to **every** connected clone-daemon. Best-effort; returns a
-    /// per-clone result so the caller can report partial failures. Cheap: `Conn::send` is a
-    /// single `MSG_DONTWAIT` `sendmsg`, so one clone that has stopped reading reports a
-    /// failure for itself rather than holding up the walk.
-    pub fn set_monitors_all(
+    /// Push a live layout to one clone-daemon. Cheap: `Conn::send` is a single
+    /// `MSG_DONTWAIT` `sendmsg`, and the clone's session holder ignores a layout equal to
+    /// the one it already holds, so a repeat moves no windows.
+    pub fn set_monitors(
         &self,
+        clone: &str,
         monitors: &[wire::MonitorSpec],
-    ) -> Vec<(String, Result<(), String>)> {
-        let conns: Vec<(String, std::sync::Arc<Conn>)> =
-            self.conns.lock().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        conns
-            .into_iter()
-            .map(|(id, c)| {
-                let r = c
-                    .send(&ServerMsg::SetMonitors { monitors: monitors.to_vec() })
-                    .map_err(|e| e.to_string());
-                (id, r)
-            })
-            .collect()
+    ) -> Result<(), String> {
+        let conn = self.conns.lock().unwrap().get(clone).cloned();
+        match conn {
+            Some(c) => c
+                .send(&ServerMsg::SetMonitors { monitors: monitors.to_vec() })
+                .map_err(|e| e.to_string()),
+            None => Err(format!("clone '{clone}' not connected")),
+        }
     }
     // NB: on-demand screenshots moved into the clone-daemon's own MCP (the fleet MCP
     // proxies to it); the control-server no longer encodes screenshots itself.
+
+    /// Register a connection under `id`, as `Hello` does. Test-only: it lets a test stand in
+    /// for a connected clone-daemon and read what the server pushed to it.
+    #[cfg(test)]
+    pub(crate) fn insert_conn_for_test(&self, id: &str, conn: Arc<Conn>) {
+        self.conns.lock().unwrap().insert(id.to_string(), conn);
+    }
 
     /// True when a clone-daemon session for `id` is live — i.e. its daemon has sent a
     /// `Hello{clone_id}` (keyed by clone_id == the clone's hostname == its host id) and
@@ -713,6 +716,83 @@ pub(crate) fn configured_monitors(cfg: &wire::AppConfig) -> Vec<wire::viewer::Vi
         .collect()
 }
 
+/// Bring one clone to the active layout preset.
+///
+/// A layout change reaches the fleet one clone at a time, on the switch to it. Applying it
+/// everywhere at once rebuilds every clone's Mutter session in the same second, and the whole
+/// board stutters for as long as that takes. A clone the operator is not watching keeps the
+/// monitors it was last viewed with until they come back to it.
+///
+/// Best-effort and silent about a clone that is not connected: a headless clone runs no
+/// daemon, and a booting one gets the layout from the `Hello` push instead. Cheap to repeat,
+/// because the clone's session holder ignores a layout it already holds.
+pub(crate) fn apply_active_layout(app: &App, clone: &str) {
+    let monitors = app.config().effective_monitors();
+    if let Err(e) = app.media.set_monitors(clone, &monitors) {
+        tracing::debug!("no layout push to '{clone}': {e}");
+    }
+}
+
+/// How long a new clone gets to register before it is left on the layout it booted with.
+/// A first boot is slow (headless GNOME, the user units, the session holder's own startup),
+/// and the create op returns before all of that finishes.
+const NEW_CLONE_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Bring a freshly created clone to the active layout preset as soon as its daemon registers.
+///
+/// A clone nobody has watched keeps the layout it boots with, and a brand-new one boots on the
+/// single monitor baked into the template image. Nobody chose that layout, so the create path
+/// calls this and the clone comes up on the preset the fleet is on, before anyone opens it.
+/// The clone has no windows yet, so the swap costs nothing.
+///
+/// Polls rather than hooking `Hello`, because the daemon may register minutes after the create
+/// op reports ready, or (a dead clone) never.
+pub(crate) fn apply_active_layout_when_ready(app: App, clone: String) {
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + NEW_CLONE_WAIT;
+        while tokio::time::Instant::now() < deadline {
+            if app.media.is_connected(&clone) {
+                apply_active_layout(&app, &clone);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        tracing::warn!(
+            "clone '{clone}' never registered; it keeps the layout it booted with until it is \
+             selected"
+        );
+    });
+}
+
+/// A connected clone-daemon for tests: the client fd, and the server side of the accept.
+///
+/// A `Conn` only exists on the far side of an accept, so a test that needs one binds a real
+/// socket. `tag` keeps concurrent tests off each other's path. The client fd is what the test
+/// reads to see what the server pushed.
+#[cfg(test)]
+pub(crate) fn accepted_conn(tag: &str) -> (OwnedFd, Arc<Conn>) {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};
+    let path = std::env::temp_dir().join(format!("rmng-conn-{}-{tag}.sock", std::process::id()));
+    let path = path.to_str().unwrap().to_string();
+    let listener = Listener::bind(&path).unwrap();
+    let fd = socket(AddressFamily::Unix, SockType::SeqPacket, SockFlag::empty(), None).unwrap();
+    connect(fd.as_raw_fd(), &UnixAddr::new(path.as_str()).unwrap()).unwrap();
+    let conn = Arc::new(listener.accept().unwrap());
+    let _ = std::fs::remove_file(&path);
+    (fd, conn)
+}
+
+/// One datagram if the socket already holds one, `None` if it is empty. Test-only.
+#[cfg(test)]
+pub(crate) fn recv_now(fd: &OwnedFd) -> Option<Vec<u8>> {
+    use nix::sys::socket::{MsgFlags, recv};
+    let mut buf = [0u8; 8192];
+    match recv(fd.as_raw_fd(), &mut buf, MsgFlags::MSG_DONTWAIT) {
+        Ok(n) => Some(buf[..n].to_vec()),
+        Err(_) => None,
+    }
+}
+
 /// The `ViewSpec` for a selection: a `Desktop` view of the configured monitors for a headed
 /// clone, an empty view when nothing is selected. Headless clones are **not** described here —
 /// termplane owns their `Terminal` `ViewSpec` (it carries the live tmux session list).
@@ -884,11 +964,16 @@ fn serve_clone(
             Ok((DaemonMsg::Hello(h), _)) => {
                 tracing::info!("clone-daemon '{}' connected", h.clone_id);
                 handle.conns.lock().unwrap().insert(h.clone_id.clone(), conn.clone());
-                // Correct a clone that booted with a stale baked RMNG_MONITORS: push the
-                // current active layout so it live-reconfigures to match the fleet.
-                let mons = app.config().effective_monitors();
-                if let Err(e) = conn.send(&ServerMsg::SetMonitors { monitors: mons }) {
-                    tracing::warn!("SetMonitors on Hello for '{}' failed: {e}", h.clone_id);
+                // Correct a stale layout only on the clone that is on screen right now: one
+                // booting with an old baked `RMNG_MONITORS`, or one whose daemon just
+                // restarted under the operator. Every other clone catches up when the
+                // operator switches to it (see `apply_active_layout`), so a fleet-wide
+                // restart does not rebuild every Mutter session at once.
+                if app.store.selected().as_deref() == Some(h.clone_id.as_str()) {
+                    let mons = app.config().effective_monitors();
+                    if let Err(e) = conn.send(&ServerMsg::SetMonitors { monitors: mons }) {
+                        tracing::warn!("SetMonitors on Hello for '{}' failed: {e}", h.clone_id);
+                    }
                 }
                 clone_id = Some(h.clone_id);
             }
@@ -1203,6 +1288,61 @@ mod tests {
             socket(AddressFamily::Unix, SockType::SeqPacket, SockFlag::empty(), None).unwrap();
         connect(fd.as_raw_fd(), &UnixAddr::new(path).unwrap()).unwrap();
         fd
+    }
+
+    /// A layout push reaches the clone it names and no other. This is the whole point of the
+    /// lazy layout: activating a preset used to rebuild every clone's Mutter session in the
+    /// same second, which stalls the board. Now only the clone on screen swaps, and the rest
+    /// take the layout when the operator switches to them.
+    #[test]
+    fn a_layout_push_reaches_only_the_named_clone() {
+        let (client_a, conn_a) = accepted_conn("layout-a");
+        let (client_b, conn_b) = accepted_conn("layout-b");
+        let handle = MediaHandle::default();
+        handle.insert_conn_for_test("a", conn_a);
+        handle.insert_conn_for_test("b", conn_b);
+
+        let mons =
+            vec![wire::MonitorSpec { width: 1280, height: 720, x: 0, y: 0, primary: true }];
+        handle.set_monitors("a", &mons).unwrap();
+        assert!(handle.set_monitors("c", &mons).is_err(), "no connection is not a push");
+
+        let got = recv_now(&client_a).expect("the named clone got the layout");
+        match serde_json::from_slice::<ServerMsg>(&got).unwrap() {
+            ServerMsg::SetMonitors { monitors } => assert_eq!(monitors, mons),
+            other => panic!("expected SetMonitors, got {other:?}"),
+        }
+        assert!(recv_now(&client_b).is_none(), "the other clone keeps its own layout");
+    }
+
+    /// A clone created while the operator watches another one still comes up on the active
+    /// preset. Nothing pushes to it before its daemon registers, and the push lands once it
+    /// does, without anyone selecting it.
+    #[tokio::test]
+    async fn a_new_clone_takes_the_active_layout_once_its_daemon_registers() {
+        let app = App::test_app();
+        let (client, conn) = accepted_conn("new-clone");
+        apply_active_layout_when_ready(app.clone(), "fresh".into());
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(recv_now(&client).is_none(), "pushed to a clone that had not registered");
+
+        app.media.insert_conn_for_test("fresh", conn);
+        let mut got = None;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            got = recv_now(&client);
+            if got.is_some() {
+                break;
+            }
+        }
+        let got = got.expect("the registered clone got the active layout");
+        match serde_json::from_slice::<ServerMsg>(&got).unwrap() {
+            ServerMsg::SetMonitors { monitors } => {
+                assert_eq!(monitors, app.config().effective_monitors());
+            }
+            other => panic!("expected SetMonitors, got {other:?}"),
+        }
     }
 
     /// The disconnect-teardown guard: a LATE old-thread teardown (its `recv()` erroring

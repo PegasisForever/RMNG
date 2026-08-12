@@ -98,8 +98,12 @@ continuous feed), `frame_request {monitor_id}` (one-shot, screenshot path), `ack
 `input(InputMsg)`, the three `clipboard_*` messages, and `set_monitors {monitors:
 MonitorSpec[]}` — apply a layout **live**: the daemon does a make-before-break session swap
 (rebuilds a fresh Mutter session with the desired monitors, switches capture + input to it,
-then stops the old one — running apps never close). Sent once on the daemon's `Hello` (to
-correct a stale baked boot layout) and again on every `POST /api/layout/activate`.
+then stops the old one, so running apps never close). Sent to the selected clone: on its
+`Hello` (to correct a stale baked boot layout), on `POST /api/layout/activate`, on a
+`PUT /api/config` that moves the active preset's geometry, and on the
+`POST /api/activate` that brings it on screen. Also sent once to a brand-new clone when its
+daemon first registers, so it starts on the active preset rather than the template's baked
+single monitor. Every other clone keeps the layout it was last viewed with.
 
 `FrameMsg`: `monitor_id`, `fourcc` (DRM, e.g. `0x34325241` "AR24"), `modifier` (DRM format
 modifier), `width`, `height`, `planes: [{offset, stride}]`, `seq` (echoed in `ack`).
@@ -348,7 +352,8 @@ setting).
 
 **clone-daemon:** `RMNG_SOCKET` (media socket; **absent → capture self-test mode**),
 `RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (boot-default layout CSV, below —
-corrected to the config's active layout preset by the server's `SetMonitors` on `Hello`),
+corrected to the config's active layout preset by the server's `SetMonitors` on a new clone's
+first registration, and thereafter whenever the clone is the selected one),
 `RMNG_DAEMON_MCP_PORT` (`9004`), `RMNG_DESKTOP_HEIGHT` (`1080`; height of the MCP's virtual
 coordinate/screenshot space — `0` serves everything at native res; see [MCP.md](MCP.md)),
 `RMNG_EMBEDDED_CURSOR` (composite cursor into frames
@@ -380,11 +385,11 @@ behalf. See the holder socket protocol above.
 primary; first is primary if none marked). E.g. `1920x1080+0+0*,1280x1024+1920+0`. Empty →
 one 1920×1080 primary. The unique `WxH` sizes also seed `MUTTER_DEBUG_DUMMY_MODE_SPECS`. This
 env var is now only a **boot default** baked into the clone template, read by the session
-holder and only when `~/.rmng/monitors` has no remembered layout. As soon as the daemon's
-first `Hello` reaches the server,
-the server replies with `ServerMsg::SetMonitors` carrying `config.effective_monitors()` (the
-active layout preset), live-correcting a stale baked layout without a restart. Every
-subsequent `POST /api/layout/activate` pushes a fresh `SetMonitors` the same way.
+holder and only when `~/.rmng/monitors` has no remembered layout. The server corrects a stale
+layout with `ServerMsg::SetMonitors` carrying `config.effective_monitors()` (the active layout
+preset), live and without a restart. That happens once for a brand-new clone, when its daemon
+first registers, and after that only while the clone is the one on screen: its `Hello`, a
+`POST /api/layout/activate`, and the `POST /api/activate` that selects it.
 
 ---
 

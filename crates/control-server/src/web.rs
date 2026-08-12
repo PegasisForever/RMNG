@@ -310,7 +310,7 @@ async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<
     if let Some(id) = req.id.as_deref() {
         app.views.mark(id, now);
     }
-    Json(app.store.mutate(|s| {
+    let state = app.store.mutate(|s| {
         // Selecting a clone acknowledges its prior working→not-working transition.
         if let Some(id) = req.id.as_deref() {
             if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
@@ -318,7 +318,17 @@ async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<
             }
         }
         s.selected = req.id;
-    }))
+    });
+    // The clone coming on screen takes the active layout now. It kept the monitors it was
+    // last viewed with while the operator was elsewhere, so this is where a layout preset
+    // activated in the meantime reaches it. Same-layout clones are unaffected: their session
+    // holder drops a layout equal to the one it holds, and no window moves.
+    if state.selected != previously_selected {
+        if let Some(id) = state.selected.as_deref() {
+            crate::mediaplane::apply_active_layout(&app, id);
+        }
+    }
+    Json(state)
 }
 
 #[derive(Deserialize)]
@@ -1540,10 +1550,14 @@ struct LayoutActivateReq {
     name: String,
 }
 
-/// `POST /api/layout/activate` — make `name` the active layout preset and live-apply it
-/// to every running clone (no session restart). Persists config, mirrors the active
-/// name into ControlState (so all sidebars update over SSE), then pushes `SetMonitors`
-/// to each daemon. Best-effort per clone; partial failures are reported.
+/// `POST /api/layout/activate`: make `name` the active layout preset and live-apply it to
+/// the clone on screen (no session restart). Persists config, mirrors the active name into
+/// ControlState (so all sidebars update over SSE), then pushes `SetMonitors` to the selected
+/// clone's daemon. Best-effort; a failure is reported.
+///
+/// The rest of the fleet keeps the monitors it was last viewed with and takes the new layout
+/// on the switch to it, in `activate`. Pushing to everything at once rebuilds every clone's
+/// Mutter session in the same second, which stalls the whole board.
 async fn layout_activate(
     State(app): State<App>,
     Json(req): Json<LayoutActivateReq>,
@@ -1563,15 +1577,18 @@ async fn layout_activate(
     // 2. Mirror into ControlState for the sidebar (SSE broadcast).
     mirror_layout_to_state(&app);
 
-    // 3. Live-apply to all running clones.
+    // 3. Live-apply to the clone the operator is watching, and to that one only.
     let monitors = cfg.effective_monitors();
-    let results = app.media.set_monitors_all(&monitors);
     let mut applied = Vec::new();
     let mut errors = Vec::new();
-    for (id, r) in results {
-        match r {
-            Ok(()) => applied.push(id),
-            Err(e) => errors.push(format!("{id}: {e}")),
+    if let Some(id) = app.store.selected() {
+        // A selection with no daemon behind it (headless, archived, still booting) is not a
+        // failure of this request: it has no monitors to change.
+        if app.media.is_connected(&id) {
+            match app.media.set_monitors(&id, &monitors) {
+                Ok(()) => applied.push(id),
+                Err(e) => errors.push(format!("{id}: {e}")),
+            }
         }
     }
     Ok(Json(
@@ -2184,6 +2201,15 @@ async fn config_put(
     }
     // Keep the sidebar's live layout list/active marker in sync with the just-saved presets.
     mirror_layout_to_state(&app);
+    // Editing the active preset's geometry is the same kind of change as activating another
+    // preset, so it lands the same way: on the clone the operator is watching, now, and on
+    // every other clone when they switch to it. Compared rather than assumed, because most
+    // config writes touch nothing to do with monitors.
+    if old.effective_monitors() != merged.effective_monitors() {
+        if let Some(id) = app.store.selected() {
+            crate::mediaplane::apply_active_layout(&app, &id);
+        }
+    }
     let resp = ConfigPutResponse {
         restart_required,
         config: merged.redacted(),
@@ -2983,6 +3009,43 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("already being pulled"), "msg: {}", err.1);
+    }
+
+    // --- POST /api/activate (selection, and the layout that follows it) ---
+
+    /// Selecting a clone is what brings it to the active layout. A preset activated while the
+    /// operator was elsewhere never reached this clone, precisely so the fleet would not
+    /// rebuild every Mutter session at once, so the switch is the only place left to apply it.
+    #[tokio::test]
+    async fn selecting_a_clone_pushes_the_active_layout_to_it() {
+        let app = test_app();
+        let (client, conn) = crate::mediaplane::accepted_conn("web-activate");
+        app.media.insert_conn_for_test("w2", conn);
+        app.store.mutate(|s| {
+            for id in ["w1", "w2"] {
+                s.hosts.push(wire::RmngClone {
+                    id: id.into(),
+                    host: id.into(),
+                    managed: true,
+                    ..Default::default()
+                });
+            }
+            s.selected = Some("w1".into());
+        });
+
+        let _ = activate(State(app.clone()), Json(ActivateReq { id: Some("w2".into()) })).await;
+
+        let got = crate::mediaplane::recv_now(&client).expect("the clone got a layout push");
+        match serde_json::from_slice::<wire::socket::ServerMsg>(&got).unwrap() {
+            wire::socket::ServerMsg::SetMonitors { monitors } => {
+                assert_eq!(monitors, app.config().effective_monitors());
+            }
+            other => panic!("expected SetMonitors, got {other:?}"),
+        }
+
+        // Re-selecting the same clone is not a switch. Nothing changed, so nothing is pushed.
+        let _ = activate(State(app.clone()), Json(ActivateReq { id: Some("w2".into()) })).await;
+        assert!(crate::mediaplane::recv_now(&client).is_none(), "a no-op select pushed a layout");
     }
 
     // --- GET /api/state (single-shot snapshot for the rmng CLI) ---

@@ -404,10 +404,16 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // clone is registered + the op marked `done` at the very end, below, once the clone is
     // genuinely streamable.
     //
+    // A new clone boots on the template's baked `RMNG_MONITORS`, a single monitor nobody chose.
+    // Bring it to the active layout preset as soon as its daemon registers, which is usually
+    // already true here. Only new clones get this: every existing one keeps the layout it was
+    // last viewed with until the operator switches to it. Headless clones run no session.
+    if !spec.headless {
+        crate::mediaplane::apply_active_layout_when_ready(app.clone(), spec.new_hostname.clone());
+    }
+
     // (`progress` at the top of this fn was moved into `clone_container`; make a fresh one for
-    // the remaining `accounts` step. New clones get their monitor layout from the daemon's
-    // `Hello` → server `SetMonitors` live push (no restart-based apply here); the baked
-    // `RMNG_MONITORS` default just covers the brief pre-connect window.)
+    // the remaining `accounts` step.)
     let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
 
     progress("accounts", "assigning agent accounts");
@@ -958,7 +964,8 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
     app.claude.forget_pushed(&host_id);
     app.codex.forget_pushed(&host_id);
 
-    app.store.mutate(|s| {
+    let previously_selected = app.store.selected();
+    let state = app.store.mutate(|s| {
         s.hosts.retain(|h| h.id != host_id);
         if s.selected.as_deref() == Some(host_id.as_str()) {
             s.selected = s.hosts.first().map(|h| h.id.clone());
@@ -975,6 +982,14 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
             op.finished_at = Some(now_ms());
         }
     });
+    // Deleting the watched clone moves the operator onto another one, which has been holding
+    // whatever layout it was last viewed with. Bring it to the active preset, exactly as a
+    // deliberate switch would.
+    if state.selected != previously_selected {
+        if let Some(id) = state.selected.as_deref() {
+            crate::mediaplane::apply_active_layout(&app, id);
+        }
+    }
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
     let dd = app.config().data_dir;
     crate::files::delete_notes(&dd, &host_id);
@@ -1035,7 +1050,8 @@ async fn run_archive(app: App, op_id: String, host_id: String) {
         return fail_op(&app, &op_id, e.to_string());
     }
 
-    app.store.mutate(|s| {
+    let previously_selected = app.store.selected();
+    let state = app.store.mutate(|s| {
         if let Some(host) = s.hosts.iter_mut().find(|h| h.id == host_id) {
             host.archived = true;
             host.monitor_state = None;
@@ -1061,6 +1077,13 @@ async fn run_archive(app: App, op_id: String, host_id: String) {
             op.finished_at = Some(now_ms());
         }
     });
+    // The clone the operator lands on has been holding its own layout since it was last
+    // viewed. Bring it to the active preset, as a deliberate switch does.
+    if state.selected != previously_selected {
+        if let Some(id) = state.selected.as_deref() {
+            crate::mediaplane::apply_active_layout(&app, id);
+        }
+    }
     drop(progress);
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
 }
