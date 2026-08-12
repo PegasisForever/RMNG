@@ -157,6 +157,19 @@ pub struct ClipboardData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     pub clone_id: String,
+    /// True when this daemon had to start the session holder, so the desktop behind it was
+    /// built seconds ago and holds no window anyone placed.
+    ///
+    /// A layout otherwise reaches a clone only while the operator is watching it, which keeps
+    /// a preset change from rebuilding every clone's session at once. That rule protects
+    /// window positions, and a session this new has none: the holder came up on whatever it
+    /// remembered, or on the built-in single monitor when it remembered nothing. So the server
+    /// pushes the active preset here instead of leaving the clone on a layout nobody chose.
+    ///
+    /// Defaults to false so a daemon older than this field reads as "the holder was already
+    /// running", which is the case that must not trigger a push.
+    #[serde(default)]
+    pub fresh_session: bool,
 }
 
 /// Top-level framed message daemon → server.
@@ -393,6 +406,18 @@ pub(crate) mod serde_bytes_b64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon older than `fresh_session` sends `Hello` without it, and that has to read as
+    /// "the holder was already running". The other way round would push a layout at every
+    /// clone whose daemon reconnects, which is the fleet-wide swap the lazy layout removed.
+    #[test]
+    fn a_hello_without_the_fresh_flag_reads_as_an_existing_session() {
+        let old: Hello = serde_json::from_str(r#"{"clone_id":"w1"}"#).unwrap();
+        assert_eq!(old, Hello { clone_id: "w1".into(), fresh_session: false });
+        let new = Hello { clone_id: "w1".into(), fresh_session: true };
+        let back: Hello = serde_json::from_slice(&serde_json::to_vec(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
+    }
 
     #[test]
     fn a_message_that_fits_is_sent_exactly_as_it_was() {

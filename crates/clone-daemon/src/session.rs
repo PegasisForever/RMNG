@@ -31,6 +31,9 @@ pub(crate) struct Holder {
     /// re-queued so the control loop sees the monitor set the same way it sees every later
     /// generation.
     inbox: std::sync::Mutex<Option<UnboundedReceiver<FromHolder>>>,
+    /// Whether this daemon started the holder rather than finding one already up. See
+    /// [`wire::socket::Hello::fresh_session`].
+    fresh: bool,
 }
 
 impl Holder {
@@ -42,10 +45,12 @@ impl Holder {
     /// holder that was already running, and the clone's windows never move.
     pub async fn connect() -> Result<Self> {
         let path = wire::holder::socket_path();
+        let mut fresh = false;
         let conn = match dial(&path).await {
             Some(c) => c,
             None => {
                 tracing::warn!("no session holder at {path}; starting the unit");
+                fresh = true;
                 start_unit("start").await;
                 dial(&path)
                     .await
@@ -53,7 +58,7 @@ impl Holder {
             }
         };
 
-        let holder = Self::handshake(conn).await?;
+        let holder = Self::handshake(conn).await?.map(|h| h.with_fresh(fresh));
         let Some(holder) = holder else {
             tracing::warn!(
                 "the session holder speaks a different protocol version; restarting it. \
@@ -63,11 +68,25 @@ impl Holder {
             let conn = dial(&path)
                 .await
                 .with_context(|| format!("no session holder at {path} after restarting it"))?;
-            return Self::handshake(conn)
+            // A restarted holder is as new as one this daemon started: its session is seconds
+            // old and the windows it inherited have already moved.
+            return Ok(Self::handshake(conn)
                 .await?
-                .context("the restarted session holder still speaks a different protocol");
+                .context("the restarted session holder still speaks a different protocol")?
+                .with_fresh(true));
         };
         Ok(holder)
+    }
+
+    fn with_fresh(mut self, fresh: bool) -> Self {
+        self.fresh = fresh;
+        self
+    }
+
+    /// Whether this daemon brought the holder up, rather than joining one that was already
+    /// holding a desktop. See [`wire::socket::Hello::fresh_session`].
+    pub fn fresh_session(&self) -> bool {
+        self.fresh
     }
 
     /// Say hello and read the answer. `Ok(None)` means the versions differ.
@@ -123,7 +142,7 @@ impl Holder {
                 }
             }
         });
-        Ok(Some(Self { conn, inbox: std::sync::Mutex::new(Some(rx2)) }))
+        Ok(Some(Self { conn, inbox: std::sync::Mutex::new(Some(rx2)), fresh: false }))
     }
 
     /// Take the stream of holder messages. Called once, by the control loop.

@@ -1086,10 +1086,26 @@ systemctl restart ssh
 /// and finding no holder. That ordering matters on the release that introduces the holder, where
 /// starting it here would raise a second set of monitors alongside the outgoing daemon's and give
 /// `apply_layout` two identical connectors to choose between.
-fn restart_clone_daemon_script() -> &'static str {
-    r#"set -e
-run_user() { runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 "$@"; }
+///
+/// The seed above the restart is for the clone that has never run a holder. The shipped holder
+/// unit carries no layout on purpose (one unit ships to every clone, and a baked layout would be
+/// wrong the moment the operator changes presets), so a holder with nothing remembered comes up
+/// on the built-in single 1920x1080. On a fleet upgrading onto the holder that is every clone at
+/// once, each one landing on a desktop the operator never chose. Writing the active preset into
+/// the holder's own memory first makes its first session the right one. Only when the file is
+/// absent: after that the holder owns it, and overwriting would drag a clone back off the layout
+/// it was last viewed with.
+fn restart_clone_daemon_script(monitors: &str) -> String {
+    format!(
+        r#"set -e
+run_user() {{ runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 "$@"; }}
 if run_user systemctl --user cat rmng-clone-daemon.service >/dev/null 2>&1; then
+  if [ ! -e /home/rmng/.rmng/monitors ]; then
+    install -d -o rmng -g rmng /home/rmng/.rmng
+    printf '%s\n' '{monitors}' > /home/rmng/.rmng/monitors
+    chown rmng:rmng /home/rmng/.rmng/monitors
+    echo "seeded the session holder's layout: {monitors}"
+  fi
   run_user systemctl --user daemon-reload
   run_user systemctl --user enable rmng-session-holder.service >/dev/null 2>&1 || true
   run_user systemctl --user restart rmng-clone-daemon.service
@@ -1097,6 +1113,19 @@ else
   echo "rmng-clone-daemon.service absent (headless clone) — skipping restart"
 fi
 "#
+    )
+}
+
+/// One monitor layout in the `WxH+X+Y[*]` form the session holder reads, the same form
+/// `RMNG_MONITORS` uses. A trailing `*` marks the primary.
+fn monitors_csv(monitors: &[wire::MonitorSpec]) -> String {
+    monitors
+        .iter()
+        .map(|m| {
+            format!("{}x{}+{}+{}{}", m.width, m.height, m.x, m.y, if m.primary { "*" } else { "" })
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Write the systemd drop-in that clears the retired inference vars from the agent-wrapper's
@@ -1694,7 +1723,7 @@ async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Re
     exec_ok(
         app,
         clone_id,
-        restart_clone_daemon_script(),
+        &restart_clone_daemon_script(&monitors_csv(&app.config().effective_monitors())),
         "restart rmng-clone-daemon",
     )
     .await?;
@@ -2781,7 +2810,7 @@ mod tests {
     /// enables it and leaves starting it to the daemon.
     #[test]
     fn the_payload_restart_enables_the_holder_without_touching_a_live_one() {
-        let script = restart_clone_daemon_script();
+        let script = restart_clone_daemon_script("1920x1080+0+0*");
         assert!(script.contains("systemctl --user enable rmng-session-holder.service"));
         assert!(
             !script.contains("restart rmng-session-holder"),
@@ -2795,6 +2824,38 @@ mod tests {
         // delete it, and an unconditional restart would abort the whole reconcile there).
         assert!(script.contains("systemctl --user restart rmng-clone-daemon.service"));
         assert!(script.contains("cat rmng-clone-daemon.service"));
+    }
+
+    /// A clone that has never run a holder gets the active preset written into the holder's
+    /// memory before the daemon starts it. Without it the first session comes up on the
+    /// built-in single 1920x1080, which is how a whole fleet once landed on a layout nobody
+    /// chose. A clone that already remembers a layout must be left alone: that memory is the
+    /// layout it was last viewed with.
+    #[test]
+    fn the_payload_restart_seeds_a_layout_only_when_the_holder_has_none() {
+        let script = restart_clone_daemon_script("2560x1440+2560+0*,2560x1440+0+0");
+        assert!(
+            script.contains("[ ! -e /home/rmng/.rmng/monitors ]"),
+            "the seed must be guarded on the file being absent:\n{script}"
+        );
+        assert!(script.contains("'2560x1440+2560+0*,2560x1440+0+0' > /home/rmng/.rmng/monitors"));
+        assert!(script.contains("chown rmng:rmng /home/rmng/.rmng/monitors"));
+        // Before the restart, because the restart is what makes the daemon start the holder.
+        let seed = script.find(".rmng/monitors").expect("seeds a layout");
+        let restart = script.find("restart rmng-clone-daemon").expect("restarts the daemon");
+        assert!(seed < restart, "the seed has to land before the daemon starts the holder");
+    }
+
+    /// The seed is written in the same `WxH+X+Y[*]` form the holder's own layout memory uses,
+    /// so one parser reads both.
+    #[test]
+    fn a_layout_is_written_the_way_the_holder_reads_it() {
+        let mons = vec![
+            wire::MonitorSpec { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
+            wire::MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: false },
+        ];
+        assert_eq!(monitors_csv(&mons), "2560x1440+2560+0*,2560x1440+0+0");
+        assert_eq!(monitors_csv(&[]), "");
     }
 
     /// A headless clone has no Mutter for the holder to hold, and its unit would restart-loop

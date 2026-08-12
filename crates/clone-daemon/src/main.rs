@@ -217,6 +217,7 @@ async fn run_shipping(
     transport.send(
         &DaemonMsg::Hello(wire::socket::Hello {
             clone_id: clone_id.clone(),
+            fresh_session: holder.fresh_session(),
         }),
         &[],
     )?;

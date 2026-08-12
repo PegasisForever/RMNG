@@ -733,6 +733,21 @@ pub(crate) fn apply_active_layout(app: &App, clone: &str) {
     }
 }
 
+/// Whether a daemon's `Hello` should be answered with the active layout.
+///
+/// Two cases, and the second is the one that cost a fleet its monitors. A clone on screen has
+/// to follow the active preset. A clone whose session holder this daemon just started has a
+/// desktop seconds old, built on whatever the holder remembered, or on the built-in single
+/// monitor when it remembered nothing. Nobody chose that layout and no window on it was
+/// placed by hand, so it takes the active preset too.
+///
+/// Everything else is left alone. A daemon that restarted under a holder that kept running
+/// still has the operator's windows where they left them, and that is exactly what the lazy
+/// layout protects.
+fn push_layout_on_hello(selected: Option<&str>, clone_id: &str, fresh_session: bool) -> bool {
+    fresh_session || selected == Some(clone_id)
+}
+
 /// How long a new clone gets to register before it is left on the layout it booted with.
 /// A first boot is slow (headless GNOME, the user units, the session holder's own startup),
 /// and the create op returns before all of that finishes.
@@ -964,12 +979,12 @@ fn serve_clone(
             Ok((DaemonMsg::Hello(h), _)) => {
                 tracing::info!("clone-daemon '{}' connected", h.clone_id);
                 handle.conns.lock().unwrap().insert(h.clone_id.clone(), conn.clone());
-                // Correct a stale layout only on the clone that is on screen right now: one
-                // booting with an old baked `RMNG_MONITORS`, or one whose daemon just
-                // restarted under the operator. Every other clone catches up when the
-                // operator switches to it (see `apply_active_layout`), so a fleet-wide
+                // Correct a stale layout on the clone that is on screen right now, and on one
+                // whose session holder just came up. Every other clone catches up when the
+                // operator switches to it (see `apply_active_layout`), so a fleet-wide daemon
                 // restart does not rebuild every Mutter session at once.
-                if app.store.selected().as_deref() == Some(h.clone_id.as_str()) {
+                let selected = app.store.selected();
+                if push_layout_on_hello(selected.as_deref(), &h.clone_id, h.fresh_session) {
                     let mons = app.config().effective_monitors();
                     if let Err(e) = conn.send(&ServerMsg::SetMonitors { monitors: mons }) {
                         tracing::warn!("SetMonitors on Hello for '{}' failed: {e}", h.clone_id);
@@ -1313,6 +1328,23 @@ mod tests {
             other => panic!("expected SetMonitors, got {other:?}"),
         }
         assert!(recv_now(&client_b).is_none(), "the other clone keeps its own layout");
+    }
+
+    /// The three `Hello` cases, and why the middle one exists: a fleet upgrading onto the
+    /// session holder started one per clone, each holder came up on the built-in single
+    /// monitor because it remembered nothing, and with only the selected clone being pushed to,
+    /// every other clone stayed on a layout nobody chose.
+    #[test]
+    fn a_hello_takes_a_layout_when_it_is_watched_or_its_session_is_new() {
+        // Watched: follows the active preset, as every other push does.
+        assert!(push_layout_on_hello(Some("a"), "a", false));
+        // Not watched, but this daemon just started the holder: the desktop behind it is
+        // seconds old, so there is no window position to protect.
+        assert!(push_layout_on_hello(Some("b"), "a", true));
+        assert!(push_layout_on_hello(None, "a", true));
+        // Not watched, holder still holding: the operator's windows are where they left them.
+        assert!(!push_layout_on_hello(Some("b"), "a", false));
+        assert!(!push_layout_on_hello(None, "a", false));
     }
 
     /// A clone created while the operator watches another one still comes up on the active

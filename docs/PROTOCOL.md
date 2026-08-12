@@ -80,13 +80,18 @@ the shared **`rmng-sock` named volume**, mounted at the same path `/srv/rmng-soc
 control-server **and** every clone (a named volume, not a bind, so siblings can share it);
 `chmod 0777` so cross-uid clones connect.
 
-**Handshake:** the daemon's first message is `DaemonMsg::Hello { clone_id }`.
+**Handshake:** the daemon's first message is `DaemonMsg::Hello { clone_id, fresh_session }`.
+`fresh_session` is true when this daemon had to start the session holder, so the desktop
+behind it is seconds old and holds no window anyone placed. The server answers those with the
+active layout preset even when the clone is not the selected one, because a holder that
+remembered nothing comes up on the built-in single 1920x1080. The field defaults to false, so
+a daemon older than it reads as "the holder was already running" and is left alone.
 
 `DaemonMsg` (daemon → server), serde tag `t`:
 
 | Variant | Payload | Meaning |
 |---|---|---|
-| `hello` | `{clone_id}` | register the clone |
+| `hello` | `{clone_id, fresh_session}` | register the clone; `fresh_session` asks for the active layout |
 | `frame` | `FrameMsg` | one captured monitor frame; dmabuf fds attached via SCM_RIGHTS |
 | `cursor` | `CursorMeta` | cursor position (+shape on change, +`warp` if MCP-driven) |
 | `layout` | `{monitors: MonitorPlacement[]}` | the actual applied monitor layout |
@@ -99,11 +104,10 @@ continuous feed), `frame_request {monitor_id}` (one-shot, screenshot path), `ack
 MonitorSpec[]}` — apply a layout **live**: the daemon does a make-before-break session swap
 (rebuilds a fresh Mutter session with the desired monitors, switches capture + input to it,
 then stops the old one, so running apps never close). Sent to the selected clone: on its
-`Hello` (to correct a stale baked boot layout), on `POST /api/layout/activate`, on a
-`PUT /api/config` that moves the active preset's geometry, and on the
-`POST /api/activate` that brings it on screen. Also sent once to a brand-new clone when its
-daemon first registers, so it starts on the active preset rather than the template's baked
-single monitor. Every other clone keeps the layout it was last viewed with.
+`Hello`, on `POST /api/layout/activate`, on a `PUT /api/config` that moves the active preset's
+geometry, and on the `POST /api/activate` that brings it on screen. Sent to any clone, watched
+or not, on a `Hello` that carries `fresh_session`, and once to a brand-new clone when its
+daemon first registers. Every other clone keeps the layout it was last viewed with.
 
 `FrameMsg`: `monitor_id`, `fourcc` (DRM, e.g. `0x34325241` "AR24"), `modifier` (DRM format
 modifier), `width`, `height`, `planes: [{offset, stride}]`, `seq` (echoed in `ack`).
@@ -385,11 +389,16 @@ behalf. See the holder socket protocol above.
 primary; first is primary if none marked). E.g. `1920x1080+0+0*,1280x1024+1920+0`. Empty →
 one 1920×1080 primary. The unique `WxH` sizes also seed `MUTTER_DEBUG_DUMMY_MODE_SPECS`. This
 env var is now only a **boot default** baked into the clone template, read by the session
-holder and only when `~/.rmng/monitors` has no remembered layout. The server corrects a stale
-layout with `ServerMsg::SetMonitors` carrying `config.effective_monitors()` (the active layout
-preset), live and without a restart. That happens once for a brand-new clone, when its daemon
-first registers, and after that only while the clone is the one on screen: its `Hello`, a
-`POST /api/layout/activate`, and the `POST /api/activate` that selects it.
+holder and only when `~/.rmng/monitors` has no remembered layout. The shipped holder unit
+carries no layout of its own, one unit going to every clone, so a payload push writes the
+active preset into `~/.rmng/monitors` when the file is absent. That is what keeps a clone
+upgrading onto the holder from building its first session on the built-in single monitor.
+
+The server corrects a stale layout with `ServerMsg::SetMonitors` carrying
+`config.effective_monitors()` (the active layout preset), live and without a restart. That
+happens once for a brand-new clone when its daemon first registers, on any `Hello` that
+reports a freshly started holder, and after that only while the clone is the one on screen:
+its `Hello`, a `POST /api/layout/activate`, and the `POST /api/activate` that selects it.
 
 ---
 
