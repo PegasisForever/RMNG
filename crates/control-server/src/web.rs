@@ -668,6 +668,13 @@ fn merge_env(base: &mut Vec<String>, overrides: &[String]) {
 /// present either way. Returns `KEY=VAL` entries, or empty (with a debug log) when the user manager
 /// isn't reachable yet — a still-booting clone — in which case the exec simply runs without the
 /// session env.
+///
+/// Whatever the manager reports, the result always ends with
+/// [`crate::clone_reconcile::retired_env_neutralizers`]. A clone built from a proxy-era image
+/// carries the dead `/cc` endpoint in its container `Config.Env`, a `docker exec` inherits that, and
+/// `show-environment` cannot override it because the manager no longer lists the key at all. An
+/// explicit empty assignment does override it, so an agent started through `rmng exec` or through a
+/// `termplane` terminal reaches Anthropic directly.
 pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String> {
     // `show-environment` talks to the per-user bus, which needs XDG_RUNTIME_DIR; the agent user's
     // runtime dir is the fixed `/run/user/<uid>`.
@@ -677,7 +684,7 @@ pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String
         "show-environment".to_string(),
     ];
     let runtime = format!("XDG_RUNTIME_DIR=/run/user/{DESKTOP_UID}");
-    match app
+    let mut env = match app
         .docker
         .exec_capture(clone_id, &cmd, DESKTOP_UID, None, &[runtime], None)
         .await
@@ -696,7 +703,9 @@ pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String
             tracing::debug!(clone = clone_id, "show-environment exec failed: {e}");
             Vec::new()
         }
-    }
+    };
+    merge_env(&mut env, &crate::clone_reconcile::retired_env_neutralizers());
+    env
 }
 
 /// `POST /api/hosts/:id/exec` — run a single non-interactive command inside the clone via

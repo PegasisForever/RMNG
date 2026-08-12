@@ -380,12 +380,34 @@ pub(crate) fn claude_model_env_var() -> wire::EnvVar {
 ///
 /// `RMNG_PROXY_KEY` is deliberately NOT here: it outlived the proxy as the clone's identity token
 /// (sub-clone parent detection in `web.rs`, and clone↔clone SSH in the fleet CLI).
-const RETIRED_ENV_KEYS: &[&str] = &[
+///
+/// `/etc/environment` is one of three carriers. The other two are the container's own `Config.Env`,
+/// inherited from a clone-source image committed during the proxy era, and a tmux server that froze
+/// that env when it started. [`retired_env_neutralizers`] covers the first,
+/// [`tmux_retired_env_scrub_script`] the second.
+pub(crate) const RETIRED_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
 ];
+
+/// [`RETIRED_ENV_KEYS`] as empty `KEY=` assignments, for the two places an env list overrides the
+/// container's `Config.Env`: a clone's create spec, and every `docker exec` that can start an agent.
+///
+/// A clone-source image committed during the group-proxy era carries the dead endpoint in its own
+/// `ENV`, so every container built from it is born with `ANTHROPIC_BASE_URL=http://…/cc` on PID 1.
+/// The control-server serves no `/cc` route: its static handler answers a POST there with
+/// `405 Method Not Allowed` and an empty body, which Claude Code prints as
+/// `API Error: 405 status code (no body)`.
+///
+/// Empty rather than absent, because neither Docker nor tmux can delete an inherited key. An
+/// override can only give it another value. Claude Code reads an empty `ANTHROPIC_BASE_URL` as
+/// unset and falls back to the credentials file, the same trick
+/// [`agent_wrapper_env_dropin_script`] plays with `Environment=KEY=`.
+pub(crate) fn retired_env_neutralizers() -> Vec<String> {
+    RETIRED_ENV_KEYS.iter().map(|k| format!("{k}=")).collect()
+}
 
 /// Merge the managed MCP tables into a clone's `~/.codex/config.toml`, preserving everything
 /// else in the file.
@@ -1180,6 +1202,42 @@ runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart a
     )
 }
 
+/// Drop the retired inference vars from a running tmux server's environment.
+///
+/// tmux fixes its environment when the SERVER starts and copies it into every session and window
+/// opened afterwards, so a server started from a poisoned `Config.Env` serves the dead `/cc`
+/// endpoint for as long as it lives. Typing `claude` into a pane is how a parent clone starts the
+/// agent in a sub clone it just created, and on `dev395-assistant` that produced a clone whose
+/// every turn answered `API Error: 405` while the same clone's agent-wrapper was healthy. The
+/// wrapper has the systemd drop-in, the tmux server has nothing.
+///
+/// `set-environment -gu` removes the key from the global environment; the per-session `-u` covers a
+/// session that copied it before this ran. Measured against tmux 3.4: a window opened after the
+/// scrub has the key absent, in the same session that carried it a moment earlier.
+///
+/// Panes that already exist keep their frozen copy, since a process environment cannot be rewritten
+/// from outside. This makes a relaunch clean; it cannot heal the Claude already running in a pane.
+///
+/// Unstamped, because a tmux server can be killed and restarted at any time and comes back with
+/// whatever env started it. Exits 0 on a clone with no tmux server, which is most of them.
+pub(crate) fn tmux_retired_env_scrub_script() -> String {
+    let keys = RETIRED_ENV_KEYS.join(" ");
+    format!(
+        r#"set -e
+tmux() {{ runuser -u rmng -- tmux "$@"; }}
+tmux list-sessions >/dev/null 2>&1 || exit 0
+for k in {keys}; do
+  tmux set-environment -g -u "$k" 2>/dev/null || true
+done
+for s in $(tmux list-sessions -F '#{{session_name}}' 2>/dev/null); do
+  for k in {keys}; do
+    tmux set-environment -t "$s" -u "$k" 2>/dev/null || true
+  done
+done
+"#
+    )
+}
+
 fn wrapper_env_stamp_path() -> &'static str {
     "etc/rmng/wrapper-env"
 }
@@ -1927,6 +1985,22 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
+        // The third carrier of the retired vars, after `/etc/environment` and the wrapper unit: a
+        // tmux server that froze the container's `Config.Env` at its own start. Unconditional and
+        // cheap, because a clone with no tmux server exits 0 at the first line.
+        match exec_ok(app, id, &tmux_retired_env_scrub_script(), "scrub retired vars from tmux").await {
+            Ok(()) => {
+                warned.remove(&format!("{id}:tmux-env"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:tmux-env")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: tmux env scrub failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: tmux env scrub still failing: {e:#}");
+                }
+            }
+        }
+
         match exec_ok(app, id, tmp_mount_mask_script(), "mask tmp.mount").await {
             Ok(()) => {
                 warned.remove(&format!("{id}:tmp-mount"));
@@ -2243,6 +2317,45 @@ mod tests {
         );
     }
 
+    /// A tmux server freezes its environment when it starts, so the drop-in above does nothing for
+    /// an agent typed into a pane. That is how a parent clone starts the agent in a sub clone it
+    /// just created, and on `dev395-assistant` it produced a clone whose every turn answered
+    /// `API Error: 405` while the same clone's agent-wrapper was healthy.
+    #[test]
+    fn tmux_scrub_clears_the_retired_keys_from_a_running_server() {
+        let script = tmux_retired_env_scrub_script();
+        // No server is the common case (a headed clone opens one only when a terminal is used),
+        // and it must be a silent success, not a per-pass warning on most of the fleet.
+        assert!(script.contains("list-sessions >/dev/null 2>&1 || exit 0"), "{script}");
+        // tmux runs as the clone user; the reconciler's exec is root.
+        assert!(script.contains("runuser -u rmng -- tmux"), "{script}");
+        assert!(script.contains(r#"set-environment -g -u "$k""#), "{script}");
+        // Per-session too: a session created before the scrub carries its own copy, which shadows
+        // the global one for every window opened in it afterwards.
+        assert!(script.contains(r#"set-environment -t "$s" -u "$k""#), "{script}");
+        for key in RETIRED_ENV_KEYS {
+            assert!(script.contains(key), "retired key {key} is never scrubbed:\n{script}");
+        }
+        // The identity key stays, or `rmng` breaks in every new pane.
+        assert!(!script.contains("RMNG_PROXY_KEY"), "identity key scrubbed:\n{script}");
+    }
+
+    /// Every carrier of a retired key needs the same empty-assignment trick, because neither Docker
+    /// nor systemd nor tmux can delete an inherited key, only give it another value.
+    #[test]
+    fn retired_env_neutralizers_are_empty_assignments_for_every_key() {
+        let n = retired_env_neutralizers();
+        assert_eq!(n.len(), RETIRED_ENV_KEYS.len());
+        for key in RETIRED_ENV_KEYS {
+            assert!(n.contains(&format!("{key}=")), "no neutralizer for {key}: {n:?}");
+        }
+        // `KEY=` and not `KEY`, or `merge_env` cannot key it and Docker rejects it.
+        for e in &n {
+            assert!(e.ends_with('='), "not an assignment: {e}");
+            assert_eq!(e.matches('=').count(), 1, "not a bare empty assignment: {e}");
+        }
+    }
+
     /// The stamp gates the drop-in per clone, so its VERSION is what makes an already-stamped
     /// clone re-run a changed script. Editing the script without bumping the version silently
     /// skips every clone that has reconciled before — which is precisely the fleet you are
@@ -2413,6 +2526,7 @@ mod tests {
             ("cursor_mcp", cursor_mcp_script(false, "lin_key")),
             ("cursor_mcp_headless", cursor_mcp_script(true, "lin_key")),
             ("etc_environment_sync", etc_environment_sync_script("A=1\n")),
+            ("tmux_retired_env_scrub", tmux_retired_env_scrub_script()),
             ("claude_hook", claude_hook_script()),
         ];
         for (name, body) in scripts {

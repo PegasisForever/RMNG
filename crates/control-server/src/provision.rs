@@ -89,9 +89,19 @@ exit 0
 /// would otherwise be born without `RMNG_CONTROL_URL` + the `XDG_*`/desktop vars (breaking bare
 /// `rmng …` in the viewer terminal). Safe to `.` because the control-server writes that file as
 /// plain unquoted `KEY=VALUE` lines (`clone_etc_environment_conf`).
-const HEADLESS_TMUX_DEFAULT_SCRIPT: &str = r#"set -e
+///
+/// `RETIRED_ENV_KEYS` are unset in the same breath, for the same reason in the opposite direction:
+/// they reach this shell from the container's `Config.Env`, an older clone-source image puts the
+/// dead `/cc` endpoint there, and the server would hand that endpoint to every agent ever typed
+/// into a pane. The create spec assigns them empty too, so this line only matters on a container
+/// created by an older control-server.
+fn headless_tmux_default_script() -> String {
+    let unsets = crate::clone_reconcile::RETIRED_ENV_KEYS.join(" ");
+    format!(
+        r#"set -e
 runuser -u rmng -- bash -lc '
 set -a; . /etc/environment; set +a
+unset {unsets}
 cat > ~/.tmux.conf <<EOF
 # RMNG: the viewer proxy attaches as a second client — size to the latest (viewer) client, not the
 # smallest, so a co-attached human shell never clamps the terminal grid.
@@ -100,7 +110,9 @@ EOF
 tmux has-session -t main 2>/dev/null || tmux new-session -d -s main -c /home/rmng
 tmux set-option -g window-size latest 2>/dev/null || true
 '
-"#;
+"#
+    )
+}
 
 // --- pure ports -----------------------------------------------------------------------
 
@@ -445,9 +457,17 @@ pub async fn clone_container(
         // symlink, PAM applies it to SSH logins, and `rmng exec` seeds from the live user session
         // (`systemctl --user show-environment`). Baking it into the container `Config.Env` too would
         // only leak it into root / PID 1 — where `XDG_RUNTIME_DIR` and friends are wrong — with no
-        // consumer that can't already reach `/etc/environment`. So the create env stays empty and
-        // `Config.Env` carries just the image's own `ENV`.
-        env: Vec::new(),
+        // consumer that can't already reach `/etc/environment`.
+        //
+        // `RETIRED_ENV_KEYS` are the one exception, and they are here to CANCEL what the image says
+        // rather than to add anything. An image committed during the group-proxy era carries the
+        // dead `/cc` endpoint in its own `ENV`, PID 1 inherits it, and so does every `docker exec`
+        // and every tmux server started from one. Docker cannot delete an image key, so the create
+        // spec assigns it empty, which Claude Code reads as unset.
+        env: crate::clone_reconcile::RETIRED_ENV_KEYS
+            .iter()
+            .map(|k| ((*k).to_string(), String::new()))
+            .collect(),
         cpus: cfg.docker.clone_cpus,
         memory_mb: cfg.docker.clone_memory_mb,
         sock_source: sock_source_dir(app).await,
@@ -876,7 +896,7 @@ async fn clone_container_after_create(
     if headless {
         on_progress("wait-ready", "headless clone — starting default tmux session");
         let code = docker
-            .exec_script(container, HEADLESS_TMUX_DEFAULT_SCRIPT, &[], &[], |_stream, line| {
+            .exec_script(container, &headless_tmux_default_script(), &[], &[], |_stream, line| {
                 tracing::debug!(target: "provision", "headless-tmux: {line}");
             })
             .await
@@ -1466,6 +1486,25 @@ mod tests {
         assert!(body.contains("RMNG_CONTROL_URL=http://rmng-control:9000\n"));
         assert!(body.contains("XDG_CURRENT_DESKTOP=custom\n"));
         assert_eq!(body.matches("XDG_CURRENT_DESKTOP=").count(), 1);
+    }
+
+    /// The tmux server a headless clone boots with is the environment every agent typed into a pane
+    /// inherits, fixed for the life of the server. `/etc/environment` is sourced into it, so the
+    /// retired keys have to be unset AFTER that source, not before.
+    #[test]
+    fn headless_tmux_script_unsets_the_retired_keys_after_sourcing_etc_environment() {
+        let script = headless_tmux_default_script();
+        let source = script.find(". /etc/environment").expect("no /etc/environment source");
+        let unset = script.find("\nunset ").expect("retired keys are never unset");
+        assert!(source < unset, "the unset must follow the source:\n{script}");
+        for key in crate::clone_reconcile::RETIRED_ENV_KEYS {
+            assert!(script[unset..].contains(key), "{key} not unset:\n{script}");
+        }
+        // The session is still created, and the window-size option still applied.
+        assert!(script.contains("tmux new-session -d -s main -c /home/rmng"), "{script}");
+        assert!(script.contains("window-size latest"), "{script}");
+        // RMNG_PROXY_KEY and the control URL must survive, or `rmng` breaks in every pane.
+        assert!(!script.contains("RMNG_PROXY_KEY"), "identity key unset:\n{script}");
     }
 
     #[test]
