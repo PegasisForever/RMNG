@@ -140,7 +140,15 @@ async fn main() -> Result<()> {
     // so the viewer draws it locally. RMNG_EMBEDDED_CURSOR=1 forces the
     // GStreamer/embedded-cursor path (cursor composited into the frame). The
     // standalone capture self-test always uses embedded (GStreamer).
-    let embedded = std::env::var("RMNG_EMBEDDED_CURSOR").is_ok() || socket.is_none();
+    //
+    // `!holder_mode` on that last clause is load-bearing. The holder has no `RMNG_SOCKET`
+    // either, its unit carrying only `WAYLAND_DISPLAY`, so reading a missing socket as "this
+    // is the self-test" made every session it built composite the cursor into the frame. The
+    // viewer then showed a painted-on pointer next to the real one and had no shape to apply
+    // to its own. Set `RMNG_EMBEDDED_CURSOR` on BOTH units to force embedding: the holder
+    // picks the session's cursor mode and the daemon picks the matching capture path.
+    let embedded =
+        std::env::var("RMNG_EMBEDDED_CURSOR").is_ok() || (socket.is_none() && !holder_mode);
     let cursor_mode = if embedded {
         mutter::CURSOR_MODE_EMBEDDED
     } else {

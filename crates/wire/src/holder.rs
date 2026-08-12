@@ -35,7 +35,10 @@ use crate::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, InputMsg, M
 /// other is any fix to the holder half that has to reach clones that are already running,
 /// because a payload push replaces the binary on disk and leaves the old process running it.
 /// Without a bump such a fix waits for the clone to restart, which may be never.
-pub const PROTO_VERSION: u32 = 1;
+/// Version 2 carries the cursor fix: the holder read its missing `RMNG_SOCKET` as "this is the
+/// capture self-test" and built every session with the cursor composited into the frame, so a
+/// running holder has to be replaced for a viewer to get a real pointer back.
+pub const PROTO_VERSION: u32 = 2;
 
 /// Where the holder binds and the daemon connects.
 ///
