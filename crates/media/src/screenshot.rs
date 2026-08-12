@@ -49,10 +49,15 @@ pub fn screenshot_jpeg(
     // the encoder's `vapostproc ! video/x-raw(memory:VAMemory)` precedent). Plain `video/x-raw`
     // — no memory feature — so the VA surface lands back in system memory for
     // `videoconvert`+`jpegenc`; adding `videoscale` here would pull the resize onto the CPU.
+    // `colorimetry=1:4:0:0` (full-range BT.601) is the JFIF convention every JPEG reader
+    // assumes, and nothing in a JPEG says otherwise. Without it `videoconvert` keeps whatever
+    // `vapostproc` produced (limited-range BT.709), and the reader stretches 16..235 to
+    // 0..255 with the wrong matrix: blacks lift ~15, whites crush ~20, saturated red loses ~37.
     let desc = format!(
         "appsrc name=src ! vapostproc ! \
          video/x-raw,width={target_w},height={target_h},pixel-aspect-ratio=1/1 ! \
-         videoconvert ! jpegenc quality={JPEG_QUALITY} ! \
+         videoconvert ! video/x-raw,format=I420,colorimetry=1:4:0:0 ! \
+         jpegenc quality={JPEG_QUALITY} ! \
          appsink name=out max-buffers=1 sync=false"
     );
     let pipeline =

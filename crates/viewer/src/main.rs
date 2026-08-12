@@ -1416,6 +1416,58 @@ pub(crate) fn toggle_fullscreen(window: &gtk4::ApplicationWindow) {
     }
 }
 
+/// The colour description of every 4:2:0 frame the server sends: limited range, BT.709 matrix,
+/// **sRGB transfer**, BT.709 primaries. The encoder pins the first two (`media::encode`) and the
+/// H.264 stream carries no VUI colour description, so the decoded frames arrive untagged.
+///
+/// The transfer is the one that matters here. A clone's desktop is sRGB-encoded and the encoder
+/// only applies a matrix + range change, so the samples stay sRGB. Left untagged, GStreamer
+/// defaults them to the BT.709 transfer and GTK then "corrects" that to sRGB when it composites
+/// the frame, lifting everything below white: a 16 renders as 32, a 128 as 140, and the whole
+/// desktop looks washed out next to the same pixels on the host.
+const VIDEO_COLORIMETRY: &str = "2:3:7:1";
+
+/// Stamp `colorimetry` onto every caps a pad pushes downstream.
+///
+/// A capsfilter cannot do this job. The decoder's caps carry a memory feature that differs per
+/// platform (`memory:DMABuf` here, `memory:GLMemory` under macOS `vtdec_hw`), and a filter that
+/// named the wrong one would fail to link; one that named a colorimetry the decoder later
+/// declared itself would fail to negotiate. Rewriting the sticky caps event has neither failure
+/// mode: it only tells everything downstream what the samples always were.
+fn retag_colorimetry(pad: &gst::Pad, colorimetry: &'static str) {
+    pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+        let retagged = match &info.data {
+            Some(gst::PadProbeData::Event(ev)) => match ev.view() {
+                gst::EventView::Caps(c) => stamp_colorimetry(c.caps(), colorimetry),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(caps) = retagged {
+            info.data = Some(gst::PadProbeData::Event(gst::event::Caps::new(&caps)));
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
+/// `caps` with `colorimetry` set on every `video/x-raw` structure, or `None` when they all
+/// already carry it (the common case after the first frame, and events we must not disturb).
+fn stamp_colorimetry(caps: &gst::CapsRef, colorimetry: &str) -> Option<gst::Caps> {
+    let stale = |s: &gst::StructureRef| {
+        s.name() == "video/x-raw" && s.get::<&str>("colorimetry") != Ok(colorimetry)
+    };
+    if !caps.iter().any(stale) {
+        return None;
+    }
+    let mut out = caps.to_owned();
+    for s in out.make_mut().iter_mut() {
+        if s.name() == "video/x-raw" {
+            s.set("colorimetry", colorimetry);
+        }
+    }
+    Some(out)
+}
+
 /// One monitor's decode pipeline → `gtk4paintablesink`. Returns the appsrc + the sink's
 /// `GdkPaintable`. Zero-copy GL path (works on Intel, where GStreamer can't export a VA
 /// dmabuf): `vah264dec ! glupload` (EGL dmabuf→GL, shares GTK's GL context) → the sink.
@@ -1433,10 +1485,10 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::Pipelin
     // one GPU pass. glupload drops out (vtdec_hw is its own GL producer). Linux string unchanged.
     #[cfg(not(target_os = "macos"))]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
-         h264parse ! vah264dec ! glupload ! gtk4paintablesink name=sink sync=false";
+         h264parse ! vah264dec name=dec ! glupload ! gtk4paintablesink name=sink sync=false";
     #[cfg(target_os = "macos")]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
-         h264parse ! vtdec_hw ! glcolorconvert ! gtk4paintablesink name=sink sync=false";
+         h264parse ! vtdec_hw name=dec ! glcolorconvert ! gtk4paintablesink name=sink sync=false";
     let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
@@ -1459,6 +1511,9 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::Pipelin
     appsrc.set_caps(Some(
         &gst::Caps::builder("video/x-h264").field("stream-format", "byte-stream").field("alignment", "au").build(),
     ));
+    // Tell the sink what the samples are before it hands them to GTK. See `VIDEO_COLORIMETRY`.
+    let dec = pipeline.by_name("dec").context("decoder")?;
+    retag_colorimetry(&dec.static_pad("src").context("decoder src pad")?, VIDEO_COLORIMETRY);
     let sink = pipeline.by_name("sink").context("gtk4paintablesink")?;
     let paintable = sink.property::<gdk::Paintable>("paintable");
     pipeline.set_state(gst::State::Playing)?;
@@ -2195,5 +2250,53 @@ fn evdev_button(n: u32) -> Option<i32> {
         8 => Some(0x113), // BTN_SIDE  (back)
         9 => Some(0x114), // BTN_EXTRA (forward)
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(s: &str) -> gst::Caps {
+        gst::init().unwrap();
+        s.parse().unwrap()
+    }
+
+    /// The decoder describes the frame's memory and size but says nothing about colour, which is
+    /// the whole reason the retag exists. Every field it did set has to survive.
+    #[test]
+    fn the_retag_adds_a_colour_description_and_keeps_the_rest() {
+        let c = caps("video/x-raw(memory:DMABuf), format=DMA_DRM, width=1920, height=1080, drm-format=NV12:0x0200000020801b03");
+        let out = stamp_colorimetry(&c, VIDEO_COLORIMETRY).expect("untagged caps get the tag");
+        let s = out.structure(0).unwrap();
+        assert_eq!(s.get::<&str>("colorimetry"), Ok("2:3:7:1"));
+        assert_eq!(s.get::<&str>("drm-format"), Ok("NV12:0x0200000020801b03"));
+        assert_eq!(s.get::<i32>("width"), Ok(1920));
+        assert!(out.features(0).unwrap().contains("memory:DMABuf"), "the memory feature is kept");
+    }
+
+    /// A decoder that names its own colour description is overruled: the samples are sRGB
+    /// whatever it inferred from the frame size, and the value we send is the encoder's.
+    #[test]
+    fn the_retag_overrules_a_decoder_that_guessed() {
+        let c = caps("video/x-raw, format=NV12, width=640, height=480, colorimetry=2:4:5:1");
+        let out = stamp_colorimetry(&c, VIDEO_COLORIMETRY).expect("a guessed tag is replaced");
+        assert_eq!(out.structure(0).unwrap().get::<&str>("colorimetry"), Ok("2:3:7:1"));
+    }
+
+    /// Caps that already carry the tag produce no replacement event, so the sticky caps the sink
+    /// holds stay the ones it negotiated.
+    #[test]
+    fn the_retag_leaves_already_correct_caps_alone() {
+        let c = caps("video/x-raw, format=NV12, width=1920, height=1080, colorimetry=2:3:7:1");
+        assert!(stamp_colorimetry(&c, VIDEO_COLORIMETRY).is_none());
+    }
+
+    /// Only raw video carries a colour description. An encoded-caps event (the appsrc's own, which
+    /// travels the same pad on a restart) must pass through untouched.
+    #[test]
+    fn the_retag_ignores_encoded_caps() {
+        let c = caps("video/x-h264, stream-format=byte-stream, alignment=au");
+        assert!(stamp_colorimetry(&c, VIDEO_COLORIMETRY).is_none());
     }
 }

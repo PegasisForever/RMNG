@@ -19,6 +19,8 @@ client) proved the approach; this crate re-implements it fresh.
    decode noise — a Phase-0 polish item).
 3. **Render** via GTK4: import each decoded dmabuf as a `Gdk::DmabufTexture`, paint with a
    frame-clock tick callback (latest-wins, no display FIFO). One surface/area per monitor.
+   The decoded frames are **retagged `2:3:7:1`** first (limited range, BT.709 matrix, sRGB
+   transfer, BT.709 primaries). See [Colour](#colour).
 4. **Cursor**: the video has no baked-in cursor (server captures METADATA). The **native OS
    cursor is shown** over the video and **takes the remote cursor's shape** — each `CursorMeta`
    `CursorShape` (BGRA bitmap + hotspot) becomes a `gdk::Cursor` set on the video widget, so the
@@ -41,6 +43,28 @@ client) proved the approach; this crate re-implements it fresh.
 8. **Clipboard**: bridge the GTK clipboard to the server's broker (rich + lazy) — offer on
    local copy, request the chosen MIME on paste, move bytes via `ClipboardData`.
 9. **Reconnect**: on drop, reconnect and `RequestKeyframe`; the server forces a fresh IDR.
+
+## Colour
+
+A clone's desktop is sRGB, and the server's encoder only applies a matrix + range change to it
+(`media::encode`), so the samples that arrive are sRGB-encoded, limited-range, BT.709-matrix
+YUV. Nothing in the bitstream says so: `vah264enc` writes no VUI colour description, so the
+decoded frames arrive with no colour description at all.
+
+Left that way, GStreamer fills in its own default, which names the **BT.709 transfer**, and GTK
+then converts that to sRGB when it composites the frame. The conversion lifts everything below
+white (16 renders as 32, 128 as 140, 224 as 227), and the desktop reads washed out beside the
+same pixels shown natively. The measured error is up to 16 of 255.
+
+So both decode paths state the truth instead of inheriting a guess:
+
+- 4:2:0: `retag_colorimetry` rewrites the decoder's sticky caps event to `2:3:7:1`. A
+  capsfilter cannot: the memory feature on those caps differs per platform, and a decoder that
+  named its own colour description would fail to negotiate against a fixed one.
+- 4:4:4: `rmngavc444unpack` declares `1:1:7:1` (full range, RGB, sRGB) on its RGBA output,
+  which is what the shader writes, rather than passing the packed stream's YUV description on.
+
+With the tag in place a patch chart survives capture → encode → decode → GTK within 1 of 255.
 
 ## Per-OS backends
 

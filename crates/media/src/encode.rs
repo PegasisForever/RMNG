@@ -51,6 +51,20 @@ fn fourcc_str(fourcc: u32) -> String {
 /// tail a few ms more but removes that slack. `do-timestamp` is unaffected.
 const APPSRC_BOUND: &str = "max-buffers=2 leaky-type=downstream";
 
+/// The colour description of the 4:2:0 stream: `range:matrix:transfer:primaries` =
+/// limited range (16..235), BT.709 matrix, transfer and primaries left unset.
+///
+/// `vah264enc` writes no VUI colour description, so nothing in the bitstream tells the viewer
+/// how these samples were made, so the two halves have to agree by construction. Pinning it here
+/// removes the guess: without it GStreamer picks a default from the frame size, and a preset
+/// small enough to read as SD would flip the matrix under the viewer's feet.
+///
+/// The transfer stays unset **on purpose**. Naming one (even the true `sRGB`) makes `vapostproc`
+/// apply a transfer conversion on top of the matrix, which crushes the dark end: a source 16
+/// lands on luma 22 instead of 30. The samples we want are a plain matrix + range change, and
+/// the viewer supplies the missing transfer on the way out (`viewer::VIDEO_COLORIMETRY`).
+const ENC_COLORIMETRY: &str = "2:3:0:0";
+
 /// `vah264enc → h264parse → appsink` tail, shared by both modes.
 ///
 /// `target-usage=1` is deliberate and **counterintuitive**: on this AMD VCN the usage mapping is
@@ -79,7 +93,8 @@ impl Encoder {
     fn new_yuv420<F: FnMut(Vec<u8>, bool) + Send + 'static>(on_au: F) -> Result<Self> {
         let desc = format!(
             "appsrc name=src is-live=true format=time do-timestamp=true {APPSRC_BOUND} ! \
-             vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! {ENC_TAIL}"
+             vapostproc ! video/x-raw(memory:VAMemory),format=NV12,colorimetry={ENC_COLORIMETRY} ! \
+             {ENC_TAIL}"
         );
         let pipeline = launch_pipeline(&desc)?;
         let appsrc = by_name_appsrc(&pipeline, "src")?;

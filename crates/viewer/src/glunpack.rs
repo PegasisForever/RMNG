@@ -146,6 +146,12 @@ void main() {
 }
 "#;
 
+/// What the shader writes: `range:matrix:transfer:primaries` = full range, RGB (no matrix left
+/// to apply), sRGB transfer, BT.709 primaries. Without it the RGBA caps inherit the decoder's
+/// YUV colour description, and the sink hands GTK a "limited range, BT.709 transfer" claim about
+/// pixels that are neither, and GTK then lifts every value below white (a 16 renders as 32).
+const RGB_COLORIMETRY: &str = "1:1:7:1";
+
 fn cat() -> &'static gst::DebugCategory {
     static CAT: OnceLock<gst::DebugCategory> = OnceLock::new();
     CAT.get_or_init(|| {
@@ -291,11 +297,15 @@ mod imp {
                         scale_height(&mut s, 1, 2);
                         s.set("format", "RGBA");
                         s.set("texture-target", "2D");
+                        s.set("colorimetry", RGB_COLORIMETRY);
                     } else {
-                        // Src → Sink: input can be NV12 W×2H with either 2D or rectangle.
+                        // Src → Sink: input can be NV12 W×2H with either 2D or rectangle, and any
+                        // colour description. The shader's matrix is fixed (BT.601 limited, the
+                        // packer's), so an inherited one would only constrain the decoder.
                         scale_height(&mut s, 2, 1);
                         s.set("format", "NV12");
                         s.set("texture-target", gst::List::new(["2D", "rectangle"]));
+                        s.remove_field("colorimetry");
                     }
                     out.append_structure_full(s, Some(gst::CapsFeatures::new(["memory:GLMemory"])));
                 }

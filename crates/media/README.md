@@ -35,10 +35,17 @@ clone-daemon ──dmabuf────┤                                        
    - Carry forward Phase-0 tuning: `constrained-baseline` isn't required without browsers,
      but keep `aud=true`, `key-int-max` short for fast reconnect, and ample decoder/encoder
      surface headroom (the large-window 60fps cap was decoder surface starvation).
+   - **Colour**: pin `colorimetry=2:3:0:0` on the NV12 caps (limited range, BT.709 matrix,
+     transfer left unset). The encoder writes no VUI colour description, so the viewer has to
+     assume a matrix, and an unpinned one follows the frame size. Naming a transfer here would
+     make `vapostproc` convert the samples; the viewer supplies the missing sRGB transfer.
 3. **Encode (screenshot)** — import an on-demand dmabuf → VA download/VPP → JPEG for
    the MCP `Screenshot` tool. Infrequent and request-driven; proven by PoC R3 (cross-
    container dmabuf → JPEG). Optional fallback: have the daemon ship RGB for screenshots if
    GPU readback latency disappoints.
+   - **Colour**: convert to `colorimetry=1:4:0:0` (full range, BT.601) before `jpegenc`, the
+     JFIF convention. A JPEG carries no colour description, so a reader that gets limited-range
+     BT.709 lifts blacks ~15, crushes whites ~20, and drains ~37 out of saturated red.
 4. **Serve port 1** — multiplex the selected clone's monitor streams over one TCP
    connection to the viewer; honor `RequestKeyframe` (→ force IDR) and a fresh-connect IDR.
    Pace at the sender on a steady clock (Phase-0 R8: damage-driven capture is bursty;
