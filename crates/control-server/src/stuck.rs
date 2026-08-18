@@ -1653,22 +1653,27 @@ impl Judge {
         Self::default()
     }
 
-    /// `(state, reason, asked)`. `asked` is false when the cache answered.
+    /// `(state, reason, asked, usage)`. `asked` is false when the cache answered.
+    ///
+    /// `usage` is what the call cost, and only a live call can carry one: a cache hit returns
+    /// `None` because it spent nothing, which is the same thing `asked: false` says. The answer
+    /// cache deliberately does not keep it — a stored cost replayed on every hit would count
+    /// one call as many.
     pub async fn resolve(
         &self,
         http: &reqwest::Client,
         backend: &Backend,
         view: &Value,
-    ) -> Result<(wire::MonitorState, String, bool)> {
+    ) -> Result<(wire::MonitorState, String, bool, Option<crate::stucklog::CallUsage>)> {
         let key = cache_key(view);
         if let Some((progress, reason)) = self.answers.read().unwrap().get(&key).cloned() {
-            return Ok((apply_verdict(Some(progress)), reason, false));
+            return Ok((apply_verdict(Some(progress)), reason, false, None));
         }
-        let answer = ask(http, backend, view).await?;
+        let (answer, usage) = ask(http, backend, view).await?;
         let progress = answer.will_progress == Some(true);
         let reason = answer.reason.unwrap_or_default();
         self.answers.write().unwrap().insert(key, (progress, reason.clone()));
-        Ok((apply_verdict(Some(progress)), reason, true))
+        Ok((apply_verdict(Some(progress)), reason, true, usage))
     }
 
     /// Whether `why` is worth logging: true the first time it is seen and again whenever it
@@ -1692,7 +1697,11 @@ impl Judge {
     }
 }
 
-async fn ask(http: &reqwest::Client, backend: &Backend, view: &Value) -> Result<Answer> {
+async fn ask(
+    http: &reqwest::Client,
+    backend: &Backend,
+    view: &Value,
+) -> Result<(Answer, Option<crate::stucklog::CallUsage>)> {
     ask_codex(http, &backend.token, &backend.account_id, &backend.model, view).await
 }
 
@@ -1709,7 +1718,7 @@ async fn ask_codex(
     account_id: &str,
     model: &str,
     view: &Value,
-) -> Result<Answer> {
+) -> Result<(Answer, Option<crate::stucklog::CallUsage>)> {
     let body = json!({
         "model": model,
         "instructions": SYSTEM,
@@ -1736,21 +1745,89 @@ async fn ask_codex(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        bail!("codex {}: {}", status.as_u16(), snippet(&text));
+        bail!("{}", error_line(status.as_u16(), &text));
     }
-    Ok(parse_answer(&codex_answer_text(&text)?))
+    let (text, usage) = codex_answer_text(&text)?;
+    Ok((parse_answer(&text), usage))
 }
 
-/// The assistant's text, out of a Responses SSE body.
+/// One line describing a failed call, reading the body rather than only its status.
+///
+/// A quota rejection carries the plan it belongs to and the instant the window reopens, and
+/// that instant is the same one the usage poller pays a separate request every ten minutes to
+/// learn. Stringifying the raw body through [`snippet`] threw both away and left an operator
+/// with a truncated blob of JSON in a warning.
+///
+/// Anything that is not this shape falls back to exactly what was reported before, because an
+/// unexpected failure must never be made less legible than it already was.
+fn error_line(status: u16, body: &str) -> String {
+    let raw = || format!("codex {status}: {}", snippet(body));
+    let Ok(parsed) = serde_json::from_str::<ApiError>(body) else {
+        return raw();
+    };
+    // An empty string is not a name, and `.or()` would let one shadow a message that has
+    // something to say.
+    let named = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
+    let what = match (named(parsed.error.kind), named(parsed.error.message)) {
+        // Both halves, because they answer different questions: the type is the stable handle
+        // to match on later, the prose is what a person reads.
+        (Some(kind), Some(message)) => format!("{kind}: {message}"),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => return raw(),
+    };
+    // The raw path has always been bounded by `snippet`, and parsing a body is no reason to
+    // stop bounding it: this string reaches a per-tick warning and the decision log.
+    let what = snippet(&what);
+    let plan = parsed.error.plan_type.map_or(String::new(), |p| format!(" on the {p} plan"));
+    let resets = parsed.error.resets_at.map_or(String::new(), |at| {
+        format!(", resets {}", crate::docker::epoch_to_rfc3339(at))
+    });
+    format!("codex {status}: {what}{plan}{resets}")
+}
+
+/// A failure response from the Responses endpoint. Every field is optional: a gateway, an
+/// outage, or a later version of the backend can all answer with something that is not this,
+/// and [`error_line`] falls back to the raw body whenever they do.
+#[derive(Debug, Default, Deserialize)]
+struct ApiError {
+    #[serde(default)]
+    error: ApiErrorBody,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ApiErrorBody {
+    /// `usage_limit_reached` and friends. Preferred over `message` because it is the stable
+    /// half: the prose changes, this does not.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    /// Which plan's allowance was spent, e.g. `pro`.
+    #[serde(default)]
+    plan_type: Option<String>,
+    /// Unix seconds at which the exhausted window reopens.
+    #[serde(default)]
+    resets_at: Option<i64>,
+}
+
+/// The assistant's text and what the call cost, out of a Responses SSE body.
 ///
 /// Read in the order the events are trustworthy: the finished message item carries the whole
 /// text, `response.output_text.done` repeats it, and the deltas are the last resort if the
 /// backend ever stops sending either. A stream that failed part way names its error rather
 /// than reading as an empty answer, which would be indistinguishable from "no".
-fn codex_answer_text(body: &str) -> Result<String> {
+///
+/// `response.completed` carries a `usage` record, which is the only exact statement of what a
+/// judge call cost that exists anywhere: the account's own usage API answers per ACCOUNT, and
+/// every clone in the fleet bills the same account, so nothing downstream of here can separate
+/// the judge's spend from theirs. It is read in the same pass rather than by a second scan of
+/// the ~14KB body, and its absence is never an error — this is transport metadata, and a
+/// backend that stops sending it must not turn a good verdict into a failed call.
+fn codex_answer_text(body: &str) -> Result<(String, Option<crate::stucklog::CallUsage>)> {
     let mut message = String::new();
     let mut done = String::new();
     let mut delta = String::new();
+    let mut usage = None;
     for line in body.lines() {
         let Some(data) = line.strip_prefix("data: ") else {
             continue;
@@ -1782,10 +1859,30 @@ fn codex_answer_text(body: &str) -> Result<String> {
                     .unwrap_or("no message");
                 bail!("codex stream failed: {}", snippet(why));
             }
+            // The two totals are the only fields this endpoint has been seen to send. The
+            // detail sub-objects are the public API's shape, read here so that a backend which
+            // starts sending them is recorded rather than silently rounded away.
+            "response.completed" if event["response"]["usage"].is_object() => {
+                let u = &event["response"]["usage"];
+                let (input, output) = (u["input_tokens"].as_u64(), u["output_tokens"].as_u64());
+                // Neither total readable means the record told us nothing, which is `None`
+                // rather than a call that cost zero. A real call always has input tokens, so
+                // there is no legitimate reading this discards.
+                if input.is_some() || output.is_some() {
+                    usage = Some(crate::stucklog::CallUsage {
+                        input_tokens: input.unwrap_or(0),
+                        output_tokens: output.unwrap_or(0),
+                        cached_input_tokens: u["input_tokens_details"]["cached_tokens"].as_u64(),
+                        reasoning_output_tokens: u["output_tokens_details"]["reasoning_tokens"]
+                            .as_u64(),
+                    });
+                }
+            }
             _ => {}
         }
     }
-    Ok([message, done, delta].into_iter().find(|t| !t.is_empty()).unwrap_or_default())
+    let text = [message, done, delta].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
+    Ok((text, usage))
 }
 
 /// Pull the JSON object out of the reply. Models fence it, prefix it, or return it bare, and
@@ -1856,12 +1953,19 @@ pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bo
         "sessions": [{"status": "shell", "quiet_for_seconds": 40}],
         "background_tasks": [{"command": "cargo build --release", "running_for_seconds": 90}],
     });
+    // This call is billed like any other, but it belongs to no session and so has no decision
+    // line to ride. Its cost is reported to the operator who pressed the button instead.
     match ask_codex(&app.http, &acct.access_token, &acct.account_id, model, &view).await {
         Err(e) => (false, format!("{model} on {email}: {e:#}")),
-        Ok(a) => match a.will_progress {
+        Ok((a, usage)) => match a.will_progress {
             // The fixture describes a release build still running, so a judge that is working
             // says true. Anything else means the model answered but not the question.
-            Some(true) => (true, format!("{model} answers on {email}")),
+            Some(true) => {
+                let cost = usage.map_or(String::new(), |u| {
+                    format!(" ({} in / {} out)", u.input_tokens, u.output_tokens)
+                });
+                (true, format!("{model} answers on {email}{cost}"))
+            }
             _ => (
                 false,
                 format!("{model} on {email} gave an unusable answer: {}", a.reason.unwrap_or_default()),
@@ -1977,7 +2081,7 @@ pub async fn resolve_fleet(
                             continue;
                         };
                         match app.stuck.resolve(&app.http, backend, &case.view).await {
-                            Ok((state, reason, asked)) => {
+                            Ok((state, reason, asked, usage)) => {
                                 if asked {
                                     tracing::debug!(
                                         target: "stuck",
@@ -1998,7 +2102,9 @@ pub async fn resolve_fleet(
                                     }
                                     None => (state, by, reason),
                                 };
-                                log.record(case.decision(&id, state, by, reason), asked);
+                                let mut decision = case.decision(&id, state, by, reason);
+                                decision.usage = usage;
+                                log.record(decision, asked);
                                 if state == wire::MonitorState::Working {
                                     last.settled(&id, wire::MonitorState::Working);
                                     return (id, wire::MonitorState::Working);
@@ -3570,7 +3676,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
 
     #[test]
     fn the_answer_is_read_out_of_the_finished_message() {
-        let text = codex_answer_text(CODEX_STREAM).expect("a stream that completed");
+        let (text, _) = codex_answer_text(CODEX_STREAM).expect("a stream that completed");
         let answer = parse_answer(&text);
         assert_eq!(answer.will_progress, Some(true));
         assert_eq!(answer.reason.as_deref(), Some("the release build is still running"));
@@ -3584,7 +3690,115 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             .filter(|l| !l.contains("output_text.done") && !l.contains(r#""type":"message""#))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(codex_answer_text(&deltas).unwrap(), r#"{"will_progress":true}"#);
+        assert_eq!(codex_answer_text(&deltas).unwrap().0, r#"{"will_progress":true}"#);
+    }
+
+    /// The exact statement of what one call cost, which nothing else in the system has: the
+    /// account's usage API answers per ACCOUNT, and every clone bills the same account.
+    #[test]
+    fn the_completed_event_says_what_the_call_cost() {
+        let (_, usage) = codex_answer_text(CODEX_STREAM).expect("a stream that completed");
+        let usage = usage.expect("response.completed carried a usage record");
+        assert_eq!(usage.input_tokens, 67);
+        assert_eq!(usage.output_tokens, 66);
+        // The fixture was trimmed from a real reply and carries only the two totals, so the
+        // detail sub-objects have to read as absent rather than as zero.
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(usage.reasoning_output_tokens, None);
+    }
+
+    /// A backend that stops sending the record, or sends a malformed one, still answered the
+    /// question. Losing the accounting is never a reason to fail a verdict.
+    #[test]
+    fn a_stream_with_no_usage_record_still_answers() {
+        let stripped: String = CODEX_STREAM
+            .lines()
+            .filter(|l| !l.contains("response.completed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (text, usage) = codex_answer_text(&stripped).expect("the answer is still there");
+        assert_eq!(parse_answer(&text).will_progress, Some(true));
+        assert_eq!(usage, None);
+
+        // Present but not an object: same reading, and no panic on the indexing below it.
+        let junk = CODEX_STREAM
+            .replace(r#""usage":{"input_tokens":67,"output_tokens":66}"#, r#""usage":null"#);
+        assert_eq!(codex_answer_text(&junk).unwrap().1, None);
+
+        // An object with neither total readable told us nothing. That is "unknown", not a call
+        // that cost zero — a fake zero would read downstream as a free call.
+        for shape in [r#""usage":{}"#, r#""usage":{"prompt_tokens":67,"completion_tokens":66}"#] {
+            let renamed = CODEX_STREAM
+                .replace(r#""usage":{"input_tokens":67,"output_tokens":66}"#, shape);
+            assert_eq!(codex_answer_text(&renamed).unwrap().1, None, "{shape}");
+        }
+    }
+
+    /// The public API breaks the totals down further. The endpoint has not been observed doing
+    /// it, so this is read opportunistically rather than required.
+    #[test]
+    fn the_detail_sub_objects_are_kept_when_a_backend_sends_them() {
+        let rich = CODEX_STREAM.replace(
+            r#""usage":{"input_tokens":67,"output_tokens":66}"#,
+            r#""usage":{"input_tokens":1913,"output_tokens":94,"input_tokens_details":{"cached_tokens":1536},"output_tokens_details":{"reasoning_tokens":28}}"#,
+        );
+        let usage = codex_answer_text(&rich).unwrap().1.expect("a usage record");
+        assert_eq!(usage.input_tokens, 1913);
+        assert_eq!(usage.cached_input_tokens, Some(1536));
+        assert_eq!(usage.reasoning_output_tokens, Some(28));
+    }
+
+    /// The body verbatim from the live endpoint on 2026-08-18, when the judge account's weekly
+    /// window was spent. Everything an operator needs is in it; the old line threw it away.
+    #[test]
+    fn a_quota_rejection_says_which_plan_and_when_it_reopens() {
+        let body = r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro","resets_at":1787196558,"eligible_promo":null,"resets_in_seconds":118088}}"#;
+        assert_eq!(
+            error_line(429, body),
+            "codex 429: usage_limit_reached: The usage limit has been reached on the pro plan, \
+             resets 2026-08-20T03:29:18Z"
+        );
+    }
+
+    /// The type is the stable handle and the prose is what a person reads. Keeping only the
+    /// type threw away everything the backend actually said about a failure.
+    #[test]
+    fn an_error_keeps_both_its_type_and_its_message() {
+        let both = r#"{"error":{"type":"invalid_request_error","message":"Stream must be set to true"}}"#;
+        assert_eq!(
+            error_line(400, both),
+            "codex 400: invalid_request_error: Stream must be set to true"
+        );
+        // An empty or blank type is not a name, and must not shadow the prose.
+        let blank = r#"{"error":{"type":"   ","message":"Stream must be set to true"}}"#;
+        assert_eq!(error_line(400, blank), "codex 400: Stream must be set to true");
+    }
+
+    /// The raw path has always been bounded. Parsing a body is no reason to stop bounding it:
+    /// this string reaches a per-tick warning and the decision log.
+    #[test]
+    fn a_parsed_error_is_capped_like_a_raw_one() {
+        let body = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(5_000));
+        let line = error_line(500, &body);
+        assert_eq!(line.len(), "codex 500: ".len() + 200, "{line}");
+    }
+
+    /// A gateway, an outage, or a later backend can answer with anything. None of them may be
+    /// made less legible than the raw body already was.
+    #[test]
+    fn an_unrecognised_error_body_still_reports_itself() {
+        assert_eq!(
+            error_line(502, "<html>bad gateway</html>"),
+            "codex 502: <html>bad gateway</html>"
+        );
+        assert_eq!(error_line(500, "{}"), "codex 500: {}");
+        // Shaped like the error envelope but with no type: the prose is the fallback.
+        assert_eq!(
+            error_line(400, r#"{"error":{"message":"Stream must be set to true"}}"#),
+            "codex 400: Stream must be set to true"
+        );
+        // A 200-character cap still applies to a body that tells us nothing.
+        assert_eq!(error_line(503, &"x".repeat(500)).len(), "codex 503: ".len() + 200);
     }
 
     /// A stream that died part way through has to be an error. Read as an empty answer it
@@ -3623,9 +3837,13 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             "sessions": [{"status": "shell", "quiet_for_seconds": 40}],
             "background_tasks": [{"command": "cargo build --release", "running_for_seconds": 90}],
         });
-        let answer = ask_codex(&http, token, account, "gpt-5.6-luna", &building).await.unwrap();
+        let (answer, usage) =
+            ask_codex(&http, token, account, "gpt-5.6-luna", &building).await.unwrap();
         assert_eq!(answer.will_progress, Some(true), "{answer:?}");
-        println!("building: {answer:?}");
+        // The live endpoint's own account of what that cost. Printed rather than asserted:
+        // the exact counts move with the prompt, and this test exists to exercise the wire.
+        println!("building: {answer:?} cost {usage:?}");
+        assert!(usage.is_some(), "the live endpoint reports usage on response.completed");
 
         // Finished, with a dev server it left running. Nothing there will ever wake anybody.
         let served = json!({
@@ -3633,9 +3851,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             "background_tasks": [{"command": "npm run dev", "running_for_seconds": 900}],
             "agent_last_said": "The dev server is up on port 3000. Let me know what to build next.",
         });
-        let answer = ask_codex(&http, token, account, "gpt-5.6-luna", &served).await.unwrap();
+        let (answer, usage) =
+            ask_codex(&http, token, account, "gpt-5.6-luna", &served).await.unwrap();
         assert_eq!(answer.will_progress, Some(false), "{answer:?}");
-        println!("served: {answer:?}");
+        println!("served: {answer:?} cost {usage:?}");
     }
 
 }

@@ -495,10 +495,12 @@ went away, or the model was called for it. A fleet holding still writes nothing.
 |---|---|
 | `ts`, `clone`, `session` | this SERVER's clock, and who the line is about |
 | `state`, `was` | `working`, `idle`, or `gone`, and what it replaced (`new` on a first sighting) |
-| `decidedBy`, `why` | `files`, `model`, `cache`, `no-judge`, or `ask-failed`, and the reason |
+| `decidedBy`, `why` | `files`, `model`, `cache`, `floor`, `no-judge`, or `ask-failed`, and the reason |
 | `status`, `waitingFor` | the registry status the verdict was read from |
 | `promptAgeSeconds` | the CLONE's clock: how long since this session's last `UserPromptSubmit` |
 | `view` | the exact JSON the model was asked, when it was asked anything |
+| `asked` | present and `true` only when a model call was made and answered for this line. `decidedBy` cannot answer that on its own: the tool-age floor relabels an answered call `floor`, which otherwise reads exactly like a free `cache` hit |
+| `usage` | what that call cost, as the provider reported it: `inputTokens`, `outputTokens`, and `cachedInputTokens` / `reasoningOutputTokens` when it breaks them out. Absent on every line no call produced, and on a call whose stream carried no usage record |
 
 To score a verdict, find the line where a session went `idle` and then the next line for that same
 session. If it says `working`, the session resumed, and `promptAgeSeconds` on that line is how long
