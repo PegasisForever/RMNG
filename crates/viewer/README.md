@@ -68,24 +68,60 @@ With the tag in place a patch chart survives capture → encode → decode → G
 
 ## Per-OS backends
 
-One toolkit-free core, two platform backends. The transport, the wire protocol and the AVC444
+One toolkit-free core, three platform backends. The transport, the wire protocol and the AVC444
 packing are identical; only these pieces differ. The numbered list above describes the Linux
 column.
 
-| | Linux | macOS (Apple Silicon) |
-| --- | --- | --- |
-| H.264 decode | `vah264dec` (VA-API) | `vtdec_hw` (VideoToolbox) |
-| GL import | `glupload` → 2D `GLMemory` | `vtdec_hw` emits IOSurface-backed `GLMemory` directly; `glupload` drops out |
-| Texture target | `2D` | `rectangle` (Apple's `CGLTexImageIOSurface2D` accepts only `GL_TEXTURE_RECTANGLE`) |
-| 4:2:0 sink path | `glupload ! gtk4paintablesink` | `vtdec_hw ! glcolorconvert ! gtk4paintablesink` (the sink takes RGBA 2D only) |
-| 4:4:4 unpack | `rmngavc444unpack`, `sampler2D`, `#version 300 es` | `rmngavc444unpack`, `sampler2DRect`, desktop GLSL (Apple has no `ARB_ES3_compatibility`) |
-| GL platform | EGL | CGL (desktop GL 4.1 over Metal) |
-| Keyboard | GTK `EventControllerKey`, `evdev = hardware_keycode − 8` | raw `NSEvent` local monitor + `kvk_evdev` table ([`keyboard_macos.rs`](src/keyboard_macos.rs)); GDK-swallowed keys still come via GTK. Cmd↔Ctrl swapped by default |
-| Pointer lock | `zwp_pointer_constraints` + `zwp_relative_pointer`, unaccelerated deltas ([`pointer_lock.rs`](src/pointer_lock.rs)) | `CGAssociateMouseAndMouseCursorPosition` + `NSEvent` deltas, which are OS-**accelerated** ([`pointer_lock_macos.rs`](src/pointer_lock_macos.rs)) |
-| Titlebar | GTK `HeaderBar` + FPS readout | real `NSWindow` titlebar + `NSButton` accessories ([`native_titlebar.rs`](src/native_titlebar.rs)); no FPS readout |
-| GSK renderer | `gl` pinned (stale-texture workaround) | `ngl` — the legacy `gl` renderer was removed in GTK 4.18, so no pin is available |
+| | Linux | macOS (Apple Silicon) | Windows |
+| --- | --- | --- | --- |
+| H.264 decode | `vah264dec` (VA-API) | `vtdec_hw` (VideoToolbox) | `d3d11h264dec` (D3D11VA), falling back to `avdec_h264` / `openh264dec` — **chosen at runtime**, see below |
+| GL import | `glupload` → 2D `GLMemory` | `vtdec_hw` emits IOSurface-backed `GLMemory` directly; `glupload` drops out | `d3d11download ! glupload` → 2D `GLMemory` (there is no D3D11↔GL interop in GStreamer, so the frame makes one sysmem round trip) |
+| Texture target | `2D` | `rectangle` (Apple's `CGLTexImageIOSurface2D` accepts only `GL_TEXTURE_RECTANGLE`) | `2D` |
+| 4:2:0 sink path | `glupload ! gtk4paintablesink` | `vtdec_hw ! glcolorconvert ! gtk4paintablesink` (the sink takes RGBA 2D only) | `glupload ! glcolorconvert ! gtk4paintablesink` (same reason as macOS) |
+| 4:4:4 unpack | `rmngavc444unpack`, `sampler2D`, `#version 300 es` | `rmngavc444unpack`, `sampler2DRect`, desktop GLSL (Apple has no `ARB_ES3_compatibility`) | `rmngavc444unpack`, `sampler2D` — same shader as Linux |
+| GL platform | EGL | CGL (desktop GL 4.1 over Metal) | WGL |
+| Keyboard | GTK `EventControllerKey`, `evdev = hardware_keycode − 8` | raw `NSEvent` local monitor + `kvk_evdev` table ([`keyboard_macos.rs`](src/keyboard_macos.rs)); GDK-swallowed keys still come via GTK. Cmd↔Ctrl swapped by default | GTK `EventControllerKey` + `vk_evdev` table ([`vk_evdev.rs`](src/vk_evdev.rs)): the VK is inverted to a set-1 scancode first, because a VK is **not** a physical key |
+| Pointer lock | `zwp_pointer_constraints` + `zwp_relative_pointer`, unaccelerated deltas ([`pointer_lock.rs`](src/pointer_lock.rs)) | `CGAssociateMouseAndMouseCursorPosition` + `NSEvent` deltas, which are OS-**accelerated** ([`pointer_lock_macos.rs`](src/pointer_lock_macos.rs)) | `ClipCursor` + Raw Input `WM_INPUT`, unaccelerated deltas ([`pointer_lock_win.rs`](src/pointer_lock_win.rs)) |
+| Titlebar | GTK `HeaderBar` + FPS readout | real `NSWindow` titlebar + `NSButton` accessories ([`native_titlebar.rs`](src/native_titlebar.rs)); no FPS readout | GTK `HeaderBar` + FPS readout (same as Linux) |
+| GSK renderer | `gl` pinned (stale-texture workaround) | `ngl` — the legacy `gl` renderer was removed in GTK 4.18, so no pin is available | `ngl`, same as macOS |
+| System shortcuts | `inhibit_system_shortcuts` — Super and Alt+Tab reach the remote | not inhibited (GDK has no macOS implementation) | not inhibited; see [Windows limitations](#windows-limitations) |
 
-Build and run instructions: [DEVELOPMENT.md § macOS](../../docs/DEVELOPMENT.md#macos).
+Build and run instructions: [DEVELOPMENT.md § macOS](../../docs/DEVELOPMENT.md#macos),
+[DEVELOPMENT.md § Windows](../../docs/DEVELOPMENT.md#windows).
+
+### Why Windows picks its decoder at runtime
+
+Linux and macOS each hardcode one decode element because each has exactly one answer: VA-API on
+the known deploy GPU, VideoToolbox on every Mac. Windows has neither guarantee — `d3d11h264dec`
+registers only when the installed GStreamer ships the D3D11 plugin *and* the GPU advertises an
+H.264 decode profile, which a VM, a remote session, or a trimmed GStreamer build will not. A
+hardcoded element would turn each of those into "cannot build the decode pipeline" and a blank
+window, so `win_decoder()` in [`main.rs`](src/main.rs) takes the first of `d3d11h264dec`,
+`avdec_h264`, `openh264dec` that actually registered and logs which one it got.
+
+The two software arms insert `videoconvert ! video/x-raw,format=NV12`, because libav and
+OpenH264 emit I420. That is safe for AVC444: the invariant `rmngavc444unpack` depends on is that
+nothing **resamples** the packed chroma before it, and I420 → NV12 is a pure re-layout of the
+same 4:2:0 samples. A converter asked for 4:4:4 or RGB would upsample and destroy the auxiliary
+view — which is why none appears anywhere ahead of the unpacker on any platform.
+
+### Windows limitations
+
+- **Physical-key fidelity has one gap.** GDK hands us a virtual key, and Windows uses the same
+  `VK_RETURN` for both `Enter` keys (they differ only by the extended bit in `lParam`, which GDK
+  does not forward), so keypad `Enter` arrives as `KEY_ENTER` rather than `KEY_KPENTER`.
+  Everything else — including the whole navigation cluster, both `Ctrl`/`Shift`/`Alt`/`Meta`
+  pairs, and non-US layouts — resolves to the correct physical position. The fix, if it is ever
+  needed, is to read `RAWKEYBOARD.MakeCode` from the Raw Input stream `pointer_lock_win` already
+  runs a message window for, and feed `vk_evdev::scancode_to_evdev` directly.
+- **System shortcuts are not inhibited.** `Super` opens the local Start menu and `Alt+Tab`
+  switches local windows instead of reaching the remote. GDK implements
+  `inhibit_system_shortcuts` for Wayland only, so this matches the macOS backend's behaviour
+  rather than Linux's. Capturing them would need a `WH_KEYBOARD_LL` hook.
+- **The frame makes one sysmem round trip.** GStreamer has no D3D11↔GL interop path, so a
+  hardware-decoded frame goes VRAM → sysmem (`d3d11download`) → VRAM (`glupload`) rather than
+  staying resident as it does on Linux and macOS. Everything after the upload — including the
+  AVC444 reconstruction — is still GPU-side.
 
 ## Headless mode (first-class)
 

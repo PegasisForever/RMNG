@@ -3656,7 +3656,6 @@ dependencies = [
  "core-graphics",
  "gdk4-wayland",
  "gstreamer",
- "gstreamer-allocators",
  "gstreamer-app",
  "gstreamer-base",
  "gstreamer-gl",
@@ -3672,6 +3671,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-client",
  "wayland-protocols",
+ "windows-sys 0.59.0",
  "wire",
 ]
 
