@@ -11,8 +11,14 @@ const STATUS: Record<NonNullable<Clone["monitorState"]>, { dot: string; label: s
 };
 
 /** The word for a clone's current state. */
+const NO_READING = {
+  dot: "bg-transparent ring-2 ring-inset ring-amber-500 dark:ring-amber-400",
+  label: "no reading",
+};
+
 export function statusLabel(clone: Clone): string {
   if (clone.archived) return "archived";
+  if (clone.activityUnknown) return NO_READING.label;
   return STATUS[clone.monitorState ?? "idle"].label;
 }
 
@@ -27,7 +33,7 @@ export function CloneStatusDot({ clone }: { clone: Clone }) {
       />
     );
   }
-  const status = STATUS[clone.monitorState ?? "idle"];
+  const status = clone.activityUnknown ? NO_READING : STATUS[clone.monitorState ?? "idle"];
   return (
     <span
       aria-label={status.label}

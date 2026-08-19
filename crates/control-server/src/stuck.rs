@@ -94,7 +94,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock as StdRwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde::Deserialize;
@@ -176,15 +176,21 @@ impl LastSeen {
     ///
     /// Holds the last real answer while the streak is short, then gives up and says `Idle`. A
     /// clone nobody has ever settled has nothing to hold and reads `Idle` from the first tick.
-    pub fn blind(&self, id: &str) -> wire::MonitorState {
+    pub fn blind(&self, id: &str, degraded: bool) -> wire::MonitorState {
         let mut seen = self.seen.write().unwrap();
         let Some((state, blind)) = seen.get_mut(id) else {
             return wire::MonitorState::Idle;
         };
         *blind = blind.saturating_add(1);
-        match *blind <= BLIND_TICKS {
-            true => *state,
-            false => wire::MonitorState::Idle,
+        match (*blind <= BLIND_TICKS, *state) {
+            (true, state) => state,
+            // A held `unknown` decays only once the outage it belongs to is over. While the
+            // judge is down, falling to `Idle` would raise the badge the outage is meant to
+            // hold back, on the least evidence in this module. Once it is back, `unknown` has
+            // nothing left to mean, and holding it forever would swallow a real stop entirely:
+            // nothing raises on `unknown`, so the clone would go quiet permanently.
+            (false, wire::MonitorState::Unknown) if degraded => wire::MonitorState::Unknown,
+            (false, _) => wire::MonitorState::Idle,
         }
     }
 
@@ -1552,6 +1558,84 @@ pub struct Judge {
     /// condition, and the fleet pass runs every few seconds, so it is said once and again
     /// only when it changes.
     last_gap: StdRwLock<String>,
+    health: StdRwLock<JudgeHealth>,
+}
+
+/// How many consecutive failed ASKS it takes to call the judge down.
+///
+/// Asks, not ticks: clones resolve concurrently, so a fleet with three or more asking sessions
+/// trips this inside one pass. That is deliberate rather than merely tolerated — what the
+/// threshold protects against is a single dropped connection, and it still does, because any
+/// answer at all calls [`JudgeHealth::recovered`] and zeroes the count. Isolated drops cannot
+/// accumulate; only a judge that is failing everything gets here. A quota rejection does not
+/// wait for it at all: see [`JudgeHealth::failed`].
+const DEGRADE_AFTER: u32 = 3;
+
+/// How often a degraded judge is probed to see whether it is back.
+///
+/// While degraded the fleet pass stops asking per session, which is the point: a failed ask is
+/// never cached, and the per-clone walk only short-circuits on a `Working` answer, so an outage
+/// today makes every Ask session re-POST its whole body every tick for as long as it lasts. One
+/// probe a minute recovers inside a minute and costs the provider nothing worth counting.
+const PROBE_EVERY: Duration = Duration::from_secs(60);
+
+/// Whether the judge is reachable, and if not, since when.
+///
+/// This is the one piece of state the module keeps between ticks besides the answer cache, and
+/// it exists because nothing else could tell an outage from a healthy fleet: [`backend`] SUCCEEDS
+/// on a quota rejection (the token refreshes fine and only the ask 429s), so the standing-gap
+/// warning never fired and no clone knew why it had gone grey.
+#[derive(Default)]
+pub struct JudgeHealth {
+    /// Consecutive ask failures of a kind that carries no promise about the future.
+    consecutive: u32,
+    /// Set once the judge is considered down. Cleared by any successful ask.
+    degraded: bool,
+    /// Unix seconds the exhausted window reopens, when the provider told us. Reported to the
+    /// operator; never trusted as a schedule, because [`PROBE_EVERY`] finds out for itself.
+    quota_resets_at: Option<i64>,
+    /// When the last probe went out, so a degraded fleet asks once a minute rather than once
+    /// per session per tick.
+    last_probe: Option<Instant>,
+}
+
+impl JudgeHealth {
+    /// Record a failed ask. `quota_resets_at` is `Some` only for a rejection that says the
+    /// allowance is spent, which is the one failure that promises to still be true in an hour —
+    /// so it degrades on the first sighting rather than waiting for [`DEGRADE_AFTER`].
+    fn failed(&mut self, quota_resets_at: Option<Option<i64>>) {
+        self.consecutive = self.consecutive.saturating_add(1);
+        if let Some(resets_at) = quota_resets_at {
+            self.quota_resets_at = resets_at;
+            self.degraded = true;
+        } else if self.consecutive >= DEGRADE_AFTER {
+            self.degraded = true;
+        }
+    }
+
+    /// Record an ask that came back. One answer is enough: whatever was wrong is over.
+    fn recovered(&mut self) {
+        *self = Self::default();
+    }
+
+    fn degraded(&self) -> bool {
+        self.degraded
+    }
+
+    /// Whether this pass may spend one call finding out if the judge is back. Only ever true
+    /// while degraded; a healthy judge is asked per session as before.
+    fn may_probe(&mut self, now: Instant) -> bool {
+        if !self.degraded {
+            return false;
+        }
+        match self.last_probe {
+            Some(at) if now.duration_since(at) < PROBE_EVERY => false,
+            _ => {
+                self.last_probe = Some(now);
+                true
+            }
+        }
+    }
 }
 
 fn bucket(seconds: f64) -> usize {
@@ -1629,11 +1713,11 @@ fn judge_account(app: &crate::app::App, want: &str) -> Result<String, String> {
 /// Called at most once per fleet pass, and only when some clone actually needs asking. A rig
 /// with no Codex account gets `None` plus a line saying so, which the caller logs once rather
 /// than once per clone per tick, and every undecided clone reads idle.
-pub async fn backend(app: &crate::app::App) -> (Option<Backend>, String) {
+pub async fn backend(app: &crate::app::App) -> (Option<Backend>, NoBackend, String) {
     let cfg = app.config();
     let email = match judge_account(app, &cfg.judge.codex_email.unwrap_or_default()) {
         Ok(email) => email,
-        Err(why) => return (None, why),
+        Err(why) => return (None, NoBackend::Absent, why),
     };
     match crate::codex::fresh_access_token(app, &email).await {
         Ok((acct, _)) => (
@@ -1642,10 +1726,27 @@ pub async fn backend(app: &crate::app::App) -> (Option<Backend>, String) {
                 account_id: acct.account_id,
                 model: cfg.judge.codex_model,
             }),
+            NoBackend::None,
             String::new(),
         ),
-        Err(e) => (None, format!("{email}: {e:#}")),
+        Err(e) => (None, NoBackend::Broken, format!("{email}: {e:#}")),
     }
+}
+
+/// Why there is no backend, when there is none.
+///
+/// The distinction is the whole of the degraded-mode scope. A rig nobody configured a judge for
+/// is not having an outage — it is working exactly as designed, reporting nothing as working —
+/// and must keep behaving as it always has. A configured account whose token will not refresh
+/// IS an outage, and reads the same to an operator as a provider that is down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoBackend {
+    /// A backend was built.
+    None,
+    /// No Codex account is imported, or none matches `judge.codexEmail`.
+    Absent,
+    /// An account is configured and its token could not be refreshed.
+    Broken,
 }
 
 impl Judge {
@@ -1653,22 +1754,27 @@ impl Judge {
         Self::default()
     }
 
-    /// `(state, reason, asked)`. `asked` is false when the cache answered.
+    /// `(state, reason, asked, usage)`. `asked` is false when the cache answered.
+    ///
+    /// `usage` is what the call cost, and only a live call can carry one: a cache hit returns
+    /// `None` because it spent nothing, which is the same thing `asked: false` says. The answer
+    /// cache deliberately does not keep it — a stored cost replayed on every hit would count
+    /// one call as many.
     pub async fn resolve(
         &self,
         http: &reqwest::Client,
         backend: &Backend,
         view: &Value,
-    ) -> Result<(wire::MonitorState, String, bool)> {
+    ) -> Result<(wire::MonitorState, String, bool, Option<crate::stucklog::CallUsage>)> {
         let key = cache_key(view);
         if let Some((progress, reason)) = self.answers.read().unwrap().get(&key).cloned() {
-            return Ok((apply_verdict(Some(progress)), reason, false));
+            return Ok((apply_verdict(Some(progress)), reason, false, None));
         }
-        let answer = ask(http, backend, view).await?;
+        let (answer, usage) = ask(http, backend, view).await?;
         let progress = answer.will_progress == Some(true);
         let reason = answer.reason.unwrap_or_default();
         self.answers.write().unwrap().insert(key, (progress, reason.clone()));
-        Ok((apply_verdict(Some(progress)), reason, true))
+        Ok((apply_verdict(Some(progress)), reason, true, usage))
     }
 
     /// Whether `why` is worth logging: true the first time it is seen and again whenever it
@@ -1683,6 +1789,35 @@ impl Judge {
         !why.is_empty()
     }
 
+    /// Whether the judge is currently considered unreachable, and when its window reopens.
+    pub fn degraded(&self) -> Option<Option<i64>> {
+        let h = self.health.read().unwrap();
+        h.degraded().then(|| h.quota_resets_at)
+    }
+
+    /// Record a failed ask, degrading at once on a spent allowance and after
+    /// [`DEGRADE_AFTER`] on anything else. Returns true when this failure is what tipped it.
+    pub fn note_ask_failure(&self, error: &anyhow::Error) -> bool {
+        let quota = error.downcast_ref::<QuotaExhausted>().map(|q| q.resets_at);
+        let mut h = self.health.write().unwrap();
+        let was = h.degraded();
+        h.failed(quota);
+        h.degraded() && !was
+    }
+
+    /// Record an ask that came back. Returns true when this is what ended an outage.
+    pub fn note_ask_success(&self) -> bool {
+        let mut h = self.health.write().unwrap();
+        let was = h.degraded();
+        h.recovered();
+        was
+    }
+
+    /// Whether this pass may spend one call checking whether a degraded judge is back.
+    pub fn may_probe(&self) -> bool {
+        self.health.write().unwrap().may_probe(Instant::now())
+    }
+
     /// Drop cached answers once the fleet has moved on, mirroring `ActivityBus::retain`.
     pub fn prune(&self, max_entries: usize) {
         let mut answers = self.answers.write().unwrap();
@@ -1692,7 +1827,11 @@ impl Judge {
     }
 }
 
-async fn ask(http: &reqwest::Client, backend: &Backend, view: &Value) -> Result<Answer> {
+async fn ask(
+    http: &reqwest::Client,
+    backend: &Backend,
+    view: &Value,
+) -> Result<(Answer, Option<crate::stucklog::CallUsage>)> {
     ask_codex(http, &backend.token, &backend.account_id, &backend.model, view).await
 }
 
@@ -1709,7 +1848,7 @@ async fn ask_codex(
     account_id: &str,
     model: &str,
     view: &Value,
-) -> Result<Answer> {
+) -> Result<(Answer, Option<crate::stucklog::CallUsage>)> {
     let body = json!({
         "model": model,
         "instructions": SYSTEM,
@@ -1736,21 +1875,127 @@ async fn ask_codex(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        bail!("codex {}: {}", status.as_u16(), snippet(&text));
+        let line = error_line(status.as_u16(), &text);
+        return Err(match quota_exhausted(&text) {
+            Some(spent) => anyhow::Error::new(spent).context(line),
+            None => anyhow::anyhow!("{line}"),
+        });
     }
-    Ok(parse_answer(&codex_answer_text(&text)?))
+    let (text, usage) = codex_answer_text(&text)?;
+    Ok((parse_answer(&text), usage))
 }
 
-/// The assistant's text, out of a Responses SSE body.
+/// One line describing a failed call, reading the body rather than only its status.
+///
+/// A quota rejection carries the plan it belongs to and the instant the window reopens, and
+/// that instant is the same one the usage poller pays a separate request every ten minutes to
+/// learn. Stringifying the raw body through [`snippet`] threw both away and left an operator
+/// with a truncated blob of JSON in a warning.
+///
+/// Anything that is not this shape falls back to exactly what was reported before, because an
+/// unexpected failure must never be made less legible than it already was.
+fn error_line(status: u16, body: &str) -> String {
+    let raw = || format!("codex {status}: {}", snippet(body));
+    let Ok(parsed) = serde_json::from_str::<ApiError>(body) else {
+        return raw();
+    };
+    // An empty string is not a name, and `.or()` would let one shadow a message that has
+    // something to say.
+    let named = |s: Option<String>| s.filter(|s| !s.trim().is_empty());
+    let what = match (named(parsed.error.kind), named(parsed.error.message)) {
+        // Both halves, because they answer different questions: the type is the stable handle
+        // to match on later, the prose is what a person reads.
+        (Some(kind), Some(message)) => format!("{kind}: {message}"),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => return raw(),
+    };
+    // The raw path has always been bounded by `snippet`, and parsing a body is no reason to
+    // stop bounding it: this string reaches a per-tick warning and the decision log.
+    let what = snippet(&what);
+    let plan = parsed.error.plan_type.map_or(String::new(), |p| format!(" on the {p} plan"));
+    let resets = parsed.error.resets_at.map_or(String::new(), |at| {
+        format!(", resets {}", crate::docker::epoch_to_rfc3339(at))
+    });
+    format!("codex {status}: {what}{plan}{resets}")
+}
+
+/// A rejection that says the account's allowance is spent.
+///
+/// Carried as a downcastable cause rather than a signature change, so every frame between
+/// [`ask_codex`] and the fleet pass keeps returning plain `anyhow`. It is the one failure that
+/// promises to still be true in an hour, which is why [`JudgeHealth`] degrades on the first
+/// sighting of it and waits for [`DEGRADE_AFTER`] on everything else.
+#[derive(Debug)]
+pub struct QuotaExhausted {
+    /// Unix seconds the window reopens, when the provider said. `None` is a spent allowance
+    /// with no stated end, which is still a spent allowance.
+    pub resets_at: Option<i64>,
+}
+
+impl std::fmt::Display for QuotaExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the judge account's allowance is spent")
+    }
+}
+
+impl std::error::Error for QuotaExhausted {}
+
+/// The spent-allowance rejection this endpoint sends, if that is what `body` is.
+///
+/// Matched on `type` rather than on the prose, which is the half that changes. A body that is
+/// not the error envelope at all — the flat `{"detail": …}` this endpoint also sends — is not
+/// a quota rejection as far as anything here can tell, and degrades on the ordinary threshold.
+fn quota_exhausted(body: &str) -> Option<QuotaExhausted> {
+    let parsed = serde_json::from_str::<ApiError>(body).ok()?;
+    match parsed.error.kind.as_deref() {
+        Some("usage_limit_reached") => Some(QuotaExhausted { resets_at: parsed.error.resets_at }),
+        _ => None,
+    }
+}
+
+/// A failure response from the Responses endpoint. Every field is optional: a gateway, an
+/// outage, or a later version of the backend can all answer with something that is not this,
+/// and [`error_line`] falls back to the raw body whenever they do.
+#[derive(Debug, Default, Deserialize)]
+struct ApiError {
+    #[serde(default)]
+    error: ApiErrorBody,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ApiErrorBody {
+    /// `usage_limit_reached` and friends. Preferred over `message` because it is the stable
+    /// half: the prose changes, this does not.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    /// Which plan's allowance was spent, e.g. `pro`.
+    #[serde(default)]
+    plan_type: Option<String>,
+    /// Unix seconds at which the exhausted window reopens.
+    #[serde(default)]
+    resets_at: Option<i64>,
+}
+
+/// The assistant's text and what the call cost, out of a Responses SSE body.
 ///
 /// Read in the order the events are trustworthy: the finished message item carries the whole
 /// text, `response.output_text.done` repeats it, and the deltas are the last resort if the
 /// backend ever stops sending either. A stream that failed part way names its error rather
 /// than reading as an empty answer, which would be indistinguishable from "no".
-fn codex_answer_text(body: &str) -> Result<String> {
+///
+/// `response.completed` carries a `usage` record, which is the only exact statement of what a
+/// judge call cost that exists anywhere: the account's own usage API answers per ACCOUNT, and
+/// every clone in the fleet bills the same account, so nothing downstream of here can separate
+/// the judge's spend from theirs. It is read in the same pass rather than by a second scan of
+/// the ~14KB body, and its absence is never an error — this is transport metadata, and a
+/// backend that stops sending it must not turn a good verdict into a failed call.
+fn codex_answer_text(body: &str) -> Result<(String, Option<crate::stucklog::CallUsage>)> {
     let mut message = String::new();
     let mut done = String::new();
     let mut delta = String::new();
+    let mut usage = None;
     for line in body.lines() {
         let Some(data) = line.strip_prefix("data: ") else {
             continue;
@@ -1782,10 +2027,30 @@ fn codex_answer_text(body: &str) -> Result<String> {
                     .unwrap_or("no message");
                 bail!("codex stream failed: {}", snippet(why));
             }
+            // The two totals are the only fields this endpoint has been seen to send. The
+            // detail sub-objects are the public API's shape, read here so that a backend which
+            // starts sending them is recorded rather than silently rounded away.
+            "response.completed" if event["response"]["usage"].is_object() => {
+                let u = &event["response"]["usage"];
+                let (input, output) = (u["input_tokens"].as_u64(), u["output_tokens"].as_u64());
+                // Neither total readable means the record told us nothing, which is `None`
+                // rather than a call that cost zero. A real call always has input tokens, so
+                // there is no legitimate reading this discards.
+                if input.is_some() || output.is_some() {
+                    usage = Some(crate::stucklog::CallUsage {
+                        input_tokens: input.unwrap_or(0),
+                        output_tokens: output.unwrap_or(0),
+                        cached_input_tokens: u["input_tokens_details"]["cached_tokens"].as_u64(),
+                        reasoning_output_tokens: u["output_tokens_details"]["reasoning_tokens"]
+                            .as_u64(),
+                    });
+                }
+            }
             _ => {}
         }
     }
-    Ok([message, done, delta].into_iter().find(|t| !t.is_empty()).unwrap_or_default())
+    let text = [message, done, delta].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
+    Ok((text, usage))
 }
 
 /// Pull the JSON object out of the reply. Models fence it, prefix it, or return it bare, and
@@ -1838,6 +2103,55 @@ fn overruled(state: wire::MonitorState, view: &Value) -> Option<(wire::MonitorSt
     ))
 }
 
+/// One call that asks only "are you answering yet".
+///
+/// Deliberately the same fixed question every time, so it costs one cache-missable request a
+/// minute and never depends on which clone happens to be first. The answer is discarded: a
+/// judge that replies at all is a judge the fleet can go back to using per session.
+async fn probe_once(http: &reqwest::Client, backend: &Backend) -> Result<()> {
+    let view = json!({"sessions": [{"status": "shell", "quiet_for_seconds": 40}]});
+    ask(http, backend, &view).await.map(|_| ())
+}
+
+/// What a session reads as when the judge cannot be reached at all.
+///
+/// Two rules, and neither is new. Both are assertions this module already makes on every tick;
+/// the only change is that they are allowed to speak when nothing answered.
+///
+/// * `generating` is the session writing tokens right now — `busy`, and not parked inside a
+///   tool call. The prompt has always told the model this settles the question on its own
+///   ("If generating is true, that alone means true"), so believing it here invents nothing.
+/// * [`overruled`] is the tool-age floor: a machine-answered call younger than [`HANG_GRACE_S`]
+///   has not hung, whatever anyone says. It is enforced rather than asked precisely because it
+///   is not a judgement call.
+///
+/// Everything else is [`wire::MonitorState::Unknown`], which is the honest answer and the whole
+/// point: most of a working agent's wall clock is spent inside a build or a test run older than
+/// a minute, and this cannot see any of it. It reports what it can prove and admits the rest,
+/// rather than asserting an `Idle` that reads as "this agent stopped".
+///
+/// Both rules only ever lift. Neither can produce `Idle`, so a degraded fleet cannot invent a
+/// clone that stopped — only one that is working.
+fn degraded_state(view: &Value) -> (wire::MonitorState, String) {
+    // Only for an entrypoint that publishes a status. `generating` means "busy and not parked
+    // in a tool call" for a cli session, which is the claim worth believing — but for a
+    // statusless one (`sdk-ts`, `claude-vscode`) it degrades to transcript mtime with no
+    // blocked gate at all, so a session sitting in `AskUserQuestion` would read as working for
+    // a whole MOVING_WINDOW_S. Believing a file that moved is exactly the weak signal the
+    // measured token-idle baseline over-reported on.
+    let publishes_status = view["session"]["status"].is_string();
+    if publishes_status && view["session"]["generating"].as_bool() == Some(true) {
+        return (wire::MonitorState::Working, "the agent is writing tokens".to_string());
+    }
+    match overruled(wire::MonitorState::Idle, view) {
+        Some((state, why)) => (state, why),
+        None => (
+            wire::MonitorState::Unknown,
+            "the judge is unreachable and the files cannot settle this session".to_string(),
+        ),
+    }
+}
+
 /// Does the GPT path work end to end? Used by `POST /api/config/test`.
 ///
 /// Asks the real question against a fixture view rather than pinging something cheaper, which
@@ -1856,12 +2170,19 @@ pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bo
         "sessions": [{"status": "shell", "quiet_for_seconds": 40}],
         "background_tasks": [{"command": "cargo build --release", "running_for_seconds": 90}],
     });
+    // This call is billed like any other, but it belongs to no session and so has no decision
+    // line to ride. Its cost is reported to the operator who pressed the button instead.
     match ask_codex(&app.http, &acct.access_token, &acct.account_id, model, &view).await {
         Err(e) => (false, format!("{model} on {email}: {e:#}")),
-        Ok(a) => match a.will_progress {
+        Ok((a, usage)) => match a.will_progress {
             // The fixture describes a release build still running, so a judge that is working
             // says true. Anything else means the model answered but not the question.
-            Some(true) => (true, format!("{model} answers on {email}")),
+            Some(true) => {
+                let cost = usage.map_or(String::new(), |u| {
+                    format!(" ({} in / {} out)", u.input_tokens, u.output_tokens)
+                });
+                (true, format!("{model} answers on {email}{cost}"))
+            }
             _ => (
                 false,
                 format!("{model} on {email} gave an unusable answer: {}", a.reason.unwrap_or_default()),
@@ -1911,16 +2232,62 @@ pub async fn resolve_fleet(
         .iter()
         .flat_map(|(_, cases)| cases.iter().flatten())
         .any(|c| c.verdict == Verdict::Ask);
-    let backend = match asking {
-        false => None,
+    // While the judge is down the fleet stops asking per session and probes once a minute
+    // instead. Without this an outage COSTS MORE than a healthy fleet: a failed ask is never
+    // cached, and the per-session walk only short-circuits on a `Working` answer, so every Ask
+    // session re-POSTs its whole body on every 4-second tick for as long as the outage lasts.
+    let was_degraded = app.stuck.degraded().is_some();
+    let (backend, absent) = match asking {
+        false => (None, false),
         true => {
-            let (backend, why) = backend(app).await;
+            let (backend, why_none, why) = backend(app).await;
             if app.stuck.note_gap(&why) {
                 tracing::warn!(target: "stuck", "no clone can read as working: {why}");
             }
-            backend
+            // A token that will not refresh is an outage like any other; an account nobody
+            // imported is not. Only the first may degrade a fleet.
+            if why_none == NoBackend::Broken {
+                app.stuck.note_ask_failure(&anyhow::anyhow!("{why}"));
+            }
+            (backend, why_none == NoBackend::Absent)
         }
     };
+    // A degraded judge is checked with ONE call, here, rather than by letting the whole fleet
+    // discover it again per session. Clones run concurrently below, so a failure found down
+    // there cannot stop the calls already in flight beside it — which is exactly how an outage
+    // came to cost more than a healthy fleet.
+    let backend = match (backend, was_degraded) {
+        (Some(backend), true) => match app.stuck.may_probe() {
+            false => None,
+            true => match probe_once(&app.http, &backend).await {
+                Ok(()) => {
+                    if app.stuck.note_ask_success() {
+                        tracing::info!(
+                            target: "stuck",
+                            "the judge answered again; the fleet is back on it"
+                        );
+                    }
+                    Some(backend)
+                }
+                Err(e) => {
+                    app.stuck.note_ask_failure(&e);
+                    tracing::debug!(target: "stuck", "the judge is still unreachable: {e:#}");
+                    None
+                }
+            },
+        },
+        (backend, _) => backend,
+    };
+    // Degraded is what [`JudgeHealth`] says it is, never merely "we have no backend right now".
+    // A token refresh that failed once is a blip and takes the same threshold as any other
+    // non-quota failure; reading `backend.is_none()` here would have degraded the whole fleet
+    // on the first one, undebounced, which is the opposite of what the threshold is for.
+    // Two different questions. `latched` is "is the judge down", which is true whether or not
+    // this particular tick has anything to ask — and it is what [`LastSeen::blind`] needs, or a
+    // held `unknown` decays on a quiet tick and raises the badge the outage is meant to hold.
+    // `degraded` additionally requires a session that actually needs deciding.
+    let latched = !absent && app.stuck.degraded().is_some();
+    let degraded = asking && latched;
 
     let decided = read.into_iter().map(|(id, snapshot)| {
         let backend = backend.clone();
@@ -1934,7 +2301,7 @@ pub async fn resolve_fleet(
                 // Nothing is readable under this clone's root right now, which says nothing
                 // about what it is doing. Asserting idle here is a false alarm on a working
                 // clone, so its last real answer stands for a few ticks. See [`LastSeen`].
-                let held = last.blind(&id);
+                let held = last.blind(&id, latched);
                 return (id, held);
             };
             // Only for a clone that was actually read: an unreachable home has no live set, and
@@ -1950,6 +2317,11 @@ pub async fn resolve_fleet(
             // the first one that answers working, because no later answer could change the
             // clone's, and each one costs a model call. Sessions after that one go unevaluated,
             // so they get no decision line either, and their last one stands.
+            // A clone is the OR of its sessions, and `unknown` sits between the two answers it
+            // used to be: a clone whose sessions we could not read is not a clone we know to be
+            // idle. Working still wins outright and still stops the walk; `unknown` only wins
+            // over `idle`, so one readable idle session never masks another we are blind to.
+            let mut settled_as = wire::MonitorState::Idle;
             for case in &cases {
                 let sid = short(&case.session);
                 match case.verdict {
@@ -1963,21 +2335,41 @@ pub async fn resolve_fleet(
                     }
                     Verdict::Ask => {
                         let Some(backend) = backend.as_ref() else {
-                            log.record(
-                                case.decision(
-                                    &id,
+                            // Two different situations reach here and they are not the same
+                            // answer. A rig nobody gave a judge is working as designed and
+                            // still reports nothing as working. A judge that is DOWN cannot
+                            // settle this session either way, and saying `idle` there is the
+                            // lie that reads as "every agent stopped".
+                            let (state, why, by) = match degraded {
+                                true => {
+                                    let (state, why) = degraded_state(&case.view);
+                                    (state, why, "degraded")
+                                }
+                                false => (
                                     wire::MonitorState::Idle,
-                                    "no-judge",
                                     "nothing is configured to answer, so no clone reads as \
                                      working"
                                         .to_string(),
+                                    "no-judge",
                                 ),
-                                false,
-                            );
+                            };
+                            log.record(case.decision(&id, state, by, why), false);
+                            if state == wire::MonitorState::Working {
+                                last.settled(&id, wire::MonitorState::Working);
+                                return (id, wire::MonitorState::Working);
+                            }
+                            if state == wire::MonitorState::Unknown {
+                                settled_as = wire::MonitorState::Unknown;
+                            }
                             continue;
                         };
                         match app.stuck.resolve(&app.http, backend, &case.view).await {
-                            Ok((state, reason, asked)) => {
+                            Ok((state, reason, asked, usage)) => {
+                                // Recovery is announced by the probe above, once, rather than
+                                // by whichever session happened to get its answer first.
+                                if asked {
+                                    app.stuck.note_ask_success();
+                                }
                                 if asked {
                                     tracing::debug!(
                                         target: "stuck",
@@ -1998,37 +2390,78 @@ pub async fn resolve_fleet(
                                     }
                                     None => (state, by, reason),
                                 };
-                                log.record(case.decision(&id, state, by, reason), asked);
+                                let mut decision = case.decision(&id, state, by, reason);
+                                decision.usage = usage;
+                                log.record(decision, asked);
                                 if state == wire::MonitorState::Working {
                                     last.settled(&id, wire::MonitorState::Working);
                                     return (id, wire::MonitorState::Working);
                                 }
                             }
                             Err(e) => {
-                                // An outage at the provider must not flip the fleet to
-                                // working. Idle is the same answer an unconfigured judge
-                                // gives, and it is the safe one.
+                                // An outage at the provider still must not flip the fleet to
+                                // working on a guess. What changed is that it no longer flips
+                                // it to `idle` either: [`degraded_state`] reports only what the
+                                // session's own files prove, and says `unknown` for the rest.
+                                // Read BEFORE recording: otherwise the very failure that tips
+                                // the latch consults the latch it just set, and a five-second
+                                // provider blip across a fleet — DEGRADE_AFTER counts asks, not
+                                // ticks — paints healthy clones `unknown` mid-pass. That slides
+                                // past the debounce and the next tick's flapping verdict fires
+                                // the "stopped working" the debounce exists to swallow. This
+                                // exempts the session that TIPS the latch, not the whole pass:
+                                // clones resolve concurrently, so sessions polled after it in
+                                // the same pass do read degraded. That is the point — the
+                                // tipping failure can no longer convict on its own evidence.
+                                let was_down = app.stuck.degraded().is_some();
+                                if app.stuck.note_ask_failure(&e) {
+                                    tracing::warn!(
+                                        target: "stuck",
+                                        "the judge is unreachable; the fleet reads from files \
+                                         until it answers again: {e:#}"
+                                    );
+                                }
+                                // Once latched the fleet stops asking per session, so this is
+                                // at most DEGRADE_AFTER-1 lines per outage rather than a flood
+                                // — and an intermittent fault that never reaches the threshold
+                                // is otherwise invisible at the default `info` filter.
                                 tracing::warn!(
                                     target: "stuck",
                                     "clone {id} {sid}: asking failed: {e:#}"
                                 );
-                                let why = format!("asking failed: {e:#}");
-                                log.record(
-                                    case.decision(
-                                        &id,
+                                // Reachable almost only while the judge is HEALTHY: once the
+                                // latch is set there is no backend, and the branch above
+                                // handles the session instead. So a single timed-out ask must
+                                // NOT paint this clone `unknown` — that slides past the
+                                // debounce (which holds only working→idle) and lets the next
+                                // tick's flapping verdict fire a "stopped working" that the
+                                // debounce existed to swallow.
+                                let (state, by, why) = match was_down {
+                                    true => {
+                                        let (state, why) = degraded_state(&case.view);
+                                        (state, "degraded", format!("{why} (asking failed: {e:#})"))
+                                    }
+                                    false => (
                                         wire::MonitorState::Idle,
                                         "ask-failed",
-                                        why,
+                                        format!("asking failed: {e:#}"),
                                     ),
-                                    false,
-                                );
+                                };
+                                log.record(case.decision(&id, state, by, why), false);
+                                if state == wire::MonitorState::Working {
+                                    last.settled(&id, wire::MonitorState::Working);
+                                    return (id, wire::MonitorState::Working);
+                                }
+                                if state == wire::MonitorState::Unknown {
+                                    settled_as = wire::MonitorState::Unknown;
+                                }
                             }
                         }
                     }
                 }
             }
-            last.settled(&id, wire::MonitorState::Idle);
-            (id, wire::MonitorState::Idle)
+            last.settled(&id, settled_as);
+            (id, settled_as)
         }
     });
     let out: HashMap<String, wire::MonitorState> =
@@ -2091,6 +2524,7 @@ impl SessionCase {
                 wire::MonitorState::Working => "working",
                 wire::MonitorState::Idle => "idle",
                 wire::MonitorState::Offline => "offline",
+                wire::MonitorState::Unknown => "unknown",
             }
             .to_string(),
             decided_by: decided_by.to_string(),
@@ -2793,11 +3227,11 @@ mod tests {
         let seen = LastSeen::new();
         seen.settled("c1", wire::MonitorState::Working);
         for tick in 1..=BLIND_TICKS {
-            assert_eq!(seen.blind("c1"), wire::MonitorState::Working, "tick {tick}");
+            assert_eq!(seen.blind("c1", false), wire::MonitorState::Working, "tick {tick}");
         }
         // Holding a stale `working` is the one thing this must never do for long.
-        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
-        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("c1", false), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("c1", false), wire::MonitorState::Idle);
     }
 
     #[test]
@@ -2807,22 +3241,22 @@ mod tests {
         let seen = LastSeen::new();
         seen.settled("c1", wire::MonitorState::Working);
         for _ in 0..BLIND_TICKS {
-            seen.blind("c1");
+            seen.blind("c1", false);
         }
         seen.settled("c1", wire::MonitorState::Working);
-        assert_eq!(seen.blind("c1"), wire::MonitorState::Working);
+        assert_eq!(seen.blind("c1", false), wire::MonitorState::Working);
     }
 
     #[test]
     fn a_clone_nobody_has_settled_has_nothing_to_hold() {
-        assert_eq!(LastSeen::new().blind("never-seen"), wire::MonitorState::Idle);
+        assert_eq!(LastSeen::new().blind("never-seen", false), wire::MonitorState::Idle);
     }
 
     #[test]
     fn holding_never_invents_working_out_of_idle() {
         let seen = LastSeen::new();
         seen.settled("c1", wire::MonitorState::Idle);
-        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("c1", false), wire::MonitorState::Idle);
     }
 
     #[test]
@@ -2830,7 +3264,7 @@ mod tests {
         let seen = LastSeen::new();
         seen.settled("gone", wire::MonitorState::Working);
         seen.retain(&["kept".to_string()].into_iter().collect());
-        assert_eq!(seen.blind("gone"), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("gone", false), wire::MonitorState::Idle);
     }
 
     #[test]
@@ -3570,7 +4004,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
 
     #[test]
     fn the_answer_is_read_out_of_the_finished_message() {
-        let text = codex_answer_text(CODEX_STREAM).expect("a stream that completed");
+        let (text, _) = codex_answer_text(CODEX_STREAM).expect("a stream that completed");
         let answer = parse_answer(&text);
         assert_eq!(answer.will_progress, Some(true));
         assert_eq!(answer.reason.as_deref(), Some("the release build is still running"));
@@ -3584,7 +4018,115 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             .filter(|l| !l.contains("output_text.done") && !l.contains(r#""type":"message""#))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(codex_answer_text(&deltas).unwrap(), r#"{"will_progress":true}"#);
+        assert_eq!(codex_answer_text(&deltas).unwrap().0, r#"{"will_progress":true}"#);
+    }
+
+    /// The exact statement of what one call cost, which nothing else in the system has: the
+    /// account's usage API answers per ACCOUNT, and every clone bills the same account.
+    #[test]
+    fn the_completed_event_says_what_the_call_cost() {
+        let (_, usage) = codex_answer_text(CODEX_STREAM).expect("a stream that completed");
+        let usage = usage.expect("response.completed carried a usage record");
+        assert_eq!(usage.input_tokens, 67);
+        assert_eq!(usage.output_tokens, 66);
+        // The fixture was trimmed from a real reply and carries only the two totals, so the
+        // detail sub-objects have to read as absent rather than as zero.
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(usage.reasoning_output_tokens, None);
+    }
+
+    /// A backend that stops sending the record, or sends a malformed one, still answered the
+    /// question. Losing the accounting is never a reason to fail a verdict.
+    #[test]
+    fn a_stream_with_no_usage_record_still_answers() {
+        let stripped: String = CODEX_STREAM
+            .lines()
+            .filter(|l| !l.contains("response.completed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (text, usage) = codex_answer_text(&stripped).expect("the answer is still there");
+        assert_eq!(parse_answer(&text).will_progress, Some(true));
+        assert_eq!(usage, None);
+
+        // Present but not an object: same reading, and no panic on the indexing below it.
+        let junk = CODEX_STREAM
+            .replace(r#""usage":{"input_tokens":67,"output_tokens":66}"#, r#""usage":null"#);
+        assert_eq!(codex_answer_text(&junk).unwrap().1, None);
+
+        // An object with neither total readable told us nothing. That is "unknown", not a call
+        // that cost zero — a fake zero would read downstream as a free call.
+        for shape in [r#""usage":{}"#, r#""usage":{"prompt_tokens":67,"completion_tokens":66}"#] {
+            let renamed = CODEX_STREAM
+                .replace(r#""usage":{"input_tokens":67,"output_tokens":66}"#, shape);
+            assert_eq!(codex_answer_text(&renamed).unwrap().1, None, "{shape}");
+        }
+    }
+
+    /// The public API breaks the totals down further. The endpoint has not been observed doing
+    /// it, so this is read opportunistically rather than required.
+    #[test]
+    fn the_detail_sub_objects_are_kept_when_a_backend_sends_them() {
+        let rich = CODEX_STREAM.replace(
+            r#""usage":{"input_tokens":67,"output_tokens":66}"#,
+            r#""usage":{"input_tokens":1913,"output_tokens":94,"input_tokens_details":{"cached_tokens":1536},"output_tokens_details":{"reasoning_tokens":28}}"#,
+        );
+        let usage = codex_answer_text(&rich).unwrap().1.expect("a usage record");
+        assert_eq!(usage.input_tokens, 1913);
+        assert_eq!(usage.cached_input_tokens, Some(1536));
+        assert_eq!(usage.reasoning_output_tokens, Some(28));
+    }
+
+    /// The body verbatim from the live endpoint on 2026-08-18, when the judge account's weekly
+    /// window was spent. Everything an operator needs is in it; the old line threw it away.
+    #[test]
+    fn a_quota_rejection_says_which_plan_and_when_it_reopens() {
+        let body = r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro","resets_at":1787196558,"eligible_promo":null,"resets_in_seconds":118088}}"#;
+        assert_eq!(
+            error_line(429, body),
+            "codex 429: usage_limit_reached: The usage limit has been reached on the pro plan, \
+             resets 2026-08-20T03:29:18Z"
+        );
+    }
+
+    /// The type is the stable handle and the prose is what a person reads. Keeping only the
+    /// type threw away everything the backend actually said about a failure.
+    #[test]
+    fn an_error_keeps_both_its_type_and_its_message() {
+        let both = r#"{"error":{"type":"invalid_request_error","message":"Stream must be set to true"}}"#;
+        assert_eq!(
+            error_line(400, both),
+            "codex 400: invalid_request_error: Stream must be set to true"
+        );
+        // An empty or blank type is not a name, and must not shadow the prose.
+        let blank = r#"{"error":{"type":"   ","message":"Stream must be set to true"}}"#;
+        assert_eq!(error_line(400, blank), "codex 400: Stream must be set to true");
+    }
+
+    /// The raw path has always been bounded. Parsing a body is no reason to stop bounding it:
+    /// this string reaches a per-tick warning and the decision log.
+    #[test]
+    fn a_parsed_error_is_capped_like_a_raw_one() {
+        let body = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(5_000));
+        let line = error_line(500, &body);
+        assert_eq!(line.len(), "codex 500: ".len() + 200, "{line}");
+    }
+
+    /// A gateway, an outage, or a later backend can answer with anything. None of them may be
+    /// made less legible than the raw body already was.
+    #[test]
+    fn an_unrecognised_error_body_still_reports_itself() {
+        assert_eq!(
+            error_line(502, "<html>bad gateway</html>"),
+            "codex 502: <html>bad gateway</html>"
+        );
+        assert_eq!(error_line(500, "{}"), "codex 500: {}");
+        // Shaped like the error envelope but with no type: the prose is the fallback.
+        assert_eq!(
+            error_line(400, r#"{"error":{"message":"Stream must be set to true"}}"#),
+            "codex 400: Stream must be set to true"
+        );
+        // A 200-character cap still applies to a body that tells us nothing.
+        assert_eq!(error_line(503, &"x".repeat(500)).len(), "codex 503: ".len() + 200);
     }
 
     /// A stream that died part way through has to be an error. Read as an empty answer it
@@ -3594,6 +4136,161 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
         let stream = "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"rate limit reached\"}}}\n";
         let e = codex_answer_text(stream).expect_err("a failed stream");
         assert!(format!("{e:#}").contains("rate limit reached"), "{e:#}");
+    }
+
+    // --- degraded mode --------------------------------------------------------------------
+
+    fn view_generating(on: bool) -> Value {
+        json!({"session": {"status": "busy", "generating": on, "quiet_for_seconds": 3}})
+    }
+
+    fn view_in_call(tool: &str, age: f64) -> Value {
+        json!({
+            "session": {"status": "busy", "generating": false},
+            "in_flight_tool_calls": [
+                {"tool": tool, "by": "main agent", "running_for_seconds": age}
+            ],
+        })
+    }
+
+    /// The prompt has always told the model this settles the question on its own, so believing
+    /// it with the model unreachable invents nothing.
+    #[test]
+    fn a_generating_session_reads_working_without_the_judge() {
+        let (state, why) = degraded_state(&view_generating(true));
+        assert_eq!(state, wire::MonitorState::Working);
+        assert!(why.contains("writing tokens"), "{why}");
+    }
+
+    /// The tool-age floor is enforced rather than asked precisely because it is not a judgement
+    /// call, so it holds when there is nobody to ask.
+    #[test]
+    fn a_fresh_tool_call_reads_working_without_the_judge() {
+        assert_eq!(degraded_state(&view_in_call("Bash", 4.0)).0, wire::MonitorState::Working);
+    }
+
+    /// Everything the two rules cannot prove. Most of a working agent's wall clock is here —
+    /// inside a build older than a minute — and claiming `idle` for it is the lie that reads
+    /// as "this agent stopped".
+    #[test]
+    fn anything_the_files_cannot_prove_reads_unknown_not_idle() {
+        for view in [
+            view_generating(false),
+            view_in_call("Bash", 4_000.0),
+            // A tool that IS the agent asking a person is never lifted, at any age.
+            view_in_call("AskUserQuestion", 4.0),
+            json!({"session": {"status": "shell"}}),
+        ] {
+            let (state, _) = degraded_state(&view);
+            assert_eq!(state, wire::MonitorState::Unknown, "{view}");
+            assert_ne!(state, wire::MonitorState::Idle);
+        }
+    }
+
+    /// The whole safety argument: both rules only ever lift. A degraded fleet can invent a
+    /// clone that is working; it can never invent one that stopped.
+    #[test]
+    fn degraded_mode_never_produces_idle() {
+        for view in [view_generating(true), view_in_call("Bash", 4.0), json!({}), json!({"session": {}})] {
+            assert_ne!(degraded_state(&view).0, wire::MonitorState::Idle, "{view}");
+        }
+    }
+
+    /// A statusless entrypoint publishes no status, so `generating` there is transcript mtime
+    /// with no blocked gate — a session parked in a dialog would read as writing tokens. Rule 1
+    /// must not fire for it at all.
+    #[test]
+    fn a_statusless_entrypoint_never_lifts_on_generating() {
+        // `sdk-ts` / `claude-vscode`: the record is written once at startup and never updated.
+        let view = json!({"session": {"status": null, "generating": true, "quiet_for_seconds": 2}});
+        assert_eq!(degraded_state(&view).0, wire::MonitorState::Unknown);
+
+        // The same view from a `cli` session is the claim worth believing.
+        let cli = json!({"session": {"status": "busy", "generating": true}});
+        assert_eq!(degraded_state(&cli).0, wire::MonitorState::Working);
+
+        // And the floor still works for a statusless session — it reads tool calls, not status.
+        let in_call = json!({
+            "session": {"status": null, "generating": true},
+            "in_flight_tool_calls": [{"tool": "Bash", "by": "main agent", "running_for_seconds": 3.0}],
+        });
+        assert_eq!(degraded_state(&in_call).0, wire::MonitorState::Working);
+    }
+
+    /// A held `unknown` may not decay into a confident `idle` DURING an outage — that would
+    /// raise the badge the outage is meant to hold back. It must decay once the outage is over,
+    /// or the stop is not deferred, it is lost: nothing ever raises on `unknown`.
+    #[test]
+    fn a_held_unknown_decays_only_once_the_outage_is_over() {
+        let seen = LastSeen::new();
+        seen.settled("c", wire::MonitorState::Unknown);
+        for _ in 0..(BLIND_TICKS + 4) {
+            assert_eq!(seen.blind("c", true), wire::MonitorState::Unknown, "still degraded");
+        }
+        assert_eq!(seen.blind("c", false), wire::MonitorState::Idle, "the judge came back");
+
+        // A held `working` decays on its own clock, outage or not.
+        let seen = LastSeen::new();
+        seen.settled("w", wire::MonitorState::Working);
+        for _ in 0..BLIND_TICKS {
+            assert_eq!(seen.blind("w", true), wire::MonitorState::Working);
+        }
+        assert_eq!(seen.blind("w", true), wire::MonitorState::Idle);
+    }
+
+    /// A spent allowance is the one failure that promises to still be true in an hour.
+    #[test]
+    fn a_spent_allowance_is_recognised_from_its_type_not_its_prose() {
+        let body = r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"pro","resets_at":1787196558}}"#;
+        assert_eq!(quota_exhausted(body).unwrap().resets_at, Some(1787196558));
+        // The flat shape this endpoint also sends is not a quota rejection as far as we can tell.
+        assert!(quota_exhausted(r#"{"detail":"Rate limit exceeded"}"#).is_none());
+        assert!(quota_exhausted(r#"{"error":{"type":"server_error"}}"#).is_none());
+        assert!(quota_exhausted("<html>502</html>").is_none());
+    }
+
+    #[test]
+    fn a_spent_allowance_degrades_at_once_and_anything_else_waits() {
+        let mut h = JudgeHealth::default();
+        h.failed(Some(Some(1787196558)));
+        assert!(h.degraded(), "a spent allowance does not wait for a threshold");
+        assert_eq!(h.quota_resets_at, Some(1787196558));
+
+        // A blip must not darken a fleet.
+        let mut h = JudgeHealth::default();
+        for _ in 1..DEGRADE_AFTER {
+            h.failed(None);
+            assert!(!h.degraded(), "one dropped connection is not an outage");
+        }
+        h.failed(None);
+        assert!(h.degraded(), "but a run of them is");
+    }
+
+    #[test]
+    fn one_answer_ends_an_outage() {
+        let mut h = JudgeHealth::default();
+        h.failed(Some(None));
+        assert!(h.degraded());
+        h.recovered();
+        assert!(!h.degraded());
+        assert_eq!(h.quota_resets_at, None);
+        // And the count starts over, so an old failure cannot combine with a new one.
+        h.failed(None);
+        assert!(!h.degraded());
+    }
+
+    /// While degraded the fleet stops asking per session. Without a probe it would never learn
+    /// the judge came back; without a bound it would be the storm it replaced.
+    #[test]
+    fn a_degraded_judge_is_probed_once_a_minute_and_a_healthy_one_never() {
+        let mut h = JudgeHealth::default();
+        let t0 = Instant::now();
+        assert!(!h.may_probe(t0), "a healthy judge is asked per session, not probed");
+
+        h.failed(Some(None));
+        assert!(h.may_probe(t0), "the first tick of an outage probes");
+        assert!(!h.may_probe(t0 + Duration::from_secs(59)), "and then holds off");
+        assert!(h.may_probe(t0 + PROBE_EVERY), "until the interval is up");
     }
 
     /// The GPT path against the real endpoint.
@@ -3623,9 +4320,13 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             "sessions": [{"status": "shell", "quiet_for_seconds": 40}],
             "background_tasks": [{"command": "cargo build --release", "running_for_seconds": 90}],
         });
-        let answer = ask_codex(&http, token, account, "gpt-5.6-luna", &building).await.unwrap();
+        let (answer, usage) =
+            ask_codex(&http, token, account, "gpt-5.6-luna", &building).await.unwrap();
         assert_eq!(answer.will_progress, Some(true), "{answer:?}");
-        println!("building: {answer:?}");
+        // The live endpoint's own account of what that cost. Printed rather than asserted:
+        // the exact counts move with the prompt, and this test exists to exercise the wire.
+        println!("building: {answer:?} cost {usage:?}");
+        assert!(usage.is_some(), "the live endpoint reports usage on response.completed");
 
         // Finished, with a dev server it left running. Nothing there will ever wake anybody.
         let served = json!({
@@ -3633,9 +4334,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             "background_tasks": [{"command": "npm run dev", "running_for_seconds": 900}],
             "agent_last_said": "The dev server is up on port 3000. Let me know what to build next.",
         });
-        let answer = ask_codex(&http, token, account, "gpt-5.6-luna", &served).await.unwrap();
+        let (answer, usage) =
+            ask_codex(&http, token, account, "gpt-5.6-luna", &served).await.unwrap();
         assert_eq!(answer.will_progress, Some(false), "{answer:?}");
-        println!("served: {answer:?}");
+        println!("served: {answer:?} cost {usage:?}");
     }
 
 }

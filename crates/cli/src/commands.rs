@@ -60,6 +60,7 @@ fn clone_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
         Some(MonitorState::Working) => "working".to_string(),
         Some(MonitorState::Idle) => "idle".to_string(),
         Some(MonitorState::Offline) => "offline".to_string(),
+        Some(MonitorState::Unknown) => "unknown".to_string(),
         None => String::new(),
     }
 }

@@ -74,13 +74,42 @@ pub struct BoardColumn {
 /// Server-owned lifecycle state. Docker supplies container liveness; `working` versus `idle`
 /// answers one question about the clone's agent, "will it get any further without a person",
 /// so a clone that has finished, asked something, or wedged all read `idle`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+///
+/// `unknown` is the fourth answer, and it is about US rather than about the clone: the judge
+/// that decides `working` could not be reached, and the files could not settle this session on
+/// their own. It exists because `idle` had been carrying two meanings — "I know it is idle" and
+/// "I cannot tell" — and an outage at the provider turned the whole fleet into the second while
+/// it read as the first. A clone reading `unknown` may well be working; nothing here knows.
+///
+/// **`Unknown` is deliberately not part of the wire vocabulary.** The `rmng` CLI is injected
+/// into a clone when it is created and existing clones keep theirs across a server upgrade, so
+/// the fleet is full of binaries compiled against the three-value enum. Serde fails the WHOLE
+/// document on an unknown variant, which would break `rmng clone ls`, `ssh`, `select` and `bind`
+/// in every pre-existing clone for exactly as long as an outage lasted. A new struct FIELD is
+/// ignored by those parsers; a new enum VALUE is not, so the fourth state travels as
+/// [`RmngClone::activity_unknown`] and this serializes as `idle` — which is what those clients
+/// showed for an unreachable judge before any of this existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum MonitorState {
     Working,
     Idle,
     Offline,
+    /// Never serialized under this name. See the type docs.
+    #[serde(skip)]
+    #[ts(skip)]
+    Unknown,
+}
+
+impl serde::Serialize for MonitorState {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            Self::Working => "working",
+            Self::Idle | Self::Unknown => "idle",
+            Self::Offline => "offline",
+        })
+    }
 }
 
 /// One local-forward rule: a TCP port inside this clone (`remote_port`) exposed at
@@ -204,6 +233,15 @@ pub struct RmngClone {
     /// Claude Code session registry and agent hooks, never reported by a clone-local process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor_state: Option<MonitorState>,
+    /// Whether `monitor_state` is a reading at all, or only the absence of one.
+    ///
+    /// Set when the judge that decides `working` could not be reached and the files could not
+    /// settle the clone on their own. `monitor_state` reads `idle` alongside it, which is what
+    /// an older client showed in that situation anyway — so a client that does not know this
+    /// field is exactly as right as it was before, and one that does can say "no reading"
+    /// instead of asserting the agent stopped. A clone flagged here may well be working.
+    #[serde(default)]
+    pub activity_unknown: bool,
     /// The clone container's IPv4 on the rmng bridge network — the address other
     /// clones can dial it at directly (alongside its `id`, which Docker's embedded
     /// DNS resolves to the same clone). Populated by the monitor poller from a Docker

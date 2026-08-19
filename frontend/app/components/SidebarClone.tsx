@@ -58,6 +58,7 @@ const STATUS_DOT: Record<NonNullable<Clone["monitorState"]>, { dot: string; labe
     dot: "bg-purple-500 shadow-[0_0_4px_rgb(168_85_247_/_0.7),0_0_10px_rgb(168_85_247_/_0.45)]",
     label: "offline",
   },
+
 };
 
 type Metric = { label: string; value: string; title: string };
@@ -486,7 +487,16 @@ export function SidebarClone({
   const sshCommand = managed && !clone.archived
     ? buildSshCommand(sshPublicHost, bastionPort, clone.id)
     : undefined;
-  const status = clone.archived ? undefined : STATUS_DOT[clone.monitorState ?? "idle"];
+  // Hollow on purpose. Every other dot is a reading; this one is the absence of one, and a
+  // filled dot in a fourth colour would read as a fourth thing the agent might be doing.
+  const status = clone.archived
+    ? undefined
+    : clone.activityUnknown
+      ? {
+          dot: "bg-transparent ring-2 ring-inset ring-amber-500 dark:ring-amber-400",
+          label: "no reading — the activity judge is unreachable",
+        }
+      : STATUS_DOT[clone.monitorState ?? "idle"];
   // A live clone always shows both figures, falling back to zero rather than to a blank. A
   // clone that has not been scanned yet is idle, not unknowable, and a row that gains its
   // numbers a moment later reads as the card changing shape.

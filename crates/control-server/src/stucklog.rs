@@ -37,6 +37,33 @@ use serde_json::Value;
 /// has been behaving oddly lately" and still bounds the directory on a server that never stops.
 const KEEP_DAYS: usize = 30;
 
+/// What one billed model call cost, exactly as the provider reported it.
+///
+/// Kept as the provider's own counts rather than blended into a total: input and output bill at
+/// different rates, and a sum cannot be taken apart again afterwards. Every field is optional
+/// or defaulted because this is transport metadata, not an answer: a backend that stops sending
+/// a usage record, or starts sending a richer one, must not turn a good verdict into an error.
+///
+/// Absent on every line no live call produced, which is what makes its presence the honest
+/// answer to "was this one billed" — see [`Decision::asked`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// The share of `input_tokens` the provider served from its own prompt cache, when it says
+    /// so. The judge re-sends a byte-identical 1,538-token prompt on every call, so this is the
+    /// field that would show whether that prefix is discounted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    /// Hidden reasoning tokens, which bill as output. Absent unless the provider breaks them
+    /// out, and it is the largest unknown in any cost estimate that does not have them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u64>,
+}
+
 /// One decision about one session, at the moment it was made.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +101,25 @@ pub struct Decision {
     /// session, which has no view: its whole evidence is `status` and `waitingFor`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<Value>,
+    /// Whether a model call was made AND answered for this line. Stamped by [`Recorder::record`]
+    /// from the same flag that decides whether the line is written at all, so the two can never
+    /// disagree.
+    ///
+    /// A call that was attempted and failed reads `false`, because the caller passes `false` on
+    /// that path: those lines are `decidedBy: "ask-failed"` and are counted from that instead.
+    /// It is deliberate — forcing them true would defeat the change test below and append a
+    /// view-carrying line per session per tick for as long as a provider outage lasted.
+    ///
+    /// `decided_by` cannot answer this on its own and never could: the tool-age floor relabels
+    /// an answered call `floor` (see `crate::stuck::overruled`), which leaves it
+    /// indistinguishable from a free `cache` hit. Counting billed calls off the label alone
+    /// therefore gives a bracket rather than a number, and this closes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asked: bool,
+    /// What the call cost, when the provider reported it. Absent on every file-settled or
+    /// cached line, and on a billed call whose stream ended without a usage record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<CallUsage>,
 }
 
 /// What each session was last reported as, plus the lines this pass has yet to write.
@@ -107,6 +153,7 @@ impl Recorder {
         }
         decision.ts = now_rfc3339();
         decision.was = was.unwrap_or_else(|| "new".to_string());
+        decision.asked = asked;
         self.seen.write().unwrap().insert(key, decision.state.clone());
         self.pending.lock().unwrap().push(decision);
     }
@@ -349,10 +396,73 @@ mod tests {
     }
 
     #[test]
+    fn a_billed_call_says_so_and_a_cache_hit_does_not() {
+        // The whole point of the field. `decidedBy` cannot answer this: the tool-age floor
+        // relabels an answered call `floor`, which otherwise reads exactly like a free cache
+        // hit, so counting billed calls off the label alone gives a bracket rather than a
+        // number.
+        let rec = Recorder::new();
+        let mut billed = decision("c1", "s1", "working");
+        billed.decided_by = "floor".to_string();
+        rec.record(billed, true);
+
+        let mut cached = decision("c1", "s2", "working");
+        cached.decided_by = "cache".to_string();
+        rec.record(cached, false);
+
+        let lines = drain(&rec);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].asked, "a `floor` line can still have cost a call");
+        assert!(!lines[1].asked, "the cache answered this one for nothing");
+
+        // On the wire too: without this, a stray `#[serde(skip)]` would pass every other test
+        // while writing a log nothing could count.
+        let json = serde_json::to_string(&lines[0]).unwrap();
+        assert!(json.contains(r#""asked":true"#), "{json}");
+        assert!(!serde_json::to_string(&lines[1]).unwrap().contains("asked"));
+    }
+
+    #[test]
+    fn what_a_call_cost_survives_a_round_trip() {
+        let mut d = decision("c1", "s1", "working");
+        d.decided_by = "model".to_string();
+        d.usage = Some(CallUsage {
+            input_tokens: 1913,
+            output_tokens: 66,
+            cached_input_tokens: Some(1536),
+            reasoning_output_tokens: Some(28),
+        });
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Decision = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.usage, d.usage);
+        assert!(json.contains(r#""inputTokens":1913"#), "camelCase on the wire: {json}");
+        assert!(json.contains(r#""cachedInputTokens":1536"#), "{json}");
+    }
+
+    /// The log's own shape, not the provider's: `crate::stuck::codex_answer_text` reads the
+    /// endpoint's snake_case fields one at a time out of a `Value`, and what lands here is
+    /// already this struct. The two totals are all that endpoint has been observed to send, so
+    /// a line carrying only them has to read back as cleanly as a fully detailed one.
+    #[test]
+    fn a_line_with_only_the_two_totals_reads_back_clean() {
+        let usage: CallUsage =
+            serde_json::from_str(r#"{"inputTokens":67,"outputTokens":66}"#).unwrap();
+        assert_eq!((usage.input_tokens, usage.output_tokens), (67, 66));
+        assert_eq!(usage.cached_input_tokens, None);
+        assert_eq!(usage.reasoning_output_tokens, None);
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(!json.contains("cached"), "an absent detail is absent, not null: {json}");
+    }
+
+    #[test]
     fn a_file_settled_line_carries_no_view_key_at_all() {
         let json = serde_json::to_string(&decision("c1", "s1", "idle")).unwrap();
         assert!(!json.contains("view"), "an absent view is absent, not null: {json}");
         assert!(!json.contains("promptAgeSeconds"));
+        // A line no model call produced is byte-identical to what it was before usage
+        // accounting existed: nothing that never asked grows an `asked` or a `usage` key.
+        assert!(!json.contains("asked"), "{json}");
+        assert!(!json.contains("usage"), "{json}");
     }
 
     #[test]

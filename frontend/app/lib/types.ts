@@ -73,6 +73,11 @@ export interface Clone {
    * distinguishes working from idle. The sidebar uses this only for its compact indicator.
    */
   monitorState?: "working" | "idle" | "offline";
+  /** Set when the activity judge could not be reached and the files could not settle this
+   *  clone on their own. `monitorState` reads `idle` alongside it — which is what every client
+   *  showed in that situation before this existed — so this is what lets the UI say "no
+   *  reading" rather than assert the agent stopped. A flagged clone may well be working. */
+  activityUnknown?: boolean;
   /** Set when an unselected clone transitions from working to idle/offline. */
   unread?: boolean;
   /** Headless clone: no desktop (display + capture units disabled at create). Selecting it

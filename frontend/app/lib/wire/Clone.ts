@@ -82,6 +82,16 @@ presetName: string | null, displayName: string | null, linearLabel: string | nul
  */
 monitorState: MonitorState | null, 
 /**
+ * Whether `monitor_state` is a reading at all, or only the absence of one.
+ *
+ * Set when the judge that decides `working` could not be reached and the files could not
+ * settle the clone on their own. `monitor_state` reads `idle` alongside it, which is what
+ * an older client showed in that situation anyway — so a client that does not know this
+ * field is exactly as right as it was before, and one that does can say "no reading"
+ * instead of asserting the agent stopped. A clone flagged here may well be working.
+ */
+activityUnknown: boolean, 
+/**
  * The clone container's IPv4 on the rmng bridge network — the address other
  * clones can dial it at directly (alongside its `id`, which Docker's embedded
  * DNS resolves to the same clone). Populated by the monitor poller from a Docker

@@ -4,5 +4,20 @@
  * Server-owned lifecycle state. Docker supplies container liveness; `working` versus `idle`
  * answers one question about the clone's agent, "will it get any further without a person",
  * so a clone that has finished, asked something, or wedged all read `idle`.
+ *
+ * `unknown` is the fourth answer, and it is about US rather than about the clone: the judge
+ * that decides `working` could not be reached, and the files could not settle this session on
+ * their own. It exists because `idle` had been carrying two meanings — "I know it is idle" and
+ * "I cannot tell" — and an outage at the provider turned the whole fleet into the second while
+ * it read as the first. A clone reading `unknown` may well be working; nothing here knows.
+ *
+ * **`Unknown` is deliberately not part of the wire vocabulary.** The `rmng` CLI is injected
+ * into a clone when it is created and existing clones keep theirs across a server upgrade, so
+ * the fleet is full of binaries compiled against the three-value enum. Serde fails the WHOLE
+ * document on an unknown variant, which would break `rmng clone ls`, `ssh`, `select` and `bind`
+ * in every pre-existing clone for exactly as long as an outage lasted. A new struct FIELD is
+ * ignored by those parsers; a new enum VALUE is not, so the fourth state travels as
+ * [`RmngClone::activity_unknown`] and this serializes as `idle` — which is what those clients
+ * showed for an unreachable judge before any of this existed.
  */
 export type MonitorState = "working" | "idle" | "offline";
