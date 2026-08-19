@@ -2282,7 +2282,12 @@ pub async fn resolve_fleet(
     // A token refresh that failed once is a blip and takes the same threshold as any other
     // non-quota failure; reading `backend.is_none()` here would have degraded the whole fleet
     // on the first one, undebounced, which is the opposite of what the threshold is for.
-    let degraded = asking && !absent && app.stuck.degraded().is_some();
+    // Two different questions. `latched` is "is the judge down", which is true whether or not
+    // this particular tick has anything to ask — and it is what [`LastSeen::blind`] needs, or a
+    // held `unknown` decays on a quiet tick and raises the badge the outage is meant to hold.
+    // `degraded` additionally requires a session that actually needs deciding.
+    let latched = !absent && app.stuck.degraded().is_some();
+    let degraded = asking && latched;
 
     let decided = read.into_iter().map(|(id, snapshot)| {
         let backend = backend.clone();
@@ -2296,7 +2301,7 @@ pub async fn resolve_fleet(
                 // Nothing is readable under this clone's root right now, which says nothing
                 // about what it is doing. Asserting idle here is a false alarm on a working
                 // clone, so its last real answer stands for a few ticks. See [`LastSeen`].
-                let held = last.blind(&id, degraded);
+                let held = last.blind(&id, latched);
                 return (id, held);
             };
             // Only for a clone that was actually read: an unreachable home has no live set, and
@@ -2398,6 +2403,14 @@ pub async fn resolve_fleet(
                                 // working on a guess. What changed is that it no longer flips
                                 // it to `idle` either: [`degraded_state`] reports only what the
                                 // session's own files prove, and says `unknown` for the rest.
+                                // Read BEFORE recording: otherwise the very failure that tips
+                                // the latch consults the latch it just set, and a five-second
+                                // provider blip across a fleet — DEGRADE_AFTER counts asks, not
+                                // ticks — paints healthy clones `unknown` mid-pass. That slides
+                                // past the debounce and the next tick's flapping verdict fires
+                                // the "stopped working" the debounce exists to swallow. Entering
+                                // degraded now requires the latch to survive to the next tick.
+                                let was_down = app.stuck.degraded().is_some();
                                 if app.stuck.note_ask_failure(&e) {
                                     tracing::warn!(
                                         target: "stuck",
@@ -2420,7 +2433,7 @@ pub async fn resolve_fleet(
                                 // debounce (which holds only working→idle) and lets the next
                                 // tick's flapping verdict fire a "stopped working" that the
                                 // debounce existed to swallow.
-                                let (state, by, why) = match app.stuck.degraded().is_some() {
+                                let (state, by, why) = match was_down {
                                     true => {
                                         let (state, why) = degraded_state(&case.view);
                                         (state, "degraded", format!("{why} (asking failed: {e:#})"))

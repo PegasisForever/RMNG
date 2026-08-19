@@ -1055,6 +1055,7 @@ async fn run_archive(app: App, op_id: String, host_id: String) {
         if let Some(host) = s.hosts.iter_mut().find(|h| h.id == host_id) {
             host.archived = true;
             host.monitor_state = None;
+            host.activity_unknown = false;
             host.local_ip = None;
             host.unread = false;
         }
@@ -1137,6 +1138,7 @@ async fn run_unarchive(app: App, op_id: String, host_id: String) {
         if let Some(host) = s.hosts.iter_mut().find(|h| h.id == host_id) {
             host.archived = false;
             host.monitor_state = None;
+            host.activity_unknown = false;
             host.local_ip = None;
             host.unread = false;
         }
