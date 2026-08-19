@@ -182,9 +182,13 @@ impl LastSeen {
             return wire::MonitorState::Idle;
         };
         *blind = blind.saturating_add(1);
-        match *blind <= BLIND_TICKS {
-            true => *state,
-            false => wire::MonitorState::Idle,
+        match (*blind <= BLIND_TICKS, *state) {
+            (true, state) => state,
+            // A clone we could not read, in an outage we could not see past, is not a clone we
+            // know to be idle. Decaying to `Idle` here would raise the badge the outage is
+            // supposed to hold back, on the least evidence anything in this module ever has.
+            (false, wire::MonitorState::Unknown) => wire::MonitorState::Unknown,
+            (false, _) => wire::MonitorState::Idle,
         }
     }
 
@@ -1555,11 +1559,14 @@ pub struct Judge {
     health: StdRwLock<JudgeHealth>,
 }
 
-/// How many consecutive failures of an UNKNOWN kind it takes to call the judge down.
+/// How many consecutive failed ASKS it takes to call the judge down.
 ///
-/// One dropped connection must not darken a fleet, and at a 4-second tick three of them is
-/// twelve seconds — shorter than the debounce that already smooths the result. A quota
-/// rejection does not wait for this: see [`JudgeHealth::failed`].
+/// Asks, not ticks: clones resolve concurrently, so a fleet with three or more asking sessions
+/// trips this inside one pass. That is deliberate rather than merely tolerated — what the
+/// threshold protects against is a single dropped connection, and it still does, because any
+/// answer at all calls [`JudgeHealth::recovered`] and zeroes the count. Isolated drops cannot
+/// accumulate; only a judge that is failing everything gets here. A quota rejection does not
+/// wait for it at all: see [`JudgeHealth::failed`].
 const DEGRADE_AFTER: u32 = 3;
 
 /// How often a degraded judge is probed to see whether it is back.
@@ -2124,7 +2131,14 @@ async fn probe_once(http: &reqwest::Client, backend: &Backend) -> Result<()> {
 /// Both rules only ever lift. Neither can produce `Idle`, so a degraded fleet cannot invent a
 /// clone that stopped — only one that is working.
 fn degraded_state(view: &Value) -> (wire::MonitorState, String) {
-    if view["session"]["generating"].as_bool() == Some(true) {
+    // Only for an entrypoint that publishes a status. `generating` means "busy and not parked
+    // in a tool call" for a cli session, which is the claim worth believing — but for a
+    // statusless one (`sdk-ts`, `claude-vscode`) it degrades to transcript mtime with no
+    // blocked gate at all, so a session sitting in `AskUserQuestion` would read as working for
+    // a whole MOVING_WINDOW_S. Believing a file that moved is exactly the weak signal the
+    // measured token-idle baseline over-reported on.
+    let publishes_status = view["session"]["status"].is_string();
+    if publishes_status && view["session"]["generating"].as_bool() == Some(true) {
         return (wire::MonitorState::Working, "the agent is writing tokens".to_string());
     }
     match overruled(wire::MonitorState::Idle, view) {
@@ -2262,11 +2276,11 @@ pub async fn resolve_fleet(
         },
         (backend, _) => backend,
     };
-    // `Absent` keeps the untouched no-judge behaviour below; anything else that left us without
-    // a backend is an outage, and its sessions read as degraded rather than as idle. Covers
-    // every way we can arrive here without one: a token that would not refresh, a probe that
-    // is still failing, and a degraded pass whose minute is not up.
-    let degraded = asking && !absent && backend.is_none();
+    // Degraded is what [`JudgeHealth`] says it is, never merely "we have no backend right now".
+    // A token refresh that failed once is a blip and takes the same threshold as any other
+    // non-quota failure; reading `backend.is_none()` here would have degraded the whole fleet
+    // on the first one, undebounced, which is the opposite of what the threshold is for.
+    let degraded = asking && !absent && app.stuck.degraded().is_some();
 
     let decided = read.into_iter().map(|(id, snapshot)| {
         let backend = backend.clone();
@@ -2393,16 +2407,25 @@ pub async fn resolve_fleet(
                                     target: "stuck",
                                     "clone {id} {sid}: asking failed: {e:#}"
                                 );
-                                let (state, why) = degraded_state(&case.view);
-                                log.record(
-                                    case.decision(
-                                        &id,
-                                        state,
-                                        "degraded",
-                                        format!("{why} (asking failed: {e:#})"),
+                                // Reachable almost only while the judge is HEALTHY: once the
+                                // latch is set there is no backend, and the branch above
+                                // handles the session instead. So a single timed-out ask must
+                                // NOT paint this clone `unknown` — that slides past the
+                                // debounce (which holds only working→idle) and lets the next
+                                // tick's flapping verdict fire a "stopped working" that the
+                                // debounce existed to swallow.
+                                let (state, by, why) = match app.stuck.degraded().is_some() {
+                                    true => {
+                                        let (state, why) = degraded_state(&case.view);
+                                        (state, "degraded", format!("{why} (asking failed: {e:#})"))
+                                    }
+                                    false => (
+                                        wire::MonitorState::Idle,
+                                        "ask-failed",
+                                        format!("asking failed: {e:#}"),
                                     ),
-                                    false,
-                                );
+                                };
+                                log.record(case.decision(&id, state, by, why), false);
                                 if state == wire::MonitorState::Working {
                                     last.settled(&id, wire::MonitorState::Working);
                                     return (id, wire::MonitorState::Working);
@@ -4149,6 +4172,45 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
         for view in [view_generating(true), view_in_call("Bash", 4.0), json!({}), json!({"session": {}})] {
             assert_ne!(degraded_state(&view).0, wire::MonitorState::Idle, "{view}");
         }
+    }
+
+    /// A statusless entrypoint publishes no status, so `generating` there is transcript mtime
+    /// with no blocked gate — a session parked in a dialog would read as writing tokens. Rule 1
+    /// must not fire for it at all.
+    #[test]
+    fn a_statusless_entrypoint_never_lifts_on_generating() {
+        // `sdk-ts` / `claude-vscode`: the record is written once at startup and never updated.
+        let view = json!({"session": {"status": null, "generating": true, "quiet_for_seconds": 2}});
+        assert_eq!(degraded_state(&view).0, wire::MonitorState::Unknown);
+
+        // The same view from a `cli` session is the claim worth believing.
+        let cli = json!({"session": {"status": "busy", "generating": true}});
+        assert_eq!(degraded_state(&cli).0, wire::MonitorState::Working);
+
+        // And the floor still works for a statusless session — it reads tool calls, not status.
+        let in_call = json!({
+            "session": {"status": null, "generating": true},
+            "in_flight_tool_calls": [{"tool": "Bash", "by": "main agent", "running_for_seconds": 3.0}],
+        });
+        assert_eq!(degraded_state(&in_call).0, wire::MonitorState::Working);
+    }
+
+    /// A held `unknown` may not decay into a confident `idle`: that would raise the badge the
+    /// outage is meant to hold back, on the least evidence in the module.
+    #[test]
+    fn an_unreadable_home_during_an_outage_stays_unknown() {
+        let seen = LastSeen::new();
+        seen.settled("c", wire::MonitorState::Unknown);
+        for _ in 0..(BLIND_TICKS + 4) {
+            assert_eq!(seen.blind("c"), wire::MonitorState::Unknown);
+        }
+        // A held `working` still decays, exactly as before.
+        let seen = LastSeen::new();
+        seen.settled("w", wire::MonitorState::Working);
+        for _ in 0..BLIND_TICKS {
+            assert_eq!(seen.blind("w"), wire::MonitorState::Working);
+        }
+        assert_eq!(seen.blind("w"), wire::MonitorState::Idle);
     }
 
     /// A spent allowance is the one failure that promises to still be true in an hour.

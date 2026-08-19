@@ -707,6 +707,61 @@ mod tests {
         }
     }
 
+    /// The replay contract: what a clone read as before the judge went dark is spent on the way
+    /// out, so a stop that really happened is deferred rather than swallowed. Hoisting the
+    /// `blinded.remove` above the lookup would kill every replay with the whole suite green.
+    #[test]
+    fn a_stop_during_an_outage_surfaces_when_the_judge_returns() {
+        // The `blinded` map is a plain HashMap threaded through poll_once; this exercises the
+        // same transition rules the mutate loop applies to it.
+        let mut blinded: HashMap<String, MonitorState> = HashMap::new();
+        let step = |blinded: &mut HashMap<String, MonitorState>,
+                    was: Option<MonitorState>,
+                    next: MonitorState| {
+            let before = match (was, next) {
+                (Some(MonitorState::Unknown), _) => blinded.get("c").copied(),
+                (was, MonitorState::Unknown) => {
+                    if let Some(was) = was {
+                        blinded.insert("c".to_string(), was);
+                    }
+                    was
+                }
+                (was, _) => was,
+            };
+            if next != MonitorState::Unknown {
+                blinded.remove("c");
+            }
+            before
+        };
+
+        // working → unknown → unknown → unknown → idle: the baseline survives the whole outage.
+        assert_eq!(step(&mut blinded, Some(MonitorState::Working), MonitorState::Unknown),
+                   Some(MonitorState::Working));
+        for _ in 0..5 {
+            assert_eq!(step(&mut blinded, Some(MonitorState::Unknown), MonitorState::Unknown),
+                       Some(MonitorState::Working), "the baseline must not erode");
+        }
+        assert_eq!(step(&mut blinded, Some(MonitorState::Unknown), MonitorState::Idle),
+                   Some(MonitorState::Working), "the stop replays");
+        assert!(blinded.is_empty(), "and the entry is spent");
+
+        // idle → unknown → idle replays nothing, so recovery is not a burst of noise.
+        assert_eq!(step(&mut blinded, Some(MonitorState::Idle), MonitorState::Unknown),
+                   Some(MonitorState::Idle));
+        assert_eq!(step(&mut blinded, Some(MonitorState::Unknown), MonitorState::Idle),
+                   Some(MonitorState::Idle));
+
+        // A clone whose FIRST ever reading is unknown has no baseline to invent.
+        assert_eq!(step(&mut blinded, None, MonitorState::Unknown), None);
+        assert!(blinded.is_empty());
+
+        // A container that dies mid-outage is not swallowed either.
+        assert_eq!(step(&mut blinded, Some(MonitorState::Working), MonitorState::Unknown),
+                   Some(MonitorState::Working));
+        assert_eq!(step(&mut blinded, Some(MonitorState::Unknown), MonitorState::Offline),
+                   Some(MonitorState::Working));
+    }
+
     #[test]
     fn a_slide_into_unknown_raises_nothing() {
         // The one case where we do NOT know the agent stopped. Raising a badge here tells an

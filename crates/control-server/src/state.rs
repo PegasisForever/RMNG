@@ -24,9 +24,32 @@ struct Inner {
     serialized_file: String,
 }
 
+/// `unknown` never reaches the file, only the wire.
+///
+/// An older control-server has no `MonitorState::Unknown` and no `#[serde(other)]`, and serde
+/// fails the WHOLE document on an unknown variant rather than the one field — `#[serde(default)]`
+/// rescues a missing key, not an invalid value. [`read_from_disk`] then falls back to an empty
+/// `ControlState`, which the first mutation persists, and `mirror_layout_to_state` runs
+/// unconditionally at boot. So a downgrade during a judge outage would wipe the fleet registry,
+/// the board, the mute list, and every per-clone binding. That is the one thing an operator most
+/// wants to do while an outage is happening.
+///
+/// `unknown` is a reading about right now and nothing reads it back off disk, so dropping it
+/// costs nothing: on restart the clone is simply unread until the next tick decides it again.
+fn downgrade_safe(state: &ControlState) -> ControlState {
+    let mut state = state.clone();
+    for host in &mut state.hosts {
+        if host.monitor_state == Some(wire::MonitorState::Unknown) {
+            host.monitor_state = None;
+        }
+    }
+    state
+}
+
 fn to_file(state: &ControlState) -> String {
     // Matches the Bun writer: 2-space pretty + trailing newline.
-    let mut s = serde_json::to_string_pretty(state).expect("ControlState serializes");
+    let mut s =
+        serde_json::to_string_pretty(&downgrade_safe(state)).expect("ControlState serializes");
     s.push('\n');
     s
 }
@@ -171,6 +194,29 @@ pub fn spawn_watcher(store: std::sync::Arc<StateStore>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one thing that makes a downgrade during an outage survivable.
+    ///
+    /// An older binary has no `Unknown` variant and no `#[serde(other)]`, and serde fails the
+    /// WHOLE document on an unknown variant — so a single `"monitorState": "unknown"` would
+    /// send it to `ControlState::default()` and the next mutation would persist an empty fleet.
+    #[test]
+    fn unknown_never_reaches_the_file_but_does_reach_the_wire() {
+        let mut state = ControlState::default();
+        state.hosts = vec![
+            wire::RmngClone { id: "a".into(), monitor_state: Some(wire::MonitorState::Unknown), ..Default::default() },
+            wire::RmngClone { id: "b".into(), monitor_state: Some(wire::MonitorState::Working), ..Default::default() },
+        ];
+        let file = to_file(&state);
+        assert!(!file.contains("unknown"), "an old binary must still parse this: {file}");
+        assert!(file.contains("working"), "and every other reading is untouched: {file}");
+
+        // The browser is a different consumer with a different lifetime; it gets the truth.
+        assert!(to_sse(&state).contains("unknown"));
+
+        // The in-memory state is not mutated by writing it out.
+        assert_eq!(state.hosts[0].monitor_state, Some(wire::MonitorState::Unknown));
+    }
     use wire::RmngClone;
 
     fn temp_path() -> PathBuf {
