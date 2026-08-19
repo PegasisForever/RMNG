@@ -2408,8 +2408,11 @@ pub async fn resolve_fleet(
                                 // provider blip across a fleet — DEGRADE_AFTER counts asks, not
                                 // ticks — paints healthy clones `unknown` mid-pass. That slides
                                 // past the debounce and the next tick's flapping verdict fires
-                                // the "stopped working" the debounce exists to swallow. Entering
-                                // degraded now requires the latch to survive to the next tick.
+                                // the "stopped working" the debounce exists to swallow. This
+                                // exempts the session that TIPS the latch, not the whole pass:
+                                // clones resolve concurrently, so sessions polled after it in
+                                // the same pass do read degraded. That is the point — the
+                                // tipping failure can no longer convict on its own evidence.
                                 let was_down = app.stuck.degraded().is_some();
                                 if app.stuck.note_ask_failure(&e) {
                                     tracing::warn!(

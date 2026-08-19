@@ -129,7 +129,7 @@ State-sensitive logic in `monitor.rs`, each decided explicitly:
 
 | Site | Behaviour with `Unknown` |
 |---|---|
-| `debounce` | Unchanged — holds only `working → idle`. Degraded is latched so it cannot flap, and the transition is silent anyway. |
+| `debounce` | Holds a slide **into** `idle` from either `working` or `unknown`, at the stored value. The slide *into* `unknown` is not held: it raises nothing, and the operator should learn at once that the reading stopped being trustworthy. `unknown → offline` is not held either — a container that died mid-outage is news the moment we can see it. |
 | `should_flag_unread` | Returns **false** for `Unknown`. This is what makes the outage silent. |
 | `lift_sub_clone_activity` | Unchanged — only a `Working` sub lifts a parent. An `unknown` sub proves nothing. |
 | `pick_stat` | Unchanged — already keys on `!= Offline`. |

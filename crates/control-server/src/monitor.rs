@@ -384,9 +384,12 @@ const DEBOUNCE: Duration = Duration::from_secs(60);
 /// CT 105 and CT 106, 36% of changes reversed inside 30 seconds.
 ///
 /// One direction only. A clone that starts working shows it on the next tick, because that is
-/// news an operator wants at once and a late-lit dot would make short turns invisible. Only the
-/// slide out of `working` waits, which is the direction that raises the unread badge and the
-/// browser notification, and the one a flapping verdict makes noisy.
+/// news an operator wants at once and a late-lit dot would make short turns invisible. Only a
+/// slide INTO `idle` waits — from `working`, or from `unknown` on the tick a judge comes back —
+/// which is the direction that raises the unread badge and the browser notification, and the one
+/// a flapping verdict makes noisy. A slide into `unknown` is not held: it raises nothing, so
+/// there is nothing to be noisy with, and an operator should learn at once that the reading
+/// stopped being trustworthy.
 ///
 /// `offline` is never held, in or out. That state is about whether the container exists, not
 /// about what an agent is doing, and an operator watching a clone die should not wait a minute
@@ -417,7 +420,8 @@ fn debounce(
         }
         // Hold at whatever is actually up rather than substituting `working`: showing
         // `working` for a clone we have told the operator we cannot read would be a new lie.
-        let shown = stored.unwrap_or(MonitorState::Working);
+        // `held` already proved this is `Some`.
+        let Some(shown) = stored else { continue };
         match pending.get(id) {
             // It has stood long enough. Let it through and stop tracking it.
             Some((held, since)) if held == proposed && now.duration_since(*since) >= DEBOUNCE => {
@@ -433,6 +437,19 @@ fn debounce(
         }
     }
     pending.retain(|id, _| next.contains_key(id));
+}
+
+/// Whether `activity_unknown` disagrees with the reading this tick proposes.
+///
+/// A function, and called from the change gate rather than inlined there, because the pair can
+/// legitimately be out of step while `monitor_state` itself is not: `Unknown` is stored as
+/// itself and serialized as `idle`, so a state.json written during an outage reloads as `Idle`
+/// with the flag still set. A gate watching only `monitor_state` sees no change, skips the whole
+/// mutation, and leaves the fleet reading "no reading" against a judge that is answering — on
+/// disk, across restarts. Extracted so a test can hold the real predicate rather than a copy of
+/// it, which is the failure mode this module has already hit twice.
+fn flag_is_stale(proposed: MonitorState, host: &RmngClone) -> bool {
+    (proposed == MonitorState::Unknown) != host.activity_unknown
 }
 
 /// What this clone last read as before the judge went dark, and the bookkeeping that keeps it.
@@ -465,7 +482,13 @@ fn replay_baseline(
             }
             blinded.get(id).copied().or(was)
         }
-        (was, _) => was,
+        // The held baseline outranks `was` here for the same reason `or_insert` outranks
+        // `insert` above: a reload collapses an in-memory `Unknown` to `Idle`, so `was` is the
+        // collapsed value while `blinded` still holds what the clone really was. Taking `was`
+        // would drop a `Working` baseline on the floor and swallow the stop it was holding —
+        // a badge `main` would have raised. Inert in healthy operation: an entry only exists
+        // while the clone reads `Unknown`.
+        (was, _) => blinded.get(id).copied().or(was),
     };
     // Spent on any real reading, so a replay can fire once and only once.
     if next != MonitorState::Unknown {
@@ -672,9 +695,7 @@ async fn poll_once(
                 // and without this the whole mutation is skipped — leaving every clone saying
                 // "no reading" against a judge that is answering fine, persisted, and
                 // surviving restarts until something else about a clone happens to change.
-                || next
-                    .get(&host.id)
-                    .is_some_and(|s| (*s == MonitorState::Unknown) != host.activity_unknown)
+                || next.get(&host.id).is_some_and(|s| flag_is_stale(*s, host))
                 || ip_updates.get(&host.id).is_some_and(|ip| *ip != host.local_ip))
     });
     if !changed {
@@ -804,38 +825,25 @@ mod tests {
     /// The pair can desync, which is the whole hazard of a derived field: `Unknown` is stored
     /// as itself but serialized as `idle`, so a state.json written during an outage reloads as
     /// `Idle` + the flag set. The first healthy tick then proposes `Idle` — equal to the stored
-    /// state — and a gate that only watches `monitor_state` skips the write, pinning the fleet
-    /// on "no reading" against a judge that is answering fine.
+    /// state — and a gate watching only `monitor_state` skips the write, pinning the fleet on
+    /// "no reading" against a judge that is answering fine.
     #[test]
     fn a_reloaded_outage_flag_still_counts_as_a_change() {
-        let stale = |flag: bool, stored: Option<MonitorState>| RmngClone {
+        let host = |flag: bool| RmngClone {
             id: "c".to_string(),
             managed: true,
-            monitor_state: stored,
+            monitor_state: Some(MonitorState::Idle),
             activity_unknown: flag,
             ..Default::default()
         };
-        // What `changed` actually tests, extracted so the predicate itself is pinned.
-        let changed = |host: &RmngClone, next: MonitorState| {
-            Some(next) != host.monitor_state
-                || (next == MonitorState::Unknown) != host.activity_unknown
-        };
 
-        // The reload case: state matches, flag does not. Must still count.
-        let host = stale(true, Some(MonitorState::Idle));
-        assert!(changed(&host, MonitorState::Idle), "the flag is stale and must be cleared");
-
+        // The reload case: the state matches, the flag does not. Must still count as news.
+        assert!(flag_is_stale(MonitorState::Idle, &host(true)), "the flag is stale");
         // Steady state on a healthy rig: nothing to do.
-        let host = stale(false, Some(MonitorState::Idle));
-        assert!(!changed(&host, MonitorState::Idle), "no change is still no change");
-
-        // Entering an outage: state moves, so this was already covered.
-        let host = stale(false, Some(MonitorState::Idle));
-        assert!(changed(&host, MonitorState::Unknown));
-
-        // Sitting in an outage: both already agree.
-        let host = stale(true, Some(MonitorState::Unknown));
-        assert!(!changed(&host, MonitorState::Unknown));
+        assert!(!flag_is_stale(MonitorState::Idle, &host(false)));
+        // Entering an outage from a clean flag, and sitting in one with it already set.
+        assert!(flag_is_stale(MonitorState::Unknown, &host(false)));
+        assert!(!flag_is_stale(MonitorState::Unknown, &host(true)));
     }
 
     #[test]
@@ -857,9 +865,16 @@ mod tests {
         let mut pending = HashMap::new();
         let clones = [clone_row("c", None, Some(MonitorState::Unknown))];
 
+        let t0 = Instant::now();
         let mut next = HashMap::from([("c".to_string(), MonitorState::Idle)]);
-        debounce(&mut next, &clones, &mut pending, Instant::now());
+        debounce(&mut next, &clones, &mut pending, t0);
         assert_eq!(next["c"], MonitorState::Unknown, "held at what is actually up");
+
+        // And it must LET GO. A hold that never expires is the most damaging thing this arm
+        // could do: the clone would sit on "no reading" forever after the judge came back.
+        let mut next = HashMap::from([("c".to_string(), MonitorState::Idle)]);
+        debounce(&mut next, &clones, &mut pending, t0 + DEBOUNCE);
+        assert_eq!(next["c"], MonitorState::Idle, "the hold expires like any other");
 
         // A container that died mid-outage is news immediately.
         let mut pending = HashMap::new();
