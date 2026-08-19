@@ -58,6 +58,12 @@ const STATUS_DOT: Record<NonNullable<Clone["monitorState"]>, { dot: string; labe
     dot: "bg-purple-500 shadow-[0_0_4px_rgb(168_85_247_/_0.7),0_0_10px_rgb(168_85_247_/_0.45)]",
     label: "offline",
   },
+  // Hollow on purpose. Every other dot is a reading; this one is the absence of one, and a
+  // filled dot in a fourth colour would read as a fourth thing the agent might be doing.
+  unknown: {
+    dot: "bg-transparent ring-2 ring-inset ring-amber-500 dark:ring-amber-400",
+    label: "unknown — the activity judge is unreachable",
+  },
 };
 
 type Metric = { label: string; value: string; title: string };

@@ -72,7 +72,7 @@ export interface Clone {
    * Server-owned lifecycle state: Docker supplies liveness and passive proxy token activity
    * distinguishes working from idle. The sidebar uses this only for its compact indicator.
    */
-  monitorState?: "working" | "idle" | "offline";
+  monitorState?: "working" | "idle" | "offline" | "unknown";
   /** Set when an unselected clone transitions from working to idle/offline. */
   unread?: boolean;
   /** Headless clone: no desktop (display + capture units disabled at create). Selecting it

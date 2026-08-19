@@ -4,5 +4,11 @@
  * Server-owned lifecycle state. Docker supplies container liveness; `working` versus `idle`
  * answers one question about the clone's agent, "will it get any further without a person",
  * so a clone that has finished, asked something, or wedged all read `idle`.
+ *
+ * `unknown` is the fourth answer, and it is about US rather than about the clone: the judge
+ * that decides `working` could not be reached, and the files could not settle this session on
+ * their own. It exists because `idle` had been carrying two meanings — "I know it is idle" and
+ * "I cannot tell" — and an outage at the provider turned the whole fleet into the second while
+ * it read as the first. A clone reading `unknown` may well be working; nothing here knows.
  */
-export type MonitorState = "working" | "idle" | "offline";
+export type MonitorState = "working" | "idle" | "offline" | "unknown";

@@ -432,13 +432,22 @@ fn debounce(
 /// already looking at it), or — for an **idle** slide specifically — when the operator has
 /// viewed the clone at or after its last token activity: they have already seen its final output,
 /// so its slide into idle is not news and it simply shows the gray "not working" dot. An
-/// **offline** transition (the container died) is always surfaced, even if recently viewed.
+/// **offline** transition (the container died) is always surfaced, even if recently viewed. A
+/// slide into **unknown** never raises anything at all: that state is about the judge being
+/// unreachable, not about the agent, and it is the one case where we do not know.
 fn should_flag_unread(
     next: MonitorState,
     is_selected: bool,
     last_viewed_at: Option<i64>,
     last_token_at: Option<i64>,
 ) -> bool {
+    // `unknown` says the judge could not be reached, which is news about US. Raising a badge
+    // for it would tell an operator their agents stopped, on the one occasion we specifically
+    // do not know that. The transition is silent and the real answer keeps until the judge is
+    // back — see the replay in [`poll_once`].
+    if next == MonitorState::Unknown {
+        return false;
+    }
     if is_selected {
         return false;
     }
@@ -456,6 +465,7 @@ async fn poll_once(
     app: &App, previous_lxc_cpu: &mut Option<CpuSample>,
     previous_clone_cpu: &mut HashMap<String, CpuSample>,
     pending_state: &mut HashMap<String, (MonitorState, Instant)>,
+    blinded: &mut HashMap<String, MonitorState>,
 ) {
     let hosts: Vec<RmngClone> = app
         .store
@@ -575,6 +585,7 @@ async fn poll_once(
     // Bound the CPU-sample map to the live fleet, so archived and deleted clones cannot
     // accumulate in it across the life of a long-running server.
     previous_clone_cpu.retain(|id, _| active_ids.contains(id));
+    blinded.retain(|id, _| active_ids.contains(id));
     app.views.retain(&active_ids);
     app.activity.retain(&active_ids);
 
@@ -619,7 +630,24 @@ async fn poll_once(
                 continue;
             }
             if let Some(&monitor_state) = next.get(&host.id) {
-                if host.monitor_state == Some(MonitorState::Working)
+                // What this clone last read as before the judge went dark. While a clone sits
+                // at `unknown` its stored state is no longer `working`, so the plain transition
+                // test below would never fire and a clone that really did stop during an
+                // outage would be swallowed silently. Remembered here, spent on the way out.
+                let before = match (host.monitor_state, monitor_state) {
+                    (Some(MonitorState::Unknown), _) => blinded.get(&host.id).copied(),
+                    (was, MonitorState::Unknown) => {
+                        if let Some(was) = was {
+                            blinded.insert(host.id.clone(), was);
+                        }
+                        was
+                    }
+                    (was, _) => was,
+                };
+                if monitor_state != MonitorState::Unknown {
+                    blinded.remove(&host.id);
+                }
+                if before == Some(MonitorState::Working)
                     && monitor_state != MonitorState::Working
                 {
                     let (last_viewed, last_token) =
@@ -646,8 +674,18 @@ pub async fn run(app: App) {
     let mut previous_lxc_cpu = None;
     let mut previous_clone_cpu = HashMap::new();
     let mut pending_state = HashMap::new();
+    // What each clone read as before an outage blinded it, so a stop that happened while the
+    // judge was down still surfaces once it is back.
+    let mut blinded = HashMap::new();
     loop {
-        poll_once(&app, &mut previous_lxc_cpu, &mut previous_clone_cpu, &mut pending_state).await;
+        poll_once(
+            &app,
+            &mut previous_lxc_cpu,
+            &mut previous_clone_cpu,
+            &mut pending_state,
+            &mut blinded,
+        )
+        .await;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -667,6 +705,30 @@ mod tests {
             mem_limit: 264u64 << 30,
             disk_used: Some(320u64 << 30),
         }
+    }
+
+    #[test]
+    fn a_slide_into_unknown_raises_nothing() {
+        // The one case where we do NOT know the agent stopped. Raising a badge here tells an
+        // operator their fleet died at the exact moment we lost the ability to say.
+        assert!(!should_flag_unread(MonitorState::Unknown, false, None, None));
+        assert!(!should_flag_unread(MonitorState::Unknown, false, Some(1), Some(2)));
+        // Everything else is unchanged.
+        assert!(should_flag_unread(MonitorState::Idle, false, None, None));
+        assert!(should_flag_unread(MonitorState::Offline, false, Some(9), Some(1)));
+    }
+
+    #[test]
+    fn the_debounce_does_not_hold_a_slide_into_unknown() {
+        // The debounce exists to stop a flapping working/idle verdict. `unknown` is latched by
+        // the judge's own health, cannot flap, and is silent anyway — so it goes straight up
+        // and an operator sees the fleet lose its reading at once.
+        let mut pending = HashMap::new();
+        let clones = [clone_row("c", None, Some(MonitorState::Working))];
+        let mut next = HashMap::from([("c".to_string(), MonitorState::Unknown)]);
+        debounce(&mut next, &clones, &mut pending, Instant::now());
+        assert_eq!(next["c"], MonitorState::Unknown);
+        assert!(pending.is_empty(), "nothing to hold back");
     }
 
     #[test]
