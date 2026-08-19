@@ -176,7 +176,7 @@ impl LastSeen {
     ///
     /// Holds the last real answer while the streak is short, then gives up and says `Idle`. A
     /// clone nobody has ever settled has nothing to hold and reads `Idle` from the first tick.
-    pub fn blind(&self, id: &str) -> wire::MonitorState {
+    pub fn blind(&self, id: &str, degraded: bool) -> wire::MonitorState {
         let mut seen = self.seen.write().unwrap();
         let Some((state, blind)) = seen.get_mut(id) else {
             return wire::MonitorState::Idle;
@@ -184,10 +184,12 @@ impl LastSeen {
         *blind = blind.saturating_add(1);
         match (*blind <= BLIND_TICKS, *state) {
             (true, state) => state,
-            // A clone we could not read, in an outage we could not see past, is not a clone we
-            // know to be idle. Decaying to `Idle` here would raise the badge the outage is
-            // supposed to hold back, on the least evidence anything in this module ever has.
-            (false, wire::MonitorState::Unknown) => wire::MonitorState::Unknown,
+            // A held `unknown` decays only once the outage it belongs to is over. While the
+            // judge is down, falling to `Idle` would raise the badge the outage is meant to
+            // hold back, on the least evidence in this module. Once it is back, `unknown` has
+            // nothing left to mean, and holding it forever would swallow a real stop entirely:
+            // nothing raises on `unknown`, so the clone would go quiet permanently.
+            (false, wire::MonitorState::Unknown) if degraded => wire::MonitorState::Unknown,
             (false, _) => wire::MonitorState::Idle,
         }
     }
@@ -2294,7 +2296,7 @@ pub async fn resolve_fleet(
                 // Nothing is readable under this clone's root right now, which says nothing
                 // about what it is doing. Asserting idle here is a false alarm on a working
                 // clone, so its last real answer stands for a few ticks. See [`LastSeen`].
-                let held = last.blind(&id);
+                let held = last.blind(&id, degraded);
                 return (id, held);
             };
             // Only for a clone that was actually read: an unreachable home has no live set, and
@@ -2403,7 +2405,11 @@ pub async fn resolve_fleet(
                                          until it answers again: {e:#}"
                                     );
                                 }
-                                tracing::debug!(
+                                // Once latched the fleet stops asking per session, so this is
+                                // at most DEGRADE_AFTER-1 lines per outage rather than a flood
+                                // — and an intermittent fault that never reaches the threshold
+                                // is otherwise invisible at the default `info` filter.
+                                tracing::warn!(
                                     target: "stuck",
                                     "clone {id} {sid}: asking failed: {e:#}"
                                 );
@@ -3205,11 +3211,11 @@ mod tests {
         let seen = LastSeen::new();
         seen.settled("c1", wire::MonitorState::Working);
         for tick in 1..=BLIND_TICKS {
-            assert_eq!(seen.blind("c1"), wire::MonitorState::Working, "tick {tick}");
+            assert_eq!(seen.blind("c1", false), wire::MonitorState::Working, "tick {tick}");
         }
         // Holding a stale `working` is the one thing this must never do for long.
-        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
-        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("c1", false), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("c1", false), wire::MonitorState::Idle);
     }
 
     #[test]
@@ -3219,22 +3225,22 @@ mod tests {
         let seen = LastSeen::new();
         seen.settled("c1", wire::MonitorState::Working);
         for _ in 0..BLIND_TICKS {
-            seen.blind("c1");
+            seen.blind("c1", false);
         }
         seen.settled("c1", wire::MonitorState::Working);
-        assert_eq!(seen.blind("c1"), wire::MonitorState::Working);
+        assert_eq!(seen.blind("c1", false), wire::MonitorState::Working);
     }
 
     #[test]
     fn a_clone_nobody_has_settled_has_nothing_to_hold() {
-        assert_eq!(LastSeen::new().blind("never-seen"), wire::MonitorState::Idle);
+        assert_eq!(LastSeen::new().blind("never-seen", false), wire::MonitorState::Idle);
     }
 
     #[test]
     fn holding_never_invents_working_out_of_idle() {
         let seen = LastSeen::new();
         seen.settled("c1", wire::MonitorState::Idle);
-        assert_eq!(seen.blind("c1"), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("c1", false), wire::MonitorState::Idle);
     }
 
     #[test]
@@ -3242,7 +3248,7 @@ mod tests {
         let seen = LastSeen::new();
         seen.settled("gone", wire::MonitorState::Working);
         seen.retain(&["kept".to_string()].into_iter().collect());
-        assert_eq!(seen.blind("gone"), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("gone", false), wire::MonitorState::Idle);
     }
 
     #[test]
@@ -4195,22 +4201,25 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
         assert_eq!(degraded_state(&in_call).0, wire::MonitorState::Working);
     }
 
-    /// A held `unknown` may not decay into a confident `idle`: that would raise the badge the
-    /// outage is meant to hold back, on the least evidence in the module.
+    /// A held `unknown` may not decay into a confident `idle` DURING an outage — that would
+    /// raise the badge the outage is meant to hold back. It must decay once the outage is over,
+    /// or the stop is not deferred, it is lost: nothing ever raises on `unknown`.
     #[test]
-    fn an_unreadable_home_during_an_outage_stays_unknown() {
+    fn a_held_unknown_decays_only_once_the_outage_is_over() {
         let seen = LastSeen::new();
         seen.settled("c", wire::MonitorState::Unknown);
         for _ in 0..(BLIND_TICKS + 4) {
-            assert_eq!(seen.blind("c"), wire::MonitorState::Unknown);
+            assert_eq!(seen.blind("c", true), wire::MonitorState::Unknown, "still degraded");
         }
-        // A held `working` still decays, exactly as before.
+        assert_eq!(seen.blind("c", false), wire::MonitorState::Idle, "the judge came back");
+
+        // A held `working` decays on its own clock, outage or not.
         let seen = LastSeen::new();
         seen.settled("w", wire::MonitorState::Working);
         for _ in 0..BLIND_TICKS {
-            assert_eq!(seen.blind("w"), wire::MonitorState::Working);
+            assert_eq!(seen.blind("w", true), wire::MonitorState::Working);
         }
-        assert_eq!(seen.blind("w"), wire::MonitorState::Idle);
+        assert_eq!(seen.blind("w", true), wire::MonitorState::Idle);
     }
 
     /// A spent allowance is the one failure that promises to still be true in an hour.

@@ -24,32 +24,9 @@ struct Inner {
     serialized_file: String,
 }
 
-/// `unknown` never reaches the file, only the wire.
-///
-/// An older control-server has no `MonitorState::Unknown` and no `#[serde(other)]`, and serde
-/// fails the WHOLE document on an unknown variant rather than the one field — `#[serde(default)]`
-/// rescues a missing key, not an invalid value. [`read_from_disk`] then falls back to an empty
-/// `ControlState`, which the first mutation persists, and `mirror_layout_to_state` runs
-/// unconditionally at boot. So a downgrade during a judge outage would wipe the fleet registry,
-/// the board, the mute list, and every per-clone binding. That is the one thing an operator most
-/// wants to do while an outage is happening.
-///
-/// `unknown` is a reading about right now and nothing reads it back off disk, so dropping it
-/// costs nothing: on restart the clone is simply unread until the next tick decides it again.
-fn downgrade_safe(state: &ControlState) -> ControlState {
-    let mut state = state.clone();
-    for host in &mut state.hosts {
-        if host.monitor_state == Some(wire::MonitorState::Unknown) {
-            host.monitor_state = None;
-        }
-    }
-    state
-}
-
 fn to_file(state: &ControlState) -> String {
     // Matches the Bun writer: 2-space pretty + trailing newline.
-    let mut s =
-        serde_json::to_string_pretty(&downgrade_safe(state)).expect("ControlState serializes");
+    let mut s = serde_json::to_string_pretty(state).expect("ControlState serializes");
     s.push('\n');
     s
 }
@@ -198,24 +175,41 @@ mod tests {
     /// The one thing that makes a downgrade during an outage survivable.
     ///
     /// An older binary has no `Unknown` variant and no `#[serde(other)]`, and serde fails the
-    /// WHOLE document on an unknown variant — so a single `"monitorState": "unknown"` would
-    /// send it to `ControlState::default()` and the next mutation would persist an empty fleet.
+    /// WHOLE document on an unknown variant — so a single `"monitorState": "unknown"` anywhere
+    /// would send it to `ControlState::default()`, and the next mutation would persist an empty
+    /// fleet. The fourth state rides a new FIELD, which old parsers ignore, and the enum keeps
+    /// its three-word vocabulary.
     #[test]
-    fn unknown_never_reaches_the_file_but_does_reach_the_wire() {
+    fn an_unknown_clone_serializes_as_idle_with_a_flag_beside_it() {
         let mut state = ControlState::default();
-        state.hosts = vec![
-            wire::RmngClone { id: "a".into(), monitor_state: Some(wire::MonitorState::Unknown), ..Default::default() },
-            wire::RmngClone { id: "b".into(), monitor_state: Some(wire::MonitorState::Working), ..Default::default() },
-        ];
-        let file = to_file(&state);
-        assert!(!file.contains("unknown"), "an old binary must still parse this: {file}");
-        assert!(file.contains("working"), "and every other reading is untouched: {file}");
-
-        // The browser is a different consumer with a different lifetime; it gets the truth.
-        assert!(to_sse(&state).contains("unknown"));
-
-        // The in-memory state is not mutated by writing it out.
+        state.hosts = vec![wire::RmngClone {
+            id: "a".into(),
+            monitor_state: Some(wire::MonitorState::Unknown),
+            activity_unknown: true,
+            ..Default::default()
+        }];
+        for body in [to_file(&state), to_sse(&state)] {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let host = &v["hosts"][0];
+            assert_eq!(host["monitorState"], "idle", "the wire vocabulary is unchanged");
+            assert_eq!(host["activityUnknown"], true, "and the truth rides beside it");
+        }
+        // The in-memory reading is untouched by writing it out.
         assert_eq!(state.hosts[0].monitor_state, Some(wire::MonitorState::Unknown));
+    }
+
+    /// A clone that is genuinely idle must not be mistaken for one we cannot read.
+    #[test]
+    fn a_real_idle_carries_no_flag() {
+        let mut state = ControlState::default();
+        state.hosts = vec![wire::RmngClone {
+            id: "a".into(),
+            monitor_state: Some(wire::MonitorState::Idle),
+            ..Default::default()
+        }];
+        let v: serde_json::Value = serde_json::from_str(&to_file(&state)).unwrap();
+        assert_eq!(v["hosts"][0]["monitorState"], "idle");
+        assert_eq!(v["hosts"][0]["activityUnknown"], false, "a real idle is not a missing one");
     }
     use wire::RmngClone;
 

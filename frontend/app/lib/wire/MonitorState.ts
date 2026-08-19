@@ -10,5 +10,14 @@
  * their own. It exists because `idle` had been carrying two meanings — "I know it is idle" and
  * "I cannot tell" — and an outage at the provider turned the whole fleet into the second while
  * it read as the first. A clone reading `unknown` may well be working; nothing here knows.
+ *
+ * **`Unknown` is deliberately not part of the wire vocabulary.** The `rmng` CLI is injected
+ * into a clone when it is created and existing clones keep theirs across a server upgrade, so
+ * the fleet is full of binaries compiled against the three-value enum. Serde fails the WHOLE
+ * document on an unknown variant, which would break `rmng clone ls`, `ssh`, `select` and `bind`
+ * in every pre-existing clone for exactly as long as an outage lasted. A new struct FIELD is
+ * ignored by those parsers; a new enum VALUE is not, so the fourth state travels as
+ * [`RmngClone::activity_unknown`] and this serializes as `idle` — which is what those clients
+ * showed for an unreachable judge before any of this existed.
  */
-export type MonitorState = "working" | "idle" | "offline" | "unknown";
+export type MonitorState = "working" | "idle" | "offline";

@@ -8,15 +8,17 @@ const STATUS: Record<NonNullable<Clone["monitorState"]>, { dot: string; label: s
   working: { dot: "bg-blue-500", label: "working" },
   idle: { dot: "bg-slate-400 dark:bg-slate-500", label: "not working" },
   offline: { dot: "bg-purple-500", label: "offline" },
-  unknown: {
-    dot: "bg-transparent ring-2 ring-inset ring-amber-500 dark:ring-amber-400",
-    label: "unknown",
-  },
 };
 
 /** The word for a clone's current state. */
+const NO_READING = {
+  dot: "bg-transparent ring-2 ring-inset ring-amber-500 dark:ring-amber-400",
+  label: "no reading",
+};
+
 export function statusLabel(clone: Clone): string {
   if (clone.archived) return "archived";
+  if (clone.activityUnknown) return NO_READING.label;
   return STATUS[clone.monitorState ?? "idle"].label;
 }
 
@@ -31,7 +33,7 @@ export function CloneStatusDot({ clone }: { clone: Clone }) {
       />
     );
   }
-  const status = STATUS[clone.monitorState ?? "idle"];
+  const status = clone.activityUnknown ? NO_READING : STATUS[clone.monitorState ?? "idle"];
   return (
     <span
       aria-label={status.label}

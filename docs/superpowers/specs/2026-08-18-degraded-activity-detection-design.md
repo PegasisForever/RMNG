@@ -103,9 +103,27 @@ answer, honestly labelled, not a correct fleet.
 
 ### 3. The fourth state
 
-`MonitorState` gains `Unknown` (`wire/src/control.rs`), serialised `"unknown"`. `MonitorState.ts`
-regenerates via ts-rs; `frontend/app/lib/types.ts` carries a hand-written duplicate union that
-must be updated by hand. Both dot maps are exhaustive `Record`s, so `tsc` catches omissions.
+**Revised after review — the first design of this section was unshippable.**
+
+`MonitorState` gains `Unknown`, but **only internally**. It is deliberately not part of the wire
+vocabulary: the `rmng` CLI is injected into a clone at create time and existing clones keep
+theirs across a server upgrade (`control-server/README.md:127`, binswap retired), so the fleet is
+full of binaries compiled against the three-value enum. Serde fails the **whole document** on an
+unknown variant, which would break `rmng clone ls`/`ssh`/`select`/`bind` in every pre-existing
+clone for exactly as long as an outage lasted.
+
+The asymmetry that makes this tractable: a new struct **field** is ignored by an old parser
+(`RmngClone` has no `deny_unknown_fields`); a new enum **value** is not. So:
+
+- `MonitorState` keeps four variants in Rust, with `#[serde(skip)]` + `#[ts(skip)]` on `Unknown`
+  and a hand-written `Serialize` mapping it to `"idle"` — what every client displayed for an
+  unreachable judge before this existed. All server-side decision logic is therefore unchanged.
+- `RmngClone` gains `activity_unknown: bool`, which carries the real state to clients that know
+  about it. `frontend/app/lib/types.ts` gains the field; both dot maps consult it before
+  `monitorState`.
+
+One mechanism, at one boundary, covering both the file and the wire — an earlier revision
+sanitised only the file copy and left the wire, which was half a fix.
 
 State-sensitive logic in `monitor.rs`, each decided explicitly:
 
@@ -132,7 +150,14 @@ The `Offline` case matters on its own: a container that dies mid-outage must not
 and `should_flag_unread` already surfaces an offline transition even when recently viewed.
 
 Kept in memory beside `LastSeen`, not persisted: a restart during an outage legitimately loses
-the baseline, and inventing one would be worse than losing it.
+the baseline, and inventing one would be worse than losing it. Extracted as
+`monitor::replay_baseline` rather than inlined, because a test can only exercise the contract by
+calling it — an earlier version asserted against a copy of the rules and would have stayed green
+through the exact mutation it warned about.
+
+`LastSeen::blind` takes the live latch. A held `Unknown` must not decay to `Idle` *during* an
+outage (that raises the badge the design holds back), and must decay once it is over — holding it
+forever swallows a real stop permanently, since nothing ever raises on `Unknown`.
 
 No artificial cap on the replay batch. It is bounded by the clones that were working at outage
 start *and* stopped during it, and `should_flag_unread` already suppresses any the operator has
