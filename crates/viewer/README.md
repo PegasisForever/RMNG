@@ -75,11 +75,11 @@ column.
 | | Linux | macOS (Apple Silicon) | Windows |
 | --- | --- | --- | --- |
 | H.264 decode | `vah264dec` (VA-API) | `vtdec_hw` (VideoToolbox) | `d3d11h264dec` (D3D11VA), falling back to `avdec_h264` / `openh264dec` — **chosen at runtime**, see below |
-| GL import | `glupload` → 2D `GLMemory` | `vtdec_hw` emits IOSurface-backed `GLMemory` directly; `glupload` drops out | `d3d11download ! glupload` → 2D `GLMemory` (there is no D3D11↔GL interop in GStreamer, so the frame makes one sysmem round trip) |
-| Texture target | `2D` | `rectangle` (Apple's `CGLTexImageIOSurface2D` accepts only `GL_TEXTURE_RECTANGLE`) | `2D` |
-| 4:2:0 sink path | `glupload ! gtk4paintablesink` | `vtdec_hw ! glcolorconvert ! gtk4paintablesink` (the sink takes RGBA 2D only) | `glupload ! glcolorconvert ! gtk4paintablesink` (same reason as macOS) |
-| 4:4:4 unpack | `rmngavc444unpack`, `sampler2D`, `#version 300 es` | `rmngavc444unpack`, `sampler2DRect`, desktop GLSL (Apple has no `ARB_ES3_compatibility`) | `rmngavc444unpack`, `sampler2D` — same shader as Linux |
-| GL platform | EGL | CGL (desktop GL 4.1 over Metal) | WGL |
+| GL import | `glupload` → 2D `GLMemory` | `vtdec_hw` emits IOSurface-backed `GLMemory` directly; `glupload` drops out | **none — GL cannot be shared with GTK here**, see below |
+| Texture target | `2D` | `rectangle` (Apple's `CGLTexImageIOSurface2D` accepts only `GL_TEXTURE_RECTANGLE`) | n/a |
+| 4:2:0 sink path | `glupload ! gtk4paintablesink` | `vtdec_hw ! glcolorconvert ! gtk4paintablesink` (the sink takes RGBA 2D only) | `d3d11convert ! d3d11download ! videoconvert ! gtk4paintablesink` — converted on the GPU, handed over as system memory |
+| 4:4:4 unpack | `rmngavc444unpack`, `sampler2D`, `#version 300 es` | `rmngavc444unpack`, `sampler2DRect`, desktop GLSL (Apple has no `ARB_ES3_compatibility`) | **not yet working**, see below |
+| GL platform | EGL | CGL (desktop GL 4.1 over Metal) | WGL (used by the offline `--glunpack-validate` harness only) |
 | Keyboard | GTK `EventControllerKey`, `evdev = hardware_keycode − 8` | raw `NSEvent` local monitor + `kvk_evdev` table ([`keyboard_macos.rs`](src/keyboard_macos.rs)); GDK-swallowed keys still come via GTK. Cmd↔Ctrl swapped by default | GTK `EventControllerKey` + `vk_evdev` table ([`vk_evdev.rs`](src/vk_evdev.rs)): the VK is inverted to a set-1 scancode first, because a VK is **not** a physical key |
 | Pointer lock | `zwp_pointer_constraints` + `zwp_relative_pointer`, unaccelerated deltas ([`pointer_lock.rs`](src/pointer_lock.rs)) | `CGAssociateMouseAndMouseCursorPosition` + `NSEvent` deltas, which are OS-**accelerated** ([`pointer_lock_macos.rs`](src/pointer_lock_macos.rs)) | `ClipCursor` + Raw Input `WM_INPUT`, unaccelerated deltas ([`pointer_lock_win.rs`](src/pointer_lock_win.rs)) |
 | Titlebar | GTK `HeaderBar` + FPS readout | real `NSWindow` titlebar + `NSButton` accessories ([`native_titlebar.rs`](src/native_titlebar.rs)); no FPS readout | GTK `HeaderBar` + FPS readout (same as Linux) |
@@ -104,6 +104,36 @@ OpenH264 emit I420. That is safe for AVC444: the invariant `rmngavc444unpack` de
 nothing **resamples** the packed chroma before it, and I420 → NV12 is a pure re-layout of the
 same 4:2:0 samples. A converter asked for 4:4:4 or RGB would upsample and destroy the auxiliary
 view — which is why none appears anywhere ahead of the unpacker on any platform.
+
+### Why Windows uses no GL, and what that costs
+
+Linux shares an EGL context with GTK and macOS a CGL one, so on both the decoded frame reaches
+`gtk4paintablesink` as `GLMemory` and never touches system memory. Windows cannot: GTK's `ngl`
+GSK renderer realizes a WGL context and keeps it current, `gtk4paintablesink` offers that context
+to the pipeline, and every `gst-gl` element then tries to adopt it through `wglShareLists` —
+which fails with `ERROR_BUSY` against a context already in use. The pipeline dies with
+`not-negotiated` and the window stays black:
+
+```
+failed to share contexts through wglShareLists 0xaa
+  /GstPipeline:pipeline0/GstGLUploadElement:gluploadelement0
+```
+
+It is specifically *sharing* that fails, not GL. `--glunpack-validate` builds a GL pipeline with
+no GTK sink in it, gets a standalone WGL context, and passes — which is why that check is not
+evidence the GUI path works. `gst-launch-1.0 … ! glupload ! gtk4paintablesink` also succeeds, for
+the same reason: with no GTK window realized there is no context to collide with.
+
+So the 4:2:0 path stays on D3D11 and hands the sink system memory. The colour conversion still
+runs on the GPU (`d3d11convert` before `d3d11download`), so only the final RGBA crosses the bus
+— but the frame does cross it, once per frame, which Linux and macOS avoid entirely.
+
+**4:4:4 (AVC444) does not work on Windows yet.** The reconstruction *is* a GL shader
+(`rmngavc444unpack`), so it cannot dodge GL the way the 4:2:0 path does, and it hits exactly the
+sharing failure above. A Windows viewer therefore needs the server in 4:2:0 mode. The fix is to
+move the GL stage into a pipeline that does not contain the GTK sink — a `GstContext` is
+pipeline-wide, so a second `gst::Pipeline` bridged by an `appsink`/`appsrc` pair would give the
+GL elements their own context, exactly as the validate harness already gets one.
 
 ### Windows limitations
 

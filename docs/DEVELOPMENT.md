@@ -167,14 +167,29 @@ Sanity-check the stack before debugging any video problem:
 
 ```sh
 gst-inspect-1.0 d3d11h264dec        # D3D11VA HW decoder — absent on VMs and some remote sessions
-gst-inspect-1.0 gtk4paintablesink   # GL zero-copy sink (gst-plugins-rs)
-cargo run -p viewer --release -- --glunpack-validate 256 144   # expect max abs err 0
+gst-inspect-1.0 gtk4paintablesink   # the GTK sink (gst-plugins-rs)
+cargo run -p viewer --release -- --glunpack-validate 256 144   # expect max abs err <= 1
+```
+
+Note that `--glunpack-validate` passing does **not** mean the GUI's video path works here: it
+builds a GL pipeline with no GTK sink in it, so it gets a standalone WGL context. The GUI cannot
+use GL at all on Windows (see [Why Windows uses no GL](../crates/viewer/README.md#why-windows-uses-no-gl-and-what-that-costs)).
+To check the real decode path end to end against a running server, use headless mode — it
+connects, decodes, and writes the first frame out as a PNG you can look at:
+
+```sh
+RMNG_VIDEO=<host>:9001 RMNG_DUMP=frame.png ./target/release/rmng-viewer.exe --headless
 ```
 
 `d3d11h264dec` being absent is **not** fatal: the viewer picks the first registered decoder from
 `d3d11h264dec`, `avdec_h264`, `openh264dec` and logs which it got at startup
 (`windows H.264 decoder: …`). Only software decode is then in play, so expect higher CPU and
 lower frame rates on large monitors.
+
+**The server must be in 4:2:0 mode.** The 4:4:4 (AVC444) reconstruction is a GL shader and GL
+cannot be used in the GUI on Windows, so a 4:4:4 server makes the viewer log
+`failed to share contexts through wglShareLists` and show nothing. The viewer logs the mode it
+was told at connect (`server chroma mode: Yuv420`).
 
 **Windows input notes.** The server address lives in
 `%APPDATA%\rmng-viewer\config.json` (not `~/.config`, which on Windows would resolve relative to

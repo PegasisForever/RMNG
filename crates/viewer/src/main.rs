@@ -1499,9 +1499,23 @@ fn stamp_colorimetry(caps: &gst::CapsRef, colorimetry: &str) -> Option<gst::Caps
 /// interleaved UV — so the auxiliary view survives it intact. What must never appear here is a
 /// converter asked to produce a 4:4:4 or RGB format, which would 4:2:0-upsample the packed
 /// chroma and destroy the reconstruction.
-/// One row per candidate: `(factory, chain to sysmem, chain to NV12 GLMemory)`, fastest first.
-/// The decoder is always named `dec` so [`make_decoder`] can find its src pad for the
-/// colorimetry retag.
+/// One row per candidate: `(factory, chain to NV12 sysmem, chain to sink-ready sysmem)`,
+/// fastest first. The decoder is always named `dec` so [`make_decoder`] can find its src pad
+/// for the colorimetry retag.
+///
+/// **Neither chain touches GL, and that is the whole point on Windows.** GTK's `ngl` GSK
+/// renderer realizes a WGL context and keeps it current; `gtk4paintablesink` then offers that
+/// context to the pipeline, and every `gst-gl` element tries to adopt it via `wglShareLists` —
+/// which fails with `ERROR_BUSY` against a context that is already in use, so the pipeline
+/// dies with `not-negotiated` and the window stays black. (It is specifically *sharing* that
+/// fails: `--glunpack-validate`, which builds a GL pipeline with no GTK sink in it, produces
+/// a standalone WGL context and passes.) Linux shares an EGL context with GTK happily and
+/// macOS a CGL one; Windows is the platform where the decoded frame has to reach the sink as
+/// plain system memory.
+///
+/// The conversion to the sink's RGB still happens on the GPU wherever the decoder is a GPU
+/// decoder — `d3d11convert` runs before `d3d11download`, so only the final RGBA crosses the
+/// bus, not the NV12 plus a CPU colour conversion.
 #[cfg(target_os = "windows")]
 const WIN_DECODERS: &[(&str, &str, &str)] = &[
     // Direct3D 11 Video Acceleration: the Windows twin of VA-API, vendor-neutral across
@@ -1509,12 +1523,12 @@ const WIN_DECODERS: &[(&str, &str, &str)] = &[
     (
         "d3d11h264dec",
         "d3d11h264dec name=dec ! d3d11download",
-        "d3d11h264dec name=dec ! d3d11download ! glupload",
+        "d3d11h264dec name=dec ! d3d11convert ! d3d11download ! videoconvert",
     ),
     // libav software decode (I420) — the most widely present fallback.
-    ("avdec_h264", "avdec_h264 name=dec", "avdec_h264 name=dec ! videoconvert ! video/x-raw,format=NV12 ! glupload"),
+    ("avdec_h264", "avdec_h264 name=dec", "avdec_h264 name=dec ! videoconvert"),
     // OpenH264 software decode, for a GStreamer built without gst-libav.
-    ("openh264dec", "openh264dec name=dec", "openh264dec name=dec ! videoconvert ! video/x-raw,format=NV12 ! glupload"),
+    ("openh264dec", "openh264dec name=dec", "openh264dec name=dec ! videoconvert"),
 ];
 
 /// The first entry of [`WIN_DECODERS`] whose element this machine's GStreamer actually
@@ -1545,23 +1559,16 @@ fn win_decoder() -> &'static (&'static str, &'static str, &'static str) {
     &WIN_DECODERS[0]
 }
 
-/// The Windows decode chain from `h264parse`'s output to NV12 `memory:GLMemory` — the same
-/// thing `vah264dec ! glupload` produces on Linux and `vtdec_hw` on macOS, so everything
-/// downstream (`rmngavc444unpack`, `glcolorconvert`, the sink) is identical across platforms.
-///
-/// **The software arms convert I420 → NV12, and that is safe for AVC444.** The invariant
-/// [`glunpack`] depends on is that nothing *resamples* the packed chroma before it. I420 → NV12
-/// is a pure re-layout — the same 4:2:0 samples, planar U/V rewritten as interleaved UV — so
-/// the auxiliary view survives intact. What must never appear here is a converter asked for a
-/// 4:4:4 or RGB format, which would 4:2:0-upsample the packed chroma and destroy the
-/// reconstruction.
+/// The Windows decode chain from `h264parse`'s output to frames `gtk4paintablesink` can show
+/// directly — the 4:2:0 GUI path, and the counterpart of `vah264dec ! glupload` on Linux and
+/// `vtdec_hw ! glcolorconvert` on macOS.
 #[cfg(target_os = "windows")]
-fn win_decode_chain() -> &'static str {
+fn win_decode_chain_display() -> &'static str {
     win_decoder().2
 }
 
-/// The Windows decode chain from `h264parse`'s output to plain sysmem, for the headless mode —
-/// which has no display, hence no GL context to upload into, and needs raw frames anyway.
+/// The Windows decode chain from `h264parse`'s output to plain NV12 system memory: the
+/// headless mode (no display, and it wants raw frames anyway) and the AVC444 GL feed.
 #[cfg(target_os = "windows")]
 pub(crate) fn win_decode_chain_sysmem() -> &'static str {
     win_decoder().1
@@ -1588,15 +1595,13 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::Pipelin
     #[cfg(target_os = "macos")]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vtdec_hw name=dec ! glcolorconvert ! gtk4paintablesink name=sink sync=false";
-    // Windows: the decoder is chosen at runtime (see `win_decode_chain`), and its chain already
-    // ends in `glupload`, so this reads exactly like the Linux string with that pair spliced in.
-    // `glcolorconvert` is added for the same reason macOS needs it — it converts the decoder's
-    // NV12 to the RGBA the sink's GL caps ask for, in one GPU pass.
+    // Windows: the decoder is chosen at runtime and its chain already ends in frames the sink
+    // can show, with no GL anywhere — see `WIN_DECODERS` for why GL cannot be used here.
     #[cfg(target_os = "windows")]
     let desc = format!(
         "appsrc name=src is-live=true format=time do-timestamp=true ! \
-         h264parse ! {} ! glcolorconvert ! gtk4paintablesink name=sink sync=false",
-        win_decode_chain()
+         h264parse ! {} ! gtk4paintablesink name=sink sync=false",
+        win_decode_chain_display()
     );
     let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
@@ -1661,13 +1666,20 @@ fn make_decoder_yuv444(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::
     #[cfg(target_os = "macos")]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vtdec_hw ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false";
-    // Windows: `win_decode_chain` ends in NV12 GLMemory, so `rmngavc444unpack` follows it
-    // directly — no glcolorconvert, same invariant as the other two platforms.
+    // Windows: NV12 sysmem from the runtime-chosen decoder, then `glupload` into GStreamer's
+    // own GL context for the unpack shader. No `glcolorconvert` — same invariant as the other
+    // two platforms.
+    //
+    // KNOWN BROKEN on Windows, see `WIN_DECODERS`: `gtk4paintablesink` offers GTK's in-use WGL
+    // context to the pipeline and `glupload` cannot `wglShareLists` with it, so this errors out
+    // with `not-negotiated`. The 4:2:0 path above avoids GL entirely, which is why it works.
+    // Fixing this needs the unpack moved off the sink's pipeline (see `make_decoder_yuv444`'s
+    // doc comment); until then a Windows viewer needs the server in 4:2:0 mode.
     #[cfg(target_os = "windows")]
     let desc = format!(
         "appsrc name=src is-live=true format=time do-timestamp=true ! \
-         h264parse ! {} ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false",
-        win_decode_chain()
+         h264parse ! {} ! glupload ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false",
+        win_decode_chain_sysmem()
     );
     let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
