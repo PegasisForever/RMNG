@@ -22,6 +22,13 @@ pub struct FrameMsg {
     pub planes: Vec<PlaneLayout>,
     /// Monotonic per-monitor sequence; echoed back in [`Ack`].
     pub seq: u64,
+    /// The fd is a **memfd of system memory**, not a dmabuf: the clone has no GPU, so
+    /// Mutter's screencast hands out shm buffers. The pixels are the same AR24/BGRA and
+    /// `planes` still gives the real (offset, stride), but the server must map the fd
+    /// instead of importing it. `serde(default)` keeps an older daemon (which never sends
+    /// the field) reading as dmabuf, so a mixed fleet during a rollout still works.
+    #[serde(default)]
+    pub shm: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +227,18 @@ pub enum ServerMsg {
     /// stops the old session (make-before-break). Sent on the daemon's `Hello` and on every
     /// `POST /api/layout/activate`.
     SetMonitors { monitors: Vec<crate::control::MonitorSpec> },
+    /// Start or stop capturing this clone's monitors.
+    ///
+    /// Capture is what makes the compositor paint: a clone with a screencast consumer
+    /// repaints on every damage event whether or not anyone is watching the result, and the
+    /// server drops those frames for every clone but the selected one. Measured on a
+    /// software-rendered clone, that waste is most of its cost (8.4 CPU-seconds per 10
+    /// seconds of a busy desktop, against 1.8 with no consumer attached).
+    ///
+    /// So the server keeps capture on only while a viewer is watching this clone, and the
+    /// daemon wakes it briefly on its own for an on-demand screenshot. An older daemon
+    /// decodes this to `Unknown` and keeps capturing, which is the previous behaviour.
+    Capture { active: bool },
     ClipboardOffer(ClipboardOffer),
     ClipboardRequest(ClipboardRequest),
     ClipboardData(ClipboardData),

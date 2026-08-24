@@ -72,6 +72,121 @@ pkill -u 1000 -f 'gnome-shell --headless' 2>/dev/null || true
 exit 0
 "#;
 
+/// Put a clone into the render mode the setting currently asks for, and make it stick.
+///
+/// Three things happen here, in one exec.
+///
+/// 1. `/etc/rmng/render-mode` records `gpu` or `cpu`.
+/// 2. A boot-time unit that reads that marker is installed and enabled, so the mode survives
+///    container restarts.
+/// 3. If the clone is not in that mode right now, it is put there and its desktop session
+///    restarted.
+///
+/// It has to work from inside the clone rather than from the container config. A clone runs
+/// `--privileged`, and Docker populates such a container's `/dev` with every host device
+/// *after* its own mounts: a tmpfs over `/dev/dri` in the create spec comes back with
+/// `renderD128` bind-mounted straight into it (verified on CT 101 — the directory looked
+/// hidden in the mount table and still listed the node).
+///
+/// Step 3 only fires on a real change, so the steady state is one cheap exec. The restart it
+/// does costs no work either: this runs at create and at unarchive, when the clone has just
+/// booted and holds nothing an operator placed.
+const RENDER_MODE_SCRIPT: &str = r#"set -e
+want_gpu="$1"
+# The marker the boot unit reads. Writing it is what makes this clone's mode survive the
+# next container restart.
+mkdir -p /etc/rmng
+if [ "$want_gpu" = yes ]; then echo gpu > /etc/rmng/render-mode; else echo cpu > /etc/rmng/render-mode; fi
+
+# The boot-time hook, (re)written every time so an older clone gains it on its next
+# unarchive and a clone created from a committed image gets this server's version.
+cat > /usr/local/sbin/rmng-render-mode <<'HELPER'
+#!/bin/sh
+# RMNG: a CPU-rendered clone must not see the GPU. Mutter enumerates render nodes under
+# /dev/dri, so an empty tmpfs there is what sends it to software rendering (it logs
+# "Created surfaceless renderer without GPU"). Change /etc/rmng/render-mode, not this file.
+set -e
+[ "$(cat /etc/rmng/render-mode 2>/dev/null)" = cpu ] || exit 0
+# The node's presence is the signal, not `mountpoint`: Docker bind-mounts /dev/dri itself
+# into a privileged container, so the directory is already a mount point before this runs
+# and a `mountpoint -q` guard would skip the work every time. With the node gone, the tmpfs
+# is already on top, so this is idempotent.
+[ -e /dev/dri/renderD128 ] || exit 0
+mount -t tmpfs -o size=64k tmpfs /dev/dri
+HELPER
+chmod 755 /usr/local/sbin/rmng-render-mode
+cat > /etc/systemd/system/rmng-render-mode.service <<'UNIT'
+[Unit]
+Description=RMNG render mode (hide the GPU render node on a CPU-rendered clone)
+DefaultDependencies=no
+Before=sysinit.target basic.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rmng-render-mode
+[Install]
+WantedBy=sysinit.target
+UNIT
+
+# Wait for the clone's user session. This also means PID 1 is far enough along to answer
+# `systemctl`, which it is not when this runs seconds after the container starts.
+for _ in $(seq 1 90); do
+  [ -S /run/user/1000/bus ] && break
+  sleep 1
+done
+
+# Guarded, both of them. Enablement only decides what happens on the NEXT boot, and it must
+# never be the reason this boot is left rendering the wrong way. (Unguarded under `set -e`,
+# a `daemon-reload` against a still-booting systemd aborted the script here and a CPU clone
+# came up with the GPU still visible.)
+systemctl daemon-reload >/dev/null 2>&1 || true
+# `enable` writes the sysinit.target.wants symlink. It has to be a real symlink: systemd
+# ignores a plain file dropped in that directory (tried, and the unit stayed disabled).
+systemctl enable rmng-render-mode.service >/dev/null 2>&1 || true
+have_gpu=no
+[ -e /dev/dri/renderD128 ] && have_gpu=yes
+if [ "$want_gpu" = "$have_gpu" ]; then
+  echo "render mode already $want_gpu"
+  exit 0
+fi
+if [ "$want_gpu" = yes ]; then
+  # `|| true`: an unmounted /dev/dri means the GPU is already visible, which is the goal.
+  umount /dev/dri 2>/dev/null || true
+else
+  mkdir -p /dev/dri
+  mount -t tmpfs -o size=64k tmpfs /dev/dri
+fi
+# Mutter picks its renderer once, at startup, so the session has to come back for the change
+# to mean anything. The holder and daemon follow it: the holder's Mutter session dies with
+# the shell, and the daemon captures through the holder.
+runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart \
+  gnome-headless.service rmng-session-holder.service rmng-clone-daemon.service
+echo "render mode set to $want_gpu"
+"#;
+
+/// Apply the current `gpuAcceleratedClones` setting to a running clone (see
+/// [`RENDER_MODE_SCRIPT`]). Best-effort: a clone that cannot be reconfigured still runs, in
+/// whichever mode it already had, and says so in the log.
+pub async fn apply_render_mode(app: &App, clone: &str, headless: bool) {
+    // A headless clone has no desktop to render, so neither mode means anything to it.
+    if headless {
+        return;
+    }
+    let want = if app.config().gpu_accelerated_clones { "yes" } else { "no" };
+    let args = [want.to_string()];
+    let res = app
+        .docker
+        .exec_script(clone, RENDER_MODE_SCRIPT, &[], &args, |stream, line| {
+            tracing::debug!("clone {clone} render mode [{stream}]: {line}");
+        })
+        .await;
+    match res {
+        Ok(0) => tracing::info!("clone {clone}: render mode applied (gpu={want})"),
+        Ok(code) => tracing::warn!("clone {clone}: render mode script exited {code}"),
+        Err(e) => tracing::warn!("clone {clone}: render mode not applied ({e:#})"),
+    }
+}
+
 /// Headless clone: pin tmux's multi-client sizing policy, then ensure a default `main` tmux
 /// session exists (idempotent). Runs as the clone user via a login shell so PATH/SHELL match an
 /// interactive session. `termplane` re-creates a missing session on select, so the default session
@@ -621,6 +736,10 @@ async fn clone_container_after_create(
     // settle, so their PAM-created environment sees `/etc/environment`.
     on_progress("inject", "starting container to inject identity + preset");
     docker.start_container(container).await?;
+
+    // Render mode: install the boot hook and, on a CPU clone, take the GPU away and restart
+    // the session it just started with. A GPU clone is left as it booted.
+    apply_render_mode(app, container, headless).await;
 
     // Headless clone: remove the desktop the instant the container is up — delete the
     // `gnome-headless.service` + `rmng-clone-daemon.service` unit files (and their wants-symlinks)
@@ -1282,7 +1401,8 @@ fn archive_pct(step: &str) -> Option<f64> {
 fn unarchive_pct(step: &str) -> Option<f64> {
     Some(match step {
         "queued" => 0.0,
-        "start" => 75.0,
+        "start" => 60.0,
+        "render" => 80.0,
         "done" => 100.0,
         _ => return None,
     })
@@ -1594,5 +1714,24 @@ mod tests {
             assert!(pct >= prev, "clone step {step} pct {pct} < previous {prev}");
             prev = pct;
         }
+    }
+
+    /// The render-mode script has to do all three jobs, and the third only on a change: it
+    /// records the mode, installs the boot hook that re-applies it after a restart, and
+    /// restarts the desktop session when the clone is not already in that mode.
+    #[test]
+    fn render_mode_script_records_installs_and_only_then_switches() {
+        let s = RENDER_MODE_SCRIPT;
+        assert!(s.contains("/etc/rmng/render-mode"), "no marker written");
+        assert!(s.contains("systemctl enable rmng-render-mode.service"), "boot hook not enabled");
+        assert!(s.contains("WantedBy=sysinit.target"), "hook runs too late to matter");
+        assert!(
+            s.contains(r#"if [ "$want_gpu" = "$have_gpu" ]"#),
+            "the script must no-op when the mode already matches"
+        );
+        // The session restart belongs after that check, so a matching clone is left alone.
+        let check = s.find(r#"if [ "$want_gpu" = "$have_gpu" ]"#).unwrap();
+        let restart = s.find("systemctl --user restart").unwrap();
+        assert!(restart > check, "the session is restarted before the no-op check");
     }
 }

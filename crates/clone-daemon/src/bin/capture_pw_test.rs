@@ -120,7 +120,10 @@ async fn main() -> Result<()> {
                     ),
                 }
             };
-            if let Err(e) = capture_pw::run(node_id, on_frame, on_cursor) {
+            // This harness captures until Ctrl-C, so its stop channel is never used: the
+            // sender is dropped right here and the receiver only ever sits idle.
+            let (_stop_tx, stop_rx) = pipewire::channel::channel::<()>();
+            if let Err(e) = capture_pw::run(node_id, on_frame, on_cursor, stop_rx) {
                 tracing::error!("capture_pw::run failed: {e:#}");
             }
         })?;

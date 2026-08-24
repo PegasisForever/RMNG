@@ -1133,6 +1133,18 @@ async fn run_unarchive(app: App, op_id: String, host_id: String) {
     if let Err(e) = app.docker.resume_container(&host_id).await {
         return fail_op(&app, &op_id, e.to_string());
     }
+    // An unarchive is the one moment a clone can change render mode for free: it has just
+    // booted, so restarting its desktop session under the new setting costs nothing. A clone
+    // that already matches is left alone (the script checks before it acts).
+    let headless = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .is_some_and(|h| h.headless);
+    progress("render", "applying the GPU / CPU rendering setting");
+    crate::provision::apply_render_mode(&app, &host_id, headless).await;
 
     app.store.mutate(|s| {
         if let Some(host) = s.hosts.iter_mut().find(|h| h.id == host_id) {

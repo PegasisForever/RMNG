@@ -109,6 +109,8 @@ struct LatestFrame {
     height: u32,
     /// Real per-plane (offset, stride) of the dmabuf, as reported by the daemon.
     planes: Vec<wire::socket::PlaneLayout>,
+    /// `fd` is a memfd of system memory, not a dmabuf: this clone has no GPU.
+    shm: bool,
 }
 
 /// Per-viewer clipboard source id. Distinct per connection so the lazy broker can
@@ -151,6 +153,67 @@ pub struct MediaHandle {
     /// Each clone's reported monitor layout — replayed to a connecting viewer so it
     /// can route cross-window drags against the real positions.
     layout: Mutex<HashMap<String, Vec<MonitorPlacement>>>,
+    /// What we last told each clone about whether anyone is watching it, so a selection
+    /// change sends one message to the two clones it concerns instead of to the fleet.
+    capture_gate: Mutex<HashMap<String, bool>>,
+}
+
+/// The clone whose desktop is on screen right now, or `None` when nobody is looking.
+///
+/// Both halves matter. Only the selected clone's frames are encoded, and with no viewer
+/// connected not even that one is, so anything else a clone captures is thrown away.
+fn watched_clone(app: &App, viewers: &Viewers) -> Option<String> {
+    if viewers.lock().unwrap().is_empty() {
+        return None;
+    }
+    app.store.selected()
+}
+
+/// Tell every connected clone-daemon whether a viewer is watching it, skipping the ones
+/// already in the right state.
+///
+/// Capture is what makes a clone's compositor paint, so this is the difference between a
+/// fleet where one desktop renders and one where all of them do. Call it whenever the answer
+/// can change: a viewer arriving or leaving, and the selection moving.
+fn update_capture_gates(handle: &MediaHandle, app: &App, viewers: &Viewers) {
+    let watched = watched_clone(app, viewers);
+    let conns: Vec<(String, Arc<Conn>)> = handle
+        .conns
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, c)| (id.clone(), c.clone()))
+        .collect();
+    for (id, conn) in conns {
+        let active = watched.as_deref() == Some(id.as_str());
+        if handle.capture_gate.lock().unwrap().get(&id) == Some(&active) {
+            continue;
+        }
+        match conn.send(&ServerMsg::Capture { active }) {
+            Ok(()) => {
+                handle.capture_gate.lock().unwrap().insert(id.clone(), active);
+                tracing::debug!("clone '{id}': capture {}", if active { "on" } else { "off" });
+            }
+            // A clone that cannot take the message keeps capturing, which is safe: it is
+            // exactly what every daemon did before this existed. Leave the record unset so
+            // the next change tries again.
+            Err(e) => tracing::warn!("clone '{id}': capture gate not delivered ({e:?})"),
+        }
+    }
+}
+
+/// Send a freshly-connected daemon its gate, whatever we last recorded for that clone.
+///
+/// Unconditional, unlike [`update_capture_gates`]: a daemon starts out capturing and a
+/// restarted one has forgotten anything it was told, so "no change since last time" is not
+/// the same as "it knows".
+fn send_capture_gate_on_hello(handle: &MediaHandle, app: &App, viewers: &Viewers, id: &str) {
+    let active = watched_clone(app, viewers).as_deref() == Some(id);
+    let conn = handle.conns.lock().unwrap().get(id).cloned();
+    let Some(conn) = conn else { return };
+    if conn.send(&ServerMsg::Capture { active }).is_ok() {
+        handle.capture_gate.lock().unwrap().insert(id.to_string(), active);
+    }
 }
 
 fn dup_owned(fd: &OwnedFd) -> Option<OwnedFd> {
@@ -322,6 +385,10 @@ pub fn spawn(app: App, init: MediaInit) {
                     // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
                     // (independent of encode latency); mode already leads its channel.
                     viewers.lock().unwrap().insert(id, ViewerConn { id, tx });
+                    // Somebody is watching now, so the selected clone has to start painting
+                    // again. Before the re-encode below, so its first fresh frame is close
+                    // behind the primed one.
+                    update_capture_gates(&handle, &app, &viewers);
                     prime_viewer_video(&handle, &encoders, &viewers, selected, chroma);
                     // If the selected clone is headless, activate its tmux view and prime this
                     // viewer with the current session list.
@@ -402,6 +469,11 @@ pub fn spawn(app: App, init: MediaInit) {
                             // Selection changed: (de)activate the headless terminal view accordingly
                             // (handles headless→headed, headed→headless, and headless→headless).
                             termplane.on_viewers_changed();
+                            // Hand capture from the clone leaving the screen to the one
+                            // arriving on it. Before the early return below, because a
+                            // selection change with no viewer attached still has to stop the
+                            // clone that was being watched a moment ago.
+                            update_capture_gates(&handle, &app, &viewers);
                         }
                         // No viewers attached → nothing to repaint; the connect path primes on connect.
                         if viewers.lock().unwrap().is_empty() {
@@ -894,23 +966,24 @@ fn prime_viewer_video(
     let Some(sel) = selected else { return };
     // Video: re-encode each monitor's latest frame (broadcasts via the shared encoder).
     let frames = dup_latest_frames(handle, &sel);
-    for (mid, fd, fourcc, modifier, w, h, planes) in frames {
+    for (mid, fd, fourcc, modifier, w, h, planes, shm) in frames {
         if let Some(enc) = encoder_for(encoders, viewers, mid, w, h, chroma) {
             enc.force_idr();
-            if let Err(e) = enc.push(fd, fourcc, modifier, w, h, &planes) {
+            if let Err(e) = enc.push(fd, fourcc, modifier, w, h, &planes, shm) {
                 tracing::warn!("prime re-encode failed: {e}");
             }
         }
     }
 }
 
-/// Duplicate the selected clone's cached latest frame per monitor (fd dup'd so the
-/// cache keeps its own) for re-encoding: (monitor_id, fd, fourcc, modifier, w, h, planes).
+/// Duplicate the selected clone's cached latest frame per monitor (fd dup'd so the cache
+/// keeps its own) for re-encoding:
+/// (monitor_id, fd, fourcc, modifier, w, h, planes, shm).
 #[allow(clippy::type_complexity)]
 fn dup_latest_frames(
     handle: &MediaHandle,
     sel: &str,
-) -> Vec<(u32, OwnedFd, u32, u64, u32, u32, Vec<wire::socket::PlaneLayout>)> {
+) -> Vec<(u32, OwnedFd, u32, u64, u32, u32, Vec<wire::socket::PlaneLayout>, bool)> {
     let latest = handle.latest.lock().unwrap();
     latest
         .get(sel)
@@ -918,7 +991,7 @@ fn dup_latest_frames(
             m.values()
                 .filter_map(|f| {
                     dup_owned(&f.fd).map(|fd| {
-                        (f.monitor_id, fd, f.fourcc, f.modifier, f.width, f.height, f.planes.clone())
+                        (f.monitor_id, fd, f.fourcc, f.modifier, f.width, f.height, f.planes.clone(), f.shm)
                     })
                 })
                 .collect()
@@ -955,9 +1028,9 @@ fn reprime_all(
         broadcast_json(viewers, T_CURSOR, &c);
     }
     let frames = dup_latest_frames(handle, &sel);
-    for (mid, fd, fourcc, modifier, w, h, planes) in frames {
+    for (mid, fd, fourcc, modifier, w, h, planes, shm) in frames {
         if let Some(enc) = encoder_for(encoders, viewers, mid, w, h, chroma) {
-            enc.push(fd, fourcc, modifier, w, h, &planes).ok();
+            enc.push(fd, fourcc, modifier, w, h, &planes, shm).ok();
         }
     }
 }
@@ -979,6 +1052,8 @@ fn serve_clone(
             Ok((DaemonMsg::Hello(h), _)) => {
                 tracing::info!("clone-daemon '{}' connected", h.clone_id);
                 handle.conns.lock().unwrap().insert(h.clone_id.clone(), conn.clone());
+                // A daemon starts out capturing, so tell it at once if nobody is watching.
+                send_capture_gate_on_hello(&handle, &app, &viewers, &h.clone_id);
                 // Correct a stale layout on the clone that is on screen right now, and on one
                 // whose session holder just came up. Every other clone catches up when the
                 // operator switches to it (see `apply_active_layout`), so a fleet-wide daemon
@@ -998,7 +1073,7 @@ fn serve_clone(
                     if let Some(dup) = dup_owned(&fd) {
                         handle.latest.lock().unwrap().entry(id.clone()).or_default().insert(
                             f.monitor_id,
-                            LatestFrame { monitor_id: f.monitor_id, fd: dup, fourcc: f.fourcc, modifier: f.modifier, width: f.width, height: f.height, planes: f.planes.clone() },
+                            LatestFrame { monitor_id: f.monitor_id, fd: dup, fourcc: f.fourcc, modifier: f.modifier, width: f.width, height: f.height, planes: f.planes.clone(), shm: f.shm },
                         );
                     }
                     // Ack as soon as the frame is received and `latest` owns its own dup of the
@@ -1022,7 +1097,7 @@ fn serve_clone(
                     }
                     if sel.as_deref() == Some(id.as_str()) {
                         if let Some(enc) = encoder_for(&encoders, &viewers, f.monitor_id, f.width, f.height, chroma) {
-                            if let Err(e) = enc.push(fd, f.fourcc, f.modifier, f.width, f.height, &f.planes) {
+                            if let Err(e) = enc.push(fd, f.fourcc, f.modifier, f.width, f.height, &f.planes, f.shm) {
                                 tracing::warn!("encode push failed: {e}");
                             }
                         }
@@ -1073,7 +1148,7 @@ fn serve_clone(
             Ok((DaemonMsg::Unknown, _)) => {}
             Err(e) => {
                 if let Some(id) = &clone_id {
-                    teardown_if_current(&handle.conns, &handle.latest, id, &conn);
+                    teardown_if_current(&handle.conns, &handle.latest, &handle.capture_gate, id, &conn);
                     clip_forget_source(&handle.clip, id);
                     tracing::info!("clone-daemon '{id}' disconnected: {e}");
                 }
@@ -1097,6 +1172,7 @@ fn serve_clone(
 fn teardown_if_current(
     conns: &Mutex<HashMap<String, Arc<Conn>>>,
     latest: &Mutex<HashMap<String, HashMap<u32, LatestFrame>>>,
+    gates: &Mutex<HashMap<String, bool>>,
     id: &str,
     this: &Arc<Conn>,
 ) {
@@ -1104,6 +1180,9 @@ fn teardown_if_current(
     if conns.get(id).is_some_and(|c| Arc::ptr_eq(c, this)) {
         conns.remove(id);
         latest.lock().unwrap().remove(id);
+        // Forget what this daemon was told. The next one to claim the id starts out
+        // capturing and gets the current answer on its `Hello`.
+        gates.lock().unwrap().remove(id);
     }
 }
 
@@ -1192,6 +1271,8 @@ fn read_viewer_input(
     app.forwards.viewer_left();
     // A departing viewer may leave the headless terminal view with no audience → deactivate.
     termplane.on_viewers_changed();
+    // The last viewer leaving means no clone needs to paint at all.
+    update_capture_gates(&handle, &app, &viewers);
 }
 
 /// Read the data-plane header: `[u32be len][JSON ForwardHeader]` (len capped at 64 KiB).
@@ -1377,6 +1458,49 @@ mod tests {
         }
     }
 
+    /// Capture follows the operator's eyes: the selected clone is told to capture, every
+    /// other connected clone is told to stop, and a clone already in the right state is not
+    /// told anything (the gate map is what keeps a selection change off the whole fleet).
+    #[tokio::test]
+    async fn capture_gates_track_the_selection() {
+        let app = App::test_app();
+        let (client_a, conn_a) = accepted_conn("gate-a");
+        let (client_b, conn_b) = accepted_conn("gate-b");
+        app.media.insert_conn_for_test("a", conn_a);
+        app.media.insert_conn_for_test("b", conn_b);
+        let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
+
+        // No viewer connected: nobody captures, whatever the selection says.
+        app.store.mutate(|s| s.selected = Some("a".into()));
+        update_capture_gates(&app.media, &app, &viewers);
+        assert_eq!(capture_msg(&client_a), Some(false));
+        assert_eq!(capture_msg(&client_b), Some(false));
+
+        // A viewer arrives on 'a': only 'a' starts, and 'b' hears nothing new.
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Arc<[u8]>>(4);
+        viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx });
+        update_capture_gates(&app.media, &app, &viewers);
+        assert_eq!(capture_msg(&client_a), Some(true));
+        assert_eq!(capture_msg(&client_b), None, "a clone already stopped was told again");
+
+        // Selection moves to 'b': exactly one stop and one start.
+        app.store.mutate(|s| s.selected = Some("b".into()));
+        update_capture_gates(&app.media, &app, &viewers);
+        assert_eq!(capture_msg(&client_a), Some(false));
+        assert_eq!(capture_msg(&client_b), Some(true));
+    }
+
+    /// The `active` flag of the next `Capture` message on this socket, or `None` when the
+    /// socket is empty. Panics on any other message, so a test cannot silently pass by
+    /// reading something else.
+    fn capture_msg(client: &OwnedFd) -> Option<bool> {
+        let raw = recv_now(client)?;
+        match serde_json::from_slice::<ServerMsg>(&raw).unwrap() {
+            ServerMsg::Capture { active } => Some(active),
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+
     /// The disconnect-teardown guard: a LATE old-thread teardown (its `recv()` erroring
     /// only after a replacement session already re-Hello'd under the same id) must leave
     /// the new session's `conns`/`latest` entries intact; the current session's own
@@ -1397,12 +1521,14 @@ mod tests {
         let conns: Mutex<HashMap<String, Arc<Conn>>> = Mutex::new(HashMap::new());
         let latest: Mutex<HashMap<String, HashMap<u32, LatestFrame>>> =
             Mutex::new(HashMap::new());
+        let gates: Mutex<HashMap<String, bool>> = Mutex::new(HashMap::new());
         // B has re-Hello'd: both maps hold the NEW session's state under id "x".
         conns.lock().unwrap().insert("x".into(), conn_b.clone());
         latest.lock().unwrap().insert("x".into(), HashMap::new());
+        gates.lock().unwrap().insert("x".into(), true);
 
         // Old thread A tears down late — B's entries must survive in BOTH maps.
-        teardown_if_current(&conns, &latest, "x", &conn_a);
+        teardown_if_current(&conns, &latest, &gates, "x", &conn_a);
         assert!(
             conns.lock().unwrap().get("x").is_some_and(|c| Arc::ptr_eq(c, &conn_b)),
             "old-thread teardown clobbered the new session's conns entry"
@@ -1413,7 +1539,7 @@ mod tests {
         );
 
         // The current session (B) tearing down removes both entries as before.
-        teardown_if_current(&conns, &latest, "x", &conn_b);
+        teardown_if_current(&conns, &latest, &gates, "x", &conn_b);
         assert!(!conns.lock().unwrap().contains_key("x"));
         assert!(!latest.lock().unwrap().contains_key("x"));
     }

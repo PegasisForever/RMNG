@@ -58,6 +58,7 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
     // from, so the Settings panel lists exactly the presets the ticket dialog offers.
     presets: makeClonePresets(),
     chroma: "yuv420",
+    gpuAcceleratedClones: true,
     ssh: {
       authorizedKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop"],
       publicHost: "rmng.example.com",

@@ -140,10 +140,29 @@ impl Session {
     }
 }
 
+/// Virtual-monitor refresh rate: 60 Hz on a clone with a GPU, 30 Hz on one without.
+///
+/// The rate caps how often Mutter repaints a virtual monitor, and each paint costs a
+/// capture, an encode and a decode downstream. On a GPU clone that paint is nearly free, so
+/// it stays at 60. A clone with no render node paints in software on the CPU, where the same
+/// desktop costs about two cores at 60 Hz, so half the rate buys back most of a core for a
+/// frame rate an operator watching a desktop does not miss.
+///
+/// The render node is the signal because it is the same thing Mutter looks at: with
+/// `/dev/dri` empty it logs "Created surfaceless renderer without GPU" and switches to
+/// llvmpipe. No configuration reaches this process, so nothing can disagree with reality.
+fn refresh_hz() -> f64 {
+    if std::path::Path::new("/dev/dri/renderD128").exists() {
+        60.0
+    } else {
+        30.0
+    }
+}
+
 fn build_modes(w: u32, h: u32) -> Vec<HashMap<String, Value<'static>>> {
     let mut m = HashMap::new();
     m.insert("size".to_string(), Value::new((w, h)));
-    m.insert("refresh-rate".to_string(), Value::new(60.0_f64));
+    m.insert("refresh-rate".to_string(), Value::new(refresh_hz()));
     // Mutter rejects a mode set with no preferred mode ("No preferred modes").
     m.insert("is-preferred".to_string(), Value::new(true));
     vec![m]

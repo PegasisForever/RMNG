@@ -504,6 +504,22 @@ pub struct AppConfig {
     /// Which GPT the stuck detector asks, and which Codex account pays for it.
     #[serde(default)]
     pub judge: JudgeConfig,
+    /// Whether a new clone's desktop renders on the GPU (the default) or on its own CPU.
+    ///
+    /// A GPU clone's compositor draws on the shared card, which is fast and nearly free in
+    /// CPU but holds video memory for as long as the clone lives: measured across the fleet,
+    /// 33 desktops held about 17 GiB of a 30 GiB card while the card itself sat at 8 percent
+    /// busy. Turning this off hides the render node from the clone, so Mutter falls back to
+    /// software rendering and the clone holds no video memory at all, paying CPU instead
+    /// while somebody is watching it (about half a core on a busy desktop, nothing when
+    /// idle). Video and screenshots work either way, and the encode still runs on the
+    /// server's GPU regardless.
+    ///
+    /// Applies to clones **created or unarchived after it changes** and never to a running
+    /// one: the mode is fixed when a clone's desktop session starts, so flipping it live
+    /// would mean restarting that session under the operator.
+    #[serde(default = "default_gpu_accelerated_clones")]
+    pub gpu_accelerated_clones: bool,
 }
 
 impl Default for AppConfig {
@@ -528,8 +544,15 @@ impl Default for AppConfig {
             agent_playbook: default_agent_playbook(),
             global_prompt: default_global_prompt(),
             judge: JudgeConfig::default(),
+            gpu_accelerated_clones: default_gpu_accelerated_clones(),
         }
     }
+}
+
+/// Clones render on the GPU unless the operator says otherwise: it is the faster mode and
+/// the one every existing deployment already runs.
+fn default_gpu_accelerated_clones() -> bool {
+    true
 }
 
 fn default_agent_port() -> u16 {
@@ -613,6 +636,7 @@ impl AppConfig {
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
             judge: self.judge.clone(),
+            gpu_accelerated_clones: self.gpu_accelerated_clones,
         }
     }
 }
@@ -649,6 +673,10 @@ pub struct AppConfigRedacted {
     pub global_prompt: String,
     /// Which GPT the stuck detector asks, and which Codex account pays for it.
     pub judge: JudgeConfig,
+    /// Whether a new clone's desktop renders on the GPU. Applies to clones created or
+    /// unarchived after it changes; see [`AppConfig::gpu_accelerated_clones`].
+    #[serde(default = "default_gpu_accelerated_clones")]
+    pub gpu_accelerated_clones: bool,
 }
 
 /// Response body for `PUT /api/config`: the redacted config after the merge, plus

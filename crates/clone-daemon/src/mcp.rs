@@ -55,8 +55,8 @@ const SCROLL_STEP_MS: u64 = 25;
 /// Let the desktop repaint before the post-action screenshot (damage-driven capture).
 const SETTLE_MS: u64 = 350;
 
-/// One captured dmabuf per monitor, refreshed by the capture callbacks; the
-/// `screenshot` tool dups the fd and GPU-encodes it to JPEG via `media`.
+/// One captured frame per monitor, refreshed by the capture callbacks; the
+/// `screenshot` tool dups the fd and encodes it to JPEG via `media`.
 pub struct LatestFrame {
     pub fd: OwnedFd,
     pub fourcc: u32,
@@ -67,8 +67,60 @@ pub struct LatestFrame {
     /// encoder imports it with the GPU-padded pitch (widths whose pitch isn't
     /// 16-aligned have stride ≠ width·4) instead of a fabricated one.
     pub planes: Vec<wire::socket::PlaneLayout>,
+    /// The fd is a memfd of system memory, not a dmabuf (a clone with no GPU). Such a
+    /// clone has no VA-API either, so the screenshot encodes on the CPU.
+    pub shm: bool,
+    /// Monotonic across all monitors, from [`next_stamp`]. A screenshot that woke a stopped
+    /// capture waits for a stamp higher than the one it saw, which is how it tells a frame
+    /// from the live desktop apart from whatever was left in this map minutes ago.
+    pub stamp: u64,
 }
 pub type LatestFrames = Arc<Mutex<HashMap<u32, LatestFrame>>>;
+
+/// Next value for [`LatestFrame::stamp`].
+pub fn next_stamp() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What the capture control loop should do, from whoever asked.
+pub enum CaptureCmd {
+    /// The server's answer to "is a viewer watching this clone right now".
+    SetWanted(bool),
+    /// A screenshot needs a frame from a capture that may be stopped. Starts it if needed
+    /// and keeps it alive for a few seconds in case more calls follow.
+    Wake,
+}
+
+/// The screenshot path's handle on capture: ask for a wake, and see whether one is needed.
+#[derive(Clone)]
+pub struct CaptureCtl {
+    tx: tokio::sync::mpsc::UnboundedSender<CaptureCmd>,
+    running: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CaptureCtl {
+    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<CaptureCmd>) -> Self {
+        Self { tx, running: Arc::new(std::sync::atomic::AtomicBool::new(false)) }
+    }
+
+    /// Called by the control loop whenever capture starts or stops.
+    pub fn set_running(&self, running: bool) {
+        self.running.store(running, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn running(&self) -> bool {
+        self.running.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn wake(&self) {
+        let _ = self.tx.send(CaptureCmd::Wake);
+    }
+
+    pub fn set_wanted(&self, wanted: bool) {
+        let _ = self.tx.send(CaptureCmd::SetWanted(wanted));
+    }
+}
 
 #[derive(Clone)]
 struct Mon {
@@ -97,10 +149,14 @@ struct McpState {
     last_pos: Arc<Mutex<HashMap<u32, (f64, f64)>>>,
     /// Default virtual-space height (`RMNG_DESKTOP_HEIGHT`, 1080). `0` disables scaling.
     virt_height: u32,
+    /// Capture runs only while a viewer watches this clone, so the agent's own screenshots
+    /// have to wake it themselves.
+    capture: CaptureCtl,
 }
 
 /// Serve the MCP over HTTP, reading the live monitor set per request so it follows a layout
 /// swap.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     holder: Arc<Holder>,
     live_monitors: Arc<Mutex<Vec<HolderMonitor>>>,
@@ -108,6 +164,7 @@ pub async fn serve(
     transport: Arc<Transport>,
     port: u16,
     virt_height: u32,
+    capture: CaptureCtl,
 ) -> anyhow::Result<()> {
     let shell = zbus::Connection::session().await?;
     let state = McpState {
@@ -118,6 +175,7 @@ pub async fn serve(
         transport,
         last_pos: Arc::new(Mutex::new(HashMap::new())),
         virt_height,
+        capture,
     };
     let app = Router::new().route("/", post(rpc)).with_state(state);
     let addr = format!("0.0.0.0:{port}");
@@ -319,6 +377,7 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
         "screenshot" => {
             let m = resolve_mon(&mons_snapshot(st), &args)?;
             let (vw, vh) = call_dims(st, &m, &args);
+            wake_capture(st, &m).await;
             Ok(image_content(&screenshot_jpeg(st, &m, vw, vh)?))
         }
         "mouse_move" => {
@@ -446,17 +505,54 @@ fn clamp(m: &Mon, x: f64, y: f64) -> (f64, f64) {
 /// virtual size `(vw, vh)`. `w`/`h` from the frame stay native: they describe the dmabuf being
 /// imported, and only the pipeline's output caps carry the virtual size.
 fn screenshot_jpeg(st: &McpState, m: &Mon, vw: u32, vh: u32) -> Result<Vec<u8>, String> {
-    let (fd, fourcc, modifier, w, h, planes) = {
+    let (fd, fourcc, modifier, w, h, planes, shm) = {
         let latest = st.latest.lock().unwrap();
         let f = latest.get(&m.id).ok_or_else(|| format!("no frame captured yet for monitor {}", m.id))?;
-        (dup(&f.fd).ok_or("dup failed")?, f.fourcc, f.modifier, f.width, f.height, f.planes.clone())
+        (dup(&f.fd).ok_or("dup failed")?, f.fourcc, f.modifier, f.width, f.height, f.planes.clone(), f.shm)
     };
+    // A shm frame comes from a clone with no render node, so `vapostproc` (VA-API) does not
+    // exist there at all: encode on the CPU instead.
+    if shm {
+        return media::screenshot_jpeg_shm(fd, fourcc, w, h, &planes, vw, vh).map_err(|e| e.to_string());
+    }
     media::screenshot_jpeg(fd, fourcc, modifier, w, h, &planes, vw, vh).map_err(|e| e.to_string())
+}
+
+/// Make sure capture is running and has produced a frame since we asked.
+///
+/// Capture is off whenever no viewer is watching this clone, which for an agent working on
+/// its own is most of the time. The wake starts it, and the wait is for the compositor's
+/// first paint into the fresh stream: without it the shot would come from whatever frame the
+/// map still held, which on a clone last watched an hour ago is an hour-old desktop.
+///
+/// Best-effort by design. If no frame arrives inside the timeout the screenshot goes ahead
+/// with what is there, since a stale image beats an error for a vision model that is about
+/// to look at it and can see it is stale.
+async fn wake_capture(st: &McpState, m: &Mon) {
+    /// Long enough for a stream to renegotiate and Mutter to paint once (measured at about
+    /// 100 ms on CT 101), with room for a loaded software-rendered clone.
+    const WAKE_TIMEOUT: Duration = Duration::from_millis(2500);
+
+    if st.capture.running() {
+        return;
+    }
+    let before = st.latest.lock().unwrap().get(&m.id).map(|f| f.stamp).unwrap_or(0);
+    st.capture.wake();
+    let deadline = std::time::Instant::now() + WAKE_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        sleep(25).await;
+        let now = st.latest.lock().unwrap().get(&m.id).map(|f| f.stamp).unwrap_or(0);
+        if now > before {
+            return;
+        }
+    }
+    tracing::warn!("monitor {}: no frame within the capture wake timeout", m.id);
 }
 
 /// Let the desktop repaint, then return a screenshot (best-effort → text on failure). Takes the
 /// caller's `(vw, vh)` so the settle image is in the same space as the coordinates that produced it.
 async fn settle_shot(st: &McpState, m: &Mon, vw: u32, vh: u32) -> Value {
+    wake_capture(st, m).await;
     sleep(SETTLE_MS).await;
     match screenshot_jpeg(st, m, vw, vh) {
         Ok(jpeg) => image_content(&jpeg),

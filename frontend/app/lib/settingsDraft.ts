@@ -81,6 +81,9 @@ export interface SettingsDraft {
   staticDir: string;
   cloneSocket: string;
   chroma: ChromaMode;
+  /** Whether a new clone's desktop renders on the GPU. Applies to clones created or
+   *  unarchived after the save; running clones keep the mode they started in. */
+  gpuAcceleratedClones: boolean;
   agentPlaybook: string;
   globalPrompt: string;
   ssh: SshConfig;
@@ -178,6 +181,7 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     staticDir: c.staticDir,
     cloneSocket: c.cloneSocket,
     chroma: c.chroma,
+    gpuAcceleratedClones: c.gpuAcceleratedClones,
     agentPlaybook: c.agentPlaybook,
     globalPrompt: c.globalPrompt,
     judge: {
@@ -233,6 +237,7 @@ export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unk
     staticDir: draft.staticDir,
     cloneSocket: draft.cloneSocket,
     chroma: draft.chroma,
+    gpuAcceleratedClones: draft.gpuAcceleratedClones,
     ssh: draft.ssh,
     agentPlaybook: draft.agentPlaybook,
     globalPrompt: draft.globalPrompt,

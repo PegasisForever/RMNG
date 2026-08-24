@@ -27,7 +27,10 @@ pub struct Encoder {
     appsrc: AppSrc,
     /// The whole encode pipeline (where `vah264enc` lives, so `force_idr` targets it).
     pipeline: gst::Pipeline,
-    cur: Mutex<Option<(u32, u64, u32, u32)>>, // fourcc, modifier, w, h — input caps gate
+    /// fourcc, modifier, w, h, shm — the input caps gate. `shm` is part of the key because
+    /// one encoder is shared per (monitor, size) across clones: selecting a GPU-less clone
+    /// after a GPU one must re-set the caps even when the frame geometry is identical.
+    cur: Mutex<Option<(u32, u64, u32, u32, bool)>>,
     /// `Some` only when `RMNG_ENC_LATENCY` is set: shared FIFO of push timestamps the appsink pops
     /// to measure per-frame push→AU latency. (This VA encoder doesn't preserve input PTS to its
     /// output AUs, so latency is correlated by push order — valid while frames aren't dropped.)
@@ -134,8 +137,16 @@ impl Encoder {
         self.pipeline.send_event(ev);
     }
 
-    /// Push one captured dmabuf frame. `fd` is consumed (the GstMemory owns it).
-    /// `planes` is the daemon-reported per-plane (offset, stride) of the dmabuf.
+    /// Push one captured frame. `fd` is consumed (the GstMemory owns it).
+    /// `planes` is the daemon-reported per-plane (offset, stride).
+    ///
+    /// `shm` marks `fd` as a memfd of system memory rather than a dmabuf, which is what a
+    /// clone with no GPU captures: its compositor runs surfaceless and its screencast
+    /// source offers shm buffers only. The pipeline is the same either way — the frame
+    /// enters as plain `video/x-raw` and `vapostproc` uploads it to a VA surface, so the
+    /// encode still runs on the server's GPU. What is lost is the zero-copy import: the
+    /// upload reads `width·height·4` bytes per frame across the bus.
+    #[allow(clippy::too_many_arguments)]
     pub fn push(
         &self,
         fd: OwnedFd,
@@ -144,10 +155,14 @@ impl Encoder {
         w: u32,
         h: u32,
         planes: &[wire::socket::PlaneLayout],
+        shm: bool,
     ) -> Result<()> {
+        if shm {
+            return self.push_shm(fd, fourcc, w, h, planes);
+        }
         {
             let mut cur = self.cur.lock().unwrap();
-            if *cur != Some((fourcc, modifier, w, h)) {
+            if *cur != Some((fourcc, modifier, w, h, false)) {
                 // GStreamer's drm-format modifier is `0x` + 16 zero-padded hex digits; a
                 // non-padded value (`{:#x}`) is a different *string* and fails caps matching.
                 let drm = format!("{}:{:#018x}", fourcc_str(fourcc), modifier);
@@ -159,7 +174,7 @@ impl Encoder {
                     .field("height", h as i32)
                     .build();
                 self.appsrc.set_caps(Some(&caps));
-                *cur = Some((fourcc, modifier, w, h));
+                *cur = Some((fourcc, modifier, w, h, false));
             }
         }
         // Size of the underlying dmabuf (lseek SEEK_END is the canonical query).
@@ -179,10 +194,7 @@ impl Encoder {
             // an EGL import with a wrong pitch is rejected, killing the stream. VA (Yuv420
             // path) ignores the meta and derives the layout itself, so this is safe for
             // both modes.
-            let vfmt = match fourcc_str(fourcc).as_str() {
-                "AB24" | "XB24" => gstreamer_video::VideoFormat::Rgba,
-                _ => gstreamer_video::VideoFormat::Bgra, // AR24/XR24 (ARGB/xRGB) and default
-            };
+            let vfmt = video_format_for(fourcc);
             let (offsets, strides) = meta_layout(w, planes);
             let _ = gstreamer_video::VideoMeta::add_full(
                 b,
@@ -203,6 +215,94 @@ impl Encoder {
         }
         Ok(())
     }
+
+    /// Push one shm frame: the memfd is wrapped as fd-backed `GstMemory` (mapped on demand,
+    /// never copied here) and enters the pipeline as plain `video/x-raw`.
+    fn push_shm(
+        &self,
+        fd: OwnedFd,
+        fourcc: u32,
+        w: u32,
+        h: u32,
+        planes: &[wire::socket::PlaneLayout],
+    ) -> Result<()> {
+        let vfmt = video_format_for(fourcc);
+        {
+            let mut cur = self.cur.lock().unwrap();
+            if *cur != Some((fourcc, 0, w, h, true)) {
+                let caps = gst::Caps::builder("video/x-raw")
+                    .field("format", vfmt.to_str().as_str())
+                    .field("width", w as i32)
+                    .field("height", h as i32)
+                    .field("framerate", gst::Fraction::new(0, 1))
+                    .build();
+                self.appsrc.set_caps(Some(&caps));
+                *cur = Some((fourcc, 0, w, h, true));
+            }
+        }
+        let buffer = sysmem_buffer(fd, vfmt, w, h, planes)?;
+        let t0 = self.lat.as_ref().map(|_| Instant::now());
+        self.appsrc.push_buffer(buffer).map_err(|e| anyhow!("push_buffer: {e:?}"))?;
+        if let (Some(fifo), Some(t0)) = (&self.lat, t0) {
+            fifo.lock().unwrap().push_back(t0);
+        }
+        Ok(())
+    }
+}
+
+/// The GStreamer pixel format for a DRM fourcc. Used for the `VideoMeta` on an imported
+/// dmabuf and for the caps of a system-memory frame alike.
+pub(crate) fn video_format_for(fourcc: u32) -> gstreamer_video::VideoFormat {
+    match fourcc_str(fourcc).as_str() {
+        "AB24" | "XB24" => gstreamer_video::VideoFormat::Rgba,
+        _ => gstreamer_video::VideoFormat::Bgra, // AR24/XR24 (ARGB/xRGB) and default
+    }
+}
+
+/// Wrap a memfd of raw pixels as a one-memory `GstBuffer` carrying the real plane layout.
+/// `fd` is consumed: the `GstMemory` owns it and closes it when the buffer is released.
+///
+/// The whole fd is wrapped and the `VideoMeta` plane offsets address the frame inside it.
+/// The compositor's mapping offset is already folded into those offsets by the daemon, so a
+/// frame that sits partway into a pooled memfd still reads correctly.
+pub(crate) fn sysmem_buffer(
+    fd: OwnedFd,
+    vfmt: gstreamer_video::VideoFormat,
+    w: u32,
+    h: u32,
+    planes: &[wire::socket::PlaneLayout],
+) -> Result<gst::Buffer> {
+    let size = nix::unistd::lseek(fd.as_raw_fd(), 0, nix::unistd::Whence::SeekEnd)
+        .context("lseek memfd")? as usize;
+    let allocator = gstreamer_allocators::FdAllocator::new();
+    // MAP_PRIVATE: we only ever read these pixels, and a shared writable mapping needs the fd
+    // itself to be writable — which a compositor's screencast memfd need not be.
+    // SAFETY: `fd` is a unique owned memfd and the GstMemory takes ownership of it — hence
+    // `into_raw_fd`, since the allocator closes it itself unless DONT_CLOSE is set.
+    let mem = unsafe {
+        allocator.alloc(
+            std::os::fd::IntoRawFd::into_raw_fd(fd),
+            size,
+            gstreamer_allocators::FdMemoryFlags::MAP_PRIVATE,
+        )
+    }
+    .map_err(|e| anyhow!("fd alloc: {e}"))?;
+    let mut buffer = gst::Buffer::new();
+    {
+        let b = buffer.get_mut().unwrap();
+        b.append_memory(mem);
+        let (offsets, strides) = meta_layout(w, planes);
+        let _ = gstreamer_video::VideoMeta::add_full(
+            b,
+            gstreamer_video::VideoFrameFlags::empty(),
+            vfmt,
+            w,
+            h,
+            &offsets,
+            &strides,
+        );
+    }
+    Ok(buffer)
 }
 
 /// VideoMeta plane layout for a pushed dmabuf: the daemon-reported per-plane
@@ -225,7 +325,38 @@ fn lat_fifo() -> Option<Arc<Mutex<VecDeque<Instant>>>> {
 }
 
 fn launch_pipeline(desc: &str) -> Result<gst::Pipeline> {
-    gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))
+    let pipeline: gst::Pipeline =
+        gst::parse::launch(desc)?.downcast().map_err(|_| anyhow!("not a pipeline"))?;
+    log_bus_errors(&pipeline);
+    Ok(pipeline)
+}
+
+/// Log the pipeline's own ERROR/WARNING messages.
+///
+/// Without this an element that rejects a frame fails **silently**: `push_buffer` returns OK
+/// (appsrc queued it), the element posts an error on the bus, nobody reads the bus, and the
+/// only symptom is a viewer that stays black. A sync handler needs no main loop and no
+/// thread: GStreamer calls it on whichever thread posted the message.
+fn log_bus_errors(pipeline: &gst::Pipeline) {
+    let Some(bus) = pipeline.bus() else { return };
+    bus.set_sync_handler(|_, msg| {
+        match msg.view() {
+            gst::MessageView::Error(e) => tracing::error!(
+                "encode pipeline error from {}: {} ({})",
+                e.src().map(|s| s.path_string().to_string()).unwrap_or_default(),
+                e.error(),
+                e.debug().unwrap_or_default()
+            ),
+            gst::MessageView::Warning(w) => tracing::warn!(
+                "encode pipeline warning from {}: {} ({})",
+                w.src().map(|s| s.path_string().to_string()).unwrap_or_default(),
+                w.error(),
+                w.debug().unwrap_or_default()
+            ),
+            _ => {}
+        }
+        gst::BusSyncReply::Drop
+    });
 }
 
 fn by_name_appsrc(p: &gst::Pipeline, name: &str) -> Result<AppSrc> {

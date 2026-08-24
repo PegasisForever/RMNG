@@ -45,6 +45,8 @@ pub struct PwFrame {
     pub planes: Vec<(u32, u32)>,
     /// dup'd dmabuf fds in plane order. Empty for shm/MemPtr frames (no fd).
     pub fds: Vec<OwnedFd>,
+    /// The fds are memfds of system memory rather than dmabufs (a GPU-less clone).
+    pub shm: bool,
 }
 
 /// A cursor update. `x`/`y` is the latest screen position; `shape` is `Some`
@@ -97,7 +99,12 @@ impl spa::buffer::meta::Metadata for CursorMeta {
 /// `pw::init()` must have been called once before this (the test bin / caller
 /// does it). The `MainLoop` is created here so all PipeWire objects (which are
 /// `!Send`) stay on this thread.
-pub fn run<F, G>(node_id: u32, on_frame: F, on_cursor: G) -> Result<()>
+pub fn run<F, G>(
+    node_id: u32,
+    on_frame: F,
+    on_cursor: G,
+    stop: pw::channel::Receiver<()>,
+) -> Result<()>
 where
     F: FnMut(PwFrame) + 'static,
     G: FnMut(PwCursor) + 'static,
@@ -162,23 +169,42 @@ where
         .register()
         .context("registering pipewire stream listener")?;
 
-    // EnumFormat advertising DMABUF (AR24 + AMD-tiled/LINEAR modifiers). The
-    // presence of the modifier property is what makes Mutter offer DMABUF.
-    let format_pod = build_enum_format_pod()?;
-    let pod = Pod::from_bytes(&format_pod).context("EnumFormat pod is not a valid pod")?;
+    // Two EnumFormats, in preference order. The first advertises DMABUF (AR24 +
+    // AMD-tiled/LINEAR modifiers): the presence of the modifier property is what makes
+    // Mutter offer DMABUF, and it is what every GPU-backed clone negotiates.
+    //
+    // The second is the same AR24 with NO modifier property, the only thing a GPU-less
+    // Mutter can satisfy: with no render node the compositor runs a "surfaceless renderer
+    // without GPU" and its screencast source offers shm buffers only. With the
+    // modifier-bearing format as the sole offer, negotiation ends in `pipewire remote
+    // error: no more input formats` and the stream never produces a frame. PipeWire picks
+    // the first format both ends accept, so a GPU clone is unaffected by the fallback.
+    let dmabuf_pod = build_enum_format_pod(true)?;
+    let shm_pod = build_enum_format_pod(false)?;
+    let pod = Pod::from_bytes(&dmabuf_pod).context("EnumFormat pod is not a valid pod")?;
+    let pod_shm = Pod::from_bytes(&shm_pod).context("shm EnumFormat pod is not a valid pod")?;
 
     stream
         .connect(
             spa::utils::Direction::Input,
             Some(node_id),
-            // No MAP_BUFFERS: we want the raw dmabuf fd, not a CPU mapping.
+            // No MAP_BUFFERS: we want the raw dmabuf fd, not a CPU mapping. The shm path
+            // passes the compositor's memfd straight on to the server, so it needs no
+            // mapping in this process either.
             pw::stream::StreamFlags::AUTOCONNECT,
-            &mut [pod],
+            &mut [pod, pod_shm],
         )
         .context("connecting pipewire stream to node")?;
 
+    // A message on `stop` ends the loop, which drops the stream and disconnects from the
+    // node. That disconnect is the point: while a consumer is connected Mutter keeps
+    // repainting the virtual monitor, so merely ignoring frames would save nothing.
+    let quit_loop = mainloop.clone();
+    let _stop = stop.attach(mainloop.loop_(), move |()| quit_loop.quit());
+
     tracing::info!(node_id, "raw-pipewire capture connected; running mainloop");
     mainloop.run();
+    tracing::debug!(node_id, "raw-pipewire capture stopped");
     Ok(())
 }
 
@@ -186,69 +212,74 @@ where
 /// modifier property's flags (MANDATORY | DONT_FIXATE) — the `property!` macro
 /// doesn't expose per-property flags. Advertising a modifier Choice is what
 /// makes Mutter negotiate DMABUF; without it the node hands back shm buffers.
-fn build_enum_format_pod() -> Result<Vec<u8>> {
+///
+/// `with_modifier` false omits the modifier property entirely, which is the shm offer a
+/// GPU-less compositor can meet (see the two offers in [`run`]).
+fn build_enum_format_pod(with_modifier: bool) -> Result<Vec<u8>> {
+    let mut properties = vec![
+        Property {
+            key: spa::sys::SPA_FORMAT_mediaType,
+            flags: PropertyFlags::empty(),
+            value: Value::Id(Id(spa::sys::SPA_MEDIA_TYPE_video)),
+        },
+        Property {
+            key: spa::sys::SPA_FORMAT_mediaSubtype,
+            flags: PropertyFlags::empty(),
+            value: Value::Id(Id(spa::sys::SPA_MEDIA_SUBTYPE_raw)),
+        },
+        // BGRA == DRM ARGB8888 / AR24.
+        Property {
+            key: spa::sys::SPA_FORMAT_VIDEO_format,
+            flags: PropertyFlags::empty(),
+            value: Value::Id(Id(VideoFormat::BGRA.as_raw())),
+        },
+    ];
+    if with_modifier {
+        // The modifier Choice. MANDATORY|DONT_FIXATE asks the node to either
+        // honour a listed modifier or renegotiate — its presence triggers
+        // the DMABUF path. List the AMD-tiled modifier first, then LINEAR.
+        properties.push(Property {
+            key: spa::sys::SPA_FORMAT_VIDEO_modifier,
+            flags: PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE,
+            value: Value::Choice(spa::pod::ChoiceValue::Long(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Enum {
+                    default: DRM_MODIFIER_AMD_TILED as i64,
+                    alternatives: vec![DRM_MODIFIER_AMD_TILED as i64, DRM_MODIFIER_LINEAR as i64],
+                },
+            ))),
+        });
+    }
+    properties.extend([
+        Property {
+            key: spa::sys::SPA_FORMAT_VIDEO_size,
+            flags: PropertyFlags::empty(),
+            value: Value::Choice(spa::pod::ChoiceValue::Rectangle(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Range {
+                    default: Rectangle { width: 1920, height: 1080 },
+                    min: Rectangle { width: 1, height: 1 },
+                    max: Rectangle { width: 16384, height: 16384 },
+                },
+            ))),
+        },
+        Property {
+            key: spa::sys::SPA_FORMAT_VIDEO_framerate,
+            flags: PropertyFlags::empty(),
+            value: Value::Choice(spa::pod::ChoiceValue::Fraction(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Range {
+                    default: spa::utils::Fraction { num: 60, denom: 1 },
+                    min: spa::utils::Fraction { num: 0, denom: 1 },
+                    max: spa::utils::Fraction { num: 1000, denom: 1 },
+                },
+            ))),
+        },
+    ]);
     let obj = Object {
         type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
         id: spa::param::ParamType::EnumFormat.as_raw(),
-        properties: vec![
-            Property {
-                key: spa::sys::SPA_FORMAT_mediaType,
-                flags: PropertyFlags::empty(),
-                value: Value::Id(Id(spa::sys::SPA_MEDIA_TYPE_video)),
-            },
-            Property {
-                key: spa::sys::SPA_FORMAT_mediaSubtype,
-                flags: PropertyFlags::empty(),
-                value: Value::Id(Id(spa::sys::SPA_MEDIA_SUBTYPE_raw)),
-            },
-            // BGRA == DRM ARGB8888 / AR24.
-            Property {
-                key: spa::sys::SPA_FORMAT_VIDEO_format,
-                flags: PropertyFlags::empty(),
-                value: Value::Id(Id(VideoFormat::BGRA.as_raw())),
-            },
-            // The modifier Choice. MANDATORY|DONT_FIXATE asks the node to either
-            // honour a listed modifier or renegotiate — its presence triggers
-            // the DMABUF path. List the AMD-tiled modifier first, then LINEAR.
-            Property {
-                key: spa::sys::SPA_FORMAT_VIDEO_modifier,
-                flags: PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE,
-                value: Value::Choice(spa::pod::ChoiceValue::Long(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Enum {
-                        default: DRM_MODIFIER_AMD_TILED as i64,
-                        alternatives: vec![
-                            DRM_MODIFIER_AMD_TILED as i64,
-                            DRM_MODIFIER_LINEAR as i64,
-                        ],
-                    },
-                ))),
-            },
-            Property {
-                key: spa::sys::SPA_FORMAT_VIDEO_size,
-                flags: PropertyFlags::empty(),
-                value: Value::Choice(spa::pod::ChoiceValue::Rectangle(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Range {
-                        default: Rectangle { width: 1920, height: 1080 },
-                        min: Rectangle { width: 1, height: 1 },
-                        max: Rectangle { width: 16384, height: 16384 },
-                    },
-                ))),
-            },
-            Property {
-                key: spa::sys::SPA_FORMAT_VIDEO_framerate,
-                flags: PropertyFlags::empty(),
-                value: Value::Choice(spa::pod::ChoiceValue::Fraction(Choice(
-                    ChoiceFlags::empty(),
-                    ChoiceEnum::Range {
-                        default: spa::utils::Fraction { num: 60, denom: 1 },
-                        min: spa::utils::Fraction { num: 0, denom: 1 },
-                        max: spa::utils::Fraction { num: 1000, denom: 1 },
-                    },
-                ))),
-            },
-        ],
+        properties,
     };
 
     let (cursor, _) =
@@ -500,34 +531,48 @@ fn read_frame(buffer: &mut pw::buffer::Buffer<'_>, info: &VideoInfoRaw) -> Optio
     let mut planes: Vec<(u32, u32)> = Vec::with_capacity(datas.len());
     let mut fds: Vec<OwnedFd> = Vec::new();
     let mut is_dmabuf = false;
+    let mut is_memfd = false;
     let mut first_size = 0u32;
 
     for (i, d) in datas.iter_mut().enumerate() {
         let chunk = d.chunk();
-        let offset = chunk.offset();
         let stride = chunk.stride().max(0) as u32;
         if i == 0 {
             // A chunk size of 0 on plane 0 means there's no pixel data this cycle.
             first_size = chunk.size();
         }
+        let raw = d.as_raw();
+        // A memfd plane is addressed from the START of the fd, so the mapping offset the
+        // compositor chose belongs in the plane offset the consumer gets. A dmabuf plane
+        // carries its whole offset in the chunk already.
+        let offset = match raw.type_ {
+            spa::sys::SPA_DATA_MemFd => chunk.offset().saturating_add(raw.mapoffset),
+            _ => chunk.offset(),
+        };
         planes.push((offset, stride));
 
-        let raw = d.as_raw();
-        if raw.type_ == spa::sys::SPA_DATA_DmaBuf {
-            is_dmabuf = true;
+        if raw.type_ == spa::sys::SPA_DATA_DmaBuf || raw.type_ == spa::sys::SPA_DATA_MemFd {
+            is_dmabuf |= raw.type_ == spa::sys::SPA_DATA_DmaBuf;
+            is_memfd |= raw.type_ == spa::sys::SPA_DATA_MemFd;
             if raw.fd >= 0 {
-                // dup() the borrowed dmabuf fd — Mutter recycles the original buffer.
+                // dup() the borrowed fd — Mutter recycles the original buffer.
                 match nix::unistd::dup(raw.fd as std::os::fd::RawFd) {
                     Ok(dup) => {
                         // SAFETY: `dup` is a fresh fd we exclusively own.
                         fds.push(unsafe { OwnedFd::from_raw_fd(dup) });
                     }
                     Err(e) => {
-                        tracing::warn!("dup dmabuf fd failed: {e}");
+                        tracing::warn!("dup capture fd failed: {e}");
                         return None;
                     }
                 }
             }
+        } else if i == 0 {
+            // MemPtr: the pixels sit in a mapping this process never made (we connect
+            // without MAP_BUFFERS), so there is nothing to pass on. Mutter's screencast
+            // source uses memfd for shm, so this is a "should not happen" branch.
+            tracing::warn!("capture buffer is MemPtr (type {}), which carries no fd", raw.type_);
+            return None;
         }
     }
 
@@ -539,7 +584,7 @@ fn read_frame(buffer: &mut pw::buffer::Buffer<'_>, info: &VideoInfoRaw) -> Optio
     let (fourcc, modifier) = if is_dmabuf {
         (DRM_FOURCC_AR24, info.modifier())
     } else {
-        // shm fallback: tightly-packed AR24 in CPU memory, no DRM modifier.
+        // shm: AR24 in CPU memory, no DRM modifier (the strides above are the real ones).
         (DRM_FOURCC_AR24, DRM_MODIFIER_LINEAR)
     };
 
@@ -550,6 +595,7 @@ fn read_frame(buffer: &mut pw::buffer::Buffer<'_>, info: &VideoInfoRaw) -> Optio
         height,
         planes,
         fds,
+        shm: is_memfd && !is_dmabuf,
     })
 }
 

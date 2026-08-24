@@ -52,6 +52,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     codexGroups: [],
     presets: [],
     chroma: "yuv420",
+    gpuAcceleratedClones: true,
     ssh: { authorizedKeys: [], publicHost: "" },
     agentPlaybook: "",
     globalPrompt: "",

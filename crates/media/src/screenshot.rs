@@ -126,3 +126,61 @@ pub fn screenshot_jpeg(
     std::thread::sleep(Duration::from_millis(1));
     Ok(jpeg)
 }
+
+/// Encode one captured **shm** frame (a memfd of system memory) to JPEG on the CPU.
+/// `fd` is consumed. Same contract as [`screenshot_jpeg`]: `w`/`h` are the frame's native
+/// size, `target_w`/`target_h` the size the JPEG comes out at.
+///
+/// A clone whose screencast produces shm has no render node, so none of the `va*` elements
+/// exist in it: `videoconvert`/`videoscale` do the work `vapostproc` does on the GPU path.
+/// The colorimetry pin is the same JFIF full-range BT.601, for the same reason (nothing in
+/// a JPEG records the matrix, so both ends have to agree by construction).
+pub fn screenshot_jpeg_shm(
+    fd: OwnedFd,
+    fourcc: u32,
+    w: u32,
+    h: u32,
+    planes: &[wire::socket::PlaneLayout],
+    target_w: u32,
+    target_h: u32,
+) -> Result<Vec<u8>> {
+    let desc = format!(
+        "appsrc name=src ! videoconvert ! videoscale ! \
+         video/x-raw,format=I420,width={target_w},height={target_h},pixel-aspect-ratio=1/1,colorimetry=1:4:0:0 ! \
+         jpegenc quality={JPEG_QUALITY} ! \
+         appsink name=out max-buffers=1 sync=false"
+    );
+    let pipeline =
+        gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+    let appsrc =
+        pipeline.by_name("src").context("appsrc")?.downcast::<AppSrc>().map_err(|_| anyhow!("not appsrc"))?;
+    let appsink =
+        pipeline.by_name("out").context("appsink")?.downcast::<AppSink>().map_err(|_| anyhow!("not appsink"))?;
+
+    let vfmt = crate::encode::video_format_for(fourcc);
+    appsrc.set_caps(Some(
+        &gst::Caps::builder("video/x-raw")
+            .field("format", vfmt.to_str().as_str())
+            .field("width", w as i32)
+            .field("height", h as i32)
+            .field("framerate", gst::Fraction::new(0, 1))
+            .build(),
+    ));
+
+    pipeline.set_state(gst::State::Playing).context("screenshot pipeline PLAYING")?;
+    let buffer = crate::encode::sysmem_buffer(fd, vfmt, w, h, planes)?;
+    appsrc.push_buffer(buffer).map_err(|e| anyhow!("push_buffer: {e:?}"))?;
+    let _ = appsrc.end_of_stream();
+
+    let sample = appsink
+        .try_pull_sample(gst::ClockTime::from_seconds(5))
+        .ok_or_else(|| anyhow!("screenshot timed out"))?;
+    let jpeg = sample
+        .buffer()
+        .and_then(|b| b.map_readable().ok())
+        .map(|m| m.as_slice().to_vec())
+        .ok_or_else(|| anyhow!("no JPEG buffer"))?;
+
+    let _ = pipeline.set_state(gst::State::Null);
+    Ok(jpeg)
+}
