@@ -8,8 +8,8 @@ use anyhow::{Result, anyhow, bail};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
 use wire::{
-    AppConfigRedacted, ContainerStats, ControlState, ExecRequest, ExecResult,
-    ImageInfo, LedgerRange, LedgerSearch, Operation,
+    AppConfigRedacted, ContainerStats, ControlState, CopyResult, ExecRequest, ExecResult,
+    ImageInfo, LedgerRange, LedgerSearch, Operation, RmngClone,
 };
 
 /// A connected control-server client.
@@ -90,6 +90,18 @@ impl Client {
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let resp = self.http.get(format!("{}{path}", self.base)).send().await?;
         Ok(Self::check(resp).await?.json().await?)
+    }
+
+    /// Attach this process's own clone identity, when it has one.
+    ///
+    /// `RMNG_PROXY_KEY` is present in a clone's environment and absent on an operator
+    /// laptop, which is exactly the distinction the server makes: it maps the key back to
+    /// the calling clone for sub-clone nesting and for `GET /api/self`.
+    fn with_identity(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match std::env::var("RMNG_PROXY_KEY").ok().filter(|k| !k.is_empty()) {
+            Some(key) => req.header("X-RMNG-Proxy-Key", key),
+            None => req,
+        }
     }
 
     async fn post_json<T: serde::de::DeserializeOwned>(
@@ -232,13 +244,8 @@ impl Client {
                 obj.insert(key.into(), json!(v));
             }
         }
-        let mut req = self.http.post(format!("{}/api/clone", self.base)).json(&body);
-        if let Some(key) = std::env::var("RMNG_PROXY_KEY")
-            .ok()
-            .filter(|k| !k.is_empty())
-        {
-            req = req.header("X-RMNG-Proxy-Key", key);
-        }
+        let req =
+            Self::with_identity(self.http.post(format!("{}/api/clone", self.base)).json(&body));
         let v: Value = Self::check(req.send().await?).await?.json().await?;
         Ok(serde_json::from_value(
             v.get("op")
@@ -405,6 +412,61 @@ impl Client {
             &serde_json::to_value(req)?,
         )
         .await
+    }
+
+    /// Stream a tar archive into `host`, extracting it at `dst`.
+    ///
+    /// `body` is streamed rather than buffered, so the caller can hand over a `tar` child
+    /// process's stdout and never hold the archive in memory.
+    pub async fn clone_copy(
+        &self,
+        host: &str,
+        dst: &str,
+        body: reqwest::Body,
+    ) -> Result<CopyResult> {
+        let req = self
+            .http
+            .post(format!("{}/api/hosts/{host}/copy", self.base))
+            .query(&[("dst", dst)])
+            .header("content-type", "application/x-tar")
+            .body(body);
+        Ok(Self::check(req.send().await?).await?.json().await?)
+    }
+
+    /// Copy a directory between two clones without moving the bytes through this process.
+    ///
+    /// The server can already see both clone homes, so it does the copy locally and this
+    /// request carries nothing but the paths.
+    pub async fn clone_copy_from(
+        &self,
+        host: &str,
+        dst: &str,
+        from: &str,
+        excludes: &[String],
+        delete: bool,
+    ) -> Result<CopyResult> {
+        let mut query = vec![("dst", dst.to_string()), ("from", from.to_string())];
+        if !excludes.is_empty() {
+            query.push(("exclude", excludes.join(",")));
+        }
+        if delete {
+            query.push(("delete", "true".to_string()));
+        }
+        let req = self
+            .http
+            .post(format!("{}/api/hosts/{host}/copy", self.base))
+            .query(&query);
+        Ok(Self::check(req.send().await?).await?.json().await?)
+    }
+
+    /// This process's own clone record, or `None` when not running inside a clone.
+    pub async fn clone_self(&self) -> Result<Option<RmngClone>> {
+        let req = Self::with_identity(self.http.get(format!("{}/api/self", self.base)));
+        let resp = req.send().await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Self::check(resp).await?.json().await?)
     }
 }
 

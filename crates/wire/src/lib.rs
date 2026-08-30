@@ -41,6 +41,6 @@ pub use control::{
     MonitorSpec, MonitorState, Operation, OperationKind, OperationStatus, PortForward, Provider,
     ScheduledMessage, UpdateStatus,
 };
-pub use exec::{ExecRequest, ExecResult};
+pub use exec::{CopyResult, ExecRequest, ExecResult};
 pub use ledger::{LedgerHit, LedgerRange, LedgerRecord, LedgerSearch};
 pub use mcp::McpCallRequest;

@@ -1884,6 +1884,35 @@ impl DockerCtl {
         Ok(())
     }
 
+    /// Extract a tar stream inside a running container, at `dst`.
+    ///
+    /// The archive is handed to the daemon frame by frame, so a caller can push a
+    /// multi-hundred-megabyte project through without it ever being held in this
+    /// process. That is the whole difference from [`Docker::upload_tar`], which builds
+    /// its archive in memory and suits the small provisioning payloads it serves.
+    ///
+    /// `dst` has to exist already, because the daemon's extract does not create it.
+    /// Ownership comes from the archive rather than from the running user, so a tar
+    /// written by uid 1000 lands owned by uid 1000.
+    pub async fn upload_tar_stream<S>(&self, container: &str, dst: &str, body: S) -> Result<()>
+    where
+        S: futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static,
+    {
+        self.daemon()?
+            .upload_to_container(
+                container,
+                Some(
+                    bollard::query_parameters::UploadToContainerOptionsBuilder::new()
+                        .path(dst)
+                        .build(),
+                ),
+                bollard::body_try_stream(body),
+            )
+            .await
+            .with_context(|| format!("streaming tar to {container}:{dst}"))?;
+        Ok(())
+    }
+
     // --- exec -------------------------------------------------------------------------
 
     /// The next chunk from an exec's output stream, or an error once it is clear none is

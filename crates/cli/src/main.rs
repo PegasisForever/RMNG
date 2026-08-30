@@ -136,6 +136,13 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 )
                 .await
             }
+            CloneCmd::Cp { src, dest, exclude } => {
+                commands::clone_cp(client, src, dest, exclude, false, json).await
+            }
+            CloneCmd::Sync { src, dest, exclude } => {
+                commands::clone_cp(client, src, dest, exclude, true, json).await
+            }
+            CloneCmd::Myself => commands::clone_self(client, json).await,
             CloneCmd::Select { clone, none } => {
                 commands::select(client, clone.as_deref(), *none, json).await
             }

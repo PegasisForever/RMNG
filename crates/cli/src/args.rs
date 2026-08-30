@@ -227,6 +227,30 @@ pub enum CloneCmd {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Copy a directory from this machine into a clone (`rmng clone cp ./src c:/home/rmng/src`)
+    Cp {
+        /// Source directory on this machine
+        src: String,
+        /// Destination as `<clone>:<absolute-path>`
+        dest: String,
+        /// Directory name to leave out, anchored at the top of SRC (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
+    },
+    /// Like `cp`, but make the destination match: files it has and the source does not are deleted
+    Sync {
+        /// Source as `<clone>:<absolute-path>` (a local source is not supported here)
+        src: String,
+        /// Destination as `<clone>:<absolute-path>`
+        dest: String,
+        /// Directory name to leave out, anchored at the top of SRC (repeatable). An excluded
+        /// name is left alone at the destination rather than deleted
+        #[arg(long)]
+        exclude: Vec<String>,
+    },
+    /// Print the calling clone's own record (fails outside a clone)
+    #[command(name = "self")]
+    Myself,
     /// Point the operator's viewer at a clone (operator-only; no effect on command targeting)
     Select {
         /// Clone id (omit and pass --none to clear the selection)
@@ -797,6 +821,50 @@ mod tests {
         ));
         // Bad provider rejected.
         assert!(Cli::try_parse_from(["rmng", "account", "ls", "--provider", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn clone_cp_takes_a_clone_qualified_destination() {
+        let cli = Cli::parse_from([
+            "rmng", "clone", "cp", "/home/rmng/proj", "agt-1:/home/rmng/proj", "--exclude",
+            "target", "--exclude", "dist",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Cp { src, dest, exclude }) => {
+                assert_eq!(src, "/home/rmng/proj");
+                assert_eq!(dest, "agt-1:/home/rmng/proj");
+                assert_eq!(exclude, vec!["target".to_string(), "dist".to_string()]);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        // Both positionals are required.
+        assert!(Cli::try_parse_from(["rmng", "clone", "cp", "/only/src"]).is_err());
+    }
+
+    #[test]
+    fn clone_sync_is_a_separate_verb_from_cp() {
+        match Cli::parse_from([
+            "rmng", "clone", "sync", "a:/home/rmng/proj", "b:/home/rmng/proj",
+            "--exclude", "target",
+        ])
+        .cmd
+        {
+            Cmd::Clone(CloneCmd::Sync { src, dest, exclude }) => {
+                assert_eq!(src, "a:/home/rmng/proj");
+                assert_eq!(dest, "b:/home/rmng/proj");
+                assert_eq!(exclude, vec!["target".to_string()]);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_self_is_spelled_self_not_myself() {
+        assert!(matches!(
+            Cli::parse_from(["rmng", "clone", "self"]).cmd,
+            Cmd::Clone(CloneCmd::Myself)
+        ));
+        assert!(Cli::try_parse_from(["rmng", "clone", "myself"]).is_err());
     }
 
     #[test]

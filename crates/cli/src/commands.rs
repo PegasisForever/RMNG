@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use control_client::{Client, CloneOpts, LedgerFilter};
@@ -237,7 +237,7 @@ pub async fn clone_create(
             &clone_opts(common, preset, None, None),
         )
         .await?;
-    started(client, op, &common.wait, json, "clone").await
+    started(client, op, &common.wait, json, "clone", true).await
 }
 
 /// The resolved-metadata `linear` mode of `POST /api/clone`: an issue this CLI already
@@ -285,7 +285,7 @@ pub async fn clone_create_from_ticket(
             &clone_opts(common, None, agent_instructions, claude_instructions),
         )
         .await?;
-    started(client, op, &common.wait, json, "clone").await
+    started(client, op, &common.wait, json, "clone", true).await
 }
 
 /// `rmng clone create-with-new-ticket --team <key> --title <t>` — create the Linear ticket, then clone
@@ -330,7 +330,7 @@ pub async fn clone_create_with_new_ticket(
             &clone_opts(common, None, agent_instructions, claude_instructions),
         )
         .await?;
-    started(client, op, &common.wait, json, "clone").await
+    started(client, op, &common.wait, json, "clone", true).await
 }
 
 fn preset_names(cfg: &wire::AppConfigRedacted) -> String {
@@ -353,7 +353,126 @@ pub async fn clone_create_plain(
             &clone_opts(common, preset, None, None),
         )
         .await?;
-    started(client, op, &common.wait, json, "clone").await
+    started(client, op, &common.wait, json, "clone", true).await
+}
+
+/// `rmng clone cp <src-dir> <clone>:<dst-dir> [--exclude NAME]` — copy a directory into a
+/// clone at an absolute path.
+///
+/// `tar` writes to a pipe and that pipe is the request body, so the archive streams from
+/// here to the server to the Docker daemon and is never held whole by any of the three.
+/// Nothing is copied back and nothing on the far side is deleted: an existing directory
+/// receives the files on top of what it already has.
+///
+/// Excludes are anchored at the top of SRC and match a directory there and nowhere deeper.
+/// Unanchored, `--exclude dist` would also strike every `node_modules/*/dist`, which holds
+/// the package code, and the copy would look complete while importing nothing.
+pub async fn clone_cp(
+    client: &Client,
+    src: &str,
+    dest: &str,
+    exclude: &[String],
+    delete: bool,
+    json: bool,
+) -> Result<u8> {
+    let (clone, dst) = split_clone_path(dest)
+        .ok_or_else(|| anyhow!("destination must be <clone>:<absolute-path>, got '{dest}'"))?;
+
+    // A clone-qualified source is one the server can reach on its own, so it does the whole
+    // copy locally and this process moves no bytes at all. That is the path for a large tree.
+    if let Some((src_clone, src_path)) = split_clone_path(src) {
+        let res = client
+            .clone_copy_from(clone, dst, &format!("{src_clone}:{src_path}"), exclude, delete)
+            .await?;
+        if json {
+            emit_json(&res)?;
+        } else {
+            let verb = if delete { "synced" } else { "copied" };
+            println!(
+                "{verb} {} from {src_clone}:{src_path} to {clone}:{}",
+                human_size(res.bytes),
+                res.dst
+            );
+        }
+        return Ok(0);
+    }
+
+    // Deleting at the destination means knowing everything the source holds, and a streamed
+    // archive only ever tells the server what it contains, never what it lacks.
+    if delete {
+        bail!("sync needs a clone source (<clone>:<path>), got '{src}'; use `clone cp` to send a local directory");
+    }
+    if !std::path::Path::new(src).is_dir() {
+        bail!("source '{src}' is not a directory");
+    }
+
+    let mut tar = tokio::process::Command::new("tar");
+    tar.arg("-cf").arg("-").arg("-C").arg(src).arg("--anchored");
+    for name in exclude {
+        tar.arg(format!("--exclude=./{}", name.trim_start_matches("./")));
+    }
+    tar.arg(".").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = tar.spawn().context("spawning tar")?;
+    let stdout = child.stdout.take().expect("piped");
+
+    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(stdout));
+    let sent = client.clone_copy(clone, dst, body).await;
+
+    // tar's own failure is the more useful message when both ends fail, so it is read first.
+    let status = child.wait().await.context("waiting for tar")?;
+    let res = match (sent, status.success()) {
+        (_, false) => {
+            let mut err = String::new();
+            if let Some(mut e) = child.stderr.take() {
+                use tokio::io::AsyncReadExt;
+                let _ = e.read_to_string(&mut err).await;
+            }
+            bail!("tar failed ({status}): {}", err.trim());
+        }
+        (Err(e), _) => return Err(e),
+        (Ok(res), true) => res,
+    };
+
+    if json {
+        emit_json(&res)?;
+    } else {
+        println!("copied {} to {clone}:{}", human_size(res.bytes), res.dst);
+    }
+    Ok(0)
+}
+
+/// Split `<clone>:<absolute-path>`, when that is what the argument is.
+///
+/// A local path never matches: it either has no colon, or its colon sits inside a path
+/// segment rather than after a bare clone id.
+fn split_clone_path(s: &str) -> Option<(&str, &str)> {
+    let (clone, path) = s.split_once(':')?;
+    if clone.is_empty() || clone.contains('/') || !path.starts_with('/') {
+        return None;
+    }
+    Some((clone, path))
+}
+
+/// `rmng clone self` — the calling clone's own record.
+///
+/// Identity comes from the per-clone router key in this process's environment, which the
+/// server maps back to a clone. Outside a clone there is no key and nothing to report, so
+/// this exits 1 rather than inventing an answer.
+pub async fn clone_self(client: &Client, json: bool) -> Result<u8> {
+    let Some(me) = client.clone_self().await? else {
+        if json {
+            emit_json(&serde_json::json!(null))?;
+        } else {
+            eprintln!("not running inside a managed clone");
+        }
+        return Ok(1);
+    };
+    if json {
+        emit_json(&me)?;
+    } else {
+        println!("{}", me.id);
+    }
+    Ok(0)
 }
 
 pub async fn clone_rm(
@@ -378,17 +497,17 @@ pub async fn clone_rm(
         }
     }
     let op = client.delete(clone).await?;
-    started(client, op, wait, json, "delete").await
+    started(client, op, wait, json, "delete", false).await
 }
 
 pub async fn archive(client: &Client, clone: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
     let op = client.archive(clone).await?;
-    started(client, op, wait, json, "archive").await
+    started(client, op, wait, json, "archive", false).await
 }
 
 pub async fn restore(client: &Client, clone: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
     let op = client.unarchive(clone).await?;
-    started(client, op, wait, json, "restore").await
+    started(client, op, wait, json, "restore", false).await
 }
 
 /// `rmng account swap <clone> <account> [--codex]` — hot-swap a clone's account for one
@@ -482,7 +601,7 @@ pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
         }
         ImageCmd::Pull { reference, wait } => {
             let op = client.image_pull(reference.as_deref()).await?;
-            started(client, op, wait, json, "pull").await
+            started(client, op, wait, json, "pull", false).await
         }
         ImageCmd::Commit {
             clone,
@@ -490,7 +609,7 @@ pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
             wait,
         } => {
             let op = client.image_commit(clone, as_name).await?;
-            started(client, op, wait, json, "commit").await
+            started(client, op, wait, json, "commit", false).await
         }
         ImageCmd::Rm { reference } => {
             client.image_delete(reference).await?;
@@ -606,7 +725,7 @@ pub async fn op_ls(client: &Client, json: bool) -> Result<u8> {
 }
 
 pub async fn wait_cmd(client: &Client, op_id: &str, timeout: u64, json: bool) -> Result<u8> {
-    settle(client, op_id, timeout, json).await
+    settle(client, op_id, timeout, json, false).await
 }
 
 // --- the transcript ledger ---------------------------------------------------
@@ -761,6 +880,39 @@ async fn ledger_read(
     Ok(0)
 }
 
+/// How long `--wait --json` on a create keeps looking for the new clone's address.
+///
+/// The create operation reports done before the address reaches the fleet view, so a
+/// caller that reads the record straight away sees `localIp: null` and has to poll for
+/// itself. Waiting here instead means one command answers the question. Bounded because a
+/// clone that never publishes an address is still a usable clone.
+const ADDRESS_SETTLE_SECS: u64 = 30;
+
+/// Poll for the created clone's record until it carries an address.
+///
+/// Returns whatever the last look found, so a timeout yields the record without an address
+/// rather than nothing at all.
+async fn settled_clone(client: &Client, id: &str) -> Option<Value> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(ADDRESS_SETTLE_SECS);
+    let mut last = None;
+    loop {
+        if let Ok(st) = client.state().await {
+            if let Some(h) = st.hosts.into_iter().find(|h| h.id == id) {
+                let has_addr = h.local_ip.as_deref().is_some_and(|s| !s.is_empty());
+                last = serde_json::to_value(&h).ok();
+                if has_addr {
+                    return last;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return last;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 /// Shared tail for commands that start an operation: print it (or its id), then
 /// `--wait` rides SSE to the terminal state.
 async fn started(
@@ -769,6 +921,7 @@ async fn started(
     wait: &WaitArgs,
     json: bool,
     verb: &str,
+    with_clone: bool,
 ) -> Result<u8> {
     if !wait.wait {
         if json {
@@ -784,14 +937,31 @@ async fn started(
     if !json {
         eprintln!("{verb} started: op {} target {}", op.id, op.target);
     }
-    settle(client, &op.id, wait.timeout, json).await
+    settle(client, &op.id, wait.timeout, json, with_clone).await
 }
 
-async fn settle(client: &Client, op_id: &str, timeout: u64, json: bool) -> Result<u8> {
+async fn settle(
+    client: &Client,
+    op_id: &str,
+    timeout: u64,
+    json: bool,
+    with_clone: bool,
+) -> Result<u8> {
     match wait_for_op(client, op_id, timeout).await? {
         WaitOutcome::Done(op) => {
+            // The clone record rides along under `clone`, which keeps the emitted object a
+            // superset of the plain operation every other verb prints.
+            let settled = if with_clone && json {
+                settled_clone(client, &op.target).await
+            } else {
+                None
+            };
             if json {
-                emit_json(&op)?;
+                let mut v = serde_json::to_value(&op)?;
+                if let Some(rec) = settled {
+                    v["clone"] = rec;
+                }
+                emit_json(&v)?;
             } else {
                 println!("done: {} ({})", op.target, op.message);
             }

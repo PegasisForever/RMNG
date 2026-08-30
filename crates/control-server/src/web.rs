@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, Path as AxPath, State},
+    extract::{DefaultBodyLimit, Multipart, Path as AxPath, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
@@ -90,6 +90,13 @@ pub fn router(app: App) -> Router {
         .route("/api/hosts/:id/unarchive", post(unarchive))
         .route("/api/hosts/:id/mcp", post(clone_mcp))
         .route("/api/hosts/:id/exec", post(clone_exec))
+        // The tar stream `rmng clone cp` sends is a whole project directory, so this one
+        // route opts out of the router's 64MB cap below and is never buffered.
+        .route(
+            "/api/hosts/:id/copy",
+            post(clone_copy).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/api/self", get(clone_self))
         // Claude + Codex accounts. The server owns each account's OAuth refresh lifecycle and
         // pushes only short-lived access tokens into clones; these twelve are symmetric across
         // the two providers. Account POOLS are not edited here — they live in `config.json`
@@ -774,6 +781,152 @@ async fn clone_exec(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopyQuery {
+    /// Absolute path inside the clone to extract the archive at.
+    dst: String,
+    /// Run-as user for the `mkdir` that precedes the extract. Defaults to the agent user,
+    /// so the directory it creates belongs to the agent rather than to root.
+    user: Option<String>,
+    /// `<clone>:<absolute-path>` to copy from, when the source is another clone this server
+    /// can already see. Set, the request carries no body and nothing crosses a socket.
+    from: Option<String>,
+    /// Comma-separated directory names to leave out, anchored at the top of the source.
+    /// Out-of-band copies only; a streamed archive is filtered by the sender's `tar`.
+    exclude: Option<String>,
+    /// Make the destination match the source, deleting what the source does not have.
+    /// Requires `from`, since a streamed archive says what it holds and never what it lacks.
+    delete: Option<bool>,
+}
+
+/// `POST /api/hosts/:id/copy?dst=<abs path>` — extract a tar stream inside the clone.
+///
+/// The body is the archive itself rather than JSON, and the route disables the router's
+/// body cap, so a whole project directory streams from the caller through this process to
+/// the Docker daemon without being buffered anywhere along the way. That is the difference
+/// from `/exec`, whose stdin is base64 inside a JSON body and therefore bounded.
+///
+/// Ownership is whatever the archive records, which means a tar written by the calling
+/// clone's agent user arrives owned by the same uid on the other side.
+async fn clone_copy(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<CopyQuery>,
+    body: axum::body::Body,
+) -> Result<Json<wire::CopyResult>, (StatusCode, String)> {
+    if !q.dst.starts_with('/') {
+        return Err((StatusCode::BAD_REQUEST, "dst must be an absolute path".into()));
+    }
+    let host = clone_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))?;
+    if host.archived {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("clone '{id}' is archived; unarchive it first"),
+        ));
+    }
+
+    // Source named: both ends are clone homes this server can reach, so the copy happens
+    // here and the request body is empty.
+    if let Some(spec) = q.from.clone() {
+        let (src_clone, src_path) = spec.split_once(':').ok_or((
+            StatusCode::BAD_REQUEST,
+            "from must be <clone>:<absolute-path>".to_string(),
+        ))?;
+        if clone_by_id(&app, src_clone).is_none() {
+            return Err((StatusCode::NOT_FOUND, format!("no clone '{src_clone}'")));
+        }
+        // A caller mistake, so it is answered as one rather than as a copy that failed.
+        // `copy_between` refuses this too, for callers that do not come through here.
+        if q.delete.unwrap_or(false) && crate::homes::is_home_root(&q.dst) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("refusing to sync onto {id}:{} itself; name a directory inside it", q.dst),
+            ));
+        }
+        let excludes: Vec<String> = q
+            .exclude
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let bytes = crate::homes::copy_between(
+            &app,
+            src_clone,
+            src_path,
+            &host.id,
+            &q.dst,
+            &excludes,
+            q.delete.unwrap_or(false),
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        tracing::info!("clone {id}: copied {bytes} bytes from {spec} into {}", q.dst);
+        return Ok(Json(wire::CopyResult { bytes, dst: q.dst }));
+    }
+
+    // The daemon's extract fails on a missing directory rather than creating one, and a
+    // directory made by root would leave the agent unable to write in its own project.
+    let user = q.user.clone().unwrap_or_else(|| DESKTOP_UID.to_string());
+    let mkdir = vec!["mkdir".to_string(), "-p".to_string(), q.dst.clone()];
+    let made = app
+        .docker
+        .exec_capture(&host.id, &mkdir, &user, None, &[], None)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if made.exit_code != 0 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("mkdir -p {} failed: {}", q.dst, made.stderr.trim()),
+        ));
+    }
+
+    // Counted as it passes, which is all this process ever knows about the archive.
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let tally = seen.clone();
+    let stream = body.into_data_stream().map(move |chunk| {
+        chunk
+            .inspect(|b| {
+                tally.fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            })
+            .map_err(std::io::Error::other)
+    });
+    app.docker
+        .upload_tar_stream(&host.id, &q.dst, stream)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    let bytes = seen.load(std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("clone {id}: copied {bytes} bytes into {}", q.dst);
+    Ok(Json(wire::CopyResult { bytes, dst: q.dst }))
+}
+
+/// `GET /api/self` — the clone record of whoever is calling.
+///
+/// Identity is the per-clone router key the caller carries in `X-RMNG-Proxy-Key`, the same
+/// proof `resolve_parent` trusts for sub-clone nesting. A caller without one is not inside
+/// a clone, which is a 404 rather than an error: it is a legitimate answer for the operator
+/// laptop.
+async fn clone_self(
+    State(app): State<App>,
+    headers: HeaderMap,
+) -> Result<Json<wire::RmngClone>, (StatusCode, String)> {
+    let id = headers
+        .get("x-rmng-proxy-key")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|key| app.clone_keys.clone_for_token(key))
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "not running inside a managed clone".to_string(),
+        ))?;
+    clone_by_id(&app, &id)
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))
 }
 
 /// Resolve the parent clone for a fleet-CLI clone create (the sub-clone relationship).
@@ -3740,6 +3893,43 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("cmd"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn clone_copy_rejects_a_relative_destination() {
+        let app = test_app();
+        let err = clone_copy(
+            State(app.clone()),
+            AxPath("anything".into()),
+            Query(CopyQuery { dst: "home/rmng/proj".into(), user: None, from: None, exclude: None, delete: None }),
+            axum::body::Body::empty(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("absolute"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn clone_copy_unknown_clone_is_404() {
+        let app = test_app();
+        let err = clone_copy(
+            State(app.clone()),
+            AxPath("ghost".into()),
+            Query(CopyQuery { dst: "/home/rmng/proj".into(), user: None, from: None, exclude: None, delete: None }),
+            axum::body::Body::empty(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn clone_self_without_a_key_is_404_not_a_guess() {
+        let app = test_app();
+        let err = clone_self(State(app.clone()), HeaderMap::new()).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert!(err.1.contains("not running inside"), "msg: {}", err.1);
     }
 
     #[tokio::test]

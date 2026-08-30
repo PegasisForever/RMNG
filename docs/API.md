@@ -30,6 +30,8 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
 | PUT | `/api/hosts/:id/forwards` | Replace a clone's port-forward rules | 200 `ControlState` |
+| POST | `/api/hosts/:id/copy?dst=` | Extract a streamed tar archive inside a clone | 200 `CopyResult` |
+| GET | `/api/self` | The calling clone's own record, by its router key | 200 `Clone` / 404 |
 | POST | `/api/layout/activate` | Make a layout preset active and live-apply it to the selected clone | 200 `{ok,applied,errors}` |
 | GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
 | POST | `/api/images/pull` | Pull the clone template from a registry (keeps its own `repo:tag`) | 200 `Operation` |

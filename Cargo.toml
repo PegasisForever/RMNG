@@ -35,6 +35,11 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
+# Chunk type for the streaming bodies `rmng clone cp` moves between the CLI, the
+# control-server and the Docker daemon.
+bytes = "1"
+# `ReaderStream`, which turns the `tar` child's stdout into that request body.
+tokio-util = { version = "0.7", features = ["io"] }
 # TCP keepalive / user-timeout tuning for the port-1 viewer link (wire::net).
 socket2 = "0.6"
 
