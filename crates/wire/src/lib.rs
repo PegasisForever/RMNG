@@ -18,6 +18,7 @@
 //! (socket/viewer/mcp) are serde-only.
 
 pub mod avc444;
+pub mod board;
 pub mod config;
 pub mod control;
 pub mod exec;

@@ -50,6 +50,9 @@ pub enum Cmd {
     /// Search the distilled transcripts of every clone, retired clones included
     #[command(subcommand)]
     Ledger(LedgerCmd),
+    /// The dashboard board: which column each clone sits in
+    #[command(subcommand)]
+    Board(BoardCmd),
     /// Drive a clone's desktop via its daemon MCP (screenshot-on-every-action)
     Desktop {
         /// Clone id
@@ -84,6 +87,10 @@ pub struct CreateArgs {
     /// Force a top-level clone even when run from inside a clone (skip auto-nesting)
     #[arg(long)]
     pub top_level: bool,
+    /// Board column to file the new clone in, by title (`"In Progress"`) or id. It goes to
+    /// the TOP of that column. Omitted, the board draws it in its home column as before.
+    #[arg(long)]
+    pub column: Option<String>,
     #[command(flatten)]
     pub wait: WaitArgs,
 }
@@ -258,6 +265,22 @@ pub enum CloneCmd {
         /// Clear the viewer selection
         #[arg(long, conflicts_with = "clone")]
         none: bool,
+    },
+}
+
+/// `rmng board <verb>` — the dashboard's columns, and which clone is in which.
+#[derive(Subcommand, Debug)]
+pub enum BoardCmd {
+    /// List the board's columns, left to right, with the clones in each
+    Ls,
+    /// Move a clone to the TOP of a column, by column title or id
+    Move {
+        /// Clone id
+        clone: String,
+        /// Destination column, as its title (`"In Progress"`) or its id
+        column: String,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
 }
 
@@ -562,6 +585,8 @@ pub fn resolve_server(flag: Option<String>, env: Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::args::BoardCmd;
     use clap::Parser;
 
     #[test]
@@ -839,6 +864,45 @@ mod tests {
         }
         // Both positionals are required.
         assert!(Cli::try_parse_from(["rmng", "clone", "cp", "/only/src"]).is_err());
+    }
+
+    #[test]
+    fn board_move_takes_a_clone_and_a_human_column_name() {
+        match Cli::parse_from(["rmng", "board", "move", "pega-we-1", "In Progress"]).cmd {
+            Cmd::Board(BoardCmd::Move { clone, column, .. }) => {
+                assert_eq!(clone, "pega-we-1");
+                assert_eq!(column, "In Progress");
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        assert!(matches!(
+            Cli::parse_from(["rmng", "board", "ls"]).cmd,
+            Cmd::Board(BoardCmd::Ls)
+        ));
+        // Both positionals are required.
+        assert!(Cli::try_parse_from(["rmng", "board", "move", "only-a-clone"]).is_err());
+    }
+
+    #[test]
+    fn every_create_verb_can_name_a_column() {
+        let cli = Cli::parse_from([
+            "rmng", "clone", "create", "c1", "--from", "img", "--column", "In Progress",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Create { common, .. }) => {
+                assert_eq!(common.column.as_deref(), Some("In Progress"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        let cli = Cli::parse_from([
+            "rmng", "clone", "create-plain", "--from", "img", "--title", "t", "--column", "Done",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::CreatePlain { common, .. }) => {
+                assert_eq!(common.column.as_deref(), Some("Done"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
     }
 
     #[test]

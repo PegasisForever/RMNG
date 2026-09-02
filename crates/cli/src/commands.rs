@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use wire::{ContainerStats, ControlState, MonitorState, Operation, Provider};
 
 use crate::args::{
-    AccountCmd, CreateArgs, DesktopCmd, ImageCmd, LedgerCmd, Provider as CliProvider, WaitArgs,
+    AccountCmd, BoardCmd, CreateArgs, DesktopCmd, ImageCmd, LedgerCmd, Provider as CliProvider,
+    WaitArgs,
 };
 use crate::output::{human_size, pct, short_id, table};
 use crate::wait::{WaitOutcome, wait_for_op};
@@ -67,6 +68,15 @@ fn clone_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
 
 pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
     let (st, stats) = tokio::try_join!(client.state(), client.stats())?;
+    // Resolved, not stored: a clone nobody filed is drawn in a column all the same, and
+    // reporting it as having none would disagree with the dashboard next to it.
+    let board = wire::board::resolve_columns(
+        &wire::board::with_defaults(&st.board_columns),
+        &st.hosts,
+    );
+    let column_of = |id: &str| {
+        wire::board::column_of(&board, id).map(|c| c.title.clone()).unwrap_or_default()
+    };
     // `--json` emits the JOINED view the human table shows — each clone object with its live
     // `stats` nested — so an agent parsing JSON gets CPU/RAM too (the raw wire `ControlState`
     // omits those volatile metrics). Stable CLI-owned shape; see docs/CLI.md.
@@ -77,6 +87,10 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
             .map(|h| {
                 let mut o = serde_json::to_value(h).unwrap_or_else(|_| serde_json::json!({}));
                 o["stats"] = serde_json::to_value(stats.get(&h.id)).unwrap_or(Value::Null);
+                // A sub clone is drawn under its parent rather than in a column of its own,
+                // so it reports its parent's column instead of an empty one.
+                let drawn = h.parent.clone().unwrap_or_else(|| h.id.clone());
+                o["column"] = serde_json::json!(column_of(&drawn));
                 // A derived per-provider view of the six flat account fields. They ARE all
                 // present on the object already (serde), but answering "what account is this
                 // clone on?" from them takes three-way logic per provider — `email` is null
@@ -139,8 +153,10 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
                 format!("{}{}", h.id, sel)
             };
             let stats = stats.get(&h.id);
+            let drawn = h.parent.clone().unwrap_or_else(|| h.id.clone());
             vec![
                 id_cell,
+                if *is_child { String::new() } else { column_of(&drawn) },
                 h.local_ip.clone().unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
                 h.preset_name.clone().unwrap_or_default(),
@@ -164,7 +180,8 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
         "{}",
         table(
             &[
-                "ID", "IP", "IMAGE", "PRESET", "CLAUDE", "CODEX", "CPU", "RAM", "STATUS",
+                "ID", "COLUMN", "IP", "IMAGE", "PRESET", "CLAUDE", "CODEX", "CPU", "RAM",
+                "STATUS",
             ],
             &rows,
         )
@@ -230,6 +247,10 @@ pub async fn clone_create(
     // no such pair: `--claude-account none` already expresses "no account", and omitting them
     // falls through the request → parent → preset-default chain.
     let preset = if no_preset { Some("none") } else { preset };
+    let column = match common.column.as_deref() {
+        Some(name) => Some(resolve_column(client, name).await?),
+        None => None,
+    };
     let op = client
         .clone_create(
             &common.from,
@@ -237,6 +258,7 @@ pub async fn clone_create(
             &clone_opts(common, preset, None, None),
         )
         .await?;
+    file_started_clone(client, &op, column.as_deref()).await?;
     started(client, op, &common.wait, json, "clone", true).await
 }
 
@@ -278,6 +300,10 @@ pub async fn clone_create_from_ticket(
     if let Err(e) = crate::linear::ensure_in_progress(&http, &key, &issue).await {
         eprintln!("warning: could not move {} to In Progress: {e}", issue.identifier);
     }
+    let column = match common.column.as_deref() {
+        Some(name) => Some(resolve_column(client, name).await?),
+        None => None,
+    };
     let op = client
         .clone_create(
             &common.from,
@@ -285,6 +311,7 @@ pub async fn clone_create_from_ticket(
             &clone_opts(common, None, agent_instructions, claude_instructions),
         )
         .await?;
+    file_started_clone(client, &op, column.as_deref()).await?;
     started(client, op, &common.wait, json, "clone", true).await
 }
 
@@ -323,6 +350,10 @@ pub async fn clone_create_with_new_ticket(
     if let Err(e) = crate::linear::ensure_in_progress(&http, &preset.linear_key, &issue).await {
         eprintln!("warning: could not move {} to In Progress: {e}", issue.identifier);
     }
+    let column = match common.column.as_deref() {
+        Some(name) => Some(resolve_column(client, name).await?),
+        None => None,
+    };
     let op = client
         .clone_create(
             &common.from,
@@ -330,6 +361,7 @@ pub async fn clone_create_with_new_ticket(
             &clone_opts(common, None, agent_instructions, claude_instructions),
         )
         .await?;
+    file_started_clone(client, &op, column.as_deref()).await?;
     started(client, op, &common.wait, json, "clone", true).await
 }
 
@@ -346,6 +378,10 @@ pub async fn clone_create_plain(
     common: &CreateArgs,
     json: bool,
 ) -> Result<u8> {
+    let column = match common.column.as_deref() {
+        Some(name) => Some(resolve_column(client, name).await?),
+        None => None,
+    };
     let op = client
         .clone_create(
             &common.from,
@@ -353,6 +389,7 @@ pub async fn clone_create_plain(
             &clone_opts(common, preset, None, None),
         )
         .await?;
+    file_started_clone(client, &op, column.as_deref()).await?;
     started(client, op, &common.wait, json, "clone", true).await
 }
 
@@ -911,6 +948,168 @@ async fn settled_clone(client: &Client, id: &str) -> Option<Value> {
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+}
+
+
+// --- the board -------------------------------------------------------------------------
+
+/// `rmng board <verb>` — the dashboard's columns, and which clone is in which.
+pub async fn board(client: &Client, cmd: &BoardCmd, json: bool) -> Result<u8> {
+    match cmd {
+        BoardCmd::Ls => board_ls(client, json).await,
+        BoardCmd::Move { clone, column, wait } => {
+            board_move(client, clone, column, wait, json).await
+        }
+    }
+}
+
+/// The columns as the dashboard draws them, left to right.
+///
+/// Resolved rather than stored, so a clone nobody has filed appears in the column the board
+/// would put it in rather than nowhere at all. That is the same view `clone ls` reports, and
+/// the reason both agree is that both call `wire::board`.
+async fn board_ls(client: &Client, json: bool) -> Result<u8> {
+    let st = client.state().await?;
+    let columns = wire::board::resolve_columns(
+        &wire::board::with_defaults(&st.board_columns),
+        &st.hosts,
+    );
+    if json {
+        emit_json(&columns)?;
+        return Ok(0);
+    }
+    let rows: Vec<Vec<String>> = columns
+        .iter()
+        .map(|c| {
+            vec![
+                c.title.clone(),
+                c.id.clone(),
+                if c.archive { "yes".into() } else { String::new() },
+                c.clone_ids.len().to_string(),
+                truncate(&c.clone_ids.join(", "), 60),
+            ]
+        })
+        .collect();
+    print!("{}", table(&["COLUMN", "ID", "ARCHIVES", "CLONES", "CONTENTS"], &rows));
+    Ok(0)
+}
+
+/// `rmng board move <clone> <column>` — put a clone at the TOP of a column.
+///
+/// Dropping a card into an archive column on the dashboard archives the clone, and dragging
+/// one out again starts it, so this does the same: the column is the gesture, and a CLI that
+/// only rearranged ids would leave the board saying one thing and the fleet doing another.
+async fn board_move(
+    client: &Client,
+    clone: &str,
+    column: &str,
+    wait: &WaitArgs,
+    json: bool,
+) -> Result<u8> {
+    let st = client.state().await?;
+    let host = st
+        .hosts
+        .iter()
+        .find(|h| h.id == clone)
+        .ok_or_else(|| anyhow!("unknown clone '{clone}' (see `rmng clone ls`)"))?;
+    // A sub clone is drawn under its parent's card and is never filed, so filing one would
+    // put an id in a column that nothing ever draws.
+    if let Some(parent) = host.parent.as_deref() {
+        if st.hosts.iter().any(|h| h.id == parent) {
+            bail!("'{clone}' is a sub clone of '{parent}', drawn under its parent's card; move '{parent}' instead");
+        }
+    }
+
+    let stored = wire::board::with_defaults(&st.board_columns);
+    let target = wire::board::find_column(&stored, column)
+        .ok_or_else(|| {
+            let names: Vec<&str> = stored.iter().map(|c| c.title.as_str()).collect();
+            anyhow!("no board column '{column}' (have: {})", names.join(", "))
+        })?
+        .clone();
+
+    // The clone's own flag says whether the server has caught up; the column says what it
+    // should be. Same order as the dashboard: change the lifecycle, then file the card.
+    let was_archived = host.archived;
+    if target.archive && !was_archived {
+        if !json {
+            eprintln!("archiving {clone}: '{}' is an archive column", target.title);
+        }
+        let op = client.archive(clone).await?;
+        settle_quietly(client, op, wait).await?;
+    } else if !target.archive && was_archived {
+        if !json {
+            eprintln!("restoring {clone}: '{}' is not an archive column", target.title);
+        }
+        let op = client.unarchive(clone).await?;
+        settle_quietly(client, op, wait).await?;
+    }
+
+    let moved = wire::board::move_card(&stored, clone, &target.id, 0);
+    let st = client.board_put(&moved).await?;
+    if json {
+        let columns = wire::board::resolve_columns(
+            &wire::board::with_defaults(&st.board_columns),
+            &st.hosts,
+        );
+        emit_json(&columns)?;
+    } else {
+        println!("{clone} is now first in {}", target.title);
+    }
+    Ok(0)
+}
+
+/// Wait out a lifecycle operation the board triggered, without printing a second report: the
+/// move is what the caller asked for, and the archive is a consequence of it.
+async fn settle_quietly(client: &Client, op: Operation, wait: &WaitArgs) -> Result<()> {
+    if !wait.wait {
+        return Ok(());
+    }
+    match wait_for_op(client, &op.id, wait.timeout).await? {
+        WaitOutcome::Failed(op) => bail!("{} failed: {}", op.target, op.message),
+        _ => Ok(()),
+    }
+}
+
+
+/// File a clone the create call just started, if the caller named a column.
+///
+/// `Operation::target` is the clone id the server settled on, which is the only way the three
+/// derived-hostname verbs learn what their clone is called.
+async fn file_started_clone(client: &Client, op: &Operation, column_id: Option<&str>) -> Result<()> {
+    match column_id {
+        Some(id) => file_at_top(client, &op.target, id).await,
+        None => Ok(()),
+    }
+}
+
+/// Turn what a person typed into a stored column id, or say what the board does have.
+///
+/// Called before a clone is created rather than after, so a typo costs nothing: the
+/// alternative is a clone that exists and a column that does not.
+async fn resolve_column(client: &Client, column: &str) -> Result<String> {
+    let st = client.state().await?;
+    let stored = wire::board::with_defaults(&st.board_columns);
+    match wire::board::find_column(&stored, column) {
+        Some(c) => Ok(c.id.clone()),
+        None => {
+            let names: Vec<&str> = stored.iter().map(|c| c.title.as_str()).collect();
+            bail!("no board column '{column}' (have: {})", names.join(", "))
+        }
+    }
+}
+
+/// File a freshly started clone at the top of a column.
+///
+/// Called with the id the create operation reports, which exists before the clone does. The
+/// board tolerates that by design: an id matching no clone is simply not drawn, and it
+/// becomes the top card the moment the clone appears. That is what lets `--column` work
+/// without `--wait`.
+async fn file_at_top(client: &Client, clone: &str, column_id: &str) -> Result<()> {
+    let st = client.state().await?;
+    let stored = wire::board::with_defaults(&st.board_columns);
+    client.board_put(&wire::board::move_card(&stored, clone, column_id, 0)).await?;
+    Ok(())
 }
 
 /// Shared tail for commands that start an operation: print it (or its id), then

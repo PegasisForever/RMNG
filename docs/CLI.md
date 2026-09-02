@@ -51,7 +51,9 @@ $RMNG_CONTROL_URL` hint.
 
 | Command (with `--json`) | Emits |
 |---|---|
-| `clone ls` | `{ selected, clones: [Clone + {stats, accounts}], operations }` (CLI shape — includes the metrics the table shows) |
+| `clone ls` | `{ selected, clones: [Clone + {stats, accounts, column}], operations }` (CLI shape — includes the metrics the table shows) |
+| `board ls` | `BoardColumn[]`, resolved the way the dashboard draws them |
+| `board move` | the resolved `BoardColumn[]` after the move |
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
 | `clone create`, `clone create-from-ticket`, `clone create-with-new-ticket`, `clone create-plain` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
@@ -77,16 +79,18 @@ $RMNG_CONTROL_URL` hint.
 
 ## Commands
 
-The surface is **noun → verb**. Nouns: `clone`, `image`, `account`, `op`, `ledger`, `desktop`.
+The surface is **noun → verb**. Nouns: `clone`, `image`, `account`, `op`, `ledger`, `board`,
+`desktop`.
 The target is always a positional **clone id** (the first column of `rmng clone ls`).
 
 ### `rmng clone ls`
-Clones table: `ID` (a `*` suffix marks the selected clone), `IP` (the current Docker bridge
+Clones table: `ID` (a `*` suffix marks the selected clone), `COLUMN` (the board column the
+clone is drawn in; blank on a sub clone, which is drawn under its parent's card), `IP` (the current Docker bridge
 address when available), `IMAGE` (source reference), `PRESET`, `CLAUDE` and `CODEX` (the account
 each provider is running — the resolved email, falling back to the selection when none is
 assigned yet), live `CPU` and `RAM`, and lifecycle `STATUS`. Sub clones are indented under their
 parent. CPU/RAM are volatile snapshots for sampled active managed clones.
-`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats, accounts}],
+`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats, accounts, column}],
 operations }` — so the metrics the table shows are available to a machine reader too.
 
 Each clone also carries a derived `accounts` object, one entry per provider:
@@ -116,7 +120,15 @@ clone-creating verb is prefixed `create-` so the action is unmistakable — the 
 with `rmng op wait <op-id>`), or blocks with `--wait`.
 
 **Common flags** (all four): `--from <IMAGE>` (required), `--claude-account <A>`,
-`--codex-account <A>`, `--headless`, `--parent <C>` | `--top-level`, `--wait` `[--timeout <N>]`.
+`--codex-account <A>`, `--headless`, `--parent <C>` | `--top-level`, `--column <NAME>`,
+`--wait` `[--timeout <N>]`.
+
+`--column` files the new clone at the **top** of that column, by title or id. The name is
+resolved before anything is created, so a typo costs no clone. The id is written to the board
+as soon as the operation starts, which is why this needs no `--wait`: the board ignores an id
+matching no clone, and the card appears at the top the moment the clone does. Naming an
+archive column files the clone there without archiving it, since archiving something that is
+still being created would race its own creation.
 
 **Account selections** take the same forms as `account swap`: an email, `auto`, `none`, or
 `group:<pool>`. Omitting them means `auto` — a new clone gets an account rather than none.
@@ -184,6 +196,27 @@ offline clones are refused. `--json` → `{ command, mode }`.
 ### `rmng clone exec <CLONE> [-u <user>] [-w <dir>] [-e KEY=VAL]… -- <cmd…>`
 Run one non-interactive command inside a clone (docker-exec style); forwards piped stdin and
 passes through the command's exit code. `--json` emits one object with the captured streams.
+
+### `rmng board ls`
+The dashboard's columns, left to right: `COLUMN ID ARCHIVES CLONES CONTENTS`. The view is
+**resolved**, not the raw stored list, so a clone nobody has filed appears in the column the
+board draws it in rather than nowhere. A board nobody has arranged yet reports the two columns
+the dashboard draws by default, `Clones` and `Archived`.
+
+`--json` emits `BoardColumn[]` in the same resolved form.
+
+### `rmng board move <CLONE> <COLUMN> [--wait]`
+Move a clone to the **top** of a column. `COLUMN` is what a person reads off the board, so
+`"In Progress"` works; the stored id (`in-progress`) works too, and both ignore case and
+surrounding space. An unknown name lists the columns that do exist and changes nothing.
+
+**An archive column archives.** Dropping a card into one on the dashboard archives the clone
+and dragging it out again restores it, so this does the same: moving into `Archived` stops the
+clone, moving it back out starts it. `--wait` blocks on that lifecycle operation. Without it
+the move is filed immediately and the archive runs in the background.
+
+A sub clone is refused. The board draws it under its parent's card and never files it, so
+filing one would write an id no column ever draws. Move the parent instead.
 
 ### `rmng clone cp <SRC> <CLONE>:<DST-DIR> [--exclude <name>]…`
 Copy a directory into a clone at an absolute path. `SRC` takes two forms, and which one you

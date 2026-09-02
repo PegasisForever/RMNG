@@ -156,6 +156,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             }
         },
         Cmd::Ledger(cmd) => commands::ledger(client, cmd, json).await,
+        Cmd::Board(cmd) => commands::board(client, cmd, json).await,
         Cmd::Desktop { clone, cmd } => commands::desktop(client, clone, cmd, json).await,
     }
 }

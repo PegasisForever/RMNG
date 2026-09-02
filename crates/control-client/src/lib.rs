@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
 use wire::{
-    AppConfigRedacted, ContainerStats, ControlState, CopyResult, ExecRequest, ExecResult,
+    AppConfigRedacted, BoardColumn, ContainerStats, ControlState, CopyResult, ExecRequest, ExecResult,
     ImageInfo, LedgerRange, LedgerSearch, Operation, RmngClone,
 };
 
@@ -457,6 +457,21 @@ impl Client {
             .post(format!("{}/api/hosts/{host}/copy", self.base))
             .query(&query);
         Ok(Self::check(req.send().await?).await?.json().await?)
+    }
+
+    /// Replace the board's columns wholesale.
+    ///
+    /// The server applies no rules here, so the caller sends the settled list. `wire::board`
+    /// holds those rules, mirrored from the browser's copy so both clients arrange a board
+    /// the same way. `PUT`, matching the route and the browser.
+    pub async fn board_put(&self, columns: &[BoardColumn]) -> Result<ControlState> {
+        let resp = self
+            .http
+            .put(format!("{}/api/board", self.base))
+            .json(&json!({ "columns": columns }))
+            .send()
+            .await?;
+        Ok(Self::check(resp).await?.json().await?)
     }
 
     /// This process's own clone record, or `None` when not running inside a clone.
