@@ -563,8 +563,8 @@ pub enum DesktopCmd {
     },
     /// Move/arrange a window by id (→ `move_window`)
     MoveWindow {
-        /// Window id
-        id: String,
+        /// Window id, as `windows` reports it (an integer)
+        id: u64,
         #[arg(long)]
         monitor: Option<u32>,
         /// Placement mode, e.g. `maximize` / `center-half`
@@ -988,10 +988,10 @@ mod tests {
             Cli::parse_from(["rmng", "desktop", "w-cp", "double-click"]).cmd,
             Cmd::Desktop { cmd: DesktopCmd::DoubleClick { .. }, .. }
         ));
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "move-window", "win1", "--mode", "maximize"]);
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "move-window", "2946527525", "--mode", "maximize"]);
         assert!(matches!(
             cli.cmd,
-            Cmd::Desktop { cmd: DesktopCmd::MoveWindow { ref id, .. }, .. } if id == "win1"
+            Cmd::Desktop { cmd: DesktopCmd::MoveWindow { id: 2946527525, .. }, .. }
         ));
     }
 

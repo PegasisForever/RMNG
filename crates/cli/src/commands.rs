@@ -1513,7 +1513,9 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             DesktopCmd::MoveWindow { id, monitor, mode } => (
                 "move_window",
                 args_obj(vec![
-                    ("id", id.clone().into()),
+                    // A number, not a string: the tool's schema says integer, and the daemon
+                    // reads it with `as_u64`, which sees a quoted id as absent.
+                    ("id", (*id).into()),
                     ("monitor", n(*monitor)),
                     ("mode", mode.clone().map(Value::from).unwrap_or(Value::Null)),
                 ]),

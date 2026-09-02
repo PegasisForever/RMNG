@@ -36,7 +36,7 @@ pub async fn call(conn: &zbus::Connection, name: &str, args: &Value) -> Result<V
     let script = match name {
         "list_windows" => js_list_windows(),
         "move_window" => {
-            let id = args.get("id").and_then(Value::as_u64).ok_or("id required")?;
+            let id = window_id(args.get("id"))?;
             let monitor = args.get("monitor").and_then(Value::as_i64).unwrap_or(-1) as i32;
             let mode = args.get("mode").and_then(Value::as_str).unwrap_or("maximize");
             if mode != "maximize" && mode != "center-half" {
@@ -48,6 +48,24 @@ pub async fn call(conn: &zbus::Connection, name: &str, args: &Value) -> Result<V
     };
     let json = eval(conn, &script).await?;
     Ok(json!([{ "type": "text", "text": json }]))
+}
+
+/// The window id a caller passed, as a number or as the string a caller may quote it into.
+///
+/// `list_windows` reports it as an integer and the schema asks for one, but a JSON id is easy
+/// to quote by accident and `Value::as_u64` reads a quoted one as absent. That made a
+/// perfectly good id fail as "id required", which sends whoever hit it looking for a missing
+/// argument rather than a quoted one.
+fn window_id(arg: Option<&Value>) -> Result<u64, String> {
+    match arg {
+        None | Some(Value::Null) => {
+            Err("id required (a window id from list_windows)".to_string())
+        }
+        Some(v) => v
+            .as_u64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+            .ok_or_else(|| format!("id must be a window id from list_windows, got {v}")),
+    }
 }
 
 /// Run a JS snippet via `Eval`; return the JSON result string, or a clear error for
@@ -136,3 +154,25 @@ fn js_move_resize(id: u64, monitor: i32, mode: &str) -> String {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The CLI used to quote the id, which `as_u64` reads as absent, so a real window id came
+    /// back as "id required" and looked like a missing argument.
+    #[test]
+    fn a_window_id_is_taken_as_a_number_or_as_a_quoted_one() {
+        assert_eq!(window_id(Some(&json!(2946527525u64))).unwrap(), 2946527525);
+        assert_eq!(window_id(Some(&json!("2946527525"))).unwrap(), 2946527525);
+        assert_eq!(window_id(Some(&json!(" 2946527525 "))).unwrap(), 2946527525);
+    }
+
+    #[test]
+    fn a_missing_id_and_a_junk_one_say_different_things() {
+        assert!(window_id(None).unwrap_err().contains("required"));
+        assert!(window_id(Some(&json!(null))).unwrap_err().contains("required"));
+        let err = window_id(Some(&json!("cursor"))).unwrap_err();
+        assert!(err.contains("must be a window id"), "{err}");
+    }
+}
