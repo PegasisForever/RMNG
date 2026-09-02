@@ -6,6 +6,7 @@
 //! `org.gnome.Shell.Eval`: the window tools are a plain gnome-shell method with no
 //! per-connection check, so they need no holder round trip.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -34,7 +35,20 @@ pub(crate) struct Holder {
     /// Whether this daemon started the holder rather than finding one already up. See
     /// [`wire::socket::Hello::fresh_session`].
     fresh: bool,
+    /// One entry per outstanding [`Holder::sync_input`], completed by the reader when its
+    /// acknowledgement arrives.
+    waiters: Waiters,
+    next_sync: std::sync::atomic::AtomicU64,
 }
+
+/// Barrier acknowledgements the reader has yet to deliver, keyed by the id that asked.
+type Waiters = Arc<std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>>;
+
+/// How long [`Holder::sync_input`] waits before giving up on an acknowledgement.
+///
+/// The holder answers from its injection queue, so this only expires when that queue is
+/// wedged, and a click that presses a frame early beats one that never presses at all.
+const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
 
 impl Holder {
     /// Connect to the holder, starting it if it is not running and restarting it if it
@@ -135,14 +149,30 @@ impl Holder {
         );
         let (tx2, rx2) = unbounded_channel::<FromHolder>();
         let _ = tx2.send(FromHolder::HelloOk { proto, generation, monitors });
+        let waiters: Waiters = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let w = waiters.clone();
         tokio::spawn(async move {
             while let Some(m) = rx.recv().await {
+                // A barrier acknowledgement belongs to whoever asked for it, not to the
+                // control loop, so it is answered here and never forwarded.
+                if let FromHolder::InputSynced { id } = m {
+                    if let Some(tx) = w.lock().unwrap().remove(&id) {
+                        let _ = tx.send(());
+                    }
+                    continue;
+                }
                 if tx2.send(m).is_err() {
                     return;
                 }
             }
         });
-        Ok(Some(Self { conn, inbox: std::sync::Mutex::new(Some(rx2)), fresh: false }))
+        Ok(Some(Self {
+            conn,
+            inbox: std::sync::Mutex::new(Some(rx2)),
+            fresh: false,
+            waiters,
+            next_sync: std::sync::atomic::AtomicU64::new(1),
+        }))
     }
 
     /// Take the stream of holder messages. Called once, by the control loop.
@@ -162,6 +192,30 @@ impl Holder {
     /// Inject one input event.
     pub fn input(&self, msg: InputMsg) {
         self.send(ToHolder::Input(msg));
+    }
+
+    /// Wait until every input queued so far has actually been applied.
+    ///
+    /// [`Holder::input`] returns when the event is written to the socket, which says nothing
+    /// about the pointer having moved: the holder injects serially and each notify is a
+    /// D-Bus round trip, so a burst of moves queues far faster than it drains. A click that
+    /// presses without waiting can therefore press against a position several events old,
+    /// which is a miss on any target smaller than the error.
+    ///
+    /// Returns false if the holder did not answer within [`SYNC_TIMEOUT`].
+    pub async fn sync_input(&self) -> bool {
+        let id = self.next_sync.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiters.lock().unwrap().insert(id, tx);
+        self.send(ToHolder::SyncInput { id });
+        match tokio::time::timeout(SYNC_TIMEOUT, rx).await {
+            Ok(Ok(())) => true,
+            _ => {
+                self.waiters.lock().unwrap().remove(&id);
+                tracing::warn!("the session holder did not acknowledge input within {SYNC_TIMEOUT:?}");
+                false
+            }
+        }
     }
 }
 
@@ -250,6 +304,54 @@ mod tests {
             first,
             FromHolder::HelloOk { proto: PROTO_VERSION, generation: 4, monitors: mons }
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Answer `Hello`, then answer every barrier, which is what a real holder does from its
+    /// injection queue.
+    fn fake_holder_answering_sync(path: String, monitors: Vec<HolderMonitor>) {
+        let listener = Listener::bind(&path).unwrap();
+        std::thread::spawn(move || {
+            let c = listener.accept().unwrap();
+            let _: ToHolder = c.recv().unwrap();
+            c.send(&FromHolder::HelloOk { proto: PROTO_VERSION, generation: 4, monitors }).unwrap();
+            while let Ok(m) = c.recv::<ToHolder>() {
+                if let ToHolder::SyncInput { id } = m {
+                    c.send(&FromHolder::InputSynced { id }).unwrap();
+                }
+            }
+        });
+    }
+
+    /// The barrier a click waits on has to complete, and it has to be answered to the caller
+    /// rather than pushed at the control loop, which has no idea what to do with it.
+    #[tokio::test]
+    async fn a_barrier_completes_and_never_reaches_the_control_loop() {
+        let path = temp_path("sync");
+        fake_holder_answering_sync(path.clone(), vec![]);
+        let conn = crate::ipc::Conn::connect(&path).unwrap();
+        let holder = Holder::handshake(conn).await.unwrap().expect("versions match");
+        holder.input(InputMsg::PointerMove { monitor_id: 0, x: 12.0, y: 34.0 });
+        assert!(holder.sync_input().await, "the holder answered the barrier");
+
+        let mut inbox = holder.inbox();
+        assert!(matches!(inbox.recv().await, Some(FromHolder::HelloOk { .. })));
+        assert!(
+            inbox.try_recv().is_err(),
+            "the acknowledgement belongs to the caller, not to the control loop"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A holder whose queue is wedged must not hang the click forever. Pressing a frame
+    /// early beats never pressing at all.
+    #[tokio::test]
+    async fn a_barrier_gives_up_rather_than_hanging_the_click() {
+        let path = temp_path("nosync");
+        fake_holder(path.clone(), PROTO_VERSION, vec![]);
+        let conn = crate::ipc::Conn::connect(&path).unwrap();
+        let holder = Holder::handshake(conn).await.unwrap().expect("versions match");
+        assert!(!holder.sync_input().await, "no answer means false, not a hang");
         let _ = std::fs::remove_file(&path);
     }
 }
