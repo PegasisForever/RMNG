@@ -2648,12 +2648,22 @@ struct LoginCompleteReq {
     provider: String,
     /// Whatever the operator copied: the callback URL, its query, or `code=…&state=…`.
     pasted: String,
-    /// The pool to join, or empty for none. Must already exist.
+    /// The pool to join, or empty for none. Must already exist. Ignored when `replaces` is
+    /// set: a replacement inherits the pools of the account it stands in for.
     #[serde(default)]
     group: String,
+    /// An imported account this sign-in stands in for, or empty for a plain import. The
+    /// replaced account's pools and clones move to the new one, and it is then deleted.
+    #[serde(default)]
+    replaces: String,
 }
 
 /// `POST /api/login/complete` — redeem the pasted callback and store the account.
+///
+/// With `replaces` set, the stored account then takes over from that one (pools, pinned
+/// clones, current assignments) and the old one is deleted. That is the whole of the
+/// "sign in again" badge: recovering a dead account used to mean deleting it and importing
+/// its replacement by hand, rebuilding its pools and pins from memory.
 ///
 /// A 400 covers everything the operator can fix by pasting again; the provider refusing the
 /// code is one of those, so it is not a 502.
@@ -2661,9 +2671,35 @@ async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq
     let provider = crate::oauth::Provider::parse(&req.provider).ok_or_else(|| {
         err_json(StatusCode::BAD_REQUEST, format!("unknown provider '{}'", req.provider))
     })?;
-    let email = crate::oauth::complete(&app, provider, &req.pasted, &req.group)
+    let replaces = req.replaces.trim().to_string();
+    // A replacement joins its predecessor's pools, so the modal's pool pick is not asked for
+    // and must not be applied on top of them.
+    let group = if replaces.is_empty() { req.group.as_str() } else { "" };
+    let email = crate::oauth::complete(&app, provider, &req.pasted, group)
         .await
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+
+    let mut moved: Vec<String> = Vec::new();
+    if !replaces.is_empty() {
+        // The account is stored either way. A failure here leaves it imported alongside the
+        // one it was meant to replace, which is recoverable by hand, so it reports rather
+        // than pretending the sign-in did not happen.
+        moved = match provider {
+            crate::oauth::Provider::Claude => {
+                crate::claude::replace_account(&app, &replaces, &email).await
+            }
+            crate::oauth::Provider::Codex => {
+                crate::codex::replace_account(&app, &replaces, &email).await
+            }
+        }
+        .map_err(|e| {
+            err_json(
+                StatusCode::BAD_REQUEST,
+                format!("{email} was signed in, but taking over from {replaces} failed: {e:#}"),
+            )
+        })?;
+    }
+
     // Put its usage on screen without making the browser wait, exactly as the clone import
     // does. The account is already stored by the line above.
     let app2 = app.clone();
@@ -2673,7 +2709,12 @@ async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq
             crate::oauth::Provider::Codex => crate::codex::poll_once(&app2).await,
         }
     });
-    Ok(Json(serde_json::json!({ "ok": true, "email": email })))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "email": email,
+        "replaced": if replaces.is_empty() { None } else { Some(replaces) },
+        "moved": moved,
+    })))
 }
 
 

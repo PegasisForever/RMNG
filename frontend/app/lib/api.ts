@@ -196,10 +196,21 @@ export const beginLogin = (provider: "claude" | "codex") =>
 /** Finish that sign-in with whatever the browser landed on. Both redirect URIs point at a
  *  port on the operator's own machine, so the page fails to load and its address bar is the
  *  only place the authorization code exists. */
-export const completeLogin = (provider: "claude" | "codex", pasted: string, group: string) =>
-  postJson("/api/login/complete", { provider, pasted, group }) as Promise<{
+/** `replaces` names an imported account this sign-in stands in for: its pools, its pinned
+ *  clones and its current assignments move to the new account, and it is then deleted.
+ *  Empty for a plain import. Signing in as the same account is not a replacement, and the
+ *  server treats it as the token refresh it already is. */
+export const completeLogin = (
+  provider: "claude" | "codex",
+  pasted: string,
+  group: string,
+  replaces = "",
+) =>
+  postJson("/api/login/complete", { provider, pasted, group, replaces }) as Promise<{
     ok: boolean;
     email: string;
+    replaced: string | null;
+    moved: string[];
   }>;
 
 /** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */

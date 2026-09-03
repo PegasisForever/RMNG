@@ -26,6 +26,7 @@ const meta = {
     accounts: rows("claude"),
     onDelete: fn(),
     onReorder: fn(),
+    onReplace: makeStoryLink("Settings/Components/ImportAccountModalView", "Replacing"),
   },
   render: (args) => (
     <Frame>

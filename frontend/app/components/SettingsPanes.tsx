@@ -168,6 +168,7 @@ export function ClaudePane({
   onReorderAccounts,
   onDeleteAccount,
   onImportAccount,
+  onReplaceAccount,
 }: SettingsPaneProps) {
   return (
     <>
@@ -192,6 +193,7 @@ export function ClaudePane({
           onDelete={onDeleteAccount}
           onReorder={(ids) => onReorderAccounts("claude", ids)}
           onImport={onImportAccount}
+          onReplace={onReplaceAccount}
         />
       </Section>
 
@@ -219,6 +221,7 @@ export function CodexPane({
   rows,
   onReorderAccounts,
   onDeleteCodexAccount,
+  onReplaceAccount,
 }: SettingsPaneProps) {
   return (
     <>
@@ -248,6 +251,7 @@ export function CodexPane({
           accounts={rows.codex}
           onDelete={onDeleteCodexAccount}
           onReorder={(ids) => onReorderAccounts("codex", ids)}
+          onReplace={onReplaceAccount}
         />
       </Section>
 

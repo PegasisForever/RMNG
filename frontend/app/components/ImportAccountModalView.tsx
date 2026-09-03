@@ -22,6 +22,7 @@ export function ImportAccountModalView({
   pasted,
   groups,
   group,
+  replacing = null,
   importing,
   error,
   onProviderChange,
@@ -39,6 +40,10 @@ export function ImportAccountModalView({
   groups: string[];
   /** The pool to join, or `""` for none. */
   group: string;
+  /** The email this sign-in stands in for, or null for a plain import. Both choices above
+   *  are already made in this mode: the provider is that account's, and the pools are the
+   *  ones it sits in, so neither control is drawn. */
+  replacing?: string | null;
   /** The exchange is in flight. */
   importing: boolean;
   error: string | null;
@@ -64,30 +69,49 @@ export function ImportAccountModalView({
       {/* Backdrop is inert: clicking it must not close the dialog, only Cancel and Escape do. */}
       <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-          {provider === "codex" ? "Add Codex account" : "Add Claude account"}
+          {replacing
+            ? "Replace account"
+            : provider === "codex"
+              ? "Add Codex account"
+              : "Add Claude account"}
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Sign in to the provider here. This server keeps the account and hands short-lived
-          tokens to clones.
+          {replacing ? (
+            <>
+              Sign in to whichever account takes over from{" "}
+              <span className="font-medium text-slate-700 dark:text-slate-200">{replacing}</span>.
+              It inherits that account&rsquo;s pools and every clone bound to it, and the old
+              account is then deleted. Signing in as the same account just repairs its token.
+            </>
+          ) : (
+            <>
+              Sign in to the provider here. This server keeps the account and hands short-lived
+              tokens to clones.
+            </>
+          )}
         </p>
 
-        <div className="my-3 flex gap-2">
-          {(["claude", "codex"] as const).map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => onProviderChange(p)}
-              className={
-                "rounded px-3 py-1 text-sm " +
-                (provider === p
-                  ? "bg-slate-800 text-white dark:bg-slate-600 dark:text-white"
-                  : "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300")
-              }
-            >
-              {p === "claude" ? "Claude" : "Codex"}
-            </button>
-          ))}
-        </div>
+        {/* Replacing fixes the provider: it is the dead account's, and a sign-in to the other
+            one could not stand in for it. */}
+        {replacing ? null : (
+          <div className="my-3 flex gap-2">
+            {(["claude", "codex"] as const).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => onProviderChange(p)}
+                className={
+                  "rounded px-3 py-1 text-sm " +
+                  (provider === p
+                    ? "bg-slate-800 text-white dark:bg-slate-600 dark:text-white"
+                    : "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300")
+                }
+              >
+                {p === "claude" ? "Claude" : "Codex"}
+              </button>
+            ))}
+          </div>
+        )}
 
         {loginUrl ? (
           <>
@@ -122,27 +146,33 @@ export function ImportAccountModalView({
           <p className="text-xs text-slate-400 dark:text-slate-500">Preparing the sign-in…</p>
         )}
 
-        <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
-          Pool
-          <select
-            value={group}
-            onChange={(e) => onGroupChange(e.target.value)}
-            disabled={groups.length === 0}
-            className={input}
-          >
-            <option value="">No pool</option>
-            {groups.map((g) => (
-              <option key={g} value={g}>
-                {g}
-              </option>
-            ))}
-          </select>
-        </label>
-        <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
-          {groups.length === 0
-            ? "No pools configured for this provider. The account can still be pinned to a clone by name."
-            : "A clone bound to this pool can be handed the account by the rotator. Outside a pool it has to be pinned by name."}
-        </p>
+        {/* Replacing inherits the pools of the account being replaced, so there is nothing to
+            pick here and picking would only fight that. */}
+        {replacing ? null : (
+          <>
+            <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
+              Pool
+              <select
+                value={group}
+                onChange={(e) => onGroupChange(e.target.value)}
+                disabled={groups.length === 0}
+                className={input}
+              >
+                <option value="">No pool</option>
+                {groups.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+              {groups.length === 0
+                ? "No pools configured for this provider. The account can still be pinned to a clone by name."
+                : "A clone bound to this pool can be handed the account by the rotator. Outside a pool it has to be pinned by name."}
+            </p>
+          </>
+        )}
 
         {error ? (
           <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-600 dark:bg-rose-950/40 dark:text-rose-400">
@@ -164,7 +194,7 @@ export function ImportAccountModalView({
             disabled={!canImport}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
-            {importing ? "Finishing…" : "Finish sign-in"}
+            {importing ? "Finishing…" : replacing ? `Replace ${replacing}` : "Finish sign-in"}
           </button>
         </div>
       </div>

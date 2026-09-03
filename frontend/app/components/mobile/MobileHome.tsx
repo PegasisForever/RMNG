@@ -45,6 +45,7 @@ export interface MobileHomeProps {
   /** Import an account from a clone that is already signed in. Opening that dialog is
    *  navigation, so this reports the tap and the container mounts the dialog. */
   onImportAccount: () => void | Promise<void>;
+  onReplaceAccount: (account: ClaudeUsage) => void;
   /** The board's columns (`ControlState.boardColumns`), which become the section headers.
    *  Empty falls back to the same defaults the desktop board uses. */
   columns: BoardColumn[];
@@ -70,6 +71,7 @@ export function MobileHome({
   onUsageOpenChange,
   onRefresh,
   onImportAccount,
+  onReplaceAccount,
   columns,
   clones,
   cloneTickets = {},
@@ -117,6 +119,7 @@ export function MobileHome({
           onUsageOpenChange={onUsageOpenChange}
           onRefresh={onRefresh}
           onImportAccount={onImportAccount}
+          onReplaceAccount={onReplaceAccount}
         />
 
         {sections.length === 0 ? (

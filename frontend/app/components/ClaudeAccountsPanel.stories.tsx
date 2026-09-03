@@ -32,6 +32,7 @@ const meta = {
     now: accountsNow,
     onRefresh: fn(),
     onImport: fn(),
+    onReplace: fn(),
   },
   render: (args) => (
     <Frame>

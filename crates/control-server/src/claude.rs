@@ -116,6 +116,14 @@ pub struct RefreshRecord {
     pub rt_after: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The provider REJECTED the grant (400/401), so no later attempt with this refresh
+    /// token can succeed. Distinct from every other failure — a timeout, a 429, a 5xx —
+    /// which leaves a perfectly good chain and must be retried, not acted on.
+    ///
+    /// This is what separates "dead" from "not answering" without waiting for the clock.
+    /// See [`grant_rejected`].
+    #[serde(default)]
+    pub rejected: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -213,7 +221,7 @@ impl ClaudeStore {
     /// Emails of every imported account. Membership, not usability: an account whose
     /// refresh chain is dead is still imported. Use [`Self::usable_emails`] to pick one
     /// for a clone.
-    fn emails(&self) -> Vec<String> {
+    pub(crate) fn emails(&self) -> Vec<String> {
         self.accounts
             .lock()
             .unwrap()
@@ -229,7 +237,7 @@ impl ClaudeStore {
             .lock()
             .unwrap()
             .iter()
-            .filter(|a| token_alive(a.expires_at, now))
+            .filter(|a| account_usable(a, now))
             .map(|a| a.email.clone())
             .collect()
     }
@@ -366,9 +374,59 @@ async fn refresh_account(http: &reqwest::Client, acct: &mut StoredClaudeAccount)
             Ok(after) => after.clone(),
             Err(_) => String::new(),
         },
-        error: out.as_ref().err().map(|e| format!("{e:#}")),
+        error: out.as_ref().err().map(|e| format!("{:#}", e.error)),
+        rejected: out.as_ref().err().is_some_and(|e| e.rejected),
     });
-    out.map(|_| ())
+    out.map(|_| ()).map_err(|e| e.error)
+}
+
+/// A refresh that did not produce a token, and whether the provider said so permanently.
+/// Shared with [`crate::codex`], whose refresh has the same three endings.
+pub(crate) struct RefreshFailure {
+    pub error: anyhow::Error,
+    /// The token endpoint answered 400 or 401. The grant is spent or revoked, and every
+    /// later attempt with it fails the same way.
+    pub rejected: bool,
+}
+
+impl RefreshFailure {
+    /// A failure that says nothing about the grant: a timeout, a 429, a 5xx, an unreadable
+    /// reply. The chain may still be fine, so the account keeps its place.
+    fn transient(error: anyhow::Error) -> Self {
+        Self { error, rejected: false }
+    }
+}
+
+impl From<anyhow::Error> for RefreshFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::transient(error)
+    }
+}
+
+/// Whether `status` from the token endpoint means the refresh token itself is dead.
+///
+/// 400 is what Anthropic returns with `{"error": "invalid_grant"}` for a spent or revoked
+/// token, and 401 for a rejected client credential. Everything else (429, 5xx, a proxy's
+/// 502) is the provider having a bad moment, and an account must not be evicted for one.
+pub(crate) fn refresh_status_is_fatal(status: u16) -> bool {
+    status == 400 || status == 401
+}
+
+/// Whether the account's refresh chain is known dead: the last attempt was rejected by the
+/// provider. A success (including a fresh sign-in, which clears the record entirely) undoes
+/// it, so an account that comes back needs no separate repair.
+pub(crate) fn grant_rejected(last_refresh: Option<&RefreshRecord>) -> bool {
+    last_refresh.is_some_and(|r| r.rejected)
+}
+
+/// Whether this account can be handed to a clone: it holds a token that has not expired
+/// AND its refresh chain has not been rejected.
+///
+/// Expiry alone was the old test, and it left a revoked account in the rotation for its
+/// whole refresh lead (two hours plus its own offset, up to three and a half). During that
+/// window every clone on it got 401s from Anthropic while the server reported it healthy.
+fn account_usable(acct: &StoredClaudeAccount, now: i64) -> bool {
+    token_alive(acct.expires_at, now) && !grant_rejected(acct.last_refresh.as_ref())
 }
 
 /// The refresh itself. Returns the fingerprint of the token the reply carried, empty when
@@ -377,7 +435,7 @@ async fn refresh_inner(
     http: &reqwest::Client,
     acct: &mut StoredClaudeAccount,
     before: &str,
-) -> Result<String> {
+) -> std::result::Result<String, RefreshFailure> {
     let resp = http
         .post(OAUTH_TOKEN_URL)
         .timeout(FETCH_TIMEOUT)
@@ -399,11 +457,14 @@ async fn refresh_inner(
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        bail!(
-            "refresh {} (rt {before}){}",
-            status.as_u16(),
-            snippet(&text)
-        );
+        return Err(RefreshFailure {
+            error: anyhow::anyhow!(
+                "refresh {} (rt {before}){}",
+                status.as_u16(),
+                snippet(&text)
+            ),
+            rejected: refresh_status_is_fatal(status.as_u16()),
+        });
     }
     let data: RefreshResp = resp.json().await.with_context(|| {
         format!(
@@ -680,11 +741,12 @@ async fn poll_inner(app: &App) -> Result<bool> {
                     any429 = true;
                 }
                 // Re-read the account: a refresh that succeeded earlier in this same pass
-                // moved `expires_at`, and the snapshot taken at the top has not.
+                // moved `expires_at`, and the snapshot taken at the top has not. It is also
+                // where the rejection this pass may have just recorded lives.
                 let alive = app
                     .claude
                     .get_by_email(&acct.email)
-                    .is_some_and(|a| token_alive(a.expires_at, now_ms()));
+                    .is_some_and(|a| account_usable(&a, now_ms()));
                 let prev = app.claude.last_good.lock().unwrap().get(&acct.id).cloned();
                 views.push(match prev {
                     Some(mut p) => {
@@ -1294,25 +1356,40 @@ async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[RmngC
         if host.claude_account_email.as_deref() == Some(email.as_str()) {
             continue; // unchanged (sticky keep) → no rewrite
         }
-        match push_account_to_clone(app, &host.id, &email).await {
-            Ok(()) => {
-                tracing::info!(
-                    "rotate[{label}]: {} {} -> {}",
-                    host.id,
-                    host.claude_account_email.as_deref().unwrap_or("none"),
-                    email
-                );
-                let id = host.id.clone();
-                app.store.mutate(|s| {
-                    if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                        h.claude_account_email = Some(email);
-                    }
-                });
+        // Record the decision BEFORE delivering it. The binding is this server's own data;
+        // the push is best-effort delivery into a container that may not be able to take
+        // one. Writing it only on a successful push froze every clone that could not: an
+        // archived clone on a dead account was re-picked and re-thrown-away every pass,
+        // measured on CT 105 as twelve clones stuck on three `invalid_grant` accounts, the
+        // same warning line repeating every ten minutes for as long as the log went back.
+        // `push_stale_tokens` is the retry, and it closes the gap for a running clone whose
+        // push fails here within one poll.
+        tracing::info!(
+            "rotate[{label}]: {} {} -> {}",
+            host.id,
+            host.claude_account_email.as_deref().unwrap_or("none"),
+            email
+        );
+        let (id, bound) = (host.id.clone(), email.clone());
+        app.store.mutate(|s| {
+            if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+                h.claude_account_email = Some(bound);
             }
-            Err(e) => tracing::warn!(
-                "rotate[{label}]: applying {email} to {} failed: {e}",
+        });
+        app.claude.forget_pushed(&host.id);
+        // An archived clone's container is stopped or frozen, so an exec into it cannot
+        // succeed. `push_stale_tokens_for` already skips these for the same reason; leaving
+        // them in scope here bought nothing and cost a docker round trip plus `STAGGER` per
+        // clone on every pass, forever.
+        if host.archived {
+            continue;
+        }
+        if let Err(e) = push_account_to_clone(app, &host.id, &email).await {
+            tracing::warn!(
+                "rotate[{label}]: {} is now bound to {email}, but installing its token failed \
+                 (the next reconcile pass retries): {e}",
                 host.id
-            ),
+            );
         }
         tokio::time::sleep(STAGGER).await; // gentle on the daemon
     }
@@ -1363,11 +1440,15 @@ pub async fn rotate_once(app: &App) {
 /// is an explicit operator choice, so it must be reassigned first (swap it to another
 /// account, a group, or `auto`). Clones running the account via `auto`/a group need no
 /// pre-work: once the token is gone a [`rotate_once`] pass moves them onto a surviving
-/// account (its assign step treats a no-longer-imported account as ineligible). Any clone
-/// that still can't be placed — its whole pool was this one account — is left cleanly
-/// unassigned (`claude_account_email = None`) rather than pointing at a deleted account.
+/// account (its assign step treats a no-longer-imported account as ineligible).
 ///
-/// Returns the ids of clones that were moved off (or unassigned from) the account.
+/// Everything the operator can see is settled before this returns: the token is off disk,
+/// the account's row is out of the published state, and no clone still points at it. The
+/// re-placement ([`rotate_once`]) runs in the background, because it walks the whole fleet
+/// with a per-clone `docker exec` and the screen must not wait on that. A clone its assign
+/// step cannot place — the account was its pool's only member — simply stays unassigned.
+///
+/// Returns the ids of clones that were on the account.
 pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
     let pinned: Vec<String> = app
         .store
@@ -1385,13 +1466,16 @@ pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
             ids = pinned.join(", "),
         );
     }
+    let account_id = app.claude.get_by_email(email).map(|a| a.id);
     if !app.claude.delete(email)? {
         bail!("no imported Claude account '{email}'");
     }
+    if let Some(id) = &account_id {
+        app.claude.last_good.lock().unwrap().remove(id);
+    }
 
     // Clones currently running the (now-deleted) account. Drop their pushed-token records so
-    // the reassignment pushes the replacement token, then reassign auto/group pools now
-    // rather than waiting up to `ROTATE_SECS` for the background rotator.
+    // the re-placement pushes the replacement token.
     let on_it: Vec<String> = app
         .store
         .get()
@@ -1403,19 +1487,125 @@ pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
     for id in &on_it {
         app.claude.forget_pushed(id);
     }
-    rotate_once(app).await;
 
-    // Degenerate case (the account was a pool's only imported member): rotate couldn't
-    // place those clones, so clear the dangling reference instead of leaving them pointed
-    // at a deleted account.
+    // One mutation, one SSE frame, and the screen is right. The account's row used to sit in
+    // the published state until the NEXT usage poll rebuilt it, and that poll walks every
+    // remaining account at a 400ms stagger with a 10s timeout each — long enough that a
+    // deleted account stayed on screen looking like the delete had failed.
     app.store.mutate(|s| {
+        s.claude_accounts
+            .retain(|u| u.provider == Some(wire::Provider::Codex) || u.email != email);
         for h in &mut s.hosts {
             if h.claude_account_email.as_deref() == Some(email) {
                 h.claude_account_email = None;
             }
         }
     });
+
+    let bg = app.clone();
+    tokio::spawn(async move { rotate_once(&bg).await });
     Ok(on_it)
+}
+
+/// Put `new` wherever `old` sat in `pools`, and take `old` out. Returns the pool names
+/// `new` ended up in.
+///
+/// Membership is the whole reason a replacement account is usable at all: an account in no
+/// pool is one the rotator will never hand to a clone. Idempotent on both halves, so an
+/// account already in a pool is not duplicated and a pool without `old` is untouched.
+pub(crate) fn swap_pool_member(
+    pools: &mut [wire::CloneGroup],
+    old: &str,
+    new: &str,
+) -> Vec<String> {
+    let mut joined = Vec::new();
+    for pool in pools.iter_mut() {
+        if !pool.accounts.iter().any(|a| a == old) {
+            continue;
+        }
+        if !pool.accounts.iter().any(|a| a == new) {
+            pool.accounts.push(new.to_string());
+        }
+        joined.push(pool.name.clone());
+    }
+    for pool in pools.iter_mut() {
+        pool.accounts.retain(|a| a != old);
+    }
+    joined
+}
+
+/// Move both of a clone's Claude bindings from `old` to `new`, fleet-wide, in one mutation.
+/// Returns the ids that were running `old`.
+///
+/// Both bindings, because they mean different things and both name the dead account: the pin
+/// (`claude_selection`, an explicit operator choice) and the current assignment
+/// (`claude_account_email`). Moving the pin is also what lets [`delete_account`] through
+/// afterwards, since it refuses while a pin names its target.
+///
+/// Separated from the config write in [`replace_account`] so it can be tested without one:
+/// [`crate::config::save`] writes a fixed relative path, so a test that reached it would drop
+/// a `config.json` in whatever directory it ran in.
+fn repoint_clones(app: &App, old: &str, new: &str) -> Vec<String> {
+    let (old, new) = (old.to_string(), new.to_string());
+    let mut moved = Vec::new();
+    app.store.mutate(|s| {
+        for h in &mut s.hosts {
+            if h.claude_selection.as_deref() == Some(old.as_str()) {
+                h.claude_selection = Some(new.clone());
+            }
+            if h.claude_account_email.as_deref() == Some(old.as_str()) {
+                h.claude_account_email = Some(new.clone());
+                moved.push(h.id.clone());
+            }
+        }
+    });
+    for id in &moved {
+        app.claude.forget_pushed(id);
+    }
+    moved
+}
+
+/// Hand everything `old_email` holds to `new_email`, then delete `old_email`.
+///
+/// This is what the "sign in again" badge does. Recovering a dead account used to mean
+/// deleting it and importing its replacement by hand, which loses two things the operator
+/// then has to rebuild from memory: which pools it was in, and which clones were pinned to
+/// it by name. Both move here, in one operation, so the replacement lands where the original
+/// stood.
+///
+/// A sign-in as the SAME account is not a replacement — `upsert_account` has already
+/// overwritten the token and cleared the rejection — so it returns early having done
+/// nothing. Returns the ids of clones that moved onto `new_email`.
+pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Result<Vec<String>> {
+    if old_email == new_email {
+        return Ok(Vec::new());
+    }
+    if app.claude.get_by_email(old_email).is_none() {
+        bail!("no imported Claude account '{old_email}' to replace");
+    }
+    if app.claude.get_by_email(new_email).is_none() {
+        bail!("'{new_email}' is not an imported Claude account");
+    }
+
+    let mut cfg = app.config();
+    let joined = swap_pool_member(&mut cfg.clone_groups, old_email, new_email);
+    crate::config::save(&cfg).context("saving the replacement's pool membership")?;
+    *app.cfg.write().unwrap() = cfg;
+
+    let moved = repoint_clones(app, old_email, new_email);
+    delete_account(app, old_email).await?;
+    tracing::info!(
+        "replaced Claude account {old_email} with {new_email}: {} clone(s), pool(s) {}",
+        moved.len(),
+        if joined.is_empty() { "none".to_string() } else { joined.join(", ") },
+    );
+
+    // Deliver the new token to everything that just moved. Backgrounded for the same reason
+    // the delete's rotation is: it is one `docker exec` per clone.
+    let bg = app.clone();
+    let email = new_email.to_string();
+    tokio::spawn(async move { push_stale_tokens_for(&bg, Some(&email)).await });
+    Ok(moved)
 }
 
 /// Self-scheduling 10-minute group-rotation loop.
@@ -2036,10 +2226,218 @@ mod tests {
         let moved = delete_account(&app, "a@x").await.unwrap();
         assert_eq!(moved, vec!["c1".to_string()]);
         assert!(!app.claude.emails().contains(&"a@x".to_string()), "token deleted");
-        // The clone no longer points at the deleted account. (The reassignment push fails
-        // without a live clone/daemon in the test, so the dangling ref is cleared to None.)
+        // The clone no longer points at the deleted account. The re-placement runs in the
+        // background, so what this call guarantees is only the detach.
         let c1 = app.store.get().hosts.into_iter().find(|h| h.id == "c1").unwrap();
         assert_ne!(c1.claude_account_email.as_deref(), Some("a@x"));
+    }
+
+    /// The delete is what the operator watches, so everything it decides has to be visible by
+    /// the time it returns. The row used to leave `claude_accounts` only when the NEXT usage
+    /// poll rebuilt that list — a walk of every remaining account at a 400ms stagger with a
+    /// 10s timeout each — so a deleted account sat on screen looking like a failed delete.
+    #[tokio::test]
+    async fn delete_account_publishes_the_removal_before_it_returns() {
+        let app = app_with_group(&["a@x", "b@x"]);
+        app.store.mutate(|s| {
+            s.claude_accounts = vec![
+                usage_row("a@x", wire::Provider::Claude),
+                usage_row("b@x", wire::Provider::Claude),
+                // Same email under the other provider: a separate account that must survive.
+                usage_row("a@x", wire::Provider::Codex),
+            ];
+        });
+        delete_account(&app, "a@x").await.unwrap();
+
+        let rows = app.store.get().claude_accounts;
+        assert!(
+            !rows.iter().any(|u| u.email == "a@x" && u.provider != Some(wire::Provider::Codex)),
+            "the deleted Claude row is still published: {rows:?}"
+        );
+        assert!(rows.iter().any(|u| u.email == "b@x"), "an untouched account was dropped");
+        assert!(
+            rows.iter().any(|u| u.email == "a@x" && u.provider == Some(wire::Provider::Codex)),
+            "the Codex account sharing the email was dropped with it"
+        );
+    }
+
+    fn usage_row(email: &str, provider: wire::Provider) -> ClaudeUsage {
+        ClaudeUsage {
+            id: format!("{email}|{provider:?}"),
+            email: email.into(),
+            provider: Some(provider),
+            active: false,
+            assignable: Some(true),
+            error: None,
+            stale: None,
+            last_updated: 0,
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            spend: None,
+            reset_credits: None,
+        }
+    }
+
+    /// A refresh chain Anthropic has rejected cannot mint another token, so the account is
+    /// dead the moment it is told so — not when its last access token happens to run out,
+    /// which is up to `REFRESH_LEAD_MS` plus the account's own offset later. Every clone on
+    /// it is getting 401s throughout that window.
+    #[test]
+    fn a_rejected_grant_takes_an_account_out_while_its_token_is_still_in_date() {
+        let app = app_with_group(&["live@x", "revoked@x"]);
+        let mut acct = app.claude.get_by_email("revoked@x").unwrap();
+        assert!(token_alive(acct.expires_at, now_ms()), "the fixture token is in date");
+        acct.last_refresh = Some(RefreshRecord {
+            at: now_ms(),
+            ok: false,
+            rt_before: "aaaa".into(),
+            rt_after: String::new(),
+            error: Some(r#"refresh 400 (rt aaaa): {"error": "invalid_grant"}"#.into()),
+            rejected: true,
+        });
+        app.claude.update_account(&acct).unwrap();
+
+        assert_eq!(app.claude.usable_emails(), vec!["live@x".to_string()]);
+        assert_eq!(pick_group_account(&app, "team", Some("revoked@x")).unwrap(), "live@x");
+    }
+
+    /// The other half of the same rule. A 429, a timeout or a 5xx says nothing about the
+    /// grant, and evicting on one would rotate the whole fleet off a healthy account every
+    /// time Anthropic had a bad minute.
+    #[test]
+    fn a_transient_refresh_failure_leaves_the_account_in_the_rotation() {
+        let app = app_with_group(&["live@x", "flaky@x"]);
+        let mut acct = app.claude.get_by_email("flaky@x").unwrap();
+        acct.last_refresh = Some(RefreshRecord {
+            at: now_ms(),
+            ok: false,
+            rt_before: "aaaa".into(),
+            rt_after: String::new(),
+            error: Some("refresh 429 (rt aaaa)".into()),
+            rejected: false,
+        });
+        app.claude.update_account(&acct).unwrap();
+
+        let mut usable = app.claude.usable_emails();
+        usable.sort();
+        assert_eq!(usable, vec!["flaky@x".to_string(), "live@x".to_string()]);
+    }
+
+    #[test]
+    fn only_a_rejection_from_the_provider_is_fatal() {
+        assert!(refresh_status_is_fatal(400), "invalid_grant arrives as a 400");
+        assert!(refresh_status_is_fatal(401));
+        for retryable in [429, 500, 502, 503] {
+            assert!(!refresh_status_is_fatal(retryable), "{retryable} must be retryable");
+        }
+    }
+
+    /// The bug this whole pass exists for. An archived clone's container is stopped, so the
+    /// token push into it can never succeed — and the binding used to be written only on a
+    /// successful push. Measured on CT 105 as twelve clones frozen on three `invalid_grant`
+    /// accounts, the rotator picking a correct replacement and discarding it every ten
+    /// minutes for as long as the log went back.
+    #[tokio::test]
+    async fn an_archived_clone_is_rebound_off_a_dead_account_without_a_push() {
+        let app = app_with_group(&["live@x", "dead@x"]);
+        kill_token(&app, "dead@x");
+        app.store.mutate(|s| {
+            s.hosts.push(RmngClone {
+                id: "archived-1".into(),
+                managed: true,
+                archived: true,
+                claude_account_email: Some("dead@x".into()),
+                claude_selection: Some("group:team".into()),
+                claude_group: Some("team".into()),
+                ..Default::default()
+            })
+        });
+
+        // No docker in the test, so a pass that still tried to push would fail and leave the
+        // binding where it was. Reaching `live@x` IS the assertion that it no longer tries.
+        rotate_once(&app).await;
+
+        let host = app.store.get().hosts.into_iter().find(|h| h.id == "archived-1").unwrap();
+        assert_eq!(host.claude_account_email.as_deref(), Some("live@x"));
+    }
+
+    #[test]
+    fn a_replacement_inherits_every_pool_the_old_account_sat_in() {
+        let mut pools = vec![
+            CloneGroup { name: "Personal".into(), accounts: vec!["old@x".into(), "other@x".into()] },
+            CloneGroup { name: "Medi".into(), accounts: vec!["old@x".into()] },
+            CloneGroup { name: "Untouched".into(), accounts: vec!["other@x".into()] },
+        ];
+        let joined = swap_pool_member(&mut pools, "old@x", "new@x");
+        assert_eq!(joined, vec!["Personal".to_string(), "Medi".to_string()]);
+        assert_eq!(pools[0].accounts, vec!["other@x".to_string(), "new@x".to_string()]);
+        assert_eq!(pools[1].accounts, vec!["new@x".to_string()]);
+        assert_eq!(pools[2].accounts, vec!["other@x".to_string()], "a pool without it is left alone");
+
+        // Replacing with an account that is already a member neither duplicates it nor
+        // leaves the old one behind.
+        let mut shared = vec![CloneGroup {
+            name: "Personal".into(),
+            accounts: vec!["old@x".into(), "new@x".into()],
+        }];
+        swap_pool_member(&mut shared, "old@x", "new@x");
+        assert_eq!(shared[0].accounts, vec!["new@x".to_string()]);
+    }
+
+    /// A replacement takes over the two things an operator would otherwise have to rebuild
+    /// from memory: which clones named the old account, and which ran it.
+    #[tokio::test]
+    async fn replacing_an_account_moves_its_pins_and_its_clones_then_deletes_it() {
+        let app = app_with_group(&["old@x", "new@x"]);
+        app.store.mutate(|s| {
+            s.hosts.push(RmngClone {
+                id: "pinned".into(),
+                managed: true,
+                archived: true, // no docker in the test; the binding is what is under test
+                claude_account_email: Some("old@x".into()),
+                claude_selection: Some("old@x".into()),
+                ..Default::default()
+            });
+            s.hosts.push(RmngClone {
+                id: "pooled".into(),
+                managed: true,
+                archived: true,
+                claude_account_email: Some("old@x".into()),
+                claude_selection: Some("group:team".into()),
+                claude_group: Some("team".into()),
+                ..Default::default()
+            });
+        });
+
+        // The two halves `replace_account` composes, minus its config write: that one goes
+        // through `crate::config::save`, which writes a fixed relative path and would leave a
+        // `config.json` behind in whatever directory the suite ran in. The pool half is
+        // covered by `a_replacement_inherits_every_pool_the_old_account_sat_in`.
+        let moved = repoint_clones(&app, "old@x", "new@x");
+        assert_eq!(moved, vec!["pinned".to_string(), "pooled".to_string()]);
+        delete_account(&app, "old@x").await.unwrap();
+
+        let hosts = app.store.get().hosts;
+        let pinned = hosts.iter().find(|h| h.id == "pinned").unwrap();
+        assert_eq!(pinned.claude_selection.as_deref(), Some("new@x"), "the pin follows");
+        assert_eq!(pinned.claude_account_email.as_deref(), Some("new@x"));
+        let pooled = hosts.iter().find(|h| h.id == "pooled").unwrap();
+        assert_eq!(pooled.claude_account_email.as_deref(), Some("new@x"));
+
+        // The old account is gone, including from the published list, and a pin no longer
+        // blocks that: moving it is part of the same operation.
+        assert!(!app.claude.emails().contains(&"old@x".to_string()));
+    }
+
+    /// Signing in as the SAME account is a token repair, which `upsert_account` has already
+    /// done by the time this is reached. Treating it as a replacement would delete the
+    /// account that was just fixed.
+    #[tokio::test]
+    async fn replacing_an_account_with_itself_does_nothing() {
+        let app = app_with_group(&["a@x", "b@x"]);
+        assert!(replace_account(&app, "a@x", "a@x").await.unwrap().is_empty());
+        assert!(app.claude.emails().contains(&"a@x".to_string()));
     }
 
     /// Mark `email`'s last access token as long expired, which is what a refresh chain

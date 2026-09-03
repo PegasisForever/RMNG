@@ -38,7 +38,7 @@ import { useTeamMeta } from "~/lib/linear/useTeamMeta";
 import { useTickets } from "~/lib/linear/useTickets";
 import { readSelection, sameSelection, withSelection } from "~/lib/selection";
 import { cloneForTicket, cloneTickets, findTicket, type LinearTicket } from "~/lib/tickets";
-import type { ControlState } from "~/lib/types";
+import type { ClaudeUsage, ControlState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
@@ -84,6 +84,8 @@ export function MobileDashboardContainer({
   const [tab, setTab] = useState<CloneTab>("chat");
   const [usageOpen, setUsageOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  // The dead account the sign-in dialog is standing in for, or null for a plain import.
+  const [replacing, setReplacing] = useState<ClaudeUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The two session reads the usage bars need. Both belong here rather than in the panel:
   // the store is shared with desktop Settings, and the clock has to tick somewhere the
@@ -279,7 +281,14 @@ export function MobileDashboardContainer({
         usageOpen={usageOpen}
         onUsageOpenChange={setUsageOpen}
         onRefresh={() => run(Promise.all([refreshClaudeUsage(), refreshCodexUsage()]))}
-        onImportAccount={() => setImportOpen(true)}
+        onImportAccount={() => {
+          setReplacing(null);
+          setImportOpen(true);
+        }}
+        onReplaceAccount={(account) => {
+          setReplacing(account);
+          setImportOpen(true);
+        }}
         columns={withDefaults(state.boardColumns ?? [])}
         clones={state.hosts}
         cloneTickets={liveCloneTickets}
@@ -290,6 +299,14 @@ export function MobileDashboardContainer({
         <ImportAccountModalContainer
           claudeGroups={cloneGroups.map((g) => g.name)}
           codexGroups={codexGroups.map((g) => g.name)}
+          replacing={
+            replacing
+              ? {
+                  provider: replacing.provider === "codex" ? "codex" : "claude",
+                  email: replacing.email,
+                }
+              : null
+          }
           onClose={() => setImportOpen(false)}
           onImported={() => {
             setImportOpen(false);

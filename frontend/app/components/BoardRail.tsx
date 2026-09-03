@@ -57,6 +57,8 @@ export interface BoardRailProps {
   onOpenSettings: () => void;
   /** Import an account from a clone that is already signed in. */
   onImportAccount: () => void;
+  /** Sign in to an account that takes over from a dead one (the "sign in again" badge). */
+  onReplaceAccount: (account: ClaudeUsage) => void;
   /** Trigger an immediate usage refresh. */
   onRefresh: () => void | Promise<void>;
 }
@@ -75,6 +77,7 @@ export function BoardRail({
   onActivateLayout,
   onOpenSettings,
   onImportAccount,
+  onReplaceAccount,
   onRefresh,
 }: BoardRailProps) {
   const lxcUsage = formatLxcUsage(lxcStats);
@@ -142,6 +145,7 @@ export function BoardRail({
         locale={locale}
         now={now}
         onImport={onImportAccount}
+        onReplace={onReplaceAccount}
         onRefresh={onRefresh}
       />
 

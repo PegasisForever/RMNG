@@ -173,6 +173,7 @@ function makeRail() {
     onActivateLayout: fn(),
     onOpenSettings: toSettings,
     onImportAccount: toImportAccount,
+    onReplaceAccount: toImportAccount,
     onRefresh: fn(),
   };
 }

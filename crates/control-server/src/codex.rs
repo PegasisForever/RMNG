@@ -161,7 +161,7 @@ impl CodexStore {
     /// Emails of every imported account. Membership, not usability: an account whose
     /// refresh chain is dead is still imported. Use [`Self::usable_emails`] to pick one
     /// for a clone.
-    fn emails(&self) -> Vec<String> {
+    pub(crate) fn emails(&self) -> Vec<String> {
         self.accounts
             .lock()
             .unwrap()
@@ -170,14 +170,15 @@ impl CodexStore {
             .collect()
     }
 
-    /// Emails whose stored token still works: the accounts a clone may be handed.
+    /// Emails whose stored token still works: the accounts a clone may be handed. See
+    /// [`account_usable`].
     fn usable_emails(&self) -> Vec<String> {
         let now = now_ms();
         self.accounts
             .lock()
             .unwrap()
             .iter()
-            .filter(|a| crate::claude::token_alive(a.expires_at, now))
+            .filter(|a| account_usable(a, now))
             .map(|a| a.email.clone())
             .collect()
     }
@@ -214,6 +215,13 @@ impl CodexStore {
 /// Write one account into the 0600 store, replacing whatever shared its id.
 ///
 /// Accounts arrive one way: signing in to the provider at this server ([`crate::oauth`]).
+/// Drop an imported account from the secret store, with none of [`delete_account`]'s healing.
+/// Exists so a test elsewhere in the crate can stage a delete landing mid-poll.
+#[cfg(test)]
+pub(crate) fn test_delete(app: &App, email: &str) {
+    app.codex.delete(email).unwrap();
+}
+
 pub fn upsert_account(app: &App, stored: StoredCodexAccount) -> Result<()> {
     let mut accts = app.codex.accounts.lock().unwrap();
     let mut by_id: HashMap<String, StoredCodexAccount> =
@@ -284,9 +292,10 @@ async fn refresh_account(http: &reqwest::Client, acct: &mut StoredCodexAccount) 
             Ok(after) => after.clone(),
             Err(_) => String::new(),
         },
-        error: out.as_ref().err().map(|e| format!("{e:#}")),
+        error: out.as_ref().err().map(|e| format!("{:#}", e.error)),
+        rejected: out.as_ref().err().is_some_and(|e| e.rejected),
     });
-    out.map(|_| ())
+    out.map(|_| ()).map_err(|e| e.error)
 }
 
 /// The refresh itself. Returns the fingerprint of the token the reply carried, empty when
@@ -295,7 +304,7 @@ async fn refresh_inner(
     http: &reqwest::Client,
     acct: &mut StoredCodexAccount,
     before: &str,
-) -> Result<String> {
+) -> std::result::Result<String, crate::claude::RefreshFailure> {
     let resp = http
         .post(OAUTH_TOKEN_URL)
         .timeout(FETCH_TIMEOUT)
@@ -316,11 +325,14 @@ async fn refresh_inner(
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        bail!(
-            "refresh {} (rt {before}){}",
-            status.as_u16(),
-            snippet(&text)
-        );
+        return Err(crate::claude::RefreshFailure {
+            error: anyhow::anyhow!(
+                "refresh {} (rt {before}){}",
+                status.as_u16(),
+                snippet(&text)
+            ),
+            rejected: crate::claude::refresh_status_is_fatal(status.as_u16()),
+        });
     }
     let data: RefreshResp = resp.json().await.with_context(|| {
         format!(
@@ -1080,6 +1092,14 @@ fn rotation_candidates(app: &App, members: &[String]) -> Vec<RotationCandidate> 
         .collect()
 }
 
+/// Whether this account can be handed to a clone: it holds a token that has not expired AND
+/// its refresh chain has not been rejected. The Codex twin of `crate::claude::account_usable`
+/// — see there for why expiry alone is not enough.
+fn account_usable(acct: &StoredCodexAccount, now: i64) -> bool {
+    crate::claude::token_alive(acct.expires_at, now)
+        && !crate::claude::grant_rejected(acct.last_refresh.as_ref())
+}
+
 fn is_exhausted(seven: f64) -> bool {
     seven >= SEVEN_DAY_CAP_PCT
 }
@@ -1288,25 +1308,31 @@ async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[RmngC
         if host.codex_account_email.as_deref() == Some(email.as_str()) {
             continue;
         }
-        match push_account_to_clone(app, &host.id, &email).await {
-            Ok(()) => {
-                tracing::info!(
-                    "codex rotate[{label}]: {} {} -> {}",
-                    host.id,
-                    host.codex_account_email.as_deref().unwrap_or("none"),
-                    email
-                );
-                let id = host.id.clone();
-                app.store.mutate(|s| {
-                    if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                        h.codex_account_email = Some(email);
-                    }
-                });
+        // Record first, deliver second. See the Claude twin in `crate::claude::rotate_pool`
+        // for why: a binding written only on a successful push strands every clone that
+        // cannot take one.
+        tracing::info!(
+            "codex rotate[{label}]: {} {} -> {}",
+            host.id,
+            host.codex_account_email.as_deref().unwrap_or("none"),
+            email
+        );
+        let (id, bound) = (host.id.clone(), email.clone());
+        app.store.mutate(|s| {
+            if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+                h.codex_account_email = Some(bound);
             }
-            Err(e) => tracing::warn!(
-                "codex rotate[{label}]: applying {email} to {} failed: {e}",
+        });
+        app.codex.forget_pushed(&host.id);
+        if host.archived {
+            continue; // stopped container: no exec can land, and the push pass skips it too
+        }
+        if let Err(e) = push_account_to_clone(app, &host.id, &email).await {
+            tracing::warn!(
+                "codex rotate[{label}]: {} is now bound to {email}, but installing its token \
+                 failed (the next reconcile pass retries): {e}",
                 host.id
-            ),
+            );
         }
         tokio::time::sleep(STAGGER).await;
     }
@@ -1344,9 +1370,10 @@ pub async fn rotate_once(app: &App) {
 }
 
 /// Delete an imported Codex account by email, then heal the fleet — the Codex twin of
-/// [`crate::claude::delete_account`]. Refuses if any clone is pinned to it; otherwise
-/// removes the token and reassigns auto/group clones off it via [`rotate_once`], clearing
-/// any dangling reference that couldn't be re-placed. Returns the ids of moved clones.
+/// [`crate::claude::delete_account`], including its ordering: everything visible is settled
+/// before this returns (token gone, row out of the published state, no clone pointing at
+/// it), and the re-placement runs in the background. Refuses if any clone is pinned to it.
+/// Returns the ids of clones that were on the account.
 pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
     let pinned: Vec<String> = app
         .store
@@ -1364,8 +1391,12 @@ pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
             ids = pinned.join(", "),
         );
     }
+    let account_id = app.codex.get_by_email(email).map(|a| a.id);
     if !app.codex.delete(email)? {
         bail!("no imported Codex account '{email}'");
+    }
+    if let Some(id) = &account_id {
+        app.codex.last_good.lock().unwrap().remove(id);
     }
 
     let on_it: Vec<String> = app
@@ -1379,16 +1410,76 @@ pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
     for id in &on_it {
         app.codex.forget_pushed(id);
     }
-    rotate_once(app).await;
 
     app.store.mutate(|s| {
+        s.claude_accounts
+            .retain(|u| u.provider != Some(wire::Provider::Codex) || u.email != email);
         for h in &mut s.hosts {
             if h.codex_account_email.as_deref() == Some(email) {
                 h.codex_account_email = None;
             }
         }
     });
+
+    let bg = app.clone();
+    tokio::spawn(async move { rotate_once(&bg).await });
     Ok(on_it)
+}
+
+/// Move both of a clone's Codex bindings from `old` to `new`, fleet-wide, in one mutation.
+/// The Codex twin of `crate::claude::repoint_clones` — see there for why both bindings move
+/// and why this is separate from the config write.
+fn repoint_clones(app: &App, old: &str, new: &str) -> Vec<String> {
+    let (old, new) = (old.to_string(), new.to_string());
+    let mut moved = Vec::new();
+    app.store.mutate(|s| {
+        for h in &mut s.hosts {
+            if h.codex_selection.as_deref() == Some(old.as_str()) {
+                h.codex_selection = Some(new.clone());
+            }
+            if h.codex_account_email.as_deref() == Some(old.as_str()) {
+                h.codex_account_email = Some(new.clone());
+                moved.push(h.id.clone());
+            }
+        }
+    });
+    for id in &moved {
+        app.codex.forget_pushed(id);
+    }
+    moved
+}
+
+/// Hand everything `old_email` holds to `new_email`, then delete it — the Codex twin of
+/// [`crate::claude::replace_account`]. Same contract: pools and both bindings move, a
+/// sign-in as the same account is a no-op, and the token delivery is backgrounded.
+pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Result<Vec<String>> {
+    if old_email == new_email {
+        return Ok(Vec::new());
+    }
+    if app.codex.get_by_email(old_email).is_none() {
+        bail!("no imported Codex account '{old_email}' to replace");
+    }
+    if app.codex.get_by_email(new_email).is_none() {
+        bail!("'{new_email}' is not an imported Codex account");
+    }
+
+    let mut cfg = app.config();
+    let joined = crate::claude::swap_pool_member(&mut cfg.codex_groups, old_email, new_email);
+    crate::config::save(&cfg).context("saving the replacement's pool membership")?;
+    *app.cfg.write().unwrap() = cfg;
+
+    let moved = repoint_clones(app, old_email, new_email);
+    delete_account(app, old_email).await?;
+    tracing::info!(
+        "replaced Codex account {old_email} with {new_email}: {} clone(s), pool(s) {}",
+        moved.len(),
+        if joined.is_empty() { "none".to_string() } else { joined.join(", ") },
+    );
+
+    let bg = app.clone();
+    let email = new_email.to_string();
+    tokio::spawn(async move { push_stale_tokens_for(&bg, Some(&email)).await });
+    Ok(moved)
 }
 
 pub async fn run_rotator(app: App) {
@@ -1466,11 +1557,12 @@ async fn poll_inner(app: &App) -> Result<bool> {
                     any429 = true;
                 }
                 // Re-read the account: a refresh that succeeded earlier in this same pass
-                // moved `expires_at`, and the snapshot taken at the top has not.
+                // moved `expires_at`, and the snapshot taken at the top has not. It is also
+                // where the rejection this pass may have just recorded lives.
                 let alive = app
                     .codex
                     .get_by_email(&acct.email)
-                    .is_some_and(|a| crate::claude::token_alive(a.expires_at, now_ms()));
+                    .is_some_and(|a| account_usable(&a, now_ms()));
                 let prev = app.codex.last_good.lock().unwrap().get(&acct.id).cloned();
                 views.push(match prev {
                     Some(mut p) => {

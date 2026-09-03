@@ -95,6 +95,7 @@ const meta = {
     // Importing an account opens a modal ON TOP of this panel, which is navigation: the
     // story jumps to that modal's own story rather than stacking it here.
     onImportAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn"),
+    onReplaceAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "Replacing"),
     setupComplete: true,
     error: null,
     restartRequired: false,

@@ -42,6 +42,7 @@ const meta = {
     // Importing opens a dialog the container mounts, so the story jumps to that dialog's
     // own story rather than stacking it on this section.
     onImportAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn"),
+    onReplaceAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "Replacing"),
   },
   render: (args) => (
     <Frame>
