@@ -18,6 +18,7 @@ mod pointer;
 mod render;
 mod settings;
 mod shared;
+mod terminal;
 mod window;
 
 use std::collections::{HashMap, VecDeque};

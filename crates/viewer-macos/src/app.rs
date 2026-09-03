@@ -26,26 +26,48 @@ use dispatch2::DispatchQueue;
 use viewer_core::auto_lock::{lock_action, LockAction};
 use viewer_core::config;
 use wire::viewer::{ViewContent, ViewMonitor};
+use crate::shared::send_tagged;
 
 use crate::clipboard::Clipboard;
 use crate::cursor::cursor_from_shape;
 use crate::pointer::PointerLock;
 use crate::render::Renderer;
 use crate::shared::{Shared, Wake};
-use crate::window::{make_window, ViewerView, WinCtx};
+use crate::terminal::{TermCallbacks, TerminalView};
+use crate::window::{make_video_view, make_window_shell, ViewerView, WinCtx};
 
 /// How often the housekeeping tick runs: auto pointer-lock reconcile, cursor shape, clipboard,
 /// focus loss. Matches the GTK viewer's 8 ms tick closely enough for the lock debounce.
 const TICK_SECS: f64 = 0.016;
 
+/// What a window currently shows. The shell outlives every content swap.
+enum Content {
+    /// A headed clone's desktop for this monitor.
+    Video { view: Retained<ViewerView>, ctx: Rc<WinCtx> },
+    /// The tmux tab view — only ever on the main window (id 0). `clone` is the owning headless
+    /// clone: when the selection moves to a different one the view is rebuilt, so one clone's
+    /// `main` tab and its scrollback can never be reused for another's.
+    Terminal { clone: String, view: TerminalView },
+    /// A secondary window while a headless clone is selected: kept open, nothing to paint.
+    Placeholder,
+}
+
 /// One live monitor window.
 struct WindowEntry {
     monitor_id: u32,
     window: Retained<NSWindow>,
-    view: Retained<ViewerView>,
-    ctx: Rc<WinCtx>,
+    content: Content,
     /// Whether this window was the key window at the previous tick (to detect focus loss).
     was_key: Cell<bool>,
+}
+
+impl WindowEntry {
+    fn video(&self) -> Option<(&Retained<ViewerView>, &Rc<WinCtx>)> {
+        match &self.content {
+            Content::Video { view, ctx } => Some((view, ctx)),
+            _ => None,
+        }
+    }
 }
 
 /// Everything the main thread owns. Lives in a main-thread-only `thread_local`; `wake` reaches it
@@ -60,6 +82,8 @@ struct AppState {
     cmd_is_ctrl: bool,
     pointer_lock: Option<Rc<PointerLock>>,
     clipboard: Clipboard,
+    /// Target for menu and tab-strip actions (AppKit holds targets unretained).
+    delegate: Retained<Delegate>,
 }
 
 thread_local! {
@@ -100,36 +124,86 @@ impl AppState {
             self.last_epoch = epoch;
             let monitors: Vec<ViewMonitor> =
                 spec.as_ref().map(|s| s.monitors.clone()).unwrap_or_default();
-            let desktop = matches!(spec.as_ref().map(|s| &s.content), Some(ViewContent::Desktop));
-            self.reconcile(&monitors, desktop);
+            self.reconcile(&monitors, spec.as_ref().map(|s| &s.content));
         }
         self.draw_all();
     }
 
-    /// Create/destroy monitor windows to match the spec (Desktop mode only for now; Terminal is a
-    /// later milestone). An empty spec tears them down and shows the startup window.
-    fn reconcile(&mut self, monitors: &[ViewMonitor], desktop: bool) {
-        let live: std::collections::HashSet<u32> =
-            if desktop { monitors.iter().map(|m| m.id).collect() } else { Default::default() };
+    /// Reconcile the window set and each window's content to the spec. Windows are created and
+    /// destroyed only when the monitor set changes; switching clones just swaps content.
+    fn reconcile(&mut self, monitors: &[ViewMonitor], content: Option<&ViewContent>) {
+        let live: std::collections::HashSet<u32> = monitors.iter().map(|m| m.id).collect();
         for id in self.windows.keys().copied().filter(|id| !live.contains(id)).collect::<Vec<_>>() {
             if let Some(e) = self.windows.remove(&id) {
-                e.view.release_all();
+                if let Some((view, _)) = e.video() {
+                    view.release_all();
+                }
                 e.window.close();
             }
         }
-        // A window going away can strand the lock: it is a single process-wide resource and on
-        // macOS holding it with no window freezes the host cursor. The tick re-engages within a
-        // frame if the policy still wants it.
-        if self.windows.is_empty() {
+        let (terminal_mode, term_clone, sessions) = match content {
+            Some(ViewContent::Terminal { clone, sessions }) => {
+                (true, clone.clone(), sessions.clone())
+            }
+            _ => (false, String::new(), Vec::new()),
+        };
+        // A terminal clone has no desktop pointer, and a vanished window can strand the lock —
+        // it is process-wide, and on macOS holding it with no target freezes the host cursor.
+        if terminal_mode || self.windows.is_empty() {
             if let Some(pl) = self.pointer_lock.as_ref() {
                 pl.release();
             }
         }
-        if desktop {
-            for m in monitors {
-                if self.windows.contains_key(&m.id) {
-                    continue;
+
+        for m in monitors {
+            if !self.windows.contains_key(&m.id) {
+                let title = format!("RMNG viewer — monitor {}", m.id);
+                let window = make_window_shell(self.mtm, &title);
+                self.windows.insert(
+                    m.id,
+                    WindowEntry {
+                        monitor_id: m.id,
+                        window,
+                        content: Content::Placeholder,
+                        was_key: Cell::new(false),
+                    },
+                );
+            }
+            let want_terminal = terminal_mode && m.id == 0;
+            let want_placeholder = terminal_mode && m.id != 0;
+            let e = self.windows.get_mut(&m.id).expect("just inserted / already present");
+
+            if want_terminal {
+                // Rebuild only when the owning clone changes, so a re-sent spec keeps scrollback.
+                let same = matches!(&e.content, Content::Terminal { clone, .. } if *clone == term_clone);
+                if !same {
+                    let frame = e.window.contentView().map(|v| v.bounds()).unwrap_or(NSRect::new(
+                        NSPoint::new(0.0, 0.0),
+                        NSSize::new(1280.0, 720.0),
+                    ));
+                    let view = TerminalView::new(self.mtm, term_callbacks(&self.shared), frame);
+                    // AppKit targets are unretained; the delegate lives as long as the app.
+                    unsafe {
+                        view.tabs().setTarget(Some(&self.delegate));
+                        view.tabs().setAction(Some(objc2::sel!(rmngTabClicked:)));
+                    }
+                    e.window.setContentView(Some(view.view()));
+                    e.window.makeFirstResponder(Some(&**view.grid_view()));
+                    e.content = Content::Terminal { clone: term_clone.clone(), view };
                 }
+                if let Content::Terminal { view, .. } = &e.content {
+                    view.set_sessions(&sessions);
+                }
+            } else if want_placeholder {
+                if !matches!(e.content, Content::Placeholder) {
+                    let label = NSTextField::labelWithString(
+                        ns_string!("Headless clone selected — no desktop"),
+                        self.mtm,
+                    );
+                    e.window.setContentView(Some(&label));
+                    e.content = Content::Placeholder;
+                }
+            } else if !matches!(e.content, Content::Video { .. }) {
                 let ctx = Rc::new(WinCtx {
                     monitor_id: m.id,
                     shared: self.shared.clone(),
@@ -143,16 +217,13 @@ impl AppState {
                     cursor_version: Cell::new(0),
                     inside: Cell::new(false),
                 });
-                let title = format!("RMNG viewer — monitor {}", m.id);
-                let (window, view) =
-                    make_window(self.mtm, ctx.clone(), self.renderer.device(), &title);
-                self.windows.insert(
-                    m.id,
-                    WindowEntry { monitor_id: m.id, window, view, ctx, was_key: Cell::new(false) },
-                );
+                let view =
+                    make_video_view(self.mtm, &e.window, ctx.clone(), self.renderer.device());
+                e.content = Content::Video { view, ctx };
             }
         }
-        // Keep-alive / status window when there are no monitor windows.
+
+        // Keep-alive / status window when there are no content windows at all.
         if self.windows.is_empty() {
             if self.startup.is_none() {
                 self.startup = Some(make_startup_window(self.mtm));
@@ -166,9 +237,10 @@ impl AppState {
     fn draw_all(&mut self) {
         let frames = self.shared.frames.lock().unwrap();
         for e in self.windows.values() {
-            let layer = e.view.metal_layer();
-            let bounds = e.view.bounds();
-            let scale = e.view.window().map(|w| w.backingScaleFactor()).unwrap_or(2.0);
+            let Some((view, ctx)) = e.video() else { continue };
+            let layer = view.metal_layer();
+            let bounds = view.bounds();
+            let scale = view.window().map(|w| w.backingScaleFactor()).unwrap_or(2.0);
             let (dw, dh) = (bounds.size.width * scale, bounds.size.height * scale);
             if dw < 1.0 || dh < 1.0 {
                 continue;
@@ -177,7 +249,7 @@ impl AppState {
             let Some(drawable) = layer.nextDrawable() else { continue };
             let frame = frames.get(&e.monitor_id);
             if let Some(f) = frame {
-                e.ctx.frame_size.set((f.width as f64, f.height as f64));
+                ctx.frame_size.set((f.width as f64, f.height as f64));
             }
             if let Err(err) = self.renderer.draw(frame, &drawable, dw, dh) {
                 tracing::warn!("monitor {}: draw error: {err:#}", e.monitor_id);
@@ -193,10 +265,12 @@ impl AppState {
         for e in self.windows.values() {
             let is_key = e.window.isKeyWindow();
             if e.was_key.get() && !is_key {
-                e.view.release_all();
+                if let Some((view, _)) = e.video() {
+                    view.release_all();
+                }
             }
             e.was_key.set(is_key);
-            has_target |= is_key;
+            has_target |= is_key && e.video().is_some();
         }
 
         // 2. Auto pointer-lock: remote cursor hidden ≥180 ms engages, shown ≥300 ms releases;
@@ -216,20 +290,21 @@ impl AppState {
         {
             let cursors = self.shared.cursors.lock().unwrap();
             for e in self.windows.values() {
+                let Some((_, ctx)) = e.video() else { continue };
                 let Some(entry) = cursors.get(&e.monitor_id) else { continue };
-                if entry.version == e.ctx.cursor_version.get() {
+                if entry.version == ctx.cursor_version.get() {
                     continue;
                 }
                 let Some(shape) = entry.shape.as_ref() else { continue };
-                e.ctx.cursor_version.set(entry.version);
+                ctx.cursor_version.set(entry.version);
                 match cursor_from_shape(shape) {
                     Ok(c) => {
                         tracing::debug!(
                             "cursor apply: mon={} version={} {}x{}",
                             e.monitor_id, entry.version, shape.width, shape.height
                         );
-                        *e.ctx.cursor.borrow_mut() = Some(c);
-                        e.ctx.apply_cursor();
+                        *ctx.cursor.borrow_mut() = Some(c);
+                        ctx.apply_cursor();
                     }
                     // Keep the previous cursor rather than losing the pointer shape entirely.
                     Err(err) => tracing::warn!("monitor {}: cursor build failed: {err:#}", e.monitor_id),
@@ -237,7 +312,20 @@ impl AppState {
             }
         }
 
-        // 4. Clipboard: drain inbound offers/data and notice a local copy.
+        // 4. Terminal: feed the server's PTY bytes into the tab that owns them, and let the view
+        //    settle its grid size (debounced, so a live window drag sends one resize, not many).
+        let chunks: Vec<(String, Vec<u8>)> =
+            self.shared.term_out.lock().unwrap().drain(..).collect();
+        for e in self.windows.values() {
+            if let Content::Terminal { view, .. } = &e.content {
+                for (session, data) in &chunks {
+                    view.feed(session, data);
+                }
+                view.tick();
+            }
+        }
+
+        // 5. Clipboard: drain inbound offers/data and notice a local copy.
         let shared = self.shared.clone();
         self.clipboard.tick(&shared);
     }
@@ -260,6 +348,38 @@ fn open_settings() {
     });
     if addr_changed {
         wake(Wake::View);
+    }
+}
+
+/// Route the terminal view's input, resize and new-session events back to the server. The
+/// viewer→server tags mirror the GTK viewer: 3 = keystrokes, 4 = grid size, 5 = new session.
+fn term_callbacks(shared: &Arc<Shared>) -> TermCallbacks {
+    TermCallbacks {
+        on_input: {
+            let shared = shared.clone();
+            Rc::new(move |session: &str, data: Vec<u8>| {
+                let msg = wire::viewer::TermInput { session: session.to_string(), data };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    send_tagged(&shared.writer, 3, &json);
+                }
+            })
+        },
+        on_resize: {
+            let shared = shared.clone();
+            Rc::new(move |cols: u16, rows: u16| {
+                if let Ok(json) = serde_json::to_string(&wire::viewer::TermResize { cols, rows }) {
+                    send_tagged(&shared.writer, 4, &json);
+                }
+            })
+        },
+        on_new_session: {
+            let shared = shared.clone();
+            Rc::new(move || {
+                if let Ok(json) = serde_json::to_string(&wire::viewer::TermNewSession {}) {
+                    send_tagged(&shared.writer, 5, &json);
+                }
+            })
+        },
     }
 }
 
@@ -323,6 +443,18 @@ define_class!(
         #[unsafe(method(rmngShowSettings:))]
         fn rmng_show_settings(&self, _sender: *mut objc2::runtime::AnyObject) {
             open_settings();
+        }
+
+        /// The terminal tab strip was clicked (a session tab, or the trailing "+").
+        #[unsafe(method(rmngTabClicked:))]
+        fn rmng_tab_clicked(&self, _sender: *mut objc2::runtime::AnyObject) {
+            with_state(|s| {
+                for e in s.windows.values() {
+                    if let Content::Terminal { view, .. } = &e.content {
+                        view.on_tab_clicked();
+                    }
+                }
+            });
         }
     }
 );
@@ -389,6 +521,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         cmd_is_ctrl: config::cmd_is_ctrl(),
         pointer_lock,
         clipboard: Clipboard::new(mtm),
+        delegate: delegate.clone(),
     };
     // Show the startup window immediately: the net thread may connect before the first spec.
     state.startup = Some(make_startup_window(mtm));

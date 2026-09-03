@@ -8,3 +8,4 @@ pub mod auto_lock;
 pub mod config;
 pub mod forward;
 pub mod kvk_evdev;
+pub mod terminal;

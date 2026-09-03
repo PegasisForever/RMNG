@@ -489,14 +489,10 @@ impl ViewerView {
     }
 }
 
-/// A viewer window for one monitor: a titled NSWindow whose content view is our Metal-backed
-/// `ViewerView`. Returns the window and the view (the caller keeps the view for drawing).
-pub fn make_window(
-    mtm: MainThreadMarker,
-    ctx: Rc<WinCtx>,
-    device: &ProtocolObject<dyn objc2_metal::MTLDevice>,
-    title: &str,
-) -> (Retained<NSWindow>, Retained<ViewerView>) {
+/// A bare viewer window: titled, resizable, no content yet. The shell is stable for the
+/// window's whole life; only its content view swaps (video ⇄ terminal ⇄ placeholder), which is
+/// what lets a clone switch without destroying and rebuilding windows.
+pub fn make_window_shell(mtm: MainThreadMarker, title: &str) -> Retained<NSWindow> {
     let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 720.0));
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
@@ -515,13 +511,28 @@ pub fn make_window(
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str(title));
     window.setAcceptsMouseMovedEvents(true);
+    window.center();
+    window.makeKeyAndOrderFront(None);
+    window
+}
 
+/// Build the Metal-backed video view for `window` and make it the content view.
+pub fn make_video_view(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    ctx: Rc<WinCtx>,
+    device: &ProtocolObject<dyn objc2_metal::MTLDevice>,
+) -> Retained<ViewerView> {
+    let frame = window.contentView().map(|v| v.bounds()).unwrap_or(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(1280.0, 720.0),
+    ));
     let view = {
         let this = ViewerView::alloc(mtm).set_ivars(ViewerViewIvars {
             ctx: RefCell::new(Some(ctx)),
             tracking: RefCell::new(None),
         });
-        let this: Retained<ViewerView> = unsafe { msg_send![super(this), initWithFrame: content] };
+        let this: Retained<ViewerView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this
     };
     view.setWantsLayer(true);
@@ -533,10 +544,8 @@ pub fn make_window(
     view.setLayer(Some(&layer));
 
     window.setContentView(Some(&view));
-    window.center();
-    window.makeKeyAndOrderFront(None);
     window.makeFirstResponder(Some(&view));
-    (window, view)
+    view
 }
 
 #[cfg(test)]

@@ -32,6 +32,9 @@ objc2-app-kit = { version = "0.3", features = [
     "NSMenu", "NSMenuItem", "NSColor", "NSFont", "NSText", "NSTextField", "NSControl", "NSCell",
     "NSButton", "NSAlert", "NSPanel", "NSProgressIndicator", "NSTitlebarAccessoryViewController",
     "NSViewController", "NSLayoutConstraint", "NSWindowController", "NSAppearance",
+    # terminal: tab strip, text drawing, and the colour/paths it needs
+    "NSSegmentedControl", "NSSegmentedCell", "NSAttributedString", "NSStringDrawing",
+    "NSBezierPath", "NSFontDescriptor", "NSParagraphStyle",
 ] }
 # Metal: the render path (NV12 → RGB, AVC444 unpack) into a CAMetalLayer.
 objc2-metal = { version = "0.3", features = [
