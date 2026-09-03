@@ -27,7 +27,8 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_video::{CVImageBuffer, CVMetalTexture, CVMetalTextureCache};
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLLibrary,
+    MTLBlendFactor, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice,
+    MTLLibrary,
     MTLLoadAction, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
     MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
     MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
@@ -133,6 +134,23 @@ fragment float4 f_unpack(VOut in [[stage_in]],
     return float4(saturate(ycbcr601_limited_255(Y, Cb, Cr)), 1.0);
 }
 
+// ── the agent-warp cursor overlay: a textured quad at an arbitrary rect ─────────────────────
+struct COut { float4 pos [[position]]; float2 uv; };
+
+vertex COut v_cursor(uint vid [[vertex_id]], constant float4& rect [[buffer(0)]]) {
+    // rect = (x, y, w, h) in NDC, y already flipped by the caller.
+    float2 corner = float2((vid == 1 || vid == 3) ? 1.0 : 0.0, (vid >= 2) ? 1.0 : 0.0);
+    COut o;
+    o.pos = float4(rect.x + corner.x * rect.z, rect.y - corner.y * rect.w, 0.0, 1.0);
+    o.uv = corner;
+    return o;
+}
+
+fragment float4 f_cursor(COut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+    return tex.sample(s, in.uv);
+}
+
 // ── blit an RGBA texture to the drawable ────────────────────────────────────────────────────
 fragment float4 f_blit(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
     constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
@@ -156,6 +174,8 @@ pub struct Renderer {
     pipe_unpack: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// RGBA texture → drawable (BGRA).
     pipe_blit: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// The agent-warp cursor sprite, alpha-blended over the video.
+    pipe_cursor: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     cache: CFRetained<CVMetalTextureCache>,
     offscreen: RefCell<Option<Offscreen>>,
 }
@@ -176,6 +196,7 @@ impl Renderer {
         let pipe_nv12 = pipeline(&device, &library, "f_nv12", MTLPixelFormat::BGRA8Unorm)?;
         let pipe_unpack = pipeline(&device, &library, "f_unpack", MTLPixelFormat::RGBA8Unorm)?;
         let pipe_blit = pipeline(&device, &library, "f_blit", MTLPixelFormat::BGRA8Unorm)?;
+        let pipe_cursor = cursor_pipeline(&device, &library)?;
 
         let mut cache: *mut CVMetalTextureCache = std::ptr::null_mut();
         let status = unsafe {
@@ -198,6 +219,7 @@ impl Renderer {
             pipe_nv12,
             pipe_unpack,
             pipe_blit,
+            pipe_cursor,
             cache,
             offscreen: RefCell::new(None),
         })
@@ -215,6 +237,7 @@ impl Renderer {
         drawable: &ProtocolObject<dyn CAMetalDrawable>,
         drawable_w: f64,
         drawable_h: f64,
+        overlay: Option<&Overlay>,
     ) -> Result<()> {
         let cmd = self.queue.commandBuffer().ok_or_else(|| anyhow!("no command buffer"))?;
 
@@ -272,6 +295,28 @@ impl Renderer {
                 }
             }
             unsafe { enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3) };
+
+            // The agent cursor rides on top, in the same viewport, so its rect is just the image
+            // rect expressed in NDC (y flipped: image y grows downward, NDC upward).
+            if let Some(o) = overlay {
+                let (fw, fh) = (f.width as f32, f.height as f32);
+                let rect: [f32; 4] = [
+                    2.0 * o.x as f32 / fw - 1.0,
+                    1.0 - 2.0 * o.y as f32 / fh,
+                    2.0 * o.w as f32 / fw,
+                    2.0 * o.h as f32 / fh,
+                ];
+                enc.setRenderPipelineState(&self.pipe_cursor);
+                unsafe {
+                    enc.setVertexBytes_length_atIndex(
+                        NonNull::new(rect.as_ptr() as *mut std::ffi::c_void).unwrap(),
+                        std::mem::size_of_val(&rect),
+                        0,
+                    );
+                    enc.setFragmentTexture_atIndex(Some(&o.texture), 0);
+                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::TriangleStrip, 0, 4);
+                }
+            }
         }
         enc.endEncoding();
         cmd.presentDrawable(ProtocolObject::from_ref(drawable));
@@ -343,6 +388,61 @@ impl Renderer {
         // The MTLTexture is +0 borrowed from the CVMetalTexture we drop here, so retain it.
         unsafe { Retained::retain(mtl) }.ok_or_else(|| anyhow!("retain MTLTexture failed"))
     }
+}
+
+/// The agent-warp cursor overlay: a sprite plus where to put it, in image pixels.
+pub struct Overlay {
+    pub texture: Tex,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl Renderer {
+    /// Upload a cursor sprite (BGRA premultiplied, as the daemon captures it) as a texture.
+    pub fn cursor_texture(&self, rgba: &[u8], w: usize, h: usize) -> Result<Tex> {
+        if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+            bail!("bad cursor sprite {w}x{h} ({} bytes)", rgba.len());
+        }
+        let tex = new_texture(
+            &self.device,
+            MTLPixelFormat::BGRA8Unorm,
+            w,
+            h,
+            MTLTextureUsage::ShaderRead,
+            MTLStorageMode::Shared,
+        )?;
+        upload(&tex, &rgba[..w * h * 4], w * 4, w, h);
+        Ok(tex)
+    }
+}
+
+/// The overlay pipeline: premultiplied-alpha blending, since the sprite arrives premultiplied.
+fn cursor_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>> {
+    let vfn = library
+        .newFunctionWithName(&NSString::from_str("v_cursor"))
+        .ok_or_else(|| anyhow!("missing v_cursor"))?;
+    let ffn = library
+        .newFunctionWithName(&NSString::from_str("f_cursor"))
+        .ok_or_else(|| anyhow!("missing f_cursor"))?;
+    let desc = MTLRenderPipelineDescriptor::new();
+    desc.setVertexFunction(Some(&vfn));
+    desc.setFragmentFunction(Some(&ffn));
+    let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+    att.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    att.setBlendingEnabled(true);
+    // Premultiplied source: One / (1 - srcAlpha).
+    att.setSourceRGBBlendFactor(MTLBlendFactor::One);
+    att.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+    att.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    att.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    device
+        .newRenderPipelineStateWithDescriptor_error(&desc)
+        .map_err(|e| anyhow!("cursor pipeline build failed: {e:?}"))
 }
 
 /// One-colour-attachment render pass onto `target`.

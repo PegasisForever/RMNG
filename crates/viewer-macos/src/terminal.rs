@@ -15,7 +15,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
@@ -32,7 +34,7 @@ use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString,
 };
 
-use viewer_core::terminal::{arrow, bold_bright, dark_theme, resolve, Rgb3, Theme};
+use viewer_core::terminal::{arrow, base_button, bold_bright, dark_theme, mouse_report, resolve, Rgb3, Theme};
 
 /// Extra leading, as a multiple of the font's natural line height.
 const LINE_HEIGHT: f64 = 1.1;
@@ -159,6 +161,78 @@ define_class!(
             self.paint();
         }
 
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &objc2_app_kit::NSEvent) {
+            self.mouse(event, true);
+        }
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &objc2_app_kit::NSEvent) {
+            self.mouse(event, false);
+        }
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
+            self.mouse(event, true);
+        }
+        #[unsafe(method(rightMouseUp:))]
+        fn right_mouse_up(&self, event: &objc2_app_kit::NSEvent) {
+            self.mouse(event, false);
+        }
+
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &objc2_app_kit::NSEvent) {
+            let Some(state) = self.state() else { return };
+            let Some(key) = state.active_session() else { return };
+            let (point, side, _, _) = self.locate(&state, event);
+            let mut terms = state.terms.borrow_mut();
+            let Some(sess) = terms.get_mut(&key) else { return };
+            // An app that grabbed the mouse gets the motion; otherwise we are extending a
+            // selection.
+            if sess.term.mode().intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+                return;
+            }
+            if let Some(sel) = sess.term.selection.as_mut() {
+                sel.update(point, side);
+                drop(terms);
+                self.setNeedsDisplay(true);
+            }
+        }
+
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &objc2_app_kit::NSEvent) {
+            let Some(state) = self.state() else { return };
+            let Some(key) = state.active_session() else { return };
+            let dy = event.scrollingDeltaY();
+            if dy == 0.0 {
+                return;
+            }
+            let (_, ch) = state.metrics.get();
+            // Precise (trackpad) deltas are in points; a wheel reports whole lines.
+            let lines = if event.hasPreciseScrollingDeltas() {
+                (dy / ch).round() as i32
+            } else {
+                dy.signum() as i32 * 3
+            };
+            if lines == 0 {
+                return;
+            }
+            let mut terms = state.terms.borrow_mut();
+            let Some(sess) = terms.get_mut(&key) else { return };
+            if sess.term.mode().intersects(TermMode::MOUSE_MODE) {
+                // The app wants wheel events itself (codes 64/65), not scrollback.
+                let mode = *sess.term.mode();
+                let (_, _, col, row) = self.locate(&state, event);
+                drop(terms);
+                let code = if lines > 0 { 64 } else { 65 };
+                for _ in 0..lines.abs() {
+                    state.send(mouse_report(code, col, row, true, mode));
+                }
+                return;
+            }
+            sess.term.scroll_display(Scroll::Delta(lines));
+            drop(terms);
+            self.setNeedsDisplay(true);
+        }
+
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &objc2_app_kit::NSEvent) {
             let Some(state) = self.state() else { return };
@@ -200,6 +274,56 @@ define_class!(
 impl GridView {
     fn state(&self) -> Option<Rc<State>> {
         self.ivars().state.borrow().clone()
+    }
+
+    /// Map a mouse event to a grid `Point` + `Side`, plus the on-screen (col, row). The view is
+    /// flipped, so `locationInWindow` converts to a top-left origin directly.
+    fn locate(
+        &self,
+        state: &Rc<State>,
+        event: &objc2_app_kit::NSEvent,
+    ) -> (Point, Side, usize, usize) {
+        let p = self.convertPoint_fromView(event.locationInWindow(), None);
+        let (cw, ch) = state.metrics.get();
+        let (cols, lines) = state.grid.get();
+        // Undo the inset applied when rendering, so clicks land on the cell they look like.
+        let pad = cw * PAD_CELLS;
+        let colf = ((p.x - pad) / cw).max(0.0);
+        let col = (colf.floor() as usize).min(cols.saturating_sub(1));
+        let row = (((p.y - pad) / ch).floor() as i64).clamp(0, lines.saturating_sub(1) as i64) as usize;
+        let side = if colf.fract() < 0.5 { Side::Left } else { Side::Right };
+        let offset = state
+            .terms
+            .borrow()
+            .get(&state.active_session().unwrap_or_default())
+            .map(|s| s.term.grid().display_offset() as i32)
+            .unwrap_or(0);
+        (Point::new(Line(row as i32 - offset), Column(col)), side, col, row)
+    }
+
+    /// A button press or release: mouse reporting when the app asked for it, else selection.
+    fn mouse(&self, event: &objc2_app_kit::NSEvent, pressed: bool) {
+        let Some(state) = self.state() else { return };
+        let Some(key) = state.active_session() else { return };
+        let (point, side, col, row) = self.locate(&state, event);
+        let mut terms = state.terms.borrow_mut();
+        let Some(sess) = terms.get_mut(&key) else { return };
+        let mode = *sess.term.mode();
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            drop(terms);
+            let code = base_button(event.buttonNumber() as u32 + 1);
+            state.send(mouse_report(code, col, row, pressed, mode));
+            return;
+        }
+        if pressed {
+            // A fresh press starts a selection; the drag handler extends it.
+            sess.term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+        }
+        drop(terms);
+        if pressed {
+            self.window().map(|w| w.makeFirstResponder(Some(self)));
+        }
+        self.setNeedsDisplay(true);
     }
 
     fn paste(&self) {

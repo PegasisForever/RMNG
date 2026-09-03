@@ -95,9 +95,12 @@ cargo build -p viewer-macos --release    # → target/release/rmng-viewer-macos
 ```
 
 It needs **no Homebrew at all** — AppKit + Metal + VideoToolbox are system frameworks, so the
-binary is self-contained. It exists because GDK's macOS backend re-derives pointer state and
-drops motion (in fullscreen, the top ~50 px stalled the pointer until you clicked); owning the
-`NSView` removes that layer. See its README for what is and is not ported yet.
+binary is self-contained; `scripts/build-macos-app.sh` wraps it in a `.app` that runs on a Mac
+which has never seen this repo. It exists because GDK's macOS backend re-derives pointer state
+and drops motion (in fullscreen, the top ~50 px stalled the pointer until you clicked); owning
+the `NSView` removes that layer. It is at feature parity with the GTK viewer — see its README
+for the handful of places where it deliberately follows Mac convention instead (⌘C/⌘V in the
+terminal, Settings under ⌘,).
 
 The GTK viewer below still builds on macOS and remains the reference implementation (and the
 Linux client). Only the **viewer** builds and runs on macOS; the capture/encode/server side is

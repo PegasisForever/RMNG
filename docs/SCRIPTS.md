@@ -43,6 +43,16 @@ they never touch the control-server binary or a live container.
 
 ---
 
+## Developer scripts
+
+### `scripts/build-macos-app.sh [OUTPUT_DIR]`
+
+Builds the native macOS viewer ([`crates/viewer-macos`](../crates/viewer-macos/README.md)) in
+release and wraps it in `OUTPUT_DIR/RMNG Viewer.app` (default `target/macos`), ad-hoc signing it
+so arm64 will launch it. The binary links only system frameworks, so the bundle is
+self-contained — no Homebrew, nothing to copy in — and runs on a Mac that has never seen this
+repo. Prints the framework/Homebrew link counts as a check. Runs on macOS only.
+
 ## In-container guest scripts
 
 ### `claude-import.sh <user> status|read|clear|apply [b64]`

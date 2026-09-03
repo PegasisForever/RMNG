@@ -11,3 +11,4 @@ platform framework, or a socket beyond plain `std::net`, so both the GTK viewer
 | `auto_lock` | the debounced auto pointer-lock policy (engage on a sustained hidden remote cursor, release on a sustained visible one) + the reconciler |
 | `forward` | local port-forward listeners driven by the server's rule set, reporting status back |
 | `kvk_evdev` | the Carbon virtual-key → Linux evdev keycode table (macOS keyboards) |
+| `terminal` | the terminal colour scheme and the escape-sequence encoders — which colour a cell resolves to and which bytes a key or click puts on the wire must not differ between the two front-ends |

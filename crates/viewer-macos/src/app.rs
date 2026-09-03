@@ -31,7 +31,7 @@ use crate::shared::send_tagged;
 use crate::clipboard::Clipboard;
 use crate::cursor::cursor_from_shape;
 use crate::pointer::PointerLock;
-use crate::render::Renderer;
+use crate::render::{Overlay, Renderer};
 use crate::shared::{Shared, Wake};
 use crate::terminal::{TermCallbacks, TerminalView};
 use crate::window::{make_video_view, make_window_shell, ViewerView, WinCtx};
@@ -59,6 +59,9 @@ struct WindowEntry {
     content: Content,
     /// Whether this window was the key window at the previous tick (to detect focus loss).
     was_key: Cell<bool>,
+    /// The agent-cursor sprite as a Metal texture, and the shape version it was built from.
+    overlay_tex: RefCell<Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>>>>,
+    overlay_version: Cell<u64>,
 }
 
 impl WindowEntry {
@@ -166,6 +169,8 @@ impl AppState {
                         window,
                         content: Content::Placeholder,
                         was_key: Cell::new(false),
+                        overlay_tex: RefCell::new(None),
+                        overlay_version: Cell::new(0),
                     },
                 );
             }
@@ -236,6 +241,8 @@ impl AppState {
     /// Draw the latest frame for each window (latest-wins; a window with no frame yet clears).
     fn draw_all(&mut self) {
         let frames = self.shared.frames.lock().unwrap();
+        let cursors = self.shared.cursors.lock().unwrap();
+        let now = Instant::now();
         for e in self.windows.values() {
             let Some((view, ctx)) = e.video() else { continue };
             let layer = view.metal_layer();
@@ -251,7 +258,40 @@ impl AppState {
             if let Some(f) = frame {
                 ctx.frame_size.set((f.width as f64, f.height as f64));
             }
-            if let Err(err) = self.renderer.draw(frame, &drawable, dw, dh) {
+            // The synthetic cursor is drawn ONLY while the remote agent is driving this
+            // monitor's pointer, so the operator can see where it is going; the rest of the time
+            // the real OS cursor (wearing the remote's shape) is the only one on screen.
+            let overlay = cursors.get(&e.monitor_id).and_then(|c| {
+                if !c.warp_until.is_some_and(|d| now < d) {
+                    return None;
+                }
+                let shape = c.shape.as_ref()?;
+                if e.overlay_version.get() != c.version || e.overlay_tex.borrow().is_none() {
+                    match self.renderer.cursor_texture(
+                        &shape.rgba,
+                        shape.width as usize,
+                        shape.height as usize,
+                    ) {
+                        Ok(t) => {
+                            *e.overlay_tex.borrow_mut() = Some(t);
+                            e.overlay_version.set(c.version);
+                        }
+                        Err(err) => {
+                            tracing::warn!("monitor {}: overlay sprite failed: {err:#}", e.monitor_id);
+                            return None;
+                        }
+                    }
+                }
+                let texture = e.overlay_tex.borrow().clone()?;
+                Some(Overlay {
+                    texture,
+                    x: (c.x - shape.hotspot_x as i32) as f64,
+                    y: (c.y - shape.hotspot_y as i32) as f64,
+                    w: shape.width as f64,
+                    h: shape.height as f64,
+                })
+            });
+            if let Err(err) = self.renderer.draw(frame, &drawable, dw, dh, overlay.as_ref()) {
                 tracing::warn!("monitor {}: draw error: {err:#}", e.monitor_id);
             }
         }
