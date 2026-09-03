@@ -80,10 +80,7 @@ pub fn light_theme() -> Theme {
     }
 }
 
-/// Whether the resolved GTK theme is dark, judged by the luminance of its default foreground
-/// color (light text ⇒ dark theme). This reflects the theme GTK actually applied from the
-
-
+/// An alacritty `Rgb` as normalized components.
 pub fn rgb_f(rgb: Rgb) -> Rgb3 {
     (rgb.r as f64 / 255.0, rgb.g as f64 / 255.0, rgb.b as f64 / 255.0)
 }
