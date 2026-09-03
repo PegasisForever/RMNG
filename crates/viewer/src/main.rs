@@ -33,14 +33,18 @@ mod glunpack;
 mod headless;
 mod terminal;
 // The Wayland pointer-lock implementation only compiles (and links) on Linux.
-// The macOS twin lives in pointer_lock_macos.rs (§4.5).
+// The macOS twin lives in pointer_lock_macos.rs (§4.5), the Windows one (ClipCursor + Raw
+// Input) in pointer_lock_win.rs.
 // Other platforms get a no-op stub.
 #[cfg(target_os = "linux")]
 mod pointer_lock;
 #[cfg(target_os = "macos")]
 #[path = "pointer_lock_macos.rs"]
 mod pointer_lock;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+#[path = "pointer_lock_win.rs"]
+mod pointer_lock;
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod pointer_lock {
     use std::net::TcpStream;
     use std::sync::{Arc, Mutex};
@@ -65,6 +69,12 @@ mod pointer_lock {
 // Carbon kVK → Linux evdev translation table (macOS only).
 #[cfg(target_os = "macos")]
 mod kvk_evdev;
+
+// Win32 virtual-key → Linux evdev translation, via the set-1 scancode (Windows only).
+// Unlike Linux (evdev + 8) and macOS (Carbon kVK), a Windows VK is layout-dependent and is
+// therefore NOT a physical key — see the module docs.
+#[cfg(target_os = "windows")]
+mod vk_evdev;
 
 // Physical-keyboard capture via a raw NSEvent monitor (macOS only): bypasses GDK's
 // IM-mediated key events, which synthesize phantom keycode-0 presses. See keyboard_macos.rs.
@@ -1468,6 +1478,102 @@ fn stamp_colorimetry(caps: &gst::CapsRef, colorimetry: &str) -> Option<gst::Caps
     Some(out)
 }
 
+/// The Windows H.264 decode chain, from `h264parse`'s output to NV12 `memory:GLMemory` — the
+/// same thing `vah264dec ! glupload` produces on Linux and `vtdec_hw` on macOS, so everything
+/// downstream (`rmngavc444unpack`, `glcolorconvert`, the sink) is identical across platforms.
+///
+/// **Why this one is chosen at runtime while the other two are compile-time strings.** Linux
+/// has exactly one answer (VA-API, and the deploy target is a known GPU) and macOS has exactly
+/// one (VideoToolbox, always present). Windows has neither: `d3d11h264dec` is registered only
+/// when the installed GStreamer carries the D3D11 plugin *and* the GPU advertises an H.264
+/// decoder profile, which a remote session, a VM, or a stripped GStreamer build will not. A
+/// fixed string would turn every one of those into "cannot build the decode pipeline" and a
+/// blank window; picking from what actually registered degrades to software instead.
+///
+/// Order is fastest-first: D3D11 Video (the vendor-neutral GPU path, AMD/NVIDIA/Intel alike),
+/// then software.
+///
+/// **The software arms convert I420 → NV12, and that is safe for AVC444.** The invariant the
+/// [`glunpack`] element depends on is that nothing *resamples* the packed chroma before it. An
+/// I420 → NV12 conversion is a pure re-layout — the same 4:2:0 samples, planar U/V rewritten as
+/// interleaved UV — so the auxiliary view survives it intact. What must never appear here is a
+/// converter asked to produce a 4:4:4 or RGB format, which would 4:2:0-upsample the packed
+/// chroma and destroy the reconstruction.
+/// One row per candidate: `(factory, chain to NV12 sysmem, chain to sink-ready sysmem)`,
+/// fastest first. The decoder is always named `dec` so [`make_decoder`] can find its src pad
+/// for the colorimetry retag.
+///
+/// **Neither chain touches GL, and that is the whole point on Windows.** GTK's `ngl` GSK
+/// renderer realizes a WGL context and keeps it current; `gtk4paintablesink` then offers that
+/// context to the pipeline, and every `gst-gl` element tries to adopt it via `wglShareLists` —
+/// which fails with `ERROR_BUSY` against a context that is already in use, so the pipeline
+/// dies with `not-negotiated` and the window stays black. (It is specifically *sharing* that
+/// fails: `--glunpack-validate`, which builds a GL pipeline with no GTK sink in it, produces
+/// a standalone WGL context and passes.) Linux shares an EGL context with GTK happily and
+/// macOS a CGL one; Windows is the platform where the decoded frame has to reach the sink as
+/// plain system memory.
+///
+/// The conversion to the sink's RGB still happens on the GPU wherever the decoder is a GPU
+/// decoder — `d3d11convert` runs before `d3d11download`, so only the final RGBA crosses the
+/// bus, not the NV12 plus a CPU colour conversion.
+#[cfg(target_os = "windows")]
+const WIN_DECODERS: &[(&str, &str, &str)] = &[
+    // Direct3D 11 Video Acceleration: the Windows twin of VA-API, vendor-neutral across
+    // AMD/NVIDIA/Intel. Decodes into D3D11 texture memory; `d3d11download` lands it in sysmem.
+    (
+        "d3d11h264dec",
+        "d3d11h264dec name=dec ! d3d11download",
+        "d3d11h264dec name=dec ! d3d11convert ! d3d11download ! videoconvert",
+    ),
+    // libav software decode (I420) — the most widely present fallback.
+    ("avdec_h264", "avdec_h264 name=dec", "avdec_h264 name=dec ! videoconvert"),
+    // OpenH264 software decode, for a GStreamer built without gst-libav.
+    ("openh264dec", "openh264dec name=dec", "openh264dec name=dec ! videoconvert"),
+];
+
+/// The first entry of [`WIN_DECODERS`] whose element this machine's GStreamer actually
+/// registered.
+///
+/// **Why Windows chooses at runtime while the other two platforms hardcode a string.** Linux
+/// has exactly one answer (VA-API, on a known deploy GPU) and macOS has exactly one
+/// (VideoToolbox, always present). Windows has neither: `d3d11h264dec` registers only when the
+/// installed GStreamer carries the D3D11 plugin *and* the GPU advertises an H.264 decode
+/// profile — which a remote session, a VM, or a stripped GStreamer build will not. A fixed
+/// string would turn every one of those into "cannot build the decode pipeline" and a blank
+/// window; picking from what registered degrades to software instead.
+#[cfg(target_os = "windows")]
+fn win_decoder() -> &'static (&'static str, &'static str, &'static str) {
+    for row in WIN_DECODERS {
+        if gst::ElementFactory::find(row.0).is_some() {
+            tracing::info!("windows H.264 decoder: {}", row.0);
+            return row;
+        }
+    }
+    // Nothing registered. Return the preferred row anyway, so the failure surfaces as a
+    // GStreamer "no element \"d3d11h264dec\"" error naming the missing plugin — far more
+    // actionable than an Option::None from a function whose contract is a chain string.
+    tracing::error!(
+        "no H.264 decoder registered (looked for {}); check the GStreamer plugin install",
+        WIN_DECODERS.iter().map(|r| r.0).collect::<Vec<_>>().join(", ")
+    );
+    &WIN_DECODERS[0]
+}
+
+/// The Windows decode chain from `h264parse`'s output to frames `gtk4paintablesink` can show
+/// directly — the 4:2:0 GUI path, and the counterpart of `vah264dec ! glupload` on Linux and
+/// `vtdec_hw ! glcolorconvert` on macOS.
+#[cfg(target_os = "windows")]
+fn win_decode_chain_display() -> &'static str {
+    win_decoder().2
+}
+
+/// The Windows decode chain from `h264parse`'s output to plain NV12 system memory: the
+/// headless mode (no display, and it wants raw frames anyway) and the AVC444 GL feed.
+#[cfg(target_os = "windows")]
+pub(crate) fn win_decode_chain_sysmem() -> &'static str {
+    win_decoder().1
+}
+
 /// One monitor's decode pipeline → `gtk4paintablesink`. Returns the appsrc + the sink's
 /// `GdkPaintable`. Zero-copy GL path (works on Intel, where GStreamer can't export a VA
 /// dmabuf): `vah264dec ! glupload` (EGL dmabuf→GL, shares GTK's GL context) → the sink.
@@ -1483,13 +1589,21 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::Pipelin
     // macOS: vtdec_hw emits NV12 GLMemory with texture-target=rectangle (IOSurface/CGL); the sink
     // only accepts RGBA/RGB 2D GLMemory, so glcolorconvert converts rectangle→2D + NV12→RGBA in
     // one GPU pass. glupload drops out (vtdec_hw is its own GL producer). Linux string unchanged.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vah264dec name=dec ! glupload ! gtk4paintablesink name=sink sync=false";
     #[cfg(target_os = "macos")]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vtdec_hw name=dec ! glcolorconvert ! gtk4paintablesink name=sink sync=false";
-    let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+    // Windows: the decoder is chosen at runtime and its chain already ends in frames the sink
+    // can show, with no GL anywhere — see `WIN_DECODERS` for why GL cannot be used here.
+    #[cfg(target_os = "windows")]
+    let desc = format!(
+        "appsrc name=src is-live=true format=time do-timestamp=true ! \
+         h264parse ! {} ! gtk4paintablesink name=sink sync=false",
+        win_decode_chain_display()
+    );
+    let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
             match msg.view() {
@@ -1546,13 +1660,28 @@ fn make_decoder_yuv444(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::
     // NV12 rectangle GLMemory). Do NOT insert glcolorconvert here: rmngavc444unpack reads the raw
     // Y/UV textures; a prior colorconvert would 4:2:0-upsample the packed auxiliary chroma and
     // destroy the AVC444 reconstruction. Rectangle→2D conversion is Task 3. Linux string unchanged.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vah264dec ! glupload ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false";
     #[cfg(target_os = "macos")]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vtdec_hw ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false";
-    let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+    // Windows: NV12 sysmem from the runtime-chosen decoder, then `glupload` into GStreamer's
+    // own GL context for the unpack shader. No `glcolorconvert` — same invariant as the other
+    // two platforms.
+    //
+    // KNOWN BROKEN on Windows, see `WIN_DECODERS`: `gtk4paintablesink` offers GTK's in-use WGL
+    // context to the pipeline and `glupload` cannot `wglShareLists` with it, so this errors out
+    // with `not-negotiated`. The 4:2:0 path above avoids GL entirely, which is why it works.
+    // Fixing this needs the unpack moved off the sink's pipeline (see `make_decoder_yuv444`'s
+    // doc comment); until then a Windows viewer needs the server in 4:2:0 mode.
+    #[cfg(target_os = "windows")]
+    let desc = format!(
+        "appsrc name=src is-live=true format=time do-timestamp=true ! \
+         h264parse ! {} ! glupload ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false",
+        win_decode_chain_sysmem()
+    );
+    let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
             match msg.view() {
@@ -1949,11 +2078,25 @@ fn install_keyboard(
             }
             // Physical key identity → Linux evdev keycode sent on the wire.
             // Linux/X11: GTK hardware_keycode = evdev + 8; subtract 8 to recover evdev.
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 let keycode = code.saturating_sub(8);
                 state.pressed.borrow_mut().insert(keycode);
                 send(&w, format!(r#"{{"kind":"key_code","keycode":{keycode},"pressed":true}}"#));
+            }
+            // Windows: `code` is the Win32 virtual key, which is layout-dependent and so is not
+            // a physical key — `vk_evdev` recovers the position via the set-1 scancode. A key
+            // with no evdev equivalent yields the 0 sentinel and must be dropped, not sent.
+            //
+            // Dedup via `state.pressed` (as macOS does): Windows repeats WM_KEYDOWN for a held
+            // key, and the remote GNOME session runs its own autorepeat, so forwarding each
+            // repeat would stack a second one on top of it.
+            #[cfg(target_os = "windows")]
+            {
+                let keycode = vk_evdev::translate(code);
+                if keycode != 0 && state.pressed.borrow_mut().insert(keycode) {
+                    send(&w, format!(r#"{{"kind":"key_code","keycode":{keycode},"pressed":true}}"#));
+                }
             }
             // macOS: physical keys are forwarded by the raw NSEvent monitor (keyboard_macos),
             // NOT from here — GTK's key events on macOS come through the Cocoa text-input
@@ -1977,11 +2120,21 @@ fn install_keyboard(
         let (w, state) = (writer.clone(), state.clone());
         key.connect_key_released(move |_c, _keyval, code, _s| {
             // Mirror the press-side translation so pressed/released are symmetric.
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 let keycode = code.saturating_sub(8);
                 state.pressed.borrow_mut().remove(&keycode);
                 release_keycode(&w, keycode);
+            }
+            // Windows: same VK → scancode → evdev path as the press side. Release only what we
+            // actually sent a press for, so the dedup above stays balanced and a key the table
+            // sentinels never produces a lone release.
+            #[cfg(target_os = "windows")]
+            {
+                let keycode = vk_evdev::translate(code);
+                if keycode != 0 && state.pressed.borrow_mut().remove(&keycode) {
+                    release_keycode(&w, keycode);
+                }
             }
             // macOS: releases come from the keyboard_macos NSEvent monitor (see key_pressed),
             // EXCEPT for the GDK-swallowed keys forwarded from key_pressed above — release

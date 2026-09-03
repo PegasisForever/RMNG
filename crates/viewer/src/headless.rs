@@ -57,6 +57,33 @@ fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) 
     //   - 4:4:4 paths: no glcolorconvert before rmngavc444unpack (invariant). gldownload from
     //     rmngavc444unpack's RGBA 2D output works fine on macOS (plain glReadPixels-style).
     //   Linux strings are byte-identical to today's originals.
+    // Windows: no VA-API, and the decoder is chosen at runtime (see `crate::win_decoder`). This
+    // mode has no display, so it has no GL context either — the 4:2:0 paths therefore use the
+    // plain sysmem chain and never touch `glupload`. The 4:4:4 paths have no such choice: the
+    // AVC444 reconstruction *is* a GL shader, so they upload and then `gldownload` back out.
+    #[cfg(target_os = "windows")]
+    let desc = {
+        let sysmem = crate::win_decode_chain_sysmem();
+        let head = "appsrc name=src is-live=true format=time do-timestamp=true ! h264parse";
+        match (yuv444, dump.is_some()) {
+            (true, true) => format!(
+                "{head} ! {sysmem} ! glupload ! rmngavc444unpack ! gldownload ! \
+                 videoconvert ! pngenc ! appsink name=out emit-signals=true max-buffers=2 sync=false"
+            ),
+            (true, false) => format!(
+                "{head} ! {sysmem} ! glupload ! rmngavc444unpack ! \
+                 appsink name=out emit-signals=true max-buffers=4 sync=false"
+            ),
+            (false, true) => format!(
+                "{head} ! {sysmem} ! videoconvert ! pngenc ! \
+                 appsink name=out emit-signals=true max-buffers=2 sync=false"
+            ),
+            (false, false) => {
+                format!("{head} ! {sysmem} ! appsink name=out emit-signals=true max-buffers=4 sync=false")
+            }
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
     let desc = match (yuv444, dump.is_some()) {
         (true, true) => if cfg!(target_os = "macos") {
             "appsrc name=src is-live=true format=time do-timestamp=true ! \
@@ -93,7 +120,7 @@ fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) 
              h264parse ! vah264dec ! appsink name=out emit-signals=true max-buffers=4 sync=false"
         },
     };
-    let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+    let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     let appsrc = pipeline.by_name("src").context("appsrc")?.downcast::<AppSrc>().map_err(|_| anyhow!("not appsrc"))?;
     let appsink = pipeline.by_name("out").context("appsink")?.downcast::<AppSink>().map_err(|_| anyhow!("not appsink"))?;
     appsrc.set_caps(Some(
