@@ -114,6 +114,9 @@ struct State {
     grid: Cell<(usize, usize)>,
     last_sent: Cell<(u16, u16)>,
     resize_at: Cell<Option<Instant>>,
+    /// Set by the "+" tab: focus whichever session appears next, since the server creates it
+    /// asynchronously and only tells us via the next `ViewSpec`.
+    focus_new: Cell<bool>,
 }
 
 impl State {
@@ -662,6 +665,7 @@ impl TerminalView {
             grid: Cell::new((INIT_COLS, INIT_ROWS)),
             last_sent: Cell::new((0, 0)),
             resize_at: Cell::new(None),
+            focus_new: Cell::new(false),
         });
 
         let container = NSView::initWithFrame(NSView::alloc(mtm), frame);
@@ -715,7 +719,8 @@ impl TerminalView {
     /// Replace the session list, keeping the screens of sessions that are still present so a
     /// re-send of the same list doesn't wipe scrollback.
     pub fn set_sessions(&self, sessions: &[String]) {
-        if *self.state.sessions.borrow() == sessions {
+        let previous = self.state.sessions.borrow().clone();
+        if previous == sessions {
             return;
         }
         {
@@ -726,10 +731,29 @@ impl TerminalView {
                 terms.entry(s.clone()).or_insert_with(|| Session::new(dims));
             }
         }
+        // The "+" asked for a session and one has appeared: focus it, the way every tab UI does.
+        let appeared = sessions.iter().position(|s| !previous.contains(s));
         *self.state.sessions.borrow_mut() = sessions.to_vec();
-        if self.state.active.get() >= sessions.len() {
-            self.state.active.set(sessions.len().saturating_sub(1));
+        match appeared {
+            Some(i) if self.state.focus_new.replace(false) => self.state.active.set(i),
+            _ if self.state.active.get() >= sessions.len() => {
+                self.state.active.set(sessions.len().saturating_sub(1))
+            }
+            _ => {}
         }
+        // Re-announce our grid size for the new session list. A session that existed before we
+        // attached is proxied only once the server has a client for it, which happens after our
+        // first resize went out — so that resize landed on nothing and the session kept the width
+        // it was created at, and its output arrived too wide and got clipped. Clearing `last_sent`
+        // forces the debounced send to repeat rather than dedupe itself away.
+        self.state.last_sent.set((0, 0));
+        self.state.resize_at.set(Some(Instant::now()));
+        tracing::info!(
+            "terminal: {} session(s) {:?}, active {}",
+            sessions.len(),
+            sessions,
+            self.state.active.get()
+        );
         self.rebuild_tabs();
         self.grid.setNeedsDisplay(true);
     }
@@ -770,6 +794,7 @@ impl TerminalView {
                 let size = (cols as u16, lines as u16);
                 if size != self.state.last_sent.get() {
                     self.state.last_sent.set(size);
+                    tracing::info!("terminal: reporting grid {}x{}", size.0, size.1);
                     (self.state.cb.on_resize)(size.0, size.1);
                 }
             }
@@ -785,8 +810,9 @@ impl TerminalView {
         }
         if sel as usize >= n {
             // The trailing "+" segment: ask the server for a new session, and put the selection
-            // back where it was so the strip doesn't look like it jumped.
+            // back where it was so the strip doesn't look like it jumped until the session lands.
             self.rebuild_tabs();
+            self.state.focus_new.set(true);
             (self.state.cb.on_new_session)();
             return;
         }
