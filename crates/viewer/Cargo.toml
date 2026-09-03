@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 wire.workspace = true
+viewer-core = { path = "../viewer-core" }
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -70,6 +71,9 @@ objc2-app-kit = { version = "0.3", features = [
     "NSImage",
     # native_titlebar: NSLayoutAttribute::Right for accessory placement
     "NSLayoutConstraint",
+    # fullscreen_macos: NSApplicationPresentationOptions for the injected
+    # window:willUseFullScreenPresentationOptions: delegate method
+    "NSApplication",
 ] }
 # Block closures for the addLocalMonitorForEventsMatchingMask:handler: callback.
 block2 = "0.6"

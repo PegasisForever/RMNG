@@ -29,7 +29,7 @@ use wire::forward::{ForwardStatusMsg, ForwardsMsg};
 use wire::socket::{ClipboardMsg, ClipboardRequest};
 use wire::viewer::ModeMsg;
 
-use crate::forward::{ForwardManager, StatusReport};
+use viewer_core::forward::{ForwardManager, StatusReport};
 
 type Counters = Arc<Mutex<HashMap<u32, Arc<AtomicU64>>>>;
 

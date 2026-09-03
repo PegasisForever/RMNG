@@ -368,7 +368,8 @@ instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NU
 `127.0.0.1:9001`), `RMNG_DUMP=frame.png` (headless: dump one decoded frame and exit),
 `RMNG_CLIP_ECHO=1` (headless: log the first 120 characters of each text clipboard payload,
 not just its size), `RMNG_NO_GRAB` (disable pointer grab), `RMNG_NO_POINTER_LOCK` (disable
-pointer-lock).
+pointer-lock), `RMNG_FULLSCREEN_MENUBAR=1` (macOS: keep the Mac menu bar's auto-hide reveal in
+fullscreen instead of hiding it).
 
 ---
 

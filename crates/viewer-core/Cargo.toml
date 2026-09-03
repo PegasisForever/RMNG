@@ -1,0 +1,14 @@
+[package]
+name = "viewer-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Toolkit-free viewer pieces shared by the GTK viewer and the native macOS viewer: config, auto pointer-lock policy, port-forward listeners, the kVK→evdev table."
+
+[dependencies]
+wire.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true

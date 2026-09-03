@@ -83,6 +83,7 @@ column.
 | Keyboard | GTK `EventControllerKey`, `evdev = hardware_keycode − 8` | raw `NSEvent` local monitor + `kvk_evdev` table ([`keyboard_macos.rs`](src/keyboard_macos.rs)); GDK-swallowed keys still come via GTK. Cmd↔Ctrl swapped by default |
 | Pointer lock | `zwp_pointer_constraints` + `zwp_relative_pointer`, unaccelerated deltas ([`pointer_lock.rs`](src/pointer_lock.rs)) | `CGAssociateMouseAndMouseCursorPosition` + `NSEvent` deltas, which are OS-**accelerated** ([`pointer_lock_macos.rs`](src/pointer_lock_macos.rs)) |
 | Titlebar | GTK `HeaderBar` + FPS readout | real `NSWindow` titlebar + `NSButton` accessories ([`native_titlebar.rs`](src/native_titlebar.rs)); no FPS readout |
+| Fullscreen | GTK `fullscreen()`; the compositor owns the screen edges | GTK `fullscreen()`, with the Mac menu bar **hidden** rather than auto-hidden so the top edge stays remote desktop instead of stalling GDK motion ([`fullscreen_macos.rs`](src/fullscreen_macos.rs)); F11 leaves |
 | GSK renderer | `gl` pinned (stale-texture workaround) | `ngl` — the legacy `gl` renderer was removed in GTK 4.18, so no pin is available |
 
 Build and run instructions: [DEVELOPMENT.md § macOS](../../docs/DEVELOPMENT.md#macos).

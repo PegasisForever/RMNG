@@ -39,7 +39,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
 
-use crate::kvk_evdev;
+use viewer_core::kvk_evdev;
 
 /// The viewer's input write half (port-1 socket); shared with the GTK thread.
 /// Same alias as `main.rs`'s `Writer` / `pointer_lock_macos.rs`.

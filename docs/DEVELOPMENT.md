@@ -48,6 +48,8 @@ running server's payloads; there's no manual redeploy step.
 | [crates/media](../crates/media/README.md) | lib | dmabuf ingest → VA-API H.264 per monitor + dmabuf→JPEG screenshots + the clone-socket transport |
 | [crates/clone-daemon](../crates/clone-daemon/README.md) | bin | the thin in-clone pipe: RecordVirtual capture, RemoteDesktop input injection, clipboard bridge, and desktop MCP (:9004) |
 | [crates/viewer](../crates/viewer/README.md) | bin | the native GTK client (GUI + headless test mode): zero-copy VA-API decode, multi-monitor, client-drawn cursor, input + pointer-lock + clipboard |
+| [crates/viewer-core](../crates/viewer-core/README.md) | lib | toolkit-free viewer pieces shared by both clients: config, auto pointer-lock policy, port-forward listeners, kVK→evdev table |
+| [crates/viewer-macos](../crates/viewer-macos/README.md) | bin | the **native macOS client**: AppKit + Metal + VideoToolbox, no GTK/GStreamer (own `NSView`, so pointer motion never routes through GDK) |
 | [crates/control-client](../crates/control-client/README.md) | lib | typed reqwest+SSE client for the port-2 web API (`/api/state`, `/events`, clone/delete/image/account wrappers); used by the `rmng` CLI and integration tests |
 | [crates/cli](../crates/cli/README.md) | bin | the `rmng` fleet CLI: clones/images/accounts/operations over the port-2 web API; injected into every clone as `/usr/local/bin/rmng` |
 | [frontend](../frontend/README.md) | web app | React Router 7 management UI, ts-rs types from `wire`, served by the control-server |
@@ -85,8 +87,21 @@ see [Publishing the template](DEPLOY.md#publishing-the-template).
 <a id="macos"></a>
 ### macOS (Apple Silicon) — viewer only
 
-Only the **viewer** builds and runs on macOS; the capture/encode/server side is Linux-only by
-design. Verified on macOS 26.4 / Apple M-series with Homebrew:
+There are **two macOS clients**. The native one
+([`crates/viewer-macos`](../crates/viewer-macos/README.md)) is the one to build now:
+
+```sh
+cargo build -p viewer-macos --release    # → target/release/rmng-viewer-macos
+```
+
+It needs **no Homebrew at all** — AppKit + Metal + VideoToolbox are system frameworks, so the
+binary is self-contained. It exists because GDK's macOS backend re-derives pointer state and
+drops motion (in fullscreen, the top ~50 px stalled the pointer until you clicked); owning the
+`NSView` removes that layer. See its README for what is and is not ported yet.
+
+The GTK viewer below still builds on macOS and remains the reference implementation (and the
+Linux client). Only the **viewer** builds and runs on macOS; the capture/encode/server side is
+Linux-only by design. Verified on macOS 26.4 / Apple M-series with Homebrew:
 
 ```sh
 brew install gtk4 gstreamer pkgconf     # verified: gtk4 4.22.4, gstreamer 1.28.4, pkgconf 2.5.1
@@ -121,3 +136,11 @@ Wayland `inhibit_system_shortcuts` protocol that `grab_keys()` uses does not exi
 that call is a silent no-op there; capturing those would need a permission-gated `CGEventTap`,
 which the viewer deliberately avoids (an `NSEvent` local monitor needs no Input Monitoring grant).
 `RMNG_NO_POINTER_LOCK=1` disables pointer lock entirely.
+
+**In fullscreen the Mac menu bar is hidden, not auto-hidden.** Parking the pointer at the top
+edge no longer slides the menu bar and titlebar down over the video: that reveal moved the
+pointer into windows GDK does not own, and GDK's macOS backend then dropped all motion until
+the next click inside the window (mouse frozen in the top ~50px until you clicked below it).
+The clone's own top bar lives in that strip anyway. Leave fullscreen with F11 (`fn`+F11 on a
+default MacBook). `RMNG_FULLSCREEN_MENUBAR=1` restores the stock reveal — see
+[`fullscreen_macos.rs`](../crates/viewer/src/fullscreen_macos.rs).

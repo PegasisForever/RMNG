@@ -26,9 +26,7 @@
 //! `gtk4paintablesink`'s paintable is a GTK object (`!Send`), so all pipelines, paintables
 //! and widgets live on the GTK main thread; the net thread only ships AU bytes over a queue.
 
-mod config;
-mod auto_lock;
-mod forward;
+use viewer_core::{auto_lock, config, forward};
 mod glunpack;
 mod headless;
 mod terminal;
@@ -62,9 +60,9 @@ mod pointer_lock {
     }
 }
 
-// Carbon kVK → Linux evdev translation table (macOS only).
+// Carbon kVK → Linux evdev translation table (macOS only), from viewer-core.
 #[cfg(target_os = "macos")]
-mod kvk_evdev;
+use viewer_core::kvk_evdev;
 
 // Physical-keyboard capture via a raw NSEvent monitor (macOS only): bypasses GDK's
 // IM-mediated key events, which synthesize phantom keycode-0 presses. See keyboard_macos.rs.
@@ -74,6 +72,11 @@ mod keyboard_macos;
 // Native macOS titlebar: replaces the GTK HeaderBar with NSWindow + NSButton accessories.
 #[cfg(target_os = "macos")]
 mod native_titlebar;
+
+// macOS fullscreen: hide (not auto-hide) the Mac menu bar so the top edge stays remote desktop
+// instead of stalling pointer motion. See fullscreen_macos.rs.
+#[cfg(target_os = "macos")]
+mod fullscreen_macos;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -441,6 +444,11 @@ fn run_gui() -> Result<()> {
             }
         });
     }
+
+    // macOS: patch GdkMacosWindow's fullscreen presentation policy before the first window
+    // exists — AppKit snapshots the delegate's methods at setDelegate: time (see the module).
+    #[cfg(target_os = "macos")]
+    fullscreen_macos::install();
 
     let app = gtk4::Application::builder().application_id("dev.rmng.viewer").build();
     app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &view, &warp, &addr, &auto, &term_out));

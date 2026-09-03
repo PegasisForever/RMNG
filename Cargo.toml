@@ -8,6 +8,8 @@ members = [
     "crates/viewer",
     "crates/control-client",
     "crates/cli",
+    "crates/viewer-core",
+    "crates/viewer-macos",
 ]
 
 [workspace.package]

@@ -1,0 +1,58 @@
+[package]
+name = "viewer-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native macOS viewer (AppKit + Metal + VideoToolbox, no GTK/GStreamer): port-1 connect, hardware H.264 decode, zero-copy Metal render, input + clipboard."
+
+[[bin]]
+name = "rmng-viewer-macos"
+path = "src/main.rs"
+
+[dependencies]
+wire.workspace = true
+viewer-core = { path = "../viewer-core" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# ObjC runtime + Foundation.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSArray", "NSData", "NSDate", "NSDictionary", "NSError", "NSGeometry", "NSNotification",
+    "NSObject", "NSRunLoop", "NSString", "NSThread", "NSTimer", "NSValue",
+] }
+# AppKit: windows, our NSView subclass (events + Metal layer), cursor, pasteboard, menu, dialogs.
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSResponder", "NSWindow", "NSView", "NSEvent", "NSCursor", "NSImage",
+    "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSScreen", "NSTrackingArea", "NSPasteboard",
+    "NSMenu", "NSMenuItem", "NSColor", "NSFont", "NSText", "NSTextField", "NSControl", "NSCell",
+    "NSButton", "NSAlert", "NSPanel", "NSProgressIndicator", "NSTitlebarAccessoryViewController",
+    "NSViewController", "NSLayoutConstraint", "NSWindowController", "NSAppearance",
+] }
+# Metal: the render path (NV12 → RGB, AVC444 unpack) into a CAMetalLayer.
+objc2-metal = { version = "0.3", features = [
+    "MTLDevice", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLRenderCommandEncoder",
+    "MTLRenderPass", "MTLRenderPipeline", "MTLLibrary", "MTLTexture", "MTLBuffer", "MTLResource",
+    "MTLDrawable", "MTLPixelFormat", "MTLTypes", "MTLSampler", "MTLDepthStencil", "MTLBlitCommandEncoder",
+    "MTLBlitPass", "MTLAllocation",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "CAMediaTiming", "objc2-metal"] }
+# CoreFoundation containers the C video APIs take (dictionaries of keys/numbers/booleans).
+objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFDictionary", "CFNumber", "CFString", "CFData", "CFArray"] }
+# CGImage → NSImage → NSCursor for the remote cursor sprite; CGDisplay for pointer lock.
+objc2-core-graphics = { version = "0.3", features = ["CGImage", "CGDataProvider", "CGColorSpace", "CGGeometry"] }
+# VideoToolbox hardware H.264 decode → CVPixelBuffer (IOSurface) → Metal texture, zero-copy.
+objc2-core-video = { version = "0.3", features = ["CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2-metal"] }
+objc2-core-media = { version = "0.3", features = ["CMBase", "CMTime", "CMFormatDescription", "CMBlockBuffer", "CMSampleBuffer", "objc2-core-video"] }
+objc2-video-toolbox = { version = "0.3", features = ["VTBase", "VTErrors", "VTSession", "VTDecompressionSession", "VTDecompressionProperties", "objc2-core-media", "objc2-core-video"] }
+# Block closures (NSEvent monitors, command-buffer completion) and main-queue hops.
+block2 = "0.6"
+dispatch2 = "0.3"
+# CGAssociateMouseAndMouseCursorPosition / CGDisplayHideCursor (pointer lock), as the GTK viewer uses.
+core-graphics = "0.25"
+# Terminal grid for headless clones (M5).
+alacritty_terminal = "0.26"
