@@ -5,7 +5,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,7 +18,8 @@ use objc2_app_kit::{
     NSMenuItem, NSTextField, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSTimer,
+    ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
+    NSRunLoopCommonModes, NSSize, NSTimer,
 };
 
 use dispatch2::DispatchQueue;
@@ -30,9 +30,10 @@ use crate::shared::send_tagged;
 
 use crate::clipboard::Clipboard;
 use crate::cursor::cursor_from_shape;
+use crate::decoder::DecodedFrame;
 use crate::pointer::PointerLock;
 use crate::render::{Overlay, Renderer};
-use crate::shared::{Shared, Wake};
+use crate::shared::{CursorEntry, Shared, Wake, WakeQueue, WakeSet};
 use crate::terminal::{TermCallbacks, TerminalView};
 use crate::window::{
     install_close_policy, is_main_monitor, make_video_view, make_window_shell, ViewerView, WinCtx,
@@ -64,6 +65,9 @@ struct WindowEntry {
     /// The agent-cursor sprite as a Metal texture, and the shape version it was built from.
     overlay_tex: RefCell<Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>>>>,
     overlay_version: Cell<u64>,
+    /// Whether the last draw put the agent cursor on screen. A frame is what normally erases it,
+    /// so when the warp window expires on a still desktop this is what says "one more draw".
+    overlay_drawn: Cell<bool>,
 }
 
 impl WindowEntry {
@@ -95,19 +99,30 @@ thread_local! {
     static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
 
-/// Coalesce wake bursts: only one `on_main_wake` is in flight at a time.
-static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+/// Coalesce wake bursts — only one `on_main_wake` is in flight at a time — while keeping every
+/// reason that arrived, so the refresh does only the work the wakes actually asked for.
+static WAKES: WakeQueue = WakeQueue::new();
 
-/// Net-thread wake: schedule a main-thread refresh (reconcile + draw). Cheap and coalesced.
-pub fn wake(_why: Wake) {
-    if !WAKE_PENDING.swap(true, Ordering::AcqRel) {
+/// Net-thread wake: record why, and schedule a main-thread refresh if one isn't already coming.
+pub fn wake(why: Wake) {
+    if WAKES.push(why) {
         DispatchQueue::main().exec_async(on_main_wake);
     }
 }
 
 fn on_main_wake() {
-    WAKE_PENDING.store(false, Ordering::Release);
-    with_state(|s| s.refresh());
+    let wakes = WAKES.drain();
+    let mut handled = false;
+    with_state(|s| {
+        s.refresh(&wakes);
+        handled = true;
+    });
+    if !handled {
+        // No app state yet. A wake can only land here once the run loop is pumping the main
+        // queue, i.e. after `run()` installed the state, so this is belt and braces — but a
+        // dropped reason means a monitor that never gets its frame drawn, so hand them back.
+        WAKES.restore(&wakes);
+    }
 }
 
 fn with_state(f: impl FnOnce(&mut AppState)) {
@@ -119,19 +134,74 @@ fn with_state(f: impl FnOnce(&mut AppState)) {
 }
 
 impl AppState {
-    /// Reconcile the window set to the latest spec, then draw whatever frames are available.
-    fn refresh(&mut self) {
+    /// Do what the wakes asked for: reconcile on a spec change, feed the terminal on data, and
+    /// present only the monitors with something new to show. Everything else on this path runs
+    /// per decoded frame per monitor, so it stays off the GPU unless it has a reason to be there.
+    fn refresh(&mut self, wakes: &WakeSet) {
+        // The epoch, not `wakes.view`, decides the reconcile: it is the same test as before and
+        // cannot miss a spec that landed while a wake was in flight. The spec is cloned only
+        // when it actually moved.
         let (spec, epoch) = {
             let v = self.shared.view.lock().unwrap();
-            (v.spec.clone(), v.epoch)
+            if v.epoch == self.last_epoch {
+                (None, v.epoch)
+            } else {
+                (v.spec.clone(), v.epoch)
+            }
         };
-        if epoch != self.last_epoch {
+        let reconciled = epoch != self.last_epoch;
+        if reconciled {
             self.last_epoch = epoch;
             let monitors: Vec<ViewMonitor> =
                 spec.as_ref().map(|s| s.monitors.clone()).unwrap_or_default();
             self.reconcile(&monitors, spec.as_ref().map(|s| &s.content));
         }
-        self.draw_all();
+
+        // After the reconcile: a wake that both created the terminal window and carried its first
+        // bytes must feed the window it just built.
+        if wakes.data {
+            self.feed_terminal();
+        }
+
+        if reconciled {
+            // A reconcile can have built a window or swapped its content: paint every one of
+            // them from the frames already in hand rather than leaving a new window blank until
+            // the remote next repaints (a still desktop sends nothing).
+            self.draw_all();
+            return;
+        }
+
+        let mut ids = wakes.frames.clone();
+        if wakes.data {
+            // The agent cursor is a drawn overlay, and a warp moves it with no video frame
+            // behind it, so a data wake still has to repaint the monitors it is on — and the one
+            // draw after it expires, to take it off screen.
+            for id in self.overlay_monitors(Instant::now()) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        if !ids.is_empty() {
+            self.draw(&ids);
+        }
+    }
+
+    /// Monitors whose agent-cursor overlay needs a repaint right now: the ones being driven, plus
+    /// any that still have the sprite on screen after the warp window closed.
+    fn overlay_monitors(&self, now: Instant) -> Vec<u32> {
+        let cursors = self.shared.cursors.lock().unwrap();
+        self.windows
+            .values()
+            .filter(|e| e.video().is_some())
+            .filter(|e| {
+                e.overlay_drawn.get()
+                    || cursors
+                        .get(&e.monitor_id)
+                        .is_some_and(|c| c.warp_until.is_some_and(|d| now < d))
+            })
+            .map(|e| e.monitor_id)
+            .collect()
     }
 
     /// Reconcile the window set and each window's content to the spec. Windows are created and
@@ -173,6 +243,7 @@ impl AppState {
                         was_key: Cell::new(false),
                         overlay_tex: RefCell::new(None),
                         overlay_version: Cell::new(0),
+                        overlay_drawn: Cell::new(false),
                     },
                 );
             }
@@ -240,12 +311,50 @@ impl AppState {
         }
     }
 
-    /// Draw the latest frame for each window (latest-wins; a window with no frame yet clears).
+    /// Draw every video window — after a reconcile, where the whole window set may be new.
     fn draw_all(&mut self) {
-        let frames = self.shared.frames.lock().unwrap();
-        let cursors = self.shared.cursors.lock().unwrap();
+        let ids: Vec<u32> =
+            self.windows.values().filter(|e| e.video().is_some()).map(|e| e.monitor_id).collect();
+        self.draw(&ids);
+    }
+
+    /// Draw the latest frame for the given monitors (latest-wins; a monitor with no frame yet
+    /// clears).
+    ///
+    /// The shared state is copied out first and both locks released before any layer or renderer
+    /// call. `nextDrawable` blocks while the layer's drawable pool is empty — a vsync interval
+    /// with display sync on, and up to its ~1 s timeout for an occluded or miniaturised window —
+    /// and holding `frames`/`cursors` across it parks the decoder's output callback and the
+    /// cursor latch, which is display pacing leaking into the socket reader.
+    fn draw(&mut self, monitors: &[u32]) {
         let now = Instant::now();
-        for e in self.windows.values() {
+        let inputs: Vec<(u32, Option<DecodedFrame>, Option<CursorEntry>)> = {
+            let frames = self.shared.frames.lock().unwrap();
+            let cursors = self.shared.cursors.lock().unwrap();
+            monitors
+                .iter()
+                .map(|&id| {
+                    // Copying the frame is a retain on the IOSurface-backed pixel buffer, and it
+                    // keeps the buffer alive for this draw even if the decoder replaces the slot.
+                    let frame = frames.get(&id).map(|f| DecodedFrame {
+                        pixel_buffer: f.pixel_buffer.clone(),
+                        width: f.width,
+                        height: f.height,
+                        yuv444: f.yuv444,
+                    });
+                    // Only the sprite the overlay is about to draw is worth copying, and only
+                    // while the agent is driving this monitor.
+                    let cursor = cursors
+                        .get(&id)
+                        .filter(|c| c.warp_until.is_some_and(|d| now < d))
+                        .cloned();
+                    (id, frame, cursor)
+                })
+                .collect()
+        };
+
+        for (id, frame, cursor) in &inputs {
+            let Some(e) = self.windows.get(id) else { continue };
             let Some((view, ctx)) = e.video() else { continue };
             let layer = view.metal_layer();
             let bounds = view.bounds();
@@ -256,17 +365,13 @@ impl AppState {
             }
             layer.setDrawableSize(NSSize::new(dw, dh));
             let Some(drawable) = layer.nextDrawable() else { continue };
-            let frame = frames.get(&e.monitor_id);
             if let Some(f) = frame {
                 ctx.frame_size.set((f.width as f64, f.height as f64));
             }
             // The synthetic cursor is drawn ONLY while the remote agent is driving this
             // monitor's pointer, so the operator can see where it is going; the rest of the time
             // the real OS cursor (wearing the remote's shape) is the only one on screen.
-            let overlay = cursors.get(&e.monitor_id).and_then(|c| {
-                if !c.warp_until.is_some_and(|d| now < d) {
-                    return None;
-                }
+            let overlay = cursor.as_ref().and_then(|c| {
                 let shape = c.shape.as_ref()?;
                 if e.overlay_version.get() != c.version || e.overlay_tex.borrow().is_none() {
                     match self.renderer.cursor_texture(
@@ -293,8 +398,11 @@ impl AppState {
                     h: shape.height as f64,
                 })
             });
-            if let Err(err) = self.renderer.draw(frame, &drawable, dw, dh, overlay.as_ref()) {
-                tracing::warn!("monitor {}: draw error: {err:#}", e.monitor_id);
+            match self.renderer.draw(frame.as_ref(), &drawable, dw, dh, overlay.as_ref()) {
+                // The flag tracks what is on screen, so it moves only when something was
+                // presented; a failed draw leaves the previous contents, overlay and all.
+                Ok(()) => e.overlay_drawn.set(overlay.is_some()),
+                Err(err) => tracing::warn!("monitor {}: draw error: {err:#}", e.monitor_id),
             }
         }
     }
@@ -354,22 +462,60 @@ impl AppState {
             }
         }
 
-        // 4. Terminal: feed the server's PTY bytes into the tab that owns them, and let the view
-        //    settle its grid size (debounced, so a live window drag sends one resize, not many).
+        // 4. Terminal: the bytes themselves are fed on the wake that announced them (keystroke
+        //    echo must not wait for a timer); this catch-up costs an empty drain and covers a
+        //    wake that landed before the window existed. What is genuinely time-driven is the
+        //    view's own tick: the grid-size debounce, so a live drag sends one resize, not many.
+        self.feed_terminal();
+        for e in self.windows.values() {
+            if let Content::Terminal { view, .. } = &e.content {
+                view.tick();
+            }
+        }
+
+        // 5. Clipboard: drain inbound offers/data and notice a local copy. This one stays on the
+        //    timer — noticing a local copy is a `changeCount` poll with no wake behind it, and
+        //    clipboard round-trips do not care about a 16 ms hop.
+        let shared = self.shared.clone();
+        self.clipboard.tick(&shared);
+
+        // 6. A resized window has to be re-presented at its new drawable size, and no wake says
+        //    so: a still remote sends no frames, and the draw path now only touches monitors
+        //    that have one. The comparison is two floats per window; the draw happens only when
+        //    the size really moved, i.e. while the operator is dragging the frame.
+        let resized: Vec<u32> = self
+            .windows
+            .values()
+            .filter_map(|e| {
+                let (view, _) = e.video()?;
+                let bounds = view.bounds();
+                let scale = view.window().map(|w| w.backingScaleFactor()).unwrap_or(2.0);
+                let (dw, dh) = (bounds.size.width * scale, bounds.size.height * scale);
+                let have = view.metal_layer().drawableSize();
+                let stale = dw >= 1.0 && dh >= 1.0 && (dw != have.width || dh != have.height);
+                stale.then_some(e.monitor_id)
+            })
+            .collect();
+        if !resized.is_empty() {
+            self.draw(&resized);
+        }
+    }
+
+    /// Hand the server's PTY bytes to the tab that owns them. Driven by the data wake, so a
+    /// keystroke echoes as soon as the socket reader has it.
+    fn feed_terminal(&self) {
         let chunks: Vec<(String, Vec<u8>)> =
             self.shared.term_out.lock().unwrap().drain(..).collect();
+        if chunks.is_empty() {
+            return;
+        }
         for e in self.windows.values() {
             if let Content::Terminal { view, .. } = &e.content {
                 for (session, data) in &chunks {
                     view.feed(session, data);
                 }
-                view.tick();
             }
         }
-
-        // 5. Clipboard: drain inbound offers/data and notice a local copy.
-        let shared = self.shared.clone();
-        self.clipboard.tick(&shared);
     }
 }
 
@@ -574,8 +720,20 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
     APP.with(|a| *a.borrow_mut() = Some(state));
 
     // Housekeeping tick (the wake hop covers frames; this covers everything time-driven).
+    // Added to the run loop by hand in the common modes rather than scheduled: the convenience
+    // constructor registers in the default mode only, so a live window resize or an open menu —
+    // which run the loop in event-tracking mode — would stop the tick exactly when the auto
+    // pointer-lock reconcile and the terminal's resize debounce are needed most.
     let block = RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| on_main_tick());
-    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(TICK_SECS, true, &block) };
+    // SAFETY: the block outlives the timer (it is copied by `timerWithTimeInterval…`) and runs
+    // on the run loop that owns the timer, i.e. this main thread.
+    let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(TICK_SECS, true, &block) };
+    // A quarter-interval of slop lets the kernel coalesce the wake-up with other timers; nothing
+    // here is deadline-driven at finer than tick granularity.
+    timer.setTolerance(TICK_SECS * 0.25);
+    // SAFETY: called on the main thread, so `currentRunLoop` is the run loop `app.run()` drives;
+    // the run loop retains the timer, which is what keeps it alive past this scope.
+    unsafe { NSRunLoop::currentRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
 
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
