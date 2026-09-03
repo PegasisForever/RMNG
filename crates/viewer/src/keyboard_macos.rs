@@ -40,6 +40,9 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
 
 use viewer_core::kvk_evdev;
+// Shared with the native macOS viewer: both read modifier state out of the same flag word,
+// and keeping one copy is what stops the two drifting apart.
+use viewer_core::kvk_modifiers::{modifier_class_flag, modifier_now_down};
 
 /// The viewer's input write half (port-1 socket); shared with the GTK thread.
 /// Same alias as `main.rs`'s `Writer` / `pointer_lock_macos.rs`.
@@ -117,65 +120,6 @@ fn send_key(writer: &Writer, keycode: u32, pressed: bool) {
     if let Some(g) = writer.lock().unwrap().as_mut() {
         let _ = g.write_all(&frame);
     }
-}
-
-/// IOKit `NX_DEVICE*` device-dependent modifier bits (the low 16 bits of
-/// `NSEvent.modifierFlags`), keyed by the modifier's Carbon kVK. This is how the key's
-/// actual up/down state is read from a `FlagsChanged` event itself (Chromium does the
-/// same in `ui/events/cocoa`), rather than inferred from history.
-fn device_flag_bit(kvk: u32) -> Option<usize> {
-    Some(match kvk {
-        0x3B => 0x0001, // kVK_Control       NX_DEVICELCTLKEYMASK
-        0x38 => 0x0002, // kVK_Shift         NX_DEVICELSHIFTKEYMASK
-        0x3C => 0x0004, // kVK_RightShift    NX_DEVICERSHIFTKEYMASK
-        0x37 => 0x0008, // kVK_Command       NX_DEVICELCMDKEYMASK
-        0x36 => 0x0010, // kVK_RightCommand  NX_DEVICERCMDKEYMASK
-        0x3A => 0x0020, // kVK_Option        NX_DEVICELALTKEYMASK
-        0x3D => 0x0040, // kVK_RightOption   NX_DEVICERALTKEYMASK
-        0x3E => 0x2000, // kVK_RightControl  NX_DEVICERCTLKEYMASK
-        _ => return None,
-    })
-}
-
-/// Device-*independent* `NSEventModifierFlags` class bit for a modifier kVK. These high
-/// bits (`Control` = 0x40000, etc.) are always present in `NSEvent.modifierFlags` — the
-/// local-shortcut detection in `install` already relies on them — so they are the
-/// reliable "is a key of this class down" signal. `keyCode` (kVK) already identifies the
-/// specific left/right key, so the class flag is all we need for state.
-fn modifier_class_flag(kvk: u32) -> Option<usize> {
-    Some(match kvk {
-        0x3B | 0x3E => NSEventModifierFlags::Control.0, // Control / RightControl
-        0x38 | 0x3C => NSEventModifierFlags::Shift.0,   // Shift / RightShift
-        0x37 | 0x36 => NSEventModifierFlags::Command.0, // Command / RightCommand
-        0x3A | 0x3D => NSEventModifierFlags::Option.0,  // Option / RightOption
-        _ => return None,
-    })
-}
-
-/// The physical up/down state of modifier `kvk`, read from a `FlagsChanged` event's
-/// `modifierFlags` (`mf`). `None` for non-modifier kVKs (fn/Globe, letters).
-///
-/// Primary signal is the device-independent class flag (guaranteed present). The
-/// device-dependent per-key bit is used *only* to refine when the event actually carries
-/// device bits (low word non-zero) — that disambiguates holding both the left and right
-/// key of one modifier. This is robust whether or not the OS populates the device bits:
-///   - class flag clear            → key is up (definitive)
-///   - class set, no device bits   → this key is down (single-key case)
-///   - class set, device bits set  → precise per-key bit
-///
-/// The old logic read `mf & device_bit` *alone*; when the device bits were not delivered
-/// that was always 0, so every transition looked like a release and nothing was ever
-/// forwarded — the remote's modifiers (e.g. a Control left stuck by a prior session)
-/// never got their release and stayed down, so Tab/Space/Enter resolved as Ctrl+Tab etc.
-fn modifier_now_down(mf: usize, kvk: u32) -> Option<bool> {
-    let class_flag = modifier_class_flag(kvk)?;
-    if mf & class_flag == 0 {
-        return Some(false);
-    }
-    Some(match device_flag_bit(kvk) {
-        Some(bit) if mf & 0xffff != 0 => mf & bit != 0,
-        _ => true,
-    })
 }
 
 /// Decide what to send for a modifier transition: `Some(pressed)` to forward, `None` to
@@ -353,10 +297,10 @@ mod tests {
     const KEY_LEFTMETA: u32 = 125;
     const KEY_LEFTSHIFT: u32 = 42;
 
-    // Carbon kVK codes (the input to modifier_now_down / modifier_class_flag).
+    // Carbon kVK codes (the input to modifier_now_down). Per-kVK coverage of the shared
+    // reader lives with it in `viewer_core::kvk_modifiers`; what is tested here is how this
+    // module pairs it with the held-set.
     const KVK_CONTROL: u32 = 0x3B;
-    const KVK_SHIFT: u32 = 0x38;
-    const KVK_RIGHT_SHIFT: u32 = 0x3C;
     const KVK_COMMAND: u32 = 0x37;
 
     /// THE bug (Cmd+Tab into the viewer): ⌘'s press went to the previous app, so the
@@ -399,66 +343,16 @@ mod tests {
         assert!(held.contains(&KEY_LEFTMETA));
     }
 
-    /// The NX_DEVICE* bits for all eight modifier kVKs, per IOKit's IOLLEvent.h (same
-    /// values Chromium's dom_code_data path uses). fn/Globe (0x3F) has no device bit.
+    /// `viewer-core` spells the modifier class bits as literals so it can stay free of any
+    /// platform framework; if AppKit's values ever disagreed with them, every modifier would
+    /// silently break. Fail here instead.
     #[test]
-    fn device_flag_bits() {
-        assert_eq!(device_flag_bit(0x3B), Some(0x0001), "kVK_Control");
-        assert_eq!(device_flag_bit(0x38), Some(0x0002), "kVK_Shift");
-        assert_eq!(device_flag_bit(0x3C), Some(0x0004), "kVK_RightShift");
-        assert_eq!(device_flag_bit(0x37), Some(0x0008), "kVK_Command");
-        assert_eq!(device_flag_bit(0x36), Some(0x0010), "kVK_RightCommand");
-        assert_eq!(device_flag_bit(0x3A), Some(0x0020), "kVK_Option");
-        assert_eq!(device_flag_bit(0x3D), Some(0x0040), "kVK_RightOption");
-        assert_eq!(device_flag_bit(0x3E), Some(0x2000), "kVK_RightControl");
-        assert_eq!(device_flag_bit(0x3F), None, "fn/Globe has no device bit");
-        assert_eq!(device_flag_bit(0x00), None, "non-modifier kVK has no device bit");
-    }
-
-    #[test]
-    fn modifier_class_flags() {
-        assert_eq!(modifier_class_flag(0x3B), Some(NSEventModifierFlags::Control.0));
-        assert_eq!(modifier_class_flag(0x3E), Some(NSEventModifierFlags::Control.0));
-        assert_eq!(modifier_class_flag(0x38), Some(NSEventModifierFlags::Shift.0));
-        assert_eq!(modifier_class_flag(0x3C), Some(NSEventModifierFlags::Shift.0));
-        assert_eq!(modifier_class_flag(0x37), Some(NSEventModifierFlags::Command.0));
-        assert_eq!(modifier_class_flag(0x36), Some(NSEventModifierFlags::Command.0));
-        assert_eq!(modifier_class_flag(0x3A), Some(NSEventModifierFlags::Option.0));
-        assert_eq!(modifier_class_flag(0x3D), Some(NSEventModifierFlags::Option.0));
-        assert_eq!(modifier_class_flag(0x3F), None, "fn/Globe");
-        assert_eq!(modifier_class_flag(0x00), None, "non-modifier");
-    }
-
-    /// THE regression this fix targets: when macOS omits the device-dependent low bits,
-    /// press/release must still be read from the device-independent class flag. The old
-    /// `mf & device_bit` logic saw 0 here, read every transition as a release, and
-    /// forwarded nothing — so a Control stuck on the remote never got its release.
-    #[test]
-    fn now_down_from_class_flag_when_device_bits_absent() {
-        let ctrl = NSEventModifierFlags::Control.0; // class flag only, low word == 0
-        assert_eq!(modifier_now_down(ctrl, KVK_CONTROL), Some(true), "press");
-        assert_eq!(modifier_now_down(0, KVK_CONTROL), Some(false), "release");
-    }
-
-    /// When the OS reports device-dependent bits, use them to distinguish left from right
-    /// so both-of-a-pair holds track independently.
-    #[test]
-    fn now_down_uses_device_bit_when_present() {
-        let shift = NSEventModifierFlags::Shift.0;
-        let l = 0x0002usize; // NX_DEVICELSHIFTKEYMASK
-        let r = 0x0004usize; // NX_DEVICERSHIFTKEYMASK
-        // Both shifts down.
-        assert_eq!(modifier_now_down(shift | l | r, KVK_SHIFT), Some(true));
-        assert_eq!(modifier_now_down(shift | l | r, KVK_RIGHT_SHIFT), Some(true));
-        // Release right while left held: class still on, only left bit remains.
-        assert_eq!(modifier_now_down(shift | l, KVK_RIGHT_SHIFT), Some(false));
-        assert_eq!(modifier_now_down(shift | l, KVK_SHIFT), Some(true));
-    }
-
-    #[test]
-    fn now_down_none_for_non_modifier() {
-        assert_eq!(modifier_now_down(0, 0x00), None);
-        assert_eq!(modifier_now_down(0, 0x3F), None, "fn/Globe");
+    fn core_class_flags_match_appkit() {
+        use viewer_core::kvk_modifiers::{CLASS_COMMAND, CLASS_CONTROL, CLASS_OPTION, CLASS_SHIFT};
+        assert_eq!(CLASS_SHIFT, NSEventModifierFlags::Shift.0);
+        assert_eq!(CLASS_CONTROL, NSEventModifierFlags::Control.0);
+        assert_eq!(CLASS_OPTION, NSEventModifierFlags::Option.0);
+        assert_eq!(CLASS_COMMAND, NSEventModifierFlags::Command.0);
     }
 
     /// End-to-end on the device-bits-absent path: a normal Control press then release

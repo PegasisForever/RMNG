@@ -24,6 +24,9 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::CAMetalLayer;
 
 use viewer_core::kvk_evdev;
+// Shared with the GTK viewer: both read modifier state out of the same flag word, and keeping
+// one copy is what stops the two drifting apart (they already had, which stuck a modifier down).
+use viewer_core::kvk_modifiers::modifier_now_down;
 
 use crate::pointer::PointerLock;
 use crate::shared::{send_input, Shared, Writer};
@@ -165,6 +168,22 @@ fn evdev_button(ns_button: isize) -> Option<i32> {
     }
 }
 
+/// Turn a wheel delta into whole scroll notches, carrying the fraction in `rem`.
+///
+/// macOS does not hand out unit notches: a non-precise wheel reports an *accelerated* line
+/// count (3, 6, 10…), and a slow nudge can report less than one line. Truncating toward zero
+/// and keeping the remainder for the next event forwards the user's real scroll distance while
+/// never inventing a notch out of a sub-notch twitch. Same scheme as the GTK viewer's
+/// `ScrollUnit::Wheel` path, so both clients scroll the same amount for the same gesture.
+fn wheel_notches(rem: &Cell<(f64, f64)>, dx: f64, dy: f64) -> (i32, i32) {
+    let (mut rx, mut ry) = rem.get();
+    rx += dx;
+    ry += dy;
+    let (sx, sy) = (rx.trunc() as i32, ry.trunc() as i32);
+    rem.set((rx - f64::from(sx), ry - f64::from(sy)));
+    (sx, sy)
+}
+
 const KVK_F11: u32 = 0x67;
 const KVK_G: u32 = 0x05;
 const KVK_P: u32 = 0x23;
@@ -173,6 +192,8 @@ const KVK_P: u32 = 0x23;
 pub struct ViewerViewIvars {
     ctx: RefCell<Option<Rc<WinCtx>>>,
     tracking: RefCell<Option<Retained<NSTrackingArea>>>,
+    /// Sub-notch wheel delta not yet forwarded, per axis (see [`wheel_notches`]).
+    wheel_rem: Cell<(f64, f64)>,
 }
 
 define_class!(
@@ -305,7 +326,18 @@ define_class!(
             // Trackpads report precise deltas in points: forward them as Mutter's smooth
             // finger-source axis, which is what the GTK viewer sends for ScrollUnit::Surface.
             // A wheel reports coarse line deltas: forward those as discrete notches.
-            let (dx, dy) = (event.scrollingDeltaX(), event.scrollingDeltaY());
+            //
+            // AppKit and Mutter measure scrolling in opposite directions: `scrollingDeltaY` is
+            // positive for scroll UP and `scrollingDeltaX` positive for scroll LEFT, while the
+            // `axis` / `axis_continuous` messages go straight through to Mutter's Wayland /
+            // libinput convention, where positive dy is DOWN and positive dx is RIGHT. Hence the
+            // negation on both axes — please don't "fix" it back; forwarding the deltas raw
+            // (what the GTK viewer correctly does with GDK's already-Wayland-oriented values) is
+            // what made the video plane scroll backwards while the terminal plane did not.
+            // macOS has already folded the user's natural-scrolling preference into the delta by
+            // the time we see it, so converting the convention here honours that setting rather
+            // than fighting it.
+            let (dx, dy) = (-event.scrollingDeltaX(), -event.scrollingDeltaY());
             if event.hasPreciseScrollingDeltas() {
                 if dx != 0.0 || dy != 0.0 {
                     send_input(
@@ -330,8 +362,7 @@ define_class!(
                 }
                 return;
             }
-            let step_y = if dy > 0.0 { 1 } else if dy < 0.0 { -1 } else { 0 };
-            let step_x = if dx > 0.0 { 1 } else if dx < 0.0 { -1 } else { 0 };
+            let (step_x, step_y) = wheel_notches(&self.ivars().wheel_rem, dx, dy);
             if step_y != 0 {
                 send_input(&ctx.writer, &format!(r#"{{"kind":"axis","axis":0,"step":{step_y}}}"#));
             }
@@ -431,13 +462,13 @@ define_class!(
                 }
                 return;
             }
-            let Some(class) = modifier_class_flag(kvk) else {
-                return; // fn/Globe and friends carry no remote-mappable state
-            };
             // Read the key's real state from THIS event's flags, never from history: a modifier
             // held across a Cmd+Tab into the viewer delivers only its release, which must read as
-            // an up rather than invert into a phantom press.
-            let now_down = mf & class != 0;
+            // an up rather than invert into a phantom press. `None` = fn/Globe and friends, which
+            // carry no remote-mappable state.
+            let Some(now_down) = modifier_now_down(mf, kvk) else {
+                return;
+            };
             let mut held = ctx.pressed.borrow_mut();
             let forward = if now_down { held.insert(code) } else { held.remove(&code) };
             drop(held);
@@ -450,19 +481,6 @@ define_class!(
         }
     }
 );
-
-/// The device-independent `NSEventModifierFlags` class bit for a modifier kVK. These high bits
-/// are always present, so they are the reliable "is a key of this class down" signal; `keyCode`
-/// already says which of the pair it is.
-fn modifier_class_flag(kvk: u32) -> Option<usize> {
-    Some(match kvk {
-        0x3B | 0x3E => NSEventModifierFlags::Control.0, // Control / RightControl
-        0x38 | 0x3C => NSEventModifierFlags::Shift.0,   // Shift / RightShift
-        0x37 | 0x36 => NSEventModifierFlags::Command.0, // Command / RightCommand
-        0x3A | 0x3D => NSEventModifierFlags::Option.0,  // Option / RightOption
-        _ => return None,
-    })
-}
 
 impl ViewerView {
     fn ctx(&self) -> Option<Rc<WinCtx>> {
@@ -531,6 +549,7 @@ pub fn make_video_view(
         let this = ViewerView::alloc(mtm).set_ivars(ViewerViewIvars {
             ctx: RefCell::new(Some(ctx)),
             tracking: RefCell::new(None),
+            wheel_rem: Cell::new((0.0, 0.0)),
         });
         let this: Retained<ViewerView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         this
@@ -575,11 +594,37 @@ mod tests {
         assert_eq!(evdev_button(7), None);
     }
 
+    /// `viewer-core` spells the modifier class bits as literals so it can stay free of any
+    /// platform framework; if AppKit's values ever disagreed with them, every modifier would
+    /// silently break. Fail here instead.
     #[test]
-    fn only_real_modifier_kvks_have_a_class_flag() {
-        assert!(modifier_class_flag(0x3B).is_some(), "Control");
-        assert!(modifier_class_flag(0x37).is_some(), "Command");
-        assert!(modifier_class_flag(0x3F).is_none(), "fn/Globe");
-        assert!(modifier_class_flag(0x00).is_none(), "letter A");
+    fn core_class_flags_match_appkit() {
+        use viewer_core::kvk_modifiers::{CLASS_COMMAND, CLASS_CONTROL, CLASS_OPTION, CLASS_SHIFT};
+        assert_eq!(CLASS_SHIFT, NSEventModifierFlags::Shift.0);
+        assert_eq!(CLASS_CONTROL, NSEventModifierFlags::Control.0);
+        assert_eq!(CLASS_OPTION, NSEventModifierFlags::Option.0);
+        assert_eq!(CLASS_COMMAND, NSEventModifierFlags::Command.0);
+    }
+
+    /// A wheel notch arrives as an accelerated line count, so the magnitude has to survive:
+    /// truncate to whole notches and carry the fraction. Collapsing to ±1 (what this replaced)
+    /// made a fast spin scroll several times slower than the GTK client, while a sub-notch
+    /// delta still moved a whole line.
+    #[test]
+    fn wheel_notches_keep_magnitude_and_carry_the_remainder() {
+        let rem = Cell::new((0.0, 0.0));
+        // An accelerated spin forwards every line, not one.
+        assert_eq!(wheel_notches(&rem, 0.0, 6.0), (0, 6));
+        // Sub-notch deltas accumulate rather than each rounding up to a full notch.
+        assert_eq!(wheel_notches(&rem, 0.0, 0.5), (0, 0));
+        assert_eq!(wheel_notches(&rem, 0.0, 0.5), (0, 1));
+        // The two axes carry their remainders independently.
+        let rem = Cell::new((0.0, 0.0));
+        assert_eq!(wheel_notches(&rem, 0.5, 2.5), (0, 2));
+        assert_eq!(wheel_notches(&rem, 0.5, 0.5), (1, 1));
+        // Truncation is toward zero, so scrolling back loses nothing either.
+        let rem = Cell::new((0.0, 0.0));
+        assert_eq!(wheel_notches(&rem, 0.0, -0.5), (0, 0));
+        assert_eq!(wheel_notches(&rem, 0.0, -0.5), (0, -1));
     }
 }
