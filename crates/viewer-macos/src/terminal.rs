@@ -76,13 +76,29 @@ impl Dimensions for Dims {
     }
 }
 
-/// `Term` needs an event sink; nothing it emits requires action here (no PTY to drive, no
-/// title/bell surface), so events are dropped deliberately rather than silently.
-struct EventProxy;
+/// The terminal's event sink. `PtyWrite` is the emulator answering a query the remote app sent —
+/// Primary/Secondary DA, DSR/CPR, DECRQM, XTVERSION, the OSC 10/11 colour reports — and those
+/// replies have to reach the PTY or the asker just times out: tmux probes its outer terminal on
+/// attach, ncurses uses `u7`/`u9`, and prompt frameworks measure themselves with CPR. OSC 52
+/// clipboard-stores are honoured by writing the general pasteboard, the same path ⌘C takes.
+/// Everything else (title, bell) has no surface here and is dropped.
+///
+/// One proxy per session, carrying its own name, so a reply is routed to the session that asked
+/// even when the user has since switched tabs.
+struct EventProxy {
+    session: String,
+    on_input: InputCb,
+    /// Injected rather than called directly, so the routing is testable without a pasteboard.
+    set_clipboard: Rc<dyn Fn(String)>,
+}
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: AlacEvent) {
-        tracing::trace!("terminal event ignored: {event:?}");
+        match event {
+            AlacEvent::PtyWrite(text) => (self.on_input)(&self.session, text.into_bytes()),
+            AlacEvent::ClipboardStore(_, text) => (self.set_clipboard)(text),
+            other => tracing::trace!("terminal event ignored: {other:?}"),
+        }
     }
 }
 
@@ -93,9 +109,14 @@ struct Session {
 }
 
 impl Session {
-    fn new(dims: Dims) -> Self {
+    fn new(name: &str, dims: Dims, on_input: InputCb) -> Self {
+        let proxy = EventProxy {
+            session: name.to_string(),
+            on_input,
+            set_clipboard: Rc::new(|text: String| set_pasteboard_string(&text)),
+        };
         Session {
-            term: Term::new(TermConfig::default(), &dims, EventProxy),
+            term: Term::new(TermConfig::default(), &dims, proxy),
             parser: Processor::new(),
         }
     }
@@ -218,12 +239,16 @@ define_class!(
             if lines == 0 {
                 return;
             }
+            // `locate` reads the term map itself, so it has to run *before* we borrow that map —
+            // doing it inside the borrow is a `BorrowMutError` and, inside an ObjC method, an
+            // abort. The mouse handlers above take the same order for the same reason; the cost on
+            // a plain scrollback tick is one point conversion.
+            let (_, _, col, row) = self.locate(&state, event);
             let mut terms = state.terms.borrow_mut();
             let Some(sess) = terms.get_mut(&key) else { return };
             if sess.term.mode().intersects(TermMode::MOUSE_MODE) {
                 // The app wants wheel events itself (codes 64/65), not scrollback.
                 let mode = *sess.term.mode();
-                let (_, _, col, row) = self.locate(&state, event);
                 drop(terms);
                 let code = if lines > 0 { 64 } else { 65 };
                 for _ in 0..lines.abs() {
@@ -363,9 +388,7 @@ impl GridView {
         if text.is_empty() {
             return;
         }
-        let pb = NSPasteboard::generalPasteboard();
-        pb.clearContents();
-        pb.setString_forType(&NSString::from_str(&text), unsafe { NSPasteboardTypeString });
+        set_pasteboard_string(&text);
     }
 
     /// Paint the active session's grid.
@@ -514,6 +537,19 @@ impl GridView {
     fn font(&self) -> Retained<NSFont> {
         terminal_font()
     }
+}
+
+/// Put `text` on the general pasteboard — the single write path for both ⌘C and the emulator's
+/// OSC 52 clipboard-store. [`crate::clipboard`] owns the pasteboard ⇄ server bridge and writes it
+/// the same way; it will notice the resulting `changeCount` bump on its next tick and offer the
+/// text to the server, exactly as it does for a ⌘C, so a remote OSC 52 propagates like a local
+/// copy instead of stopping at this viewer.
+fn set_pasteboard_string(text: &str) {
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    // SAFETY: `NSPasteboardTypeString` is the documented AppKit pasteboard-type global.
+    let ty = unsafe { NSPasteboardTypeString };
+    pb.setString_forType(&NSString::from_str(text), ty);
 }
 
 /// Fill `rect` with `color`.
@@ -727,8 +763,11 @@ impl TerminalView {
             let mut terms = self.state.terms.borrow_mut();
             terms.retain(|k, _| sessions.contains(k));
             let dims = self.dims();
+            let on_input = self.state.cb.on_input.clone();
             for s in sessions {
-                terms.entry(s.clone()).or_insert_with(|| Session::new(dims));
+                terms
+                    .entry(s.clone())
+                    .or_insert_with(|| Session::new(s, dims, on_input.clone()));
             }
         }
         // The "+" asked for a session and one has appeared: focus it, the way every tab UI does.
@@ -845,7 +884,58 @@ impl TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_key;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use alacritty_terminal::event::{Event as AlacEvent, EventListener};
+    use alacritty_terminal::term::ClipboardType;
+
+    use super::{encode_key, EventProxy};
+
+    /// What the proxy's sinks saw: PTY writes as (session, bytes), and clipboard texts.
+    #[derive(Default)]
+    struct Recorder {
+        pty: RefCell<Vec<(String, Vec<u8>)>>,
+        clip: RefCell<Vec<String>>,
+    }
+
+    /// A proxy whose sinks record instead of reaching the socket or the pasteboard.
+    fn recording_proxy() -> (EventProxy, Rc<Recorder>) {
+        let rec = Rc::new(Recorder::default());
+        let proxy = EventProxy {
+            session: "work".to_string(),
+            on_input: {
+                let rec = rec.clone();
+                Rc::new(move |s: &str, b: Vec<u8>| rec.pty.borrow_mut().push((s.to_string(), b)))
+            },
+            set_clipboard: {
+                let rec = rec.clone();
+                Rc::new(move |t: String| rec.clip.borrow_mut().push(t))
+            },
+        };
+        (proxy, rec)
+    }
+
+    /// The emulator answers Device Attributes, DSR/CPR, DECRQM and the colour queries with a
+    /// `PtyWrite`. Dropping those leaves tmux (which probes its outer terminal on attach) and
+    /// ncurses (`u7`/`u9`) waiting for a reply that never arrives, so the reply must reach the
+    /// PTY — tagged with the session that asked, not whichever tab happens to be in front.
+    #[test]
+    fn pty_writes_reach_the_asking_session() {
+        let (proxy, rec) = recording_proxy();
+        proxy.send_event(AlacEvent::PtyWrite("\x1b[?6c".to_string()));
+        assert_eq!(rec.pty.borrow().as_slice(), [("work".to_string(), b"\x1b[?6c".to_vec())]);
+    }
+
+    #[test]
+    fn clipboard_stores_are_honoured_and_other_events_dropped() {
+        let (proxy, rec) = recording_proxy();
+        proxy.send_event(AlacEvent::ClipboardStore(ClipboardType::Clipboard, "copied".to_string()));
+        proxy.send_event(AlacEvent::Bell);
+        proxy.send_event(AlacEvent::Title("ignored".to_string()));
+        assert_eq!(rec.clip.borrow().as_slice(), ["copied".to_string()]);
+        assert!(rec.pty.borrow().is_empty(), "only PtyWrite goes to the PTY");
+    }
 
     #[test]
     fn named_keys_encode_to_their_sequences() {
