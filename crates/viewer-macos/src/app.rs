@@ -34,7 +34,9 @@ use crate::pointer::PointerLock;
 use crate::render::{Overlay, Renderer};
 use crate::shared::{Shared, Wake};
 use crate::terminal::{TermCallbacks, TerminalView};
-use crate::window::{make_video_view, make_window_shell, ViewerView, WinCtx};
+use crate::window::{
+    install_close_policy, is_main_monitor, make_video_view, make_window_shell, ViewerView, WinCtx,
+};
 
 /// How often the housekeeping tick runs: auto pointer-lock reconcile, cursor shape, clipboard,
 /// focus loss. Matches the GTK viewer's 8 ms tick closely enough for the lock debounce.
@@ -161,7 +163,7 @@ impl AppState {
         for m in monitors {
             if !self.windows.contains_key(&m.id) {
                 let title = format!("RMNG viewer — monitor {}", m.id);
-                let window = make_window_shell(self.mtm, &title);
+                let window = make_window_shell(self.mtm, &title, is_main_monitor(m.id));
                 self.windows.insert(
                     m.id,
                     WindowEntry {
@@ -441,6 +443,9 @@ fn make_startup_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(ns_string!("RMNG viewer"));
+    // The startup window is the only UI before the first spec arrives, so it is the main window
+    // for close purposes: closing it quits, rather than hiding the viewer behind the menu bar.
+    install_close_policy(mtm, &window, true);
     let label = NSTextField::labelWithString(
         ns_string!("Connecting to the server…\nChange the address with ⌘, (Settings)."),
         mtm,
@@ -472,8 +477,9 @@ define_class!(
     unsafe impl NSApplicationDelegate for Delegate {
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window(&self, _app: &NSApplication) -> bool {
-            // Secondary / startup windows closing must not kill the app; the viewer is driven by
-            // the server's view spec and can legitimately have no window for a while.
+            // Windows going away must not kill the app; the viewer is driven by the server's
+            // view spec and can legitimately have no window for a while. Quitting on a user
+            // close is the window delegate's job instead (see `install_close_policy`).
             false
         }
     }
