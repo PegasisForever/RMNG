@@ -10,9 +10,13 @@
 //! editable from the title-bar Settings button; `RMNG_VIDEO` only seeds the first run.
 
 mod app;
+mod clipboard;
+mod cursor;
 mod decoder;
 mod net;
+mod pointer;
 mod render;
+mod settings;
 mod shared;
 mod window;
 

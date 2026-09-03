@@ -1,39 +1,51 @@
 //! The AppKit main thread: application setup, the net-thread → main-thread wake hop, window
-//! reconciliation from the server's `ViewSpec`, and draw-on-frame. The GTK viewer's `build_ui` +
-//! tick, re-expressed on NSApplication with no GTK.
+//! reconciliation from the server's `ViewSpec`, draw-on-frame, and the housekeeping tick. The GTK
+//! viewer's `build_ui` + 8 ms tick, re-expressed on NSApplication with no GTK.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSMenu, NSMenuItem, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSMenu,
+    NSMenuItem, NSTextField, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSTimer,
 };
 
 use dispatch2::DispatchQueue;
+use viewer_core::auto_lock::{lock_action, LockAction};
 use viewer_core::config;
 use wire::viewer::{ViewContent, ViewMonitor};
 
+use crate::clipboard::Clipboard;
+use crate::cursor::cursor_from_shape;
+use crate::pointer::PointerLock;
 use crate::render::Renderer;
 use crate::shared::{Shared, Wake};
 use crate::window::{make_window, ViewerView, WinCtx};
 
+/// How often the housekeeping tick runs: auto pointer-lock reconcile, cursor shape, clipboard,
+/// focus loss. Matches the GTK viewer's 8 ms tick closely enough for the lock debounce.
+const TICK_SECS: f64 = 0.016;
+
 /// One live monitor window.
 struct WindowEntry {
     monitor_id: u32,
-    _window: Retained<NSWindow>,
+    window: Retained<NSWindow>,
     view: Retained<ViewerView>,
     ctx: Rc<WinCtx>,
+    /// Whether this window was the key window at the previous tick (to detect focus loss).
+    was_key: Cell<bool>,
 }
 
 /// Everything the main thread owns. Lives in a main-thread-only `thread_local`; `wake` reaches it
@@ -46,6 +58,8 @@ struct AppState {
     last_epoch: u64,
     startup: Option<Retained<NSWindow>>,
     cmd_is_ctrl: bool,
+    pointer_lock: Option<Rc<PointerLock>>,
+    clipboard: Clipboard,
 }
 
 thread_local! {
@@ -64,9 +78,13 @@ pub fn wake(_why: Wake) {
 
 fn on_main_wake() {
     WAKE_PENDING.store(false, Ordering::Release);
+    with_state(|s| s.refresh());
+}
+
+fn with_state(f: impl FnOnce(&mut AppState)) {
     APP.with(|a| {
         if let Some(state) = a.borrow_mut().as_mut() {
-            state.refresh();
+            f(state);
         }
     });
 }
@@ -74,17 +92,17 @@ fn on_main_wake() {
 impl AppState {
     /// Reconcile the window set to the latest spec, then draw whatever frames are available.
     fn refresh(&mut self) {
-        let (spec, epoch, connected) = {
+        let (spec, epoch) = {
             let v = self.shared.view.lock().unwrap();
-            (v.spec.clone(), v.epoch, self.shared.connected.load(Ordering::Relaxed))
+            (v.spec.clone(), v.epoch)
         };
         if epoch != self.last_epoch {
             self.last_epoch = epoch;
-            let monitors: Vec<ViewMonitor> = spec.as_ref().map(|s| s.monitors.clone()).unwrap_or_default();
+            let monitors: Vec<ViewMonitor> =
+                spec.as_ref().map(|s| s.monitors.clone()).unwrap_or_default();
             let desktop = matches!(spec.as_ref().map(|s| &s.content), Some(ViewContent::Desktop));
             self.reconcile(&monitors, desktop);
         }
-        let _ = connected;
         self.draw_all();
     }
 
@@ -93,12 +111,18 @@ impl AppState {
     fn reconcile(&mut self, monitors: &[ViewMonitor], desktop: bool) {
         let live: std::collections::HashSet<u32> =
             if desktop { monitors.iter().map(|m| m.id).collect() } else { Default::default() };
-        // Drop windows no longer present.
-        let gone: Vec<u32> = self.windows.keys().copied().filter(|id| !live.contains(id)).collect();
-        for id in gone {
+        for id in self.windows.keys().copied().filter(|id| !live.contains(id)).collect::<Vec<_>>() {
             if let Some(e) = self.windows.remove(&id) {
                 e.view.release_all();
-                e._window.close();
+                e.window.close();
+            }
+        }
+        // A window going away can strand the lock: it is a single process-wide resource and on
+        // macOS holding it with no window freezes the host cursor. The tick re-engages within a
+        // frame if the policy still wants it.
+        if self.windows.is_empty() {
+            if let Some(pl) = self.pointer_lock.as_ref() {
+                pl.release();
             }
         }
         if desktop {
@@ -111,19 +135,27 @@ impl AppState {
                     shared: self.shared.clone(),
                     writer: self.shared.writer.clone(),
                     cmd_is_ctrl: self.cmd_is_ctrl,
-                    frame_size: std::cell::Cell::new((m.width as f64, m.height as f64)),
+                    pointer_lock: self.pointer_lock.clone(),
+                    frame_size: Cell::new((m.width as f64, m.height as f64)),
                     pressed: RefCell::new(Default::default()),
                     buttons: RefCell::new(Default::default()),
+                    cursor: RefCell::new(None),
+                    cursor_version: Cell::new(0),
+                    inside: Cell::new(false),
                 });
                 let title = format!("RMNG viewer — monitor {}", m.id);
-                let (window, view) = make_window(self.mtm, ctx.clone(), self.renderer.device(), &title);
-                self.windows.insert(m.id, WindowEntry { monitor_id: m.id, _window: window, view, ctx });
+                let (window, view) =
+                    make_window(self.mtm, ctx.clone(), self.renderer.device(), &title);
+                self.windows.insert(
+                    m.id,
+                    WindowEntry { monitor_id: m.id, window, view, ctx, was_key: Cell::new(false) },
+                );
             }
         }
         // Keep-alive / status window when there are no monitor windows.
         if self.windows.is_empty() {
             if self.startup.is_none() {
-                self.startup = Some(make_startup_window(self.mtm, &self.shared));
+                self.startup = Some(make_startup_window(self.mtm));
             }
         } else if let Some(w) = self.startup.take() {
             w.close();
@@ -152,13 +184,92 @@ impl AppState {
             }
         }
     }
+
+    /// Housekeeping: focus loss, auto pointer-lock, the remote cursor shape, and the clipboard.
+    fn tick(&mut self) {
+        // 1. Focus loss releases every key/button this window holds, so nothing sticks down on
+        //    the remote after a Cmd+Tab away.
+        let mut has_target = false;
+        for e in self.windows.values() {
+            let is_key = e.window.isKeyWindow();
+            if e.was_key.get() && !is_key {
+                e.view.release_all();
+            }
+            e.was_key.set(is_key);
+            has_target |= is_key;
+        }
+
+        // 2. Auto pointer-lock: remote cursor hidden ≥180 ms engages, shown ≥300 ms releases;
+        //    the manual chords override on top. Wanting the lock with no focused window is a
+        //    RELEASE condition — a held macOS lock outlives our focus and would freeze the host
+        //    cursor inside whatever app the operator switched to.
+        if let Some(pl) = self.pointer_lock.as_ref() {
+            let want = self.shared.auto_lock.lock().unwrap().want(Instant::now());
+            match lock_action(want, has_target, pl.is_engaged()) {
+                LockAction::Engage => pl.engage(),
+                LockAction::Release => pl.release(),
+                LockAction::Nothing => {}
+            }
+        }
+
+        // 3. Remote cursor shape → a real NSCursor, rebuilt only when the sprite changes.
+        {
+            let cursors = self.shared.cursors.lock().unwrap();
+            for e in self.windows.values() {
+                let Some(entry) = cursors.get(&e.monitor_id) else { continue };
+                if entry.version == e.ctx.cursor_version.get() {
+                    continue;
+                }
+                let Some(shape) = entry.shape.as_ref() else { continue };
+                e.ctx.cursor_version.set(entry.version);
+                match cursor_from_shape(shape) {
+                    Ok(c) => {
+                        tracing::debug!(
+                            "cursor apply: mon={} version={} {}x{}",
+                            e.monitor_id, entry.version, shape.width, shape.height
+                        );
+                        *e.ctx.cursor.borrow_mut() = Some(c);
+                        e.ctx.apply_cursor();
+                    }
+                    // Keep the previous cursor rather than losing the pointer shape entirely.
+                    Err(err) => tracing::warn!("monitor {}: cursor build failed: {err:#}", e.monitor_id),
+                }
+            }
+        }
+
+        // 4. Clipboard: drain inbound offers/data and notice a local copy.
+        let shared = self.shared.clone();
+        self.clipboard.tick(&shared);
+    }
+}
+
+fn on_main_tick() {
+    with_state(|s| s.tick());
+}
+
+/// Open the server-address dialog (⌘, or the menu item).
+fn open_settings() {
+    let addr_changed = APP.with(|a| {
+        let b = a.borrow();
+        let Some(state) = b.as_ref() else { return false };
+        let (mtm, shared) = (state.mtm, state.shared.clone());
+        // Drop the borrow before running a modal loop: the dialog pumps events, which can
+        // re-enter the tick and would panic on a second borrow_mut.
+        drop(b);
+        crate::settings::show(mtm, &shared)
+    });
+    if addr_changed {
+        wake(Wake::View);
+    }
 }
 
 /// The startup / keep-alive window: a small titled window with a status label, shown until video
-/// arrives. (Settings dialog + live status text land in a later milestone.)
-fn make_startup_window(mtm: MainThreadMarker, _shared: &Arc<Shared>) -> Retained<NSWindow> {
-    let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(420.0, 160.0));
-    let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable;
+/// arrives. The address is editable from the app menu (⌘,) — the reason the GTK viewer puts a
+/// Settings button here is that with a wrong address no other window ever appears.
+fn make_startup_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
+    let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(440.0, 150.0));
+    let style =
+        NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable;
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -170,9 +281,11 @@ fn make_startup_window(mtm: MainThreadMarker, _shared: &Arc<Shared>) -> Retained
     };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(ns_string!("RMNG viewer"));
-    let label =
-        objc2_app_kit::NSTextField::labelWithString(ns_string!("Connecting to the server…"), mtm);
-    label.setFrame(NSRect::new(NSPoint::new(20.0, 60.0), NSSize::new(380.0, 40.0)));
+    let label = NSTextField::labelWithString(
+        ns_string!("Connecting to the server…\nChange the address with ⌘, (Settings)."),
+        mtm,
+    );
+    label.setFrame(NSRect::new(NSPoint::new(20.0, 45.0), NSSize::new(400.0, 60.0)));
     if let Some(content) = window.contentView() {
         content.addSubview(&label);
     }
@@ -199,8 +312,17 @@ define_class!(
     unsafe impl NSApplicationDelegate for Delegate {
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window(&self, _app: &NSApplication) -> bool {
-            // The main (monitor 0) window closing quits; secondary/startup windows do not force it.
+            // Secondary / startup windows closing must not kill the app; the viewer is driven by
+            // the server's view spec and can legitimately have no window for a while.
             false
+        }
+    }
+
+    impl Delegate {
+        /// Menu action for Settings (⌘,).
+        #[unsafe(method(rmngShowSettings:))]
+        fn rmng_show_settings(&self, _sender: *mut objc2::runtime::AnyObject) {
+            open_settings();
         }
     }
 );
@@ -212,12 +334,24 @@ impl Delegate {
     }
 }
 
-/// Build the minimal main menu (an app menu with Quit ⌘Q).
-fn install_menu(mtm: MainThreadMarker, app: &NSApplication) {
+/// Build the app menu: Settings (⌘,) and Quit (⌘Q).
+fn install_menu(mtm: MainThreadMarker, app: &NSApplication, delegate: &Delegate) {
     let main = NSMenu::new(mtm);
     let app_item = NSMenuItem::new(mtm);
     main.addItem(&app_item);
+
     let app_menu = NSMenu::new(mtm);
+    let settings = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            ns_string!("Settings…"),
+            Some(objc2::sel!(rmngShowSettings:)),
+            ns_string!(","),
+        )
+    };
+    unsafe { settings.setTarget(Some(delegate)) };
+    app_menu.addItem(&settings);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let quit = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -231,18 +365,20 @@ fn install_menu(mtm: MainThreadMarker, app: &NSApplication) {
     app.setMainMenu(Some(&main));
 }
 
-/// Run the GUI. Builds the app state, installs it in the main-thread thread-local, shows the
-/// startup window, and enters the AppKit run loop.
+/// Run the GUI: build the app state, install it in the main-thread thread-local, show the startup
+/// window, start the housekeeping tick, and enter the AppKit run loop.
 pub fn run(shared: Arc<Shared>) -> Result<()> {
-    let mtm = MainThreadMarker::new().ok_or_else(|| anyhow!("run() must be called on the main thread"))?;
+    let mtm =
+        MainThreadMarker::new().ok_or_else(|| anyhow!("run() must be called on the main thread"))?;
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    install_menu(mtm, &app);
 
     let delegate = Delegate::new(mtm);
+    install_menu(mtm, &app, &delegate);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
     let renderer = Renderer::new()?;
+    let pointer_lock = PointerLock::new(shared.writer.clone()).map(Rc::new);
     let mut state = AppState {
         mtm,
         shared: shared.clone(),
@@ -251,10 +387,16 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         last_epoch: 0,
         startup: None,
         cmd_is_ctrl: config::cmd_is_ctrl(),
+        pointer_lock,
+        clipboard: Clipboard::new(mtm),
     };
-    // Show the startup window immediately (net thread may connect before the first spec).
-    state.startup = Some(make_startup_window(mtm, &shared));
+    // Show the startup window immediately: the net thread may connect before the first spec.
+    state.startup = Some(make_startup_window(mtm));
     APP.with(|a| *a.borrow_mut() = Some(state));
+
+    // Housekeeping tick (the wake hop covers frames; this covers everything time-driven).
+    let block = RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| on_main_tick());
+    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(TICK_SECS, true, &block) };
 
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
