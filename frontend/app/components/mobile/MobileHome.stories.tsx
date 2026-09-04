@@ -52,6 +52,7 @@ const meta = {
     // here: tapping a row is the phone's whole navigation, and the import dialog is mounted
     // by the container beside this page, never inside it.
     onImportAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn"),
+    onReplaceAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "Replacing"),
     onSelectClone: makeStoryLink("Mobile/Pages/MobileClone", "Chat"),
     error: null,
   },

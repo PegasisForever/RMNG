@@ -51,10 +51,15 @@ $RMNG_CONTROL_URL` hint.
 
 | Command (with `--json`) | Emits |
 |---|---|
-| `clone ls` | `{ selected, clones: [Clone + {stats, accounts}], operations }` (CLI shape — includes the metrics the table shows) |
+| `clone ls` | `{ selected, clones: [Clone + {stats, accounts, column}], operations }` (CLI shape — includes the metrics the table shows) |
+| `board ls` | `BoardColumn[]`, resolved the way the dashboard draws them |
+| `board move` | the resolved `BoardColumn[]` after the move |
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
-| `clone create`, `clone create-from-ticket`, `clone create-with-new-ticket`, `clone create-plain`, `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
+| `clone create`, `clone create-from-ticket`, `clone create-with-new-ticket`, `clone create-plain` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
+| `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
+| `clone cp` | `{ bytes, dst }` |
+| `clone self` | the caller's `Clone` record, or exit 1 outside a clone |
 | `op wait` | the terminal `Operation` |
 | `op ls` | `Operation[]` |
 | `image ls` | `ImageInfo[]` |
@@ -74,16 +79,18 @@ $RMNG_CONTROL_URL` hint.
 
 ## Commands
 
-The surface is **noun → verb**. Nouns: `clone`, `image`, `account`, `op`, `ledger`, `desktop`.
+The surface is **noun → verb**. Nouns: `clone`, `image`, `account`, `op`, `ledger`, `board`,
+`desktop`.
 The target is always a positional **clone id** (the first column of `rmng clone ls`).
 
 ### `rmng clone ls`
-Clones table: `ID` (a `*` suffix marks the selected clone), `IP` (the current Docker bridge
+Clones table: `ID` (a `*` suffix marks the selected clone), `COLUMN` (the board column the
+clone is drawn in; blank on a sub clone, which is drawn under its parent's card), `IP` (the current Docker bridge
 address when available), `IMAGE` (source reference), `PRESET`, `CLAUDE` and `CODEX` (the account
 each provider is running — the resolved email, falling back to the selection when none is
 assigned yet), live `CPU` and `RAM`, and lifecycle `STATUS`. Sub clones are indented under their
 parent. CPU/RAM are volatile snapshots for sampled active managed clones.
-`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats, accounts}],
+`rmng clone ls --json` returns the CLI shape `{ selected, clones: [Clone + {stats, accounts, column}],
 operations }` — so the metrics the table shows are available to a machine reader too.
 
 Each clone also carries a derived `accounts` object, one entry per provider:
@@ -113,7 +120,15 @@ clone-creating verb is prefixed `create-` so the action is unmistakable — the 
 with `rmng op wait <op-id>`), or blocks with `--wait`.
 
 **Common flags** (all four): `--from <IMAGE>` (required), `--claude-account <A>`,
-`--codex-account <A>`, `--headless`, `--parent <C>` | `--top-level`, `--wait` `[--timeout <N>]`.
+`--codex-account <A>`, `--headless`, `--parent <C>` | `--top-level`, `--column <NAME>`,
+`--wait` `[--timeout <N>]`.
+
+`--column` files the new clone at the **top** of that column, by title or id. The name is
+resolved before anything is created, so a typo costs no clone. The id is written to the board
+as soon as the operation starts, which is why this needs no `--wait`: the board ignores an id
+matching no clone, and the card appears at the top the moment the clone does. Naming an
+archive column files the clone there without archiving it, since archiving something that is
+still being created would race its own creation.
 
 **Account selections** take the same forms as `account swap`: an email, `auto`, `none`, or
 `group:<pool>`. Omitting them means `auto` — a new clone gets an account rather than none.
@@ -181,6 +196,92 @@ offline clones are refused. `--json` → `{ command, mode }`.
 ### `rmng clone exec <CLONE> [-u <user>] [-w <dir>] [-e KEY=VAL]… -- <cmd…>`
 Run one non-interactive command inside a clone (docker-exec style); forwards piped stdin and
 passes through the command's exit code. `--json` emits one object with the captured streams.
+
+### `rmng board ls`
+The dashboard's columns, left to right: `COLUMN ID ARCHIVES CLONES CONTENTS`. The view is
+**resolved**, not the raw stored list, so a clone nobody has filed appears in the column the
+board draws it in rather than nowhere. A board nobody has arranged yet reports the two columns
+the dashboard draws by default, `Clones` and `Archived`.
+
+`--json` emits `BoardColumn[]` in the same resolved form.
+
+### `rmng board move <CLONE> <COLUMN> [--wait]`
+Move a clone to the **top** of a column. `COLUMN` is what a person reads off the board, so
+`"In Progress"` works; the stored id (`in-progress`) works too, and both ignore case and
+surrounding space. An unknown name lists the columns that do exist and changes nothing.
+
+**An archive column archives.** Dropping a card into one on the dashboard archives the clone
+and dragging it out again restores it, so this does the same: moving into `Archived` stops the
+clone, moving it back out starts it. `--wait` blocks on that lifecycle operation. Without it
+the move is filed immediately and the archive runs in the background.
+
+A sub clone is refused. The board draws it under its parent's card and never files it, so
+filing one would write an id no column ever draws. Move the parent instead.
+
+### `rmng clone cp <SRC> <CLONE>:<DST-DIR> [--exclude <name>]…`
+Copy a directory into a clone at an absolute path. `SRC` takes two forms, and which one you
+use decides where the bytes travel.
+
+**`<CLONE>:<DIR>`, clone to clone.** The server can already see every running clone's home
+(the same links the SMB share is built on), so it does the copy itself, with `rclone` in
+parallel across files. Nothing enters this process, a socket, or the Docker API. Use this
+for a large tree. Both paths must sit under `/home/rmng`, and both clones must be running.
+An image without rclone falls back to `cp -a`, which is slower on a source tree and the only
+one of the two that preserves hardlinks.
+
+**A local directory, streaming.** `tar` writes into the request body and the server passes
+the archive to the Docker daemon, so the project streams through without either end
+buffering it, and the route is exempt from the 64MB body cap the JSON routes carry. This is
+the only form available from a machine the server cannot see, such as an operator laptop,
+and it is the only one that reaches a path outside `/home/rmng`.
+
+Files and directories both arrive owned as they were at the source, which for a copy between
+clone agents is the same agent user on the far side. Directories take a second pass, because
+the rclone Ubuntu ships has no directory metadata and would otherwise leave every one of them
+owned by the server's root: a tree whose files are writable but whose directories are not
+lets an agent edit code and fail to create a single new file.
+
+Measured clone to clone on CT 101: 266 MB over 23,470 files takes **2.1s** out of band
+against **5.8s** streamed, and 4 GB in five files **1.4s** against **10.0s**. Bulk data is
+dominated by the transport and a large file count by per-file work, so the out-of-band form
+wins on both, for different reasons.
+
+ZFS block cloning does not help here even where the pool supports it. `FICLONE` returns
+`EPERM` inside an unprivileged LXC, on a plain dataset as much as through overlayfs, though
+the same `cp --reflink=always` succeeds on the Proxmox host. Where the pool runs dedup, a
+duplicated tree still costs little space; it costs the write.
+
+The destination is created if missing. Nothing is deleted there and nothing is copied back:
+an existing directory receives these files on top of what it already holds.
+
+`--exclude <name>` is anchored at the top of SRC and matches a directory there and nowhere
+below it. That matters for a JavaScript project: unanchored, `--exclude dist` would also
+strike every `node_modules/*/dist`, and the copy would look complete while importing nothing.
+
+    rmng clone cp /home/rmng/proj agt-1a2b:/home/rmng/proj --exclude target --exclude .venv
+
+`--json` → `{ bytes, dst }`. `--exclude` is anchored at the top of SRC either way.
+
+### `rmng clone sync <CLONE>:<SRC-DIR> <CLONE>:<DST-DIR> [--exclude <name>]…`
+`cp` with deletion: the destination ends up matching the source, so a file it holds and the
+source does not is removed. Everything else is `cp`'s clone-to-clone form, including the
+anchored excludes and the ownership handling.
+
+An excluded name is left alone rather than deleted, which is what lets a destination keep its
+own `target/` through a sync that excludes it.
+
+Two restrictions, both because deletion is involved. The source must be a clone, since a
+streamed archive tells the server what it holds and never what it lacks; use `cp` to send a
+local directory. And the destination cannot be `/home/rmng` itself, where a sync would delete
+`Desktop`, `.ssh`, `.claude` and everything else the source happens not to have.
+
+    rmng clone sync pega-we-142:/home/rmng/proj agt-1a2b:/home/rmng/proj --exclude target
+
+### `rmng clone self`
+Print the calling clone's own id, or the whole record with `--json`. Identity is the
+per-clone router key in this process's environment, the same proof the server trusts for
+sub-clone nesting, so it needs no hostname convention. Outside a clone it prints nothing and
+exits 1.
 
 ### `rmng clone select <CLONE>` / `rmng clone select --none`
 Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears it. **Operator-only

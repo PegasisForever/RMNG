@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, Path as AxPath, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path as AxPath, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
@@ -90,6 +90,13 @@ pub fn router(app: App) -> Router {
         .route("/api/hosts/:id/unarchive", post(unarchive))
         .route("/api/hosts/:id/mcp", post(clone_mcp))
         .route("/api/hosts/:id/exec", post(clone_exec))
+        // The tar stream `rmng clone cp` sends is a whole project directory, so this one
+        // route opts out of the router's 64MB cap below and is never buffered.
+        .route(
+            "/api/hosts/:id/copy",
+            post(clone_copy).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/api/self", get(clone_self))
         // Claude + Codex accounts. The server owns each account's OAuth refresh lifecycle and
         // pushes only short-lived access tokens into clones; these twelve are symmetric across
         // the two providers. Account POOLS are not edited here — they live in `config.json`
@@ -151,7 +158,14 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("port 2 (web API + SSE + static) on http://{addr}");
-    axum::serve(listener, router).await?;
+    // `with_connect_info` is what puts the peer address in reach of a handler, and
+    // [`caller_clone`] needs it: a clone's address on the rmng bridge is the one thing about
+    // the caller that Docker assigns and nothing inside the clone can restate.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -776,17 +790,226 @@ async fn clone_exec(
     Ok(Json(result))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopyQuery {
+    /// Absolute path inside the clone to extract the archive at.
+    dst: String,
+    /// Run-as user for the `mkdir` that precedes the extract. Defaults to the agent user,
+    /// so the directory it creates belongs to the agent rather than to root.
+    user: Option<String>,
+    /// `<clone>:<absolute-path>` to copy from, when the source is another clone this server
+    /// can already see. Set, the request carries no body and nothing crosses a socket.
+    from: Option<String>,
+    /// Comma-separated directory names to leave out, anchored at the top of the source.
+    /// Out-of-band copies only; a streamed archive is filtered by the sender's `tar`.
+    exclude: Option<String>,
+    /// Make the destination match the source, deleting what the source does not have.
+    /// Requires `from`, since a streamed archive says what it holds and never what it lacks.
+    delete: Option<bool>,
+}
+
+/// `POST /api/hosts/:id/copy?dst=<abs path>` — extract a tar stream inside the clone.
+///
+/// The body is the archive itself rather than JSON, and the route disables the router's
+/// body cap, so a whole project directory streams from the caller through this process to
+/// the Docker daemon without being buffered anywhere along the way. That is the difference
+/// from `/exec`, whose stdin is base64 inside a JSON body and therefore bounded.
+///
+/// Ownership is whatever the archive records, which means a tar written by the calling
+/// clone's agent user arrives owned by the same uid on the other side.
+async fn clone_copy(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<CopyQuery>,
+    body: axum::body::Body,
+) -> Result<Json<wire::CopyResult>, (StatusCode, String)> {
+    if !q.dst.starts_with('/') {
+        return Err((StatusCode::BAD_REQUEST, "dst must be an absolute path".into()));
+    }
+    let host = clone_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))?;
+    if host.archived {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("clone '{id}' is archived; unarchive it first"),
+        ));
+    }
+
+    // Source named: both ends are clone homes this server can reach, so the copy happens
+    // here and the request body is empty.
+    if let Some(spec) = q.from.clone() {
+        let (src_clone, src_path) = spec.split_once(':').ok_or((
+            StatusCode::BAD_REQUEST,
+            "from must be <clone>:<absolute-path>".to_string(),
+        ))?;
+        if clone_by_id(&app, src_clone).is_none() {
+            return Err((StatusCode::NOT_FOUND, format!("no clone '{src_clone}'")));
+        }
+        // A caller mistake, so it is answered as one rather than as a copy that failed.
+        // `copy_between` refuses this too, for callers that do not come through here.
+        if q.delete.unwrap_or(false) && crate::homes::is_home_root(&q.dst) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("refusing to sync onto {id}:{} itself; name a directory inside it", q.dst),
+            ));
+        }
+        let excludes: Vec<String> = q
+            .exclude
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let bytes = crate::homes::copy_between(
+            &app,
+            src_clone,
+            src_path,
+            &host.id,
+            &q.dst,
+            &excludes,
+            q.delete.unwrap_or(false),
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+        tracing::info!("clone {id}: copied {bytes} bytes from {spec} into {}", q.dst);
+        return Ok(Json(wire::CopyResult { bytes, dst: q.dst }));
+    }
+
+    // The daemon's extract fails on a missing directory rather than creating one, and a
+    // directory made by root would leave the agent unable to write in its own project.
+    let user = q.user.clone().unwrap_or_else(|| DESKTOP_UID.to_string());
+    let mkdir = vec!["mkdir".to_string(), "-p".to_string(), q.dst.clone()];
+    let made = app
+        .docker
+        .exec_capture(&host.id, &mkdir, &user, None, &[], None)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if made.exit_code != 0 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("mkdir -p {} failed: {}", q.dst, made.stderr.trim()),
+        ));
+    }
+
+    // Counted as it passes, which is all this process ever knows about the archive.
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let tally = seen.clone();
+    let stream = body.into_data_stream().map(move |chunk| {
+        chunk
+            .inspect(|b| {
+                tally.fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            })
+            .map_err(std::io::Error::other)
+    });
+    app.docker
+        .upload_tar_stream(&host.id, &q.dst, stream)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    let bytes = seen.load(std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("clone {id}: copied {bytes} bytes into {}", q.dst);
+    Ok(Json(wire::CopyResult { bytes, dst: q.dst }))
+}
+
+/// The managed clone reachable at `ip` on the rmng bridge, when exactly one is.
+///
+/// `local_ip` is refreshed from a Docker inspect on every monitor tick (4 s), so a recreated
+/// container's new address is current within one tick. Two rows claiming one address means the
+/// map is mid-refresh and no answer is trustworthy, so that yields `None` rather than a guess.
+fn clone_at_ip(app: &App, ip: std::net::IpAddr) -> Option<String> {
+    let ip = ip.to_canonical(); // an IPv4 peer on a dual-stack listener arrives as ::ffff:a.b.c.d
+    let mut hit = None;
+    for h in app.store.get().hosts.iter().filter(|h| h.managed) {
+        if h.local_ip.as_deref().and_then(|s| s.parse().ok()) != Some(ip) {
+            continue;
+        }
+        if hit.is_some() {
+            return None;
+        }
+        hit = Some(h.id.clone());
+    }
+    hit
+}
+
+/// Which clone is calling: its address first, then the two identity headers `control-client`
+/// sends.
+///
+/// **The peer address decides.** A clone reaches the server over the rmng bridge, container to
+/// container, so the address on the connection is the one Docker gave that container. Nothing
+/// running inside the clone chooses it, nothing can inherit it from an image, and it cannot go
+/// stale, which is what separates it from everything else the caller could say about itself.
+///
+/// The headers are the fallback for a caller whose address does not name a clone: the fleet CLI
+/// run on the operator's box against a remote server, a request through a proxy, dev mode.
+/// `X-RMNG-Proxy-Key` says whether the caller is inside the fleet at all, being present in a
+/// clone's environment and absent on a laptop, and `X-RMNG-Clone` carries the caller's container
+/// hostname, which is the clone id. Between those two the hostname wins.
+///
+/// The key alone was wrong for a fleet's worth of clones: it travels through `/etc/environment`
+/// into the lingering user manager and then into every session child, a committed image bakes
+/// the source clone's copy, and a process keeps its launch environment for life. Seven clones on
+/// the production fleet ran their whole desktop session (terminals, editors, agents) under the
+/// identity of the clone their image was committed from.
+fn caller_clone(app: &App, headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> Option<String> {
+    if let Some(id) = peer.and_then(|ip| clone_at_ip(app, ip)) {
+        return Some(id);
+    }
+    let header = |name| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+    let by_key = app
+        .clone_keys
+        .clone_for_token(header("x-rmng-proxy-key").filter(|k| !k.is_empty())?);
+    let by_host = header("x-rmng-clone")
+        .filter(|h| !h.is_empty())
+        .filter(|h| app.store.get().hosts.iter().any(|c| c.id == *h && c.managed))
+        .map(str::to_string);
+    match (by_host, by_key) {
+        (Some(host), Some(key)) if host != key => {
+            tracing::warn!(
+                "clone {host} presented {key}'s identity key, so the hostname decides. Its \
+                 /etc/environment was inherited from a committed image; the clone heals on its \
+                 next container restart"
+            );
+            Some(host)
+        }
+        (Some(host), _) => Some(host),
+        (None, by_key) => by_key,
+    }
+}
+
+/// `GET /api/self` — the clone record of whoever is calling.
+///
+/// Identity is [`caller_clone`]: the address the request arrived on, and the headers only when
+/// that address names no clone. A caller the server cannot place is not inside a clone, which is
+/// a 404 rather than an error: it is a legitimate answer for the operator laptop.
+///
+/// `ConnectInfo` is optional so the handler still answers under a test server built without it.
+async fn clone_self(
+    State(app): State<App>,
+    peer: Option<ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
+) -> Result<Json<wire::RmngClone>, (StatusCode, String)> {
+    let id = caller_clone(&app, &headers, peer.map(|p| p.0.ip())).ok_or((
+        StatusCode::NOT_FOUND,
+        "not running inside a managed clone".to_string(),
+    ))?;
+    clone_by_id(&app, &id)
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))
+}
+
 /// Resolve the parent clone for a fleet-CLI clone create (the sub-clone relationship).
 /// Precedence: a `topLevel` body flag → `None`; an explicit `parent` body id → validated as a
-/// top-level managed clone; otherwise auto-detect the calling clone from its per-clone router
-/// key header (`X-RMNG-Proxy-Key`, the same bearer the `/cc` proxy trusts, mapped by
-/// [`crate::clonekey::CloneKeys::clone_for_token`]) and nest under it only when the caller
-/// is itself top-level — nesting is one level deep, so a request from a sub clone (or from
-/// outside the fleet with no key) yields a top-level clone. `topLevel` + `parent` is an error.
+/// top-level managed clone; otherwise auto-detect the calling clone with [`caller_clone`] and
+/// nest under it only when the caller is itself top-level. Nesting is one level deep, so a
+/// request from a sub clone (or from outside the fleet) yields a top-level clone.
+/// `topLevel` + `parent` is an error.
 fn resolve_parent(
     app: &App,
     body: &serde_json::Value,
     headers: &HeaderMap,
+    peer: Option<std::net::IpAddr>,
 ) -> Result<Option<String>, (StatusCode, String)> {
     let bad = |m: String| (StatusCode::BAD_REQUEST, m);
     let top_level = body
@@ -819,12 +1042,8 @@ fn resolve_parent(
             Some(_) => Ok(Some(pid.to_string())),
         };
     }
-    // Auto-detect: the calling clone proves its identity with its own per-clone router key.
-    let caller = headers
-        .get("x-rmng-proxy-key")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|key| app.clone_keys.clone_for_token(key));
-    Ok(caller.filter(|id| top_level_managed(id)))
+    // Auto-detect: the address the request came in on, falling back to the caller's headers.
+    Ok(caller_clone(app, headers, peer).filter(|id| top_level_managed(id)))
 }
 
 /// The effective account selections + preset for a fleet-CLI clone, applying sub-clone
@@ -1055,6 +1274,7 @@ fn derive_hostname(app: &App, base: &str, title: &str) -> (String, String) {
 /// client can see.
 async fn clone(
     State(app): State<App>,
+    peer: Option<ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1126,7 +1346,7 @@ async fn clone(
     // clone is auto-detected from its per-clone router key. The web dialog's "sub clone of X"
     // checkbox sends `parent`, so this is NOT fleet-CLI-only — resolving it here rather than
     // inside the hostname branch is what makes that checkbox work in the UI create modes.
-    let parent = resolve_parent(&app, &body, &headers)?;
+    let parent = resolve_parent(&app, &body, &headers, peer.map(|p| p.0.ip()))?;
 
     // Raw hostname clone (fleet CLI): the caller owns the exact hostname; no ticket, no
     // derived display name. A preset is optional — fleet workers usually need none; an
@@ -2495,12 +2715,22 @@ struct LoginCompleteReq {
     provider: String,
     /// Whatever the operator copied: the callback URL, its query, or `code=…&state=…`.
     pasted: String,
-    /// The pool to join, or empty for none. Must already exist.
+    /// The pool to join, or empty for none. Must already exist. Ignored when `replaces` is
+    /// set: a replacement inherits the pools of the account it stands in for.
     #[serde(default)]
     group: String,
+    /// An imported account this sign-in stands in for, or empty for a plain import. The
+    /// replaced account's pools and clones move to the new one, and it is then deleted.
+    #[serde(default)]
+    replaces: String,
 }
 
 /// `POST /api/login/complete` — redeem the pasted callback and store the account.
+///
+/// With `replaces` set, the stored account then takes over from that one (pools, pinned
+/// clones, current assignments) and the old one is deleted. That is the whole of the
+/// "sign in again" badge: recovering a dead account used to mean deleting it and importing
+/// its replacement by hand, rebuilding its pools and pins from memory.
 ///
 /// A 400 covers everything the operator can fix by pasting again; the provider refusing the
 /// code is one of those, so it is not a 502.
@@ -2508,9 +2738,35 @@ async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq
     let provider = crate::oauth::Provider::parse(&req.provider).ok_or_else(|| {
         err_json(StatusCode::BAD_REQUEST, format!("unknown provider '{}'", req.provider))
     })?;
-    let email = crate::oauth::complete(&app, provider, &req.pasted, &req.group)
+    let replaces = req.replaces.trim().to_string();
+    // A replacement joins its predecessor's pools, so the modal's pool pick is not asked for
+    // and must not be applied on top of them.
+    let group = if replaces.is_empty() { req.group.as_str() } else { "" };
+    let email = crate::oauth::complete(&app, provider, &req.pasted, group)
         .await
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+
+    let mut moved: Vec<String> = Vec::new();
+    if !replaces.is_empty() {
+        // The account is stored either way. A failure here leaves it imported alongside the
+        // one it was meant to replace, which is recoverable by hand, so it reports rather
+        // than pretending the sign-in did not happen.
+        moved = match provider {
+            crate::oauth::Provider::Claude => {
+                crate::claude::replace_account(&app, &replaces, &email).await
+            }
+            crate::oauth::Provider::Codex => {
+                crate::codex::replace_account(&app, &replaces, &email).await
+            }
+        }
+        .map_err(|e| {
+            err_json(
+                StatusCode::BAD_REQUEST,
+                format!("{email} was signed in, but taking over from {replaces} failed: {e:#}"),
+            )
+        })?;
+    }
+
     // Put its usage on screen without making the browser wait, exactly as the clone import
     // does. The account is already stored by the line above.
     let app2 = app.clone();
@@ -2520,7 +2776,12 @@ async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq
             crate::oauth::Provider::Codex => crate::codex::poll_once(&app2).await,
         }
     });
-    Ok(Json(serde_json::json!({ "ok": true, "email": email })))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "email": email,
+        "replaced": if replaces.is_empty() { None } else { Some(replaces) },
+        "moved": moved,
+    })))
 }
 
 
@@ -3087,7 +3348,7 @@ mod tests {
             "hostname": "w-mod-claude",
             "claudeAccount": "auto",
         });
-        let resp = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap().0;
+        let resp = clone(State(app.clone()), None, HeaderMap::new(), Json(body)).await.unwrap().0;
         assert_eq!(resp["ok"], true);
         let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
         assert_eq!(op.kind, wire::OperationKind::Clone);
@@ -3100,7 +3361,7 @@ mod tests {
     async fn clone_hostname_mode_rejects_bad_label() {
         let app = test_app();
         let body = json!({ "image": "tmpl:latest", "hostname": "Not A Label!" });
-        let err = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap_err();
+        let err = clone(State(app.clone()), None, HeaderMap::new(), Json(body)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("DNS label"), "msg: {}", err.1);
     }
@@ -3109,7 +3370,7 @@ mod tests {
     async fn clone_hostname_mode_rejects_unknown_preset() {
         let app = test_app();
         let body = json!({ "image": "tmpl:latest", "hostname": "w1", "preset": "nope" });
-        let err = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap_err();
+        let err = clone(State(app.clone()), None, HeaderMap::new(), Json(body)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
     }
@@ -3218,7 +3479,7 @@ mod tests {
         let app = ticket_app();
         let body = json!({ "image": "tmpl:latest", "linear": issue_body(), "preset": "work" });
 
-        let resp = clone(State(app.clone()), HeaderMap::new(), Json(body)).await.unwrap().0;
+        let resp = clone(State(app.clone()), None, HeaderMap::new(), Json(body)).await.unwrap().0;
 
         assert_eq!(resp["ok"], true);
         let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
@@ -3234,6 +3495,7 @@ mod tests {
         let app = ticket_app();
         let ok = clone(
             State(app.clone()),
+            None,
             HeaderMap::new(),
             Json(json!({ "image": "tmpl:latest", "linear": issue_body() })),
         )
@@ -3244,6 +3506,7 @@ mod tests {
 
         let err = clone(
             State(app.clone()),
+            None,
             HeaderMap::new(),
             Json(json!({ "image": "tmpl:latest", "linear": { "ticket": "XX-9", "title": "t" } })),
         )
@@ -3260,6 +3523,7 @@ mod tests {
         let app = test_app();
         let err = clone(
             State(app.clone()),
+            None,
             HeaderMap::new(),
             Json(json!({ "image": "tmpl:latest" })),
         )
@@ -3333,19 +3597,19 @@ mod tests {
         let empty = HeaderMap::new();
 
         // `topLevel` forces a top-level clone; no hints also → top-level.
-        assert_eq!(resolve_parent(&app, &json!({ "topLevel": true }), &empty).unwrap(), None);
-        assert_eq!(resolve_parent(&app, &json!({}), &empty).unwrap(), None);
+        assert_eq!(resolve_parent(&app, &json!({ "topLevel": true }), &empty, None).unwrap(), None);
+        assert_eq!(resolve_parent(&app, &json!({}), &empty, None).unwrap(), None);
         // A valid explicit top-level parent is accepted.
         assert_eq!(
-            resolve_parent(&app, &json!({ "parent": "p" }), &empty).unwrap(),
+            resolve_parent(&app, &json!({ "parent": "p" }), &empty, None).unwrap(),
             Some("p".into())
         );
         // A sub clone, an unmanaged row, and an unknown id are all rejected as parents.
         for pid in ["c", "u", "ghost"] {
-            assert!(resolve_parent(&app, &json!({ "parent": pid }), &empty).is_err());
+            assert!(resolve_parent(&app, &json!({ "parent": pid }), &empty, None).is_err());
         }
         // `parent` + `topLevel` together is an error.
-        assert!(resolve_parent(&app, &json!({ "parent": "p", "topLevel": true }), &empty).is_err());
+        assert!(resolve_parent(&app, &json!({ "parent": "p", "topLevel": true }), &empty, None).is_err());
     }
 
     /// Deleting a pool must not strand the clones bound to it.
@@ -3434,7 +3698,7 @@ mod tests {
             ..app.config()
         };
         let create = |body: serde_json::Value| {
-            clone(State(app.clone()), HeaderMap::new(), Json(body))
+            clone(State(app.clone()), None, HeaderMap::new(), Json(body))
         };
 
         // A configured pool is accepted (reaches the op, i.e. past validation).
@@ -3654,17 +3918,17 @@ mod tests {
         // A top-level caller's own router key nests the new clone under it.
         let key_p = app.clone_keys.mint("p");
         assert_eq!(
-            resolve_parent(&app, &json!({}), &header(&key_p)).unwrap(),
+            resolve_parent(&app, &json!({}), &header(&key_p), None).unwrap(),
             Some("p".into())
         );
         // A sub-clone caller can't nest deeper (one level) → top-level.
         let key_c = app.clone_keys.mint("c");
-        assert_eq!(resolve_parent(&app, &json!({}), &header(&key_c)).unwrap(), None);
+        assert_eq!(resolve_parent(&app, &json!({}), &header(&key_c), None).unwrap(), None);
         // An unrecognized key → top-level.
-        assert_eq!(resolve_parent(&app, &json!({}), &header("bogus")).unwrap(), None);
+        assert_eq!(resolve_parent(&app, &json!({}), &header("bogus"), None).unwrap(), None);
         // An explicit `topLevel` overrides the caller key.
         assert_eq!(
-            resolve_parent(&app, &json!({ "topLevel": true }), &header(&key_p)).unwrap(),
+            resolve_parent(&app, &json!({ "topLevel": true }), &header(&key_p), None).unwrap(),
             None
         );
     }
@@ -3740,6 +4004,148 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("cmd"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn clone_copy_rejects_a_relative_destination() {
+        let app = test_app();
+        let err = clone_copy(
+            State(app.clone()),
+            AxPath("anything".into()),
+            Query(CopyQuery { dst: "home/rmng/proj".into(), user: None, from: None, exclude: None, delete: None }),
+            axum::body::Body::empty(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("absolute"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn clone_copy_unknown_clone_is_404() {
+        let app = test_app();
+        let err = clone_copy(
+            State(app.clone()),
+            AxPath("ghost".into()),
+            Query(CopyQuery { dst: "/home/rmng/proj".into(), user: None, from: None, exclude: None, delete: None }),
+            axum::body::Body::empty(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    /// Two managed clones on the rmng bridge, addressed the way Docker's IPAM addresses them.
+    /// `pega-template` is the clone the fleet's images were committed from, so it is the one a
+    /// stale key names.
+    fn two_clones() -> App {
+        let app = test_app();
+        for (id, ip) in [("pega-template", "10.99.0.4"), ("pega-we-649", "10.99.0.6")] {
+            app.store.mutate(|s| {
+                s.hosts.push(wire::RmngClone {
+                    id: id.into(),
+                    host: id.into(),
+                    managed: true,
+                    local_ip: Some(ip.into()),
+                    ..Default::default()
+                })
+            });
+        }
+        app
+    }
+
+    fn connect_info(ip: Option<std::net::IpAddr>) -> Option<ConnectInfo<std::net::SocketAddr>> {
+        ip.map(|ip| ConnectInfo(std::net::SocketAddr::new(ip, 44444)))
+    }
+
+    /// Two clones on the rmng bridge, and the caller holds the wrong one's key while also
+    /// naming the wrong one in its hostname header. That is the shape a clone born from an image
+    /// that baked `pega-template`'s `/etc/environment` has for its whole life, and it is why
+    /// neither of those is allowed to outrank the address the request arrived on.
+    #[tokio::test]
+    async fn the_address_outranks_anything_the_caller_says_about_itself() {
+        let app = two_clones();
+        let stale = app.clone_keys.mint("pega-template");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-rmng-proxy-key", stale.parse().unwrap());
+        headers.insert("x-rmng-clone", "pega-template".parse().unwrap());
+        let peer = Some(std::net::IpAddr::from([10, 99, 0, 6]));
+
+        assert_eq!(caller_clone(&app, &headers, peer).as_deref(), Some("pega-we-649"));
+        let me = clone_self(State(app.clone()), connect_info(peer), headers.clone())
+            .await
+            .unwrap();
+        assert_eq!(me.0.id, "pega-we-649");
+
+        // The same answer decides where a sub clone nests, which is the other half of the damage:
+        // a terminal in pega-we-649 would have hung its sub clone off pega-template.
+        let parent = resolve_parent(&app, &serde_json::json!({}), &headers, peer).unwrap();
+        assert_eq!(parent.as_deref(), Some("pega-we-649"));
+    }
+
+    /// An IPv4 peer on a dual-stack listener arrives mapped into IPv6, and the same clone has to
+    /// come back.
+    #[tokio::test]
+    async fn a_v4_mapped_peer_resolves_to_the_same_clone() {
+        let app = two_clones();
+        let mapped = Some("::ffff:10.99.0.6".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(caller_clone(&app, &HeaderMap::new(), mapped).as_deref(), Some("pega-we-649"));
+    }
+
+    /// An address that names no clone, which is every request from the operator's LAN, falls
+    /// through to the headers rather than guessing.
+    #[tokio::test]
+    async fn an_address_off_the_bridge_falls_through_to_the_headers() {
+        let app = two_clones();
+        let lan = Some(std::net::IpAddr::from([10, 0, 0, 15]));
+        let mut headers = HeaderMap::new();
+        assert_eq!(caller_clone(&app, &headers, lan), None);
+        headers.insert("x-rmng-proxy-key", app.clone_keys.mint("pega-we-649").parse().unwrap());
+        assert_eq!(caller_clone(&app, &headers, lan).as_deref(), Some("pega-we-649"));
+    }
+
+    /// Two rows on one address means the IP map is mid-refresh, so it answers nothing at all.
+    #[tokio::test]
+    async fn a_duplicated_address_is_not_an_identity() {
+        let app = two_clones();
+        app.store.mutate(|s| {
+            for h in &mut s.hosts {
+                h.local_ip = Some("10.99.0.6".into());
+            }
+        });
+        let peer = Some(std::net::IpAddr::from([10, 99, 0, 6]));
+        assert_eq!(caller_clone(&app, &HeaderMap::new(), peer), None);
+    }
+
+    #[tokio::test]
+    async fn clone_self_from_an_unplaceable_caller_is_404_not_a_guess() {
+        let app = two_clones();
+        let err = clone_self(State(app.clone()), None, HeaderMap::new()).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert!(err.1.contains("not running inside"), "msg: {}", err.1);
+    }
+
+    /// The hostname alone proves nothing. An operator laptop that happens to be named after a
+    /// clone sends no key, and must stay outside the fleet.
+    #[tokio::test]
+    async fn a_hostname_without_a_key_is_not_a_clone() {
+        let app = two_clones();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-rmng-clone", "pega-we-649".parse().unwrap());
+        assert_eq!(caller_clone(&app, &headers, None), None);
+    }
+
+    /// An unmanaged host's name is not an identity either, so the key still decides. This is
+    /// also the old-CLI path: no hostname header at all.
+    #[tokio::test]
+    async fn the_key_still_answers_when_the_hostname_names_nothing() {
+        let app = two_clones();
+        let key = app.clone_keys.mint("pega-we-649");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-rmng-proxy-key", key.parse().unwrap());
+        assert_eq!(caller_clone(&app, &headers, None).as_deref(), Some("pega-we-649"));
+        headers.insert("x-rmng-clone", "someones-laptop".parse().unwrap());
+        assert_eq!(caller_clone(&app, &headers, None).as_deref(), Some("pega-we-649"));
     }
 
     #[tokio::test]

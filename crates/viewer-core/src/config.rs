@@ -57,11 +57,37 @@ pub fn cmd_is_ctrl() -> bool {
 }
 
 pub fn config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        home.join(".config")
-    });
-    base.join("rmng-viewer").join("config.json")
+    config_base().join("rmng-viewer").join("config.json")
+}
+
+/// The directory that holds this user's application config.
+///
+/// An explicit `XDG_CONFIG_HOME` wins on every platform — it is how a portable or test install
+/// relocates the file. Otherwise Unix uses `~/.config` and Windows uses `%APPDATA%`.
+///
+/// Windows needs its own branch rather than the Unix fallback: `HOME` is not set for a process
+/// started from Explorer, the Start menu, or a shortcut — only a POSIX-ish shell (Git Bash,
+/// MSYS2) defines it. With `HOME` unset the fallback produces the *relative* path
+/// `.config\rmng-viewer\config.json`, which resolves against the working directory, so the
+/// server address would be written next to wherever the viewer happened to be launched from
+/// and silently fail to load the next time it was launched from anywhere else.
+fn config_base() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata);
+        }
+        // %APPDATA% is set for every interactive logon; this only covers an unusual service or
+        // stripped environment, where %USERPROFILE% still gives the canonical location.
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return PathBuf::from(profile).join("AppData").join("Roaming");
+        }
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    home.join(".config")
 }
 
 /// Load the persisted config, falling back to defaults (which seed from
@@ -117,6 +143,21 @@ mod tests {
             .expect("legacy config must deserialize");
         assert_eq!(c.server_addr, "10.0.0.100:9001");
         assert!(c.cmd_is_ctrl, "the swap defaults on");
+    }
+
+    /// The config has to land in the same place no matter how the viewer was started. On
+    /// Windows the Unix `HOME` fallback yields a path relative to the working directory, so the
+    /// address saved from the Settings dialog would vanish the next time the viewer was
+    /// launched from anywhere else. Absolute is the property that rules that out.
+    ///
+    /// Windows-only on purpose: on Linux this asserts a property of the *environment* (`HOME`
+    /// being set), not of this code, and a container that runs the suite without one would fail
+    /// it for a reason unrelated to the change.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_config_path_does_not_depend_on_the_working_directory() {
+        let path = config_path();
+        assert!(path.is_absolute(), "config path must be absolute, got {path:?}");
     }
 
     #[test]

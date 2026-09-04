@@ -90,7 +90,7 @@ import { copyText } from "~/lib/clipboard";
 import { browserLocale } from "~/lib/format";
 import { readSelection, sameSelection, withSelection, type Selection } from "~/lib/selection";
 import { rememberSideWidth, SIDE_DEFAULT, storedSideWidth } from "~/lib/sidePanelWidth";
-import { type ControlState, type Clone } from "~/lib/types";
+import { type ClaudeUsage, type ControlState, type Clone } from "~/lib/types";
 import { toggleMuted } from "~/lib/mute";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
@@ -175,6 +175,9 @@ export function DashboardContainer({
   const [changing, setChanging] = useState(false);
   // The group an "add account" OAuth login is in flight for (null = modal closed).
   const [importOpen, setImportOpen] = useState(false);
+  // The dead account the sign-in modal is standing in for, or null for a plain import.
+  // One modal serves both: a replacement IS a sign-in, it just knows what it takes over.
+  const [replacing, setReplacing] = useState<ClaudeUsage | null>(null);
   const [forwardClone, setForwardClone] = useState<Clone | null>(null);
   const [forwarding, setForwarding] = useState(false);
   const [forwardError, setForwardError] = useState<string | null>(null);
@@ -547,10 +550,20 @@ export function DashboardContainer({
   const claudeAccounts = accounts.filter((a) => a.provider !== "codex");
   const codexAccounts = accounts.filter((a) => a.provider === "codex");
 
+  // The server publishes the removal in the same mutation that deletes the token, so the row
+  // leaves on the first SSE frame and nothing here has to wait for it. The usage poll is
+  // deliberately NOT chained: it walks every remaining account at a 400ms stagger with a 10s
+  // timeout each, and chaining it made the delete look like it took half a minute to land.
+  /** Open the sign-in modal, either plain or standing in for `account`. */
+  const openImport = (account: ClaudeUsage | null) => {
+    setReplacing(account);
+    setImportOpen(true);
+  };
+
   const onDeleteAccount = (email: string) =>
-    run(deleteClaudeAccount(email).then(() => refreshClaudeUsage()));
+    run(deleteClaudeAccount(email).then(() => void refreshClaudeUsage().catch(() => {})));
   const onDeleteCodexAccount = (email: string) =>
-    run(deleteCodexAccount(email).then(() => refreshCodexUsage()));
+    run(deleteCodexAccount(email).then(() => void refreshCodexUsage().catch(() => {})));
 
   // Archiving rides a drag into the Archived column, and that column's contents come from
   // the server's `archived` flag rather than from the column list. So when the call fails
@@ -740,7 +753,8 @@ export function DashboardContainer({
           activeLayout: state.activeLayout ?? "",
           onActivateLayout: (name) => run(activateLayout(name)),
           onOpenSettings: () => setSettingsOpen(true),
-          onImportAccount: () => setImportOpen(true),
+          onImportAccount: () => openImport(null),
+          onReplaceAccount: (account) => openImport(account),
           onRefresh: () => {
             void Promise.all([refreshClaudeUsage(), refreshCodexUsage()]);
           },
@@ -918,7 +932,8 @@ export function DashboardContainer({
           )}
           onPullTemplate={(reference) => run(pullTemplate(reference))}
           onDeleteImage={(reference) => run(deleteImage(reference))}
-          onImportAccount={() => setImportOpen(true)}
+          onImportAccount={() => openImport(null)}
+          onReplaceAccount={(account) => openImport(account)}
           onDeleteAccount={onDeleteAccount}
           onDeleteCodexAccount={onDeleteCodexAccount}
           boardColumns={columns}
@@ -969,6 +984,11 @@ export function DashboardContainer({
         <ImportAccountModalContainer
           claudeGroups={cloneGroups.map((g) => g.name)}
           codexGroups={codexGroups.map((g) => g.name)}
+          replacing={
+            replacing
+              ? { provider: replacing.provider === "codex" ? "codex" : "claude", email: replacing.email }
+              : null
+          }
           onClose={() => setImportOpen(false)}
           onImported={() => {
             setImportOpen(false);

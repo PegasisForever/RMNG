@@ -68,6 +68,7 @@ export interface SettingsPanelContainerProps {
   /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
    *  control-server harvests the tokens off a clone that's already signed in. */
   onImportAccount: () => void;
+  onReplaceAccount: (account: ClaudeUsage) => void;
   // --- board columns ---
   /** The dashboard board's columns, left to right. Omit to hide the section entirely,
    *  which is what a page without a board does. */
@@ -99,6 +100,7 @@ export function SettingsPanelContainer({
   onDeleteAccount,
   onDeleteCodexAccount,
   onImportAccount,
+  onReplaceAccount,
   boardColumns,
   boardColumnCounts,
   onAddBoardColumn,
@@ -296,6 +298,7 @@ export function SettingsPanelContainer({
       onDeleteAccount={(email) => confirmDelete(email, onDeleteAccount)}
       onDeleteCodexAccount={(email) => confirmDelete(email, onDeleteCodexAccount)}
       onImportAccount={onImportAccount}
+      onReplaceAccount={onReplaceAccount}
       setupComplete={!!config?.setupComplete}
       error={error}
       restartRequired={restartRequired}

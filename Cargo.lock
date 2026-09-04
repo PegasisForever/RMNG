@@ -536,6 +536,7 @@ dependencies = [
  "axum",
  "base64",
  "bollard",
+ "bytes",
  "futures",
  "libc",
  "media",
@@ -2864,6 +2865,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "wire",
 ]
 
@@ -3738,7 +3740,6 @@ dependencies = [
  "anyhow",
  "gdk4-wayland",
  "gstreamer",
- "gstreamer-allocators",
  "gstreamer-app",
  "gstreamer-base",
  "gstreamer-gl",
@@ -3752,6 +3753,7 @@ dependencies = [
  "viewer-core",
  "wayland-client",
  "wayland-protocols",
+ "windows-sys 0.59.0",
  "wire",
 ]
 

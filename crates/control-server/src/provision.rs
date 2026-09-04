@@ -514,10 +514,13 @@ fn clone_pct(step: &str) -> Option<f64> {
 /// (gotcha #7).
 ///
 /// `image` must be a clone source (`rmng.image=1`); `env` is the resolved control + preset
-/// env (control URLs first so a preset can still override). One `upload_tar` injects: a
-/// fresh random `/etc/machine-id` (always — a committed image carries a baked one),
-/// `/etc/environment`, and — when the preset sets `PATH` — the fish/profile preset-PATH rc
-/// (root-owned `/etc`). After start, when the preset set `PATH`,
+/// env (control URLs first so a preset can still override). A pre-boot `upload_tar` injects
+/// the clone's identity: a fresh random `/etc/machine-id` (always, because a committed image
+/// carries a baked one), `/etc/environment`, and, when the preset sets `PATH`, the fish/profile
+/// preset-PATH rc (root-owned `/etc`). Pre-boot because the lingering user manager reads that
+/// environment about a second into the boot, and every session process inherits it for the life
+/// of the container. A second `upload_tar` after start carries what needs a running container.
+/// After start, when the preset set `PATH`,
 /// the bashrc marker block is appended via an exec (a plain tar can't append). wait-ready
 /// polls the mediaplane for the daemon's `Hello{clone_id == hostname}` ≤ 90 s; a timeout with
 /// the container still running SUCCEEDS with a warning in the op log; a dead container FAILS
@@ -732,9 +735,65 @@ async fn clone_container_after_create(
         docker.upload_tar(container, bins).await?;
     }
 
-    // systemd PID 1 comes up; we then inject identity + preset files before the user units
-    // settle, so their PAM-created environment sees `/etc/environment`.
-    on_progress("inject", "starting container to inject identity + preset");
+    // The clone's identity and env, written while the container is STILL STOPPED.
+    //
+    // This cannot wait until after the start. The template enables lingering for the clone user,
+    // so `systemd --user` comes up with PID 1 and imports `/etc/environment` through the
+    // `/usr/lib/environment.d/99-environment.conf` symlink within about a second. Every process
+    // it goes on to start, the whole desktop session included, inherits that environment for as
+    // long as the container runs. A committed image carries the `/etc/environment` of the
+    // clone it was committed from, `RMNG_PROXY_KEY` and all. Writing ours seconds after the boot
+    // therefore lost a race it could not win: seven clones on the production fleet ran their
+    // terminals, editors and agents under the identity of their image's source clone, so
+    // `rmng clone self` named that clone and a sub clone created from a terminal would have
+    // nested under it. `commit_clone_image` no longer bakes the key, and this write closes the
+    // window for every image that already does.
+    let preset_conf = clone_etc_environment_conf(env);
+    let path_rc = preset_path_rc(&preset_conf);
+    let mut identity: Vec<TarEntry> = vec![
+        // Fresh random machine-id: a committed image bakes one in, and systemd-in-docker
+        // does NOT persist a generated id into an empty writable /etc/machine-id (it runs
+        // with a transient one; seen live in the E2E — hostnamectl broken, id unstable
+        // across restarts). Writing a unique id per clone gives stable, collision-free
+        // D-Bus/journald identity; commit truncates it again, so images never carry it.
+        TarEntry {
+            path: "etc/machine-id".into(),
+            data: fresh_machine_id()?,
+            mode: 0o444,
+            uid: 0,
+            gid: 0,
+        },
+        // Per-clone env (base desktop session + control URLs + preset vars), read by PAM for
+        // SSH sessions and the lingering user manager.
+        TarEntry {
+            path: "etc/environment".into(),
+            data: preset_conf.clone().into_bytes(),
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        },
+    ];
+    if let Some(rc) = &path_rc {
+        identity.push(TarEntry {
+            path: "etc/fish/conf.d/rmng-preset-path.fish".into(),
+            data: rc.fish.clone().into_bytes(),
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        });
+        identity.push(TarEntry {
+            path: "etc/profile.d/rmng-preset-path.sh".into(),
+            data: rc.profile.clone().into_bytes(),
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        });
+    }
+    on_progress("inject", "injecting machine-id + preset env + PATH rc (pre-boot)");
+    docker.upload_tar(container, identity).await?;
+
+    // systemd PID 1 comes up, and the user manager with it, now reading the env written above.
+    on_progress("inject", "starting container to inject the rest of the preset");
     docker.start_container(container).await?;
 
     // Render mode: install the boot hook and, on a CPU clone, take the GPU away and restart
@@ -801,32 +860,9 @@ async fn clone_container_after_create(
         tracing::warn!("clone {hostname}: Codex CLI install exited {code} (reconciler will retry)");
     }
 
-    // Build the single upload_tar: machine-id (always), /etc/environment + PATH rc.
-    let preset_conf = clone_etc_environment_conf(env);
-    let path_rc = preset_path_rc(&preset_conf);
-    let mut entries: Vec<TarEntry> = vec![
-        // Fresh random machine-id: a committed image bakes one in, and systemd-in-docker
-        // does NOT persist a generated id into an empty writable /etc/machine-id (it runs
-        // with a transient one; seen live in the E2E — hostnamectl broken, id unstable
-        // across restarts). Writing a unique id per clone gives stable, collision-free
-        // D-Bus/journald identity; commit truncates it again, so images never carry it.
-        TarEntry {
-            path: "etc/machine-id".into(),
-            data: fresh_machine_id()?,
-            mode: 0o444,
-            uid: 0,
-            gid: 0,
-        },
-        // Per-clone env (base desktop session + control URLs + preset vars), read by PAM for
-        // SSH sessions and the lingering user manager.
-        TarEntry {
-            path: "etc/environment".into(),
-            data: preset_conf.clone().into_bytes(),
-            mode: 0o644,
-            uid: 0,
-            gid: 0,
-        },
-    ];
+    // Build the second upload_tar: the files that had to wait for the container to be up. The
+    // identity + env went in pre-boot, above.
+    let mut entries: Vec<TarEntry> = Vec::new();
     // The Settings-editable agent playbook (global + preset append), read by the agent-wrapper
     // at startup (AGENT_INSTRUCTIONS_PATH). Empty ⇒ skip; the wrapper then uses its baked-in
     // default. Distinct from /etc/environment (this is a multi-KB markdown blob, not a KEY=VALUE).
@@ -844,22 +880,6 @@ async fn clone_container_after_create(
         &codex_entries,
     ));
     entries.append(&mut codex_entries);
-    if let Some(rc) = &path_rc {
-        entries.push(TarEntry {
-            path: "etc/fish/conf.d/rmng-preset-path.fish".into(),
-            data: rc.fish.clone().into_bytes(),
-            mode: 0o644,
-            uid: 0,
-            gid: 0,
-        });
-        entries.push(TarEntry {
-            path: "etc/profile.d/rmng-preset-path.sh".into(),
-            data: rc.profile.clone().into_bytes(),
-            mode: 0o644,
-            uid: 0,
-            gid: 0,
-        });
-    }
     // SSH: the clone's stable host key + the current authorized_keys, so `ssh -J … rmng@<id>`
     // works the moment the clone is up. The template pre-created ~rmng/.ssh (700) and ships
     // no host keys, so these land with the right owner/perms. Best-effort: a keygen failure
@@ -875,7 +895,7 @@ async fn clone_container_after_create(
         Err(e) => tracing::warn!("clone {hostname}: ssh material skipped: {e}"),
     }
 
-    on_progress("inject", "injecting machine-id + preset env + PATH rc");
+    on_progress("inject", "injecting the agent playbook + Codex parity + SSH material");
     docker.upload_tar(container, entries).await?;
 
     // Interactive Claude Code reads MCP servers from ~/.claude.json (state-bearing → jq merge, not
@@ -1216,13 +1236,37 @@ fn commit_pct(step: &str) -> Option<f64> {
     })
 }
 
+/// Clear both halves of a clone's identity, right before its filesystem is snapshotted into an
+/// image: the machine-id, and the identity bearer in `/etc/environment`.
+///
+/// Neither belongs to anything built from the image. A baked `RMNG_PROXY_KEY` is read by the next
+/// clone's user manager during boot and handed to its whole desktop session, which then claims to
+/// be the clone the image came from; it is also a live bearer sitting in an image.
+const COMMIT_PREPARE_SCRIPT: &str = "sed -i '/^RMNG_PROXY_KEY=/d' /etc/environment 2>/dev/null || true\n\
+                                     truncate -s0 /etc/machine-id\n\
+                                     sync\n";
+
+/// Put the source clone's identity bearer back after the snapshot.
+///
+/// Appended only when absent, because a reconcile pass during the commit (which can run for
+/// minutes) may have rewritten `/etc/environment` already. Nothing needs restarting either way:
+/// a process started before the strip carries the value in its own environment and never saw
+/// the file change.
+fn commit_restore_script(key: &str) -> String {
+    format!(
+        "grep -q '^RMNG_PROXY_KEY=' /etc/environment || \
+         printf 'RMNG_PROXY_KEY=%s\\n' '{key}' >> /etc/environment\n"
+    )
+}
+
 /// Commit a RUNNING clone to a new clone-source image `<name>:latest`. Steps (→ pct):
 /// `queued` 0, `prepare` 15, `commit` 40, `done` 100. Returns the committed reference.
 ///
-/// `prepare` runs `sync; truncate -s0 /etc/machine-id` inside the clone so the image doesn't
-/// bake the source clone's identity. `commit` freezes the container (`pause=true`) — this can
-/// take minutes for a large clone — with the `rmng.image=1` + `rmng.created-from=<source>`
-/// labels. Volume mounts are excluded by `docker commit`, so the clone's inner-Docker state
+/// `prepare` clears both halves of the source clone's identity so the image cannot carry them:
+/// `/etc/machine-id`, and the `RMNG_PROXY_KEY` line in `/etc/environment`. `commit` freezes the
+/// container (`pause=true`), which can take minutes for a large clone, with the
+/// `rmng.image=1` and `rmng.created-from=<source>` labels. The key goes back afterwards.
+/// Volume mounts are excluded by `docker commit`, so the clone's inner-Docker state
 /// (`/var/lib/docker`) never enters the image (gotcha #11). Logs the baked-credentials
 /// warning (gotcha #10): any on-disk Claude token / secret in the clone's home travels into
 /// the image.
@@ -1246,21 +1290,29 @@ pub async fn commit_clone_image(
         bail!("an image named '{reference}' already exists; pick another name or delete it first");
     }
 
-    // Prepare: flush + clear machine-id in the running clone so committed images don't carry
-    // the source clone's identity (a fresh id is regenerated on the next clone's first boot,
-    // since clone_container also injects an empty machine-id).
+    // Prepare: flush, then clear both halves of the source clone's identity so committed images
+    // don't carry them. The machine-id is regenerated on the next clone's first boot (
+    // `clone_container` injects a fresh one).
+    //
+    // `RMNG_PROXY_KEY` is the other half, and it used to travel. Every image ever committed from
+    // a clone holds that clone's live identity bearer in `/etc/environment`: `pega-template11`
+    // and `pega-template12` both carry `pega-template`'s. A clone born from such an image reads
+    // it during boot and hands it to its whole desktop session, so terminals, editors and agents
+    // all claim to be the image's source clone. It is also a bearer secret sitting in an image
+    // anyone can build a clone from.
+    //
+    // Stripping the line leaves the SOURCE clone briefly without it, which is why it goes back
+    // below. The reconciler is the backstop: it rewrites `/etc/environment` from the desired var
+    // list every pass, so even a server that dies mid-commit leaves the clone repaired within
+    // one interval.
     on_progress(
         "prepare",
-        "flushing filesystem + clearing machine-id in the clone",
+        "flushing filesystem + clearing the clone's identity",
     );
     let prep_code = docker
-        .exec_script(
-            container,
-            "sync; truncate -s0 /etc/machine-id\n",
-            &[],
-            &[],
-            |_s, line| tracing::debug!(target: "provision", "commit-prepare: {line}"),
-        )
+        .exec_script(container, COMMIT_PREPARE_SCRIPT, &[], &[], |_s, line| {
+            tracing::debug!(target: "provision", "commit-prepare: {line}");
+        })
         .await?;
     if prep_code != 0 {
         tracing::warn!("commit-prepare exited {prep_code} in {container} (non-fatal; proceeding)");
@@ -1287,11 +1339,31 @@ pub async fn commit_clone_image(
         // commit wears the base badge and steals the picker preselect (found in E2E).
         (crate::docker::LABEL_BASE.to_string(), "0".to_string()),
     ];
-    docker
+    let committed = docker
         .commit(
             container, name, /*set_boot_config=*/ true, /*pause=*/ true, &labels,
         )
-        .await?;
+        .await;
+
+    // Give the source clone its identity back, whether or not the commit worked.
+    let restore = commit_restore_script(&app.clone_keys.mint(container));
+    match docker
+        .exec_script(container, &restore, &[], &[], |_s, line| {
+            tracing::debug!(target: "provision", "commit-restore: {line}");
+        })
+        .await
+    {
+        Ok(0) => {}
+        Ok(code) => tracing::warn!(
+            "restoring {container}'s identity key after the commit exited {code}; the \
+             reconciler rewrites /etc/environment on its next pass"
+        ),
+        Err(e) => tracing::warn!(
+            "restoring {container}'s identity key after the commit failed: {e}; the \
+             reconciler rewrites /etc/environment on its next pass"
+        ),
+    }
+    committed?;
 
     on_progress("done", &format!("image {reference} ready"));
     Ok(reference)
@@ -1625,6 +1697,24 @@ mod tests {
         assert!(script.contains("window-size latest"), "{script}");
         // RMNG_PROXY_KEY and the control URL must survive, or `rmng` breaks in every pane.
         assert!(!script.contains("RMNG_PROXY_KEY"), "identity key unset:\n{script}");
+    }
+
+    /// The image must carry neither half of the source clone's identity, and the clone must get
+    /// its bearer back afterwards. Every image committed before this, `pega-template11` and
+    /// `pega-template12` included, holds `pega-template`'s key in `/etc/environment`.
+    #[test]
+    fn a_commit_takes_the_identity_out_and_puts_it_back() {
+        assert!(
+            COMMIT_PREPARE_SCRIPT.contains("sed -i '/^RMNG_PROXY_KEY=/d' /etc/environment"),
+            "the identity bearer is baked into the image:\n{COMMIT_PREPARE_SCRIPT}"
+        );
+        assert!(
+            COMMIT_PREPARE_SCRIPT.contains("truncate -s0 /etc/machine-id"),
+            "the machine-id is baked into the image:\n{COMMIT_PREPARE_SCRIPT}"
+        );
+        let restore = commit_restore_script("deadbeef");
+        assert!(restore.contains("grep -q '^RMNG_PROXY_KEY=' /etc/environment ||"), "{restore}");
+        assert!(restore.contains("'deadbeef'"), "{restore}");
     }
 
     #[test]

@@ -107,8 +107,9 @@ server side is Linux-only by design.
 **Build the package, not the workspace root.** `cargo build` / `check` / `test` / `clippy` at
 the root fail on macOS inside `libspa-sys`: `clone-daemon` depends on pipewire unconditionally,
 and the workspace declares no `default-members`. Everything you need on a Mac is
-`-p viewer-macos` (add `-p cli -p control-client` if you want the `rmng` CLI, which builds clean
-and is HTTP-only).
+`-p viewer-macos` (add `-p rmng-cli -p control-client` if you want the `rmng` CLI, which builds
+clean and is HTTP-only — note the package is `rmng-cli`, not `cli`, which is only the directory
+name).
 
 **macOS input notes.** **Cmd and Control are swapped on the wire by default**, so Mac chords
 (Cmd+C, Cmd+T) reach the remote GNOME session as Ctrl and physical Control produces Super —
@@ -118,3 +119,92 @@ F1, F2 etc. as standard function keys"). `RMNG_NO_POINTER_LOCK=1` disables point
 entirely. The rest of the Mac-specific behaviour — fullscreen, ⌘-chord forwarding, ⌘C/⌘V in the
 terminal, Settings under ⌘, — is documented in
 [`crates/viewer-macos`](../crates/viewer-macos/README.md).
+
+<a id="windows"></a>
+### Windows — viewer only
+
+As on macOS, only the **viewer** builds and runs; the capture/encode/server side is Linux-only by
+design. Unlike macOS, Windows runs the same GTK
+[`crates/viewer`](../crates/viewer/README.md) as Linux. The toolchain is **MSYS2 MINGW64 + the `x86_64-pc-windows-gnu` Rust target**, because
+that is the only combination with prebuilt GTK4 *and* GStreamer packages. (The MSVC route works
+too, but GTK4 has no MSVC binary distribution — `gvsbuild` compiles the whole stack from source,
+which takes hours and buys nothing here.)
+
+**Use MINGW64, not UCRT64.** Rust's `x86_64-pc-windows-gnu` target links against msvcrt, which
+is what the `mingw-w64-x86_64-*` packages are built for; the UCRT64 environment pairs a different
+C runtime into the same process.
+
+```sh
+# 1. MSYS2 from https://www.msys2.org, then in the MSYS2 shell:
+pacman -Syu                             # run twice; the first pass updates the core runtime
+pacman -S --needed \
+  mingw-w64-x86_64-toolchain mingw-w64-x86_64-pkgconf \
+  mingw-w64-x86_64-gtk4 \
+  mingw-w64-x86_64-gstreamer mingw-w64-x86_64-gst-plugins-base \
+  mingw-w64-x86_64-gst-plugins-good mingw-w64-x86_64-gst-plugins-bad \
+  mingw-w64-x86_64-gst-plugins-rs mingw-w64-x86_64-gst-libav
+
+# 2. Rust, targeting the GNU ABI so it matches the mingw-w64 libraries above:
+rustup-init.exe -y --default-host x86_64-pc-windows-gnu
+
+# 3. Build. /mingw64/bin must be on PATH for pkg-config to find the .pc files
+#    AND for the linker to find the import libraries.
+export PATH="/mingw64/bin:$PATH"
+cargo build -p viewer --release         # → target/release/rmng-viewer.exe
+```
+
+**Build the viewer package, not the workspace root** — same reason as macOS: `clone-daemon`
+depends on pipewire unconditionally and the workspace declares no `default-members`. Add
+`-p rmng-cli -p control-client` for the `rmng` CLI, which is HTTP-only and builds clean.
+
+**`rmng-viewer.exe` needs `mingw64\bin` on `PATH` at run time**, not just at build time — GTK4,
+GStreamer and their plugins are DLLs resolved by the loader. Launching from the MSYS2 MINGW64
+shell handles this; a shortcut or a copy dropped elsewhere will fail to start until `PATH`
+includes `C:\msys64\mingw64\bin` (adjust for your install root).
+
+Sanity-check the stack before debugging any video problem:
+
+```sh
+gst-inspect-1.0 d3d11h264dec        # D3D11VA HW decoder — absent on VMs and some remote sessions
+gst-inspect-1.0 gtk4paintablesink   # the GTK sink (gst-plugins-rs)
+cargo run -p viewer --release -- --glunpack-validate 256 144   # expect max abs err <= 1
+```
+
+Note that `--glunpack-validate` passing does **not** mean the GUI's video path works here: it
+builds a GL pipeline with no GTK sink in it, so it gets a standalone WGL context. The GUI cannot
+use GL at all on Windows (see [Why Windows uses no GL](../crates/viewer/README.md#why-windows-uses-no-gl-and-what-that-costs)).
+To check the real decode path end to end against a running server, use headless mode — it
+connects, decodes, and writes the first frame out as a PNG you can look at:
+
+```sh
+RMNG_VIDEO=<host>:9001 RMNG_DUMP=frame.png ./target/release/rmng-viewer.exe --headless
+```
+
+`d3d11h264dec` being absent is **not** fatal: the viewer picks the first registered decoder from
+`d3d11h264dec`, `avdec_h264`, `openh264dec` and logs which it got at startup
+(`windows H.264 decoder: …`). Only software decode is then in play, so expect higher CPU and
+lower frame rates on large monitors.
+
+**The server must be in 4:2:0 mode.** The 4:4:4 (AVC444) reconstruction is a GL shader and GL
+cannot be used in the GUI on Windows, so a 4:4:4 server makes the viewer log
+`failed to share contexts through wglShareLists` and show nothing. The viewer logs the mode it
+was told at connect (`server chroma mode: Yuv420`).
+
+**Display scaling.** The viewer sets `GDK_WIN32_PER_MONITOR_HIDPI` for itself before GTK starts,
+so Windows does not bitmap-stretch its window when that window sits on a monitor whose scale
+differs from the primary display's. Without it GTK asks for system DPI awareness only, which
+fixes one DPI for the whole session from the primary display: on a mixed-scale desktop (a 125%
+primary next to a 100% monitor, say) the picture is then resampled twice and even a fullscreen
+1:1 stream reads soft. `GDK_WIN32_DISABLE_HIDPI=1` turns DPI awareness off again if you need it.
+
+**Windows input notes.** The server address lives in
+`%APPDATA%\rmng-viewer\config.json` (not `~/.config`, which on Windows would resolve relative to
+the working directory). Physical keys are recovered from the Win32 virtual key by inverting it to
+a set-1 scancode, so **non-US layouts send the correct physical position**; the one exception is
+the keypad `Enter`, which arrives as `KEY_ENTER`. **`Super` and `Alt+Tab` cannot be forwarded** —
+`grab_keys()` uses the Wayland `inhibit_system_shortcuts` protocol, which GDK does not implement
+on Windows, so the local Start menu and task switcher win; capturing them would need a
+`WH_KEYBOARD_LL` hook. Pointer lock uses `ClipCursor` plus Raw Input and gives **unaccelerated**
+deltas (better than the Mac client, which can only offer accelerated ones);
+`RMNG_NO_POINTER_LOCK=1` disables it. If the local cursor ever stays pinned after a crash, any
+`ClipCursor` owner exiting releases it — logging out is never required.

@@ -459,37 +459,31 @@ pub fn spawn(app: App, init: MediaInit) {
                         let monitors = configured_monitors(&app.config());
                         let monitors_changed = monitors != last_monitors;
                         last_monitors = monitors;
-                        let mut ls = last_sel.lock().unwrap();
-                        let sel_changed = *ls != sel;
-                        if !sel_changed && !monitors_changed {
+                        let sel_changed = adopt_selection(
+                            &handle,
+                            &encoders,
+                            &viewers,
+                            &app,
+                            &termplane,
+                            &last_sel,
+                            sel.clone(),
+                            chroma,
+                            "the store watcher",
+                        );
+                        if sel_changed || !monitors_changed {
                             continue;
-                        }
-                        if sel_changed {
-                            *ls = sel.clone();
-                            // Selection changed: (de)activate the headless terminal view accordingly
-                            // (handles headless→headed, headed→headless, and headless→headless).
-                            termplane.on_viewers_changed();
-                            // Hand capture from the clone leaving the screen to the one
-                            // arriving on it. Before the early return below, because a
-                            // selection change with no viewer attached still has to stop the
-                            // clone that was being watched a moment ago.
-                            update_capture_gates(&handle, &app, &viewers);
                         }
                         // No viewers attached → nothing to repaint; the connect path primes on connect.
                         if viewers.lock().unwrap().is_empty() {
                             continue;
                         }
-                        if sel_changed {
-                            reprime_all(&handle, &encoders, &viewers, &app, sel, chroma);
-                        } else {
-                            // Only the configured layout changed: refresh the window set in place.
-                            // Headless clones re-broadcast their Terminal ViewSpec (with the new
-                            // monitors) via termplane; headed clones get a fresh Desktop ViewSpec.
-                            match sel.as_deref() {
-                                Some(s) if is_headless(&state, s) => termplane.on_viewers_changed(),
-                                Some(_) => broadcast_json(&viewers, T_VIEWSPEC, &desktop_view_spec(&app.config())),
-                                None => {}
-                            }
+                        // Only the configured layout changed: refresh the window set in place.
+                        // Headless clones re-broadcast their Terminal ViewSpec (with the new
+                        // monitors) via termplane. Headed clones get a fresh Desktop ViewSpec.
+                        match sel.as_deref() {
+                            Some(s) if is_headless(&state, s) => termplane.on_viewers_changed(),
+                            Some(_) => broadcast_json(&viewers, T_VIEWSPEC, &desktop_view_spec(&app.config())),
+                            None => {}
                         }
                     }
                     Err(RecvError::Closed) => break,
@@ -513,9 +507,17 @@ pub fn spawn(app: App, init: MediaInit) {
         loop {
             match listener.accept() {
                 Ok(conn) => {
-                    let (handle, app, encoders, viewers, last_sel) =
-                        (handle.clone(), app.clone(), encoders.clone(), viewers.clone(), last_sel.clone());
-                    std::thread::spawn(move || serve_clone(conn, handle, app, encoders, viewers, last_sel));
+                    let (handle, app, encoders, viewers, last_sel, termplane) = (
+                        handle.clone(),
+                        app.clone(),
+                        encoders.clone(),
+                        viewers.clone(),
+                        last_sel.clone(),
+                        termplane.clone(),
+                    );
+                    std::thread::spawn(move || {
+                        serve_clone(conn, handle, app, encoders, viewers, last_sel, termplane)
+                    });
                 }
                 Err(e) => {
                     tracing::error!("clone accept failed: {e}");
@@ -999,6 +1001,52 @@ fn dup_latest_frames(
         .unwrap_or_default()
 }
 
+/// Take `sel` as the selection everyone is being shown, and report whether it changed.
+///
+/// Two threads can be first to see a flip: the store watcher, and any clone's frame loop
+/// (which re-reads `selected` per frame). `last_sel` decides which of them owns it, and the
+/// winner has to do the WHOLE handover, because the loser then sees no change and does
+/// nothing at all.
+///
+/// Half a handover is what leaves a switch frozen. The clone arriving on screen gets its
+/// cached last frame painted (`reprime_all`) but is never told to capture, so no fresh frame
+/// ever follows and the viewer sits on a picture from the last time anyone watched it. The
+/// clone leaving keeps capturing, keeps shipping frames nobody encodes, and its frame loop is
+/// the very thread most likely to steal the next flip too.
+#[allow(clippy::too_many_arguments)]
+fn adopt_selection(
+    handle: &MediaHandle,
+    encoders: &Encoders,
+    viewers: &Viewers,
+    app: &App,
+    termplane: &crate::termplane::TermPlane,
+    last_sel: &Mutex<Option<String>>,
+    sel: Option<String>,
+    chroma: ChromaMode,
+    claimant: &str,
+) -> bool {
+    let mut ls = last_sel.lock().unwrap();
+    if *ls == sel {
+        return false;
+    }
+    *ls = sel.clone();
+    // Which thread got here first is the whole story when a switch misbehaves, and nothing
+    // else in the log distinguishes them.
+    tracing::debug!("selection → {sel:?}, claimed by {claimant}");
+    // (De)activate the headless terminal view for the clone arriving on screen (handles
+    // headless→headed, headed→headless, and headless→headless).
+    termplane.on_viewers_changed();
+    // Hand capture from the clone leaving the screen to the one arriving on it. Before the
+    // viewer check below, because a selection change with no viewer attached still has to stop
+    // the clone that was being watched a moment ago.
+    update_capture_gates(handle, app, viewers);
+    // No viewer attached → nothing to repaint; the connect path primes on connect.
+    if !viewers.lock().unwrap().is_empty() {
+        reprime_all(handle, encoders, viewers, app, sel, chroma);
+    }
+    true
+}
+
 /// Re-prime ALL viewers after a selection change: force fresh keyframes + rebroadcast
 /// the newly-selected clone's view spec / cursor / last frame to everyone.
 fn reprime_all(
@@ -1035,6 +1083,7 @@ fn reprime_all(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_clone(
     conn: Conn,
     handle: Arc<MediaHandle>,
@@ -1042,6 +1091,7 @@ fn serve_clone(
     encoders: Encoders,
     viewers: Viewers,
     last_sel: Arc<Mutex<Option<String>>>,
+    termplane: Arc<crate::termplane::TermPlane>,
 ) {
     let conn = Arc::new(conn);
     let mut clone_id: Option<String> = None;
@@ -1087,14 +1137,19 @@ fn serve_clone(
                     // Acking here degrades to a lower frame rate under load instead of deadlock.
                     let _ = conn.send(&ServerMsg::Ack(Ack { monitor_id: f.monitor_id, seq: f.seq }));
                     let sel = app.store.selected();
-                    {
-                        let mut ls = last_sel.lock().unwrap();
-                        if *ls != sel {
-                            *ls = sel.clone();
-                            // Repaint every viewer from the newly-selected clone's last frame + cursor.
-                            reprime_all(&handle, &encoders, &viewers, &app, sel.clone(), chroma);
-                        }
-                    }
+                    // This loop re-reads the selection per frame, so it can beat the store
+                    // watcher to a flip. When it does, it owns the whole handover.
+                    adopt_selection(
+                        &handle,
+                        &encoders,
+                        &viewers,
+                        &app,
+                        &termplane,
+                        &last_sel,
+                        sel.clone(),
+                        chroma,
+                        &format!("clone '{id}'s frame loop"),
+                    );
                     if sel.as_deref() == Some(id.as_str()) {
                         if let Some(enc) = encoder_for(&encoders, &viewers, f.monitor_id, f.width, f.height, chroma) {
                             if let Err(e) = enc.push(fd, f.fourcc, f.modifier, f.width, f.height, &f.planes, f.shm) {
@@ -1488,6 +1543,85 @@ mod tests {
         update_capture_gates(&app.media, &app, &viewers);
         assert_eq!(capture_msg(&client_a), Some(false));
         assert_eq!(capture_msg(&client_b), Some(true));
+    }
+
+    /// Whoever claims a selection flip hands capture over, and only the first claimant acts.
+    ///
+    /// The regression this pins: a clone's frame loop used to claim the flip and then only
+    /// repaint, leaving the arriving clone's capture gate shut. The operator saw that clone's
+    /// last frame from the previous time anyone watched it, frozen, because no fresh frame
+    /// could follow. The store watcher, seeing no change left to make, stayed silent.
+    #[tokio::test]
+    async fn whoever_sees_the_switch_first_hands_capture_over() {
+        let app = App::test_app();
+        let (client_a, conn_a) = accepted_conn("adopt-a");
+        let (client_b, conn_b) = accepted_conn("adopt-b");
+        app.media.insert_conn_for_test("a", conn_a);
+        app.media.insert_conn_for_test("b", conn_b);
+        let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
+        let encoders: Encoders = Arc::new(Mutex::new(HashMap::new()));
+        let last_sel: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let termplane = crate::termplane::TermPlane::new(
+            app.clone(),
+            viewers.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Arc<[u8]>>(64);
+        viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx });
+
+        let adopt = |sel: Option<String>| {
+            adopt_selection(
+                &app.media,
+                &encoders,
+                &viewers,
+                &app,
+                &termplane,
+                &last_sel,
+                sel,
+                ChromaMode::Yuv420,
+                "the test",
+            )
+        };
+
+        app.store.mutate(|s| s.selected = Some("a".into()));
+        assert!(adopt(Some("a".into())), "the first claimant owns the flip");
+        assert_eq!(capture_msg(&client_a), Some(true));
+        assert_eq!(capture_msg(&client_b), Some(false));
+
+        // The switch: 'a' stops painting and 'b' starts, from one claim.
+        app.store.mutate(|s| s.selected = Some("b".into()));
+        assert!(adopt(Some("b".into())));
+        assert_eq!(capture_msg(&client_a), Some(false), "the clone leaving kept capturing");
+        assert_eq!(capture_msg(&client_b), Some(true), "the clone arriving was never told to paint");
+
+        // The second observer of the same flip finds nothing to do and says nothing.
+        assert!(!adopt(Some("b".into())), "the same selection was claimed twice");
+        assert_eq!(capture_msg(&client_a), None);
+        assert_eq!(capture_msg(&client_b), None);
+    }
+
+    /// The frame loop must route its selection check through [`adopt_selection`]. Writing
+    /// `last_sel` there directly claims the flip and silences the store watcher, which is
+    /// exactly how the arriving clone ends up frozen on a stale frame. Guards the source,
+    /// because reaching the real frame arm needs a live clone-daemon on a socket.
+    #[test]
+    fn the_frame_loop_claims_a_switch_through_the_shared_handover() {
+        let src = include_str!("mediaplane.rs");
+        let frame_arm = src
+            .split_once("Ok((DaemonMsg::Frame(f), fds))")
+            .expect("frame arm present")
+            .1
+            .split_once("Ok((DaemonMsg::ClipboardOffer")
+            .expect("frame arm ends at the next match arm")
+            .0;
+        assert!(
+            frame_arm.contains("adopt_selection("),
+            "the frame arm must claim a selection change through adopt_selection"
+        );
+        assert!(
+            !frame_arm.contains("last_sel.lock()"),
+            "the frame arm claimed the flip itself, so the capture handover never runs"
+        );
     }
 
     /// The `active` flag of the next `Capture` message on this socket, or `None` when the

@@ -54,6 +54,10 @@ const TYPE_KEY_MS: u64 = 12;
 const SCROLL_STEP_MS: u64 = 25;
 /// Let the desktop repaint before the post-action screenshot (damage-driven capture).
 const SETTLE_MS: u64 = 350;
+/// One 60Hz frame plus a little, waited after the pointer is known to have arrived and
+/// before anything is pressed. Covers what the compositor does with the new position,
+/// which is not finished when the D-Bus call returns.
+const POINTER_FRAME_MS: u64 = 20;
 
 /// One captured frame per monitor, refreshed by the capture callbacks; the
 /// `screenshot` tool dups the fd and encodes it to JPEG via `media`.
@@ -386,6 +390,7 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
             // `resolution` and the image it returns can never disagree.
             let (vw, vh) = call_dims(st, &m, &args);
             let (x, y) = (n("x").ok_or("x required")?, n("y").ok_or("y required")?);
+            wake_for_input(st, &m).await;
             ease_move(st, &m, vw, vh, x, y).await?;
             Ok(settle_shot(st, &m, vw, vh).await)
         }
@@ -396,6 +401,7 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
         "scroll" => {
             let m = resolve_mon(&mons_snapshot(st), &args)?;
             let (vw, vh) = call_dims(st, &m, &args);
+            wake_for_input(st, &m).await;
             if n("x").is_some() && n("y").is_some() {
                 ease_move(st, &m, vw, vh, n("x").unwrap(), n("y").unwrap()).await?;
             }
@@ -410,6 +416,11 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
         "key" => {
             let combo = args.get("keys").and_then(Value::as_str).ok_or("keys required")?;
             let syms = keysym::parse_key_combo(combo).map_err(|e| e.to_string())?;
+            // Keyboard notifies carry no stream, so they do not depend on capture the way
+            // pointer ones do. Waking anyway keeps every action tool on one rule, and the
+            // call is free when capture is already running.
+            let mon = mons_snapshot(st).into_iter().next().ok_or("no monitors")?;
+            wake_for_input(st, &mon).await;
             for &s in &syms {
                 st.holder.input(InputMsg::Key { keysym: s, pressed: true });
             }
@@ -423,6 +434,8 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
         }
         "type" => {
             let txt = args.get("text").and_then(Value::as_str).ok_or("text required")?;
+            let mon = mons_snapshot(st).into_iter().next().ok_or("no monitors")?;
+            wake_for_input(st, &mon).await;
             for ch in txt.chars() {
                 let Some(ks) = keysym::char_to_keysym(ch) else { continue };
                 st.holder.input(InputMsg::Key { keysym: ks, pressed: true });
@@ -446,9 +459,12 @@ async fn call_tool(st: &McpState, name: &str, args: Value) -> Result<Value, Stri
 async fn click(st: &McpState, args: &Value, button: i32, count: u32) -> Result<Value, String> {
     let m = resolve_mon(&mons_snapshot(st), args)?;
     let (vw, vh) = call_dims(st, &m, args);
+    wake_for_input(st, &m).await;
     if let (Some(x), Some(y)) = (args.get("x").and_then(Value::as_f64), args.get("y").and_then(Value::as_f64)) {
-        ease_move(st, &m, vw, vh, x, y).await?;
+        warp_to(st, &m, vw, vh, x, y).await?;
     }
+    // Nothing below presses against a guess: either the warp above was acknowledged, or no
+    // warp was asked for and the pointer is wherever the last acknowledged move left it.
     for i in 0..count {
         if i > 0 {
             sleep(DOUBLE_GAP_MS).await;
@@ -458,6 +474,58 @@ async fn click(st: &McpState, args: &Value, button: i32, count: u32) -> Result<V
         st.holder.input(InputMsg::Button { button, pressed: false });
     }
     Ok(settle_shot(st, &m, vw, vh).await)
+}
+
+/// Put the pointer exactly on (tx,ty) and return only once the compositor has it there.
+///
+/// One absolute move rather than the eased glide, because a click cares about landing and
+/// not about looking pretty on the way. The glide queues ten notifies faster than the holder
+/// drains them, so a press issued at the end of it applies against a position one or more
+/// steps stale: on a 1000px move the last eased step alone is about 20px, which is wider
+/// than a browser tab and every text link on a page.
+///
+/// The move is sent even when the pointer is believed to be there already. `last_pos` only
+/// records what this MCP injected, and the operator drives the same pointer over a path that
+/// never passes through here, so treating it as the live position would let a click land
+/// wherever a person left the mouse. One absolute move to the target cannot knock anything,
+/// unlike the glide it replaces, which crossed ten intermediate positions to get there.
+async fn warp_to(
+    st: &McpState,
+    m: &Mon,
+    vw: u32,
+    vh: u32,
+    tx: f64,
+    ty: f64,
+) -> Result<(), String> {
+    let (tx, ty) = to_native(m, vw, vh, tx, ty);
+    let (tx, ty) = clamp(m, tx, ty);
+    st.holder.input(InputMsg::PointerMove { monitor_id: m.id, x: tx, y: ty });
+    emit_warp(st, m.id, tx, ty);
+    *st.last_pos.lock().unwrap().entry(m.id).or_default() = (tx, ty);
+    settle_pointer(st).await;
+    Ok(())
+}
+
+/// Wait for every queued input to be applied, then for the compositor to act on it.
+///
+/// The acknowledgement covers the D-Bus round trip. The frame after it covers what Mutter
+/// does with the new position, since a pointer that has just arrived over a control may
+/// still be a frame away from that control considering itself hovered.
+async fn settle_pointer(st: &McpState) {
+    st.holder.sync_input().await;
+    sleep(POINTER_FRAME_MS).await;
+}
+
+/// Make sure the clone is in a state where injected input has any effect at all.
+///
+/// `NotifyPointerMotionAbsolute` is stream-relative, so a pointer event aimed at a monitor
+/// whose screencast is stopped is accepted by Mutter and silently does nothing. Capture only
+/// runs while a viewer is watching, so an agent acting on an unwatched clone was injecting
+/// into a stopped stream: measured on a clone, a move after a 20s gap left the pointer where
+/// it was, and the same move preceded by a screenshot landed. [`wake_capture`] returns once a
+/// frame has actually arrived, which is the proof that the stream is live again.
+async fn wake_for_input(st: &McpState, m: &Mon) {
+    wake_capture(st, m).await;
 }
 
 /// Glide the pointer to (tx,ty) over MOVE_STEPS eased steps, emitting a cursor warp
@@ -487,6 +555,9 @@ async fn ease_move(
         sleep(MOVE_STEP_MS).await;
     }
     *st.last_pos.lock().unwrap().entry(m.id).or_default() = (tx, ty);
+    // `mouse_move` reports a hover, and `scroll` acts on whatever is under the pointer, so
+    // both need the pointer to be there and not merely on its way.
+    settle_pointer(st).await;
     Ok(())
 }
 

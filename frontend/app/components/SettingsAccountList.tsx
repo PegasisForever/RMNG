@@ -48,9 +48,11 @@ function useReorderSensors() {
 function SortableAccountRow({
   account,
   onDelete,
+  onReplace,
 }: {
   account: ClaudeUsage;
   onDelete: (email: string) => void;
+  onReplace: (account: ClaudeUsage) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: account.id,
@@ -80,6 +82,20 @@ function SortableAccountRow({
         <GripVertical className="h-3.5 w-3.5" />
       </button>
       <span className="min-w-0 flex-1 truncate">{account.email}</span>
+      {/* The same badge the rail's usage panel draws, and the same button. This list is where
+          the repair used to happen by hand — delete the dead account, add its replacement,
+          then put the pools and pins back — so it is the list that most needs the one-click
+          version. */}
+      {account.assignable === false ? (
+        <button
+          type="button"
+          onClick={() => onReplace(account)}
+          title={`${account.error ?? "the stored token expired and could not be refreshed"}\n\nSign in to replace this account.`}
+          className="shrink-0 rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-600 hover:bg-rose-200 dark:bg-rose-950/60 dark:text-rose-400 dark:hover:bg-rose-900/60"
+        >
+          sign in again
+        </button>
+      ) : null}
       <button
         type="button"
         title="delete account"
@@ -96,12 +112,15 @@ function SortableAccountRow({
 export function SettingsAccountList({
   accounts,
   onDelete,
+  onReplace,
   onReorder,
   onImport,
 }: {
   /** This provider's rows, already in the operator's saved order. */
   accounts: ClaudeUsage[];
   onDelete: (email: string) => void;
+  /** Sign in to an account that takes over from a dead one, from its "sign in again" badge. */
+  onReplace: (account: ClaudeUsage) => void;
   onReorder: (orderedIds: string[]) => void;
   /** Import an account from a clone that is already signed in. Only the Claude section
    *  offers it: importing is provider-picked inside the same modal, so a second entry point
@@ -130,7 +149,12 @@ export function SettingsAccountList({
         <SortableContext items={ids} strategy={verticalListSortingStrategy}>
           <ul className="space-y-1.5">
             {accounts.map((a) => (
-              <SortableAccountRow key={a.id} account={a} onDelete={onDelete} />
+              <SortableAccountRow
+                key={a.id}
+                account={a}
+                onDelete={onDelete}
+                onReplace={onReplace}
+              />
             ))}
           </ul>
         </SortableContext>

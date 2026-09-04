@@ -62,8 +62,17 @@ pub(crate) fn now_ms() -> i64 {
 
 
 /// A short `: <prefix>` of an error body for log lines (empty stays empty).
+///
+/// Counted in characters, because a byte slice panics when the cut lands inside a multi-byte
+/// one. Every provider error body reaches this, and the panic would take the whole poller
+/// task with it (`main.rs` spawns it unsupervised), so one error page with a typographic
+/// quote at the wrong offset would end token refreshes until the container restarts.
 pub(crate) fn snippet(s: &str) -> String {
-    if s.is_empty() { String::new() } else { format!(": {}", &s[..s.len().min(120)]) }
+    if s.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", s.chars().take(120).collect::<String>())
+    }
 }
 
 /// Non-cryptographic randomness from `/dev/urandom` (mirrors `files::rand_hex`),
@@ -108,6 +117,18 @@ pub(crate) fn replace_provider_views(
     mut views: Vec<wire::ClaudeUsage>,
     pinned: Option<&str>,
 ) {
+    // An account deleted while this pass was running must not ride back in on it. A poll
+    // snapshots its account list at the top and then spends a 400ms stagger and up to a 10s
+    // fetch per account, which is plenty of room for a delete to land in the middle — and a
+    // deleted account reappearing on screen reads as a delete that silently failed.
+    let still_imported: std::collections::HashSet<String> = match provider {
+        wire::Provider::Claude => app.claude.emails(),
+        wire::Provider::Codex => app.codex.emails(),
+    }
+    .into_iter()
+    .collect();
+    views.retain(|u| still_imported.contains(&u.email));
+
     views.sort_by(|a, b| {
         let ap = Some(a.email.as_str()) == pinned;
         let bp = Some(b.email.as_str()) == pinned;
@@ -253,6 +274,19 @@ mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
 
+    /// A provider error body is arbitrary bytes from the network, and cutting it at byte 120
+    /// panicked whenever a multi-byte character straddled that offset. The panic landed in
+    /// the usage poller, which runs unsupervised, so it ended every token refresh in the
+    /// process.
+    #[test]
+    fn a_long_error_body_is_cut_on_a_character_boundary() {
+        let body = format!("{}\u{201c}invalid_grant\u{201d}", "x".repeat(119));
+        let out = snippet(&body);
+        assert_eq!(out.chars().count(), 122, "the `: ` prefix plus 120 characters");
+        assert!(out.ends_with('\u{201c}'), "cut after the quote, not inside it: {out}");
+        assert_eq!(snippet(""), "", "an empty body stays empty");
+    }
+
     fn usage_view(email: &str, assignable: bool, error: Option<&str>) -> wire::ClaudeUsage {
         wire::ClaudeUsage {
             id: email.into(),
@@ -333,6 +367,23 @@ mod tests {
         assert!(try_poll(&flag).is_some(), "the next poll was locked out forever");
     }
 
+    /// A minimal imported Codex account. Only the id and the email are read by anything under
+    /// test here; the tokens exist because the struct has no default.
+    fn imported_codex(email: &str) -> crate::codex::StoredCodexAccount {
+        crate::codex::StoredCodexAccount {
+            id: format!("codex:{email}"),
+            email: email.into(),
+            account_id: email.into(),
+            plan: String::new(),
+            active: false,
+            access_token: String::new(),
+            id_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: now_ms() + 60 * 60 * 1000,
+            last_refresh: None,
+        }
+    }
+
     #[test]
     fn replace_provider_views_preserves_other_provider() {
         use wire::{ClaudeUsage, Provider};
@@ -354,6 +405,12 @@ mod tests {
             }
         }
         let app = crate::app::App::test_app();
+        // Import first. A publish now drops any account the store no longer holds, so that a
+        // delete landing mid-poll is not undone by the pass it interrupted — which makes an
+        // unimported email a row that cannot be published at all.
+        for email in ["z@o", "y@o"] {
+            crate::codex::upsert_account(&app, imported_codex(email)).unwrap();
+        }
         // Seed: two claude, one codex.
         app.store.mutate(|s| {
             s.claude_accounts =
@@ -382,6 +439,50 @@ mod tests {
         let st2 = app.store.get();
         assert_eq!(st2.claude_accounts.len(), 2);
         assert!(st2.claude_accounts.iter().all(|u| u.provider == Some(Provider::Claude)));
+    }
+
+    /// A poll snapshots its account list at the top and then spends a 400ms stagger and up to
+    /// a 10s fetch per account, so a delete lands in the middle of one routinely. Publishing
+    /// the pass's own snapshot would put the deleted account back on screen, which reads as a
+    /// delete that silently failed.
+    #[test]
+    fn a_publish_cannot_resurrect_an_account_deleted_while_the_poll_ran() {
+        use wire::{ClaudeUsage, Provider};
+        let app = crate::app::App::test_app();
+        crate::codex::upsert_account(&app, imported_codex("kept@o")).unwrap();
+        crate::codex::upsert_account(&app, imported_codex("deleted@o")).unwrap();
+
+        let views: Vec<ClaudeUsage> = ["kept@o", "deleted@o"]
+            .iter()
+            .map(|email| ClaudeUsage {
+                id: format!("codex:{email}"),
+                email: (*email).into(),
+                provider: Some(Provider::Codex),
+                active: false,
+                assignable: Some(true),
+                error: None,
+                stale: None,
+                last_updated: 0,
+                five_hour: None,
+                seven_day: None,
+                fable: None,
+                spend: None,
+                reset_credits: None,
+            })
+            .collect();
+
+        // The delete, mid-pass: the store loses the account while `views` still names it.
+        crate::codex::test_delete(&app, "deleted@o");
+        replace_provider_views(&app, Provider::Codex, views, None);
+
+        let published: Vec<String> = app
+            .store
+            .get()
+            .claude_accounts
+            .into_iter()
+            .map(|u| u.email)
+            .collect();
+        assert_eq!(published, vec!["kept@o".to_string()]);
     }
 
 

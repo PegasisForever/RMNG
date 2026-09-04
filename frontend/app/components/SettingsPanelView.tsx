@@ -65,6 +65,7 @@ export interface SettingsPanelViewProps {
   /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
    *  control-server harvests the tokens off a clone that's already signed in. */
   onImportAccount: () => void;
+  onReplaceAccount: (account: ClaudeUsage) => void;
 
   /** First-run setup has finished, so the clone subnet is read-only. */
   setupComplete: boolean;

@@ -38,7 +38,11 @@ use crate::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, InputMsg, M
 /// Version 2 carries the cursor fix: the holder read its missing `RMNG_SOCKET` as "this is the
 /// capture self-test" and built every session with the cursor composited into the frame, so a
 /// running holder has to be replaced for a viewer to get a real pointer back.
-pub const PROTO_VERSION: u32 = 2;
+///
+/// Version 3 carries [`ToHolder::SyncInput`], which a running holder cannot answer and which a
+/// click needs before it presses. Without the restart the daemon would wait on an
+/// acknowledgement that never comes and fall back to guessing, which is the bug being fixed.
+pub const PROTO_VERSION: u32 = 3;
 
 /// Where the holder binds and the daemon connects.
 ///
@@ -91,6 +95,15 @@ pub enum ToHolder {
     /// Inject one event. Fire-and-forget: `SOCK_SEQPACKET` preserves order on a connection,
     /// so a press still lands before its release.
     Input(InputMsg),
+    /// Ask when the input queued before this has actually been applied. Answered by
+    /// [`FromHolder::InputSynced`] carrying the same `id`.
+    ///
+    /// Ordering alone is not enough for a click. The holder injects serially and each
+    /// notify is a D-Bus round trip to Mutter, so a producer that queues faster than that
+    /// drains leaves the button pressing against a pointer position several events old. A
+    /// click that has to land on an 11px tab needs to know the warp arrived, not that it
+    /// was sent.
+    SyncInput { id: u64 },
     /// Apply a new monitor layout, make-before-break. Answered by [`FromHolder::Monitors`].
     SetLayout { monitors: Vec<MonitorSpec> },
     /// Capture is running on every node in `generation`, so the holder may drop the old
@@ -128,6 +141,11 @@ pub enum FromHolder {
     /// The old session is gone and the layout is applied, so the daemon may tear down the
     /// captures of every earlier generation. Third step of the swap handshake.
     SwapDone { generation: u64 },
+    /// Every input queued before the matching [`ToHolder::SyncInput`] has been applied.
+    ///
+    /// The holder injects from one queue in order, so reaching the barrier means each
+    /// earlier notify already returned from Mutter.
+    InputSynced { id: u64 },
     /// A clone app put something on its clipboard.
     ClipboardOffer(ClipboardOffer),
     /// A clone app is pasting a remote selection: the daemon asks the broker for the bytes.

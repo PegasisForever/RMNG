@@ -1170,7 +1170,33 @@ async fn run_unarchive(app: App, op_id: String, host_id: String) {
     crate::shared::ensure_now(&app, &host_id).await;
     crate::homes::ensure_now(&app, &host_id).await;
     crate::ssh::allow_clone_now(&app, &host_id).await;
+    push_current_tokens(&app, &host_id).await;
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+}
+
+/// Install both providers' current access tokens into a clone that has just come back.
+///
+/// An archived clone is skipped by every push pass while it is down ([`crate::claude::
+/// push_stale_tokens_for`]) and re-bound without a push by the rotator, so the credentials
+/// on its disk are whatever it was archived with — possibly an account that has since been
+/// deleted or gone dark. Without this it runs them until the next poll, up to ten minutes of
+/// 401s on a clone the operator was just told is ready.
+///
+/// Best-effort on both halves. A failure here is logged and left to the next reconcile pass.
+async fn push_current_tokens(app: &App, host_id: &str) {
+    let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == host_id) else {
+        return;
+    };
+    if let Some(email) = host.claude_account_email.as_deref() {
+        if let Err(e) = crate::claude::push_account_to_clone(app, host_id, email).await {
+            tracing::warn!("unarchive {host_id}: installing {email}'s Claude token failed: {e}");
+        }
+    }
+    if let Some(email) = host.codex_account_email.as_deref() {
+        if let Err(e) = crate::codex::push_account_to_clone(app, host_id, email).await {
+            tracing::warn!("unarchive {host_id}: installing {email}'s Codex token failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]

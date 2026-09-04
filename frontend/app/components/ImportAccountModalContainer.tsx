@@ -17,6 +17,7 @@ import { beginLogin, completeLogin } from "~/lib/api";
 export function ImportAccountModalContainer({
   claudeGroups,
   codexGroups,
+  replacing,
   onClose,
   onImported,
 }: {
@@ -24,10 +25,15 @@ export function ImportAccountModalContainer({
   claudeGroups: string[];
   /** Pool names from `config.codexGroups`. */
   codexGroups: string[];
+  /** An account this sign-in stands in for. Its provider is the one being signed in, so the
+   *  provider tabs go away, and its pools are inherited, so the pool picker does too. */
+  replacing?: { provider: "claude" | "codex"; email: string } | null;
   onClose: () => void;
   onImported: (email: string) => void;
 }) {
-  const [provider, setProvider] = useState<"claude" | "codex">("claude");
+  const [provider, setProvider] = useState<"claude" | "codex">(
+    replacing?.provider ?? "claude",
+  );
   const [loginUrl, setLoginUrl] = useState<string | null>(null);
   const [pasted, setPasted] = useState("");
   const [group, setGroup] = useState("");
@@ -57,7 +63,7 @@ export function ImportAccountModalContainer({
     if (importing || !pasted.trim()) return;
     setImporting(true);
     setError(null);
-    completeLogin(provider, pasted.trim(), group)
+    completeLogin(provider, pasted.trim(), group, replacing?.email ?? "")
       .then((r) => onImported(r.email))
       .catch((e: Error) => {
         setError(e.message);
@@ -72,6 +78,7 @@ export function ImportAccountModalContainer({
       pasted={pasted}
       groups={groups}
       group={group}
+      replacing={replacing?.email ?? null}
       importing={importing}
       error={error}
       onProviderChange={setProvider}

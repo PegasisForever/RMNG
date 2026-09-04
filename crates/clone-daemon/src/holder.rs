@@ -142,8 +142,8 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
     }
 
     // Input injection, off a queue so a slow D-Bus call never stalls the control loop.
-    let (input_tx, input_rx) = unbounded_channel::<InputMsg>();
-    tokio::spawn(inject_loop(active.clone(), input_rx));
+    let (input_tx, input_rx) = unbounded_channel::<Inject>();
+    tokio::spawn(inject_loop(active.clone(), input_rx, out.clone()));
 
     // Clipboard bridge: reads the current session per operation, answers on `out`.
     let (clip_tx, clip_rx) = unbounded_channel::<clipboard::FromServer>();
@@ -200,7 +200,12 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
                         });
                     }
                     ToHolder::Input(m) => {
-                        let _ = input_tx.send(m);
+                        let _ = input_tx.send(Inject::Event(m));
+                    }
+                    // Rides the same queue as the input it is asking about, which is what
+                    // makes it a barrier rather than a second opinion.
+                    ToHolder::SyncInput { id } => {
+                        let _ = input_tx.send(Inject::Barrier(id));
                     }
                     ToHolder::SetLayout { monitors } => {
                         let desired = monitors_from_specs(&monitors);
@@ -330,11 +335,28 @@ fn watch_closed(session: &Session, generation: u64, tx: UnboundedSender<u64>) {
 }
 
 /// Inject input events one at a time against whichever session is current.
+/// One item of the injection queue: an event to apply, or a barrier to answer once
+/// everything ahead of it has been applied.
+enum Inject {
+    Event(InputMsg),
+    Barrier(u64),
+}
+
 async fn inject_loop(
     active: ActiveSession,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<InputMsg>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Inject>,
+    out: Out,
 ) {
-    while let Some(msg) = rx.recv().await {
+    while let Some(item) = rx.recv().await {
+        // Answering here, from inside the same serial loop, is the whole guarantee: every
+        // earlier notify has already returned from Mutter by the time this is reached.
+        let msg = match item {
+            Inject::Event(m) => m,
+            Inject::Barrier(id) => {
+                let _ = out.send(FromHolder::InputSynced { id });
+                continue;
+            }
+        };
         // Snapshot the current session's `rd` (and this event's stream, for PointerMove)
         // under a SHORT lock, then drop the guard BEFORE the D-Bus await, so a slow notify
         // never holds the lock a swap needs.

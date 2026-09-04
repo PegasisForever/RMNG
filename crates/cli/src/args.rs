@@ -50,6 +50,9 @@ pub enum Cmd {
     /// Search the distilled transcripts of every clone, retired clones included
     #[command(subcommand)]
     Ledger(LedgerCmd),
+    /// The dashboard board: which column each clone sits in
+    #[command(subcommand)]
+    Board(BoardCmd),
     /// Drive a clone's desktop via its daemon MCP (screenshot-on-every-action)
     Desktop {
         /// Clone id
@@ -84,6 +87,10 @@ pub struct CreateArgs {
     /// Force a top-level clone even when run from inside a clone (skip auto-nesting)
     #[arg(long)]
     pub top_level: bool,
+    /// Board column to file the new clone in, by title (`"In Progress"`) or id. It goes to
+    /// the TOP of that column. Omitted, the board draws it in its home column as before.
+    #[arg(long)]
+    pub column: Option<String>,
     #[command(flatten)]
     pub wait: WaitArgs,
 }
@@ -227,6 +234,30 @@ pub enum CloneCmd {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Copy a directory from this machine into a clone (`rmng clone cp ./src c:/home/rmng/src`)
+    Cp {
+        /// Source directory on this machine
+        src: String,
+        /// Destination as `<clone>:<absolute-path>`
+        dest: String,
+        /// Directory name to leave out, anchored at the top of SRC (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
+    },
+    /// Like `cp`, but make the destination match: files it has and the source does not are deleted
+    Sync {
+        /// Source as `<clone>:<absolute-path>` (a local source is not supported here)
+        src: String,
+        /// Destination as `<clone>:<absolute-path>`
+        dest: String,
+        /// Directory name to leave out, anchored at the top of SRC (repeatable). An excluded
+        /// name is left alone at the destination rather than deleted
+        #[arg(long)]
+        exclude: Vec<String>,
+    },
+    /// Print the calling clone's own record (fails outside a clone)
+    #[command(name = "self")]
+    Myself,
     /// Point the operator's viewer at a clone (operator-only; no effect on command targeting)
     Select {
         /// Clone id (omit and pass --none to clear the selection)
@@ -234,6 +265,22 @@ pub enum CloneCmd {
         /// Clear the viewer selection
         #[arg(long, conflicts_with = "clone")]
         none: bool,
+    },
+}
+
+/// `rmng board <verb>` — the dashboard's columns, and which clone is in which.
+#[derive(Subcommand, Debug)]
+pub enum BoardCmd {
+    /// List the board's columns, left to right, with the clones in each
+    Ls,
+    /// Move a clone to the TOP of a column, by column title or id
+    Move {
+        /// Clone id
+        clone: String,
+        /// Destination column, as its title (`"In Progress"`) or its id
+        column: String,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
 }
 
@@ -516,8 +563,8 @@ pub enum DesktopCmd {
     },
     /// Move/arrange a window by id (→ `move_window`)
     MoveWindow {
-        /// Window id
-        id: String,
+        /// Window id, as `windows` reports it (an integer)
+        id: u64,
         #[arg(long)]
         monitor: Option<u32>,
         /// Placement mode, e.g. `maximize` / `center-half`
@@ -538,6 +585,8 @@ pub fn resolve_server(flag: Option<String>, env: Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::args::BoardCmd;
     use clap::Parser;
 
     #[test]
@@ -800,6 +849,89 @@ mod tests {
     }
 
     #[test]
+    fn clone_cp_takes_a_clone_qualified_destination() {
+        let cli = Cli::parse_from([
+            "rmng", "clone", "cp", "/home/rmng/proj", "agt-1:/home/rmng/proj", "--exclude",
+            "target", "--exclude", "dist",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Cp { src, dest, exclude }) => {
+                assert_eq!(src, "/home/rmng/proj");
+                assert_eq!(dest, "agt-1:/home/rmng/proj");
+                assert_eq!(exclude, vec!["target".to_string(), "dist".to_string()]);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        // Both positionals are required.
+        assert!(Cli::try_parse_from(["rmng", "clone", "cp", "/only/src"]).is_err());
+    }
+
+    #[test]
+    fn board_move_takes_a_clone_and_a_human_column_name() {
+        match Cli::parse_from(["rmng", "board", "move", "pega-we-1", "In Progress"]).cmd {
+            Cmd::Board(BoardCmd::Move { clone, column, .. }) => {
+                assert_eq!(clone, "pega-we-1");
+                assert_eq!(column, "In Progress");
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        assert!(matches!(
+            Cli::parse_from(["rmng", "board", "ls"]).cmd,
+            Cmd::Board(BoardCmd::Ls)
+        ));
+        // Both positionals are required.
+        assert!(Cli::try_parse_from(["rmng", "board", "move", "only-a-clone"]).is_err());
+    }
+
+    #[test]
+    fn every_create_verb_can_name_a_column() {
+        let cli = Cli::parse_from([
+            "rmng", "clone", "create", "c1", "--from", "img", "--column", "In Progress",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Create { common, .. }) => {
+                assert_eq!(common.column.as_deref(), Some("In Progress"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        let cli = Cli::parse_from([
+            "rmng", "clone", "create-plain", "--from", "img", "--title", "t", "--column", "Done",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::CreatePlain { common, .. }) => {
+                assert_eq!(common.column.as_deref(), Some("Done"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_sync_is_a_separate_verb_from_cp() {
+        match Cli::parse_from([
+            "rmng", "clone", "sync", "a:/home/rmng/proj", "b:/home/rmng/proj",
+            "--exclude", "target",
+        ])
+        .cmd
+        {
+            Cmd::Clone(CloneCmd::Sync { src, dest, exclude }) => {
+                assert_eq!(src, "a:/home/rmng/proj");
+                assert_eq!(dest, "b:/home/rmng/proj");
+                assert_eq!(exclude, vec!["target".to_string()]);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_self_is_spelled_self_not_myself() {
+        assert!(matches!(
+            Cli::parse_from(["rmng", "clone", "self"]).cmd,
+            Cmd::Clone(CloneCmd::Myself)
+        ));
+        assert!(Cli::try_parse_from(["rmng", "clone", "myself"]).is_err());
+    }
+
+    #[test]
     fn clone_exec_separates_command_after_dashes() {
         let cli = Cli::parse_from([
             "rmng", "clone", "exec", "c", "-u", "root", "-w", "/srv", "-e", "A=1", "-e", "B=2",
@@ -856,10 +988,10 @@ mod tests {
             Cli::parse_from(["rmng", "desktop", "w-cp", "double-click"]).cmd,
             Cmd::Desktop { cmd: DesktopCmd::DoubleClick { .. }, .. }
         ));
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "move-window", "win1", "--mode", "maximize"]);
+        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "move-window", "2946527525", "--mode", "maximize"]);
         assert!(matches!(
             cli.cmd,
-            Cmd::Desktop { cmd: DesktopCmd::MoveWindow { ref id, .. }, .. } if id == "win1"
+            Cmd::Desktop { cmd: DesktopCmd::MoveWindow { id: 2946527525, .. }, .. }
         ));
     }
 

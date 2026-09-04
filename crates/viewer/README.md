@@ -22,7 +22,10 @@ client) proved the approach; this crate re-implements it fresh.
    receive `MonitorList`.
 2. **Decode** each monitor's `VideoAu` (Annex-B H.264) on a VA-API decoder → zero-copy
    `dmabuf` frame. Skip access units until the first SPS/PPS+IDR (suppresses pre-IDR
-   decode noise — a Phase-0 polish item).
+   decode noise — a Phase-0 polish item). Two things also stop the feed: a window that is
+   minimized or fully covered, and a decoder that has fallen more than `AU_BACKLOG_MAX`
+   access units behind. Both resume at the next keyframe, which the encoder emits at least
+   every 30 frames.
 3. **Render** via GTK4: import each decoded dmabuf as a `Gdk::DmabufTexture`, paint with a
    frame-clock tick callback (latest-wins, no display FIFO). One surface/area per monitor.
    The decoded frames are **retagged `2:3:7:1`** first (limited range, BT.709 matrix, sRGB
@@ -74,21 +77,118 @@ With the tag in place a patch chart survives capture → encode → decode → G
 
 ## Platform support
 
-**Linux** is the developed and tested target: VA-API decode (`vah264dec`), EGL, the Wayland
-pointer-lock protocols, and the `GSK_RENDERER=gl` pin for the stale-texture bug. The numbered
-list above describes it.
-
-**Windows** builds from the same source with two pieces absent: pointer-lock is a no-op stub
-(`PointerLock::new` returns `None`, so Ctrl+Alt+G does nothing and the auto policy never
-engages), and the GSK renderer pin does not apply — GTK ≥ 4.18 dropped the legacy `gl`
-renderer. Everything else — decode, render, input, clipboard, the terminal tab view — is the
-shared path.
+One toolkit-free core, two platform backends. **Linux** is the developed and primary target;
+**Windows** builds and runs from the same source. The transport, the wire protocol and the
+AVC444 packing are identical; only the pieces below differ. The numbered list above describes
+the Linux column.
 
 **macOS is not built from this crate.** GDK's macOS backend re-derives pointer state and routes
 keys through the Cocoa text-input machinery, which cost a growing pile of platform shims here;
 [`viewer-macos`](../viewer-macos/README.md) replaced them with a native AppKit + Metal +
 VideoToolbox client that owns its own `NSView`. Building this crate on a Mac is a
 `compile_error!` pointing there.
+
+| | Linux | Windows |
+| --- | --- | --- |
+| H.264 decode | `vah264dec` (VA-API) | `d3d11h264dec` (D3D11VA), falling back to `avdec_h264` / `openh264dec` — **chosen at runtime**, see below |
+| GL import | `glupload` → 2D `GLMemory` | **none — GL cannot be shared with GTK here**, see below |
+| 4:2:0 sink path | `glupload ! gtk4paintablesink` | `d3d11download ! videoconvert ! gtk4paintablesink`, NV12 in system memory (see below) |
+| 4:4:4 unpack | `rmngavc444unpack`, `sampler2D`, `#version 300 es` | **not yet working**, see below |
+| GL platform | EGL | WGL (used by the offline `--glunpack-validate` harness only) |
+| Keyboard | GTK `EventControllerKey`, `evdev = hardware_keycode − 8` | GTK `EventControllerKey` + `vk_evdev` table ([`vk_evdev.rs`](src/vk_evdev.rs)): the VK is inverted to a set-1 scancode first, because a VK is **not** a physical key |
+| Pointer lock | `zwp_pointer_constraints` + `zwp_relative_pointer`, unaccelerated deltas ([`pointer_lock.rs`](src/pointer_lock.rs)) | `ClipCursor` + Raw Input `WM_INPUT`, unaccelerated deltas ([`pointer_lock_win.rs`](src/pointer_lock_win.rs)) |
+| Titlebar | GTK `HeaderBar` + FPS readout | GTK `HeaderBar` + FPS readout (same as Linux) |
+| GSK renderer | `gl` pinned (stale-texture workaround) | `ngl` — the legacy `gl` renderer was removed in GTK 4.18, so no pin is available |
+| System shortcuts | `inhibit_system_shortcuts` — Super and Alt+Tab reach the remote | not inhibited; see [Windows limitations](#windows-limitations) |
+
+Build and run instructions: [DEVELOPMENT.md § Windows](../../docs/DEVELOPMENT.md#windows).
+
+### Why Windows picks its decoder at runtime
+
+Linux hardcodes one decode element because it has exactly one answer: VA-API on the known deploy
+GPU. Windows has no such guarantee — `d3d11h264dec`
+registers only when the installed GStreamer ships the D3D11 plugin *and* the GPU advertises an
+H.264 decode profile, which a VM, a remote session, or a trimmed GStreamer build will not. A
+hardcoded element would turn each of those into "cannot build the decode pipeline" and a blank
+window, so `win_decoder()` in [`main.rs`](src/main.rs) takes the first of `d3d11h264dec`,
+`avdec_h264`, `openh264dec` that actually registered and logs which one it got.
+
+The two software arms emit I420, which `gtk4paintablesink` displays as happily as NV12, so the
+4:2:0 path needs nothing added. The 4:4:4 path does: `rmngavc444unpack` takes NV12 only, so a
+software-decoded AVC444 stream needs a `videoconvert ! video/x-raw,format=NV12` of its own
+before the unpacker (one more reason 4:4:4 does not run on Windows today, on top of the GL
+problem below). That conversion is safe for AVC444: the invariant `rmngavc444unpack` depends on
+is that nothing **resamples** the packed chroma before it, and I420 to NV12 is a pure re-layout
+of the same 4:2:0 samples. A converter asked for 4:4:4 or RGB would upsample and destroy the
+auxiliary view, which is why none appears anywhere ahead of the unpacker on any platform.
+
+### Why Windows uses no GL, and what that costs
+
+Linux shares an EGL context with GTK, so there the decoded frame reaches
+`gtk4paintablesink` as `GLMemory` and never touches system memory. Windows cannot: GTK's `ngl`
+GSK renderer realizes a WGL context and keeps it current, `gtk4paintablesink` offers that context
+to the pipeline, and every `gst-gl` element then tries to adopt it through `wglShareLists` —
+which fails with `ERROR_BUSY` against a context already in use. The pipeline dies with
+`not-negotiated` and the window stays black:
+
+```
+failed to share contexts through wglShareLists 0xaa
+  /GstPipeline:pipeline0/GstGLUploadElement:gluploadelement0
+```
+
+It is specifically *sharing* that fails, not GL. `--glunpack-validate` builds a GL pipeline with
+no GTK sink in it, gets a standalone WGL context, and passes — which is why that check is not
+evidence the GUI path works. `gst-launch-1.0 … ! glupload ! gtk4paintablesink` also succeeds, for
+the same reason: with no GTK window realized there is no context to collide with.
+
+So the 4:2:0 path stays on D3D11 and hands the sink system memory. What crosses the bus is NV12,
+not RGBA: `gtk4paintablesink` accepts NV12 system memory directly (it wraps the mapped planes as
+a two-plane `G8B8R8_420` `GdkMemoryTexture` and lets GSK do the colour conversion in its shader),
+and `videoconvert` prefers passthrough, so the format negotiated from decoder to sink stays NV12.
+That is 3.1 MB per 1080p frame rather than 8.3, and no CPU colour pass. `videoconvert` is there
+as insurance for a `gst-plugin-gtk4` built without the GTK 4.20 memory formats, where the sink
+drops NV12 from its caps and something has to convert.
+
+The frame still crosses the bus twice, which Linux avoids entirely: down in
+`d3d11download`, and back up when GTK uploads the memory texture to composite it. At 1920x1080
+and 60 fps that is about 373 MB/s per monitor. A converter in front of `d3d11download` does not
+help, because negotiation settles on NV12 upstream of it and it passes through too. Forcing the
+conversion onto the GPU would need an explicit `format=RGBA` capsfilter, and would then move
+8.3 MB per frame instead of 3.1.
+
+**4:4:4 (AVC444) does not work on Windows yet.** The reconstruction *is* a GL shader
+(`rmngavc444unpack`), so it cannot dodge GL the way the 4:2:0 path does, and it hits exactly the
+sharing failure above. A Windows viewer therefore needs the server in 4:2:0 mode. The fix is to
+move the GL stage into a pipeline that does not contain the GTK sink — a `GstContext` is
+pipeline-wide, so a second `gst::Pipeline` bridged by an `appsink`/`appsrc` pair would give the
+GL elements their own context, exactly as the validate harness already gets one.
+
+### Windows limitations
+
+- **Physical-key fidelity has one gap.** GDK hands us a virtual key, and Windows uses the same
+  `VK_RETURN` for both `Enter` keys (they differ only by the extended bit in `lParam`, which GDK
+  does not forward), so keypad `Enter` arrives as `KEY_ENTER` rather than `KEY_KPENTER`.
+  Everything else — including the whole navigation cluster, both `Ctrl`/`Shift`/`Alt`/`Meta`
+  pairs, and non-US layouts — resolves to the correct physical position. The fix, if it is ever
+  needed, is to read `RAWKEYBOARD.MakeCode` from the Raw Input stream `pointer_lock_win` already
+  runs a message window for, and feed `vk_evdev::scancode_to_evdev` directly.
+- **System shortcuts are not inhibited.** `Super` opens the local Start menu and `Alt+Tab`
+  switches local windows instead of reaching the remote. GDK implements
+  `inhibit_system_shortcuts` for Wayland only, so unlike Linux the Windows backend never gets
+  them. Capturing them would need a `WH_KEYBOARD_LL` hook.
+- **The frame makes one sysmem round trip.** A hardware-decoded frame goes VRAM to sysmem
+  (`d3d11download`) and back to VRAM (GTK's own texture upload at paint time), rather than
+  staying resident as it does on Linux. The blocker is the WGL context sharing above,
+  not a missing D3D11-to-GL path: GTK on Windows can be put on EGL/ANGLE
+  (`GDK_DEBUG=gl-egl`), and `gst-plugin-gtk4` has a matching `winegl` feature that its default
+  build leaves off. Turning both on is the one change that would restore zero-copy here and
+  un-break 4:4:4 at the same time.
+- **The window is sharp, but scaled by whole numbers.** The viewer asks GTK for per-monitor DPI
+  awareness (`GDK_WIN32_PER_MONITOR_HIDPI`, set in `main()`), which stops the Desktop Window
+  Manager bitmap-stretching the window whenever it sits on a monitor whose scale differs from the
+  primary display's. GTK's own Windows scale factor is still integer (`dpi / 96` truncated), so
+  on a 125% or 150% monitor the viewer draws 1:1 and reads physically smaller than other
+  applications there. On a 100% monitor it is exact.
 
 ## Headless mode (first-class)
 

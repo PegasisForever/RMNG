@@ -46,6 +46,36 @@ fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) 
     let yuv444 = CHROMA.load(Ordering::Relaxed) == 1;
     // No glcolorconvert before rmngavc444unpack in the 4:4:4 paths (invariant): it reads the raw
     // Y/UV textures, and a colorconvert would 4:2:0-upsample the packed auxiliary chroma.
+    //
+    // Per-OS pipeline selection, resolved at compile time.
+    // Windows: no VA-API, and the decoder is chosen at runtime (see `crate::win_decoder`). This
+    // mode has no display, so it has no GL context either — the 4:2:0 paths therefore use the
+    // plain sysmem chain and never touch `glupload`. The 4:4:4 paths have no such choice: the
+    // AVC444 reconstruction *is* a GL shader, so they upload and then `gldownload` back out.
+    #[cfg(target_os = "windows")]
+    let desc = {
+        let sysmem = crate::win_decode_chain_sysmem();
+        let head = "appsrc name=src is-live=true format=time do-timestamp=true ! h264parse";
+        match (yuv444, dump.is_some()) {
+            (true, true) => format!(
+                "{head} ! {sysmem} ! glupload ! rmngavc444unpack ! gldownload ! \
+                 videoconvert ! pngenc ! appsink name=out emit-signals=true max-buffers=2 sync=false"
+            ),
+            (true, false) => format!(
+                "{head} ! {sysmem} ! glupload ! rmngavc444unpack ! \
+                 appsink name=out emit-signals=true max-buffers=4 sync=false"
+            ),
+            (false, true) => format!(
+                "{head} ! {sysmem} ! videoconvert ! pngenc ! \
+                 appsink name=out emit-signals=true max-buffers=2 sync=false"
+            ),
+            (false, false) => {
+                format!("{head} ! {sysmem} ! appsink name=out emit-signals=true max-buffers=4 sync=false")
+            }
+        }
+    };
+    // Linux: VA-API decode, and `glupload` feeds the 4:4:4 GL reconstruction.
+    #[cfg(not(target_os = "windows"))]
     let desc = match (yuv444, dump.is_some()) {
         (true, true) => "appsrc name=src is-live=true format=time do-timestamp=true ! \
              h264parse ! vah264dec ! glupload ! rmngavc444unpack ! gldownload ! \
@@ -59,7 +89,10 @@ fn make_decoder(monitor_id: u32, counter: Arc<AtomicU64>, dump: Option<String>) 
         (false, false) => "appsrc name=src is-live=true format=time do-timestamp=true ! \
              h264parse ! vah264dec ! appsink name=out emit-signals=true max-buffers=4 sync=false",
     };
-    let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+    // `&desc`: on Windows `desc` is a `String`, on Linux a `&'static str` — clippy only ever
+    // sees this target's arm, so the borrow looks needless on one of them.
+    #[allow(clippy::needless_borrow)]
+    let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     let appsrc = pipeline.by_name("src").context("appsrc")?.downcast::<AppSrc>().map_err(|_| anyhow!("not appsrc"))?;
     let appsink = pipeline.by_name("out").context("appsink")?.downcast::<AppSink>().map_err(|_| anyhow!("not appsink"))?;
     appsrc.set_caps(Some(

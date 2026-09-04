@@ -39,9 +39,10 @@
 //!
 //! A producer may hand us `texture-target=rectangle` (GL_TEXTURE_RECTANGLE, unnormalized coords)
 //! rather than 2D — this was written for the retired macOS `vtdec_hw` path, whose IOSurface
-//! textures could only be rectangle, and Mesa offers the target too. Nothing in the Linux
-//! pipeline produces it today, so the variant is carried but unexercised. The shader switches
-//! sampler type and coordinate expressions accordingly:
+//! textures could only be rectangle, and Mesa offers the target too. Neither supported pipeline
+//! produces it today: Linux and Windows both feed us through `glupload`, which yields 2D. So the
+//! variant is carried but unexercised. The shader switches sampler type and coordinate
+//! expressions accordingly:
 //! - 2D: `sampler2D`, normalized coords `(sx+0.5)/w / (sy+0.5)/(2h)`.
 //! - rect: `sampler2DRect`, unnormalized coords `sx+0.5 / sy+0.5` (the texel-center offsets
 //!   already computed by the lum()/chr() helpers — the rect variant just drops the divides).

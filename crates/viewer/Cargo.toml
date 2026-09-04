@@ -21,11 +21,18 @@ tracing-subscriber.workspace = true
 # adds gtk4 in the next increment; the decode/transport core is toolkit-free so
 # the headless test mode needs no display.
 gstreamer = "0.23"
-gstreamer-app = "0.23"
+# `v1_20` for `AppSrc::current_level_buffers`, which the viewer reads to notice a decoder
+# falling behind (see `AU_BACKLOG_MAX`). GStreamer 1.20 is 2022, and the video/gl crates below
+# already ask for 1.24.
+gstreamer-app = { version = "0.23", features = ["v1_20"] }
 # BaseTransform/GLFilter subclassing for the zero-copy AVC444 GL unpacker (src/glunpack.rs).
 gstreamer-base = "0.23"
 gstreamer-video = { version = "0.23", features = ["v1_24"] }
-gstreamer-allocators = "0.23"
+# NOTE: no `gstreamer-allocators` here. It was listed since the initial commit but no viewer
+# source ever referenced it — the crate's users are `media` and `clone-daemon`, which allocate
+# DmaBuf on the capture/encode side. Keeping it would have made the viewer unbuildable on
+# Windows for nothing: gstreamer-allocators 0.23.5 declares `std::os::unix` unconditionally
+# (`fd_allocator.rs`), so it fails to compile on any non-Unix target.
 gstreamer-gl = { version = "0.23", features = ["v1_24"] }
 gtk4 = { version = "0.9", package = "gtk4", features = ["v4_14"] }
 serde.workspace = true
@@ -43,3 +50,22 @@ alacritty_terminal = "0.26"
 gdk4-wayland = { version = "0.9", features = ["wayland_crate"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+
+# Windows pointer-lock (ClipCursor + Raw Input, src/pointer_lock_win.rs) and the
+# VK → set-1 scancode inversion the keymap needs (src/vk_evdev.rs).
+# `windows-sys` rather than `windows`: these are plain C entry points and POD structs, with no
+# COM, no WinRT and no interface machinery to justify the heavier bindings.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    # HWND/LPARAM/LRESULT/WPARAM, POINT, RECT.
+    "Win32_Foundation",
+    # Window class + message-only window, the message pump, ClipCursor/GetCursorPos, SetTimer.
+    "Win32_UI_WindowsAndMessaging",
+    # `WNDCLASSW` embeds HICON/HCURSOR/HBRUSH, so windows-sys gates both it and
+    # `RegisterClassW` behind the GDI feature — even though this viewer draws no GDI at all.
+    "Win32_Graphics_Gdi",
+    # RegisterRawInputDevices / GetRawInputData and the RAWINPUT structures.
+    "Win32_UI_Input",
+    # MapVirtualKeyW + MAPVK_VK_TO_VSC_EX (vk_evdev).
+    "Win32_UI_Input_KeyboardAndMouse",
+] }

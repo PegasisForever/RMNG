@@ -64,6 +64,14 @@ export const Codex: Story = {
  *  an account added here does not silently become one no clone can be handed. */
 export const NoPools: Story = { args: { groups: [] } };
 
+/** Standing in for a dead account, which is where the "sign in again" badge lands. Both
+ *  choices the plain dialog offers are already made here — the provider is the dead
+ *  account's, and the pools are the ones it sits in — so neither control is drawn, and the
+ *  button names what it is about to do. */
+export const Replacing: Story = {
+  args: { replacing: "test@talktomedi.com" },
+};
+
 /** The provider refused the code. The commonest real error on this path, because the code is
  *  single-use and expires within minutes of the sign-in. */
 export const Refused: Story = {

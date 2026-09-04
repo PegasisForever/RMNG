@@ -44,21 +44,25 @@ use viewer_core::drag_route::{route_drag, Screen};
 mod glunpack;
 mod headless;
 mod terminal;
-// The Wayland pointer-lock implementation only compiles (and links) on Linux; Windows gets a
-// no-op stub. The stub's cfg says "not Linux" rather than naming Windows so that a macOS build
-// still resolves this module: nothing there will ever run it (the `compile_error!` above ends
-// that build), but without it the Mac gets an unresolved-import cascade that buries the one
-// message it is supposed to read.
+// The Wayland pointer-lock implementation only compiles (and links) on Linux; the Windows one
+// (ClipCursor + Raw Input) lives in pointer_lock_win.rs. Every other platform gets a no-op stub.
+// The stub's cfg is written as "neither Linux nor Windows" rather than naming a target so that a
+// macOS build still resolves this module: nothing there will ever run it (the `compile_error!`
+// above ends that build), but without it the Mac gets an unresolved-import cascade — starting
+// with `use pointer_lock::PointerLock;` — that buries the one message it is supposed to read.
 #[cfg(target_os = "linux")]
 mod pointer_lock;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+#[path = "pointer_lock_win.rs"]
+mod pointer_lock;
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod pointer_lock {
     use std::net::TcpStream;
     use std::sync::{Arc, Mutex};
 
     use gtk4::gdk;
 
-    /// Stub for non-Linux builds: always returns `None` from `new`.
+    /// Stub for non-Linux/Windows builds: always returns `None` from `new`.
     pub struct PointerLock;
 
     impl PointerLock {
@@ -72,6 +76,12 @@ mod pointer_lock {
         pub fn release(&self) {}
     }
 }
+
+// Win32 virtual-key → Linux evdev translation, via the set-1 scancode (Windows only).
+// Unlike Linux, where a GDK keycode is just evdev + 8, a Windows VK is layout-dependent and is
+// therefore NOT a physical key — see the module docs.
+#[cfg(target_os = "windows")]
+mod vk_evdev;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -115,6 +125,22 @@ fn main() -> Result<()> {
     if std::env::var_os("GSK_RENDERER").is_none() {
         unsafe { std::env::set_var("GSK_RENDERER", "gl") };
     }
+    // Windows: ask GTK for per-monitor DPI awareness. Without this variable
+    // `gdk/win32/gdkdisplay-win32.c` calls `SetProcessDpiAwarenessContext(SYSTEM_AWARE)`, and
+    // system awareness means one DPI for the whole session, fixed at logon from the primary
+    // display. With two monitors at different scales, every window on the *other* one is then
+    // bitmap-stretched by the Desktop Window Manager: with a 125% primary and the viewer on a
+    // 100% 1920x1080 monitor, Windows reports that monitor as 2400x1350, GTK renders at that
+    // size, and DWM scales the result back down by 0.8. Two resamples, so even a fullscreen
+    // 1:1 desktop stream arrives soft. Linux never sees this because the Wayland backend takes
+    // a real per-output fractional scale instead of one session-wide number.
+    // GTK reads this once when it opens the display, so it must be set before GTK starts. We
+    // are still single-threaded here, so set_var is sound. `GDK_WIN32_DISABLE_HIDPI` remains
+    // the escape hatch, since GTK checks it first.
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("GDK_WIN32_PER_MONITOR_HIDPI").is_none() {
+        unsafe { std::env::set_var("GDK_WIN32_PER_MONITOR_HIDPI", "1") };
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -157,6 +183,98 @@ type VideoSrcs = Arc<Mutex<HashMap<u32, AppSrc>>>;
 /// reconstruction). Process-global because it's server-wide and fixed per session; the
 /// net thread sets it, `make_decoder` reads it when lazily building each monitor pipeline.
 static VIEWER_CHROMA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Monitors whose window is minimized or fully covered, as a bitmask over monitor ids (ids are
+/// layout slots, `0..n-1`). The GTK thread sets a bit from the toplevel's state, the net thread
+/// reads it and stops feeding that monitor's decoder.
+///
+/// Decoding for a window nobody can see is pure waste, and the size of the waste is platform
+/// specific: Linux keeps the frame in video memory, while Windows reads every frame
+/// back to system memory (3.1 MB per frame at 1080p) because it cannot share a GL context with
+/// GTK. Ids at or above 64 are never marked, so they behave exactly as before.
+static HIDDEN_MONITORS: AtomicU64 = AtomicU64::new(0);
+/// Monitors whose decode feed has a hole in it, so the next access unit pushed to them must be
+/// an IDR. Set whenever an AU is dropped (a hidden window, or [`AU_BACKLOG_MAX`]), cleared by
+/// the first AU carrying an IDR NAL. A delta frame pushed across a hole has no reference frame
+/// to build on, which is macroblock garbage rather than a late picture.
+static NEEDS_IDR: AtomicU64 = AtomicU64::new(0);
+/// How many access units may sit in one monitor's appsrc before the viewer stops feeding it.
+///
+/// `appsrc` does not bound itself here: with `block=false` and no `enough-data` handler it
+/// enqueues past `max-bytes` anyway, so a decoder that cannot keep up builds a backlog that
+/// never drains and every later frame inherits the delay. The server's encoder bounds its own
+/// input for exactly this reason (`media::encode::APPSRC_BOUND`, which measured p99 ≈ 115 ms on
+/// a 7 to 8 frame backlog). Eight AUs is about 130 ms at 60 fps, far above the steady state of
+/// 0 or 1. Dropping costs a resync to the next keyframe, which the encoder emits at least every
+/// 30 frames (`key-int-max=30`), so the price of overload is a brief freeze rather than a delay
+/// that never goes away.
+const AU_BACKLOG_MAX: u64 = 8;
+
+/// One monitor's bit in [`HIDDEN_MONITORS`] / [`NEEDS_IDR`], or 0 for an id past the mask.
+fn mon_bit(mid: u32) -> u64 {
+    if mid < 64 { 1 << mid } else { 0 }
+}
+fn flag_set(flags: &AtomicU64, mid: u32) {
+    flags.fetch_or(mon_bit(mid), Ordering::Relaxed);
+}
+fn flag_clear(flags: &AtomicU64, mid: u32) {
+    flags.fetch_and(!mon_bit(mid), Ordering::Relaxed);
+}
+fn flag_get(flags: &AtomicU64, mid: u32) -> bool {
+    flags.load(Ordering::Relaxed) & mon_bit(mid) != 0
+}
+
+/// True when this Annex-B access unit carries an IDR slice (NAL unit type 5), which is the only
+/// point a decoder can be joined at. The server's `h264parse config-interval=-1` puts the SPS
+/// and PPS in front of every keyframe, so an IDR AU is self-sufficient.
+fn au_has_idr(au: &[u8]) -> bool {
+    let mut i = 0usize;
+    // Both start codes end in `00 00 01`, so matching the 3-byte form finds the 4-byte one too.
+    while i + 3 < au.len() {
+        if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
+            if au[i + 3] & 0x1f == 5 {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Whether to hand this access unit to `mid`'s decoder, and the bookkeeping for when not.
+///
+/// Three reasons to drop: nobody is looking at the window, the decoder is already behind, or the
+/// feed has a hole and this AU is not the keyframe that closes it. The first two set
+/// [`NEEDS_IDR`] so the third takes over and the decoder resumes on a clean picture.
+fn admit_au(src: &AppSrc, mid: u32, au: &[u8]) -> bool {
+    if flag_get(&HIDDEN_MONITORS, mid) {
+        flag_set(&NEEDS_IDR, mid);
+        return false;
+    }
+    let queued = src.current_level_buffers();
+    if queued > AU_BACKLOG_MAX {
+        // Once per episode: the drop below keeps NEEDS_IDR set until a keyframe clears it.
+        if !flag_get(&NEEDS_IDR, mid) {
+            tracing::warn!(
+                "monitor {mid}: the decoder is {queued} access units behind, so the viewer is \
+                 dropping to the next keyframe rather than letting the delay compound"
+            );
+        }
+        flag_set(&NEEDS_IDR, mid);
+        return false;
+    }
+    if flag_get(&NEEDS_IDR, mid) {
+        if !au_has_idr(au) {
+            return false;
+        }
+        flag_clear(&NEEDS_IDR, mid);
+        tracing::debug!("monitor {mid}: decode resumed on a keyframe");
+    }
+    true
+}
+
 /// Input/clipboard write half (None while disconnected).
 type Writer = Arc<Mutex<Option<TcpStream>>>;
 /// The server `host:port`, shared GTK main thread (Settings dialog writes) → net
@@ -408,7 +526,11 @@ fn run_gui() -> Result<()> {
                             // hand-off stays ordered — an out-of-order AU would corrupt H.264 decode.
                             let g = srcs.lock().unwrap();
                             if let Some(src) = g.get(&mid) {
-                                let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
+                                // Not every AU is worth decoding: see `admit_au` for the three
+                                // cases (hidden window, decoder behind, waiting for a keyframe).
+                                if admit_au(src, mid, &au) {
+                                    let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
+                                }
                             } else {
                                 let mut q = aus.lock().unwrap();
                                 if q.len() >= AU_QUEUE_CAP {
@@ -705,7 +827,11 @@ fn build_ui(
                 let batch: Vec<(u32, Vec<u8>)> = aus.lock().unwrap().drain(..).collect();
                 for (mid, au) in batch {
                     if let Some(src) = srcs.get(&mid) {
-                        let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
+                        // Same gate as the net thread's direct push, so both feeds agree about
+                        // when a decoder is being fed and when it is waiting for a keyframe.
+                        if admit_au(src, mid, &au) {
+                            let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
+                        }
                     }
                 }
             }
@@ -947,7 +1073,10 @@ fn reconcile_view(
                             while i < q.len() {
                                 if q[i].0 == m.id {
                                     let (_, au) = q.remove(i).expect("index in range");
-                                    let _ = vc.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
+                                    if admit_au(&vc.appsrc, m.id, &au) {
+                                        let _ =
+                                            vc.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
+                                    }
                                 } else {
                                     i += 1;
                                 }
@@ -1119,7 +1248,45 @@ fn make_window_shell(
     }
 
     window.present();
+    // present() has realized the surface, so the toplevel exists to watch from here on.
+    watch_visibility(&window, mid);
     (window, fps_count)
+}
+
+/// Mirror `window`'s minimized/covered state into [`HIDDEN_MONITORS`] for monitor `mid`, so the
+/// net thread can stop feeding a decoder whose pictures nobody will see.
+///
+/// `GdkToplevel`'s state is the portable form of the question. The Windows backend reports
+/// `MINIMIZED` (`gdk/win32/gdksurface-win32.c` sets it around `SW_MINIMIZE`), and a Wayland
+/// compositor adds `SUSPENDED` when a window is fully covered or on another workspace. A backend
+/// that reports neither simply leaves the bit clear, which is the behaviour this viewer had
+/// before: keep decoding regardless.
+fn watch_visibility(window: &gtk4::ApplicationWindow, mid: u32) {
+    // A fresh window starts visible, and this also drops any bit left by a window that used to
+    // hold this layout slot.
+    flag_clear(&HIDDEN_MONITORS, mid);
+    let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() else {
+        tracing::debug!("monitor {mid}: no toplevel to watch, so its decoder always runs");
+        return;
+    };
+    let apply = move |state: gdk::ToplevelState| {
+        let hidden = state.intersects(gdk::ToplevelState::MINIMIZED | gdk::ToplevelState::SUSPENDED);
+        if hidden == flag_get(&HIDDEN_MONITORS, mid) {
+            return;
+        }
+        if hidden {
+            flag_set(&HIDDEN_MONITORS, mid);
+        } else {
+            flag_clear(&HIDDEN_MONITORS, mid);
+        }
+        tracing::info!(
+            "monitor {mid}: window {}, so its decoder {}",
+            if hidden { "hidden" } else { "visible" },
+            if hidden { "stops until it comes back" } else { "resumes at the next keyframe" }
+        );
+    };
+    apply(toplevel.state());
+    toplevel.connect_state_notify(move |t| apply(t.state()));
 }
 
 /// Build the video content for a window: decoder + letterboxed `Picture` + cursor overlay + input
@@ -1409,6 +1576,95 @@ fn stamp_colorimetry(caps: &gst::CapsRef, colorimetry: &str) -> Option<gst::Caps
     Some(out)
 }
 
+/// The Windows H.264 decoder candidates: `(factory, chain to plain sysmem, chain to frames the
+/// sink can show)`, fastest first. The decoder is always named `dec` so [`make_decoder`] can
+/// find its src pad for the colorimetry retag.
+///
+/// **Why this one is chosen at runtime while Linux's is a compile-time string.** Linux
+/// has exactly one answer (VA-API, and the deploy target is a known GPU).
+/// Windows does not: `d3d11h264dec` is registered only
+/// when the installed GStreamer carries the D3D11 plugin *and* the GPU advertises an H.264
+/// decoder profile, which a remote session, a VM, or a stripped GStreamer build will not. A
+/// fixed string would turn every one of those into "cannot build the decode pipeline" and a
+/// blank window; picking from what actually registered degrades to software instead.
+///
+/// **Neither chain touches GL, and that is the whole point on Windows.** GTK's GSK renderer
+/// realizes a WGL context and keeps it current; `gtk4paintablesink` then offers that context to
+/// the pipeline, and every `gst-gl` element tries to adopt it via `wglShareLists`, which fails
+/// with `ERROR_BUSY` against a context that is already in use. The pipeline dies with
+/// `not-negotiated` and the window stays black. (It is specifically *sharing* that fails:
+/// `--glunpack-validate` builds a GL pipeline with no GTK sink in it, gets a standalone WGL
+/// context, and passes.) Linux shares an EGL context with GTK happily, so Windows is the one
+/// platform where the decoded frame has to reach the sink as plain system memory. The way back to zero-copy is GTK's EGL/ANGLE backend plus a `gst-plugin-gtk4` built
+/// with its `winegl` feature, which is also what the 4:4:4 path needs.
+///
+/// **What crosses the bus is NV12, not RGBA.** `gtk4paintablesink` accepts NV12 system memory
+/// directly (it hands GDK a two-plane `G8B8R8_420` texture and GSK converts in its shader) and
+/// `videoconvert` prefers passthrough, so the negotiated format stays NV12 from the decoder to
+/// the sink: 3.1 MB per 1080p frame across the bus rather than 8.3. `videoconvert` therefore
+/// earns its place as insurance rather than as a converter, for a `gst-plugin-gtk4` built
+/// without the GTK 4.20 memory formats, where the sink drops NV12 from its caps and somebody
+/// has to convert. Putting a `d3d11convert` in front of `d3d11download` does not move that work
+/// to the GPU: negotiation settles on NV12 upstream of it, so it passes through as well. Only
+/// an explicit `video/x-raw(memory:D3D11Memory),format=RGBA` capsfilter would, and it would pay
+/// 8.3 MB per frame for the privilege.
+#[cfg(target_os = "windows")]
+const WIN_DECODERS: &[(&str, &str, &str)] = &[
+    // Direct3D 11 Video Acceleration: the Windows twin of VA-API, vendor-neutral across
+    // AMD/NVIDIA/Intel. Decodes into D3D11 texture memory; `d3d11download` lands it in sysmem.
+    (
+        "d3d11h264dec",
+        "d3d11h264dec name=dec ! d3d11download",
+        "d3d11h264dec name=dec ! d3d11download ! videoconvert",
+    ),
+    // libav software decode (I420) — the most widely present fallback.
+    ("avdec_h264", "avdec_h264 name=dec", "avdec_h264 name=dec ! videoconvert"),
+    // OpenH264 software decode, for a GStreamer built without gst-libav.
+    ("openh264dec", "openh264dec name=dec", "openh264dec name=dec ! videoconvert"),
+];
+
+/// The first entry of [`WIN_DECODERS`] whose element this machine's GStreamer actually
+/// registered.
+///
+/// **Why Windows chooses at runtime while Linux hardcodes a string.** Linux
+/// has exactly one answer (VA-API, on a known deploy GPU).
+/// Windows does not: `d3d11h264dec` registers only when the
+/// installed GStreamer carries the D3D11 plugin *and* the GPU advertises an H.264 decode
+/// profile — which a remote session, a VM, or a stripped GStreamer build will not. A fixed
+/// string would turn every one of those into "cannot build the decode pipeline" and a blank
+/// window; picking from what registered degrades to software instead.
+#[cfg(target_os = "windows")]
+fn win_decoder() -> &'static (&'static str, &'static str, &'static str) {
+    for row in WIN_DECODERS {
+        if gst::ElementFactory::find(row.0).is_some() {
+            tracing::info!("windows H.264 decoder: {}", row.0);
+            return row;
+        }
+    }
+    // Nothing registered. Return the preferred row anyway, so the failure surfaces as a
+    // GStreamer "no element \"d3d11h264dec\"" error naming the missing plugin — far more
+    // actionable than an Option::None from a function whose contract is a chain string.
+    tracing::error!(
+        "no H.264 decoder registered (looked for {}); check the GStreamer plugin install",
+        WIN_DECODERS.iter().map(|r| r.0).collect::<Vec<_>>().join(", ")
+    );
+    &WIN_DECODERS[0]
+}
+
+/// The Windows decode chain from `h264parse`'s output to frames `gtk4paintablesink` can show
+/// directly — the 4:2:0 GUI path, and the counterpart of `vah264dec ! glupload` on Linux.
+#[cfg(target_os = "windows")]
+fn win_decode_chain_display() -> &'static str {
+    win_decoder().2
+}
+
+/// The Windows decode chain from `h264parse`'s output to plain NV12 system memory: the
+/// headless mode (no display, and it wants raw frames anyway) and the AVC444 GL feed.
+#[cfg(target_os = "windows")]
+pub(crate) fn win_decode_chain_sysmem() -> &'static str {
+    win_decoder().1
+}
+
 /// One monitor's decode pipeline → `gtk4paintablesink`. Returns the appsrc + the sink's
 /// `GdkPaintable`. Zero-copy GL path (works on Intel, where GStreamer can't export a VA
 /// dmabuf): `vah264dec ! glupload` (EGL dmabuf→GL, shares GTK's GL context) → the sink.
@@ -1420,9 +1676,21 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::Pipelin
     // lowest latency for a live, latest-wins paintable (no audio to sync to). It also makes
     // the sink immune to any reorder/DPB latency the decoder declares in a LATENCY query, so
     // the only display delay left is the next vsync. Matches the 444 path (make_decoder_yuv444).
+    #[cfg(not(target_os = "windows"))]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vah264dec name=dec ! glupload ! gtk4paintablesink name=sink sync=false";
-    let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+    // Windows: the decoder is chosen at runtime and its chain already ends in frames the sink
+    // can show, with no GL anywhere — see `WIN_DECODERS` for why GL cannot be used here.
+    #[cfg(target_os = "windows")]
+    let desc = format!(
+        "appsrc name=src is-live=true format=time do-timestamp=true ! \
+         h264parse ! {} ! gtk4paintablesink name=sink sync=false",
+        win_decode_chain_display()
+    );
+    // `&desc`: on Windows `desc` is a `String`, on Linux a `&'static str` — clippy only ever
+    // sees this target's arm, so the borrow looks needless on one of them.
+    #[allow(clippy::needless_borrow)]
+    let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
             match msg.view() {
@@ -1478,9 +1746,35 @@ fn make_decoder_yuv444(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::
     // Do NOT insert a glcolorconvert here: rmngavc444unpack reads the raw Y/UV textures, and a
     // prior colorconvert would 4:2:0-upsample the packed auxiliary chroma and destroy the AVC444
     // reconstruction.
+    #[cfg(not(target_os = "windows"))]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vah264dec ! glupload ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false";
-    let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
+    // Windows: NV12 sysmem from the runtime-chosen decoder, then `glupload` into GStreamer's
+    // own GL context for the unpack shader. No `glcolorconvert` — same invariant as Linux.
+    //
+    // KNOWN BROKEN on Windows, see `WIN_DECODERS`: `gtk4paintablesink` offers GTK's in-use WGL
+    // context to the pipeline and `glupload` cannot `wglShareLists` with it, so this errors out
+    // with `not-negotiated`. The 4:2:0 path above avoids GL entirely, which is why it works.
+    // Fixing this needs the unpack moved off the sink's pipeline (see `make_decoder_yuv444`'s
+    // doc comment); until then a Windows viewer needs the server in 4:2:0 mode.
+    //
+    // There is a second break underneath that one, so fixing the context sharing alone is not
+    // enough: the software arms of `win_decode_chain_sysmem` end at the decoder, which emits
+    // I420, while `rmngavc444unpack`'s sink caps take NV12 only (see `glunpack.rs`). Those two
+    // arms need a `videoconvert ! video/x-raw,format=NV12` of their own here. That conversion is
+    // safe for AVC444 (I420 to NV12 is a pure re-layout of the same 4:2:0 samples, not a
+    // resample), but it must not be added to the shared sysmem chain, where the headless dump
+    // would pay for it and gain nothing.
+    #[cfg(target_os = "windows")]
+    let desc = format!(
+        "appsrc name=src is-live=true format=time do-timestamp=true ! \
+         h264parse ! {} ! glupload ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false",
+        win_decode_chain_sysmem()
+    );
+    // `&desc`: on Windows `desc` is a `String`, on Linux a `&'static str` — clippy only ever
+    // sees this target's arm, so the borrow looks needless on one of them.
+    #[allow(clippy::needless_borrow)]
+    let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
             match msg.view() {
@@ -1827,10 +2121,27 @@ fn install_keyboard(
                 return glib::Propagation::Stop;
             }
             // Physical key identity → Linux evdev keycode sent on the wire.
-            // GTK hardware_keycode = evdev + 8; subtract 8 to recover evdev.
-            let keycode = code.saturating_sub(8);
-            state.pressed.borrow_mut().insert(keycode);
-            send(&w, format!(r#"{{"kind":"key_code","keycode":{keycode},"pressed":true}}"#));
+            // Linux/X11: GTK hardware_keycode = evdev + 8; subtract 8 to recover evdev.
+            #[cfg(not(target_os = "windows"))]
+            {
+                let keycode = code.saturating_sub(8);
+                state.pressed.borrow_mut().insert(keycode);
+                send(&w, format!(r#"{{"kind":"key_code","keycode":{keycode},"pressed":true}}"#));
+            }
+            // Windows: `code` is the Win32 virtual key, which is layout-dependent and so is not
+            // a physical key — `vk_evdev` recovers the position via the set-1 scancode. A key
+            // with no evdev equivalent yields the 0 sentinel and must be dropped, not sent.
+            //
+            // Dedup via `state.pressed`: Windows repeats WM_KEYDOWN for a held key, and the
+            // remote GNOME session runs its own autorepeat, so forwarding each repeat would
+            // stack a second one on top of it.
+            #[cfg(target_os = "windows")]
+            {
+                let keycode = vk_evdev::translate(code);
+                if keycode != 0 && state.pressed.borrow_mut().insert(keycode) {
+                    send(&w, format!(r#"{{"kind":"key_code","keycode":{keycode},"pressed":true}}"#));
+                }
+            }
             glib::Propagation::Proceed
         });
     }
@@ -1838,9 +2149,22 @@ fn install_keyboard(
         let (w, state) = (writer.clone(), state.clone());
         key.connect_key_released(move |_c, _keyval, code, _s| {
             // Mirror the press-side translation so pressed/released are symmetric.
-            let keycode = code.saturating_sub(8);
-            state.pressed.borrow_mut().remove(&keycode);
-            release_keycode(&w, keycode);
+            #[cfg(not(target_os = "windows"))]
+            {
+                let keycode = code.saturating_sub(8);
+                state.pressed.borrow_mut().remove(&keycode);
+                release_keycode(&w, keycode);
+            }
+            // Windows: same VK → scancode → evdev path as the press side. Release only what we
+            // actually sent a press for, so the dedup above stays balanced and a key the table
+            // sentinels never produces a lone release.
+            #[cfg(target_os = "windows")]
+            {
+                let keycode = vk_evdev::translate(code);
+                if keycode != 0 && state.pressed.borrow_mut().remove(&keycode) {
+                    release_keycode(&w, keycode);
+                }
+            }
         });
     }
     window.add_controller(key.clone());
@@ -2130,5 +2454,39 @@ mod tests {
     fn the_retag_ignores_encoded_caps() {
         let c = caps("video/x-h264, stream-format=byte-stream, alignment=au");
         assert!(stamp_colorimetry(&c, VIDEO_COLORIMETRY).is_none());
+    }
+
+    /// The resync after a dropped access unit hangs on this: a keyframe has to be recognised
+    /// through either start-code length, and a delta frame must never pass for one.
+    #[test]
+    fn an_idr_is_found_behind_either_start_code() {
+        // 4-byte start code, NAL type 5 (IDR slice).
+        assert!(au_has_idr(&[0, 0, 0, 1, 0x65, 0x88, 0x84]));
+        // 3-byte start code, same NAL.
+        assert!(au_has_idr(&[0, 0, 1, 0x65, 0x88]));
+        // An access unit delimiter (type 9) and SPS (7) and PPS (8) ahead of the IDR, which is
+        // the shape the server actually sends (`aud=true`, `h264parse config-interval=-1`).
+        let au = [0, 0, 0, 1, 0x09, 0x30, 0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65, 0x88];
+        assert!(au_has_idr(&au));
+        // A non-IDR slice (type 1) is not a join point, whatever else rides with it.
+        assert!(!au_has_idr(&[0, 0, 0, 1, 0x09, 0x30, 0, 0, 0, 1, 0x41, 0x9a]));
+        // Nothing to scan, and a truncated start code with no NAL header after it.
+        assert!(!au_has_idr(&[]));
+        assert!(!au_has_idr(&[0, 0, 0, 1]));
+    }
+
+    /// The hidden/needs-keyframe flags are a 64-bit mask, so a monitor id past the end has to
+    /// degrade to "always fed" rather than aliasing onto some other monitor's bit.
+    #[test]
+    fn a_monitor_id_past_the_mask_is_never_flagged() {
+        flag_set(&NEEDS_IDR, 64);
+        assert!(!flag_get(&NEEDS_IDR, 64), "id 64 has no bit, so it reads as clear");
+        assert_eq!(NEEDS_IDR.load(Ordering::Relaxed), 0, "and it set nobody else's");
+
+        flag_set(&NEEDS_IDR, 3);
+        assert!(flag_get(&NEEDS_IDR, 3));
+        assert!(!flag_get(&NEEDS_IDR, 4), "neighbouring ids are independent");
+        flag_clear(&NEEDS_IDR, 3);
+        assert_eq!(NEEDS_IDR.load(Ordering::Relaxed), 0);
     }
 }

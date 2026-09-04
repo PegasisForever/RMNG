@@ -416,6 +416,9 @@ async fn run_shipping(
                 let _ = transport.send(&DaemonMsg::ClipboardData(d), &[]);
                 continue;
             }
+            // Answered by the session reader, which hands it to whoever asked for the
+            // barrier; it never reaches this loop.
+            FromHolder::InputSynced { .. } => continue,
             FromHolder::Unknown => continue,
         };
         if announced <= generation {

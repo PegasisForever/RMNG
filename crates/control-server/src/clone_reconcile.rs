@@ -525,16 +525,37 @@ or GUI. The kind can't be changed after creation.
 
 ## Inspect the fleet
 
-- `rmng clone ls` — list clones with live CPU, RAM, status, and each provider's bound account.
-  Sub clones are indented under their parent. `--json` gives one object per clone with `stats`
-  nested.
+- `rmng clone ls` — list clones with live CPU, RAM, status, the board column each sits in, and
+  each provider's bound account. Sub clones are indented under their parent. `--json` gives one
+  object per clone with `stats` nested.
 - `rmng op ls` — list recent operations (clone / delete / archive / restore / pull / commit /
   update).
 - `rmng op wait <op-id> [--timeout <secs>]` — block until an operation reaches a terminal state.
 
+## The board
+
+The dashboard arranges clones in columns, and the CLI reads and writes the same board.
+
+- `rmng board ls` — the columns left to right, with what is in each. A clone nobody filed is
+  still reported in the column the board draws it in.
+- `rmng board move <clone> "<column>"` — put a clone at the **top** of a column. Name it the
+  way it reads on the board (`"In Progress"`); the stored id works too, and case and spacing
+  do not matter.
+- Every create verb takes `--column "<name>"`, which files the new clone at the top of it.
+
+**Moving into an archive column archives the clone**, and moving it back out restores it,
+exactly as dropping a card there does on the dashboard. Add `--wait` to block on that.
+A sub clone cannot be filed: it is drawn under its parent's card, so move the parent.
+
 ## Reach another clone
 
 - `rmng clone ssh <clone>` — print a ready-to-paste `ssh` command for a clone.
+- `rmng clone self` — this clone's own record (its id, image, address and accounts).
+- `rmng clone cp <src> <clone>:<dst>` — copy a directory into another clone. Naming both ends
+  as clones (`<clone>:<path>`) has the server do the copy between the two homes it can already
+  see, which is the fast path for a big tree; a local source streams instead.
+  `rmng clone sync` is the same but makes the destination match, deleting what the source does
+  not have. Both take `--exclude <name>`, anchored at the top of the source.
 - `rmng clone exec <clone> -- <argv…>` — run one non-interactive command inside another clone
   (docker-exec style). Flags: `-u <user>`, `-w <dir>`, `-e KEY=VAL` (repeatable), `-d`/`--detach`
   (fire-and-forget: return immediately, no captured output). Passes through the command's exit
@@ -1806,6 +1827,17 @@ async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Re
     Ok(true)
 }
 
+/// The clones a commit is snapshotting right now, by clone id. A commit op records the image
+/// name as its `target` and the clone it came from as its `source`.
+fn clones_being_committed(ops: &[wire::Operation]) -> HashSet<&str> {
+    ops.iter()
+        .filter(|o| {
+            o.status == wire::OperationStatus::Running && o.kind == wire::OperationKind::Commit
+        })
+        .filter_map(|o| o.source.as_deref())
+        .collect()
+}
+
 /// Make each managed clone's container agree with its `archived` flag: archived means the
 /// container is not up, and not archived means it is not frozen.
 ///
@@ -1817,12 +1849,19 @@ async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Re
 /// clone runs its agent and burns CPU while the UI still shows it archived. That is the shape
 /// a clone archived by the build that froze them instead lands in.
 ///
-/// A clone that is paused and not archived. Nothing pauses a container any more, so this only
-/// clears leftovers from that same build, but a frozen clone answers no exec and no sweep
-/// would ever reach it.
+/// A clone that is paused and not archived, which is a frozen leftover of that same build, and
+/// a frozen clone answers no exec and no sweep would ever reach it.
+///
+/// One thing does still pause a container on purpose: `commit_clone_image` freezes it so the
+/// image is a consistent snapshot. Thawing that mid-flight defeats the freeze and lets a file
+/// written afterwards land in the image, so a clone with a commit running is left alone. A
+/// commit whose server died leaves no `Running` op behind (`jobs::fail_stale_ops` at boot), so
+/// this cannot strand a frozen clone.
 async fn reconcile_archived_state(app: &App, warned: &mut HashSet<String>) {
-    for h in app.store.get().hosts {
-        if !h.managed || !is_safe_id(&h.id) {
+    let st = app.store.get();
+    let committing = clones_being_committed(&st.operations);
+    for h in &st.hosts {
+        if !h.managed || !is_safe_id(&h.id) || committing.contains(h.id.as_str()) {
             continue;
         }
         let id = h.id.as_str();
@@ -2209,6 +2248,35 @@ mod tests {
     #[test]
     fn payload_stamp_path_is_under_opt_rmng() {
         assert_eq!(payload_stamp_path(), "opt/rmng/.payload-hash");
+    }
+
+    /// The thaw sweep must not touch a clone a commit is snapshotting. Thawing it defeats the
+    /// freeze the commit asked for, and the env sync that follows can write the source clone's
+    /// identity back into the file while it is still being read into the image.
+    #[test]
+    fn a_clone_under_commit_is_left_frozen() {
+        let op = |kind, status, source: &str| wire::Operation {
+            id: "op_1".into(),
+            kind,
+            target: "an-image".into(),
+            source: Some(source.to_string()),
+            status,
+            step: "commit".into(),
+            pct: 40.0,
+            message: String::new(),
+            log: Vec::new(),
+            started_at: 0,
+            finished_at: None,
+        };
+        let ops = vec![
+            op(wire::OperationKind::Commit, wire::OperationStatus::Running, "being-committed"),
+            op(wire::OperationKind::Commit, wire::OperationStatus::Done, "committed-already"),
+            op(wire::OperationKind::Clone, wire::OperationStatus::Running, "being-cloned"),
+        ];
+        let busy = clones_being_committed(&ops);
+        assert!(busy.contains("being-committed"));
+        assert!(!busy.contains("committed-already"), "a finished commit holds nothing frozen");
+        assert!(!busy.contains("being-cloned"), "only a commit freezes a container");
     }
 
     #[test]

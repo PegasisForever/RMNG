@@ -120,7 +120,17 @@ export function groupAccounts(
   return out;
 }
 
-function Row({ a, now, locale }: { a: ClaudeUsage; now: number | null; locale: string }) {
+function Row({
+  a,
+  now,
+  locale,
+  onReplace,
+}: {
+  a: ClaudeUsage;
+  now: number | null;
+  locale: string;
+  onReplace: (account: ClaudeUsage) => void;
+}) {
   const resetCredits =
     a.provider === "codex" && a.resetCredits != null ? Number(a.resetCredits) : null;
   return (
@@ -142,14 +152,20 @@ function Row({ a, now, locale }: { a: ClaudeUsage; now: number | null; locale: s
         {/* The account holds no token that still works, so the rotator has taken it out and
             no clone can run on it until someone signs in again. Dimmed bars and a tooltip
             were the only sign of this before, which is how one dead account ran a third of
-            the fleet on an expired token for ten hours. */}
+            the fleet on an expired token for ten hours.
+
+            It is the fix as well as the diagnosis. As a label it named a repair the operator
+            then had to carry out by hand — delete the account, import its replacement, and
+            rebuild its pools and pins from memory. */}
         {a.assignable === false ? (
-          <span
-            className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 dark:bg-rose-950/60 dark:text-rose-400"
-            title={a.error ?? "the stored token expired and could not be refreshed"}
+          <button
+            type="button"
+            onClick={() => onReplace(a)}
+            title={`${a.error ?? "the stored token expired and could not be refreshed"}\n\nSign in to replace this account.`}
+            className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 hover:bg-rose-200 dark:bg-rose-950/60 dark:text-rose-400 dark:hover:bg-rose-900/60"
           >
             sign in again
-          </span>
+          </button>
         ) : null}
         {a.spend ? (
           <span className="shrink-0 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
@@ -195,6 +211,7 @@ export function ClaudeAccountsPanel({
   now,
   onRefresh,
   onImport,
+  onReplace,
 }: {
   accounts: ClaudeUsage[];
   /** The cosmetic order the operator dragged out in Settings, per provider. The container
@@ -216,6 +233,9 @@ export function ClaudeAccountsPanel({
   now: number | null;
   onRefresh: () => void | Promise<void>;
   onImport: () => void | Promise<void>;
+  /** Sign in to an account that takes over from this dead one. Reached from the "sign in
+   *  again" badge, which only draws on a row the server has marked unassignable. */
+  onReplace: (account: ClaudeUsage) => void;
 }) {
   const rows = orderedWithinBuckets(
     accounts,
@@ -278,7 +298,7 @@ export function ClaudeAccountsPanel({
       ) : sections.length === 0 ? (
         <div className="mt-0.5 divide-y divide-slate-200/70 dark:divide-slate-700/70">
           {rows.map((a) => (
-            <Row key={a.id} a={a} now={now} locale={locale} />
+            <Row key={a.id} a={a} now={now} locale={locale} onReplace={onReplace} />
           ))}
         </div>
       ) : (
@@ -302,6 +322,7 @@ export function ClaudeAccountsPanel({
                       a={a}
                       now={now}
                       locale={locale}
+                      onReplace={onReplace}
                     />
                   ))}
                 </div>

@@ -26,6 +26,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 futures.workspace = true
+bytes.workspace = true
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { workspace = true, features = ["multipart"] }
