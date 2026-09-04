@@ -11,3 +11,6 @@ crates/control-server/embedded-bin/*
 # Local test-run artifacts: state, uploads, and generated SSH host/fleet KEYS.
 # The suite writes real private keys here; they must never reach a remote.
 data/
+
+# Agent-generated plans/specs archive — local only.
+docs/superpowers/
