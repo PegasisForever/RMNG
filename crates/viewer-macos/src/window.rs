@@ -27,6 +27,7 @@ use objc2_app_kit::{
 use objc2_foundation::{
     MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
+use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
 use objc2_quartz_core::CAMetalLayer;
 
 use viewer_core::kvk_evdev;
@@ -806,6 +807,15 @@ pub fn make_video_view(
     let layer = CAMetalLayer::layer();
     layer.setDevice(Some(device));
     layer.setPixelFormat(objc2_metal::MTLPixelFormat::BGRA8Unorm);
+    // Say what the pixels mean. The stream is tagged sRGB transfer + BT.709 primaries
+    // (`VIDEO_COLORIMETRY` in the GTK viewer), which is exactly sRGB, and the Metal shaders hand
+    // the layer sRGB-encoded values. A `CAMetalLayer` with no colorspace is *not* colour matched:
+    // its values go to the panel raw, so on a wide-gamut (Display P3) Mac every colour is
+    // stretched to P3 primaries and the picture comes out oversaturated against the same desktop
+    // seen on the Linux client. Tagging it makes the window manage like every other sRGB surface;
+    // on an sRGB display it is a no-op.
+    let srgb = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }));
+    layer.setColorspace(srgb.as_deref());
     layer.setFramebufferOnly(true);
     // A layer we host ourselves does not inherit the view's scale — `setWantsLayer:` only does
     // that for the layer AppKit makes. The draw path sizes the drawable from

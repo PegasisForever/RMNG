@@ -5,6 +5,7 @@
 //!   rmng-viewer-macos                      GUI
 //!   rmng-viewer-macos --headless           decode + report per-monitor fps (CI driver)
 //!   rmng-viewer-macos --unpack-validate    Metal AVC444 unpack vs the CPU oracle
+//!   rmng-viewer-macos --nv12-validate      Metal 4:2:0 BT.709 matrix vs the CPU oracle
 //!
 //! The server address is `~/.config/rmng-viewer/config.json` (shared with the GTK viewer),
 //! editable from the title-bar Settings button; `RMNG_VIDEO` only seeds the first run.
@@ -45,6 +46,11 @@ fn main() -> Result<()> {
         let w = args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(256);
         let h = args.get(pos + 2).and_then(|s| s.parse().ok()).unwrap_or(144);
         return render::validate_unpack(w, h);
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--nv12-validate") {
+        let w = args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(256);
+        let h = args.get(pos + 2).and_then(|s| s.parse().ok()).unwrap_or(144);
+        return render::validate_nv12(w, h);
     }
     let headless = args.iter().any(|a| a == "--headless");
 

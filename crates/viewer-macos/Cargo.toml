@@ -43,7 +43,7 @@ objc2-metal = { version = "0.3", features = [
     "MTLDrawable", "MTLPixelFormat", "MTLTypes", "MTLSampler", "MTLDepthStencil", "MTLBlitCommandEncoder",
     "MTLBlitPass", "MTLAllocation",
 ] }
-objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "CAMediaTiming", "objc2-metal"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "CAMediaTiming", "objc2-metal", "objc2-core-graphics"] }
 # CoreFoundation containers the C video APIs take (dictionaries of keys/numbers/booleans).
 objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFDictionary", "CFNumber", "CFString", "CFData", "CFArray"] }
 # CGImage → NSImage → NSCursor for the remote cursor sprite; CGDisplay for pointer lock.

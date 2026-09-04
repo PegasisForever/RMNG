@@ -58,10 +58,16 @@ vertex VOut v_main(uint vid [[vertex_id]]) {
 }
 
 // BT.709 limited-range Y'CbCr -> RGB (the 4:2:0 stream's tagged colorimetry).
+//
+// Limited range packs luma into 16..235 and chroma into 16..240, so BOTH have to be stretched
+// back to full scale before the full-range matrix below applies: luma by 255/219, chroma by
+// 255/224. Stretching only the luma leaves chroma 224/255 = 87.8% of its true amplitude, which
+// is a silent desaturation -- neutrals stay exact (their chroma is zero) while saturated colour
+// bleeds toward grey, e.g. pure red arrives as (231, 7, 6) instead of (255, 0, 0).
 static inline float3 ycbcr709_limited(float y, float cb, float cr) {
     float yy = (y - 16.0/255.0) * (255.0/219.0);
-    float u  = cb - 128.0/255.0;
-    float v  = cr - 128.0/255.0;
+    float u  = (cb - 128.0/255.0) * (255.0/224.0);
+    float v  = (cr - 128.0/255.0) * (255.0/224.0);
     return float3(yy + 1.5748 * v,
                   yy - 0.1873 * u - 0.4681 * v,
                   yy + 1.8556 * u);
@@ -500,6 +506,186 @@ fn new_texture(
     device.newTextureWithDescriptor(&desc).ok_or_else(|| anyhow!("newTextureWithDescriptor failed"))
 }
 
+/// BT.709 limited-range Y'CbCr → RGB, the CPU twin of the shader's `ycbcr709_limited`.
+///
+/// Inputs are 0..255 sample values (`cb`/`cr` already bilinearly upsampled by the caller);
+/// the output is 0..255, clamped. Both luma and chroma are stretched out of their limited-range
+/// spans (219 and 224) before the full-range matrix — see the shader comment for why leaving the
+/// chroma stretch out desaturates everything.
+pub fn ycbcr709_limited_to_rgb(y: f32, cb: f32, cr: f32) -> [u8; 3] {
+    let yy = (y - 16.0) * (255.0 / 219.0);
+    let u = (cb - 128.0) * (255.0 / 224.0);
+    let v = (cr - 128.0) * (255.0 / 224.0);
+    let f = |x: f32| x.clamp(0.0, 255.0).round() as u8;
+    [
+        f(yy + 1.5748 * v),
+        f(yy - 0.1873 * u - 0.4681 * v),
+        f(yy + 1.8556 * u),
+    ]
+}
+
+/// Bilinear tap positions + weight for one axis of a `filter::linear`, `clamp_to_edge` sample of
+/// a half-resolution plane, at the centre of full-resolution pixel `p`.
+///
+/// The fragment samples at uv = `(p + 0.5) / full`, so the chroma texel coordinate is
+/// `uv * half - 0.5 = (p + 0.5) / 2 - 0.5`, i.e. weights of exactly ¼ and ¾ — representable, so
+/// the GPU's filtering matches this to the bit.
+fn chroma_taps(p: usize, half: usize) -> (usize, usize, f32) {
+    let f = (p as f32 + 0.5) / 2.0 - 0.5;
+    let i = f.floor();
+    let t = f - i;
+    let lo = i.max(0.0) as usize;
+    let hi = ((i + 1.0).max(0.0) as usize).min(half - 1);
+    (lo.min(half - 1), hi, t)
+}
+
+/// `--nv12-validate W H`: render the Metal 4:2:0 path (`f_nv12`) over a synthetic NV12 frame and
+/// compare it with [`ycbcr709_limited_to_rgb`] applied to the same bilinearly upsampled chroma.
+///
+/// The AVC444 path has had [`validate_unpack`] holding it to `wire`'s oracle since it was
+/// written; the 4:2:0 path had nothing, which is how a BT.709 matrix that forgot to stretch
+/// limited-range chroma shipped and desaturated every frame by 12%. Needs a GPU, no window and
+/// no server.
+pub fn validate_nv12(w: usize, h: usize) -> Result<()> {
+    if w % 2 != 0 || h % 2 != 0 {
+        bail!("--nv12-validate needs even dimensions (got {w}x{h})");
+    }
+    println!("nv12 validate: {w}x{h}");
+
+    // Deterministic synthetic planes, plus the primaries pinned into the top-left blocks so a
+    // matrix regression shows up on colours a human can name, not just in the mean.
+    let mut y = vec![0u8; w * h];
+    let mut cbcr = vec![0u8; w * h / 2];
+    let mut s = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s & 0xFF) as u8
+    };
+    for v in y.iter_mut() {
+        *v = 16 + next() % 220;
+    }
+    for v in cbcr.iter_mut() {
+        *v = 16 + next() % 225;
+    }
+    // (Y, Cb, Cr) for full-range red / green / blue / white under BT.709 limited.
+    const PRIMARIES: [(u8, u8, u8); 4] =
+        [(63, 102, 240), (173, 42, 26), (32, 240, 118), (235, 128, 128)];
+    for (i, &(py, pcb, pcr) ) in PRIMARIES.iter().enumerate() {
+        let (x0, y0) = (i * 8, 0);
+        for dy in 0..8 {
+            for dx in 0..8 {
+                y[(y0 + dy) * w + x0 + dx] = py;
+            }
+        }
+        for dy in 0..4 {
+            for dx in 0..4 {
+                let o = ((y0 / 2 + dy) * (w / 2) + x0 / 2 + dx) * 2;
+                cbcr[o] = pcb;
+                cbcr[o + 1] = pcr;
+            }
+        }
+    }
+
+    let device =
+        objc2_metal::MTLCreateSystemDefaultDevice().ok_or_else(|| anyhow!("no Metal device"))?;
+    let r = Renderer::with_device(device)?;
+
+    let ytex = new_texture(
+        &r.device,
+        MTLPixelFormat::R8Unorm,
+        w,
+        h,
+        MTLTextureUsage::ShaderRead,
+        MTLStorageMode::Shared,
+    )?;
+    upload(&ytex, &y, w, w, h);
+    let ctex = new_texture(
+        &r.device,
+        MTLPixelFormat::RG8Unorm,
+        w / 2,
+        h / 2,
+        MTLTextureUsage::ShaderRead,
+        MTLStorageMode::Shared,
+    )?;
+    upload(&ctex, &cbcr, w, w / 2, h / 2);
+
+    // BGRA, because `pipe_nv12` is the shipping drawable pipeline and that is its pixel format.
+    let out = new_texture(
+        &r.device,
+        MTLPixelFormat::BGRA8Unorm,
+        w,
+        h,
+        MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+        MTLStorageMode::Shared,
+    )?;
+    let cmd = r.queue.commandBuffer().ok_or_else(|| anyhow!("no command buffer"))?;
+    let pass = render_pass(&out, MTLLoadAction::DontCare);
+    let enc = cmd.renderCommandEncoderWithDescriptor(&pass).ok_or_else(|| anyhow!("no encoder"))?;
+    enc.setRenderPipelineState(&r.pipe_nv12);
+    unsafe {
+        enc.setFragmentTexture_atIndex(Some(&ytex), 0);
+        enc.setFragmentTexture_atIndex(Some(&ctex), 1);
+        enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+    }
+    enc.endEncoding();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+
+    let mut gpu = vec![0u8; w * h * 4];
+    unsafe {
+        out.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+            NonNull::new(gpu.as_mut_ptr().cast()).unwrap(),
+            w * 4,
+            MTLRegion {
+                origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                size: MTLSize { width: w, height: h, depth: 1 },
+            },
+            0,
+        );
+    }
+
+    let (cw, ch) = (w / 2, h / 2);
+    let (mut sum, mut max, mut nbad) = (0u64, 0u8, 0usize);
+    for py in 0..h {
+        let (yl, yh, ty) = chroma_taps(py, ch);
+        for px in 0..w {
+            let (xl, xh, tx) = chroma_taps(px, cw);
+            let tap = |cx: usize, cy: usize, c: usize| cbcr[(cy * cw + cx) * 2 + c] as f32;
+            let lerp2 = |c: usize| {
+                let a = tap(xl, yl, c) * (1.0 - tx) + tap(xh, yl, c) * tx;
+                let b = tap(xl, yh, c) * (1.0 - tx) + tap(xh, yh, c) * tx;
+                a * (1.0 - ty) + b * ty
+            };
+            let want = ycbcr709_limited_to_rgb(y[py * w + px] as f32, lerp2(0), lerp2(1));
+            // BGRA on the wire from Metal; compare as RGB.
+            let got = [gpu[(py * w + px) * 4 + 2], gpu[(py * w + px) * 4 + 1], gpu[(py * w + px) * 4]];
+            for c in 0..3 {
+                let d = got[c].abs_diff(want[c]);
+                sum += d as u64;
+                max = max.max(d);
+                if d > 2 {
+                    nbad += 1;
+                }
+            }
+        }
+    }
+    let mean = sum as f64 / (w * h * 3) as f64;
+    println!("Metal 4:2:0 vs CPU oracle: mean abs RGB err={mean:.4} max={max} (#>2: {nbad})");
+
+    // Name the primaries explicitly: this is the check that would have caught the desaturation.
+    for (i, name) in ["red", "green", "blue", "white"].iter().enumerate() {
+        let p = (2 * w + i * 8 + 2) * 4; // interior of the block, clear of chroma edge blending
+        println!("  {name:6} -> ({}, {}, {})", gpu[p + 2], gpu[p + 1], gpu[p]);
+    }
+    if mean > 0.5 || max > 2 {
+        bail!("Metal 4:2:0 diverges from the oracle (mean {mean:.3}, max {max})");
+    }
+    println!("OK: Metal 4:2:0 matches the oracle within tolerance.");
+    Ok(())
+}
+
 /// `--unpack-validate W H`: render the Metal AVC444 unpack over a synthetic packed frame and
 /// compare it pixel-for-pixel with [`wire::avc444::unpack_stacked_nv12_to_rgba`], the CPU oracle
 /// the GTK viewer's GL filter is held to. Needs a GPU but no window and no server.
@@ -637,4 +823,78 @@ unsafe extern "C-unwind" {
         texture_out: NonNull<*mut CVMetalTexture>,
     ) -> i32;
     fn CVMetalTextureGetTexture(texture: &CVMetalTexture) -> *mut ProtocolObject<dyn MTLTexture>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Encode a full-range RGB triple the way the server's `vapostproc` does: BT.709 matrix,
+    /// limited range (`ENC_COLORIMETRY = "2:3:0:0"` in `crates/media/src/encode.rs`).
+    fn encode709_limited(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+        const KR: f32 = 0.2126;
+        const KG: f32 = 0.7152;
+        const KB: f32 = 0.0722;
+        let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+        let y = KR * r + KG * g + KB * b;
+        (
+            (16.0 + 219.0 * y).round(),
+            (128.0 + 224.0 * (b - y) / (2.0 * (1.0 - KB))).round(),
+            (128.0 + 224.0 * (r - y) / (2.0 * (1.0 - KR))).round(),
+        )
+    }
+
+    /// The decode has to invert the encode. A chroma stretch that is missing (or a luma one that
+    /// is doubled) leaves neutrals untouched and only shows up on saturated colour, so the
+    /// primaries are the whole point of this test — pure red used to come back as (231, 7, 6).
+    #[test]
+    fn bt709_limited_round_trips_the_encoders_samples() {
+        for &(rgb, name) in &[
+            ([255u8, 0, 0], "red"),
+            ([0, 255, 0], "green"),
+            ([0, 0, 255], "blue"),
+            ([255, 255, 0], "yellow"),
+            ([0, 255, 255], "cyan"),
+            ([255, 0, 255], "magenta"),
+            ([255, 255, 255], "white"),
+            ([0, 0, 0], "black"),
+            ([128, 128, 128], "grey"),
+            ([200, 40, 90], "rose"),
+        ] {
+            let (y, cb, cr) = encode709_limited(rgb[0], rgb[1], rgb[2]);
+            let got = ycbcr709_limited_to_rgb(y, cb, cr);
+            for c in 0..3 {
+                let d = got[c].abs_diff(rgb[c]);
+                assert!(d <= 2, "{name}: {rgb:?} -> ({y},{cb},{cr}) -> {got:?} (channel {c} off by {d})");
+            }
+        }
+    }
+
+    /// The limited-range endpoints, independent of the round trip above.
+    #[test]
+    fn bt709_limited_endpoints() {
+        assert_eq!(ycbcr709_limited_to_rgb(16.0, 128.0, 128.0), [0, 0, 0]);
+        assert_eq!(ycbcr709_limited_to_rgb(235.0, 128.0, 128.0), [255, 255, 255]);
+    }
+
+    /// The shader and the oracle must agree literally, not just in spirit: both stretch chroma by
+    /// 255/224. If someone edits one, this points at the other.
+    #[test]
+    fn shader_and_oracle_use_the_same_chroma_stretch() {
+        assert!(
+            SHADER.contains("(cb - 128.0/255.0) * (255.0/224.0)")
+                && SHADER.contains("(cr - 128.0/255.0) * (255.0/224.0)"),
+            "f_nv12's BT.709 matrix must stretch limited-range chroma by 255/224"
+        );
+    }
+
+    /// Chroma taps at a full-res pixel centre land on exact quarter weights, which is what makes
+    /// the GPU's bilinear filtering bit-comparable with the oracle's.
+    #[test]
+    fn chroma_taps_are_quarter_weighted_and_clamped() {
+        assert_eq!(chroma_taps(0, 8), (0, 0, 0.75)); // clamped to the edge texel
+        assert_eq!(chroma_taps(1, 8), (0, 1, 0.25));
+        assert_eq!(chroma_taps(2, 8), (0, 1, 0.75));
+        assert_eq!(chroma_taps(15, 8), (7, 7, 0.25)); // clamped at the far edge
+    }
 }
