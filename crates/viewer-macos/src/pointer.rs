@@ -3,8 +3,8 @@
 //! `CGAssociateMouseAndMouseCursorPosition(false)` pins the cursor where it is; an `NSEvent`
 //! local monitor supplies `deltaX/deltaY` for each motion. Both are in-process and need **no
 //! TCC permission** (unlike a `CGEventTap`), which is why the viewer uses this pair rather than
-//! capturing at the HID level. Ported from the GTK viewer's `pointer_lock_macos.rs`, minus the
-//! `gdk::Surface` argument — here there is no compositor surface to attach to.
+//! capturing at the HID level. (The GTK viewer's retired macOS build used the same pair, plus a
+//! `gdk::Surface` argument — here there is no compositor surface to attach to.)
 //!
 //! Delivery matches the Wayland twin byte for byte: `{"kind":"pointer_relative","dx":…,"dy":…}`
 //! with integer-unit sends and a fractional carry, so slow drags don't quantise away.

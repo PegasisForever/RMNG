@@ -753,9 +753,8 @@ const KVK_COMMA: u32 = 0x2B;
 /// AppKit runs a menu item's key equivalent from `sendEvent:`, *before* the event is offered to
 /// the first responder — so with the Cmd↔Ctrl swap on, the two chords [`install_menu`] claims
 /// could never be typed at the remote as Ctrl+Q / Ctrl+, and ⌘Q killed the viewer mid-session.
-/// An `NSEvent` local monitor runs earlier still (it sees the event before `sendEvent:` is
-/// called at all), which is exactly how the GTK viewer reads the keyboard on macOS — see
-/// `crates/viewer/src/keyboard_macos.rs`.
+/// An `NSEvent` local monitor runs earlier still: it sees the event before `sendEvent:` is
+/// called at all.
 ///
 /// It is focus-aware and deliberately narrow. The chords are taken only while a video view is
 /// the first responder of the key window *and* the swap is on — i.e. only when the remote is

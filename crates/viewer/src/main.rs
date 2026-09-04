@@ -1,4 +1,8 @@
-//! `viewer` (Phase 5) — native client.
+//! `viewer` (Phase 5) — native GTK client for **Linux and Windows**.
+//!
+//! macOS has its own client, [`viewer-macos`](../../viewer-macos) (AppKit + Metal +
+//! VideoToolbox); this crate refuses to build there rather than hand a Mac a degraded GTK
+//! binary. See the `compile_error!` below.
 //!
 //! Modes:
 //!   - default (GUI): **one GTK4 window per remote monitor** (`monitor_id`). Each decodes
@@ -27,6 +31,12 @@
 //! `gtk4paintablesink`'s paintable is a GTK object (`!Send`), so all pipelines, paintables
 //! and widgets live on the GTK main thread; the net thread only ships AU bytes over a queue.
 
+// Refuse the build rather than degrade it. macOS *would* still compile here — the pointer-lock
+// stub below would answer for it — and the result would be a viewer that silently cannot do
+// relative mouse-look, on the one platform that already has a better client. Say so instead.
+#[cfg(target_os = "macos")]
+compile_error!("the macOS client is the `viewer-macos` crate; this GTK viewer is for Linux and Windows");
+
 use viewer_core::{auto_lock, config, forward};
 // Cross-window drag routing is shared with the native macOS viewer: one copy of the geometry,
 // so a fix to how a drag crosses the seam lands in both clients at once.
@@ -34,22 +44,21 @@ use viewer_core::drag_route::{route_drag, Screen};
 mod glunpack;
 mod headless;
 mod terminal;
-// The Wayland pointer-lock implementation only compiles (and links) on Linux.
-// The macOS twin lives in pointer_lock_macos.rs (§4.5).
-// Other platforms get a no-op stub.
+// The Wayland pointer-lock implementation only compiles (and links) on Linux; Windows gets a
+// no-op stub. The stub's cfg says "not Linux" rather than naming Windows so that a macOS build
+// still resolves this module: nothing there will ever run it (the `compile_error!` above ends
+// that build), but without it the Mac gets an unresolved-import cascade that buries the one
+// message it is supposed to read.
 #[cfg(target_os = "linux")]
 mod pointer_lock;
-#[cfg(target_os = "macos")]
-#[path = "pointer_lock_macos.rs"]
-mod pointer_lock;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(target_os = "linux"))]
 mod pointer_lock {
     use std::net::TcpStream;
     use std::sync::{Arc, Mutex};
 
     use gtk4::gdk;
 
-    /// Stub for non-Linux/macOS builds: always returns `None` from `new`.
+    /// Stub for non-Linux builds: always returns `None` from `new`.
     pub struct PointerLock;
 
     impl PointerLock {
@@ -63,24 +72,6 @@ mod pointer_lock {
         pub fn release(&self) {}
     }
 }
-
-// Carbon kVK → Linux evdev translation table (macOS only), from viewer-core.
-#[cfg(target_os = "macos")]
-use viewer_core::kvk_evdev;
-
-// Physical-keyboard capture via a raw NSEvent monitor (macOS only): bypasses GDK's
-// IM-mediated key events, which synthesize phantom keycode-0 presses. See keyboard_macos.rs.
-#[cfg(target_os = "macos")]
-mod keyboard_macos;
-
-// Native macOS titlebar: replaces the GTK HeaderBar with NSWindow + NSButton accessories.
-#[cfg(target_os = "macos")]
-mod native_titlebar;
-
-// macOS fullscreen: hide (not auto-hide) the Mac menu bar so the top edge stays remote desktop
-// instead of stalling pointer motion. See fullscreen_macos.rs.
-#[cfg(target_os = "macos")]
-mod fullscreen_macos;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -114,12 +105,10 @@ fn main() -> Result<()> {
     // doesn't cache that way: it re-samples the live texture every draw, so it's clean AND fast.
     // Empirically confirmed on this Intel/Mesa box: cairo=clean(slow), ngl/vulkan=stale, gl=clean.
     // Pin `gl` unless the user overrides. Must be set before GTK realizes its first surface; we're
-    // still single-threaded here so set_var is sound.
-    // macOS: the legacy `gl` renderer was removed in GTK ≥ 4.18, so the pin is Linux-only — which
-    // means macOS runs `ngl`, the renderer this workaround exists for, with no escape available.
-    // The symptom has never actually been observed on a Mac (Apple's compositor path differs), so
-    // we do not pay for a mitigation up front. If an old frame ever flashes there — most likely in
-    // a downscaled window, since ngl caches a scaled intermediate — the manual escape is
+    // still single-threaded here so set_var is sound. Linux-only: the legacy `gl` renderer was
+    // removed in GTK ≥ 4.18, which is what a Windows GTK runtime ships, and the stale-texture
+    // symptom has not been observed there. If an old frame ever flashes on Windows — most likely
+    // in a downscaled window, since ngl caches a scaled intermediate — the manual escape is
     // `GSK_RENDERER=cairo` (correct, slower), and the designed fix is rendering the latest frame
     // ourselves via a GtkGLArea fed by `appsink max-buffers=1 drop=true` instead of for_paintable.
     #[cfg(target_os = "linux")]
@@ -438,11 +427,6 @@ fn run_gui() -> Result<()> {
         });
     }
 
-    // macOS: patch GdkMacosWindow's fullscreen presentation policy before the first window
-    // exists — AppKit snapshots the delegate's methods at setDelegate: time (see the module).
-    #[cfg(target_os = "macos")]
-    fullscreen_macos::install();
-
     let app = gtk4::Application::builder().application_id("dev.rmng.viewer").build();
     app.connect_activate(move |app| build_ui(app, &aus, &srcs, &writer, &inbox, &cursors, &view, &warp, &addr, &auto, &term_out));
     let empty: [&str; 0] = [];
@@ -468,7 +452,7 @@ struct MonitorWindow {
     id: u32,
     window: gtk4::ApplicationWindow,
     /// FPS readout counter, bumped by the current video paintable and read by a 1s timer created
-    /// with the shell. Unused on macOS / for non-video content.
+    /// with the shell. Unused for non-video content.
     fps_count: Rc<Cell<u32>>,
     content: Content,
 }
@@ -506,9 +490,8 @@ struct VideoContent {
     keyboard: gtk4::EventControllerKey,
     /// The window's `is-active` handler, connected by `install_keyboard`. Disconnected when this
     /// window leaves video mode: the window shell outlives its content, so without this each
-    /// content swap stacks another handler (N× `release_all_input` per focus change, and on macOS
-    /// N× the keyboard-gate count). `Option` so `teardown_content` can take it by value —
-    /// `GObject::disconnect` consumes the id.
+    /// content swap stacks another handler (N× `release_all_input` per focus change). `Option` so
+    /// `teardown_content` can take it by value — `GObject::disconnect` consumes the id.
     active_notify: Option<glib::SignalHandlerId>,
 }
 
@@ -662,17 +645,6 @@ fn build_ui(
         pointer_lock = PointerLock::new(&display, writer.clone()).map(Rc::new);
     }
 
-    // macOS: forward PHYSICAL keys from a raw NSEvent monitor instead of GTK's key events.
-    // GDK's macOS backend runs keys through the Cocoa text-input machinery and synthesizes
-    // keycode-0 "null key" events for IME-committed text, which our kVK table mistranslated
-    // to a phantom, out-of-order KEY_A. One app-global monitor (single remote keyboard).
-    //
-    // Cmd↔Ctrl is swapped by default so Mac chords reach the remote GNOME session as Ctrl
-    // (physical Control becomes Super, so overview chords stay reachable). Disable with
-    // RMNG_CMD_IS_CTRL=0 or "cmd_is_ctrl": false in the viewer config.
-    #[cfg(target_os = "macos")]
-    keyboard_macos::install(writer.clone(), config::cmd_is_ctrl());
-
     // A window exists from launch, before any connection: monitor windows are built
     // lazily on each monitor's first video AU, so a wrong/unset server address used
     // to mean no window at all — and with it no Settings button to fix the address.
@@ -740,8 +712,8 @@ fn build_ui(
             // 3. Auto pointer-lock: reconcile the actual lock with the policy (remote cursor hidden
             //    ≥180ms → engage; shown ≥300ms → release; manual chords override — see auto_lock.rs).
             //    The target is the active video window's surface; NO target releases (see
-            //    auto_lock::lock_action — holding a macOS lock through a focus loss freezes the
-            //    host cursor process-wide, which mutter prevents for us on Wayland).
+            //    auto_lock::lock_action — a lock held through a focus loss can freeze the host
+            //    cursor process-wide on platforms where the compositor does not unwind it for us).
             if let Some(pl) = pointer_lock.as_ref() {
                 let want = auto.lock().unwrap().want(Instant::now());
                 // Resolve the target into a local so the `windows` borrow is dropped before
@@ -1015,8 +987,8 @@ fn reconcile_view(
 /// `set_child`.) Leaves the window in a neutral `Placeholder` state; the caller sets the real
 /// content next.
 ///
-/// Releasing the lock here is what makes window teardown safe on macOS: only a video window can
-/// hold it, the lock is a single process-wide resource, and once this window is gone (or showing a
+/// Releasing the lock here is what makes window teardown safe: only a video window can hold it,
+/// the lock is a single process-wide resource, and once this window is gone (or showing a
 /// terminal) there is no key controller left to run the Ctrl+Alt+P escape. The tick re-engages
 /// within one frame if the policy still wants it and a video window is focused.
 fn teardown_content(mw: &mut MonitorWindow, srcs: &VideoSrcs, pointer_lock: &Option<Rc<PointerLock>>) {
@@ -1024,13 +996,6 @@ fn teardown_content(mw: &mut MonitorWindow, srcs: &VideoSrcs, pointer_lock: &Opt
         mw.window.remove_controller(&vc.keyboard);
         if let Some(id) = vc.active_notify.take() {
             mw.window.disconnect(id);
-        }
-        // macOS: balance install_keyboard's priming. The handler is gone, so its own decrement
-        // will never fire; if this window is the key window right now the gate would stay armed
-        // for content that has no remote desktop.
-        #[cfg(target_os = "macos")]
-        if mw.window.is_active() {
-            keyboard_macos::note_window_active(false);
         }
         if let Some(pl) = pointer_lock.as_ref() {
             pl.release(); // idempotent when not engaged
@@ -1103,10 +1068,8 @@ fn make_window_shell(
     let fps_count = Rc::new(Cell::new(0u32));
 
     // ── Title bar ──────────────────────────────────────────────────────────────────────
-    // On Linux (and non-macOS): a GTK HeaderBar with FPS readout, fullscreen button, and (main
-    // window only) server-address button. On macOS: native_titlebar wires NSButton accessories to
-    // the real NSWindow titlebar instead — do NOT call window.set_titlebar(...) there.
-    #[cfg(not(target_os = "macos"))]
+    // A GTK HeaderBar with FPS readout, fullscreen button, and (main window only) a
+    // server-address button.
     {
         let header = gtk4::HeaderBar::new();
         let fps_label = gtk4::Label::new(Some("0 FPS"));
@@ -1141,7 +1104,6 @@ fn make_window_shell(
             });
         }
     }
-    // TODO(spike): native FPS label on macOS — add NSTextField updated from a 1s glib timer.
 
     // Close logic: every window is closable, and closing any of them quits the whole viewer. The
     // window set mirrors the remote desktop, so shutting one on its own would leave a hole nothing
@@ -1155,11 +1117,6 @@ fn make_window_shell(
             glib::Propagation::Proceed
         });
     }
-
-    // macOS: register the native titlebar BEFORE present() so connect_realize fires once the
-    // surface is ready. The closure runs asynchronously on the main thread.
-    #[cfg(target_os = "macos")]
-    native_titlebar::install(&window, is_main, addr, writer);
 
     window.present();
     (window, fps_count)
@@ -1223,15 +1180,10 @@ fn make_video_content(
     window.add_css_class("video-window");
 
     // FPS: bump the shared counter on each presented frame (the header timer reads it).
-    #[cfg(not(target_os = "macos"))]
     {
         let c = fps_count.clone();
         paintable.connect_invalidate_contents(move |_| c.set(c.get() + 1));
     }
-    // macOS shows the real NSWindow titlebar (native_titlebar.rs), which carries no FPS readout —
-    // so nothing consumes the counter there and there is no point paying for the invalidate hook.
-    #[cfg(target_os = "macos")]
-    let _ = fps_count;
 
     let state = Rc::new(WinInput::default());
     install_pointer(&video, mid, &paintable, window, layout, writer, &state, pointer_lock, warp);
@@ -1264,8 +1216,6 @@ fn make_startup_window(app: &gtk4::Application, addr: &ServerAddr, writer: &Writ
         .build();
 
     // Same Settings button as the main monitor window's title bar.
-    // On Linux: use the GTK HeaderBar. On macOS: use native NSButton via native_titlebar.
-    #[cfg(not(target_os = "macos"))]
     {
         let header = gtk4::HeaderBar::new();
         let settings = gtk4::Button::from_icon_name("network-server-symbolic");
@@ -1277,7 +1227,6 @@ fn make_startup_window(app: &gtk4::Application, addr: &ServerAddr, writer: &Writ
         header.pack_end(&settings);
         window.set_titlebar(Some(&header));
     }
-    // macOS: native settings button is installed after realize (see below).
 
     let spinner = gtk4::Spinner::new();
     spinner.set_spinning(true);
@@ -1314,10 +1263,6 @@ fn make_startup_window(app: &gtk4::Application, addr: &ServerAddr, writer: &Writ
             glib::ControlFlow::Continue
         });
     }
-
-    // macOS: install native titlebar with settings button before presenting.
-    #[cfg(target_os = "macos")]
-    native_titlebar::install(&window, true, addr, writer);
 
     window.present();
     window
@@ -1426,10 +1371,10 @@ const VIDEO_COLORIMETRY: &str = "2:3:7:1";
 /// Stamp `colorimetry` onto every caps a pad pushes downstream.
 ///
 /// A capsfilter cannot do this job. The decoder's caps carry a memory feature that differs per
-/// platform (`memory:DMABuf` here, `memory:GLMemory` under macOS `vtdec_hw`), and a filter that
-/// named the wrong one would fail to link; one that named a colorimetry the decoder later
-/// declared itself would fail to negotiate. Rewriting the sticky caps event has neither failure
-/// mode: it only tells everything downstream what the samples always were.
+/// platform (`memory:DMABuf` here, `memory:GLMemory` elsewhere), and a filter that named the
+/// wrong one would fail to link; one that named a colorimetry the decoder later declared itself
+/// would fail to negotiate. Rewriting the sticky caps event has neither failure mode: it only
+/// tells everything downstream what the samples always were.
 fn retag_colorimetry(pad: &gst::Pad, colorimetry: &'static str) {
     pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
         let retagged = match &info.data {
@@ -1475,16 +1420,8 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::Pipelin
     // lowest latency for a live, latest-wins paintable (no audio to sync to). It also makes
     // the sink immune to any reorder/DPB latency the decoder declares in a LATENCY query, so
     // the only display delay left is the next vsync. Matches the 444 path (make_decoder_yuv444).
-    //
-    // macOS: vtdec_hw emits NV12 GLMemory with texture-target=rectangle (IOSurface/CGL); the sink
-    // only accepts RGBA/RGB 2D GLMemory, so glcolorconvert converts rectangle→2D + NV12→RGBA in
-    // one GPU pass. glupload drops out (vtdec_hw is its own GL producer). Linux string unchanged.
-    #[cfg(not(target_os = "macos"))]
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vah264dec name=dec ! glupload ! gtk4paintablesink name=sink sync=false";
-    #[cfg(target_os = "macos")]
-    let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
-         h264parse ! vtdec_hw name=dec ! glcolorconvert ! gtk4paintablesink name=sink sync=false";
     let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
@@ -1529,25 +1466,20 @@ fn make_decoder(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::Pipelin
 /// texture zero-copy. The returned appsrc/paintable match the 4:2:0 path's interface (intrinsic
 /// size `W×H`), so the rest of the viewer (letterbox, cursor overlay, fps) is unchanged.
 ///
-/// Do **not** put a `glcolorconvert`/`videoconvert` between the decoder (`glupload` on Linux,
-/// `vtdec_hw` on macOS) and `rmngavc444unpack`: that would 4:2:0-upsample the packed chroma and
-/// destroy the auxiliary view. The element reads the raw Y/UV textures.
+/// Do **not** put a `glcolorconvert`/`videoconvert` between `glupload` and `rmngavc444unpack`:
+/// that would 4:2:0-upsample the packed chroma and destroy the auxiliary view. The element reads
+/// the raw Y/UV textures.
 fn make_decoder_yuv444(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::Pipeline)> {
     glunpack::register()?;
     // Plain `gtk4paintablesink sync=false` (present on arrival, no audio to clock-sync to) — same as
     // the 4:2:0 path. The "old frame from a few back when downscaling" bug was NOT a sink backlog
     // (the sink is latest-wins); it was GTK's `ngl`/`vulkan` GSK renderer caching a recycled
     // GdkTexture — fixed by pinning `GSK_RENDERER=gl` in main().
-    // macOS: vtdec_hw replaces vah264dec + glupload (vtdec_hw is its own GL producer, outputs
-    // NV12 rectangle GLMemory). Do NOT insert glcolorconvert here: rmngavc444unpack reads the raw
-    // Y/UV textures; a prior colorconvert would 4:2:0-upsample the packed auxiliary chroma and
-    // destroy the AVC444 reconstruction. Rectangle→2D conversion is Task 3. Linux string unchanged.
-    #[cfg(not(target_os = "macos"))]
+    // Do NOT insert a glcolorconvert here: rmngavc444unpack reads the raw Y/UV textures, and a
+    // prior colorconvert would 4:2:0-upsample the packed auxiliary chroma and destroy the AVC444
+    // reconstruction.
     let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
          h264parse ! vah264dec ! glupload ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false";
-    #[cfg(target_os = "macos")]
-    let desc = "appsrc name=src is-live=true format=time do-timestamp=true ! \
-         h264parse ! vtdec_hw ! rmngavc444unpack ! gtk4paintablesink name=sink sync=false";
     let pipeline = gst::parse::launch(desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
     if let Some(bus) = pipeline.bus() {
         bus.set_sync_handler(move |_, msg| {
@@ -1643,7 +1575,7 @@ fn install_pointer(
             // no-ops until the following crossing. Bouncing through a *named* cursor takes
             // GDK's cursor-shape path (clearing the attached flag), and restoring the
             // texture cursor then forces a full set_cursor with the current enter serial.
-            // Wayland-specific; gated so macOS doesn't get the unnecessary bounce.
+            // Wayland-specific; gated so no other backend pays for the unnecessary bounce.
             #[cfg(target_os = "linux")]
             if !pl.as_ref().is_some_and(|p| p.is_engaged()) {
                 if let Some(cur) = video2.cursor() {
@@ -1841,33 +1773,6 @@ fn release_all_input(writer: &Writer, state: &WinInput) {
     }
 }
 
-/// macOS only: Carbon kVKs whose `keyDown` GDK consumes via `interpretKeyEvents:` — turned
-/// into Cocoa commands (key-view loop, button "click", default button, cursor movement) —
-/// so they NEVER reach the raw NSEvent monitor in `keyboard_macos`; only their `keyUp`
-/// does. GTK's `EventControllerKey` *does* see them, with `code` == the kVK, so these keys
-/// are forwarded from the GTK handler instead. Returns the evdev keycode to send, or `None`
-/// if the monitor already owns this key (forwarding those here too would double-send).
-///
-/// Two families are swallowed:
-///   - activation / focus: Tab 0x30, Space 0x31, Return 0x24, KeypadEnter 0x4C
-///   - cursor movement:    arrows 0x7B–0x7E, Home 0x73, PageUp 0x74, End 0x77, PageDown 0x79
-///
-/// Verified in-log: Tab/Space/Return reach the GTK handler, not the monitor; arrows are the
-/// same movement-command class (a correct kVK→evdev entry exists, yet they did nothing on
-/// the remote — i.e. the monitor never saw them). *Text* keys (letters, Backspace 0x33,
-/// punctuation) DO reach the monitor, so they are deliberately excluded here.
-#[cfg(target_os = "macos")]
-fn macos_gdk_swallowed_key(code: u32) -> Option<u32> {
-    // `code` == Carbon kVK on macOS.
-    matches!(
-        code,
-        0x24 | 0x30 | 0x31 | 0x4C           // Return, Tab, Space, KeypadEnter
-        | 0x73 | 0x74 | 0x77 | 0x79         // Home, PageUp, End, PageDown
-        | 0x7B..=0x7E                        // Left, Right, Down, Up arrows
-    )
-    .then(|| kvk_evdev::translate(code))
-}
-
 fn install_keyboard(
     window: &gtk4::ApplicationWindow,
     writer: &Writer,
@@ -1895,8 +1800,6 @@ fn install_keyboard(
                 s.contains(gdk::ModifierType::CONTROL_MASK) && s.contains(gdk::ModifierType::ALT_MASK);
             if ctrl_alt && (keyval == gdk::Key::g || keyval == gdk::Key::G) {
                 release_all_input(&w, &state); // drop the leaked Ctrl/Alt before entering the game
-                #[cfg(target_os = "macos")]
-                keyboard_macos::release_all(); // keys are held in the NSEvent monitor's set, not `state`
                 // Manual override on top of the auto policy: flip the effective
                 // state and apply it immediately (the tick keeps it reconciled).
                 // The override self-clears once auto converges — a manual release
@@ -1921,33 +1824,13 @@ fn install_keyboard(
                     pl.release();
                 }
                 release_all_input(&w, &state);
-                #[cfg(target_os = "macos")]
-                keyboard_macos::release_all(); // keys are held in the NSEvent monitor's set, not `state`
                 return glib::Propagation::Stop;
             }
             // Physical key identity → Linux evdev keycode sent on the wire.
-            // Linux/X11: GTK hardware_keycode = evdev + 8; subtract 8 to recover evdev.
-            #[cfg(not(target_os = "macos"))]
-            {
-                let keycode = code.saturating_sub(8);
-                state.pressed.borrow_mut().insert(keycode);
-                send(&w, format!(r#"{{"kind":"key_code","keycode":{keycode},"pressed":true}}"#));
-            }
-            // macOS: physical keys are forwarded by the raw NSEvent monitor (keyboard_macos),
-            // NOT from here — GTK's key events on macOS come through the Cocoa text-input
-            // machinery, which synthesizes phantom keycode-0 presses. The ONE exception is the
-            // handful of keys GDK swallows before the monitor sees them (Tab/Space/Return/Enter,
-            // see `macos_gdk_swallowed_key`): those genuinely arrive here with a valid `code`,
-            // so forward them from here. Dedup via `state.pressed` so held-key autorepeat isn't
-            // stacked on top of the remote's own repeat.
-            #[cfg(target_os = "macos")]
-            if let Some(keycode) = macos_gdk_swallowed_key(code) {
-                if state.pressed.borrow_mut().insert(keycode) {
-                    send(&w, format!(r#"{{"kind":"key_code","keycode":{keycode},"pressed":true}}"#));
-                    tracing::debug!("gtk forward (monitor-missed): code={code:#04x} evdev={keycode} pressed=true");
-                }
-                return glib::Propagation::Stop;
-            }
+            // GTK hardware_keycode = evdev + 8; subtract 8 to recover evdev.
+            let keycode = code.saturating_sub(8);
+            state.pressed.borrow_mut().insert(keycode);
+            send(&w, format!(r#"{{"kind":"key_code","keycode":{keycode},"pressed":true}}"#));
             glib::Propagation::Proceed
         });
     }
@@ -1955,22 +1838,9 @@ fn install_keyboard(
         let (w, state) = (writer.clone(), state.clone());
         key.connect_key_released(move |_c, _keyval, code, _s| {
             // Mirror the press-side translation so pressed/released are symmetric.
-            #[cfg(not(target_os = "macos"))]
-            {
-                let keycode = code.saturating_sub(8);
-                state.pressed.borrow_mut().remove(&keycode);
-                release_keycode(&w, keycode);
-            }
-            // macOS: releases come from the keyboard_macos NSEvent monitor (see key_pressed),
-            // EXCEPT for the GDK-swallowed keys forwarded from key_pressed above — release
-            // those here to stay symmetric.
-            #[cfg(target_os = "macos")]
-            if let Some(keycode) = macos_gdk_swallowed_key(code) {
-                if state.pressed.borrow_mut().remove(&keycode) {
-                    release_keycode(&w, keycode);
-                    tracing::debug!("gtk forward (monitor-missed): code={code:#04x} evdev={keycode} pressed=false");
-                }
-            }
+            let keycode = code.saturating_sub(8);
+            state.pressed.borrow_mut().remove(&keycode);
+            release_keycode(&w, keycode);
         });
     }
     window.add_controller(key.clone());
@@ -1979,11 +1849,6 @@ fn install_keyboard(
         let (w, state, window2) = (writer.clone(), state.clone(), window.clone());
         window.connect_is_active_notify(move |win| {
             tracing::debug!("window active: {:?} active={}", win.title().map(|t| t.to_string()), win.is_active());
-            // macOS: gate the NSEvent keyboard monitor on whether a video window is the key
-            // window — so keys reach the remote when looking at it, but stay local (dialogs,
-            // the pre-connection window) otherwise.
-            #[cfg(target_os = "macos")]
-            keyboard_macos::note_window_active(win.is_active());
             if win.is_active() {
                 if state.inside.get() {
                     grab_keys(&window2);
@@ -1991,20 +1856,9 @@ fn install_keyboard(
             } else {
                 ungrab_shortcuts(&window2);
                 release_all_input(&w, &state);
-                #[cfg(target_os = "macos")]
-                keyboard_macos::release_all(); // drop remote-held keys tracked by the monitor
             }
         })
     };
-
-    // macOS: prime the keyboard gate. `is-active` only *notifies* on a transition, so a window
-    // whose content becomes video while it is already the key window would never arm the monitor
-    // — keys would stay local until the operator Cmd-Tabbed away and back. The matching
-    // decrement is in teardown_content.
-    #[cfg(target_os = "macos")]
-    if window.is_active() {
-        keyboard_macos::note_window_active(true);
-    }
 
     (key, active_notify)
 }

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Native GTK4 viewer (GUI + headless): port-1 connect, VA-API H.264 decode, dmabuf render, input + clipboard."
+description = "Native GTK4 viewer for Linux/Windows (GUI + headless): port-1 connect, VA-API H.264 decode, dmabuf render, input + clipboard."
 
 [[bin]]
 name = "rmng-viewer"
@@ -32,48 +32,14 @@ serde.workspace = true
 serde_json.workspace = true
 # Full terminal engine (grid, scrollback, selection, mouse/app modes) for the headless-clone
 # tmux tab view (src/terminal.rs). We feed the server's raw PTY bytes and render its grid into a
-# GTK DrawingArea with cairo — no system terminal lib, so it builds and runs identically on Linux
-# and macOS (unlike the GTK VTE widget). Its unused PTY-spawn deps are harmless compile weight.
+# GTK DrawingArea with cairo — no system terminal lib (unlike the GTK VTE widget), so the tab
+# view is ours on every platform. Its unused PTY-spawn deps are harmless compile weight.
 alacritty_terminal = "0.26"
 
-# Pointer-lock / relative mouse (Wayland only; gdk4-wayland links a C lib that
-# does not exist on macOS).  The pointer_lock module is gated by the same cfg.
+# Pointer-lock / relative mouse (Wayland only; gdk4-wayland links libwayland, which is Linux's).
+# The pointer_lock module is gated by the same cfg; Windows gets the no-op stub instead.
 [target.'cfg(target_os = "linux")'.dependencies]
 # `wayland_crate` re-exports a version-matched wayland-client (0.31, matching gtk4 0.9).
 gdk4-wayland = { version = "0.9", features = ["wayland_crate"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
-
-# macOS pointer-lock via CGAssociateMouseAndMouseCursorPosition + NSEvent local monitor.
-# No TCC permission required for local monitors.
-[target.'cfg(target_os = "macos")'.dependencies]
-# CGAssociateMouseAndMouseCursorPosition, CGDisplayHideCursor, kCGDirectMainDisplay.
-core-graphics = "0.25"
-# NSEvent (local monitor API + deltaX/deltaY), NSCursor (hide/unhide), NSEventMask.
-objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit = { version = "0.3", features = [
-    # pointer-lock (pre-existing)
-    "NSEvent",
-    "NSCursor",
-    # native_titlebar: NSWindow titlebar configuration
-    "NSWindow",
-    "NSResponder",
-    # native_titlebar: titlebar accessory view controller
-    "NSTitlebarAccessoryViewController",
-    "NSViewController",
-    # native_titlebar: container view + subviews
-    "NSView",
-    # native_titlebar: NSButton action bridge
-    "NSButton",
-    "NSControl",
-    # native_titlebar: NSImage (SF Symbol icons)
-    "NSImage",
-    # native_titlebar: NSLayoutAttribute::Right for accessory placement
-    "NSLayoutConstraint",
-    # fullscreen_macos: NSApplicationPresentationOptions for the injected
-    # window:willUseFullScreenPresentationOptions: delegate method
-    "NSApplication",
-] }
-# Block closures for the addLocalMonitorForEventsMatchingMask:handler: callback.
-block2 = "0.6"

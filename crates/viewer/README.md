@@ -1,8 +1,14 @@
 # viewer
 
-The native live viewer — a **from-scratch** GTK4 client that connects to control-server
-**port 1**, hardware-decodes the selected clone's H.264 monitor streams, renders them
-zero-copy, and captures input back. It runs in two modes over one shared core: a **GUI**
+The native live viewer for **Linux and Windows** — a **from-scratch** GTK4 client that connects
+to control-server **port 1**, hardware-decodes the selected clone's H.264 monitor streams, renders
+them zero-copy, and captures input back. macOS has its own client,
+[`viewer-macos`](../viewer-macos/README.md) (AppKit + Metal + VideoToolbox, no GTK); this crate
+`compile_error!`s there rather than hand a Mac a degraded GTK binary. What the two share lives in
+[`viewer-core`](../viewer-core): the wire protocol, drag routing, the auto-lock policy, the
+terminal colour scheme and encoders, and the config file.
+
+It runs in two modes over one shared core: a **GUI**
 mode and a first-class **headless** mode for testing (see
 [Headless mode](#headless-mode-first-class)). This is the production successor to the old
 RDP client (`../../core`/`../../gtk`/`../../headless`), and it is the one component the user
@@ -66,27 +72,23 @@ So both decode paths state the truth instead of inheriting a guess:
 
 With the tag in place a patch chart survives capture → encode → decode → GTK within 1 of 255.
 
-## Per-OS backends
+## Platform support
 
-One toolkit-free core, two platform backends. The transport, the wire protocol and the AVC444
-packing are identical; only these pieces differ. The numbered list above describes the Linux
-column.
+**Linux** is the developed and tested target: VA-API decode (`vah264dec`), EGL, the Wayland
+pointer-lock protocols, and the `GSK_RENDERER=gl` pin for the stale-texture bug. The numbered
+list above describes it.
 
-| | Linux | macOS (Apple Silicon) |
-| --- | --- | --- |
-| H.264 decode | `vah264dec` (VA-API) | `vtdec_hw` (VideoToolbox) |
-| GL import | `glupload` → 2D `GLMemory` | `vtdec_hw` emits IOSurface-backed `GLMemory` directly; `glupload` drops out |
-| Texture target | `2D` | `rectangle` (Apple's `CGLTexImageIOSurface2D` accepts only `GL_TEXTURE_RECTANGLE`) |
-| 4:2:0 sink path | `glupload ! gtk4paintablesink` | `vtdec_hw ! glcolorconvert ! gtk4paintablesink` (the sink takes RGBA 2D only) |
-| 4:4:4 unpack | `rmngavc444unpack`, `sampler2D`, `#version 300 es` | `rmngavc444unpack`, `sampler2DRect`, desktop GLSL (Apple has no `ARB_ES3_compatibility`) |
-| GL platform | EGL | CGL (desktop GL 4.1 over Metal) |
-| Keyboard | GTK `EventControllerKey`, `evdev = hardware_keycode − 8` | raw `NSEvent` local monitor + `kvk_evdev` table ([`keyboard_macos.rs`](src/keyboard_macos.rs)); GDK-swallowed keys still come via GTK. Cmd↔Ctrl swapped by default |
-| Pointer lock | `zwp_pointer_constraints` + `zwp_relative_pointer`, unaccelerated deltas ([`pointer_lock.rs`](src/pointer_lock.rs)) | `CGAssociateMouseAndMouseCursorPosition` + `NSEvent` deltas, which are OS-**accelerated** ([`pointer_lock_macos.rs`](src/pointer_lock_macos.rs)) |
-| Titlebar | GTK `HeaderBar` + FPS readout | real `NSWindow` titlebar + `NSButton` accessories ([`native_titlebar.rs`](src/native_titlebar.rs)); no FPS readout |
-| Fullscreen | GTK `fullscreen()`; the compositor owns the screen edges | GTK `fullscreen()`, with the Mac menu bar **hidden** rather than auto-hidden so the top edge stays remote desktop instead of stalling GDK motion ([`fullscreen_macos.rs`](src/fullscreen_macos.rs)); F11 leaves |
-| GSK renderer | `gl` pinned (stale-texture workaround) | `ngl` — the legacy `gl` renderer was removed in GTK 4.18, so no pin is available |
+**Windows** builds from the same source with two pieces absent: pointer-lock is a no-op stub
+(`PointerLock::new` returns `None`, so Ctrl+Alt+G does nothing and the auto policy never
+engages), and the GSK renderer pin does not apply — GTK ≥ 4.18 dropped the legacy `gl`
+renderer. Everything else — decode, render, input, clipboard, the terminal tab view — is the
+shared path.
 
-Build and run instructions: [DEVELOPMENT.md § macOS](../../docs/DEVELOPMENT.md#macos).
+**macOS is not built from this crate.** GDK's macOS backend re-derives pointer state and routes
+keys through the Cocoa text-input machinery, which cost a growing pile of platform shims here;
+[`viewer-macos`](../viewer-macos/README.md) replaced them with a native AppKit + Metal +
+VideoToolbox client that owns its own `NSView`. Building this crate on a Mac is a
+`compile_error!` pointing there.
 
 ## Headless mode (first-class)
 
@@ -144,6 +146,10 @@ uses raw `wayland-client`/`wayland-protocols` + `gdk4-wayland`. `tokio` (port-1 
 dependency on `../../core`, `../../gtk`, `../../headless`, or `../../shared`.
 
 ## Tests
+
+`rmng-viewer --glunpack-validate [W H]` is an offline pixel check that needs no server: it
+synthesizes a `W×H` AVC444 frame, runs it through the GL unpacker, and compares against
+`wire::avc444`'s CPU oracle. Expect a max absolute error of 0.
 
 Most tests run the **headless mode** (no display) against control-server + a clone or stub:
 - Connects, negotiates `MonitorList`, paints within ~1 IDR interval of connect.

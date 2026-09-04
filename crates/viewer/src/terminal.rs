@@ -7,8 +7,8 @@
 //! server's raw PTY bytes via [`TerminalView::feed`]. Rendering is a custom `gtk4::Widget`
 //! ([`TermArea`]) whose `snapshot()` emits **GSK render nodes**: glyphs via `append_layout` (GTK's
 //! GPU glyph atlas) and backgrounds/cursor/selection via `append_color` — so text is drawn by the
-//! GL/Vulkan renderer rather than rasterized on the CPU each frame. No system terminal library, so
-//! it builds and runs identically on Linux and macOS.
+//! GL/Vulkan renderer rather than rasterized on the CPU each frame. No system terminal library
+//! (unlike the GTK VTE widget), so it builds and runs identically wherever GTK does.
 //!
 //! Interactions match a normal terminal: text **selection** (click-drag, word/line on
 //! double/triple click) with **copy** (Ctrl+Shift+C and the primary selection), **paste**
@@ -43,12 +43,6 @@ use gtk4::subclass::prelude::ObjectSubclassIsExt;
 /// Font used when the desktop's `monospace-font-name` is unset, or names a family that does not
 /// resolve to an installed monospace face. A point size (not `px`), so it scales with DPI +
 /// text-scaling like the rest of the desktop.
-///
-/// macOS gets an explicit family: fontconfig's generic `Monospace` alias does resolve there, but
-/// naming the system terminal font is both faster to resolve and what the platform expects.
-#[cfg(target_os = "macos")]
-const FALLBACK_FONT: &str = "Menlo 11";
-#[cfg(not(target_os = "macos"))]
 const FALLBACK_FONT: &str = "Monospace 11";
 /// Cell-height multiplier over the font's natural ascent+descent (glyphs are vertically centered
 /// in the taller cell). 1.0 = tight/VTE-default; >1.0 adds line spacing.
@@ -72,7 +66,7 @@ pub type ResizeCb = Rc<dyn Fn(u16, u16)>;
 /// The tab-bar "+" → create a new tmux session.
 pub type NewSessionCb = Rc<dyn Fn()>;
 
-/// The GNOME interface settings, or `None` when the schema isn't installed (non-GNOME / macOS),
+/// The GNOME interface settings, or `None` when the schema isn't installed (a non-GNOME desktop),
 /// in which case we fall back to a generic monospace font. Checked via the schema source so a
 /// missing schema never aborts the process.
 fn interface_settings() -> Option<gio::Settings> {
@@ -100,11 +94,11 @@ fn load_font(settings: Option<&gio::Settings>, ctx: &pango::Context) -> pango::F
 ///
 /// The family MUST be checked against the font map, not merely parsed. A `FontDescription` built
 /// from a missing family still reports `family() == Some(..)`, and pango then silently substitutes
-/// a **proportional** face — so the old `fd.family().is_some()` guard could not catch it. That is
-/// exactly what happens on macOS: Homebrew pulls in `gsettings-desktop-schemas` as a GStreamer
-/// dependency, so the GNOME schema *is* readable and yields `'Adwaita Mono 11'` for a font that is
-/// not installed. Measuring cell metrics from the substituted proportional face garbles the grid
-/// and ships a wrong column count to the real tmux PTYs. Linux is protected by the same check.
+/// a **proportional** face — so the old `fd.family().is_some()` guard could not catch it. The
+/// schema being readable says nothing about the font being installed: any box where
+/// `gsettings-desktop-schemas` arrived as a dependency of something else answers with a name like
+/// `'Adwaita Mono 11'` for a font it does not have. Measuring cell metrics from the substituted
+/// proportional face garbles the grid and ships a wrong column count to the real tmux PTYs.
 ///
 /// `is_monospace_family` is injected so the decision is testable without a display.
 fn pick_font(
@@ -980,7 +974,7 @@ fn paste_from(
 
 // --- theme + colors ---------------------------------------------------------------------
 
-/// system — correct on any desktop and macOS, unlike the portal's often-"no preference" hint.
+/// system — correct on any desktop, unlike the portal's often-"no preference" hint.
 fn is_dark(fg: gdk::RGBA) -> bool {
     0.2126 * fg.red() as f64 + 0.7152 * fg.green() as f64 + 0.0722 * fg.blue() as f64 > 0.5
 }
@@ -1093,10 +1087,10 @@ fn encode_key(keyval: gdk::Key, state: gdk::ModifierType, app_cursor: bool) -> O
 mod tests {
     use super::*;
 
-    /// The macOS failure this guard fixes: the desktop setting names a family that is not
-    /// installed, so pango substitutes a proportional face and the cell metrics get measured from
-    /// it. A descriptor for a missing family still reports `family() == Some(..)`, so only a
-    /// font-map check can catch it.
+    /// The failure this guard fixes: the desktop setting names a family that is not installed, so
+    /// pango substitutes a proportional face and the cell metrics get measured from it. A
+    /// descriptor for a missing family still reports `family() == Some(..)`, so only a font-map
+    /// check can catch it.
     #[test]
     fn unresolvable_family_falls_back() {
         let fd = pick_font(Some("Adwaita Mono 11"), |_| false);

@@ -3736,8 +3736,6 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "block2",
- "core-graphics",
  "gdk4-wayland",
  "gstreamer",
  "gstreamer-allocators",
@@ -3746,9 +3744,6 @@ dependencies = [
  "gstreamer-gl",
  "gstreamer-video",
  "gtk4",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
  "serde",
  "serde_json",
  "tokio",

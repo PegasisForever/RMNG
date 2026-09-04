@@ -364,12 +364,16 @@ coordinate/screenshot space — `0` serves everything at native res; see [MCP.md
 instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NUDGE`
 (oscillate cursor to force damage — test only), `RUST_LOG`.
 
-**viewer:** `RMNG_VIDEO` (`host:port` of the control-server video port, default
-`127.0.0.1:9001`), `RMNG_DUMP=frame.png` (headless: dump one decoded frame and exit),
-`RMNG_CLIP_ECHO=1` (headless: log the first 120 characters of each text clipboard payload,
-not just its size), `RMNG_NO_GRAB` (disable pointer grab), `RMNG_NO_POINTER_LOCK` (disable
-pointer-lock), `RMNG_FULLSCREEN_MENUBAR=1` (macOS: keep the Mac menu bar's auto-hide reveal in
-fullscreen instead of hiding it).
+**viewer** (the GTK client, Linux/Windows): `RMNG_VIDEO` (`host:port` of the control-server
+video port, default `127.0.0.1:9001`), `RMNG_DUMP=frame.png` (headless: dump one decoded frame
+and exit), `RMNG_CLIP_ECHO=1` (headless: log the first 120 characters of each text clipboard
+payload, not just its size), `RMNG_NO_GRAB` (disable pointer grab), `RMNG_NO_POINTER_LOCK`
+(disable pointer-lock).
+
+**viewer-macos** (the native macOS client): `RMNG_VIDEO` and `RMNG_NO_POINTER_LOCK` as above,
+plus `RMNG_CMD_IS_CTRL=0` (stop swapping ⌘ and Control on the wire) and
+`RMNG_FULLSCREEN_MENUBAR=1` (keep the Mac menu bar's auto-hide reveal in fullscreen instead of
+hiding it).
 
 ---
 

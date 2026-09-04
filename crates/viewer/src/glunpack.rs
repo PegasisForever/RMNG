@@ -12,9 +12,8 @@
 //! Pipeline position (see [`crate::make_decoder_yuv444`]):
 //! `vah264dec ! glupload ! rmngavc444unpack ! gtk4paintablesink` — `memory:GLMemory` end to end.
 //!
-//! - **sink**: NV12 `W×2H` GLMemory (2 textures: Y as R8, UV as RG8). On Linux `glupload` yields
-//!   `texture-target=2D`; on macOS `vtdec_hw` emits IOSurface-backed `texture-target=rectangle`
-//!   (Apple's `CGLTexImageIOSurface2D` only accepts `GL_TEXTURE_RECTANGLE`). Both are accepted.
+//! - **sink**: NV12 `W×2H` GLMemory (2 textures: Y as R8, UV as RG8). `glupload` yields
+//!   `texture-target=2D`; `rectangle` is accepted too (see *Rectangle-texture support*).
 //! - **src**: RGBA `W×H` GLMemory (the reconstructed image; `gtk4paintablesink` demands 2D and
 //!   displays it zero-copy, intrinsic size `W×H` so the viewer's letterbox/cursor/fps logic is
 //!   unchanged).
@@ -28,18 +27,21 @@
 //!
 //! ## Shader dialect selection
 //!
-//! Apple's OpenGL (4.1 core / GL-on-Metal) has no `GL_ARB_ES3_compatibility`, so `#version 300 es`
-//! shaders are **rejected**. We detect the context API at runtime:
-//! - `GLES2` context → `#version 300 es` + `precision` qualifiers (Linux, original behavior).
-//! - `OPENGL3` context → `#version 330 core`, no precision qualifiers (macOS CGL / Mesa desktop).
+//! A desktop-GL context without `GL_ARB_ES3_compatibility` **rejects** `#version 300 es` shaders,
+//! so we detect the context API at runtime instead of assuming one dialect:
+//! - `GLES2` context → `#version 300 es` + `precision` qualifiers (the usual Linux/EGL case).
+//! - `OPENGL3` context → `#version 330 core`, no precision qualifiers (Mesa desktop GL).
 //!
 //! GstGL's GLSL auto-mangling applies only to its *internal* shaders; for custom GLFilters we must
 //! embed the version line in the source ourselves. We do, and tell GstGL the matching metadata.
 //!
 //! ## Rectangle-texture support
 //!
-//! `vtdec_hw` on macOS emits `texture-target=rectangle` (GL_TEXTURE_RECTANGLE, unnormalized
-//! coords). The shader switches sampler type and coordinate expressions accordingly:
+//! A producer may hand us `texture-target=rectangle` (GL_TEXTURE_RECTANGLE, unnormalized coords)
+//! rather than 2D — this was written for the retired macOS `vtdec_hw` path, whose IOSurface
+//! textures could only be rectangle, and Mesa offers the target too. Nothing in the Linux
+//! pipeline produces it today, so the variant is carried but unexercised. The shader switches
+//! sampler type and coordinate expressions accordingly:
 //! - 2D: `sampler2D`, normalized coords `(sx+0.5)/w / (sy+0.5)/(2h)`.
 //! - rect: `sampler2DRect`, unnormalized coords `sx+0.5 / sy+0.5` (the texel-center offsets
 //!   already computed by the lum()/chr() helpers — the rect variant just drops the divides).
@@ -179,8 +181,8 @@ mod imp {
         /// The unpack shader, compiled lazily once the GL context exists.
         /// Reset to `None` on each `set_caps` so the correct dialect/sampler variant is rebuilt.
         shader: Option<GLShader>,
-        /// GL texture target for the *input* (sink) textures: `GL_TEXTURE_2D` (Linux glupload,
-        /// `--glunpack-validate`) or `GL_TEXTURE_RECTANGLE` (macOS vtdec_hw IOSurface textures).
+        /// GL texture target for the *input* (sink) textures: `GL_TEXTURE_2D` (glupload,
+        /// `--glunpack-validate`) or `GL_TEXTURE_RECTANGLE` (see the module's rectangle note).
         /// Defaults to `GL_TEXTURE_2D`; updated by `set_caps`.
         tex_target: u32,
     }
@@ -224,9 +226,9 @@ mod imp {
             static T: OnceLock<Vec<gst::PadTemplate>> = OnceLock::new();
             T.get_or_init(|| {
                 let range = || gst::IntRange::<i32>::new(1, i32::MAX);
-                // Sink: NV12 W×2H GLMemory. Accepts 2D (Linux glupload / validate harness) and
-                // rectangle (macOS vtdec_hw IOSurface — CGLTexImageIOSurface2D only accepts
-                // GL_TEXTURE_RECTANGLE, so vtdec always emits texture-target=rectangle on macOS).
+                // Sink: NV12 W×2H GLMemory. Accepts 2D (glupload / validate harness) and
+                // rectangle, so an IOSurface-style producer that can only offer
+                // GL_TEXTURE_RECTANGLE still negotiates.
                 let sink_caps = gst::Caps::builder("video/x-raw")
                     .features(["memory:GLMemory"])
                     .field("format", "NV12")
@@ -413,7 +415,7 @@ glib::wrapper! {
 // ---- raw GL: FBO-render the unpack shader from the two NV12 textures into the RGBA output -------
 
 const GL_TEXTURE_2D: u32 = 0x0DE1;
-const GL_TEXTURE_RECTANGLE: u32 = 0x84F5; // IOSurface textures on macOS; also available on Mesa
+const GL_TEXTURE_RECTANGLE: u32 = 0x84F5; // available on Mesa; was the IOSurface target on macOS
 const GL_FRAMEBUFFER: u32 = 0x8D40;
 const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
 const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
@@ -449,8 +451,8 @@ unsafe fn gl_fn<T>(ctx: &gst_gl::GLContext, name: &str) -> Option<T> {
 /// Build the unpack shader for the given GL context and input texture target.
 ///
 /// Two axes:
-/// 1. *GLSL dialect*: detected from `ctx.gl_api()` — `OPENGL3` → `#version 330 core` (macOS CGL /
-///    Mesa desktop); `GLES2` → `#version 300 es` + `precision` qualifiers (Linux).
+/// 1. *GLSL dialect*: detected from `ctx.gl_api()` — `OPENGL3` → `#version 330 core` (desktop GL);
+///    `GLES2` → `#version 300 es` + `precision` qualifiers (the usual EGL case).
 ///    GstGL does **not** mangle custom GLFilter shaders, so we embed the version line in the source
 ///    and pass matching metadata to `GLSLStage::with_strings`.
 /// 2. *Sampler type*: `use_rect=true` → `sampler2DRect` with unnormalized texel coordinates (the
@@ -517,7 +519,7 @@ fn build_unpack_shader(ctx: &gst_gl::GLContext, use_rect: bool) -> Result<GLShad
 
 /// FBO-render `shader` into `out_tex` (RGBA `w×h`), sampling the Y (`y_tex`, R8 `w×2h`) and UV
 /// (`uv_tex`, RG8 `w/2×h`) NV12 textures. `tex_target` is the GL target for the *input* textures:
-/// `GL_TEXTURE_2D` (Linux / validate harness) or `GL_TEXTURE_RECTANGLE` (macOS vtdec_hw).
+/// `GL_TEXTURE_2D` (glupload / validate harness) or `GL_TEXTURE_RECTANGLE`.
 /// The FBO color attachment (output) always stays `GL_TEXTURE_2D`.
 ///
 /// **Must run on the GL thread with the context current.**
@@ -656,10 +658,10 @@ pub fn register() -> anyhow::Result<()> {
 /// `gldownload` is only here, for the readback; the production path stays on the GPU.
 ///
 /// This validates the **2D path only** — `glupload` from raw sysmem always yields 2D textures, so
-/// the harness cannot reach the rectangle-sampler variant. That is the variant macOS actually uses
-/// in Yuv444 (vtdec_hw emits IOSurface-backed rectangle textures), and it is covered only by
-/// running live against a server in `RMNG_CHROMA=yuv444`. Exercising it here would mean building a
-/// rectangle-texture source by hand; worth doing if the rect path ever regresses.
+/// the harness cannot reach the rectangle-sampler variant. Nothing in the current pipeline
+/// produces rectangle textures either (that was the retired macOS `vtdec_hw` path), so that
+/// variant is now untested by construction; exercising it would mean building a rectangle-texture
+/// source by hand.
 pub fn validate(w: usize, h: usize) -> anyhow::Result<()> {
     use anyhow::{Context, anyhow};
     use gstreamer_app::{AppSink, AppSrc};

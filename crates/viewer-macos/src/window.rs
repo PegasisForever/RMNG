@@ -213,7 +213,7 @@ impl WinCtx {
 }
 
 /// Cmd↔Ctrl swap (an involution): Cmd→Ctrl, Ctrl→Super, so Mac chords reach GNOME as Ctrl while
-/// the overview stays reachable. Mirrors `crates/viewer/src/keyboard_macos.rs`.
+/// the overview stays reachable.
 fn swap_cmd_ctrl(evdev: u32) -> u32 {
     match evdev {
         125 => 29,  // LEFTMETA  -> LEFTCTRL
@@ -740,9 +740,9 @@ define_class!(
 /// HideDock` instead means nothing is revealed at the top edge; F11 (consumed locally in
 /// `keyDown:`) remains the way out.
 ///
-/// Opt out (keep the stock auto-hide reveal): `RMNG_FULLSCREEN_MENUBAR=1`. Same knob, same
-/// meaning, as the GTK viewer's `crates/viewer/src/fullscreen_macos.rs` — which needs 160 lines
-/// of `class_addMethod` injection to reach a window class GDK owns, where we simply own ours.
+/// Opt out (keep the stock auto-hide reveal): `RMNG_FULLSCREEN_MENUBAR=1`. The GTK viewer used
+/// to spell the same policy in 160 lines of `class_addMethod` injection, to reach a window class
+/// GDK owned; owning our own window is the whole difference.
 fn hidden_menubar_options(
     proposed: NSApplicationPresentationOptions,
 ) -> NSApplicationPresentationOptions {
@@ -889,8 +889,7 @@ mod tests {
 
     /// The fullscreen policy the operator actually needs: the top strip of the screen must stay
     /// the remote's, so the Mac menu bar has to be *hidden*, not auto-hidden (which reveals it —
-    /// and the titlebar — the moment the pointer reaches the top edge). Mirrors the GTK viewer's
-    /// tests in `crates/viewer/src/fullscreen_macos.rs`, which is the same policy.
+    /// and the titlebar — the moment the pointer reaches the top edge).
     #[test]
     fn fullscreen_swaps_the_auto_hide_pair_for_the_hidden_pair() {
         use NSApplicationPresentationOptions as O;

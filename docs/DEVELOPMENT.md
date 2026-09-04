@@ -47,7 +47,7 @@ running server's payloads; there's no manual redeploy step.
 | [crates/control-server](../crates/control-server/README.md) | bin | the server: media plane, web API/SSE, passive token accounting, Docker lifecycle, port-forward + SMB planes, and clone payloads |
 | [crates/media](../crates/media/README.md) | lib | dmabuf ingest → VA-API H.264 per monitor + dmabuf→JPEG screenshots + the clone-socket transport |
 | [crates/clone-daemon](../crates/clone-daemon/README.md) | bin | the thin in-clone pipe: RecordVirtual capture, RemoteDesktop input injection, clipboard bridge, and desktop MCP (:9004) |
-| [crates/viewer](../crates/viewer/README.md) | bin | the native GTK client (GUI + headless test mode): zero-copy VA-API decode, multi-monitor, client-drawn cursor, input + pointer-lock + clipboard |
+| [crates/viewer](../crates/viewer/README.md) | bin | the native GTK client for **Linux/Windows** (GUI + headless test mode): zero-copy VA-API decode, multi-monitor, client-drawn cursor, input + pointer-lock + clipboard |
 | [crates/viewer-core](../crates/viewer-core/README.md) | lib | toolkit-free viewer pieces shared by both clients: config, auto pointer-lock policy, port-forward listeners, kVK→evdev table |
 | [crates/viewer-macos](../crates/viewer-macos/README.md) | bin | the **native macOS client**: AppKit + Metal + VideoToolbox, no GTK/GStreamer (own `NSView`, so pointer motion never routes through GDK) |
 | [crates/control-client](../crates/control-client/README.md) | lib | typed reqwest+SSE client for the port-2 web API (`/api/state`, `/events`, clone/delete/image/account wrappers); used by the `rmng` CLI and integration tests |
@@ -87,8 +87,11 @@ see [Publishing the template](DEPLOY.md#publishing-the-template).
 <a id="macos"></a>
 ### macOS (Apple Silicon) — viewer only
 
-There are **two macOS clients**. The native one
-([`crates/viewer-macos`](../crates/viewer-macos/README.md)) is the one to build now:
+macOS runs [`crates/viewer-macos`](../crates/viewer-macos/README.md), and only that. The GTK
+[`crates/viewer`](../crates/viewer/README.md) is the Linux/Windows client and `compile_error!`s
+on a Mac: it used to build there behind a growing pile of AppKit shims (a raw `NSEvent`
+keyboard monitor, a native `NSWindow` titlebar, a menu-bar presentation hack, its own pointer
+lock), all of which the native client replaced.
 
 ```sh
 cargo build -p viewer-macos --release    # → target/release/rmng-viewer-macos
@@ -98,52 +101,20 @@ It needs **no Homebrew at all** — AppKit + Metal + VideoToolbox are system fra
 binary is self-contained; `scripts/build-macos-app.sh` wraps it in a `.app` that runs on a Mac
 which has never seen this repo. It exists because GDK's macOS backend re-derives pointer state
 and drops motion (in fullscreen, the top ~50 px stalled the pointer until you clicked); owning
-the `NSView` removes that layer. It is at feature parity with the GTK viewer — see its README
-for the handful of places where it deliberately follows Mac convention instead (⌘C/⌘V in the
-terminal, Settings under ⌘,).
+the `NSView` removes that layer. Only the **viewer** runs on macOS at all; the capture/encode/
+server side is Linux-only by design.
 
-The GTK viewer below still builds on macOS and remains the reference implementation (and the
-Linux client). Only the **viewer** builds and runs on macOS; the capture/encode/server side is
-Linux-only by design. Verified on macOS 26.4 / Apple M-series with Homebrew:
-
-```sh
-brew install gtk4 gstreamer pkgconf     # verified: gtk4 4.22.4, gstreamer 1.28.4, pkgconf 2.5.1
-cargo build -p viewer --release         # → target/release/rmng-viewer
-```
-
-**Build the viewer package, not the workspace root.** `cargo build` / `check` / `test` / `clippy`
-at the root fail on macOS inside `libspa-sys`: `clone-daemon` depends on pipewire
-unconditionally, and the workspace declares no `default-members`. Everything you need on a Mac is
-`-p viewer` (add `-p cli -p control-client` if you want the `rmng` CLI, which builds clean and is
-HTTP-only).
-
-**Never mix GTK providers.** The official `GStreamer.framework` `.pkg` bundles *its own* GTK4 for
-the gtk4 plugin. Use Homebrew for **both** GStreamer and GTK4 (one GTK in the process) or the
-framework for both — mixing them produces link-time and runtime chaos. No environment variables
-are needed with an all-Homebrew stack at the default `/opt/homebrew` prefix.
-
-Sanity-check the stack before debugging any video problem:
-
-```sh
-gst-inspect-1.0 vtdec_hw            # VideoToolbox HW decoder (applemedia)
-gst-inspect-1.0 gtk4paintablesink   # GL zero-copy sink
-cargo run -p viewer --release -- --glunpack-validate 256 144   # expect max abs err 0
-```
+**Build the package, not the workspace root.** `cargo build` / `check` / `test` / `clippy` at
+the root fail on macOS inside `libspa-sys`: `clone-daemon` depends on pipewire unconditionally,
+and the workspace declares no `default-members`. Everything you need on a Mac is
+`-p viewer-macos` (add `-p cli -p control-client` if you want the `rmng` CLI, which builds clean
+and is HTTP-only).
 
 **macOS input notes.** **Cmd and Control are swapped on the wire by default**, so Mac chords
 (Cmd+C, Cmd+T) reach the remote GNOME session as Ctrl and physical Control produces Super —
 disable with `RMNG_CMD_IS_CTRL=0` or `"cmd_is_ctrl": false` in
 `~/.config/rmng-viewer/config.json`. The F-row needs `fn` on a default MacBook (or turn on "Use
-F1, F2 etc. as standard function keys"). **Cmd-Tab and Cmd-Space cannot be forwarded** — the
-Wayland `inhibit_system_shortcuts` protocol that `grab_keys()` uses does not exist on macOS, so
-that call is a silent no-op there; capturing those would need a permission-gated `CGEventTap`,
-which the viewer deliberately avoids (an `NSEvent` local monitor needs no Input Monitoring grant).
-`RMNG_NO_POINTER_LOCK=1` disables pointer lock entirely.
-
-**In fullscreen the Mac menu bar is hidden, not auto-hidden.** Parking the pointer at the top
-edge no longer slides the menu bar and titlebar down over the video: that reveal moved the
-pointer into windows GDK does not own, and GDK's macOS backend then dropped all motion until
-the next click inside the window (mouse frozen in the top ~50px until you clicked below it).
-The clone's own top bar lives in that strip anyway. Leave fullscreen with F11 (`fn`+F11 on a
-default MacBook). `RMNG_FULLSCREEN_MENUBAR=1` restores the stock reveal — see
-[`fullscreen_macos.rs`](../crates/viewer/src/fullscreen_macos.rs).
+F1, F2 etc. as standard function keys"). `RMNG_NO_POINTER_LOCK=1` disables pointer lock
+entirely. The rest of the Mac-specific behaviour — fullscreen, ⌘-chord forwarding, ⌘C/⌘V in the
+terminal, Settings under ⌘, — is documented in
+[`crates/viewer-macos`](../crates/viewer-macos/README.md).
