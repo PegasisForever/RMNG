@@ -4,6 +4,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,11 +12,12 @@ use std::time::Instant;
 use anyhow::{anyhow, Result};
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSMenu,
-    NSMenuItem, NSTextField, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
+    NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSTextField,
+    NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
@@ -79,6 +81,18 @@ impl WindowEntry {
             _ => None,
         }
     }
+
+    /// Drop everything this window's current content still holds down on the remote.
+    ///
+    /// Owed by every path that takes the content away, not just the ones that take the window
+    /// away: the held keys and buttons live in the `WinCtx`, which a content swap drops on the
+    /// floor. Select a headless clone with a key held and, without this, that key stays down on
+    /// the remote with nothing left that could ever release it.
+    fn release_input(&self) {
+        if let Some((view, _)) = self.video() {
+            view.release_all();
+        }
+    }
 }
 
 /// Everything the main thread owns. Lives in a main-thread-only `thread_local`; `wake` reaches it
@@ -95,9 +109,15 @@ struct AppState {
     startup: Option<Retained<NSWindow>>,
     cmd_is_ctrl: bool,
     pointer_lock: Option<Rc<PointerLock>>,
+    /// Whether pointer lock was engaged at the previous tick, to catch its release edge (the
+    /// moment the remote's cursor shape has to be put back — see `tick`).
+    was_locked: bool,
     clipboard: Clipboard,
     /// Target for menu and tab-strip actions (AppKit holds targets unretained).
     delegate: Retained<Delegate>,
+    /// Keeps the ⌘Q / ⌘, event monitor installed for as long as the app runs; removing it is
+    /// what would put those chords back on the menu (see [`install_menu_chord_monitor`]).
+    _menu_chord_monitor: Option<Retained<AnyObject>>,
 }
 
 thread_local! {
@@ -223,9 +243,7 @@ impl AppState {
         let live: std::collections::HashSet<u32> = monitors.iter().map(|m| m.id).collect();
         for id in self.windows.keys().copied().filter(|id| !live.contains(id)).collect::<Vec<_>>() {
             if let Some(e) = self.windows.remove(&id) {
-                if let Some((view, _)) = e.video() {
-                    view.release_all();
-                }
+                e.release_input();
                 e.window.close();
             }
         }
@@ -268,6 +286,7 @@ impl AppState {
                 // Rebuild only when the owning clone changes, so a re-sent spec keeps scrollback.
                 let same = matches!(&e.content, Content::Terminal { clone, .. } if *clone == term_clone);
                 if !same {
+                    e.release_input();
                     let frame = e.window.contentView().map(|v| v.bounds()).unwrap_or(NSRect::new(
                         NSPoint::new(0.0, 0.0),
                         NSSize::new(1280.0, 720.0),
@@ -287,6 +306,7 @@ impl AppState {
                 }
             } else if want_placeholder {
                 if !matches!(e.content, Content::Placeholder) {
+                    e.release_input();
                     let label = NSTextField::labelWithString(
                         ns_string!("Headless clone selected — no desktop"),
                         self.mtm,
@@ -370,6 +390,13 @@ impl AppState {
         for (id, frame, cursor) in &inputs {
             let Some(e) = self.windows.get(id) else { continue };
             let Some((view, ctx)) = e.video() else { continue };
+            // Pointer lock owns the cursor: the real one is hidden and the remote is being
+            // driven by relative motion, so the agent's sprite would be the only pointer on
+            // screen and it would be pointing at a position nobody is using. The GTK viewer
+            // gates the same overlay the same way (`let show = !locked && …`). Asked here
+            // rather than in the snapshot above because that runs under the frame/cursor locks,
+            // where the window's `WinCtx` is not in hand.
+            let cursor = if ctx.locked() { None } else { cursor.as_ref() };
             let layer = view.metal_layer();
             let bounds = view.bounds();
             let scale = view.window().map(|w| w.backingScaleFactor()).unwrap_or(2.0);
@@ -385,7 +412,7 @@ impl AppState {
             // The synthetic cursor is drawn ONLY while the remote agent is driving this
             // monitor's pointer, so the operator can see where it is going; the rest of the time
             // the real OS cursor (wearing the remote's shape) is the only one on screen.
-            let overlay = cursor.as_ref().and_then(|c| {
+            let overlay = cursor.and_then(|c| {
                 let shape = c.shape.as_ref()?;
                 if e.overlay_version.get() != c.version || e.overlay_tex.borrow().is_none() {
                     match self.renderer.cursor_texture(
@@ -449,6 +476,21 @@ impl AppState {
                 LockAction::Nothing => {}
             }
         }
+        // 2b. Put the remote's cursor shape back on the lock's release edge. Releasing un-hides
+        //     the system cursor wearing whatever shape AppKit last set — the plain arrow — and
+        //     `apply_cursor` otherwise only runs on entering a view or on a new sprite, so the
+        //     remote's I-beam/hand would not come back until the pointer next crossed a window
+        //     boundary. The GTK viewer flips the cursor on the same edge (`locked !=
+        //     cursor_hidden`). Only the view the pointer is actually inside acts on it.
+        let locked = self.pointer_lock.as_ref().is_some_and(|pl| pl.is_engaged());
+        if self.was_locked && !locked {
+            for e in self.windows.values() {
+                if let Some((_, ctx)) = e.video() {
+                    ctx.apply_cursor();
+                }
+            }
+        }
+        self.was_locked = locked;
 
         // 3. Remote cursor shape → a real NSCursor, rebuilt only when the sprite changes.
         {
@@ -703,6 +745,77 @@ fn install_menu(mtm: MainThreadMarker, app: &NSApplication, delegate: &Delegate)
     app.setMainMenu(Some(&main));
 }
 
+/// Carbon kVKs of the two keys the app menu claims as ⌘-equivalents.
+const KVK_Q: u32 = 0x0C;
+const KVK_COMMA: u32 = 0x2B;
+
+/// Let ⌘Q and ⌘, reach the remote instead of the menu.
+///
+/// AppKit runs a menu item's key equivalent from `sendEvent:`, *before* the event is offered to
+/// the first responder — so with the Cmd↔Ctrl swap on, the two chords [`install_menu`] claims
+/// could never be typed at the remote as Ctrl+Q / Ctrl+, and ⌘Q killed the viewer mid-session.
+/// An `NSEvent` local monitor runs earlier still (it sees the event before `sendEvent:` is
+/// called at all), which is exactly how the GTK viewer reads the keyboard on macOS — see
+/// `crates/viewer/src/keyboard_macos.rs`.
+///
+/// It is focus-aware and deliberately narrow. The chords are taken only while a video view is
+/// the first responder of the key window *and* the swap is on — i.e. only when the remote is
+/// listening for them. A terminal window, the startup window and the settings dialog keep the
+/// stock ⌘Q and ⌘,, and both menu items stay clickable everywhere, so the viewer never becomes
+/// impossible to quit. With the swap off, Cmd is not standing in for the remote's Ctrl and the
+/// chords carry no remote meaning worth taking the local ones for.
+///
+/// A stolen event is *consumed* and handed to the view here, so it is delivered exactly once —
+/// passing it through instead would hand it straight back to the menu, which is the bug.
+fn install_menu_chord_monitor() -> Option<Retained<AnyObject>> {
+    let block = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: AppKit hands the monitor a live event of one of the masked types.
+        let ev = unsafe { event.as_ref() };
+        let kvk = ev.keyCode() as u32;
+        if (kvk != KVK_Q && kvk != KVK_COMMA)
+            || !ev.modifierFlags().contains(NSEventModifierFlags::Command)
+        {
+            return event.as_ptr();
+        }
+        let mut target: Option<Retained<ViewerView>> = None;
+        with_state(|s| {
+            if !s.cmd_is_ctrl {
+                return;
+            }
+            target = s
+                .windows
+                .values()
+                .filter(|e| e.window.isKeyWindow())
+                .find_map(|e| e.video().map(|(view, _)| view.clone()))
+                .filter(|view| view.owns_keystrokes());
+        });
+        // The state borrow is released before dispatching: `keyDown:` runs the whole forwarding
+        // path, and re-entering `with_state` from under it would panic on the second borrow.
+        let Some(view) = target else { return event.as_ptr() };
+        if ev.r#type() == NSEventType::KeyUp {
+            // macOS withholds `keyUp:` from the responder chain while Cmd is held, so the
+            // release has to come from here too or Q would stay down on the remote forever.
+            view.keyUp(ev);
+        } else {
+            view.keyDown(ev);
+        }
+        std::ptr::null_mut()
+    });
+    // SAFETY: called on the main thread, where the block also runs; the handler returns either
+    // the event it was given or null, which is the contract the monitor requires.
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown | NSEventMask::KeyUp,
+            &block,
+        )
+    };
+    if monitor.is_none() {
+        // Not fatal: the viewer keeps working, the two chords just stay local (⌘Q quits).
+        tracing::warn!("⌘Q/⌘, monitor install failed; those chords will not reach the remote");
+    }
+    monitor
+}
+
 /// Run the GUI: build the app state, install it in the main-thread thread-local, show the startup
 /// window, start the housekeeping tick, and enter the AppKit run loop.
 pub fn run(shared: Arc<Shared>) -> Result<()> {
@@ -727,8 +840,10 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         startup: None,
         cmd_is_ctrl: config::cmd_is_ctrl(),
         pointer_lock,
+        was_locked: false,
         clipboard: Clipboard::new(mtm),
         delegate: delegate.clone(),
+        _menu_chord_monitor: install_menu_chord_monitor(),
     };
     // Show the startup window immediately: the net thread may connect before the first spec.
     state.startup = Some(make_startup_window(mtm));
