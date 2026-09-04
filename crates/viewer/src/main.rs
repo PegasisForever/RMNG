@@ -5,8 +5,9 @@
 //!     VA-API H.264 via `vah264dec ! glupload ! gtk4paintablesink` → zero-copy `GdkPaintable`
 //!     (portable incl. Intel). Input capture → port 1. A drag that leaves one window's edge
 //!     (held button → implicit pointer grab → overshoot coords) is routed onto the
-//!     neighbouring monitor via a left-to-right `Layout` + `route_drag` (ported from the old
-//!     `../gtk` client), so a remote window-drag continues across the local-window seam.
+//!     neighbouring monitor via the configured monitor layout + [`viewer_core::drag_route`]
+//!     (shared with the native macOS viewer), so a remote window-drag continues across the
+//!     local-window seam.
 //!   - `--headless`: decode + report per-monitor fps (CI driver). `RMNG_DUMP=*.png`
 //!     writes the first decoded frame as PNG, then exits.
 //!
@@ -27,6 +28,9 @@
 //! and widgets live on the GTK main thread; the net thread only ships AU bytes over a queue.
 
 use viewer_core::{auto_lock, config, forward};
+// Cross-window drag routing is shared with the native macOS viewer: one copy of the geometry,
+// so a fix to how a drag crosses the seam lands in both clients at once.
+use viewer_core::drag_route::{route_drag, Screen};
 mod glunpack;
 mod headless;
 mod terminal;
@@ -207,17 +211,6 @@ const WARP_SUPPRESS: Duration = Duration::from_millis(500);
 /// warp, so it persists through a multi-step agent glide and hides this long after the last.
 const AGENT_CURSOR_SHOW: Duration = Duration::from_millis(1000);
 
-/// One monitor's place in the desktop layout (unified-desktop px). Populated from the
-/// server's reported layout (the clone's real positions); falls back to a computed
-/// left-to-right packing until the report arrives.
-#[derive(Clone, Copy)]
-struct Screen {
-    id: u32,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-}
 /// Shared monitor layout used for cross-window drag routing (main thread).
 type SharedLayout = Rc<RefCell<Vec<Screen>>>;
 
@@ -1602,24 +1595,6 @@ fn letterbox(pic: &gtk4::Picture, paintable: &gdk::Paintable) -> (f64, f64, f64)
     let (ww, wh) = (pic.width().max(1) as f64, pic.height().max(1) as f64);
     let scale = (ww / fw).min(wh / fh);
     (scale, (ww - fw * scale) / 2.0, (wh - fh * scale) / 2.0)
-}
-
-/// Follow a button-drag past the origin monitor's edge into an adjacent one (ported from
-/// the old `../gtk` client's `screens::route_drag`). `mx`/`my` are **unclamped** origin-local
-/// coords (the implicit grab delivers overshoot past the edge); lift them into unified
-/// desktop coords and find which monitor they land in. Dead space → pinned to the origin edge.
-fn route_drag(layout: &[Screen], origin: u32, mx: f64, my: f64) -> Option<(u32, f64, f64)> {
-    let o = layout.iter().find(|s| s.id == origin)?;
-    let ux = o.x as f64 + mx;
-    let uy = o.y as f64 + my;
-    for s in layout {
-        if ux >= s.x as f64 && ux < s.x as f64 + s.w as f64 && uy >= s.y as f64 && uy < s.y as f64 + s.h as f64 {
-            return Some((s.id, ux - s.x as f64, uy - s.y as f64));
-        }
-    }
-    let lx = mx.clamp(0.0, o.w.saturating_sub(1) as f64);
-    let ly = my.clamp(0.0, o.h.saturating_sub(1) as f64);
-    Some((origin, lx, ly))
 }
 
 /// Resolve a drag motion/release at this window's widget coords to a `(monitor, local)`

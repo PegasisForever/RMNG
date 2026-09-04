@@ -25,6 +25,7 @@ use objc2_foundation::{
 use dispatch2::DispatchQueue;
 use viewer_core::auto_lock::{lock_action, LockAction};
 use viewer_core::config;
+use viewer_core::drag_route::Screen;
 use wire::viewer::{ViewContent, ViewMonitor};
 use crate::shared::send_tagged;
 
@@ -36,7 +37,8 @@ use crate::render::{Overlay, Renderer};
 use crate::shared::{CursorEntry, Shared, Wake, WakeQueue, WakeSet};
 use crate::terminal::{TermCallbacks, TerminalView};
 use crate::window::{
-    install_close_policy, is_main_monitor, make_video_view, make_window_shell, ViewerView, WinCtx,
+    install_close_policy, is_main_monitor, make_video_view, make_window_shell, SharedLayout,
+    ViewerView, WinCtx,
 };
 
 /// How often the housekeeping tick runs: auto pointer-lock reconcile, cursor shape, clipboard,
@@ -86,6 +88,9 @@ struct AppState {
     shared: Arc<Shared>,
     renderer: Renderer,
     windows: HashMap<u32, WindowEntry>,
+    /// The monitor rectangles every window routes a cross-seam drag against; refreshed from the
+    /// spec on each reconcile and shared with every live `WinCtx`.
+    layout: SharedLayout,
     last_epoch: u64,
     startup: Option<Retained<NSWindow>>,
     cmd_is_ctrl: bool,
@@ -207,6 +212,14 @@ impl AppState {
     /// Reconcile the window set and each window's content to the spec. Windows are created and
     /// destroyed only when the monitor set changes; switching clones just swaps content.
     fn reconcile(&mut self, monitors: &[ViewMonitor], content: Option<&ViewContent>) {
+        // Drag-routing layout from the configured monitor geometry. Refreshed before anything
+        // else touches the window set, so a window that survives this reconcile is already
+        // routing against the new geometry.
+        *self.layout.borrow_mut() = monitors
+            .iter()
+            .map(|m| Screen { id: m.id, x: m.x, y: m.y, w: m.width, h: m.height })
+            .collect();
+
         let live: std::collections::HashSet<u32> = monitors.iter().map(|m| m.id).collect();
         for id in self.windows.keys().copied().filter(|id| !live.contains(id)).collect::<Vec<_>>() {
             if let Some(e) = self.windows.remove(&id) {
@@ -285,6 +298,7 @@ impl AppState {
                 let ctx = Rc::new(WinCtx {
                     monitor_id: m.id,
                     shared: self.shared.clone(),
+                    layout: self.layout.clone(),
                     writer: self.shared.writer.clone(),
                     cmd_is_ctrl: self.cmd_is_ctrl,
                     pointer_lock: self.pointer_lock.clone(),
@@ -708,6 +722,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         shared: shared.clone(),
         renderer,
         windows: HashMap::new(),
+        layout: Rc::new(RefCell::new(Vec::new())),
         last_epoch: 0,
         startup: None,
         cmd_is_ctrl: config::cmd_is_ctrl(),

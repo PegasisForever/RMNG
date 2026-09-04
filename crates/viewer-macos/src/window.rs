@@ -5,7 +5,10 @@
 //!
 //! Coordinates: AppKit delivers `locationInWindow` in points with a bottom-left origin; we invert
 //! the letterbox transform (the same `contain` fit the renderer uses) to reach monitor-pixel
-//! image coordinates for `pointer_move`.
+//! image coordinates for `pointer_move`. Ordinary motion clamps to the image; a *drag* must not,
+//! because AppKit's implicit grab keeps delivering to the view the button went down in even once
+//! the pointer is over the next window, and that out-of-bounds overshoot is what says which
+//! neighbouring monitor the drag has crossed onto (see [`viewer_core::drag_route`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -26,18 +29,31 @@ use objc2_foundation::{
 use objc2_quartz_core::CAMetalLayer;
 
 use viewer_core::kvk_evdev;
-// Shared with the GTK viewer: both read modifier state out of the same flag word, and keeping
-// one copy is what stops the two drifting apart (they already had, which stuck a modifier down).
+// Shared with the GTK viewer: the drag across the window seam is the same geometry in both
+// clients, and both read modifier state out of the same flag word. Keeping one copy of each is
+// what stops the two drifting apart (the modifiers already had, which stuck a modifier down).
+use viewer_core::drag_route::{route_drag, Screen};
 use viewer_core::kvk_modifiers::modifier_now_down;
 
 use crate::pointer::PointerLock;
 use crate::shared::{send_input, Shared, Writer};
+
+/// The monitor layout every window routes drags against, held once for the whole window set.
+///
+/// It lives here rather than being copied into each `WinCtx` at construction because a `WinCtx`
+/// is built only when a window's *content* is (re)created: a spec that moves a monitor without
+/// touching content would otherwise leave every existing window routing against stale geometry.
+/// `AppState::reconcile` refreshes the one `RefCell`, and every window sees it. Main-thread only,
+/// like the rest of `WinCtx` — the GTK viewer's `SharedLayout` is the same shape.
+pub type SharedLayout = Rc<RefCell<Vec<Screen>>>;
 
 /// Per-view context: which monitor it shows, where to send input, and the state the tick needs.
 /// Main-thread only, so `Rc` + `Cell`/`RefCell` rather than atomics.
 pub struct WinCtx {
     pub monitor_id: u32,
     pub shared: Arc<Shared>,
+    /// The desktop layout, for following a drag off this window's edge onto its neighbour.
+    pub layout: SharedLayout,
     pub writer: Writer,
     /// Whether Cmd/Ctrl are swapped on the wire (Mac muscle memory → remote Ctrl).
     pub cmd_is_ctrl: bool,
@@ -62,42 +78,91 @@ impl WinCtx {
         self.pointer_lock.as_ref().is_some_and(|p| p.is_engaged())
     }
 
+    /// Whether local pointer motion must be swallowed right now. Two reasons, and both apply to
+    /// every path that would send an absolute `pointer_move`: pointer lock owns the cursor while
+    /// engaged (the relative path sends motion, and an absolute move would yank the grab), and
+    /// just after an agent-driven warp local motion is held off so the user's mouse doesn't pull
+    /// the cursor off the agent's target (debounced; refreshed by each warp).
+    fn motion_suppressed(&self) -> bool {
+        self.locked()
+            || self.shared.warp.lock().unwrap().is_some_and(|deadline| Instant::now() < deadline)
+    }
+
+    /// The image size to map against — the last frame's, falling back to 1080p before any frame
+    /// has arrived, since a zero would collapse the whole transform.
+    fn image_size(&self) -> (f64, f64) {
+        let (fw, fh) = self.frame_size.get();
+        (if fw > 0.0 { fw } else { 1920.0 }, if fh > 0.0 { fh } else { 1080.0 })
+    }
+
     /// Map a window-space point (points, bottom-left origin) to image pixels, inverting the
-    /// letterbox. Clamped to the image.
-    fn to_image(&self, view: &NSView, p: NSPoint) -> (f64, f64) {
+    /// letterbox, **without clamping**.
+    ///
+    /// A drag past the window's edge arrives here (implicit grab) with a `locationInWindow`
+    /// outside the view, and how far outside is precisely what says which neighbouring monitor
+    /// the drag is now over — so the drag path must keep it. Everything else wants
+    /// [`WinCtx::to_image`]'s clamp.
+    fn to_image_unclamped(&self, view: &NSView, p: NSPoint) -> (f64, f64) {
         let bounds = view.bounds();
         let (vw, vh) = (bounds.size.width.max(1.0), bounds.size.height.max(1.0));
         // Convert to a top-left origin.
-        let (px, py) = (p.x, vh - p.y);
-        let (fw, fh) = self.frame_size.get();
-        let (fw, fh) = (if fw > 0.0 { fw } else { 1920.0 }, if fh > 0.0 { fh } else { 1080.0 });
-        let scale = (vw / fw).min(vh / fh);
-        let off_x = (vw - fw * scale) / 2.0;
-        let off_y = (vh - fh * scale) / 2.0;
-        let ix = ((px - off_x) / scale).clamp(0.0, fw);
-        let iy = ((py - off_y) / scale).clamp(0.0, fh);
-        (ix, iy)
+        letterbox_inverse((vw, vh), self.image_size(), (p.x, vh - p.y))
+    }
+
+    /// Map a window-space point (points, bottom-left origin) to image pixels, inverting the
+    /// letterbox. Clamped to the image.
+    fn to_image(&self, view: &NSView, p: NSPoint) -> (f64, f64) {
+        let (fw, fh) = self.image_size();
+        let (ix, iy) = self.to_image_unclamped(view, p);
+        (ix.clamp(0.0, fw), iy.clamp(0.0, fh))
+    }
+
+    /// Where a drag at window point `p` really is: the monitor it has been pulled onto and the
+    /// position on it. This view *is* the drag's origin — AppKit delivers every `mouseDragged:`
+    /// to the view the `mouseDown:` landed in, whatever window the pointer has since moved
+    /// over — so no separate origin needs tracking. `None` when this window's monitor is no
+    /// longer in the layout, in which case there is nowhere honest to send the drag.
+    fn drag_target(&self, view: &NSView, p: NSPoint) -> Option<(u32, f64, f64)> {
+        let (mx, my) = self.to_image_unclamped(view, p);
+        route_drag(&self.layout.borrow(), self.monitor_id, mx, my)
+    }
+
+    fn send_move_to(&self, monitor: u32, x: f64, y: f64) {
+        send_input(
+            &self.writer,
+            &format!(r#"{{"kind":"pointer_move","monitor_id":{monitor},"x":{x:.1},"y":{y:.1}}}"#),
+        );
     }
 
     fn send_move(&self, view: &NSView, ev: &NSEvent) {
-        // Pointer lock owns motion while engaged: the relative path sends it, and an absolute
-        // move here would yank the grabbed pointer.
-        if self.locked() {
+        if self.motion_suppressed() {
             return;
         }
-        // Just after an agent-driven warp, hold off local motion so the user's mouse doesn't pull
-        // the cursor off the agent's target (debounced; refreshed by each warp).
-        if self.shared.warp.lock().unwrap().is_some_and(|deadline| Instant::now() < deadline) {
+        let p = ev.locationInWindow();
+        // Mid-drag (a button is held), follow the pointer across the seam: the implicit grab
+        // keeps the events coming here after the pointer has left, so clamping to this window
+        // would pin a remote window-drag at the monitor edge instead of letting it cross.
+        let (monitor, x, y) = if self.buttons.borrow().is_empty() {
+            let (x, y) = self.to_image(view, p);
+            (self.monitor_id, x, y)
+        } else {
+            match self.drag_target(view, p) {
+                Some(t) => t,
+                None => return,
+            }
+        };
+        self.send_move_to(monitor, x, y);
+    }
+
+    /// A button release ends any drag: put the remote cursor at the routed target first, so the
+    /// button-up lands where the drag actually got to rather than back on the origin monitor.
+    fn send_drag_end_move(&self, view: &NSView, ev: &NSEvent) {
+        if self.motion_suppressed() {
             return;
         }
-        let (x, y) = self.to_image(view, ev.locationInWindow());
-        send_input(
-            &self.writer,
-            &format!(
-                r#"{{"kind":"pointer_move","monitor_id":{},"x":{x:.1},"y":{y:.1}}}"#,
-                self.monitor_id
-            ),
-        );
+        if let Some((monitor, x, y)) = self.drag_target(view, ev.locationInWindow()) {
+            self.send_move_to(monitor, x, y);
+        }
     }
 
     fn send_button(&self, button: i32, pressed: bool) {
@@ -156,6 +221,14 @@ fn swap_cmd_ctrl(evdev: u32) -> u32 {
         97 => 126,  // RIGHTCTRL -> RIGHTMETA
         other => other,
     }
+}
+
+/// Invert the renderer's `contain` letterbox: a view point in points (top-left origin) → image
+/// pixels. Deliberately **unclamped**: a point outside the view maps outside the image, which is
+/// how a drag past the window edge tells [`viewer_core::drag_route`] which neighbour it is over.
+fn letterbox_inverse((vw, vh): (f64, f64), (fw, fh): (f64, f64), (px, py): (f64, f64)) -> (f64, f64) {
+    let scale = (vw / fw).min(vh / fh);
+    ((px - (vw - fw * scale) / 2.0) / scale, (py - (vh - fh * scale) / 2.0) / scale)
 }
 
 /// evdev mouse-button codes. An unknown button must NOT fall back to left (a phantom click).
@@ -491,6 +564,12 @@ impl ViewerView {
 
     fn button(&self, event: &NSEvent, pressed: bool) {
         let Some(ctx) = self.ctx() else { return };
+        // The release is the last event of a drag, and it can arrive without a final
+        // `mouseDragged:` — so resolve the cross-seam position here too, before the button-up
+        // goes out, or a drag that ended on the neighbour would be dropped on this monitor.
+        if !pressed {
+            ctx.send_drag_end_move(self, event);
+        }
         if let Some(b) = evdev_button(event.buttonNumber()) {
             ctx.send_button(b, pressed);
         }
@@ -700,6 +779,32 @@ mod tests {
         assert_eq!(CLASS_CONTROL, NSEventModifierFlags::Control.0);
         assert_eq!(CLASS_OPTION, NSEventModifierFlags::Option.0);
         assert_eq!(CLASS_COMMAND, NSEventModifierFlags::Command.0);
+    }
+
+    /// The overshoot is the whole signal for cross-monitor drag routing, so the inverse must
+    /// carry a point outside the view straight out of the image rather than folding it back in.
+    /// (`to_image` clamps on top of this for ordinary motion; this is what the drag path uses.)
+    #[test]
+    fn the_letterbox_inverse_keeps_points_outside_the_view() {
+        // Matched aspect: the transform is a pure scale, no bars.
+        let (v, f) = ((960.0, 540.0), (1920.0, 1080.0));
+        assert_eq!(letterbox_inverse(v, f, (0.0, 0.0)), (0.0, 0.0));
+        assert_eq!(letterbox_inverse(v, f, (480.0, 270.0)), (960.0, 540.0));
+        // One point past the right edge is two pixels past the image — the drag has crossed.
+        assert_eq!(letterbox_inverse(v, f, (961.0, 270.0)), (1922.0, 540.0));
+        // And off the left/top, negative, which routes onto the monitor on that side.
+        assert_eq!(letterbox_inverse(v, f, (-10.0, -5.0)), (-20.0, -10.0));
+
+        // Pillarboxed (a 16:9 image in a 2:1 window): the bars are not part of the image, so a
+        // point inside the left bar is already a negative image coordinate.
+        let (v, f) = ((2000.0, 1000.0), (1920.0, 1080.0));
+        let scale = 1000.0 / 1080.0;
+        let bar = (2000.0 - 1920.0 * scale) / 2.0;
+        assert_eq!(letterbox_inverse(v, f, (bar, 0.0)), (0.0, 0.0));
+        let (ix, _) = letterbox_inverse(v, f, (bar - 1.0, 0.0));
+        assert!(ix < 0.0, "a point in the left bar is left of the image, got {ix}");
+        let (ix, _) = letterbox_inverse(v, f, (2000.0, 500.0));
+        assert!(ix > 1920.0, "a point past the right bar is right of the image, got {ix}");
     }
 
     /// A wheel notch arrives as an accelerated line count, so the magnitude has to survive:
