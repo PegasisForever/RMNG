@@ -12,8 +12,8 @@
 //! Pipeline position (see [`crate::make_decoder_yuv444`]):
 //! `vah264dec ! glupload ! rmngavc444unpack ! gtk4paintablesink` — `memory:GLMemory` end to end.
 //!
-//! - **sink**: NV12 `W×2H` GLMemory (2 textures: Y as R8, UV as RG8). `glupload` yields
-//!   `texture-target=2D`; `rectangle` is accepted too (see *Rectangle-texture support*).
+//! - **sink**: NV12 `W×2H` GLMemory (2 textures: Y as R8, UV as RG8), `texture-target=2D` — every
+//!   supported pipeline reaches us through `glupload`, which yields 2D.
 //! - **src**: RGBA `W×H` GLMemory (the reconstructed image; `gtk4paintablesink` demands 2D and
 //!   displays it zero-copy, intrinsic size `W×H` so the viewer's letterbox/cursor/fps logic is
 //!   unchanged).
@@ -34,19 +34,6 @@
 //!
 //! GstGL's GLSL auto-mangling applies only to its *internal* shaders; for custom GLFilters we must
 //! embed the version line in the source ourselves. We do, and tell GstGL the matching metadata.
-//!
-//! ## Rectangle-texture support
-//!
-//! A producer may hand us `texture-target=rectangle` (GL_TEXTURE_RECTANGLE, unnormalized coords)
-//! rather than 2D — this was written for the retired macOS `vtdec_hw` path, whose IOSurface
-//! textures could only be rectangle, and Mesa offers the target too. Neither supported pipeline
-//! produces it today: Linux and Windows both feed us through `glupload`, which yields 2D. So the
-//! variant is carried but unexercised. The shader switches sampler type and coordinate
-//! expressions accordingly:
-//! - 2D: `sampler2D`, normalized coords `(sx+0.5)/w / (sy+0.5)/(2h)`.
-//! - rect: `sampler2DRect`, unnormalized coords `sx+0.5 / sy+0.5` (the texel-center offsets
-//!   already computed by the lum()/chr() helpers — the rect variant just drops the divides).
-//! The FBO output attachment always stays `GL_TEXTURE_2D` (gtk4paintablesink demands 2D).
 
 use std::sync::{Mutex, OnceLock};
 
@@ -79,10 +66,7 @@ void main() {
 }
 "#;
 
-/// Fragment shader body template: placeholders are filled by [`build_unpack_shader`].
-/// - `{SAMPLER}` → `sampler2D` (2D textures, normalized coords) or `sampler2DRect` (rectangle).
-/// - `{LUM}` → texel-coord expression for the luma plane sample.
-/// - `{CHR}` → texel-coord expression for the chroma plane sample.
+/// Fragment shader body (version header is prepended at runtime by [`build_unpack_shader`]).
 ///
 /// The gather is the exact inverse of [`wire::avc444::unpack_stacked_nv12_to_rgba`] (CPU oracle).
 /// For each output pixel `(x,y)` in `W×H`, with `i=x&1`, `j=y&1`, `xc=x>>1`, `yc=y>>1`:
@@ -94,19 +78,19 @@ void main() {
 /// NEAREST sampling + texel-center offsets; results scaled ×255 for the 0..255 matrix then
 /// divided back to [0,1] for the UNORM8 store (matching the CPU oracle's round().clamp()).
 const FRAG_BODY: &str = r#"in vec2 v_texcoord;
-uniform {SAMPLER} y_tex;    // R8,  W   x 2H  (luma + aux-luma tiling)
-uniform {SAMPLER} uv_tex;   // RG8, W/2 x H   (NV12 chroma: main over aux)
+uniform sampler2D y_tex;    // R8,  W   x 2H  (luma + aux-luma tiling)
+uniform sampler2D uv_tex;   // RG8, W/2 x H   (NV12 chroma: main over aux)
 uniform float w;            // output image width  W
 uniform float h;            // output image height H
 out vec4 frag;
 
 // luma texel (sx,sy) in the W x 2H plane → 0..255
 float lum(float sx, float sy) {
-    return texture(y_tex, {LUM}).r * 255.0;
+    return texture(y_tex, vec2((sx + 0.5) / w, (sy + 0.5) / (2.0 * h))).r * 255.0;
 }
 // chroma texel (cx,cy) in the (W/2) x H plane → (U,V) 0..255
 vec2 chr(float cx, float cy) {
-    return texture(uv_tex, {CHR}).rg * 255.0;
+    return texture(uv_tex, vec2((cx + 0.5) / (0.5 * w), (cy + 0.5) / h)).rg * 255.0;
 }
 
 void main() {
@@ -174,29 +158,15 @@ mod imp {
         state: Mutex<State>,
     }
 
+    #[derive(Default)]
     struct State {
         /// Negotiated sink (NV12 `W×2H` GLMemory) video info, for the input GL frame map + uniforms.
         in_info: Option<VideoInfo>,
         /// Negotiated src (RGBA `W×H` GLMemory) video info, for the output GL frame map.
         out_info: Option<VideoInfo>,
         /// The unpack shader, compiled lazily once the GL context exists.
-        /// Reset to `None` on each `set_caps` so the correct dialect/sampler variant is rebuilt.
+        /// Reset to `None` on each `set_caps` so the correct GLSL dialect is rebuilt.
         shader: Option<GLShader>,
-        /// GL texture target for the *input* (sink) textures: `GL_TEXTURE_2D` (glupload,
-        /// `--glunpack-validate`) or `GL_TEXTURE_RECTANGLE` (see the module's rectangle note).
-        /// Defaults to `GL_TEXTURE_2D`; updated by `set_caps`.
-        tex_target: u32,
-    }
-
-    impl Default for State {
-        fn default() -> Self {
-            State {
-                in_info: None,
-                out_info: None,
-                shader: None,
-                tex_target: GL_TEXTURE_2D,
-            }
-        }
     }
 
     #[glib::object_subclass]
@@ -227,15 +197,14 @@ mod imp {
             static T: OnceLock<Vec<gst::PadTemplate>> = OnceLock::new();
             T.get_or_init(|| {
                 let range = || gst::IntRange::<i32>::new(1, i32::MAX);
-                // Sink: NV12 W×2H GLMemory. Accepts 2D (glupload / validate harness) and
-                // rectangle, so an IOSurface-style producer that can only offer
-                // GL_TEXTURE_RECTANGLE still negotiates.
+                // Sink: NV12 W×2H GLMemory, 2D only — everything upstream of us (glupload on
+                // Linux and Windows, the validate harness) hands over 2D textures.
                 let sink_caps = gst::Caps::builder("video/x-raw")
                     .features(["memory:GLMemory"])
                     .field("format", "NV12")
                     .field("width", range())
                     .field("height", range())
-                    .field("texture-target", gst::List::new(["2D", "rectangle"]))
+                    .field("texture-target", "2D")
                     .build();
                 // Src: RGBA W×H GLMemory. Always 2D: gtk4paintablesink's GL caps demand texture-
                 // target=2D (GdkGLTextureBuilder has no texture-target property).
@@ -279,10 +248,7 @@ mod imp {
 
         // sink (NV12 W×2H GLMemory) ↔ src (RGBA W×H GLMemory): swap format, scale height by 2.
         // GLFilter's transform_caps wraps this (adds the memory:GLMemory feature + intersects with
-        // the peer filter), so we just produce the format/size translation.
-        //
-        // Direction sink→src: output is always RGBA 2D (gtk4paintablesink demands 2D).
-        // Direction src→sink: we can accept either 2D or rectangle on the sink.
+        // the peer filter), so we just produce the format/size translation. Both pads are 2D.
         fn transform_internal_caps(
             &self,
             direction: gst::PadDirection,
@@ -296,18 +262,18 @@ mod imp {
                 for i in 0..caps.size() {
                     let mut s = caps.structure(i).unwrap().to_owned();
                     if to_rgba {
-                        // Sink → Src: output is RGBA W×H, always 2D.
+                        // Sink → Src: output is RGBA W×H.
                         scale_height(&mut s, 1, 2);
                         s.set("format", "RGBA");
                         s.set("texture-target", "2D");
                         s.set("colorimetry", RGB_COLORIMETRY);
                     } else {
-                        // Src → Sink: input can be NV12 W×2H with either 2D or rectangle, and any
-                        // colour description. The shader's matrix is fixed (BT.601 limited, the
-                        // packer's), so an inherited one would only constrain the decoder.
+                        // Src → Sink: input is NV12 W×2H with any colour description. The shader's
+                        // matrix is fixed (BT.601 limited, the packer's), so an inherited one would
+                        // only constrain the decoder.
                         scale_height(&mut s, 2, 1);
                         s.set("format", "NV12");
-                        s.set("texture-target", gst::List::new(["2D", "rectangle"]));
+                        s.set("texture-target", "2D");
                         s.remove_field("colorimetry");
                     }
                     out.append_structure_full(s, Some(gst::CapsFeatures::new(["memory:GLMemory"])));
@@ -327,20 +293,11 @@ mod imp {
             if in_info.width() % 2 != 0 || in_info.height() % 2 != 0 {
                 return Err(gst::loggable_error!(cat(), "AVC444 unpack needs even dimensions"));
             }
-            // Parse negotiated texture-target from incaps so unpack_render binds the right target.
-            // VideoInfo does not carry texture-target; read it directly from the caps structure.
-            let tex_target = incaps
-                .structure(0)
-                .and_then(|s| s.get::<&str>("texture-target").ok())
-                .map(|t| if t == "rectangle" { GL_TEXTURE_RECTANGLE } else { GL_TEXTURE_2D })
-                .unwrap_or(GL_TEXTURE_2D);
             let mut st = self.state.lock().unwrap();
-            // Drop the cached shader: the new caps may need a different dialect or sampler variant
-            // (e.g. GLES→desktop, 2D→rectangle).
+            // Drop the cached shader: the new caps may need a different GLSL dialect (GLES→desktop).
             st.shader = None;
             st.in_info = Some(in_info);
             st.out_info = Some(out_info);
-            st.tex_target = tex_target;
             Ok(())
         }
 
@@ -351,7 +308,6 @@ mod imp {
             let mut st = self.state.lock().unwrap();
             let in_info = st.in_info.clone().ok_or_else(|| gst::loggable_error!(cat(), "no caps set"))?;
             let out_info = st.out_info.clone().ok_or_else(|| gst::loggable_error!(cat(), "no caps set"))?;
-            let tex_target = st.tex_target;
             let (w, h2) = (in_info.width() as i32, in_info.height() as i32); // decoded NV12 W×2H
             let h = h2 / 2; // reconstructed image height
 
@@ -361,8 +317,7 @@ mod imp {
                 .ok_or_else(|| gst::loggable_error!(cat(), "no GL context"))?;
 
             if st.shader.is_none() {
-                let use_rect = tex_target == GL_TEXTURE_RECTANGLE;
-                st.shader = Some(build_unpack_shader(&ctx, use_rect)?);
+                st.shader = Some(build_unpack_shader(&ctx)?);
             }
             let shader = st.shader.as_ref().unwrap().clone();
             drop(st);
@@ -382,7 +337,7 @@ mod imp {
                 .map_err(|_| gst::loggable_error!(cat(), "map output RGBA"))?;
             let out_tex = out_frame.memory(0).map_err(|_| gst::loggable_error!(cat(), "RGBA plane"))?.texture_id();
 
-            let ok = unsafe { unpack_render(&ctx, y_tex, uv_tex, out_tex, w, h, &shader, tex_target) };
+            let ok = unsafe { unpack_render(&ctx, y_tex, uv_tex, out_tex, w, h, &shader) };
             // Drop the output map first → commits the WRITE|GL transfer state for downstream.
             drop(out_frame);
             drop(in_frame);
@@ -416,7 +371,6 @@ glib::wrapper! {
 // ---- raw GL: FBO-render the unpack shader from the two NV12 textures into the RGBA output -------
 
 const GL_TEXTURE_2D: u32 = 0x0DE1;
-const GL_TEXTURE_RECTANGLE: u32 = 0x84F5; // available on Mesa; was the IOSurface target on macOS
 const GL_FRAMEBUFFER: u32 = 0x8D40;
 const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
 const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
@@ -449,19 +403,15 @@ unsafe fn gl_fn<T>(ctx: &gst_gl::GLContext, name: &str) -> Option<T> {
     if p == 0 { None } else { Some(unsafe { std::mem::transmute_copy::<usize, T>(&p) }) }
 }
 
-/// Build the unpack shader for the given GL context and input texture target.
+/// Build the unpack shader for the given GL context.
 ///
-/// Two axes:
-/// 1. *GLSL dialect*: detected from `ctx.gl_api()` — `OPENGL3` → `#version 330 core` (desktop GL);
-///    `GLES2` → `#version 300 es` + `precision` qualifiers (the usual EGL case).
-///    GstGL does **not** mangle custom GLFilter shaders, so we embed the version line in the source
-///    and pass matching metadata to `GLSLStage::with_strings`.
-/// 2. *Sampler type*: `use_rect=true` → `sampler2DRect` with unnormalized texel coordinates (the
-///    lum()/chr() helpers compute the texel position first; the rect variant just drops the divide
-///    and keeps the +0.5 center offset). `use_rect=false` → `sampler2D` with normalized coords.
+/// The one variable is the *GLSL dialect*, detected from `ctx.gl_api()` — `OPENGL3` →
+/// `#version 330 core` (desktop GL); `GLES2` → `#version 300 es` + `precision` qualifiers (the
+/// usual EGL case). GstGL does **not** mangle custom GLFilter shaders, so we embed the version line
+/// in the source and pass matching metadata to `GLSLStage::with_strings`.
 ///
 /// Must run on the GL thread (GLSL attach needs the context) — `filter()` already is.
-fn build_unpack_shader(ctx: &gst_gl::GLContext, use_rect: bool) -> Result<GLShader, gst::LoggableError> {
+fn build_unpack_shader(ctx: &gst_gl::GLContext) -> Result<GLShader, gst::LoggableError> {
     use gst_gl::GLAPI;
     let is_desktop = ctx.gl_api().contains(GLAPI::OPENGL3);
 
@@ -479,27 +429,7 @@ fn build_unpack_shader(ctx: &gst_gl::GLContext, use_rect: bool) -> Result<GLShad
         "#version 300 es\nprecision highp float;\nprecision highp int;".to_string()
     };
 
-    // Sampler type and coordinate expressions.
-    // 2D path: normalized coords — divide by texture dimensions.
-    // Rect path: unnormalized texel coords — drop the divide; keep the +0.5 texel-center offset.
-    let (sampler, lum_coord, chr_coord) = if use_rect {
-        (
-            "sampler2DRect",
-            "vec2(sx + 0.5, sy + 0.5)",
-            "vec2(cx + 0.5, cy + 0.5)",
-        )
-    } else {
-        (
-            "sampler2D",
-            "vec2((sx + 0.5) / w, (sy + 0.5) / (2.0 * h))",
-            "vec2((cx + 0.5) / (0.5 * w), (cy + 0.5) / h)",
-        )
-    };
-
-    let frag_src = format!("{frag_header}\n{FRAG_BODY}")
-        .replace("{SAMPLER}", sampler)
-        .replace("{LUM}", lum_coord)
-        .replace("{CHR}", chr_coord);
+    let frag_src = format!("{frag_header}\n{FRAG_BODY}");
 
     // GLSLVersion/GLSLProfile metadata passed to GstGL: matches the embedded version line.
     // GstGL does NOT prepend a version directive from these — they are bookkeeping only.
@@ -519,9 +449,7 @@ fn build_unpack_shader(ctx: &gst_gl::GLContext, use_rect: bool) -> Result<GLShad
 }
 
 /// FBO-render `shader` into `out_tex` (RGBA `w×h`), sampling the Y (`y_tex`, R8 `w×2h`) and UV
-/// (`uv_tex`, RG8 `w/2×h`) NV12 textures. `tex_target` is the GL target for the *input* textures:
-/// `GL_TEXTURE_2D` (glupload / validate harness) or `GL_TEXTURE_RECTANGLE`.
-/// The FBO color attachment (output) always stays `GL_TEXTURE_2D`.
+/// (`uv_tex`, RG8 `w/2×h`) NV12 textures. Every texture here is `GL_TEXTURE_2D`.
 ///
 /// **Must run on the GL thread with the context current.**
 unsafe fn unpack_render(
@@ -532,7 +460,6 @@ unsafe fn unpack_render(
     w: i32,
     h: i32,
     shader: &GLShader,
-    tex_target: u32,
 ) -> bool {
     unsafe {
         let (
@@ -581,7 +508,6 @@ unsafe fn unpack_render(
         let mut fb = 0u32;
         gen_fb(1, &mut fb);
         bind_fb(GL_FRAMEBUFFER, fb);
-        // Output texture is always 2D (gtk4paintablesink demands it; our FBO render produces it).
         fb_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out_tex, 0);
         let status = fb_status(GL_FRAMEBUFFER);
         viewport(0, 0, w, h);
@@ -592,15 +518,14 @@ unsafe fn unpack_render(
         shader.set_uniform_1f("w", w as f32);
         shader.set_uniform_1f("h", h as f32);
 
-        // Bind input textures to the negotiated target (GL_TEXTURE_2D or GL_TEXTURE_RECTANGLE).
         active_tex(GL_TEXTURE0);
-        bind_tex(tex_target, y_tex);
-        tex_param(tex_target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        tex_param(tex_target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        bind_tex(GL_TEXTURE_2D, y_tex);
+        tex_param(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        tex_param(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         active_tex(GL_TEXTURE1);
-        bind_tex(tex_target, uv_tex);
-        tex_param(tex_target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        tex_param(tex_target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        bind_tex(GL_TEXTURE_2D, uv_tex);
+        tex_param(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        tex_param(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
         draw(GL_TRIANGLES, 0, 3);
 
@@ -613,11 +538,10 @@ unsafe fn unpack_render(
         }
 
         // Restore the GL state we touched so we don't disturb GstGL's bookkeeping.
-        // Unbind input textures from the negotiated target.
         active_tex(GL_TEXTURE1);
-        bind_tex(tex_target, 0);
+        bind_tex(GL_TEXTURE_2D, 0);
         active_tex(GL_TEXTURE0);
-        bind_tex(tex_target, 0);
+        bind_tex(GL_TEXTURE_2D, 0);
         fb_tex(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
         bind_fb(GL_FRAMEBUFFER, 0);
         del_fb(1, &fb);
@@ -657,12 +581,6 @@ pub fn register() -> anyhow::Result<()> {
 /// assert the GPU result matches [`wire::avc444::unpack_stacked_nv12_to_rgba`] (the CPU oracle) on
 /// the **same bytes** — no H.264 in the loop, so this isolates the shader's gather + matrix. The
 /// `gldownload` is only here, for the readback; the production path stays on the GPU.
-///
-/// This validates the **2D path only** — `glupload` from raw sysmem always yields 2D textures, so
-/// the harness cannot reach the rectangle-sampler variant. Nothing in the current pipeline
-/// produces rectangle textures either (that was the retired macOS `vtdec_hw` path), so that
-/// variant is now untested by construction; exercising it would mean building a rectangle-texture
-/// source by hand.
 pub fn validate(w: usize, h: usize) -> anyhow::Result<()> {
     use anyhow::{Context, anyhow};
     use gstreamer_app::{AppSink, AppSrc};
