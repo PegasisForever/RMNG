@@ -158,7 +158,7 @@ impl State {
 #[derive(Default)]
 pub struct GridIvars {
     state: RefCell<Option<Rc<State>>>,
-    /// Sub-cell scroll delta not yet turned into a line (see [`scroll_lines`]).
+    /// Sub-notch scroll delta not yet turned into a notch (see [`scroll_notches`]).
     scroll_rem: Cell<f64>,
 }
 
@@ -245,17 +245,16 @@ define_class!(
                 return;
             }
             let (_, ch) = state.metrics.get();
-            // Precise (trackpad) deltas are in points and a slow two-finger drag reports well
-            // under one cell per event, so the fraction is carried rather than rounded away. A
-            // wheel reports whole lines already.
-            let lines = if event.hasPreciseScrollingDeltas() {
-                scroll_lines(&self.ivars().scroll_rem, dy / ch)
-            } else {
-                dy.signum() as i32 * 3
-            };
-            if lines == 0 {
+            // Everything below counts in notches, because that is the unit the two consumers
+            // disagree on: an app in mouse-reporting mode wants one report per notch, while
+            // scrollback and the alternate screen move three lines for that same turn. Deriving
+            // both from one count is what keeps a tmux pane scrolling at the GTK viewer's speed.
+            let precise = event.hasPreciseScrollingDeltas();
+            let notches = scroll_notches(&self.ivars().scroll_rem, precise, dy, ch);
+            if notches == 0 {
                 return;
             }
+            let lines = notches * LINES_PER_NOTCH;
             // `locate` reads the term map itself, so it has to run *before* we borrow that map —
             // doing it inside the borrow is a `BorrowMutError` and, inside an ObjC method, an
             // abort. The mouse handlers above take the same order for the same reason; the cost on
@@ -268,10 +267,12 @@ define_class!(
             // Shift always means "scroll my scrollback", overriding whatever the app asked for —
             // otherwise a tmux pane with `mouse on` leaves no way to look back.
             if mode.intersects(TermMode::MOUSE_MODE) && !shift {
-                // The app wants wheel events itself (codes 64/65), not scrollback.
+                // The app wants wheel events itself (codes 64/65), not scrollback. One report per
+                // notch: the app decides for itself how far a notch scrolls its pane, so sending
+                // three would scroll it three times as far as every other terminal does.
                 drop(terms);
-                let code = if lines > 0 { 64 } else { 65 };
-                for _ in 0..lines.abs() {
+                let code = if notches > 0 { 64 } else { 65 };
+                for _ in 0..notches.abs() {
                     state.send(mouse_report(code, col, row, true, mode));
                 }
                 return;
@@ -726,18 +727,27 @@ fn xterm_button(ns_button: isize) -> Option<u8> {
     Some(base_button(gtk))
 }
 
-/// Accumulate a fractional scroll delta into whole grid lines, carrying the rest in `rem`.
+/// Lines one wheel notch moves — the step terminals have used for as long as wheels have
+/// existed, and the one the GTK viewer sends.
+const LINES_PER_NOTCH: i32 = 3;
+
+/// Turn one scroll event into whole wheel notches, carrying the rest in `rem`.
 ///
-/// A trackpad reports a few points at a time, which is far less than one cell, so rounding each
-/// event on its own makes a slow two-finger drag move nothing at all. Truncating toward zero and
-/// keeping the remainder forwards the distance the fingers actually travelled without inventing a
-/// line out of a twitch. [`crate::window`]'s `wheel_notches` does the same for the video plane,
-/// but in notches rather than grid lines, so the two stay separate.
-fn scroll_lines(rem: &Cell<f64>, delta: f64) -> i32 {
-    let acc = rem.get() + delta;
-    let lines = acc.trunc() as i32;
-    rem.set(acc - f64::from(lines));
-    lines
+/// A wheel (`precise` false) reports a notch at a time, so only its direction matters. A trackpad
+/// reports points, and a slow two-finger drag is a small fraction of a notch per event, so the
+/// delta is scaled to notches and truncated toward zero with the remainder kept — rounding each
+/// event on its own would leave that drag frozen. Scaling by the notch rather than the cell costs
+/// the drag no distance, since the caller multiplies back by [`LINES_PER_NOTCH`]; it only makes
+/// the finger travel a notch before anything moves. [`crate::window`]'s `wheel_notches` carries
+/// the same way for the video plane, on its own remainder.
+fn scroll_notches(rem: &Cell<f64>, precise: bool, dy: f64, cell_h: f64) -> i32 {
+    if !precise {
+        return dy.signum() as i32;
+    }
+    let acc = rem.get() + dy / (cell_h * f64::from(LINES_PER_NOTCH));
+    let notches = acc.trunc() as i32;
+    rem.set(acc - f64::from(notches));
+    notches
 }
 
 /// Encode a macOS key press into terminal input bytes. `kvk` is the Carbon virtual key and
@@ -1034,7 +1044,7 @@ mod tests {
     use alacritty_terminal::event::{Event as AlacEvent, EventListener};
     use alacritty_terminal::term::ClipboardType;
 
-    use super::{encode_key, scroll_lines, xterm_button, EventProxy};
+    use super::{encode_key, scroll_notches, xterm_button, EventProxy, LINES_PER_NOTCH};
 
     /// What the proxy's sinks saw: PTY writes as (session, bytes), and clipboard texts.
     #[derive(Default)]
@@ -1147,21 +1157,60 @@ mod tests {
         assert_eq!(xterm_button(3), None, "back/forward have no xterm encoding");
     }
 
-    /// A trackpad reports a fraction of a cell per event; rounding each one alone leaves a slow
-    /// two-finger scroll frozen, so the remainder has to carry.
+    /// Cell height used by the scroll tests; one notch is `CH * LINES_PER_NOTCH` points of travel.
+    const CH: f64 = 20.0;
+
+    /// One turn of a real wheel is one notch, whichever way it goes — so a mouse-reporting app
+    /// gets one report and our scrollback moves three lines. Sending three reports for the notch
+    /// scrolled a tmux pane three times as far here as under the GTK viewer.
     #[test]
-    fn sub_cell_scroll_deltas_accumulate() {
+    fn one_wheel_notch_is_one_report_and_three_lines() {
         let rem = Cell::new(0.0);
-        assert_eq!(scroll_lines(&rem, 0.4), 0);
-        assert_eq!(scroll_lines(&rem, 0.4), 0);
-        assert_eq!(scroll_lines(&rem, 0.4), 1, "three sub-cell nudges make a line");
-        // A fast flick forwards its whole distance, not one line.
+        let notches = scroll_notches(&rem, false, 10.0, CH);
+        assert_eq!(notches, 1, "one report per notch, not one per line");
+        assert_eq!(notches * LINES_PER_NOTCH, 3, "but three lines of scrollback for it");
+        assert_eq!(scroll_notches(&rem, false, -10.0, CH), -1, "and the same downwards");
+        // A wheel carries nothing between events: its magnitude never reaches the remainder.
+        assert_eq!(rem.get(), 0.0);
+    }
+
+    /// A flick of the trackpad covering several notches forwards all of them at once, rather than
+    /// dribbling them out one event at a time.
+    #[test]
+    fn a_fast_trackpad_flick_forwards_every_notch_it_covered() {
         let rem = Cell::new(0.0);
-        assert_eq!(scroll_lines(&rem, 7.5), 7);
-        assert_eq!(scroll_lines(&rem, 0.5), 1, "the carried half completes the eighth line");
-        // Truncation is toward zero, so scrolling the other way loses nothing either.
+        let far = 3.5 * CH * f64::from(LINES_PER_NOTCH);
+        assert_eq!(scroll_notches(&rem, true, far, CH), 3);
+        let half = 0.5 * CH * f64::from(LINES_PER_NOTCH);
+        assert_eq!(scroll_notches(&rem, true, half, CH), 1, "the carried half completes a notch");
+    }
+
+    /// A trackpad reports a small fraction of a notch per event; rounding each one alone would
+    /// leave a slow two-finger drag frozen, so the remainder has to carry — and it must not fire
+    /// early either, or scrolling in mouse-reporting mode outruns the wheel again.
+    #[test]
+    fn sub_notch_trackpad_deltas_accumulate_into_exactly_one_notch() {
         let rem = Cell::new(0.0);
-        assert_eq!(scroll_lines(&rem, -0.5), 0);
-        assert_eq!(scroll_lines(&rem, -0.5), -1);
+        let nudge = 0.4 * CH * f64::from(LINES_PER_NOTCH); // two fifths of a notch per event
+        assert_eq!(scroll_notches(&rem, true, nudge, CH), 0, "a nudge alone moves nothing");
+        assert_eq!(scroll_notches(&rem, true, nudge, CH), 0);
+        assert_eq!(scroll_notches(&rem, true, nudge, CH), 1, "three nudges make one notch");
+        assert_eq!(scroll_notches(&rem, true, nudge, CH), 0, "and the fourth starts over");
+        // Truncation is toward zero, so a drag the other way loses nothing either.
+        let rem = Cell::new(0.0);
+        assert_eq!(scroll_notches(&rem, true, -nudge, CH), 0);
+        assert_eq!(scroll_notches(&rem, true, -nudge, CH), 0);
+        assert_eq!(scroll_notches(&rem, true, -nudge, CH), -1);
+    }
+
+    /// Reversing mid-drag cancels what the fingers had banked, instead of the leftover from one
+    /// direction firing a notch the other way.
+    #[test]
+    fn a_trackpad_drag_that_reverses_cancels_its_carried_fraction() {
+        let rem = Cell::new(0.0);
+        let half = 0.5 * CH * f64::from(LINES_PER_NOTCH);
+        assert_eq!(scroll_notches(&rem, true, half, CH), 0);
+        assert_eq!(scroll_notches(&rem, true, -half, CH), 0);
+        assert_eq!(rem.get(), 0.0, "the fingers ended where they started");
     }
 }
