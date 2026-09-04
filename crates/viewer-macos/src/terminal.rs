@@ -28,7 +28,7 @@ use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSBezierPath, NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
     NSPasteboard, NSPasteboardTypeString, NSSegmentedControl, NSSegmentSwitchTracking,
-    NSUnderlineStyleAttributeName, NSView,
+    NSStrikethroughStyleAttributeName, NSUnderlineStyleAttributeName, NSView,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSDictionary, NSNumber, NSPoint, NSRect, NSSize, NSString,
@@ -158,6 +158,8 @@ impl State {
 #[derive(Default)]
 pub struct GridIvars {
     state: RefCell<Option<Rc<State>>>,
+    /// Sub-cell scroll delta not yet turned into a line (see [`scroll_lines`]).
+    scroll_rem: Cell<f64>,
 }
 
 define_class!(
@@ -201,6 +203,16 @@ define_class!(
         fn right_mouse_up(&self, event: &objc2_app_kit::NSEvent) {
             self.mouse(event, false);
         }
+        // AppKit routes every button past left and right through `otherMouse*`; without these the
+        // middle button never reaches an app that asked for mouse reports.
+        #[unsafe(method(otherMouseDown:))]
+        fn other_mouse_down(&self, event: &objc2_app_kit::NSEvent) {
+            self.mouse(event, true);
+        }
+        #[unsafe(method(otherMouseUp:))]
+        fn other_mouse_up(&self, event: &objc2_app_kit::NSEvent) {
+            self.mouse(event, false);
+        }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &objc2_app_kit::NSEvent) {
@@ -210,8 +222,11 @@ define_class!(
             let mut terms = state.terms.borrow_mut();
             let Some(sess) = terms.get_mut(&key) else { return };
             // An app that grabbed the mouse gets the motion; otherwise we are extending a
-            // selection.
-            if sess.term.mode().intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+            // selection. Shift overrides the grab here too, or the selection a Shift-click just
+            // started could never grow past its first cell.
+            let shift = event.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Shift);
+            let grabbed = sess.term.mode().intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION);
+            if grabbed && !shift {
                 return;
             }
             if let Some(sel) = sess.term.selection.as_mut() {
@@ -230,9 +245,11 @@ define_class!(
                 return;
             }
             let (_, ch) = state.metrics.get();
-            // Precise (trackpad) deltas are in points; a wheel reports whole lines.
+            // Precise (trackpad) deltas are in points and a slow two-finger drag reports well
+            // under one cell per event, so the fraction is carried rather than rounded away. A
+            // wheel reports whole lines already.
             let lines = if event.hasPreciseScrollingDeltas() {
-                (dy / ch).round() as i32
+                scroll_lines(&self.ivars().scroll_rem, dy / ch)
             } else {
                 dy.signum() as i32 * 3
             };
@@ -244,15 +261,29 @@ define_class!(
             // abort. The mouse handlers above take the same order for the same reason; the cost on
             // a plain scrollback tick is one point conversion.
             let (_, _, col, row) = self.locate(&state, event);
+            let shift = event.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Shift);
             let mut terms = state.terms.borrow_mut();
             let Some(sess) = terms.get_mut(&key) else { return };
-            if sess.term.mode().intersects(TermMode::MOUSE_MODE) {
+            let mode = *sess.term.mode();
+            // Shift always means "scroll my scrollback", overriding whatever the app asked for —
+            // otherwise a tmux pane with `mouse on` leaves no way to look back.
+            if mode.intersects(TermMode::MOUSE_MODE) && !shift {
                 // The app wants wheel events itself (codes 64/65), not scrollback.
-                let mode = *sess.term.mode();
                 drop(terms);
                 let code = if lines > 0 { 64 } else { 65 };
                 for _ in 0..lines.abs() {
                     state.send(mouse_report(code, col, row, true, mode));
+                }
+                return;
+            }
+            if mode.contains(TermMode::ALT_SCREEN) && !shift {
+                // The alternate screen has no scrollback of ours to move, so the wheel is
+                // synthesized as arrow keys — that is what makes `less` and `man` scroll.
+                drop(terms);
+                let app = mode.contains(TermMode::APP_CURSOR);
+                let seq = if lines > 0 { arrow(b'A', app) } else { arrow(b'B', app) };
+                for _ in 0..lines.abs() {
+                    state.send(seq.clone());
                 }
                 return;
             }
@@ -268,6 +299,7 @@ define_class!(
             let cmd = mods.contains(objc2_app_kit::NSEventModifierFlags::Command);
             let ctrl = mods.contains(objc2_app_kit::NSEventModifierFlags::Control);
             let alt = mods.contains(objc2_app_kit::NSEventModifierFlags::Option);
+            let shift = mods.contains(objc2_app_kit::NSEventModifierFlags::Shift);
             let kvk = event.keyCode() as u32;
 
             // ⌘V pastes; ⌘C copies the selection when there is one. These are Mac chords, so they
@@ -283,16 +315,46 @@ define_class!(
             if cmd {
                 return; // other ⌘ chords belong to the app, not the remote shell
             }
+            let Some(key) = state.active_session() else { return };
+
+            // Shift + the paging keys drive our scrollback instead of reaching the app, which is
+            // the only way to read history that a full-screen app would otherwise swallow.
+            if shift {
+                let scroll = match kvk {
+                    0x74 => Some(Scroll::PageUp),
+                    0x79 => Some(Scroll::PageDown),
+                    0x73 => Some(Scroll::Top),
+                    0x77 => Some(Scroll::Bottom),
+                    _ => None,
+                };
+                if let Some(s) = scroll {
+                    if let Some(sess) = state.terms.borrow_mut().get_mut(&key) {
+                        sess.term.scroll_display(s);
+                    }
+                    self.setNeedsDisplay(true);
+                    return;
+                }
+            }
 
             let app_cursor = {
                 let terms = state.terms.borrow();
-                state
-                    .active_session()
-                    .and_then(|s| terms.get(&s).map(|t| t.term.mode().contains(TermMode::APP_CURSOR)))
-                    .unwrap_or(false)
+                terms.get(&key).map(|t| t.term.mode().contains(TermMode::APP_CURSOR)).unwrap_or(false)
             };
             let chars = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
-            if let Some(bytes) = encode_key(kvk, &chars, ctrl, alt, app_cursor) {
+            if let Some(bytes) = encode_key(kvk, &chars, ctrl, alt, shift, app_cursor) {
+                // Typing means the user is done reading history, so snap back to the prompt —
+                // otherwise the keystroke goes to a screen they cannot see.
+                let scrolled = {
+                    let mut terms = state.terms.borrow_mut();
+                    terms.get_mut(&key).is_some_and(|sess| {
+                        let was = sess.term.grid().display_offset() != 0;
+                        sess.term.scroll_display(Scroll::Bottom);
+                        was
+                    })
+                };
+                if scrolled {
+                    self.setNeedsDisplay(true);
+                }
                 state.send(bytes);
             }
         }
@@ -333,19 +395,32 @@ impl GridView {
     fn mouse(&self, event: &objc2_app_kit::NSEvent, pressed: bool) {
         let Some(state) = self.state() else { return };
         let Some(key) = state.active_session() else { return };
+        let Some(code) = xterm_button(event.buttonNumber()) else { return };
+        let shift = event.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Shift);
+        let clicks = event.clickCount();
         let (point, side, col, row) = self.locate(&state, event);
         let mut terms = state.terms.borrow_mut();
         let Some(sess) = terms.get_mut(&key) else { return };
         let mode = *sess.term.mode();
-        if mode.intersects(TermMode::MOUSE_MODE) {
+        // Shift overrides the app's mouse grab, so text stays selectable inside a tmux pane
+        // running `mouse on` — without it there is no way to copy anything out of one.
+        if mode.intersects(TermMode::MOUSE_MODE) && !shift {
             drop(terms);
-            let code = base_button(event.buttonNumber() as u32 + 1);
             state.send(mouse_report(code, col, row, pressed, mode));
             return;
         }
-        if pressed {
-            // A fresh press starts a selection; the drag handler extends it.
-            sess.term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+        // Only the left button starts a selection: a right- or middle-click otherwise collapses
+        // the selection the user just made. The GTK viewer pastes PRIMARY on a middle-click, but
+        // macOS has no PRIMARY selection, so the middle button here only ever reports.
+        if pressed && code == 0 {
+            // Click count picks the granularity, the way every terminal does: double for a word,
+            // triple for the line. The drag handler extends whichever we started.
+            let ty = match clicks {
+                2 => SelectionType::Semantic,
+                n if n >= 3 => SelectionType::Lines,
+                _ => SelectionType::Simple,
+            };
+            sess.term.selection = Some(Selection::new(ty, point, side));
         }
         drop(terms);
         if pressed {
@@ -358,7 +433,11 @@ impl GridView {
         let Some(state) = self.state() else { return };
         let pb = NSPasteboard::generalPasteboard();
         let Some(text) = pb.stringForType(unsafe { NSPasteboardTypeString }) else { return };
-        let s = text.to_string();
+        // A terminal's Return is CR; pasting the LF the pasteboard actually holds leaves readline
+        // and every line-based shell waiting for an end of line that never comes. Normalizing
+        // outside the bracketed wrapper matters too — bracketed paste changes how the app reads
+        // the bytes, not which byte ends a line.
+        let s = text.to_string().replace('\n', "\r");
         let bracketed = {
             let terms = state.terms.borrow();
             state
@@ -501,7 +580,9 @@ impl GridView {
 
             // Glyph run.
             let glyph = if flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
-            let style = flags & (Flags::UNDERLINE | Flags::BOLD | Flags::ITALIC);
+            // The run key has to carry every flag `draw_text` acts on, or a decorated cell would
+            // be merged into an undecorated run and lose its decoration.
+            let style = flags & (TEXT_STYLE_FLAGS | Flags::BOLD | Flags::ITALIC);
             match text_run.take() {
                 Some((r, c0, mut s, f, fl))
                     if r == rowi && f == fg && fl == style && c0 + s.chars().count() == col =>
@@ -558,12 +639,20 @@ fn fill_rect(rect: NSRect, color: Rgb3) {
     NSBezierPath::fillRect(rect);
 }
 
+/// The cell flags `draw_text` turns into text attributes. AppKit draws one underline style, so
+/// the double and curly variants fold into a plain underline — the same simplification the GTK
+/// viewer makes, and far better than the nothing they render as otherwise.
+const TEXT_STYLE_FLAGS: Flags = Flags::UNDERLINE
+    .union(Flags::DOUBLE_UNDERLINE)
+    .union(Flags::UNDERCURL)
+    .union(Flags::STRIKEOUT);
+
 /// Draw `text` with the terminal font at `origin` (top-left, the view being flipped).
 fn draw_text(text: &str, origin: NSPoint, font: &NSFont, fg: Rgb3, flags: Flags) {
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
     let _ = mtm;
-    let mut keys: Vec<&objc2_foundation::NSString> = Vec::with_capacity(3);
-    let mut vals: Vec<&AnyObject> = Vec::with_capacity(3);
+    let mut keys: Vec<&objc2_foundation::NSString> = Vec::with_capacity(4);
+    let mut vals: Vec<&AnyObject> = Vec::with_capacity(4);
     let color = ns_color(fg);
     // SAFETY: these are the documented AppKit attribute-name globals.
     unsafe {
@@ -572,11 +661,19 @@ fn draw_text(text: &str, origin: NSPoint, font: &NSFont, fg: Rgb3, flags: Flags)
         keys.push(NSForegroundColorAttributeName);
         vals.push(&*(&*color as *const NSColor as *const AnyObject));
     }
-    let underline = NSNumber::new_i32(1);
-    if flags.contains(Flags::UNDERLINE) {
+    let single = NSNumber::new_i32(1);
+    if flags.intersects(Flags::UNDERLINE | Flags::DOUBLE_UNDERLINE | Flags::UNDERCURL) {
+        // SAFETY: the documented AppKit attribute-name global.
         unsafe {
             keys.push(NSUnderlineStyleAttributeName);
-            vals.push(&*(&*underline as *const NSNumber as *const AnyObject));
+            vals.push(&*(&*single as *const NSNumber as *const AnyObject));
+        }
+    }
+    if flags.contains(Flags::STRIKEOUT) {
+        // SAFETY: the documented AppKit attribute-name global.
+        unsafe {
+            keys.push(NSStrikethroughStyleAttributeName);
+            vals.push(&*(&*single as *const NSNumber as *const AnyObject));
         }
     }
     let attrs = NSDictionary::from_slices(&keys, &vals);
@@ -609,12 +706,56 @@ fn cell_metrics() -> (f64, f64) {
     (cw, ch)
 }
 
+/// The xterm button code for an `NSEvent.buttonNumber`, or `None` for a button the terminal has
+/// nothing to say about.
+///
+/// AppKit numbers buttons 0=left, **1=right**, 2=middle, while xterm's low two bits run 0=left,
+/// 1=middle, 2=right — the two disagree on exactly right vs middle, so feeding a button number
+/// straight to [`base_button`] reports a right-click as a middle-click. [`crate::window`]'s
+/// `evdev_button` translates the same AppKit numbering for the video plane; going through
+/// `base_button` here keeps the xterm codes themselves in `viewer-core`.
+fn xterm_button(ns_button: isize) -> Option<u8> {
+    let gtk = match ns_button {
+        0 => 1, // left
+        1 => 3, // right
+        2 => 2, // middle
+        // Back/forward have no xterm encoding; reporting them as a left click would be worse
+        // than dropping them.
+        _ => return None,
+    };
+    Some(base_button(gtk))
+}
+
+/// Accumulate a fractional scroll delta into whole grid lines, carrying the rest in `rem`.
+///
+/// A trackpad reports a few points at a time, which is far less than one cell, so rounding each
+/// event on its own makes a slow two-finger drag move nothing at all. Truncating toward zero and
+/// keeping the remainder forwards the distance the fingers actually travelled without inventing a
+/// line out of a twitch. [`crate::window`]'s `wheel_notches` does the same for the video plane,
+/// but in notches rather than grid lines, so the two stay separate.
+fn scroll_lines(rem: &Cell<f64>, delta: f64) -> i32 {
+    let acc = rem.get() + delta;
+    let lines = acc.trunc() as i32;
+    rem.set(acc - f64::from(lines));
+    lines
+}
+
 /// Encode a macOS key press into terminal input bytes. `kvk` is the Carbon virtual key and
 /// `chars` the characters ignoring modifiers; `None` means "not a key the terminal sends".
-fn encode_key(kvk: u32, chars: &str, ctrl: bool, alt: bool, app_cursor: bool) -> Option<Vec<u8>> {
+fn encode_key(
+    kvk: u32,
+    chars: &str,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
     let named: Option<Vec<u8>> = match kvk {
         0x24 | 0x4C => Some(vec![b'\r']),          // Return / KeypadEnter
         0x33 => Some(vec![0x7f]),                  // Delete (backspace)
+        // Shift+Tab is back-tab (CBT), which is how readline and every TUI walk a completion
+        // list or a field order backwards; plain TAB would just complete forwards again.
+        0x30 if shift => Some(b"\x1b[Z".to_vec()), // Shift+Tab
         0x30 => Some(vec![b'\t']),                 // Tab
         0x35 => Some(vec![0x1b]),                  // Escape
         0x7E => Some(arrow(b'A', app_cursor)),     // Up
@@ -730,7 +871,10 @@ impl TerminalView {
         );
         let grid = {
             let this = GridView::alloc(mtm)
-                .set_ivars(GridIvars { state: RefCell::new(Some(state.clone())) });
+                .set_ivars(GridIvars {
+                    state: RefCell::new(Some(state.clone())),
+                    ..GridIvars::default()
+                });
             let this: Retained<GridView> = unsafe { msg_send![super(this), initWithFrame: grid_frame] };
             this
         };
@@ -884,13 +1028,13 @@ impl TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use alacritty_terminal::event::{Event as AlacEvent, EventListener};
     use alacritty_terminal::term::ClipboardType;
 
-    use super::{encode_key, EventProxy};
+    use super::{encode_key, scroll_lines, xterm_button, EventProxy};
 
     /// What the proxy's sinks saw: PTY writes as (session, bytes), and clipboard texts.
     #[derive(Default)]
@@ -939,42 +1083,85 @@ mod tests {
 
     #[test]
     fn named_keys_encode_to_their_sequences() {
-        assert_eq!(encode_key(0x24, "\r", false, false, false), Some(vec![b'\r']), "Return");
-        assert_eq!(encode_key(0x33, "", false, false, false), Some(vec![0x7f]), "Backspace is DEL");
-        assert_eq!(encode_key(0x35, "", false, false, false), Some(vec![0x1b]), "Escape");
+        assert_eq!(encode_key(0x24, "\r", false, false, false, false), Some(vec![b'\r']), "Return");
+        assert_eq!(encode_key(0x33, "", false, false, false, false), Some(vec![0x7f]), "Backspace is DEL");
+        assert_eq!(encode_key(0x35, "", false, false, false, false), Some(vec![0x1b]), "Escape");
     }
 
     /// Application-cursor mode swaps CSI for SS3 — getting this wrong breaks arrow keys in vim
     /// and every full-screen TUI.
     #[test]
     fn arrows_follow_application_cursor_mode() {
-        assert_eq!(encode_key(0x7E, "", false, false, false), Some(b"\x1b[A".to_vec()));
-        assert_eq!(encode_key(0x7E, "", false, false, true), Some(b"\x1bOA".to_vec()));
+        assert_eq!(encode_key(0x7E, "", false, false, false, false), Some(b"\x1b[A".to_vec()));
+        assert_eq!(encode_key(0x7E, "", false, false, false, true), Some(b"\x1bOA".to_vec()));
     }
 
     #[test]
     fn control_letters_become_control_codes() {
-        assert_eq!(encode_key(0x08, "c", true, false, false), Some(vec![0x03]), "Ctrl+C");
-        assert_eq!(encode_key(0x00, "a", true, false, false), Some(vec![0x01]), "Ctrl+A");
-        assert_eq!(encode_key(0x31, " ", true, false, false), Some(vec![0x00]), "Ctrl+Space is NUL");
+        assert_eq!(encode_key(0x08, "c", true, false, false, false), Some(vec![0x03]), "Ctrl+C");
+        assert_eq!(encode_key(0x00, "a", true, false, false, false), Some(vec![0x01]), "Ctrl+A");
+        assert_eq!(
+            encode_key(0x31, " ", true, false, false, false),
+            Some(vec![0x00]),
+            "Ctrl+Space is NUL"
+        );
     }
 
     /// Alt/Meta prefixes with ESC, both for plain characters and for named sequences.
     #[test]
     fn alt_prefixes_with_escape() {
-        assert_eq!(encode_key(0x00, "a", false, true, false), Some(vec![0x1b, b'a']));
-        assert_eq!(encode_key(0x7E, "", false, true, false), Some(b"\x1b\x1b[A".to_vec()));
+        assert_eq!(encode_key(0x00, "a", false, true, false, false), Some(vec![0x1b, b'a']));
+        assert_eq!(encode_key(0x7E, "", false, true, false, false), Some(b"\x1b\x1b[A".to_vec()));
     }
 
     #[test]
     fn plain_text_passes_through_as_utf8() {
-        assert_eq!(encode_key(0x00, "a", false, false, false), Some(vec![b'a']));
-        assert_eq!(encode_key(0x00, "é", false, false, false), Some("é".as_bytes().to_vec()));
+        assert_eq!(encode_key(0x00, "a", false, false, false, false), Some(vec![b'a']));
+        assert_eq!(encode_key(0x00, "é", false, false, false, false), Some("é".as_bytes().to_vec()));
     }
 
     /// A bare modifier press produces no characters and must send nothing.
     #[test]
     fn keys_with_no_characters_send_nothing() {
-        assert_eq!(encode_key(0x3B, "", false, false, false), None);
+        assert_eq!(encode_key(0x3B, "", false, false, false, false), None);
+    }
+
+    /// Shift+Tab is back-tab, not another forward tab: sending TAB makes a completion menu or a
+    /// field order walk the wrong way, with no way to go back.
+    #[test]
+    fn shift_tab_is_back_tab() {
+        assert_eq!(encode_key(0x30, "\t", false, false, false, false), Some(vec![b'\t']), "Tab");
+        assert_eq!(encode_key(0x30, "\t", false, false, true, false), Some(b"\x1b[Z".to_vec()));
+        // Alt still prefixes the back-tab sequence, like every other named key.
+        assert_eq!(encode_key(0x30, "\t", false, true, true, false), Some(b"\x1b\x1b[Z".to_vec()));
+    }
+
+    /// AppKit's button numbering (0=left, 1=right, 2=middle) disagrees with xterm's
+    /// (0=left, 1=middle, 2=right) on exactly the pair that matters, and the mismatch used to
+    /// report every right-click as a middle-click — which pastes, in an app that honours it.
+    #[test]
+    fn appkit_buttons_map_to_their_xterm_codes() {
+        assert_eq!(xterm_button(0), Some(0), "left");
+        assert_eq!(xterm_button(1), Some(2), "right is xterm 2, not 1");
+        assert_eq!(xterm_button(2), Some(1), "middle is xterm 1, not 2");
+        assert_eq!(xterm_button(3), None, "back/forward have no xterm encoding");
+    }
+
+    /// A trackpad reports a fraction of a cell per event; rounding each one alone leaves a slow
+    /// two-finger scroll frozen, so the remainder has to carry.
+    #[test]
+    fn sub_cell_scroll_deltas_accumulate() {
+        let rem = Cell::new(0.0);
+        assert_eq!(scroll_lines(&rem, 0.4), 0);
+        assert_eq!(scroll_lines(&rem, 0.4), 0);
+        assert_eq!(scroll_lines(&rem, 0.4), 1, "three sub-cell nudges make a line");
+        // A fast flick forwards its whole distance, not one line.
+        let rem = Cell::new(0.0);
+        assert_eq!(scroll_lines(&rem, 7.5), 7);
+        assert_eq!(scroll_lines(&rem, 0.5), 1, "the carried half completes the eighth line");
+        // Truncation is toward zero, so scrolling the other way loses nothing either.
+        let rem = Cell::new(0.0);
+        assert_eq!(scroll_lines(&rem, -0.5), 0);
+        assert_eq!(scroll_lines(&rem, -0.5), -1);
     }
 }
