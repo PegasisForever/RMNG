@@ -398,6 +398,10 @@ async fn store_claude(app: &App, tokens: TokenResp) -> Result<String> {
     struct ProfileAccount {
         #[serde(default)]
         email: String,
+        /// The account's own uuid, which every clone running this account has to declare.
+        /// See `crate::claude::identity_json`.
+        #[serde(default)]
+        uuid: String,
     }
     #[derive(Default, Deserialize)]
     struct ProfileOrg {
@@ -431,6 +435,7 @@ async fn store_claude(app: &App, tokens: TokenResp) -> Result<String> {
     let stored = crate::claude::StoredClaudeAccount {
         id: format!("{email}|{}", profile.organization.uuid),
         email: email.clone(),
+        account_uuid: profile.account.uuid,
         org_uuid: profile.organization.uuid,
         org_name: profile.organization.name,
         active: false,

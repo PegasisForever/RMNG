@@ -28,7 +28,7 @@ control-server binary and streamed to a container over `docker exec bash -s` —
 
 | Script | Runs where | Invoked by | Purpose |
 |---|---|---|---|
-| `crates/control-server/scripts/claude-import.sh` | in a clone container (`docker exec`) | `provision::run_clone_op` (`claude.rs`) | Read `claude auth status` / the credentials file, clear it, or install a token |
+| `crates/control-server/scripts/claude-import.sh` | in a clone container (`docker exec`) | `provision::run_clone_op` (`claude.rs`) | Clear the credentials file, or install a token and the identity that goes with it |
 | `crates/control-server/scripts/codex-import.sh` | in a clone container (`docker exec`) | `clone_ops::run_clone_op` (`codex.rs`) | Read `~/.codex/auth.json` status / the auth file, clear it, or install a token |
 | `template/setup/{lib,10-desktop,15-gnome-patch,20-toolbox,30-user}.sh` | in the template build (`RUN`) | `template/Dockerfile` | Provision the clone template rootfs: desktop, patched shell, dev toolbox, the clone user + its units (the RMNG binaries are **not** baked in — the control-server injects them at clone-create time) |
 | `gnome-patch/build-shell-deb.sh` | the `gnome-build` stage of `template/Dockerfile` | `docker build` | Build the patched gnome-shell `.deb` |
@@ -45,14 +45,17 @@ they never touch the control-server binary or a live container.
 
 ## In-container guest scripts
 
-### `claude-import.sh <user> status|read|clear|apply [b64]`
+### `claude-import.sh <user> clear|apply [creds_b64] [identity_b64]`
 Runs inside the target **clone** container as the clone user, printing the raw result to
-stdout. `status` — `claude auth status` JSON (stderr merged so a logged-out clone still
-parses; never fails). `read` — the clone's `~/.claude/.credentials.json`. `clear` — delete
-it, print `CLEARED`. `apply <b64>` — write `~/.claude/.credentials.json` (0600) from the
-base64 JSON in `$3` (the current short-lived access token, refresh emptied). Backs
-`claude.rs`'s `{check_clone_auth, import_clone_account, apply_clone_token}`; hot-swaps a
-running clone's account with no restart (Claude Code re-reads creds per request).
+stdout. `clear` — delete `~/.claude/.credentials.json`, print `CLEARED`. `apply` — write
+that file (0600) from the base64 JSON in `$3` (the current short-lived access token, refresh
+emptied), print `RMNG_APPLY_OK`, then merge the base64 identity in `$4` into
+`~/.claude.json`. The identity is `userID`, `machineID` and `oauthAccount`, and it names the
+account the token belongs to, which is what Claude Code reports to Anthropic on every
+request. Pass `-` for `$4` to install the token alone. The merge keeps the other keys in
+that file and prints one of `RMNG_IDENTITY_{WRITTEN,CURRENT,FAILED}`, none of which fails
+the push. Backs `claude.rs`'s `apply_clone_token`; hot-swaps a running clone's account with
+no restart (Claude Code re-reads both files per request).
 
 ### `codex-import.sh <user> status|read|clear|apply [b64]`
 Mirrors `claude-import.sh` for the Codex CLI. Runs inside the target **clone** container

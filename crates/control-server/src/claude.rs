@@ -17,9 +17,11 @@
 //! it needed a clone standing, Claude Code installed in it, and a second login for an
 //! account the provider will hand over directly.
 //!
-//! What the server writes INTO a clone is unchanged. Each clone gets a short-lived access
-//! token in its `~/.claude/.credentials.json` with an empty refresh token, so its Claude
-//! Code can never rotate the pair this server owns. Those writes go over `docker exec`
+//! Each clone gets a short-lived access token in its `~/.claude/.credentials.json` with an
+//! empty refresh token, so its Claude Code can never rotate the pair this server owns. It
+//! gets the account's identity with it ([`identity_json`]), because Claude Code names its
+//! account to Anthropic on every request and a token swap alone leaves it naming the
+//! previous one. Those writes go over `docker exec`
 //! ([`crate::provision::run_clone_op`]), addressing the clone by container name.
 
 use std::collections::HashMap;
@@ -37,6 +39,9 @@ use crate::app::App;
 use crate::clone_ops::{now_ms, rand_u64, shuffle, snippet};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// Who an access token belongs to. Same endpoint the sign-in uses (`crate::oauth`), read
+/// here only to backfill an account uuid the sign-in did not record.
+const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
@@ -75,6 +80,14 @@ const ROTATE_SECS: u64 = 600;
 pub struct StoredClaudeAccount {
     pub id: String,
     pub email: String,
+    /// The account's own uuid at Anthropic, which is NOT the organization's.
+    ///
+    /// Claude Code names the signed-in account by this uuid in every request it makes
+    /// ([`identity_json`]), so a clone cannot be told who it is without it. Accounts
+    /// imported before this field existed carry an empty string until the poller fills it
+    /// in from the profile endpoint.
+    #[serde(default)]
+    pub account_uuid: String,
     #[serde(default)]
     pub org_uuid: String,
     #[serde(default)]
@@ -507,19 +520,33 @@ async fn refresh_inner(
     Ok(after)
 }
 
-/// `email`'s current access token, refreshed (and persisted) first if within
-/// [`refresh_lead_ms`] of expiry. Returns `(token, rotated)`. All refreshes run
+/// `email`'s current account, refreshed (and persisted) first if within
+/// [`refresh_lead_ms`] of expiry. Returns `(account, rotated)`. All refreshes run
 /// under the store's refresh gate, so concurrent callers can't burn the same
-/// single-use refresh token; the account is re-read under the gate so a refresh
+/// single-use refresh token. The account is re-read under the gate so a refresh
 /// another caller just finished is observed instead of repeated.
-pub async fn fresh_access_token(app: &App, email: &str) -> Result<(String, bool)> {
+pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredClaudeAccount, bool)> {
     let _gate = app.claude.refresh_gate.lock().await;
     let mut acct = app
         .claude
         .get_by_email(email)
         .with_context(|| format!("no imported Claude account for '{email}'"))?;
     if !is_expired(&acct.email, acct.expires_at) {
-        return Ok((acct.access_token, false));
+        return Ok((acct, false));
+    }
+    // A rejected grant cannot mint anything, so posting it again only tells Anthropic that
+    // this address keeps presenting a dead refresh token. Nothing here can repair it: the
+    // repair is a sign-in, and that clears the record ([`upsert_account`] stores
+    // `last_refresh: None`), so the next poll picks the account straight back up.
+    //
+    // Left unguarded this ran every poll forever. Measured on CT 101 on 2026-09-04: two
+    // rejected accounts retried every 10 minutes for 38 hours, about 460 rejected calls.
+    if let Some(rec) = acct.last_refresh.as_ref().filter(|r| r.rejected) {
+        let why = rec.error.as_deref().unwrap_or("no reason recorded");
+        bail!(
+            "{email}'s refresh token was rejected by Anthropic, so no refresh is attempted \
+             until it is signed in again: {why}"
+        );
     }
     if let Err(e) = refresh_account(&app.http, &mut acct).await {
         // Persist the attempt even though it failed. `refresh_account` leaves the tokens
@@ -539,7 +566,66 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(String, bool)
             acct.email
         )
     })?;
-    Ok((acct.access_token, true))
+    Ok((acct, true))
+}
+
+/// Ask Anthropic which account a token belongs to, for the `accountUuid` a sign-in before
+/// 2026-09-04 never captured. One call per account, once, and only for the accounts that
+/// still lack it: [`identity_json`] cannot name the account without it, so those clones
+/// keep declaring whoever they were bound to last.
+async fn fetch_account_uuid(http: &reqwest::Client, token: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Profile {
+        #[serde(default)]
+        account: ProfileAccount,
+    }
+    #[derive(Default, Deserialize)]
+    struct ProfileAccount {
+        #[serde(default)]
+        uuid: String,
+    }
+    let resp = http
+        .get(PROFILE_URL)
+        .timeout(FETCH_TIMEOUT)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", USER_AGENT)
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        bail!("profile {}{}", status.as_u16(), snippet(&text));
+    }
+    let profile: Profile = resp.json().await?;
+    if profile.account.uuid.is_empty() {
+        bail!("the profile carried no account uuid");
+    }
+    Ok(profile.account.uuid)
+}
+
+/// Fill in `email`'s missing `account_uuid` and persist. Runs under the refresh gate so the
+/// read-modify-write cannot land on top of a refresh that rotated the tokens meanwhile.
+async fn backfill_account_uuid(app: &App, email: &str, token: &str) {
+    let uuid = match fetch_account_uuid(&app.http, token).await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::debug!("looking up {email}'s account uuid failed, retrying next poll: {e:#}");
+            return;
+        }
+    };
+    let _gate = app.claude.refresh_gate.lock().await;
+    let Some(mut acct) = app.claude.get_by_email(email) else {
+        return;
+    };
+    if acct.account_uuid == uuid {
+        return;
+    }
+    acct.account_uuid = uuid;
+    match app.claude.update_account(&acct) {
+        Ok(()) => tracing::info!("recorded {email}'s account uuid, so its clones can name it"),
+        Err(e) => tracing::warn!("persisting {email}'s account uuid failed: {e:#}"),
+    }
 }
 
 // The usage API returns explicit `null` for numeric fields that don't apply (e.g.
@@ -719,7 +805,8 @@ async fn poll_inner(app: &App) -> Result<bool> {
             tokio::time::sleep(STAGGER).await;
         }
         let outcome = async {
-            let (token, rotated) = fresh_access_token(app, &acct.email).await?;
+            let (fresh, rotated) = fresh_access_token(app, &acct.email).await?;
+            let token = fresh.access_token;
             if rotated {
                 // Before the usage fetch, not after the whole pass: this account's clones
                 // are holding the token the refresh above just replaced, and the fetch can
@@ -727,6 +814,11 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 push_stale_tokens_for(app, Some(&acct.email)).await;
             }
             let raw = fetch_usage(&app.http, &token).await?;
+            // After the usage fetch, so a profile lookup that fails never costs the numbers.
+            // Once it lands the account is complete and this never runs again.
+            if fresh.account_uuid.is_empty() {
+                backfill_account_uuid(app, &acct.email, &token).await;
+            }
             Ok::<_, anyhow::Error>(to_usage(acct, raw))
         }
         .await;
@@ -1635,25 +1727,102 @@ fn credentials_json(token: &str) -> String {
     )
 }
 
-/// Install an access token into clone `host_id`'s `~/.claude/.credentials.json` over
-/// `docker exec` (via [`crate::provision::run_clone_op`], fish-proof). Hot-swaps a running
-/// clone with **no** agent-wrapper restart — Claude Code re-reads the file at request time.
+/// A stable 64-hex machine identity for `acct`, different for every account.
+///
+/// Anthropic sees this value with every request Claude Code makes, so one value shared by
+/// the whole fleet reads as a single machine running dozens of sessions across a dozen
+/// accounts. Measured on 2026-09-04: all 24 readable clone homes on CT 105 and CT 106 held
+/// the identical `userID`, the one baked into the template image. Deriving it from the
+/// account instead makes one account look like one machine, which is what
+/// [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) settled on as well (its
+/// device pool canonicalizes to exactly one device per credential).
+///
+/// `field` separates the two identifiers Claude Code keeps, so `userID` and `machineID`
+/// never collide.
+fn device_id(acct: &StoredClaudeAccount, field: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"rmng-claude-identity/v1|");
+    h.update(field.as_bytes());
+    h.update(b"|");
+    // The uuid, not the email: an account re-signed-in under the same address keeps its
+    // machine rather than appearing to move to a new one.
+    h.update(acct.account_uuid.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// What clone `host_id` should say about itself once it runs `acct`'s token: the account
+/// identity Claude Code sends to Anthropic, plus this account's machine identity.
+///
+/// `None` when the account uuid is unknown, because a clone that names the wrong account is
+/// exactly the problem this fixes. The poller backfills the uuid within one pass
+/// ([`backfill_account_uuid`]), and until then the clone keeps whatever it had.
+///
+/// The guest merges these three keys into `~/.claude.json` and leaves its other 50 alone.
+/// Inside `oauthAccount` it keeps the sibling fields (billing type, rate-limit tier) when
+/// the account is unchanged and drops them when it is not, since none of them describe the
+/// new account.
+fn identity_json(acct: &StoredClaudeAccount) -> Option<String> {
+    if acct.account_uuid.is_empty() {
+        return None;
+    }
+    let body = serde_json::json!({
+        "userID": device_id(acct, "user"),
+        "machineID": device_id(acct, "machine"),
+        "oauthAccount": {
+            "accountUuid": acct.account_uuid,
+            "emailAddress": acct.email,
+            "organizationUuid": acct.org_uuid,
+            "organizationName": acct.org_name,
+        },
+    });
+    Some(body.to_string())
+}
+
+/// What was last delivered to a clone, as one comparable string: the token AND the identity
+/// that went with it. A rebind can hand a clone a different account whose token happens to
+/// be pushed already, and comparing tokens alone would call that clone current while it
+/// still names the previous account.
+fn push_key(acct: &StoredClaudeAccount) -> String {
+    format!(
+        "{}|{}",
+        fingerprint(&acct.access_token),
+        fingerprint(identity_json(acct).as_deref().unwrap_or(""))
+    )
+}
+
+/// Install `acct`'s access token AND its identity into clone `host_id` over `docker exec`
+/// (via [`crate::provision::run_clone_op`], fish-proof). Hot-swaps a running clone with
+/// **no** agent-wrapper restart, because Claude Code re-reads both files at request time.
 /// Best-effort; errors are returned to log. Low-level: callers that target an assigned host
 /// should go through [`push_account_to_clone`] / [`push_stale_tokens`] so the push is recorded.
-pub async fn apply_clone_token(app: &App, host_id: &str, token: &str) -> Result<()> {
-    let token = token.trim();
+///
+/// The token alone used to be the whole push, which left `~/.claude.json` naming whoever the
+/// clone ran before. Measured on CT 105 on 2026-09-04: 11 of 14 readable clones declared an
+/// account that was not the one their token belonged to. See [`identity_json`].
+pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredClaudeAccount) -> Result<()> {
+    let token = acct.access_token.trim();
     if !token.starts_with("sk-ant-") {
         bail!("refusing to apply a non-`sk-ant-` token");
     }
     let b64 = B64.encode(credentials_json(token).as_bytes());
-    let out = crate::provision::run_clone_op(app, host_id, "apply", &[&b64]).await?;
+    // "-" rather than an empty argument: the guest reads positional arguments, and an empty
+    // one is easy to lose to a shell along the way.
+    let id_b64 = identity_json(acct)
+        .map(|j| B64.encode(j.as_bytes()))
+        .unwrap_or_else(|| "-".to_string());
+    let out = crate::provision::run_clone_op(app, host_id, "apply", &[&b64, &id_b64]).await?;
     // A distinctive marker, matched against stdout and stderr merged. The old check was for
     // "OK", which any line containing TOKEN, BROKEN or LOOKUP satisfies.
-    if out.contains("RMNG_APPLY_OK") {
-        Ok(())
-    } else {
+    if !out.contains("RMNG_APPLY_OK") {
         bail!("token apply produced unexpected output: {}", out.trim());
     }
+    // The identity is a separate outcome from the token. A clone that took the token and
+    // refused the identity still works, so it is a warning rather than a failed push.
+    if let Some(line) = out.lines().find(|l| l.contains("RMNG_IDENTITY_FAILED")) {
+        tracing::warn!("{host_id} kept {}'s token but not its identity: {}", acct.email, line.trim());
+    }
+    Ok(())
 }
 
 /// Remove clone `host_id`'s `~/.claude/.credentials.json` over `docker exec`, leaving it
@@ -1672,14 +1841,14 @@ pub async fn clear_clone_token(app: &App, host_id: &str) -> Result<()> {
 /// container name), recording the push so the reconcile pass doesn't repeat it. If the
 /// refresh rotated the token, fan it out to the account's other clones in the background.
 pub async fn push_account_to_clone(app: &App, host_id: &str, email: &str) -> Result<()> {
-    let (token, rotated) = fresh_access_token(app, email).await?;
-    let applied = apply_clone_token(app, host_id, &token).await;
+    let (acct, rotated) = fresh_access_token(app, email).await?;
+    let applied = apply_clone_token(app, host_id, &acct).await;
     if applied.is_ok() {
         app.claude
             .pushed
             .lock()
             .unwrap()
-            .insert(host_id.to_string(), token);
+            .insert(host_id.to_string(), push_key(&acct));
     }
     // Fan out whether or not THIS clone took its copy. The refresh above already happened,
     // and Anthropic revokes the previous access token the moment it mints a new one — so
@@ -1731,7 +1900,7 @@ pub const PUSH_CONCURRENCY: usize = 8;
 /// is bounded by the slowest clone rather than by their sum.
 pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     let started = std::time::Instant::now();
-    let mut targets: Vec<(String, String, String)> = Vec::new(); // (host, email, token)
+    let mut targets: Vec<(String, StoredClaudeAccount)> = Vec::new(); // (host, account)
     let mut skipped_fresh = 0usize;
     let mut skipped_no_account = 0usize;
 
@@ -1756,11 +1925,11 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
             );
             continue;
         };
-        if app.claude.pushed.lock().unwrap().get(&host.id) == Some(&acct.access_token) {
+        if app.claude.pushed.lock().unwrap().get(&host.id) == Some(&push_key(&acct)) {
             skipped_fresh += 1;
             continue;
         }
-        targets.push((host.id.clone(), email.to_string(), acct.access_token));
+        targets.push((host.id.clone(), acct));
     }
 
     if targets.is_empty() {
@@ -1780,18 +1949,19 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     let mut failed = 0usize;
     let mut unreachable = 0usize;
     for chunk in targets.chunks(PUSH_CONCURRENCY) {
-        let results = futures::future::join_all(chunk.iter().map(|(id, email, token)| async move {
+        let results = futures::future::join_all(chunk.iter().map(|(id, acct)| async move {
             // A clone whose container is not running cannot take a push, and asking costs a
             // fraction of what the failing exec does. On a fleet with many stopped clones
             // that is most of the pass.
             if !app.docker.is_running(id).await.unwrap_or(false) {
-                return (id, email, token, None);
+                return (id, acct, None);
             }
-            (id, email, token, Some(apply_clone_token(app, id, token).await))
+            (id, acct, Some(apply_clone_token(app, id, acct).await))
         }))
         .await;
 
-        for (id, email, token, outcome) in results {
+        for (id, acct, outcome) in results {
+            let email = &acct.email;
             match outcome {
                 None => {
                     unreachable += 1;
@@ -1799,7 +1969,7 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
                 }
                 Some(Ok(())) => {
                     ok += 1;
-                    app.claude.pushed.lock().unwrap().insert(id.clone(), token.clone());
+                    app.claude.pushed.lock().unwrap().insert(id.clone(), push_key(acct));
                     tracing::info!("pushed fresh token ({email}) to {id}");
                 }
                 Some(Err(e)) => {
@@ -1878,6 +2048,7 @@ mod tests {
         let acct = StoredClaudeAccount {
             id: "a@b|o".into(),
             email: "a@b".into(),
+            account_uuid: "acct-uuid".into(),
             org_uuid: "o".into(),
             org_name: String::new(),
             active: false,
@@ -1913,6 +2084,7 @@ mod tests {
         let acct = StoredClaudeAccount {
             id: "a@b|o".into(),
             email: "a@b".into(),
+            account_uuid: "acct-uuid".into(),
             org_uuid: "o".into(),
             org_name: String::new(),
             active: false,
@@ -2120,6 +2292,7 @@ mod tests {
         StoredClaudeAccount {
             id: email.into(),
             email: email.into(),
+            account_uuid: format!("uuid-of-{email}"),
             org_uuid: String::new(),
             org_name: String::new(),
             active: true,
@@ -2222,6 +2395,71 @@ mod tests {
         assert!(!app.claude.emails().contains(&"a@x".to_string()));
         assert!(app.claude.emails().contains(&"b@x".to_string()));
         assert!(!app.claude.delete("a@x").unwrap(), "already gone → false");
+    }
+
+    /// The provider has already said this grant is dead, so the only thing another POST can
+    /// do is tell Anthropic that this address keeps presenting a rejected refresh token. The
+    /// account comes back through a sign-in, which clears the record.
+    #[tokio::test]
+    async fn a_rejected_grant_is_never_posted_to_the_provider_again() {
+        let app = app_with_group(&["a@x"]);
+        let mut acct = app.claude.get_by_email("a@x").unwrap();
+        acct.expires_at = 0; // long expired, so a refresh is due
+        acct.last_refresh = Some(RefreshRecord {
+            at: 1,
+            ok: false,
+            rt_before: "beef".into(),
+            rt_after: String::new(),
+            error: Some("refresh 400: invalid_grant".into()),
+            rejected: true,
+        });
+        app.claude.update_account(&acct).unwrap();
+
+        let err = fresh_access_token(&app, "a@x").await.unwrap_err().to_string();
+        assert!(err.contains("signed in again"), "message: {err}");
+        assert!(err.contains("invalid_grant"), "the reason travels with it: {err}");
+        // No HTTP call happened, so the record is exactly the one the test wrote.
+        let after = app.claude.get_by_email("a@x").unwrap();
+        assert_eq!(after.last_refresh.unwrap().rt_before, "beef");
+    }
+
+    /// A clone declares its account to Anthropic on every request. Handing it a token
+    /// without the matching identity is what left 11 of 14 clones on CT 105 naming an
+    /// account they were not running.
+    #[test]
+    fn the_identity_names_the_account_whose_token_is_installed() {
+        let acct = stored("a@x");
+        let body: serde_json::Value =
+            serde_json::from_str(&identity_json(&acct).expect("uuid present")).unwrap();
+        assert_eq!(body["oauthAccount"]["emailAddress"], "a@x");
+        assert_eq!(body["oauthAccount"]["accountUuid"], "uuid-of-a@x");
+        assert_eq!(body["userID"].as_str().unwrap().len(), 64);
+        assert_ne!(body["userID"], body["machineID"], "two identifiers, not one");
+    }
+
+    #[test]
+    fn an_account_without_a_uuid_gets_no_identity_rather_than_a_wrong_one() {
+        let mut acct = stored("a@x");
+        acct.account_uuid = String::new();
+        assert!(identity_json(&acct).is_none());
+    }
+
+    #[test]
+    fn one_account_is_one_machine_and_two_accounts_are_two() {
+        let (a, b) = (stored("a@x"), stored("b@x"));
+        assert_ne!(device_id(&a, "user"), device_id(&b, "user"));
+        // Stable across calls, or every push would rewrite the clone's config.
+        assert_eq!(device_id(&a, "user"), device_id(&stored("a@x"), "user"));
+    }
+
+    /// A rebind can hand a clone an account whose token was already pushed somewhere else.
+    /// Comparing tokens alone called that clone current while it still named its old account.
+    #[test]
+    fn a_clone_is_stale_when_its_identity_changed_even_if_the_token_did_not() {
+        let a = stored("a@x");
+        let mut b = stored("b@x");
+        b.access_token = a.access_token.clone();
+        assert_ne!(push_key(&a), push_key(&b));
     }
 
     #[tokio::test]

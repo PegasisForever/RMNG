@@ -379,6 +379,15 @@ pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredCodexAc
     if !is_expired(&acct.email, acct.expires_at) {
         return Ok((acct, false));
     }
+    // A rejected grant is retried by nobody. See `claude::fresh_access_token`, which carries
+    // the reasoning and the measurement: the repair is a sign-in, and that clears the record.
+    if let Some(rec) = acct.last_refresh.as_ref().filter(|r| r.rejected) {
+        let why = rec.error.as_deref().unwrap_or("no reason recorded");
+        anyhow::bail!(
+            "{email}'s codex refresh token was rejected, so no refresh is attempted until it \
+             is signed in again: {why}"
+        );
+    }
     if let Err(e) = refresh_account(&app.http, &mut acct).await {
         // Persist the attempt even though it failed: every failing path leaves the tokens
         // untouched, so this writes back the record and nothing else.
@@ -1739,6 +1748,47 @@ mod tests {
             expires_at: 0,
             last_refresh: None,
         }
+    }
+
+    /// The Codex twin of `claude::a_rejected_grant_is_never_posted_to_the_provider_again`.
+    /// Both providers rotate a single-use refresh token, so both stop asking once the
+    /// provider has rejected one.
+    #[tokio::test]
+    async fn a_rejected_codex_grant_is_never_posted_to_the_provider_again() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!(
+            "rmng-codex-rejected-{}-{}",
+            std::process::id(),
+            crate::clone_ops::rand_u64()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
+        let app = App::new(
+            store,
+            wire::AppConfig {
+                data_dir: dir.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+        );
+        let mut acct = sample_account();
+        acct.expires_at = 0; // long expired, so a refresh is due
+        acct.last_refresh = Some(crate::claude::RefreshRecord {
+            at: 1,
+            ok: false,
+            rt_before: "beef".into(),
+            rt_after: String::new(),
+            error: Some("refresh 400: invalid_grant".into()),
+            rejected: true,
+        });
+        app.codex.update_account(&acct).unwrap();
+
+        let err = fresh_access_token(&app, &acct.email)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signed in again"), "message: {err}");
+        let after = app.codex.get_by_email(&acct.email).unwrap();
+        assert_eq!(after.last_refresh.unwrap().rt_before, "beef");
     }
 
     /// One imported account is the common rig, and it should need no answer in Settings.
