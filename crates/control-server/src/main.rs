@@ -240,8 +240,7 @@ async fn main() -> Result<()> {
 
     // GStreamer init MUST finish before smb/ssh (and any other child
     // spawners). Those supervisors otherwise inherit gst-plugin-scanner pipes and
-    // hang media init forever — web/video/forward never bind. See
-    // docs/superpowers/specs/2026-07-24-gstreamer-init-before-children-design.md.
+    // hang media init forever — web/video/forward never bind.
     let app_for_bg = app.clone();
     let app_for_media = app.clone();
     boot::run_late_boot(
