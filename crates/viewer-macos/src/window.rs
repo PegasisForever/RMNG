@@ -20,8 +20,9 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSCursor, NSEvent, NSEventModifierFlags, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSApplication, NSApplicationPresentationOptions, NSBackingStoreType, NSCursor, NSEvent,
+    NSEventModifierFlags, NSResponder, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -74,7 +75,7 @@ pub struct WinCtx {
 
 impl WinCtx {
     /// Is pointer lock currently holding the cursor?
-    fn locked(&self) -> bool {
+    pub fn locked(&self) -> bool {
         self.pointer_lock.as_ref().is_some_and(|p| p.is_engaged())
     }
 
@@ -320,6 +321,19 @@ define_class!(
             };
             self.addTrackingArea(&area);
             *self.ivars().tracking.borrow_mut() = Some(area);
+        }
+
+        // The window moved to a display with a different backing scale (or gained one at all).
+        // A hosted layer's `contentsScale` does not follow the view on its own, so it is set
+        // here as well as at construction — see [`make_video_view`] for why it matters.
+        #[unsafe(method(viewDidChangeBackingProperties))]
+        fn view_did_change_backing_properties(&self) {
+            // SAFETY: plain superclass call on the main thread; NSView's implementation is the
+            // documented thing to chain to from an override of this method.
+            unsafe { msg_send![super(self), viewDidChangeBackingProperties] }
+            if let Some(layer) = self.layer() {
+                layer.setContentsScale(self.backing_scale());
+            }
         }
 
         #[unsafe(method(mouseEntered:))]
@@ -575,6 +589,25 @@ impl ViewerView {
         }
     }
 
+    /// The scale factor of the display this view is on, falling back to 1.0 before the view has
+    /// a window (never 2.0: guessing Retina on a 1x display would scale the layer up by two).
+    fn backing_scale(&self) -> f64 {
+        self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0)
+    }
+
+    /// Is this view the first responder of its window — i.e. are typed keys actually on their
+    /// way to the remote right now? What the ⌘Q / ⌘, monitor asks before stealing those chords
+    /// from the menu (see `app::install_menu_chord_monitor`).
+    pub fn owns_keystrokes(&self) -> bool {
+        let Some(fr) = self.window().and_then(|w| w.firstResponder()) else {
+            return false;
+        };
+        // Identity, not equality: `isEqual:` on responders is pointer equality anyway, and this
+        // says plainly that the *same object* is the one AppKit would hand the key event to.
+        let me: &NSResponder = self;
+        std::ptr::eq(&*fr, me)
+    }
+
     /// Release every key + button this window holds on the remote (genuine focus loss).
     pub fn release_all(&self) {
         if let Some(ctx) = self.ctx() {
@@ -617,9 +650,36 @@ pub fn make_window_shell(mtm: MainThreadMarker, title: &str, is_main: bool) -> R
     window.setTitle(&NSString::from_str(title));
     window.setAcceptsMouseMovedEvents(true);
     install_close_policy(mtm, &window, is_main);
-    window.center();
+    place_cascaded(&window);
     window.makeKeyAndOrderFront(None);
     window
+}
+
+thread_local! {
+    /// Where the next window's top-left goes. `cascadeTopLeftFromPoint:` answers with the point
+    /// for the window *after* the one it just placed, so carrying that answer here is the whole
+    /// cascade; AppKit also steps the column and wraps at the screen edge for us.
+    static NEXT_CASCADE: Cell<Option<NSPoint>> = const { Cell::new(None) };
+}
+
+/// Place `window` one step down the staircase from the last one.
+///
+/// An N-monitor layout opens N windows at once, and centring every one of them stacks them
+/// exactly on top of each other — the ones underneath can only be reached through the window
+/// menu. This is deliberately just a cascade: which *physical* screen a remote monitor's window
+/// belongs on is a separate question, and `AppState`'s layout is the remote geometry, not the
+/// local one.
+fn place_cascaded(window: &NSWindow) {
+    let from = NEXT_CASCADE.with(|c| c.get());
+    // The first window still lands in the middle of the screen; the staircase starts there.
+    // `NSZeroPoint` means "don't move it, just tell me where the next one goes", which is
+    // exactly how the cascade is seeded from a centred window.
+    let start = from.unwrap_or_else(|| {
+        window.center();
+        NSPoint::new(0.0, 0.0)
+    });
+    let next = window.cascadeTopLeftFromPoint(start);
+    NEXT_CASCADE.with(|c| c.set(Some(next)));
 }
 
 // ── close policy ────────────────────────────────────────────────────────────────────────────
@@ -665,8 +725,58 @@ define_class!(
                 false
             }
         }
+
+        // Fullscreen presentation policy — see [`hidden_menubar_options`]. The delegate is
+        // shared by every window of its role, which is right for this: the policy is about
+        // what fullscreen means for a viewer window, not about which one it is, and the
+        // window AppKit asks is whichever one the user just sent to fullscreen.
+        #[unsafe(method(window:willUseFullScreenPresentationOptions:))]
+        fn will_use_fullscreen_presentation_options(
+            &self,
+            _window: &NSWindow,
+            proposed: NSApplicationPresentationOptions,
+        ) -> NSApplicationPresentationOptions {
+            if std::env::var_os("RMNG_FULLSCREEN_MENUBAR").is_some() {
+                tracing::info!(
+                    "fullscreen: RMNG_FULLSCREEN_MENUBAR set — keeping the Mac menu bar's auto-hide reveal"
+                );
+                return proposed;
+            }
+            let chosen = hidden_menubar_options(proposed);
+            tracing::info!(
+                "fullscreen: presentation options {proposed:?} → {chosen:?} \
+                 (Mac menu bar hidden, not auto-hidden; F11 leaves fullscreen)"
+            );
+            chosen
+        }
     }
 );
+
+/// Rewrite AppKit's proposed fullscreen presentation options: swap the auto-hide menu bar /
+/// Dock pair for the hidden pair and keep everything else — notably `FullScreen`, which AppKit
+/// requires to stay set. `HideMenuBar` must be accompanied by `HideDock` (AppKit rejects it with
+/// an auto-hidden Dock), hence both are forced together.
+///
+/// # Why
+/// In macOS fullscreen the menu bar is only *auto-hidden* by default: parking the pointer at the
+/// top edge slides the Mac menu bar and the window's titlebar down over the content. That is
+/// precisely the strip a remote-desktop viewer needs to hand to the remote — the clone's GNOME
+/// top bar lives there, and the operator has to be able to reach it. Asking for `HideMenuBar |
+/// HideDock` instead means nothing is revealed at the top edge; F11 (consumed locally in
+/// `keyDown:`) remains the way out.
+///
+/// Opt out (keep the stock auto-hide reveal): `RMNG_FULLSCREEN_MENUBAR=1`. Same knob, same
+/// meaning, as the GTK viewer's `crates/viewer/src/fullscreen_macos.rs` — which needs 160 lines
+/// of `class_addMethod` injection to reach a window class GDK owns, where we simply own ours.
+fn hidden_menubar_options(
+    proposed: NSApplicationPresentationOptions,
+) -> NSApplicationPresentationOptions {
+    (proposed
+        - (NSApplicationPresentationOptions::AutoHideMenuBar
+            | NSApplicationPresentationOptions::AutoHideDock))
+        | NSApplicationPresentationOptions::HideMenuBar
+        | NSApplicationPresentationOptions::HideDock
+}
 
 impl WindowDelegate {
     fn new(mtm: MainThreadMarker, is_main: bool) -> Retained<Self> {
@@ -724,6 +834,14 @@ pub fn make_video_view(
     layer.setDevice(Some(device));
     layer.setPixelFormat(objc2_metal::MTLPixelFormat::BGRA8Unorm);
     layer.setFramebufferOnly(true);
+    // A layer we host ourselves does not inherit the view's scale — `setWantsLayer:` only does
+    // that for the layer AppKit makes. The draw path sizes the drawable from
+    // `backingScaleFactor` regardless, so the picture already lands at native resolution; the
+    // scale still has to be right or everything else the layer measures in points (its own
+    // geometry, and any content Core Animation rasterises) is off by 2× on a Retina display.
+    // (Asked of the window, not the view: the view is not in it yet, so it has no display of
+    // its own to answer for. `viewDidChangeBackingProperties` keeps this current afterwards.)
+    layer.setContentsScale(window.backingScaleFactor());
     view.setLayer(Some(&layer));
 
     window.setContentView(Some(&view));
@@ -805,6 +923,33 @@ mod tests {
         assert!(ix < 0.0, "a point in the left bar is left of the image, got {ix}");
         let (ix, _) = letterbox_inverse(v, f, (2000.0, 500.0));
         assert!(ix > 1920.0, "a point past the right bar is right of the image, got {ix}");
+    }
+
+    /// The fullscreen policy the operator actually needs: the top strip of the screen must stay
+    /// the remote's, so the Mac menu bar has to be *hidden*, not auto-hidden (which reveals it —
+    /// and the titlebar — the moment the pointer reaches the top edge). Mirrors the GTK viewer's
+    /// tests in `crates/viewer/src/fullscreen_macos.rs`, which is the same policy.
+    #[test]
+    fn fullscreen_swaps_the_auto_hide_pair_for_the_hidden_pair() {
+        use NSApplicationPresentationOptions as O;
+        let stock = O::FullScreen | O::AutoHideMenuBar | O::AutoHideDock;
+        let got = hidden_menubar_options(stock);
+        assert!(got.contains(O::HideMenuBar | O::HideDock));
+        assert!(!got.intersects(O::AutoHideMenuBar | O::AutoHideDock));
+        // AppKit requires FullScreen to survive the delegate's answer, and unrelated bits are
+        // none of our business.
+        assert!(got.contains(O::FullScreen));
+        assert!(hidden_menubar_options(stock | O::AutoHideToolbar).contains(O::AutoHideToolbar));
+    }
+
+    /// `HideMenuBar` alongside an auto-hidden Dock is an invalid AppKit combination, so the Dock
+    /// bit has to be forced even when only the menu bar's was proposed.
+    #[test]
+    fn a_hidden_menu_bar_always_brings_a_hidden_dock() {
+        use NSApplicationPresentationOptions as O;
+        let got = hidden_menubar_options(O::FullScreen | O::AutoHideMenuBar);
+        assert!(got.contains(O::HideDock));
+        assert!(!got.contains(O::AutoHideDock));
     }
 
     /// A wheel notch arrives as an accelerated line count, so the magnitude has to survive:
