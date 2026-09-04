@@ -39,8 +39,7 @@ use crate::render::{Overlay, Renderer};
 use crate::shared::{CursorEntry, Shared, Wake, WakeQueue, WakeSet};
 use crate::terminal::{TermCallbacks, TerminalView};
 use crate::window::{
-    install_close_policy, is_main_monitor, make_video_view, make_window_shell, SharedLayout,
-    ViewerView, WinCtx,
+    install_window_delegate, make_video_view, make_window_shell, SharedLayout, ViewerView, WinCtx,
 };
 
 /// How often the housekeeping tick runs: auto pointer-lock reconcile, cursor shape, clipboard,
@@ -264,7 +263,7 @@ impl AppState {
         for m in monitors {
             if !self.windows.contains_key(&m.id) {
                 let title = format!("RMNG viewer — monitor {}", m.id);
-                let window = make_window_shell(self.mtm, &title, is_main_monitor(m.id));
+                let window = make_window_shell(self.mtm, &title);
                 self.windows.insert(
                     m.id,
                     WindowEntry {
@@ -645,9 +644,9 @@ fn make_startup_window(mtm: MainThreadMarker) -> Retained<NSWindow> {
     };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(ns_string!("RMNG viewer"));
-    // The startup window is the only UI before the first spec arrives, so it is the main window
-    // for close purposes: closing it quits, rather than hiding the viewer behind the menu bar.
-    install_close_policy(mtm, &window, true);
+    // The startup window is the only UI before the first spec arrives, so closing it quits like
+    // any monitor window does, rather than hiding the viewer behind the menu bar.
+    install_window_delegate(mtm, &window);
     let label = NSTextField::labelWithString(
         ns_string!("Connecting to the server…\nChange the address with ⌘, (Settings)."),
         mtm,
@@ -681,7 +680,7 @@ define_class!(
         fn should_terminate_after_last_window(&self, _app: &NSApplication) -> bool {
             // Windows going away must not kill the app; the viewer is driven by the server's
             // view spec and can legitimately have no window for a while. Quitting on a user
-            // close is the window delegate's job instead (see `install_close_policy`).
+            // close is the window delegate's job instead (see `install_window_delegate`).
             false
         }
     }

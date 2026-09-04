@@ -625,17 +625,13 @@ impl ViewerView {
 /// window's whole life; only its content view swaps (video ⇄ terminal ⇄ placeholder), which is
 /// what lets a clone switch without destroying and rebuilding windows.
 ///
-/// `is_main` decides the close behaviour — see [`install_close_policy`].
-pub fn make_window_shell(mtm: MainThreadMarker, title: &str, is_main: bool) -> Retained<NSWindow> {
+/// Every window is closable, and closing any of them quits — see [`install_window_delegate`].
+pub fn make_window_shell(mtm: MainThreadMarker, title: &str) -> Retained<NSWindow> {
     let content = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 720.0));
-    // Only the main window gets a close button: a secondary window's existence mirrors the
-    // remote desktop's layout, so the user closing one would leave a hole nothing refills.
-    let mut style = NSWindowStyleMask::Titled
+    let style = NSWindowStyleMask::Titled
+        | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable
         | NSWindowStyleMask::Resizable;
-    if is_main {
-        style |= NSWindowStyleMask::Closable;
-    }
     // SAFETY: standard window creation; released-when-closed is disabled below.
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -649,7 +645,7 @@ pub fn make_window_shell(mtm: MainThreadMarker, title: &str, is_main: bool) -> R
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str(title));
     window.setAcceptsMouseMovedEvents(true);
-    install_close_policy(mtm, &window, is_main);
+    install_window_delegate(mtm, &window);
     place_cascaded(&window);
     window.makeKeyAndOrderFront(None);
     window
@@ -682,27 +678,12 @@ fn place_cascaded(window: &NSWindow) {
     NEXT_CASCADE.with(|c| c.set(Some(next)));
 }
 
-// ── close policy ────────────────────────────────────────────────────────────────────────────
-
-/// Is the window for `monitor_id` the main one? Slot 0 is the main window fleet-wide (it carries
-/// the close button, Settings and the tmux tabs) — the same rule the GTK viewer's `is_main`
-/// applies. `ViewMonitor::primary` is a different question: it describes which of the *remote*
-/// desktop's displays is primary, not which of our windows the user drives the viewer from.
-pub fn is_main_monitor(monitor_id: u32) -> bool {
-    monitor_id == 0
-}
-
-#[derive(Default)]
-struct WindowDelegateIvars {
-    /// Whether the guarded window is the main one; a secondary one refuses to close.
-    is_main: bool,
-}
+// ── window delegate ─────────────────────────────────────────────────────────────────────────
 
 define_class!(
     // SAFETY: NSObject superclass has no subclassing requirements; no conflicting Drop.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[ivars = WindowDelegateIvars]
     #[name = "RmngWindowDelegate"]
     struct WindowDelegate;
 
@@ -711,25 +692,19 @@ define_class!(
     unsafe impl NSWindowDelegate for WindowDelegate {
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
-            if self.ivars().is_main {
-                // Closing the main window means "done with the viewer", as it does in GTK
-                // (`app.quit()` there). Terminating deliberately is what keeps this from leaving
-                // a headless process behind, since the app must not quit on last-window-closed.
-                NSApplication::sharedApplication(self.mtm()).terminate(None);
-                true
-            } else {
-                // The window set is driven by the server's ViewSpec, not by the user: a closed
-                // secondary window is never rebuilt (reconcile only creates windows for monitors
-                // it has none for). Refusing covers the closes the missing close button can't —
-                // `performClose:`, and anything the window server initiates.
-                false
-            }
+            // Closing any window means "done with the viewer", as it does in GTK (`app.quit()`
+            // there). The window set mirrors the remote desktop, so a lone window the user shut
+            // would never come back — reconcile only builds windows for monitors it has none
+            // for — and quitting deliberately is also what keeps a last close from leaving a
+            // headless process behind, since the app must not quit on last-window-closed.
+            NSApplication::sharedApplication(self.mtm()).terminate(None);
+            true
         }
 
-        // Fullscreen presentation policy — see [`hidden_menubar_options`]. The delegate is
-        // shared by every window of its role, which is right for this: the policy is about
-        // what fullscreen means for a viewer window, not about which one it is, and the
-        // window AppKit asks is whichever one the user just sent to fullscreen.
+        // Fullscreen presentation policy — see [`hidden_menubar_options`]. One delegate is
+        // shared by every window, which is right for this: the policy is about what fullscreen
+        // means for a viewer window, not about which one it is, and the window AppKit asks
+        // about is whichever one the user just sent to fullscreen.
         #[unsafe(method(window:willUseFullScreenPresentationOptions:))]
         fn will_use_fullscreen_presentation_options(
             &self,
@@ -779,32 +754,30 @@ fn hidden_menubar_options(
 }
 
 impl WindowDelegate {
-    fn new(mtm: MainThreadMarker, is_main: bool) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(WindowDelegateIvars { is_main });
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // The delegate is stateless now that every window gets the same policy; `set_ivars`
+        // still has to run, since super-init only accepts a partially-initialised object.
+        let this = Self::alloc(mtm).set_ivars(());
         // SAFETY: initialising our own NSObject subclass through its superclass's init.
         unsafe { msg_send![super(this), init] }
     }
 }
 
 thread_local! {
-    /// The window delegates, kept alive for the whole process: AppKit holds `window.delegate`
+    /// The window delegate, kept alive for the whole process: AppKit holds `window.delegate`
     /// weakly, so something on our side has to own it for as long as a window points at it (the
-    /// application delegate is retained by `AppState` for the same reason). A delegate's only
-    /// state is the role it guards, so these two serve every window and never grow with the set.
-    static MAIN_WINDOW_DELEGATE: RefCell<Option<Retained<WindowDelegate>>> =
-        const { RefCell::new(None) };
-    static SECONDARY_WINDOW_DELEGATE: RefCell<Option<Retained<WindowDelegate>>> =
+    /// application delegate is retained by `AppState` for the same reason). It carries no
+    /// per-window state, so this one instance serves every window and never grows with the set.
+    static WINDOW_DELEGATE: RefCell<Option<Retained<WindowDelegate>>> =
         const { RefCell::new(None) };
 }
 
-/// Give `window` the close behaviour for its role: closing the main window quits the viewer,
-/// and a secondary window refuses to close. Programmatic `close()` — how `reconcile` retires a
-/// window the spec dropped — bypasses `windowShouldClose:`, so this only guards the user.
-pub fn install_close_policy(mtm: MainThreadMarker, window: &NSWindow, is_main: bool) {
-    let slot = if is_main { &MAIN_WINDOW_DELEGATE } else { &SECONDARY_WINDOW_DELEGATE };
-    let delegate = slot.with(|d| {
-        d.borrow_mut().get_or_insert_with(|| WindowDelegate::new(mtm, is_main)).clone()
-    });
+/// Give `window` the shared delegate: closing it quits the viewer, and fullscreen hands the top
+/// of the screen to the remote. Programmatic `close()` — how `reconcile` retires a window the
+/// spec dropped — bypasses `windowShouldClose:`, so the quit only ever follows a user close.
+pub fn install_window_delegate(mtm: MainThreadMarker, window: &NSWindow) {
+    let delegate = WINDOW_DELEGATE
+        .with(|d| d.borrow_mut().get_or_insert_with(|| WindowDelegate::new(mtm)).clone());
     window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 }
 
@@ -852,17 +825,6 @@ pub fn make_video_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Exactly one window may be closable, and it has to be the same one the GTK viewer and the
-    /// wire's `ViewMonitor` doc call main (slot 0) — pick a different window and closing the one
-    /// with the close button would quit while a window that cannot be closed is still on screen.
-    #[test]
-    fn only_slot_zero_is_the_main_window() {
-        assert!(is_main_monitor(0));
-        for id in 1..8u32 {
-            assert!(!is_main_monitor(id), "monitor {id}");
-        }
-    }
 
     /// A swap, not a one-way map: physical Control must still produce Super, or the GNOME
     /// overview becomes unreachable from a Mac keyboard.

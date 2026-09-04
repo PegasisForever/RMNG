@@ -1093,9 +1093,6 @@ fn make_window_shell(
         .title(format!("RMNG viewer — monitor {mid}"))
         .default_width(1280)
         .default_height(720)
-        // Only the main window (monitor 0) gets a close button; secondary monitor windows
-        // can't be closed individually (their layout mirrors the remote desktop).
-        .deletable(is_main)
         .build();
     // The `video-window` class (black letterbox background) is applied per-content: only while the
     // window shows video, so a terminal/placeholder window keeps the normal themed background
@@ -1146,18 +1143,16 @@ fn make_window_shell(
     }
     // TODO(spike): native FPS label on macOS — add NSTextField updated from a 1s glib timer.
 
-    // Close logic: only the main window is closable, and closing it quits the whole viewer.
-    // Secondary windows have no close button (deletable=false above); block any close request that
-    // still reaches them (e.g. a window-manager-initiated close).
+    // Close logic: every window is closable, and closing any of them quits the whole viewer. The
+    // window set mirrors the remote desktop, so shutting one on its own would leave a hole nothing
+    // refills — reconcile only builds a window for a monitor it has none for. A monitor leaving
+    // the spec goes through `destroy()`, which does not emit `close-request`, so this only ever
+    // fires for a close the user (or the window manager) asked for.
     {
         let app = app.clone();
         window.connect_close_request(move |_| {
-            if is_main {
-                app.quit();
-                glib::Propagation::Proceed
-            } else {
-                glib::Propagation::Stop
-            }
+            app.quit();
+            glib::Propagation::Proceed
         });
     }
 
