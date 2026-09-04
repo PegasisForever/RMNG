@@ -129,6 +129,22 @@ fn main() -> Result<()> {
     if std::env::var_os("GSK_RENDERER").is_none() {
         unsafe { std::env::set_var("GSK_RENDERER", "gl") };
     }
+    // Windows: ask GTK for per-monitor DPI awareness. Without this variable
+    // `gdk/win32/gdkdisplay-win32.c` calls `SetProcessDpiAwarenessContext(SYSTEM_AWARE)`, and
+    // system awareness means one DPI for the whole session, fixed at logon from the primary
+    // display. With two monitors at different scales, every window on the *other* one is then
+    // bitmap-stretched by the Desktop Window Manager: with a 125% primary and the viewer on a
+    // 100% 1920x1080 monitor, Windows reports that monitor as 2400x1350, GTK renders at that
+    // size, and DWM scales the result back down by 0.8. Two resamples, so even a fullscreen
+    // 1:1 desktop stream arrives soft. Linux never sees this because the Wayland backend takes
+    // a real per-output fractional scale instead of one session-wide number.
+    // GTK reads this once when it opens the display, so it must be set before GTK starts. We
+    // are still single-threaded here, so set_var is sound. `GDK_WIN32_DISABLE_HIDPI` remains
+    // the escape hatch, since GTK checks it first.
+    #[cfg(target_os = "windows")]
+    if std::env::var_os("GDK_WIN32_PER_MONITOR_HIDPI").is_none() {
+        unsafe { std::env::set_var("GDK_WIN32_PER_MONITOR_HIDPI", "1") };
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -171,6 +187,98 @@ type VideoSrcs = Arc<Mutex<HashMap<u32, AppSrc>>>;
 /// reconstruction). Process-global because it's server-wide and fixed per session; the
 /// net thread sets it, `make_decoder` reads it when lazily building each monitor pipeline.
 static VIEWER_CHROMA: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Monitors whose window is minimized or fully covered, as a bitmask over monitor ids (ids are
+/// layout slots, `0..n-1`). The GTK thread sets a bit from the toplevel's state, the net thread
+/// reads it and stops feeding that monitor's decoder.
+///
+/// Decoding for a window nobody can see is pure waste, and the size of the waste is platform
+/// specific: Linux and macOS keep the frame in video memory, while Windows reads every frame
+/// back to system memory (3.1 MB per frame at 1080p) because it cannot share a GL context with
+/// GTK. Ids at or above 64 are never marked, so they behave exactly as before.
+static HIDDEN_MONITORS: AtomicU64 = AtomicU64::new(0);
+/// Monitors whose decode feed has a hole in it, so the next access unit pushed to them must be
+/// an IDR. Set whenever an AU is dropped (a hidden window, or [`AU_BACKLOG_MAX`]), cleared by
+/// the first AU carrying an IDR NAL. A delta frame pushed across a hole has no reference frame
+/// to build on, which is macroblock garbage rather than a late picture.
+static NEEDS_IDR: AtomicU64 = AtomicU64::new(0);
+/// How many access units may sit in one monitor's appsrc before the viewer stops feeding it.
+///
+/// `appsrc` does not bound itself here: with `block=false` and no `enough-data` handler it
+/// enqueues past `max-bytes` anyway, so a decoder that cannot keep up builds a backlog that
+/// never drains and every later frame inherits the delay. The server's encoder bounds its own
+/// input for exactly this reason (`media::encode::APPSRC_BOUND`, which measured p99 ≈ 115 ms on
+/// a 7 to 8 frame backlog). Eight AUs is about 130 ms at 60 fps, far above the steady state of
+/// 0 or 1. Dropping costs a resync to the next keyframe, which the encoder emits at least every
+/// 30 frames (`key-int-max=30`), so the price of overload is a brief freeze rather than a delay
+/// that never goes away.
+const AU_BACKLOG_MAX: u64 = 8;
+
+/// One monitor's bit in [`HIDDEN_MONITORS`] / [`NEEDS_IDR`], or 0 for an id past the mask.
+fn mon_bit(mid: u32) -> u64 {
+    if mid < 64 { 1 << mid } else { 0 }
+}
+fn flag_set(flags: &AtomicU64, mid: u32) {
+    flags.fetch_or(mon_bit(mid), Ordering::Relaxed);
+}
+fn flag_clear(flags: &AtomicU64, mid: u32) {
+    flags.fetch_and(!mon_bit(mid), Ordering::Relaxed);
+}
+fn flag_get(flags: &AtomicU64, mid: u32) -> bool {
+    flags.load(Ordering::Relaxed) & mon_bit(mid) != 0
+}
+
+/// True when this Annex-B access unit carries an IDR slice (NAL unit type 5), which is the only
+/// point a decoder can be joined at. The server's `h264parse config-interval=-1` puts the SPS
+/// and PPS in front of every keyframe, so an IDR AU is self-sufficient.
+fn au_has_idr(au: &[u8]) -> bool {
+    let mut i = 0usize;
+    // Both start codes end in `00 00 01`, so matching the 3-byte form finds the 4-byte one too.
+    while i + 3 < au.len() {
+        if au[i] == 0 && au[i + 1] == 0 && au[i + 2] == 1 {
+            if au[i + 3] & 0x1f == 5 {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Whether to hand this access unit to `mid`'s decoder, and the bookkeeping for when not.
+///
+/// Three reasons to drop: nobody is looking at the window, the decoder is already behind, or the
+/// feed has a hole and this AU is not the keyframe that closes it. The first two set
+/// [`NEEDS_IDR`] so the third takes over and the decoder resumes on a clean picture.
+fn admit_au(src: &AppSrc, mid: u32, au: &[u8]) -> bool {
+    if flag_get(&HIDDEN_MONITORS, mid) {
+        flag_set(&NEEDS_IDR, mid);
+        return false;
+    }
+    let queued = src.current_level_buffers();
+    if queued > AU_BACKLOG_MAX {
+        // Once per episode: the drop below keeps NEEDS_IDR set until a keyframe clears it.
+        if !flag_get(&NEEDS_IDR, mid) {
+            tracing::warn!(
+                "monitor {mid}: the decoder is {queued} access units behind, so the viewer is \
+                 dropping to the next keyframe rather than letting the delay compound"
+            );
+        }
+        flag_set(&NEEDS_IDR, mid);
+        return false;
+    }
+    if flag_get(&NEEDS_IDR, mid) {
+        if !au_has_idr(au) {
+            return false;
+        }
+        flag_clear(&NEEDS_IDR, mid);
+        tracing::debug!("monitor {mid}: decode resumed on a keyframe");
+    }
+    true
+}
+
 /// Input/clipboard write half (None while disconnected).
 type Writer = Arc<Mutex<Option<TcpStream>>>;
 /// The server `host:port`, shared GTK main thread (Settings dialog writes) → net
@@ -433,7 +541,11 @@ fn run_gui() -> Result<()> {
                             // hand-off stays ordered — an out-of-order AU would corrupt H.264 decode.
                             let g = srcs.lock().unwrap();
                             if let Some(src) = g.get(&mid) {
-                                let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
+                                // Not every AU is worth decoding: see `admit_au` for the three
+                                // cases (hidden window, decoder behind, waiting for a keyframe).
+                                if admit_au(src, mid, &au) {
+                                    let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
+                                }
                             } else {
                                 let mut q = aus.lock().unwrap();
                                 if q.len() >= AU_QUEUE_CAP {
@@ -742,7 +854,11 @@ fn build_ui(
                 let batch: Vec<(u32, Vec<u8>)> = aus.lock().unwrap().drain(..).collect();
                 for (mid, au) in batch {
                     if let Some(src) = srcs.get(&mid) {
-                        let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
+                        // Same gate as the net thread's direct push, so both feeds agree about
+                        // when a decoder is being fed and when it is waiting for a keyframe.
+                        if admit_au(src, mid, &au) {
+                            let _ = src.push_buffer(gst::Buffer::from_mut_slice(au));
+                        }
                     }
                 }
             }
@@ -984,7 +1100,10 @@ fn reconcile_view(
                             while i < q.len() {
                                 if q[i].0 == m.id {
                                     let (_, au) = q.remove(i).expect("index in range");
-                                    let _ = vc.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
+                                    if admit_au(&vc.appsrc, m.id, &au) {
+                                        let _ =
+                                            vc.appsrc.push_buffer(gst::Buffer::from_mut_slice(au));
+                                    }
                                 } else {
                                     i += 1;
                                 }
@@ -1176,7 +1295,45 @@ fn make_window_shell(
     native_titlebar::install(&window, is_main, addr, writer);
 
     window.present();
+    // present() has realized the surface, so the toplevel exists to watch from here on.
+    watch_visibility(&window, mid);
     (window, fps_count)
+}
+
+/// Mirror `window`'s minimized/covered state into [`HIDDEN_MONITORS`] for monitor `mid`, so the
+/// net thread can stop feeding a decoder whose pictures nobody will see.
+///
+/// `GdkToplevel`'s state is the portable form of the question. The Windows backend reports
+/// `MINIMIZED` (`gdk/win32/gdksurface-win32.c` sets it around `SW_MINIMIZE`), and a Wayland
+/// compositor adds `SUSPENDED` when a window is fully covered or on another workspace. A backend
+/// that reports neither simply leaves the bit clear, which is the behaviour this viewer had
+/// before: keep decoding regardless.
+fn watch_visibility(window: &gtk4::ApplicationWindow, mid: u32) {
+    // A fresh window starts visible, and this also drops any bit left by a window that used to
+    // hold this layout slot.
+    flag_clear(&HIDDEN_MONITORS, mid);
+    let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() else {
+        tracing::debug!("monitor {mid}: no toplevel to watch, so its decoder always runs");
+        return;
+    };
+    let apply = move |state: gdk::ToplevelState| {
+        let hidden = state.intersects(gdk::ToplevelState::MINIMIZED | gdk::ToplevelState::SUSPENDED);
+        if hidden == flag_get(&HIDDEN_MONITORS, mid) {
+            return;
+        }
+        if hidden {
+            flag_set(&HIDDEN_MONITORS, mid);
+        } else {
+            flag_clear(&HIDDEN_MONITORS, mid);
+        }
+        tracing::info!(
+            "monitor {mid}: window {}, so its decoder {}",
+            if hidden { "hidden" } else { "visible" },
+            if hidden { "stops until it comes back" } else { "resumes at the next keyframe" }
+        );
+    };
+    apply(toplevel.state());
+    toplevel.connect_state_notify(move |t| apply(t.state()));
 }
 
 /// Build the video content for a window: decoder + letterboxed `Picture` + cursor overlay + input
@@ -1478,9 +1635,9 @@ fn stamp_colorimetry(caps: &gst::CapsRef, colorimetry: &str) -> Option<gst::Caps
     Some(out)
 }
 
-/// The Windows H.264 decode chain, from `h264parse`'s output to NV12 `memory:GLMemory` — the
-/// same thing `vah264dec ! glupload` produces on Linux and `vtdec_hw` on macOS, so everything
-/// downstream (`rmngavc444unpack`, `glcolorconvert`, the sink) is identical across platforms.
+/// The Windows H.264 decoder candidates: `(factory, chain to plain sysmem, chain to frames the
+/// sink can show)`, fastest first. The decoder is always named `dec` so [`make_decoder`] can
+/// find its src pad for the colorimetry retag.
 ///
 /// **Why this one is chosen at runtime while the other two are compile-time strings.** Linux
 /// has exactly one answer (VA-API, and the deploy target is a known GPU) and macOS has exactly
@@ -1490,32 +1647,27 @@ fn stamp_colorimetry(caps: &gst::CapsRef, colorimetry: &str) -> Option<gst::Caps
 /// fixed string would turn every one of those into "cannot build the decode pipeline" and a
 /// blank window; picking from what actually registered degrades to software instead.
 ///
-/// Order is fastest-first: D3D11 Video (the vendor-neutral GPU path, AMD/NVIDIA/Intel alike),
-/// then software.
+/// **Neither chain touches GL, and that is the whole point on Windows.** GTK's GSK renderer
+/// realizes a WGL context and keeps it current; `gtk4paintablesink` then offers that context to
+/// the pipeline, and every `gst-gl` element tries to adopt it via `wglShareLists`, which fails
+/// with `ERROR_BUSY` against a context that is already in use. The pipeline dies with
+/// `not-negotiated` and the window stays black. (It is specifically *sharing* that fails:
+/// `--glunpack-validate` builds a GL pipeline with no GTK sink in it, gets a standalone WGL
+/// context, and passes.) Linux shares an EGL context with GTK happily and macOS a CGL one, so
+/// Windows is the one platform where the decoded frame has to reach the sink as plain system
+/// memory. The way back to zero-copy is GTK's EGL/ANGLE backend plus a `gst-plugin-gtk4` built
+/// with its `winegl` feature, which is also what the 4:4:4 path needs.
 ///
-/// **The software arms convert I420 → NV12, and that is safe for AVC444.** The invariant the
-/// [`glunpack`] element depends on is that nothing *resamples* the packed chroma before it. An
-/// I420 → NV12 conversion is a pure re-layout — the same 4:2:0 samples, planar U/V rewritten as
-/// interleaved UV — so the auxiliary view survives it intact. What must never appear here is a
-/// converter asked to produce a 4:4:4 or RGB format, which would 4:2:0-upsample the packed
-/// chroma and destroy the reconstruction.
-/// One row per candidate: `(factory, chain to NV12 sysmem, chain to sink-ready sysmem)`,
-/// fastest first. The decoder is always named `dec` so [`make_decoder`] can find its src pad
-/// for the colorimetry retag.
-///
-/// **Neither chain touches GL, and that is the whole point on Windows.** GTK's `ngl` GSK
-/// renderer realizes a WGL context and keeps it current; `gtk4paintablesink` then offers that
-/// context to the pipeline, and every `gst-gl` element tries to adopt it via `wglShareLists` —
-/// which fails with `ERROR_BUSY` against a context that is already in use, so the pipeline
-/// dies with `not-negotiated` and the window stays black. (It is specifically *sharing* that
-/// fails: `--glunpack-validate`, which builds a GL pipeline with no GTK sink in it, produces
-/// a standalone WGL context and passes.) Linux shares an EGL context with GTK happily and
-/// macOS a CGL one; Windows is the platform where the decoded frame has to reach the sink as
-/// plain system memory.
-///
-/// The conversion to the sink's RGB still happens on the GPU wherever the decoder is a GPU
-/// decoder — `d3d11convert` runs before `d3d11download`, so only the final RGBA crosses the
-/// bus, not the NV12 plus a CPU colour conversion.
+/// **What crosses the bus is NV12, not RGBA.** `gtk4paintablesink` accepts NV12 system memory
+/// directly (it hands GDK a two-plane `G8B8R8_420` texture and GSK converts in its shader) and
+/// `videoconvert` prefers passthrough, so the negotiated format stays NV12 from the decoder to
+/// the sink: 3.1 MB per 1080p frame across the bus rather than 8.3. `videoconvert` therefore
+/// earns its place as insurance rather than as a converter, for a `gst-plugin-gtk4` built
+/// without the GTK 4.20 memory formats, where the sink drops NV12 from its caps and somebody
+/// has to convert. Putting a `d3d11convert` in front of `d3d11download` does not move that work
+/// to the GPU: negotiation settles on NV12 upstream of it, so it passes through as well. Only
+/// an explicit `video/x-raw(memory:D3D11Memory),format=RGBA` capsfilter would, and it would pay
+/// 8.3 MB per frame for the privilege.
 #[cfg(target_os = "windows")]
 const WIN_DECODERS: &[(&str, &str, &str)] = &[
     // Direct3D 11 Video Acceleration: the Windows twin of VA-API, vendor-neutral across
@@ -1523,7 +1675,7 @@ const WIN_DECODERS: &[(&str, &str, &str)] = &[
     (
         "d3d11h264dec",
         "d3d11h264dec name=dec ! d3d11download",
-        "d3d11h264dec name=dec ! d3d11convert ! d3d11download ! videoconvert",
+        "d3d11h264dec name=dec ! d3d11download ! videoconvert",
     ),
     // libav software decode (I420) — the most widely present fallback.
     ("avdec_h264", "avdec_h264 name=dec", "avdec_h264 name=dec ! videoconvert"),
@@ -1675,6 +1827,14 @@ fn make_decoder_yuv444(monitor_id: u32) -> Result<(AppSrc, gdk::Paintable, gst::
     // with `not-negotiated`. The 4:2:0 path above avoids GL entirely, which is why it works.
     // Fixing this needs the unpack moved off the sink's pipeline (see `make_decoder_yuv444`'s
     // doc comment); until then a Windows viewer needs the server in 4:2:0 mode.
+    //
+    // There is a second break underneath that one, so fixing the context sharing alone is not
+    // enough: the software arms of `win_decode_chain_sysmem` end at the decoder, which emits
+    // I420, while `rmngavc444unpack`'s sink caps take NV12 only (see `glunpack.rs`). Those two
+    // arms need a `videoconvert ! video/x-raw,format=NV12` of their own here. That conversion is
+    // safe for AVC444 (I420 to NV12 is a pure re-layout of the same 4:2:0 samples, not a
+    // resample), but it must not be added to the shared sysmem chain, where the headless dump
+    // would pay for it and gain nothing.
     #[cfg(target_os = "windows")]
     let desc = format!(
         "appsrc name=src is-live=true format=time do-timestamp=true ! \
@@ -2451,5 +2611,39 @@ mod tests {
     fn the_retag_ignores_encoded_caps() {
         let c = caps("video/x-h264, stream-format=byte-stream, alignment=au");
         assert!(stamp_colorimetry(&c, VIDEO_COLORIMETRY).is_none());
+    }
+
+    /// The resync after a dropped access unit hangs on this: a keyframe has to be recognised
+    /// through either start-code length, and a delta frame must never pass for one.
+    #[test]
+    fn an_idr_is_found_behind_either_start_code() {
+        // 4-byte start code, NAL type 5 (IDR slice).
+        assert!(au_has_idr(&[0, 0, 0, 1, 0x65, 0x88, 0x84]));
+        // 3-byte start code, same NAL.
+        assert!(au_has_idr(&[0, 0, 1, 0x65, 0x88]));
+        // An access unit delimiter (type 9) and SPS (7) and PPS (8) ahead of the IDR, which is
+        // the shape the server actually sends (`aud=true`, `h264parse config-interval=-1`).
+        let au = [0, 0, 0, 1, 0x09, 0x30, 0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65, 0x88];
+        assert!(au_has_idr(&au));
+        // A non-IDR slice (type 1) is not a join point, whatever else rides with it.
+        assert!(!au_has_idr(&[0, 0, 0, 1, 0x09, 0x30, 0, 0, 0, 1, 0x41, 0x9a]));
+        // Nothing to scan, and a truncated start code with no NAL header after it.
+        assert!(!au_has_idr(&[]));
+        assert!(!au_has_idr(&[0, 0, 0, 1]));
+    }
+
+    /// The hidden/needs-keyframe flags are a 64-bit mask, so a monitor id past the end has to
+    /// degrade to "always fed" rather than aliasing onto some other monitor's bit.
+    #[test]
+    fn a_monitor_id_past_the_mask_is_never_flagged() {
+        flag_set(&NEEDS_IDR, 64);
+        assert!(!flag_get(&NEEDS_IDR, 64), "id 64 has no bit, so it reads as clear");
+        assert_eq!(NEEDS_IDR.load(Ordering::Relaxed), 0, "and it set nobody else's");
+
+        flag_set(&NEEDS_IDR, 3);
+        assert!(flag_get(&NEEDS_IDR, 3));
+        assert!(!flag_get(&NEEDS_IDR, 4), "neighbouring ids are independent");
+        flag_clear(&NEEDS_IDR, 3);
+        assert_eq!(NEEDS_IDR.load(Ordering::Relaxed), 0);
     }
 }

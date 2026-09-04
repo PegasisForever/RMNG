@@ -20,7 +20,10 @@ tracing-subscriber.workspace = true
 # adds gtk4 in the next increment; the decode/transport core is toolkit-free so
 # the headless test mode needs no display.
 gstreamer = "0.23"
-gstreamer-app = "0.23"
+# `v1_20` for `AppSrc::current_level_buffers`, which the viewer reads to notice a decoder
+# falling behind (see `AU_BACKLOG_MAX`). GStreamer 1.20 is 2022, and the video/gl crates below
+# already ask for 1.24.
+gstreamer-app = { version = "0.23", features = ["v1_20"] }
 # BaseTransform/GLFilter subclassing for the zero-copy AVC444 GL unpacker (src/glunpack.rs).
 gstreamer-base = "0.23"
 gstreamer-video = { version = "0.23", features = ["v1_24"] }

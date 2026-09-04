@@ -191,6 +191,13 @@ cannot be used in the GUI on Windows, so a 4:4:4 server makes the viewer log
 `failed to share contexts through wglShareLists` and show nothing. The viewer logs the mode it
 was told at connect (`server chroma mode: Yuv420`).
 
+**Display scaling.** The viewer sets `GDK_WIN32_PER_MONITOR_HIDPI` for itself before GTK starts,
+so Windows does not bitmap-stretch its window when that window sits on a monitor whose scale
+differs from the primary display's. Without it GTK asks for system DPI awareness only, which
+fixes one DPI for the whole session from the primary display: on a mixed-scale desktop (a 125%
+primary next to a 100% monitor, say) the picture is then resampled twice and even a fullscreen
+1:1 stream reads soft. `GDK_WIN32_DISABLE_HIDPI=1` turns DPI awareness off again if you need it.
+
 **Windows input notes.** The server address lives in
 `%APPDATA%\rmng-viewer\config.json` (not `~/.config`, which on Windows would resolve relative to
 the working directory). Physical keys are recovered from the Win32 virtual key by inverting it to
