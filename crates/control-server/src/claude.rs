@@ -275,20 +275,26 @@ impl ClaudeStore {
 
 // --- the account store ----------------------------------------------------
 
-/// Write one account into the 0600 store, replacing whatever shared its id.
+/// Write one account into the 0600 store, replacing whatever shared its **email**.
 ///
 /// Accounts arrive one way: signing in to the provider at this server ([`crate::oauth`]).
 /// Reading credentials back out of a signed-in clone was the other, and it is gone: it
 /// needed a clone standing, the CLI installed in it, and a second login.
+///
+/// The email is the identity, not `id`. Everything downstream names an account by email
+/// ([`ClaudeStore::get_by_email`], `claude_account_email`, pool membership, [`delete_account`])
+/// and takes the FIRST record with that email. `id` carries the org uuid, so a sign-in under
+/// a different org (or one recorded before the org uuid was captured, leaving `id` as
+/// `email|`) used to land a SECOND record beside the first instead of over it. The stale copy
+/// then answered every lookup for the fresh one, so its rejected grant made a just-signed-in
+/// account unusable and no clone could get the new token. Two records for one email are not
+/// distinguishable by any caller, so the store never holds them.
 pub fn upsert_account(app: &App, stored: StoredClaudeAccount) -> Result<()> {
     let mut accts = app.claude.accounts.lock().unwrap();
-    let mut by_id: HashMap<String, StoredClaudeAccount> =
-        accts.drain(..).map(|a| (a.id.clone(), a)).collect();
-    by_id.insert(stored.id.clone(), stored);
-    let mut next: Vec<_> = by_id.into_values().collect();
-    next.sort_by(|a, b| a.email.cmp(&b.email));
-    app.claude.save(&next)?;
-    *accts = next;
+    accts.retain(|a| a.id != stored.id && a.email != stored.email);
+    accts.push(stored);
+    accts.sort_by(|a, b| a.email.cmp(&b.email));
+    app.claude.save(&accts)?;
     Ok(())
 }
 
@@ -2190,6 +2196,23 @@ mod tests {
             claude_selection: Some(AUTO.into()),
             ..Default::default()
         }
+    }
+
+    /// Measured on CT 105 on 2026-09-03: three emails held two records each, the dead one
+    /// first, so `get_by_email` handed every caller the rejected grant of an account the
+    /// operator had just signed in. A sign-in must land ON the old record, whatever its id.
+    #[test]
+    fn a_second_sign_in_replaces_the_record_even_when_the_id_changed() {
+        let app = app_with_group(&["a@x"]);
+        let mut again = stored("a@x");
+        // What the org uuid moving (or arriving for the first time) does to the id.
+        again.id = "a@x|org-uuid".into();
+        again.access_token = "sk-ant-oat01-new".into();
+        upsert_account(&app, again).unwrap();
+
+        let held: Vec<_> = app.claude.snapshot().into_iter().filter(|a| a.email == "a@x").collect();
+        assert_eq!(held.len(), 1, "one email, one record: {:?}", held.iter().map(|a| &a.id).collect::<Vec<_>>());
+        assert_eq!(app.claude.get_by_email("a@x").unwrap().access_token, "sk-ant-oat01-new");
     }
 
     #[test]

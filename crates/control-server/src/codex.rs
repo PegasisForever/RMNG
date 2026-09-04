@@ -212,9 +212,6 @@ impl CodexStore {
 
 // --- the account store ----------------------------------------------------
 
-/// Write one account into the 0600 store, replacing whatever shared its id.
-///
-/// Accounts arrive one way: signing in to the provider at this server ([`crate::oauth`]).
 /// Drop an imported account from the secret store, with none of [`delete_account`]'s healing.
 /// Exists so a test elsewhere in the crate can stage a delete landing mid-poll.
 #[cfg(test)]
@@ -222,15 +219,16 @@ pub(crate) fn test_delete(app: &App, email: &str) {
     app.codex.delete(email).unwrap();
 }
 
+/// Replaces by **email**, not by `id`, for the reason spelled out in
+/// [`crate::claude::upsert_account`]: every caller looks an account up by email and takes the
+/// first match, so a second record under the same email is unreachable and answers for the
+/// one that is reachable.
 pub fn upsert_account(app: &App, stored: StoredCodexAccount) -> Result<()> {
     let mut accts = app.codex.accounts.lock().unwrap();
-    let mut by_id: HashMap<String, StoredCodexAccount> =
-        accts.drain(..).map(|a| (a.id.clone(), a)).collect();
-    by_id.insert(stored.id.clone(), stored);
-    let mut next: Vec<_> = by_id.into_values().collect();
-    next.sort_by(|a, b| a.email.cmp(&b.email));
-    app.codex.save(&next)?;
-    *accts = next;
+    accts.retain(|a| a.id != stored.id && a.email != stored.email);
+    accts.push(stored);
+    accts.sort_by(|a, b| a.email.cmp(&b.email));
+    app.codex.save(&accts)?;
     Ok(())
 }
 
