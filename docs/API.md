@@ -11,6 +11,16 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
   [files.rs](../crates/control-server/src/files.rs); wire types in
   [crates/wire/src/control.rs](../crates/wire/src/control.rs) and [config.rs](../crates/wire/src/config.rs).
 - All request/response bodies are JSON unless noted (`/api/upload` is `multipart/form-data`).
+- **Caller identity** (`GET /api/self`, and the sub-clone nesting on `POST /api/clone`) is the
+  address the request arrived on. A clone reaches the server container-to-container over the
+  rmng bridge, so the peer address is the one Docker gave that container, and it is matched
+  against each clone's `localIp` (refreshed by the monitor poller every 4 s). Nothing inside a
+  clone chooses that address, which is what makes it the answer.
+- Two headers are the **fallback**, for a caller whose address names no clone (the CLI run on
+  the operator's box, a proxy in front, dev mode). `X-RMNG-Proxy-Key` is the clone's bearer from
+  `RMNG_PROXY_KEY` and says whether the caller is in the fleet at all; `X-RMNG-Clone` is the
+  caller's container hostname and says which clone. The hostname outranks the key, because the
+  key can be inherited from a committed image, and was.
 - The frontend talks to this port using ts-rs-generated types in `frontend/app/lib/wire/`,
   kept byte-compatible with the Rust `wire` types.
 
@@ -31,7 +41,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
 | PUT | `/api/hosts/:id/forwards` | Replace a clone's port-forward rules | 200 `ControlState` |
 | POST | `/api/hosts/:id/copy?dst=` | Extract a streamed tar archive inside a clone | 200 `CopyResult` |
-| GET | `/api/self` | The calling clone's own record, by its router key | 200 `Clone` / 404 |
+| GET | `/api/self` | The calling clone's own record, by the address it called from | 200 `Clone` / 404 |
 | POST | `/api/layout/activate` | Make a layout preset active and live-apply it to the selected clone | 200 `{ok,applied,errors}` |
 | GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
 | POST | `/api/images/pull` | Pull the clone template from a registry (keeps its own `repo:tag`) | 200 `Operation` |
@@ -596,7 +606,7 @@ Body (one of three modes + optional account/instructions):
                                     //   top-level one — nesting is ONE level deep). Honoured in
                                     //   every mode; the web dialog's "sub clone of X" checkbox
                                     //   sends it. Omitted ⇒ the caller clone is auto-detected
-                                    //   from its `X-RMNG-Proxy-Key` and nested under when it is
+                                    //   from its identity headers and nested under when it is
                                     //   itself top-level; no key (e.g. a browser) ⇒ top-level.
   "topLevel": true                  // force a top-level clone, skipping that auto-detection.
                                     //   Mutually exclusive with `parent` (400).

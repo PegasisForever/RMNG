@@ -150,7 +150,10 @@ Consequences worth knowing before you deploy:
   agent you start by hand inside a clone, with no wrapper, reads as `idle`).
 - **`RMNG_PROXY_KEY` survives under that name**, but it is no longer an inference credential — it
   is the clone's **identity** token, used to auto-detect the calling clone when it creates a sub
-  clone and to choose direct clone↔clone SSH. Renaming it would need every existing clone's
+  clone and to choose direct clone↔clone SSH. It is now the fallback rather than the answer: the
+  server identifies a calling clone by the bridge address the request arrived on, and reads the
+  key (plus the `X-RMNG-Clone` hostname header) only when that address names no clone. The key
+  lost the top spot because it can reach a process from a committed image, and did. Renaming it would need every existing clone's
   `/etc/environment` rewritten, and any clone that hadn't reconciled yet would silently lose both
   features. The keys likewise still live in their original `data/` file for the same reason:
   pointing at a fresh path would mint new keys and invalidate every clone's identity at once.

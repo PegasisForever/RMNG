@@ -19,6 +19,20 @@ pub struct Client {
     http: reqwest::Client,
 }
 
+/// This container's hostname, which for a managed clone is its clone id.
+///
+/// Read from `/proc/sys/kernel/hostname` (the live UTS namespace) rather than from the
+/// `HOSTNAME` env var or `/etc/hostname`. The env var is a bash-ism that fish never sets and
+/// that a long-lived process can carry from a previous container, and both files can be baked
+/// into a committed image. The proc entry belongs to the running namespace and nothing else.
+///
+/// `None` off Linux, where the CLI is not inside a clone anyway.
+fn hostname() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
 /// The knobs every `POST /api/clone` mode shares, mirroring the controls the web dialog
 /// shows below its three tabs. The mode-specific fields (`hostname` / `ticket` / `create` /
 /// `plain`) are supplied separately by [`Client::clone_create`].
@@ -34,8 +48,8 @@ pub struct CloneOpts<'a> {
     /// Env preset by name; `Some("none")` opts out of inheriting a parent's.
     pub preset: Option<&'a str>,
     pub headless: bool,
-    /// Nest under this clone id. `None` + not `top_level` ⇒ the server auto-detects the
-    /// caller from `X-RMNG-Proxy-Key`, so a clone spawning a clone nests with no flags.
+    /// Nest under this clone id. `None` + not `top_level` ⇒ the server auto-detects the caller
+    /// from the address it called on, so a clone spawning a clone nests with no flags.
     pub parent: Option<&'a str>,
     pub top_level: bool,
     pub agent_instructions: Option<&'a str>,
@@ -94,12 +108,25 @@ impl Client {
 
     /// Attach this process's own clone identity, when it has one.
     ///
-    /// `RMNG_PROXY_KEY` is present in a clone's environment and absent on an operator
-    /// laptop, which is exactly the distinction the server makes: it maps the key back to
-    /// the calling clone for sub-clone nesting and for `GET /api/self`.
+    /// Both headers are a fallback. The server identifies a calling clone by the address the
+    /// request arrives on, and reads these only when that address names no clone: the CLI run
+    /// on an operator's box against a remote server, a proxy in front, dev mode.
+    ///
+    /// `RMNG_PROXY_KEY` is present in a clone's environment and absent on an operator laptop,
+    /// so it decides whether the caller is inside the fleet at all, and nothing is sent without
+    /// it. `X-RMNG-Clone` carries the container's hostname, which is the clone id, and decides
+    /// *which* clone. The hostname outranks the key because the key can be stale: it reaches a
+    /// process through `/etc/environment` → the lingering `systemd --user` manager → every
+    /// session child, and a process keeps the environment it was launched with for life. A clone
+    /// booted from an image that baked another clone's key ran its whole desktop session
+    /// (terminals, editors, agents) under that clone's identity.
     fn with_identity(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match std::env::var("RMNG_PROXY_KEY").ok().filter(|k| !k.is_empty()) {
-            Some(key) => req.header("X-RMNG-Proxy-Key", key),
+        let Some(key) = std::env::var("RMNG_PROXY_KEY").ok().filter(|k| !k.is_empty()) else {
+            return req;
+        };
+        let req = req.header("X-RMNG-Proxy-Key", key);
+        match hostname().filter(|h| !h.is_empty()) {
+            Some(host) => req.header("X-RMNG-Clone", host),
             None => req,
         }
     }
@@ -204,9 +231,8 @@ impl Client {
     /// Start a clone. `mode` carries exactly one of the mode-selecting fields the server
     /// dispatches on — `hostname`, `ticket`, `create`, or `plain` — and `opts` the shared rest.
     ///
-    /// The `X-RMNG-Proxy-Key` header is populated from this process's own `RMNG_PROXY_KEY` env
-    /// var (present when `rmng` runs inside a clone), which is how the server identifies the
-    /// calling clone for sub-clone auto-nesting.
+    /// [`Client::with_identity`] attaches this process's own clone identity, which is how the
+    /// server picks the parent for sub-clone auto-nesting.
     pub async fn clone_create(
         &self,
         image: &str,

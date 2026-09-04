@@ -492,9 +492,9 @@ fn split_clone_path(s: &str) -> Option<(&str, &str)> {
 
 /// `rmng clone self` — the calling clone's own record.
 ///
-/// Identity comes from the per-clone router key in this process's environment, which the
-/// server maps back to a clone. Outside a clone there is no key and nothing to report, so
-/// this exits 1 rather than inventing an answer.
+/// The server answers from the address the request arrives on, which for a clone is the one
+/// Docker gave its container. Outside a clone there is no such address and nothing to report,
+/// so this exits 1 rather than inventing an answer.
 pub async fn clone_self(client: &Client, json: bool) -> Result<u8> {
     let Some(me) = client.clone_self().await? else {
         if json {
