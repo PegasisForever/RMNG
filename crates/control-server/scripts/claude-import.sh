@@ -60,15 +60,18 @@ before = json.dumps(cur, sort_keys=True)
 
 want = patch['oauthAccount']
 have = cur.get('oauthAccount')
-# A different account, so nothing the old block said about billing, seat or rate-limit tier
-# describes this one. Keep those siblings only when the account is unchanged.
 if isinstance(have, dict) and have.get('accountUuid') == want['accountUuid']:
-    have = dict(have)
+    # The same account, so its billing, seat and rate-limit fields still describe it.
+    block = dict(have)
+    block.update(want)
+    if block != have:
+        # Something we own moved, so the rest of the block is a profile of the old state.
+        # Claude Code refills it the next time it looks the account up.
+        block.pop('profileFetchedAt', None)
 else:
-    have = {}
-have.update(want)
-# Claude Code refills the rest of the block the next time it looks the account up.
-have.pop('profileFetchedAt', None)
+    # A different account. Nothing the old block said carries over.
+    block = dict(want)
+have = block
 
 cur['userID'] = patch['userID']
 cur['machineID'] = patch['machineID']

@@ -521,11 +521,25 @@ async fn refresh_inner(
 }
 
 /// `email`'s current account, refreshed (and persisted) first if within
-/// [`refresh_lead_ms`] of expiry. Returns `(account, rotated)`. All refreshes run
-/// under the store's refresh gate, so concurrent callers can't burn the same
-/// single-use refresh token. The account is re-read under the gate so a refresh
-/// another caller just finished is observed instead of repeated.
+/// [`refresh_lead_ms`] of expiry. Returns `(account, rotated)`.
+///
+/// The work runs in its own task, so a caller that goes away cannot abandon a refresh
+/// half-done. Two of the three callers are HTTP handlers (`/api/claude/refresh` and
+/// `/api/claude/swap`), axum drops a handler's future the moment its client disconnects, and
+/// the refresh pass they start runs for ten seconds or more across a fleet's accounts. A
+/// drop between the POST and the store write leaves Anthropic holding a rotated pair and the
+/// store holding the token it just spent, with no record and no log line, and the account
+/// dies at its next refresh. The gate goes into the task with the work for the same reason:
+/// released early, it would let a second caller refresh an account mid-rotation.
 pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredClaudeAccount, bool)> {
+    let app = app.clone();
+    let email = email.to_string();
+    tokio::spawn(async move { refresh_and_persist(&app, &email).await })
+        .await
+        .context("the refresh task did not finish")?
+}
+
+async fn refresh_and_persist(app: &App, email: &str) -> Result<(StoredClaudeAccount, bool)> {
     let _gate = app.claude.refresh_gate.lock().await;
     let mut acct = app
         .claude
@@ -1766,15 +1780,20 @@ fn identity_json(acct: &StoredClaudeAccount) -> Option<String> {
     if acct.account_uuid.is_empty() {
         return None;
     }
+    let mut account = serde_json::Map::new();
+    account.insert("accountUuid".into(), acct.account_uuid.clone().into());
+    account.insert("emailAddress".into(), acct.email.clone().into());
+    // Only when we have one. The reverse migration (`crate::token_unmigrate`) recovers
+    // accounts with no organization recorded, and naming an empty one would write that
+    // emptiness over a clone's correct value. Claude Code refills what it is not told.
+    if !acct.org_uuid.is_empty() {
+        account.insert("organizationUuid".into(), acct.org_uuid.clone().into());
+        account.insert("organizationName".into(), acct.org_name.clone().into());
+    }
     let body = serde_json::json!({
         "userID": device_id(acct, "user"),
         "machineID": device_id(acct, "machine"),
-        "oauthAccount": {
-            "accountUuid": acct.account_uuid,
-            "emailAddress": acct.email,
-            "organizationUuid": acct.org_uuid,
-            "organizationName": acct.org_name,
-        },
+        "oauthAccount": account,
     });
     Some(body.to_string())
 }
@@ -2435,6 +2454,22 @@ mod tests {
         assert_eq!(body["oauthAccount"]["accountUuid"], "uuid-of-a@x");
         assert_eq!(body["userID"].as_str().unwrap().len(), 64);
         assert_ne!(body["userID"], body["machineID"], "two identifiers, not one");
+    }
+
+    /// The reverse migration recovers accounts with no organization. Naming an empty one
+    /// would write that emptiness over whatever the clone already had, so those two keys are
+    /// left out instead and the clone keeps its own.
+    #[test]
+    fn an_account_with_no_organization_names_only_itself() {
+        let mut acct = stored("a@x");
+        acct.org_uuid = String::new();
+        acct.org_name = String::new();
+        let body: serde_json::Value =
+            serde_json::from_str(&identity_json(&acct).expect("uuid present")).unwrap();
+        let account = body["oauthAccount"].as_object().unwrap();
+        assert_eq!(account["accountUuid"], "uuid-of-a@x");
+        assert!(!account.contains_key("organizationUuid"), "no empty org: {account:?}");
+        assert!(!account.contains_key("organizationName"));
     }
 
     #[test]

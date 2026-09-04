@@ -62,8 +62,17 @@ pub(crate) fn now_ms() -> i64 {
 
 
 /// A short `: <prefix>` of an error body for log lines (empty stays empty).
+///
+/// Counted in characters, because a byte slice panics when the cut lands inside a multi-byte
+/// one. Every provider error body reaches this, and the panic would take the whole poller
+/// task with it (`main.rs` spawns it unsupervised), so one error page with a typographic
+/// quote at the wrong offset would end token refreshes until the container restarts.
 pub(crate) fn snippet(s: &str) -> String {
-    if s.is_empty() { String::new() } else { format!(": {}", &s[..s.len().min(120)]) }
+    if s.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", s.chars().take(120).collect::<String>())
+    }
 }
 
 /// Non-cryptographic randomness from `/dev/urandom` (mirrors `files::rand_hex`),
@@ -264,6 +273,19 @@ mod tests {
     use super::*;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
+
+    /// A provider error body is arbitrary bytes from the network, and cutting it at byte 120
+    /// panicked whenever a multi-byte character straddled that offset. The panic landed in
+    /// the usage poller, which runs unsupervised, so it ended every token refresh in the
+    /// process.
+    #[test]
+    fn a_long_error_body_is_cut_on_a_character_boundary() {
+        let body = format!("{}\u{201c}invalid_grant\u{201d}", "x".repeat(119));
+        let out = snippet(&body);
+        assert_eq!(out.chars().count(), 122, "the `: ` prefix plus 120 characters");
+        assert!(out.ends_with('\u{201c}'), "cut after the quote, not inside it: {out}");
+        assert_eq!(snippet(""), "", "an empty body stays empty");
+    }
 
     fn usage_view(email: &str, assignable: bool, error: Option<&str>) -> wire::ClaudeUsage {
         wire::ClaudeUsage {

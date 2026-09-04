@@ -368,9 +368,21 @@ async fn refresh_inner(
 }
 
 /// `email`'s current account, refreshed (and persisted) first if within
-/// [`REFRESH_LEAD_MS`] of expiry. Returns `(account, rotated)`. Runs under the store's
-/// refresh gate so concurrent callers can't burn the same single-use refresh token.
+/// [`REFRESH_LEAD_MS`] of expiry. Returns `(account, rotated)`.
+///
+/// Runs in its own task with the refresh gate inside it, so a disconnected HTTP client
+/// cannot abandon a rotation half-done. `claude::fresh_access_token` carries the reasoning,
+/// and this side has the same two cancellable callers in `/api/codex/{refresh,swap}` plus
+/// the stuck detector.
 pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredCodexAccount, bool)> {
+    let app = app.clone();
+    let email = email.to_string();
+    tokio::spawn(async move { refresh_and_persist(&app, &email).await })
+        .await
+        .context("the codex refresh task did not finish")?
+}
+
+async fn refresh_and_persist(app: &App, email: &str) -> Result<(StoredCodexAccount, bool)> {
     let _gate = app.codex.refresh_gate.lock().await;
     let mut acct = app
         .codex
