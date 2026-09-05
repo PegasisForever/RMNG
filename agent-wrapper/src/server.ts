@@ -141,6 +141,11 @@ async function startSession(): Promise<AgentSession> {
       { name: "rmng-mcp", factory: createMcpAdapter({ config: mcpConfig() }) },
       { name: "rmng-service-tier", factory: serviceTierExtension },
     ],
+    // Load only the two factories above, never whatever sits in ~/.pi/agent/extensions.
+    // Anything installed there would load ahead of them and could block a tool call or
+    // rewrite the provider payload before either one runs. The assistant's behaviour is
+    // the wrapper's to define, so a `pi install` in the clone must not change it.
+    noExtensions: true,
     ...(SYSTEM_APPEND ? { appendSystemPrompt: [SYSTEM_APPEND] } : {}),
   });
   // A caller-supplied loader starts empty. createAgentSession only reloads the one it

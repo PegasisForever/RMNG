@@ -29,6 +29,8 @@ pi ships no MCP support, so [`pi-mcp-adapter`](https://www.npmjs.com/package/pi-
 
 The desktop server is promoted to direct tools (`desktop_screenshot`, `desktop_left_click`, …), which replaces the old `alwaysLoad` flag. Linear stays behind the proxy tool.
 
+The loader runs with `noExtensions`, so the wrapper loads only these two inline extensions and ignores anything under `~/.pi/agent/extensions`. A discovered extension would load ahead of them and could block a tool call or rewrite the provider payload before either one runs, so a `pi install` inside the clone must not reach the assistant.
+
 Promotion needs the adapter's tool-metadata cache at `~/.pi/agent/mcp-cache.json`, which it fills after connecting. The startup line the wrapper logs is a snapshot taken before that first sync, so it lists only `mcp` and `mcpScript` on a cold cache. The direct tools appear once the sync lands, within the first session. The `mcp` proxy reaches the same servers meanwhile.
 
 ## Config (environment)
