@@ -1,0 +1,16 @@
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+const root = fileURLToPath(new URL("../../", import.meta.url));
+const piRoot = join(root, ".rmng-runtime/node_modules/@earendil-works/pi-coding-agent");
+process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT = piRoot;
+process.env.PATH = join(root, ".rmng-runtime/bin") + ":" + process.env.PATH;
+process.env.RMNG_CONTROL_URL = "http://rmng-control:9000";
+const { createJiti } = await import(join(root, "node_modules/jiti/lib/jiti.mjs"));
+const jiti = createJiti(import.meta.url);
+const { resolveHostPeerAliases } = await jiti.import(join(root, "src/runs/background/runner-aliases.ts"));
+const { aliases, missing } = resolveHostPeerAliases(piRoot);
+if (missing.length) throw new Error(missing.join(", "));
+process.env.JITI_ALIAS = JSON.stringify(aliases);
+const loader = createJiti(import.meta.url, { alias: aliases });
+const { probe } = await loader.import(join(root, "test/rmng/live-probe.ts"));
+await probe();

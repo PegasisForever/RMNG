@@ -189,3 +189,61 @@ Four checks caught real bugs during the pi swap.
 4. The dashboard path, not just the wrapper. They are separate hops.
 
 Silence is not success. A wrapper that starts cleanly can still fail every request.
+
+## Test pi subclones
+
+The `pi-subagents` fork uses `rmng clone create --seed` to copy its project and runtime into each worker clone.
+The fork lives at [`pi-subagents-rmng/`](../pi-subagents-rmng/README-RMNG.md) in this repository.
+Run `pi-subagents-rmng/scripts/rmng/install.sh` from the repository root to install it in a clone.
+The seed option requires the matching control-server and fleet command binaries.
+A successful create operation includes the completed seed copies.
+The operation log reports copy duration in the `seed` step.
+Total operation time also includes container creation, startup, and account setup.
+Compare file hashes and metadata before starting pi when testing an exact copy.
+Pi creates runtime caches and refreshes the Git index after it starts.
+The terminal plugin runs separately from the dashboard assistant's fixed extension list.
+
+On 2026-09-05, serial `cp` copied the 357,684-entry `/home/rmng/Dev` tree in 103.82 seconds.
+The deployed eight-worker copy took 42.17 seconds, and total clone creation took 51.65 seconds.
+The test clone is `dev-seed-fast-20260905`.
+The comparison found no missing entries, extra entries, or changed metadata or file contents.
+
+### Repeated copy comparison
+
+On 2026-09-05, three rounds compared copy tools against the same 357,684-entry `Dev` tree in CT 101.
+Each copy started with an empty destination in `dev-seed-verify-20260905`.
+The benchmark rotated execution order: `cp`, rsync, rclone, then rsync, rclone, `cp`, then rclone, `cp`, rsync.
+Copies ran sequentially, and verification ran after all timed copies.
+The benchmark did not clear caches or control other workloads.
+
+| Copy configuration | Round 1 seconds | Round 2 seconds | Round 3 seconds | Median seconds | Median processor seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `cp`, 8 workers | 36.94 | 31.74 | 24.68 | 31.74 | 94.61 |
+| rsync 3.4.1, 8 processes | 60.90 | 50.01 | 38.79 | 50.01 | 197.66 |
+| rclone 1.75.1, 32 transfers | 96.10 | 71.97 | 54.59 | 71.97 | 447.84 |
+
+The repeated benchmark used a Python implementation of the seed copy's partitioning, eight-worker schedule, and directory metadata restoration.
+Both `cp` and rsync used that implementation.
+These timings include planning and directory metadata restoration, but exclude clone creation.
+Processor time sums user and system time for copy processes and the planner.
+It excludes the Docker command transport processes.
+The earlier 42.17-second measurement used the deployed Rust implementation.
+
+The `cp` jobs used `-a --parents --reflink=auto`.
+The rsync jobs used `-aHAXSU --numeric-ids --relative --whole-file --inplace --checksum-choice=none`.
+The rclone copy used `--metadata --links --create-empty-src-dirs --local-metadata-restore-special-bits`.
+It also used `--inplace --no-check-dest --ignore-checksum --transfers 32 --checkers 32 --retries 1 --low-level-retries 1 --config /dev/null`.
+
+All tools became faster across rounds, so individual elapsed times do not establish fixed performance guarantees.
+The `cp` implementation won every round and used less processor time.
+Its slowest run also beat the fastest rsync and rclone runs.
+Keep the eight-worker `cp` seed copy for this workload.
+
+Separate preservation tests passed for `cp` and rsync.
+The rclone test lost hardlink relationships and access control lists.
+It also failed to copy a named pipe and an ordinary file named `literal.rclonelink`.
+Full comparisons of the third-round `cp` and rsync copies found zero differences across all 357,684 entries.
+Both comparisons checked file hashes and metadata.
+The rclone metadata comparison found changes only on the destination root directory: owner, group, permissions, and modification time.
+That comparison checked sizes but did not hash rclone's output.
+The [benchmark report](benchmarks/ct101-dev-copy-20260905.json) records every run and verification result.

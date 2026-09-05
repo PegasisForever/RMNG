@@ -70,6 +70,9 @@ pub struct CreateArgs {
     /// Clone-source image reference to create from (see `rmng image ls`)
     #[arg(long)]
     pub from: String,
+    /// Copy this directory from the calling clone before the new clone becomes ready. Repeat for multiple directories.
+    #[arg(long, value_name = "PATH")]
+    pub seed: Vec<String>,
     /// Claude account for the new clone: an email, `auto`, `none`, or `group:<pool>`.
     /// Omitted inherits the parent's selection (inside a clone), else `auto`.
     #[arg(long)]
@@ -846,6 +849,13 @@ mod tests {
         ));
         // Bad provider rejected.
         assert!(Cli::try_parse_from(["rmng", "account", "ls", "--provider", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn clone_create_accepts_multiple_seed_directories() {
+        let cli = Cli::parse_from(["rmng", "clone", "create", "seed-test", "--from", "template:latest", "--seed", "/home/rmng/project", "--seed", "/home/rmng/tools"]);
+        let Cmd::Clone(CloneCmd::Create { common, .. }) = cli.cmd else { panic!("expected clone create") };
+        assert_eq!(common.seed, vec!["/home/rmng/project", "/home/rmng/tools"]);
     }
 
     #[test]

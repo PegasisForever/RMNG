@@ -38,6 +38,9 @@ docs/
 # run on the host, never consumed by an image build, so they stay out of the context.
 /scripts/
 
+# Install the terminal pi extension from the checkout.
+/pi-subagents-rmng/
+
 # Editor/OS cruft
 *.tmp.*
 *.swp

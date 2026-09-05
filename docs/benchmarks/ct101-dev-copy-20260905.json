@@ -1,0 +1,388 @@
+{
+  "date": "2026-09-05",
+  "container": 101,
+  "source_clone": "pi-probe",
+  "source_path": "/home/rmng/Dev",
+  "destination_clone": "dev-seed-verify-20260905",
+  "entries": 357684,
+  "bytes_hashed": 3634501895,
+  "methodology": {
+    "rounds": 3,
+    "order": [
+      [
+        "cp8",
+        "rsync8",
+        "rclone32"
+      ],
+      [
+        "rsync8",
+        "rclone32",
+        "cp8"
+      ],
+      [
+        "rclone32",
+        "cp8",
+        "rsync8"
+      ]
+    ],
+    "destinations": "Each run starts with an empty destination.",
+    "concurrency": "Copy benchmarks run sequentially. Verification follows all timed copies.",
+    "harness": "Python planner matches the seed partitioning and directory metadata restoration for cp and rsync.",
+    "timing": "Elapsed time includes planning and directory metadata restoration. Clone creation is excluded.",
+    "cpu": "User and system time includes copy processes and planner. Docker command transport processes are excluded.",
+    "limitations": "Caches and other workloads are uncontrolled. Pressure measurements include benchmark work.",
+    "versions": {
+      "rsync": "3.4.1",
+      "rclone": "1.75.1"
+    },
+    "cp_flags": [
+      "-a",
+      "--parents",
+      "--reflink=auto"
+    ],
+    "rsync_flags": [
+      "-aHAXSU",
+      "--numeric-ids",
+      "--relative",
+      "--whole-file",
+      "--inplace",
+      "--checksum-choice=none"
+    ],
+    "rclone_flags": [
+      "--metadata",
+      "--links",
+      "--create-empty-src-dirs",
+      "--local-metadata-restore-special-bits",
+      "--inplace",
+      "--no-check-dest",
+      "--ignore-checksum",
+      "--transfers",
+      "32",
+      "--checkers",
+      "32",
+      "--retries",
+      "1",
+      "--low-level-retries",
+      "1",
+      "--config",
+      "/dev/null"
+    ]
+  },
+  "summary": {
+    "cp8": {
+      "median_seconds": 31.73996680881828,
+      "min_seconds": 24.681520123034716,
+      "max_seconds": 36.939280927181244,
+      "median_cpu_seconds": 94.60530200000001
+    },
+    "rsync8": {
+      "median_seconds": 50.01347540086135,
+      "min_seconds": 38.78638743981719,
+      "max_seconds": 60.90386072406545,
+      "median_cpu_seconds": 197.655544
+    },
+    "rclone32": {
+      "median_seconds": 71.97010791068897,
+      "min_seconds": 54.58660247223452,
+      "max_seconds": 96.10364019498229,
+      "median_cpu_seconds": 447.84149099999996
+    }
+  },
+  "runs": [
+    {
+      "method": "parallel",
+      "workers": 8,
+      "seconds": 36.939280927181244,
+      "destination": "/home/rmng/.copy-bench-round1-cp8",
+      "child_user_seconds": 1.16,
+      "child_system_seconds": 86.42999999999999,
+      "involuntary_context_switches": 167390.0,
+      "planner_cpu_seconds": 12.703529000000001,
+      "cpu_pressure_percent": {
+        "some": 5.767416004117028,
+        "full": 3.8745285887437375
+      },
+      "round": 1,
+      "position": 1,
+      "case": "cp8"
+    },
+    {
+      "method": "rsync-parallel",
+      "workers": 8,
+      "seconds": 60.90386072406545,
+      "destination": "/home/rmng/.copy-bench-round1-rsync8",
+      "child_user_seconds": 9.17,
+      "child_system_seconds": 189.63,
+      "involuntary_context_switches": 580269.0,
+      "planner_cpu_seconds": 6.886023,
+      "cpu_pressure_percent": {
+        "some": 16.52045679925883,
+        "full": 10.650883085046884
+      },
+      "round": 1,
+      "position": 2,
+      "case": "rsync8"
+    },
+    {
+      "method": "rclone-current",
+      "workers": 32,
+      "seconds": 96.10364019498229,
+      "destination": "/home/rmng/.copy-bench-round1-rclone32",
+      "child_user_seconds": 105.88,
+      "child_system_seconds": 350.39,
+      "involuntary_context_switches": 1222044.0,
+      "planner_cpu_seconds": 0.0023130000000000026,
+      "cpu_pressure_percent": {
+        "some": 26.05704419644602,
+        "full": 13.17554982757158
+      },
+      "round": 1,
+      "position": 3,
+      "case": "rclone32"
+    },
+    {
+      "method": "rsync-parallel",
+      "workers": 8,
+      "seconds": 50.01347540086135,
+      "destination": "/home/rmng/.copy-bench-round2-rsync8",
+      "child_user_seconds": 7.65,
+      "child_system_seconds": 183.16,
+      "involuntary_context_switches": 477745.0,
+      "planner_cpu_seconds": 6.845544,
+      "cpu_pressure_percent": {
+        "some": 12.40189558970976,
+        "full": 8.090043668371656
+      },
+      "round": 2,
+      "position": 1,
+      "case": "rsync8"
+    },
+    {
+      "method": "rclone-current",
+      "workers": 32,
+      "seconds": 71.97010791068897,
+      "destination": "/home/rmng/.copy-bench-round2-rclone32",
+      "child_user_seconds": 96.71,
+      "child_system_seconds": 349.66,
+      "involuntary_context_switches": 1073973.0,
+      "planner_cpu_seconds": 0.0011630000000000043,
+      "cpu_pressure_percent": {
+        "some": 26.3433841498856,
+        "full": 12.565059665079264
+      },
+      "round": 2,
+      "position": 2,
+      "case": "rclone32"
+    },
+    {
+      "method": "parallel",
+      "workers": 8,
+      "seconds": 31.73996680881828,
+      "destination": "/home/rmng/.copy-bench-round2-cp8",
+      "child_user_seconds": 1.15,
+      "child_system_seconds": 86.73,
+      "involuntary_context_switches": 146022.0,
+      "planner_cpu_seconds": 6.725302000000001,
+      "cpu_pressure_percent": {
+        "some": 8.161190008807203,
+        "full": 5.219570675605507
+      },
+      "round": 2,
+      "position": 3,
+      "case": "cp8"
+    },
+    {
+      "method": "rclone-current",
+      "workers": 32,
+      "seconds": 54.58660247223452,
+      "destination": "/home/rmng/.copy-bench-round3-rclone32",
+      "child_user_seconds": 93.7,
+      "child_system_seconds": 354.14,
+      "involuntary_context_switches": 983132.0,
+      "planner_cpu_seconds": 0.0014909999999999993,
+      "cpu_pressure_percent": {
+        "some": 25.03741830598774,
+        "full": 11.559352870898147
+      },
+      "round": 3,
+      "position": 1,
+      "case": "rclone32"
+    },
+    {
+      "method": "parallel",
+      "workers": 8,
+      "seconds": 24.681520123034716,
+      "destination": "/home/rmng/.copy-bench-round3-cp8",
+      "child_user_seconds": 1.08,
+      "child_system_seconds": 85.4,
+      "involuntary_context_switches": 109939.0,
+      "planner_cpu_seconds": 6.050981,
+      "cpu_pressure_percent": {
+        "some": 3.9994902869808606,
+        "full": 2.917417551311927
+      },
+      "round": 3,
+      "position": 2,
+      "case": "cp8"
+    },
+    {
+      "method": "rsync-parallel",
+      "workers": 8,
+      "seconds": 38.78638743981719,
+      "destination": "/home/rmng/.copy-bench-round3-rsync8",
+      "child_user_seconds": 6.36,
+      "child_system_seconds": 176.52,
+      "involuntary_context_switches": 374799.0,
+      "planner_cpu_seconds": 6.078967,
+      "cpu_pressure_percent": {
+        "some": 8.122989038070749,
+        "full": 5.236432506511291
+      },
+      "round": 3,
+      "position": 3,
+      "case": "rsync8"
+    }
+  ],
+  "verification": {
+    "cp8": {
+      "round": 3,
+      "scope": "File hashes and metadata for all entries.",
+      "result": {
+        "source": {
+          "bytes_hashed": 3634501895,
+          "counts": {
+            "16384": 31106,
+            "32768": 326281,
+            "40960": 297
+          },
+          "entries": 357684,
+          "seconds": 110.84
+        },
+        "target": {
+          "bytes_hashed": 3634501895,
+          "counts": {
+            "16384": 31106,
+            "32768": 326281,
+            "40960": 297
+          },
+          "entries": 357684,
+          "seconds": 65.95
+        },
+        "missing": [],
+        "extra": [],
+        "changes": []
+      }
+    },
+    "rsync8": {
+      "round": 3,
+      "scope": "File hashes and metadata for all entries.",
+      "result": {
+        "source": {
+          "bytes_hashed": 3634501895,
+          "counts": {
+            "16384": 31106,
+            "32768": 326281,
+            "40960": 297
+          },
+          "entries": 357684,
+          "seconds": 110.84
+        },
+        "target": {
+          "bytes_hashed": 3634501895,
+          "counts": {
+            "16384": 31106,
+            "32768": 326281,
+            "40960": 297
+          },
+          "entries": 357684,
+          "seconds": 56.95
+        },
+        "missing": [],
+        "extra": [],
+        "changes": []
+      }
+    },
+    "rclone32": {
+      "round": 3,
+      "scope": "Metadata and sizes only.",
+      "result": {
+        "entries": 357684,
+        "missing": [],
+        "extra": [],
+        "changes": [
+          {
+            "path": ".",
+            "fields": {
+              "uid": [
+                1000,
+                0
+              ],
+              "gid": [
+                1000,
+                0
+              ],
+              "mode": [
+                509,
+                493
+              ],
+              "mtime_ns": [
+                1788634111863865990,
+                1788646680790634237
+              ]
+            }
+          }
+        ],
+        "verification": "metadata and sizes only",
+        "seconds": 39.65787850692868
+      }
+    }
+  },
+  "preservation_fixture": [
+    {
+      "method": "cp",
+      "returncode": 0,
+      "missing": [],
+      "extra": [],
+      "changed_fields": {}
+    },
+    {
+      "method": "rsync",
+      "returncode": 0,
+      "missing": [],
+      "extra": [],
+      "changed_fields": {}
+    },
+    {
+      "method": "rclone-old",
+      "returncode": 1,
+      "missing": [
+        "literal.rclonelink",
+        "pipe"
+      ],
+      "extra": [],
+      "changed_fields": {
+        "mtime": 4,
+        "xattrs": 4,
+        "uid": 1,
+        "mode": 2,
+        "gid": 1,
+        "hardlink": 1
+      }
+    },
+    {
+      "method": "rclone-current",
+      "returncode": 1,
+      "missing": [
+        "literal.rclonelink",
+        "pipe"
+      ],
+      "extra": [],
+      "changed_fields": {
+        "mtime": 1,
+        "xattrs": 3,
+        "mode": 2,
+        "hardlink": 1
+      }
+    }
+  ]
+}

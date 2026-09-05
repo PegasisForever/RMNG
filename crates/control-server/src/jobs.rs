@@ -47,6 +47,7 @@ pub struct LinearMeta {
 /// Everything the API hands to `start_clone`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CloneSpec {
+    pub seed: Option<crate::seed::SeedSpec>,
     /// The clone-source image reference (e.g. `pegasis0/rmng-template:latest`) or id to clone from.
     pub source_image: String,
     pub new_hostname: String,
@@ -415,6 +416,21 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // (`progress` at the top of this fn was moved into `clone_container`; make a fresh one for
     // the remaining `accounts` step.)
     let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
+
+    if let Some(seed) = &spec.seed {
+        progress("seed", "copying directories from the source clone");
+        let started = std::time::Instant::now();
+        if let Err(error) = crate::seed::copy(&app, seed, &spec.new_hostname).await {
+            return fail_op(&app, &op_id, format!("seed failed: {error:#}"));
+        }
+        progress(
+            "seed",
+            &format!(
+                "copied seed directories in {:.2} seconds",
+                started.elapsed().as_secs_f64()
+            ),
+        );
+    }
 
     progress("accounts", "assigning agent accounts");
 

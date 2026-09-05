@@ -1233,6 +1233,7 @@ impl ResolvedIssue {
 /// Everything a ticket-backed clone request carries that is neither the issue nor the preset.
 /// Grouped so [`ticket_clone_spec`] takes one argument for them instead of seven.
 struct CloneRequestCommon {
+    seed: Option<crate::seed::SeedSpec>,
     image: String,
     claude_account: Option<String>,
     codex_account: Option<String>,
@@ -1347,6 +1348,8 @@ async fn clone(
     // checkbox sends `parent`, so this is NOT fleet-CLI-only — resolving it here rather than
     // inside the hostname branch is what makes that checkbox work in the UI create modes.
     let parent = resolve_parent(&app, &body, &headers, peer.map(|p| p.0.ip()))?;
+    let seed = crate::seed::parse(&app, body.get("seed"), caller_clone(&app, &headers, peer.map(|p| p.0.ip())))
+        .map_err(|error| bad(error.to_string()))?;
 
     // Raw hostname clone (fleet CLI): the caller owns the exact hostname; no ticket, no
     // derived display name. A preset is optional — fleet workers usually need none; an
@@ -1373,6 +1376,7 @@ async fn clone(
             &cfg.presets,
         );
         let spec = CloneSpec {
+            seed,
             source_image: image,
             new_hostname: hostname,
             linear: None,
@@ -1424,6 +1428,7 @@ async fn clone(
         let (hostname, display) =
             derive_hostname(&app, &naming::plain_hostname_base(&prefix, &title), &title);
         let spec = CloneSpec {
+            seed,
             source_image: image,
             new_hostname: hostname,
             linear: Some(LinearMeta {
@@ -1455,6 +1460,7 @@ async fn clone(
     }
 
     let common = CloneRequestCommon {
+        seed,
         image,
         claude_account,
         codex_account,
@@ -1509,6 +1515,7 @@ fn ticket_clone_spec(
     let base = naming::ticket_hostname_base(hostname_prefix, &issue.identifier);
     let (hostname, display) = derive_hostname(app, &base, &issue.title);
     CloneSpec {
+        seed: common.seed,
         source_image: common.image,
         new_hostname: hostname,
         linear: Some(LinearMeta {
@@ -3422,6 +3429,7 @@ mod tests {
 
         let issue = ResolvedIssue::from_body(&issue_body()).unwrap();
         let common = CloneRequestCommon {
+            seed: None,
             image: "tmpl:latest".into(),
             claude_account: None,
             codex_account: None,

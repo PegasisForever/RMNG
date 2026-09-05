@@ -20,6 +20,7 @@ mod docker;
 mod files;
 mod forward;
 mod homes;
+mod seed;
 mod jobs;
 mod ledger;
 mod mediaplane;

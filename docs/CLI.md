@@ -475,3 +475,18 @@ printed to stderr whenever the step or whole-percent changes.
   already pruned before the first frame, or the SSE stream ending under a server restart):
   reported as a **warning + exit 0** — overwhelmingly the Done-prune corner.
 - **Timeout** → exit 4 (the op may still be running — check `rmng op ls`).
+
+## Seed a new clone
+
+`rmng clone create worker --from template:latest --headless --seed /home/rmng/project --wait`
+
+Repeat `--seed` to copy more directories from the calling clone into the same paths.
+The server finishes the copies before the create operation reports success.
+Seed directories must sit below `/home/rmng` and must not overlap.
+The copy preserves git metadata, uncommitted files, symbolic links, modes, and ownership.
+Large trees use up to eight copy workers.
+Trees with hardlinks use one worker to preserve links across directories.
+The operation log reports the time spent copying seed directories separately from total clone creation time.
+The server keeps replaced template directories as `.rmng-seed-backup-N` in the new clone's home.
+A failed copy fails the create operation and retains the clone for inspection.
+The copy reads live files and does not freeze the source clone.

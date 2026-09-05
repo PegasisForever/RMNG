@@ -228,6 +228,7 @@ fn clone_opts<'a>(
         headless: common.headless,
         parent: common.parent.as_deref(),
         top_level: common.top_level,
+        seed: &common.seed,
         agent_instructions: agent_instructions.map(String::as_str),
         claude_instructions: claude_instructions.map(String::as_str),
     }

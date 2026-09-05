@@ -52,6 +52,8 @@ pub struct CloneOpts<'a> {
     /// from the address it called on, so a clone spawning a clone nests with no flags.
     pub parent: Option<&'a str>,
     pub top_level: bool,
+    /// Directories to copy from the calling clone before readiness.
+    pub seed: &'a [String],
     pub agent_instructions: Option<&'a str>,
     pub claude_instructions: Option<&'a str>,
 }
@@ -258,6 +260,9 @@ impl Client {
         }
         if let Some(parent) = opts.parent.map(str::trim).filter(|p| !p.is_empty()) {
             obj.insert("parent".into(), json!(parent));
+        }
+        if !opts.seed.is_empty() {
+            obj.insert("seed".into(), json!(opts.seed));
         }
         if opts.top_level {
             obj.insert("topLevel".into(), json!(true));
