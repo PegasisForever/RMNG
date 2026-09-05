@@ -343,11 +343,11 @@ WantedBy=default.target
 UNIT
 cat > "$UDIR/agent-wrapper.service" <<UNIT
 [Unit]
-Description=rmng agent-wrapper (Claude Agent SDK on :4096)
+Description=rmng agent-wrapper (pi coding agent on :4096)
 After=gnome-headless.service
 [Service]
 Type=simple
-# Self-contained Bun binary; the SDK drives the standalone claude CLI (~/.local/bin).
+# Self-contained Bun binary; pi is embedded, and the clone's pushed Codex token authorizes it.
 Environment=PATH=/home/$USERNAME/.local/bin:$BINDIR:/usr/local/bin:/usr/bin:/bin
 Environment=AGENT_PORT=4096
 ExecStart=$BINDIR/agent-wrapper

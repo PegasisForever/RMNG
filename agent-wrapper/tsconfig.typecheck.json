@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "pi-mcp-adapter": ["./src/types/pi-mcp-adapter.d.ts"]
+    }
+  }
+}

@@ -53,8 +53,8 @@ server derives clone activity from proxy token traffic.
 
 ## 1. Confirm a display is available
 
-Every flow drives the GUI, so first take a `mcp__desktop__screenshot` (or
-`list_monitors`). If the desktop tool reports no display / no active graphical
+Every flow drives the GUI, so first take a `desktop_screenshot` (or
+`desktop_list_monitors`). If the desktop tool reports no display / no active graphical
 session, do not retry or continue; stop. Only proceed once a real desktop is
 visible.
 

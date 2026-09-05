@@ -17,23 +17,22 @@ const runtimeDir = process.env.XDG_RUNTIME_DIR ?? `/run/user/${uid()}`;
 export const CONFIG = {
   /** HTTP listen port — the control-server connects to http://<container-ip>:<port>. */
   port: Number(process.env.AGENT_PORT ?? 4096),
-  /** Model for the session, passed to the CLI as `--model`. The `opus` alias tracks the latest
-   * Opus release, so every clone follows it without a wrapper rebuild or a per-clone override.
-   * Fixed on purpose: the fleet runs one model, and the container's logged-in `claude`
-   * subscription is what authorizes it. */
-  model: "opus",
-  /** JS runtime the SDK uses to run the bundled Claude Code CLI. Ignored when
-   * `claudeExecutable` points at a standalone (native) binary — the SDK spawns it directly. */
-  executable: (process.env.AGENT_EXECUTABLE as "node" | "bun" | "deno" | undefined) ?? "node",
+  /** Model for the session, resolved against pi's built-in `openai-codex` catalog. Fixed on
+   * purpose: the fleet runs one model, and the clone's pushed Codex token is what authorizes
+   * it. Qualified with the provider so a same-named model on another provider can't win. */
+  model: "openai-codex/gpt-5.6-luna",
 
-  /** Path to the Claude Code CLI the SDK spawns. We ship this wrapper as a
-   * `bun build --compile` single-exec, so the SDK can't resolve its own bundled
-   * `cli.js` (it lives in the bunfs virtual FS, and the optional native-CLI package
-   * isn't compiled in) — `query()` throws "Native CLI binary … not found". The clone
-   * has the standalone Claude Code installed at ~/.local/bin/claude (see
-   * provision-clone.sh); point the SDK at it. A non-`.js` path ⇒ the SDK spawns it as
-   * a native binary directly (no node needed), which matches the standalone install. */
-  claudeExecutable: process.env.CLAUDE_CODE_BIN ?? `${process.env.HOME ?? "/home/rmng"}/.local/bin/claude`,
+  /** Reasoning effort. pi maps this through the model's thinkingLevelMap to
+   * `reasoning.effort`. The Fast speed tier rides separately, see serviceTier.ts. */
+  thinkingLevel: "xhigh",
+
+  /** The Codex credential the control-server pushes (codex.rs `apply_clone_token`). Read on
+   * every request so a rotated token lands without a restart. See auth.ts. */
+  codexAuthPath: process.env.CODEX_AUTH_PATH ?? `${process.env.HOME ?? "/home/rmng"}/.codex/auth.json`,
+
+  /** pi's own config directory. Kept inside the clone's home so sessions, settings, and any
+   * operator-installed pi packages survive a wrapper restart. */
+  agentDir: process.env.PI_CODING_AGENT_DIR ?? `${process.env.HOME ?? "/home/rmng"}/.pi/agent`,
 
   /** Per-node desktop MCP (HTTP) — the clone-daemon serves the computer-use tools
    * (screenshot/click/key/type/window-mgmt) locally, sharing its Mutter session. */
@@ -43,8 +42,8 @@ export const CONFIG = {
    * rmng-clone-daemon.service at create time (control-server `provision.rs` HEADLESS_DISABLE_SCRIPT),
    * so nothing serves the desktop MCP on :9004. Detect that by the absence of the clone-daemon user
    * unit — a create-time-stable signal (unlike a TCP probe, it can't misfire during the boot race
-   * before the daemon has bound its port). When headless, `mcpServers()` skips the `desktop` server
-   * so the SDK doesn't register (and, with alwaysLoad, keep retrying) a dead endpoint. */
+   * before the daemon has bound its port). When headless, `mcpConfig()` skips the `desktop` server
+   * so the adapter doesn't eagerly connect to a dead endpoint. */
   headless: !existsSync(
     `${process.env.HOME ?? "/home/rmng"}/.config/systemd/user/rmng-clone-daemon.service`,
   ),
@@ -65,7 +64,7 @@ export const CONFIG = {
 
   /** The control-server-written MCP descriptor — the single source of truth for the managed
    * server set (`desktop`+`linear`), already headless-filtered. The wrapper reads this at
-   * startup and maps it to the SDK's `mcpServers`; absent ⇒ the built-in fallback in server.ts. */
+   * startup and maps it to pi-mcp-adapter's config; absent ⇒ the built-in fallback in server.ts. */
   mcpConfigPath:
     process.env.RMNG_MCP_CONFIG_PATH ??
     `${process.env.HOME ?? "/home/rmng"}/.config/rmng/mcp.json`,

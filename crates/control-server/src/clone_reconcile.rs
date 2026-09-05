@@ -928,7 +928,8 @@ fn rmng_cli_skill_entries() -> Vec<TarEntry> {
 
 /// The per-clone agent config bundle: the shared **global agent prompt** (layers a+c, passed in
 /// as `global_prompt`) written to every agent's native rules file — Claude Code's
-/// `~/.claude/CLAUDE.md` and Codex's `~/.codex/AGENTS.md` — plus the generated Codex config and
+/// `~/.claude/CLAUDE.md`, Codex's `~/.codex/AGENTS.md`, and pi's `~/.pi/agent/AGENTS.md` —
+/// plus the generated Codex config and
 /// the neutral MCP descriptor the node-agent reads. Identical body in both rules files, so a
 /// single source drives every agent's operating memory. The content-hash stamp on this set means
 /// a Settings edit to layer a/c re-applies on the next pass.
@@ -944,6 +945,10 @@ pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<T
         // The global agent prompt (a+c), one identical body per agent's rules location.
         guidance("home/rmng/.claude/CLAUDE.md"),
         guidance("home/rmng/.codex/AGENTS.md"),
+        // pi (the node-agent's embedded coding agent) reads its own global context file. It
+        // recognises AGENTS.md and CLAUDE.md at the working directory and above, but the only
+        // location it always loads is this one, and the wrapper runs with cwd = the clone home.
+        guidance("home/rmng/.pi/agent/AGENTS.md"),
         // Cursor reads neither of those. Its own user-level rules are `.mdc` files under
         // `~/.cursor/rules`, which is where it looks: `joinPath(userHome, ".cursor", "rules")`
         // in its bundle, and nothing at the home level named AGENTS.md or CLAUDE.md is read at
