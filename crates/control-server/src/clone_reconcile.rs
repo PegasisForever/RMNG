@@ -1054,9 +1054,19 @@ pub(crate) fn claude_mcp_stamp_entry_for(headless: bool) -> TarEntry {
     }
 }
 
+/// Stamp value for the Codex-parity step: the payload bytes plus the prepare script that
+/// creates their parent directories.
+pub(crate) fn codex_parity_desired(entries: &[TarEntry]) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    desired_payload_hash(entries).hash(&mut h);
+    codex_prepare_script().hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 pub(crate) fn codex_prepare_script() -> &'static str {
     r#"set -e
 install -d -o rmng -g rmng -m700 /home/rmng/.codex
+install -d -o rmng -g rmng -m700 /home/rmng/.pi /home/rmng/.pi/agent
 install -d -o rmng -g rmng -m755 /home/rmng/.config /home/rmng/.config/rmng /home/rmng/.claude
 install -d -o rmng -g rmng -m755 /home/rmng/.claude/skills/rmng-cli /home/rmng/.agents/skills/rmng-cli
 install -d -o rmng -g rmng -m755 /home/rmng/.cursor /home/rmng/.cursor/rules
@@ -1602,7 +1612,10 @@ async fn ensure_codex_parity(
     global_prompt: &str,
 ) -> Result<bool> {
     let entries = codex_parity_entries(headless, global_prompt);
-    let desired = desired_payload_hash(&entries);
+    // The prepare script rides the stamp because it owns the parent directories these entries
+    // land in. Without that, adding a directory to it would never reach a clone already stamped
+    // for this content, and the tar extract would create the dir root-owned instead.
+    let desired = codex_parity_desired(&entries);
     if read_stamp(app, clone_id, codex_parity_stamp_path(), "codex parity")
         .await?
         .as_deref()
@@ -2465,6 +2478,45 @@ mod tests {
     ///
     /// `~/.codex/config.toml` is the operator's file: `model`, `approval_policy`,
     /// `sandbox_*`, `[profiles.*]`, and their own `[mcp_servers.*]` all live there. It used to
+    /// Every parent directory the parity tar writes into must be created by the prepare
+    /// script first, owned by the clone user.
+    ///
+    /// Docker's tar extract invents a missing parent as root:root, and the agent then cannot
+    /// write beside the file we placed. That is exactly what happened when `~/.pi/agent/AGENTS.md`
+    /// was added without the matching `install -d`: the wrapper could not write its MCP tool
+    /// cache, so the desktop tools were never promoted and every session ran proxy-only.
+    #[test]
+    fn the_prepare_script_owns_every_parity_parent_dir() {
+        let script = codex_prepare_script();
+        for entry in codex_parity_entries(false, "prompt") {
+            let parent = std::path::Path::new(&entry.path)
+                .parent()
+                .expect("entry has a parent")
+                .to_string_lossy()
+                .to_string();
+            let absolute = format!("/{parent}");
+            assert!(
+                script.contains(&absolute),
+                "prepare script never creates {absolute}, so the tar extract would make it root-owned",
+            );
+        }
+    }
+
+    /// Adding a directory to the prepare script has to re-stamp, or clones already stamped for
+    /// this content keep the broken ownership forever.
+    #[test]
+    fn the_codex_parity_stamp_tracks_the_prepare_script() {
+        let entries = codex_parity_entries(false, "prompt");
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        desired_payload_hash(&entries).hash(&mut h);
+        "a different prepare script".hash(&mut h);
+        assert_ne!(
+            codex_parity_desired(&entries),
+            format!("{:016x}", h.finish()),
+            "the stamp ignores the prepare script",
+        );
+    }
+
     /// be rewritten wholesale every reconcile pass, silently reverting any hand-edit within
     /// ~30 s. The failure modes are all in shell, not Rust, so this runs the REAL generated
     /// script against a real file rather than asserting on its text.

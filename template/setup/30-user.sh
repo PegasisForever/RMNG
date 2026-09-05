@@ -198,6 +198,10 @@ chmod 644 "$CLAUDE_DIR/CLAUDE.md"
 log "shared user Codex AGENTS.md + MCP config"
 CODEX_DIR="/home/$USERNAME/.codex"
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "$CODEX_DIR"
+# pi's config dir, used by the agent-wrapper. It holds the global AGENTS.md the
+# control-server writes plus the MCP tool cache the wrapper writes at runtime, so it has
+# to be owned by the clone user before anything lands in it.
+install -d -o "$USERNAME" -g "$USERNAME" -m700 "/home/$USERNAME/.pi" "/home/$USERNAME/.pi/agent"
 cat > "$CODEX_DIR/AGENTS.md" <<'CODEXAGENTS'
 # Working in this clone
 
