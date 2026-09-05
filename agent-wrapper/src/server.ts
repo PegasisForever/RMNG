@@ -160,6 +160,8 @@ async function startSession(): Promise<AgentSession> {
   for (const e of extensionsResult.errors) {
     console.error(`extension failed: ${e.path}: ${e.error}`);
   }
+  // A snapshot taken before the adapter's first tool sync. On a cold metadata cache it lists
+  // only the mcp proxy; the promoted desktop_* tools land during the first session.
   console.log(
     `extensions: ${extensionsResult.extensions.map((e) => e.path).join(", ") || "none"} | ` +
       `tools: ${created.agent.state.tools.map((t) => t.name).join(", ") || "none"}`,

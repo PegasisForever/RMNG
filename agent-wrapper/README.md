@@ -27,7 +27,9 @@ Auth is file-based. The control-server signs in, refreshes, and pushes `~/.codex
 
 pi ships no MCP support, so [`pi-mcp-adapter`](https://www.npmjs.com/package/pi-mcp-adapter) bridges the servers into pi tools. The wrapper reads the control-server's neutral descriptor at `~/.config/rmng/mcp.json` (the single source of truth, already headless-filtered) and maps it to the adapter's config.
 
-The desktop server is promoted to direct tools (`desktop_screenshot`, `desktop_left_click`, …), which replaces the old `alwaysLoad` flag. Linear stays behind the proxy tool. On the very first session of a fresh clone the adapter has no tool-metadata cache yet, so that turn reaches both servers through the `mcp` proxy tool instead.
+The desktop server is promoted to direct tools (`desktop_screenshot`, `desktop_left_click`, …), which replaces the old `alwaysLoad` flag. Linear stays behind the proxy tool.
+
+Promotion needs the adapter's tool-metadata cache at `~/.pi/agent/mcp-cache.json`, which it fills after connecting. The startup line the wrapper logs is a snapshot taken before that first sync, so it lists only `mcp` and `mcpScript` on a cold cache. The direct tools appear once the sync lands, within the first session. The `mcp` proxy reaches the same servers meanwhile.
 
 ## Config (environment)
 
