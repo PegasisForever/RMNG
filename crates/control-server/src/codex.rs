@@ -452,14 +452,38 @@ fn auth_json(acct: &StoredCodexAccount) -> String {
     )
 }
 
-/// Install `acct`'s tokens into clone `host_id`'s `~/.codex/auth.json`. Sanity-checks the
-/// access token is a JWT (`eyJ…`). Best-effort hot-swap; codex re-reads auth.json per call.
+/// The `~/.pi/agent/auth.json` body that logs a stock `pi` in as `acct`.
+///
+/// pi keys credentials by provider id and reads only its own file, so it never sees the
+/// Codex CLI's `~/.codex/auth.json`. Writing this second copy is what makes a `pi` the
+/// operator installs themselves start authenticated instead of at a `/login` prompt.
+///
+/// `expires` is year 2100 for the same reason the refresh token is empty: pi refreshes any
+/// OAuth credential within five minutes of expiry, and that call could only fail. The server
+/// owns rotation and re-pushes both files roughly two hours before the real expiry, which is
+/// about nine days out. Same trick as `claude::credentials_json`.
+///
+/// The clone's own agent-wrapper does NOT read this file. It bridges `~/.codex/auth.json`
+/// directly through its own CredentialStore, so the assistant keeps working even when this
+/// copy is stale or absent.
+fn pi_auth_json(acct: &StoredCodexAccount) -> String {
+    format!(
+        r#"{{"openai-codex":{{"type":"oauth","access":"{access}","refresh":"","expires":4102444800000,"accountId":"{acct_id}"}}}}"#,
+        access = acct.access_token,
+        acct_id = acct.account_id,
+    )
+}
+
+/// Install `acct`'s tokens into clone `host_id`'s `~/.codex/auth.json` and `~/.pi/agent/auth.json`.
+/// Sanity-checks the access token is a JWT (`eyJ…`). Best-effort hot-swap; codex and pi both
+/// re-read their auth file per call.
 pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredCodexAccount) -> Result<()> {
     if !acct.access_token.starts_with("eyJ") {
         bail!("refusing to apply a non-JWT codex access token");
     }
     let b64 = B64.encode(auth_json(acct).as_bytes());
-    let out = run_clone_op(app, host_id, IMPORT_SCRIPT, "apply", &[&b64]).await?;
+    let pi_b64 = B64.encode(pi_auth_json(acct).as_bytes());
+    let out = run_clone_op(app, host_id, IMPORT_SCRIPT, "apply", &[&b64, &pi_b64]).await?;
     // A distinctive marker rather than "OK", which is a substring of ordinary words.
     if out.contains("RMNG_APPLY_OK") {
         Ok(())
@@ -1855,6 +1879,33 @@ mod tests {
         assert_eq!(v["tokens"]["refresh_token"], "");
         // last_refresh is a present RFC3339 string (defeats the CLI's 8-day fallback).
         assert!(v["last_refresh"].as_str().is_some_and(|s| s.contains('T')));
+    }
+
+    /// pi keys credentials by provider id and never reads ~/.codex, so this second file is
+    /// the only thing that logs a stock `pi` in.
+    #[test]
+    fn injected_pi_auth_json_shape() {
+        let j = pi_auth_json(&sample_account());
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        let c = &v["openai-codex"];
+        assert_eq!(c["type"], "oauth");
+        assert_eq!(c["access"], "eyJaccess");
+        assert_eq!(c["accountId"], "acc-1");
+        // Empty for the same reason as the codex file: the server owns rotation.
+        assert_eq!(c["refresh"], "");
+        // Year 2100. A real expiry would make pi attempt a refresh that can only fail.
+        assert_eq!(c["expires"], 4102444800000i64);
+    }
+
+    /// Both files carry the same access token, so a clone can never run codex under one
+    /// account while pi runs under another.
+    #[test]
+    fn both_auth_files_carry_the_same_token() {
+        let acct = sample_account();
+        let codex: serde_json::Value = serde_json::from_str(&auth_json(&acct)).unwrap();
+        let pi: serde_json::Value = serde_json::from_str(&pi_auth_json(&acct)).unwrap();
+        assert_eq!(codex["tokens"]["access_token"], pi["openai-codex"]["access"]);
+        assert_eq!(codex["tokens"]["account_id"], pi["openai-codex"]["accountId"]);
     }
 
     #[test]
