@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::app::App;
 
@@ -409,6 +410,20 @@ fn distill(
     st: &mut FileState,
     now: &str,
 ) -> Vec<LedgerRecord> {
+    // Pi lines never parse into anything below keeps: main sessions use `"type":"message"`
+    // (no Claude Code line does) and child transcripts use `"recordType"`. The substring
+    // pre-filter keeps every other agent on its single parse; only candidates pay for the
+    // second one, and the shape check inside rejects lookalikes.
+    if line.contains("\"recordType\"")
+        || line.contains("\"type\":\"message\"")
+        || line.contains("\"type\": \"message\"")
+    {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if is_pi_line(&v) {
+                return distill_pi(clone, session, &v, st, now);
+            }
+        }
+    }
     let Ok(raw) = serde_json::from_str::<RawLine>(line) else { return Vec::new() };
     if let Some(ts) = raw.timestamp.as_deref().filter(|t| !t.is_empty()) {
         st.last_ts = ts.to_string();
@@ -542,6 +557,198 @@ fn distill_codex(
             let mut rec = emit("toolResult", tool_result_text(payload.get("output")));
             rec.tool_id = text_at("call_id");
             vec![rec]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a parsed line is a Pi session or Pi child-transcript record.
+///
+/// Main sessions mark message lines `{"type":"message","message":{"role":…}}`, where no
+/// Claude Code line uses `message` as a line type. Child transcripts mark every record with
+/// `recordType`. Both shapes are Pi-only; a Claude, Cursor or Codex line matches neither.
+fn is_pi_line(v: &serde_json::Value) -> bool {
+    if v.get("recordType").and_then(|r| r.as_str()).is_some() {
+        return true;
+    }
+    v.get("type").and_then(|t| t.as_str()) == Some("message") && v.get("message").is_some()
+}
+
+/// A Pi timestamp as an RFC3339 string: the line's own ISO stamp when present, else a numeric
+/// millisecond stamp converted. `None` when the line carries neither, leaving the caller to
+/// inherit or stamp the pass time.
+fn pi_ledger_ts(v: &serde_json::Value) -> Option<String> {
+    if let Some(iso) = v.get("timestamp").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
+        return Some(iso.to_string());
+    }
+    let ms = v
+        .get("ts")
+        .and_then(|t| t.as_i64())
+        .or_else(|| v.get("message").and_then(|m| m.get("timestamp")).and_then(|t| t.as_i64()))?;
+    (ms > 0).then(|| crate::docker::epoch_to_rfc3339(ms / 1000))
+}
+
+/// Plain text out of a Pi content array: `text` blocks joined, everything else (thinking,
+/// tool calls) left for its own record.
+fn pi_text(content: &serde_json::Value) -> String {
+    let Value::Array(blocks) = content else {
+        return content.as_str().unwrap_or_default().to_string();
+    };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The records one Pi line contributes, for both Pi shapes (see [`pi_session_files`]).
+///
+/// | Ledger kind | Pi record |
+/// |---|---|
+/// | `user` | main `message` / `user`, child `message` / `user` (incl. the initial prompt) |
+/// | `assistant` | main `message` / `assistant` text, child `message` / `assistant` |
+/// | `toolUse` | main `toolCall` block, child `tool_start` |
+/// | `toolResult` | main `message` / `toolResult`, child `message` / `toolResult` |
+///
+/// Dropped like their Claude Code counterparts: thinking blocks, `tool_end` (its output
+/// arrives as a `toolResult` message), `stdout`/`stderr` process chatter, session and model
+/// bookkeeping lines.
+fn distill_pi(
+    clone: &str,
+    session: &str,
+    v: &serde_json::Value,
+    st: &mut FileState,
+    now: &str,
+) -> Vec<LedgerRecord> {
+    if let Some(ts) = pi_ledger_ts(v) {
+        st.last_ts = ts;
+    }
+    let base = LedgerRecord {
+        clone: clone.to_string(),
+        session: session.to_string(),
+        ts: match st.last_ts.is_empty() {
+            true => now.to_string(),
+            false => st.last_ts.clone(),
+        },
+        ..Default::default()
+    };
+    let emit = |kind: &str, text: String| LedgerRecord {
+        kind: kind.to_string(),
+        text,
+        ..base.clone()
+    };
+    let str_at = |v: &serde_json::Value, key: &str| {
+        v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string()
+    };
+
+    // Child transcript shape first: its `recordType` names the record directly.
+    match v.get("recordType").and_then(|r| r.as_str()) {
+        Some("message") => {
+            let role = v.get("role").and_then(|r| r.as_str()).unwrap_or_default();
+            match role {
+                "user" | "assistant" => {
+                    let said = v
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string)
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| {
+                            v.get("message")
+                                .map(|m| pi_text(m.get("content").unwrap_or(&Value::Null)))
+                                .unwrap_or_default()
+                        });
+                    if said.is_empty() {
+                        return Vec::new();
+                    }
+                    vec![emit(role, clip(&said, MAX_TEXT_CHARS))]
+                }
+                "toolResult" => {
+                    let mut rec = emit(
+                        "toolResult",
+                        tool_result_text(Some(&v.get("text").cloned().unwrap_or(Value::Null))),
+                    );
+                    rec.tool_id = str_at(v, "toolCallId");
+                    rec.tool = str_at(v, "toolName");
+                    vec![rec]
+                }
+                _ => Vec::new(),
+            }
+        }
+        Some("tool_start") => {
+            let args = v
+                .get("argsPayload")
+                .and_then(|a| a.as_str())
+                .map(str::to_string)
+                .unwrap_or_default();
+            let mut rec = emit("toolUse", clip(&args, MAX_TOOL_INPUT_CHARS));
+            rec.tool = str_at(v, "toolName");
+            rec.tool_id = str_at(v, "toolCallId");
+            vec![rec]
+        }
+        // `tool_end` carries no output, `stdout`/`stderr` are process chatter whose content
+        // arrives as `toolResult` messages, and anything else is bookkeeping.
+        _ if v.get("recordType").is_some() => Vec::new(),
+        // Main session shape: `{"type":"message","message":{"role":…}}`.
+        None => {
+            let Some(msg) = v.get("message") else { return Vec::new() };
+            match msg.get("role").and_then(|r| r.as_str()) {
+                Some("user") => {
+                    let said = pi_text(msg.get("content").unwrap_or(&Value::Null));
+                    if said.is_empty() {
+                        return Vec::new();
+                    }
+                    vec![emit("user", clip(&said, MAX_TEXT_CHARS))]
+                }
+                Some("assistant") => {
+                    let content = msg.get("content").unwrap_or(&Value::Null);
+                    let mut out = Vec::new();
+                    let mut said = Vec::new();
+                    let Some(blocks) = content.as_array() else {
+                        let text = pi_text(content);
+                        if text.is_empty() {
+                            return Vec::new();
+                        }
+                        return vec![emit("assistant", clip(&text, MAX_TEXT_CHARS))];
+                    };
+                    for b in blocks {
+                        match b.get("type").and_then(|t| t.as_str()) {
+                            Some("text") => {
+                                if let Some(t) = b.get("text").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
+                                    said.push(t.to_string());
+                                }
+                            }
+                            Some("toolCall") => {
+                                if !said.is_empty() {
+                                    out.push(emit("assistant", clip(&said.join("\n"), MAX_TEXT_CHARS)));
+                                    said.clear();
+                                }
+                                let input = b.get("arguments").map(|a| a.to_string()).unwrap_or_default();
+                                let mut rec = emit("toolUse", clip(&input, MAX_TOOL_INPUT_CHARS));
+                                rec.tool = str_at(b, "name");
+                                rec.tool_id = str_at(b, "id");
+                                out.push(rec);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !said.is_empty() {
+                        out.push(emit("assistant", clip(&said.join("\n"), MAX_TEXT_CHARS)));
+                    }
+                    out
+                }
+                Some("toolResult") => {
+                    let mut rec = emit(
+                        "toolResult",
+                        tool_result_text(msg.get("content")),
+                    );
+                    rec.tool_id = str_at(msg, "toolCallId");
+                    rec.tool = str_at(msg, "toolName");
+                    vec![rec]
+                }
+                _ => Vec::new(),
+            }
         }
         _ => Vec::new(),
     }
@@ -817,6 +1024,79 @@ fn codex_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
     out
 }
 
+/// Every Pi transcript under `home`, at most `cap` of them.
+///
+/// Pi files one JSONL session per file under a slug of its working directory:
+/// `~/.pi/agent/sessions/<slug>/<timestamp>_<id>.jsonl`. Delegated work lands beside them
+/// in `subagent-artifacts/<runId>_<agent>_transcript.jsonl`, in a flatter record shape
+/// (`recordType` rather than `type`). The artifacts directory names no parent session, so
+/// each child transcript is filed as its own session under its run id, marked `sidechain`
+/// like a Claude Code subagent file, and the ledger search reunites them by clone.
+///
+/// Main transcripts sort first, subagent ones after, so [`MAX_READ_PER_CLONE`] spends its
+/// budget on the operator's own conversation before delegated bulk.
+fn pi_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
+    let root = home.join(".pi/agent/sessions");
+    let mut out: Vec<Transcript> = Vec::new();
+    let mut stack = vec![root];
+    let mut budget = 20_000;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if budget == 0 || out.len() >= cap {
+                out.sort_unstable_by(|a, b| (a.sidechain, &a.path).cmp(&(b.sidechain, &b.path)));
+                return out;
+            }
+            budget -= 1;
+            let path = e.path();
+            let Ok(kind) = e.file_type() else { continue };
+            if kind.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let Some(file) = entry_name(&e) else { continue };
+            if !file.ends_with(".jsonl") {
+                continue;
+            }
+            let key = match path.strip_prefix(home).ok().and_then(|p| p.to_str()) {
+                Some(rel) => rel.to_string(),
+                None => continue,
+            };
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            // A child transcript: `<runId>_<agent>_transcript`.
+            if let Some(minus_kind) = stem.strip_suffix("_transcript") {
+                if let Some((run, agent)) = minus_kind.rsplit_once('_') {
+                    if !run.is_empty() && !agent.is_empty() {
+                        out.push(Transcript {
+                            key,
+                            name: format!("{run}.ndjson"),
+                            agent: run.to_string(),
+                            path,
+                            sidechain: true,
+                        });
+                    }
+                }
+                continue;
+            }
+            // A main session: `<timestamp>_<id>`.
+            let tail = stem.rsplit('_').next().unwrap_or(stem);
+            let Some(id) = crate::stuck::codex_session_id(tail) else { continue };
+            out.push(Transcript {
+                key,
+                name: format!("{id}.ndjson"),
+                path,
+                sidechain: false,
+                agent: String::new(),
+            });
+        }
+    }
+    out.sort_unstable_by(|a, b| (a.sidechain, &a.path).cmp(&(b.sidechain, &b.path)));
+    out
+}
+
 /// Append the ledger lines for whatever has been added to `src` since its cursor, returning the
 /// bytes of transcript consumed.
 ///
@@ -940,7 +1220,9 @@ fn tail_clone(clone: &str, home: &Path, dir: &Path) {
     let cursor = cursor_session_files(home, left);
     left = left.saturating_sub(cursor.len());
     let codex = codex_session_files(home, left);
-    for src in claude.iter().chain(cursor.iter()).chain(codex.iter()) {
+    left = left.saturating_sub(codex.len());
+    let pi = pi_session_files(home, left);
+    for src in claude.iter().chain(cursor.iter()).chain(codex.iter()).chain(pi.iter()) {
         if budget == 0 {
             break; // Backlog drains over the next few passes.
         }
@@ -1234,6 +1516,73 @@ mod tests {
         // moment the pass read it.
         assert_eq!(recs[0].session, "e52bd0c6");
         assert_eq!(recs[0].ts, READ_AT);
+    }
+
+    #[test]
+    fn a_pi_session_distills_words_calls_and_results() {
+        let mut st = FileState::default();
+        let user = r#"{"type":"message","timestamp":"2026-09-08T05:00:10.000Z","message":{"role":"user","content":[{"type":"text","text":"build it"}],"timestamp":1788840010000}}"#;
+        let recs = distill("c", "01a07f33-9913-7397-ba86-9003a65261d2", user, &mut st, READ_AT);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, "user");
+        assert_eq!(recs[0].text, "build it");
+        assert_eq!(recs[0].ts, "2026-09-08T05:00:10.000Z");
+
+        // Thinking is dropped; the tool call keeps its name, id and input.
+        let asst = r#"{"type":"message","timestamp":"2026-09-08T05:00:15.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"On it."},{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"cargo build"}}],"timestamp":1788840015000}}"#;
+        let recs = distill("c", "s", asst, &mut st, READ_AT);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].kind, "assistant");
+        assert_eq!(recs[0].text, "On it.");
+        assert_eq!(recs[1].kind, "toolUse");
+        assert_eq!(recs[1].tool, "bash");
+        assert_eq!(recs[1].tool_id, "c1");
+
+        let res = r#"{"type":"message","timestamp":"2026-09-08T05:00:16.000Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","content":[{"type":"text","text":"ok"}],"timestamp":1788840016000}}"#;
+        let recs = distill("c", "s", res, &mut st, READ_AT);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, "toolResult");
+        assert_eq!(recs[0].tool_id, "c1");
+        assert_eq!(recs[0].text, "ok");
+    }
+
+    #[test]
+    fn a_pi_child_transcript_distills_messages_and_tool_starts() {
+        let mut st = FileState::default();
+        let msg = r#"{"version":1,"recordType":"message","runId":"r1","agent":"worker","ts":1788840010000,"timestamp":"2026-09-08T05:00:10.000Z","role":"assistant","text":"Found it in auth.ts."}"#;
+        let recs = distill("c", "r1", msg, &mut st, READ_AT);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, "assistant");
+        // tool_end and stdout carry no new content: the toolResult message has the output.
+        let end = r#"{"version":1,"recordType":"tool_end","ts":1788840011000,"timestamp":"2026-09-08T05:00:11.000Z","toolCallId":"c2"}"#;
+        assert!(distill("c", "r1", end, &mut st, READ_AT).is_empty());
+        let start = r#"{"version":1,"recordType":"tool_start","ts":1788840012000,"timestamp":"2026-09-08T05:00:12.000Z","toolCallId":"c3","toolName":"grep","argsPayload":"{\"pattern\": \"foo\"}"}"#;
+        let recs = distill("c", "r1", start, &mut st, READ_AT);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, "toolUse");
+        assert_eq!(recs[0].tool, "grep");
+        assert_eq!(recs[0].tool_id, "c3");
+    }
+
+    #[test]
+    fn pi_transcripts_and_their_subagents_are_both_found() {
+        let home = std::env::temp_dir().join(format!("rmng-ledger-pi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let slug = home.join(".pi/agent/sessions/--home-rmng-api--");
+        std::fs::create_dir_all(slug.join("subagent-artifacts")).unwrap();
+        let id = "01a07f33-9913-7397-ba86-9003a65261d2";
+        std::fs::write(slug.join(format!("2026-09-08T05-00-00-000Z_{id}.jsonl")), "{}\n").unwrap();
+        std::fs::write(slug.join("subagent-artifacts/r1_worker_transcript.jsonl"), "{}\n").unwrap();
+        std::fs::write(slug.join("subagent-artifacts/r1_worker_meta.json"), "{}\n").unwrap();
+
+        let found = pi_session_files(&home, 4096);
+        assert_eq!(found.len(), 2);
+        assert!(!found[0].sidechain);
+        assert_eq!(found[0].name, format!("{id}.ndjson"));
+        assert!(found[1].sidechain);
+        assert_eq!(found[1].name, "r1.ndjson");
+        assert_eq!(found[1].agent, "r1");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

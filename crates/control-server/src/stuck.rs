@@ -48,6 +48,10 @@
 //! model's answer. That is what makes "no Codex account imported" behave correctly with no
 //! branch for it: with nothing to answer [`Verdict::Ask`], no clone is ever reported working.
 //!
+//! Pi background tasks reach the model the same way Claude Code's do: as `background_tasks`
+//! entries judged by their command. The harness's wake flags stay out of the view entirely
+//! and are used only for file routing (a wake-off task never forces a question).
+//!
 //! The model's answer is taken as given with one exception, [`overruled`]. An agent inside a
 //! tool call four seconds old has not hung, whatever the model says, and the prompt has
 //! forbidden that reading since the first pilot without stopping it. So it is enforced instead:
@@ -237,6 +241,11 @@ pub struct Session {
     /// that reused its pid.
     #[serde(default)]
     pub proc_start: String,
+    /// The session's working directory, for Pi sessions only. Pi background tasks carry a
+    /// `cwd` but no session id, so this is what matches a task to the session waiting on
+    /// it. `None` on every other agent. Filled in by [`read_pi_sessions`], never by serde.
+    #[serde(skip)]
+    pub pi_cwd: Option<String>,
     /// Filled in by [`read_sessions`], never by serde.
     #[serde(skip)]
     pub alive: bool,
@@ -825,6 +834,375 @@ pub fn read_codex_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>) {
     (sessions, events)
 }
 
+/// Where the Pi coding agent files a session's transcript, under the clone's home.
+///
+/// One JSONL session per file: `~/.pi/agent/sessions/<slug>/<timestamp>_<id>.jsonl`, where
+/// `<slug>` is the working directory with separators flattened (`--home-rmng-RMNG--`) and
+/// `<id>` is the session id. The first line names the session and its `cwd`:
+/// `{"type":"session","id":"<id>","cwd":"/home/rmng/<project>"}`.
+const PI_SESSIONS: &str = "home/rmng/.pi/agent/sessions";
+
+/// Most Pi session files read for one clone in one pass. Pi keeps every session it has ever
+/// run, and a long-lived clone accumulates them. Newest mtime first, so a cap drops dead
+/// history before it drops the live turn.
+const MAX_PI_SESSION_FILES: usize = 64;
+
+/// Most `.pi/tasks` metadata files read for one clone in one pass. Tasks live per project
+/// (`<project>/.pi/tasks/<run>/<id>.json`), so a clone with many checkouts can hold many.
+/// Running wake-tasks are what matters, and those are few; the cap only bounds the walk.
+const MAX_PI_TASK_FILES: usize = 256;
+
+/// One Pi `bg_run` / `/bg` background task, as its `.pi/tasks/<run>/<id>.json` file records
+/// it. Only four fields ever decide anything: `status`, `triggerOnCompletion`,
+/// `notifyOnCompletion`, and `cwd`. Everything else is context for the log line.
+#[derive(Debug, Clone, Default)]
+pub struct PiTask {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub cwd: String,
+    pub status: String,
+    pub trigger: bool,
+    pub notify: bool,
+    pub started_ms: i64,
+    pub output_path: String,
+}
+
+impl PiTask {
+    /// Whether this task will wake the agent on its own when it finishes. That is the whole
+    /// of Plan A: the agent (or user) declares at launch whether completion matters, and the
+    /// status check trusts the declaration instead of classifying the command text.
+    ///
+    /// Both flags are required, not just `trigger`. A wake request without its notification
+    /// never fires (the wake rides the notification), so `trigger` alone over-reads.
+    /// A missing flag reads as false: inventing a wake nobody asked for pins a clone
+    /// `working` on a dev server someone launched with bare defaults.
+    pub fn wakes_agent(&self) -> bool {
+        self.status == "running" && self.trigger && self.notify
+    }
+}
+
+/// The session id inside a Pi session file name, which is the part after the last `_`.
+///
+/// `2026-09-08T04-08-03-092Z_01a07f33-9913-7397-ba86-9003a65261d2` is one id shaped like a
+/// UUID, so the same shape check as [`codex_session_id`] applies once the timestamp prefix
+/// is stripped.
+fn pi_session_id(stem: &str) -> Option<&str> {
+    let tail = stem.rsplit('_').next().unwrap_or(stem);
+    codex_session_id(tail)
+}
+
+/// One line of a Pi session file. Only `message` lines carry turns; `session` carries the
+/// id and cwd, and `model_change` / `thinking_level_change` carry nothing this module reads.
+#[derive(Debug, Deserialize)]
+struct PiLine {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    message: Option<PiMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PiMessage {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    content: Option<Value>,
+    #[serde(rename = "toolCallId", default)]
+    tool_call_id: Option<String>,
+    #[serde(rename = "toolName", default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    timestamp: Option<i64>,
+}
+
+/// Stamp of one Pi record in clone-clock seconds: the numeric message stamp when present,
+/// else the line's own ISO stamp. Numeric is milliseconds; ISO shares the RFC3339 parser.
+fn pi_ts(line_ts: Option<&str>, msg_ts: Option<i64>) -> f64 {
+    if let Some(ms) = msg_ts {
+        return ms as f64 / 1000.0;
+    }
+    line_ts
+        .and_then(crate::claude::parse_rfc3339_utc_secs)
+        .map_or(0.0, |secs| secs as f64)
+}
+
+/// Pi's sessions, shaped so one resolver covers every agent, plus hook-shaped events for
+/// the shared folds and each session's cwd for matching background tasks.
+///
+/// The mapping mirrors [`read_codex_sessions`]: a `user` message is a `UserPromptSubmit`,
+/// an assistant `toolCall` is a `PreToolUse`, a `toolResult` is a `PostToolUse`. A session
+/// whose newest turn has no reply yet reads `busy` (generating); one sitting inside an
+/// unclosed call also reads `busy`; anything else reads `idle`.
+///
+/// Liveness is approximate: Pi publishes no process registry, so every parsed session with
+/// a user message in it counts as live. A dead session settles `Stuck` from its own status
+/// and costs nothing; a killed-mid-call one asks the model once per cache bucket and the
+/// judge correctly calls its huge quiet hung. The mtime cap bounds the cost.
+pub fn read_pi_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>, HashMap<String, String>) {
+    let mut files: Vec<(f64, PathBuf)> = Vec::new();
+    let mut stack = vec![root.join(PI_SESSIONS)];
+    let mut budget = 20_000;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if budget == 0 { break; }
+            budget -= 1;
+            let path = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|x| x != "jsonl") { continue; }
+            if path.file_stem().and_then(|s| s.to_str()).and_then(pi_session_id).is_none() {
+                continue;
+            }
+            // Skip huge transcripts: a multi-MB session costs a full parse every 4s tick.
+            // The live turn is almost always in a small file; subagent bulk lives under
+            // `subagent-artifacts/`, which this walk never enters by name shape anyway.
+            let mtime = e.metadata().and_then(|m| m.modified()).ok();
+            files.push((mtime.map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)).unwrap_or(0.0), path));
+        }
+    }
+    files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    files.truncate(MAX_PI_SESSION_FILES);
+    // Read oldest-first so later files cannot shadow an id they predate; newest wins below.
+    files.reverse();
+
+    let mut sessions = Vec::new();
+    let mut events = Vec::new();
+    let mut cwds: HashMap<String, String> = HashMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (_, path) in &files {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let Some(id) = pi_session_id(stem).map(str::to_string) else { continue };
+        if !seen.insert(id.clone()) { continue; }
+        let Ok(body) = std::fs::read_to_string(path) else { continue };
+        let mut cwd = String::new();
+        let mut has_user = false;
+        let mut open: HashSet<String> = HashSet::new();
+        let mut last_kind = String::new();
+        for line in body.lines() {
+            if line.trim().is_empty() { continue; }
+            let Ok(raw) = serde_json::from_str::<PiLine>(line) else { continue };
+            let ts = pi_ts(raw.timestamp.as_deref(), raw.message.as_ref().and_then(|m| m.timestamp));
+            match raw.kind.as_deref() {
+                Some("session") => {
+                    if let Some(c) = raw.cwd.filter(|c| !c.is_empty()) { cwd = c; }
+                }
+                Some("message") => {
+                    let Some(msg) = raw.message else { continue };
+                    match msg.role.as_deref() {
+                        Some("user") => {
+                            has_user = true;
+                            last_kind = "user".to_string();
+                            events.push(HookEvent {
+                                hook_event_name: "UserPromptSubmit".into(),
+                                session_id: Some(id.clone()),
+                                ts,
+                                ..Default::default()
+                            });
+                        }
+                        Some("assistant") => {
+                            last_kind = "assistant".to_string();
+                            if let Some(content) = msg.content {
+                                let calls: Vec<PiToolCall> = match content {
+                                    Value::Array(blocks) => blocks.iter().filter_map(|b| {
+                                        (b.get("type")?.as_str() == Some("toolCall")).then(|| PiToolCall {
+                                            id: b.get("id").and_then(Value::as_str).map(str::to_string),
+                                            name: b.get("name").and_then(Value::as_str).map(str::to_string),
+                                            arguments: b.get("arguments").cloned(),
+                                        })
+                                    }).collect(),
+                                    _ => Vec::new(),
+                                };
+                                for c in calls {
+                                    if let Some(cid) = c.id.clone() { open.insert(cid.clone()); }
+                                    events.push(HookEvent {
+                                        hook_event_name: "PreToolUse".into(),
+                                        session_id: Some(id.clone()),
+                                        tool_name: c.name,
+                                        tool_use_id: c.id,
+                                        tool_input: c.arguments.map(|v| v.to_string()),
+                                        ts,
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        }
+                        Some("toolResult") => {
+                            last_kind = "toolResult".to_string();
+                            if let Some(cid) = msg.tool_call_id.clone() { open.remove(&cid); }
+                            events.push(HookEvent {
+                                hook_event_name: "PostToolUse".into(),
+                                session_id: Some(id.clone()),
+                                tool_name: msg.tool_name,
+                                tool_use_id: msg.tool_call_id,
+                                ts,
+                                ..Default::default()
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !has_user { continue; }
+        if !cwd.is_empty() { cwds.insert(id.clone(), cwd.clone()); }
+        // Generating means the newest turn has a prompt but no reply yet. Pi appends a
+        // session line only when a message completes, so a trailing user message with a
+        // fresh file is an agent mid-generation, not an idle one.
+        let file_quiet = std::fs::metadata(path).and_then(|m| m.modified()).ok().map(|t| {
+            std::time::SystemTime::now().duration_since(t).map(|d| d.as_secs_f64()).unwrap_or(f64::MAX)
+        }).unwrap_or(f64::MAX);
+        let generating = last_kind == "user" && file_quiet <= MOVING_WINDOW_S;
+        sessions.push(Session {
+            session_id: id,
+            status: Some(if !open.is_empty() || generating { "busy" } else { "idle" }.to_string()),
+            pi_cwd: Some(cwd).filter(|c| !c.is_empty()),
+            alive: true,
+            ..Default::default()
+        });
+    }
+    (sessions, events, cwds)
+}
+
+#[derive(Debug, Default)]
+struct PiToolCall {
+    id: Option<String>,
+    name: Option<String>,
+    arguments: Option<Value>,
+}
+
+/// Every Pi background task under the clone's home, at most [`MAX_PI_TASK_FILES`] of them.
+///
+/// Tasks live per project (`<project>/.pi/tasks/<run>/<id>.json`), so this walks
+/// `home/rmng` looking for `tasks` directories under a `.pi` parent. `*.output` files are
+/// skipped by extension; only the `*.json` metadata decides anything.
+fn read_pi_tasks(root: &Path) -> Vec<PiTask> {
+    #[derive(Debug, Deserialize, Default)]
+    struct RawTask {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(rename = "triggerOnCompletion", default)]
+        trigger: Option<bool>,
+        #[serde(rename = "notifyOnCompletion", default)]
+        notify: Option<bool>,
+        #[serde(rename = "startTime", default)]
+        started_ms: Option<i64>,
+        #[serde(rename = "outputPath", default)]
+        output_path: Option<String>,
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![root.join("home/rmng")];
+    let mut budget = 20_000;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            if budget == 0 || out.len() >= MAX_PI_TASK_FILES { return out; }
+            budget -= 1;
+            let path = e.path();
+            let Ok(kind) = e.file_type() else { continue };
+            if kind.is_dir() {
+                // Only descend where tasks can be: a `.pi` tree or the home itself.
+                // Anything else (checkouts, node_modules, target/) cannot hold task
+                // metadata and is skipped without being listed further.
+                let name = e.file_name().to_string_lossy().into_owned();
+                let under_pi = path.components().any(|c| c.as_os_str() == ".pi");
+                if under_pi || dir.ends_with("home/rmng") || name == ".pi" {
+                    stack.push(path);
+                } else if name != ".pi" {
+                    // Project roots sit directly under the home: one level is enough to
+                    // reach their `.pi` dirs, and deeper trees are entered only once
+                    // inside `.pi`.
+                    let rel = path.strip_prefix(root.join("home/rmng")).ok();
+                    if rel.map(|r| r.components().count() <= 1).unwrap_or(false) {
+                        stack.push(path);
+                    }
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|x| x != "json") { continue; }
+            if !path.components().any(|c| c.as_os_str() == ".pi") { continue; }
+            if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.')) {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else { continue };
+            let Ok(raw) = serde_json::from_str::<RawTask>(&body) else { continue };
+            // A task file without a status is not a task record (delegate seeds and
+            // bookkeeping share these directories).
+            let Some(status) = raw.status.filter(|s| !s.is_empty()) else { continue };
+            out.push(PiTask {
+                id: raw.id.unwrap_or_default(),
+                name: raw.name.or(raw.description).unwrap_or_default(),
+                command: raw.command.unwrap_or_default(),
+                cwd: raw.cwd.unwrap_or_default(),
+                status,
+                trigger: raw.trigger.unwrap_or(false),
+                notify: raw.notify.unwrap_or(false),
+                started_ms: raw.started_ms.unwrap_or(0),
+                output_path: raw.output_path.unwrap_or_default(),
+            });
+        }
+    }
+    out
+}
+
+/// Size and staleness of one Pi task's output file, resolved against its own `cwd`.
+///
+/// `outputPath` is stored display-relative (`<project>/.pi/tasks/...`) or project-relative
+/// (`.pi/tasks/...`), so both shapes are tried under the container root.
+fn pi_task_output(root: &Path, task: &PiTask, now: f64) -> Option<(u64, f64)> {
+    if task.output_path.is_empty() { return None; }
+    let mut candidates = Vec::new();
+    if !task.cwd.is_empty() {
+        let under = task.cwd.strip_prefix('/').unwrap_or(&task.cwd);
+        candidates.push(root.join(under).join(&task.output_path));
+        candidates.push(root.join(under).join(task.output_path.trim_start_matches("../").to_string()));
+    }
+    candidates.push(root.join(task.output_path.trim_start_matches('/')));
+    for path in candidates {
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        if !meta.is_file() { continue; }
+        let Ok(mtime) = meta.modified() else { continue };
+        let age = now - mtime.duration_since(std::time::UNIX_EPOCH).map_or(now, |d| d.as_secs_f64());
+        return Some((meta.len(), age));
+    }
+    None
+}
+
+/// Whether one of `tasks` is a live wake for the session working out of `cwd`.
+///
+/// A live wake forces the session to Ask so the model can verify the launcher's claim
+/// against the command. Matching is by `cwd` when the session knows its own: a compile in
+/// `/home/rmng/api` must not wake a question about a session in `/home/rmng/web`. A session
+/// with no known cwd takes every task, because dropping a real wake over a missing directory
+/// is the worse failure.
+fn pi_live_wake<'a>(tasks: &'a [PiTask], cwd: Option<&str>) -> Option<&'a PiTask> {
+    tasks.iter().find(|t| {
+        if !t.wakes_agent() { return false; }
+        match (cwd.filter(|c| !c.is_empty()), t.cwd.as_str()) {
+            (Some(want), got) if !got.is_empty() => got == want,
+            _ => true,
+        }
+    })
+}
+
 /// The clone's clock for this pass: this server's, raised to the newest hook stamp.
 ///
 /// Stamped AFTER the log is read, never before. A hook that fires during the read would
@@ -1018,6 +1396,7 @@ fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
         root.join("home/rmng/.claude/projects"),
         root.join("home/rmng/.cursor/projects"),
         root.join(CODEX_SESSIONS),
+        root.join(PI_SESSIONS),
     ];
     // Bounded walk: a clone keeps every project it has ever opened, and the tree is shallow.
     let mut budget = 20_000;
@@ -1032,6 +1411,11 @@ fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
             budget -= 1;
             let path = entry.path();
             if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                // Pi's `subagent-artifacts/` holds reviewer inputs, outputs and meta files
+                // beside the transcripts; none of them is a live turn, so skip the dir.
+                if path.file_name().is_some_and(|n| n == "subagent-artifacts") {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }
@@ -1206,6 +1590,12 @@ pub struct CloneFacts<'a> {
     stops: HashMap<&'a str, &'a HookEvent>,
     /// The `StopFailure` each session is still sitting on, if any.
     errors: HashMap<&'a str, &'a HookEvent>,
+    /// Every Pi background task under the clone's home. Read once per clone; scoped to a
+    /// session by `cwd` where the view is built, never here.
+    pi_tasks: Vec<PiTask>,
+    /// Size and staleness of each Pi task's output file, keyed by task id. Same shape as
+    /// [`background_outputs`](CloneFacts::outputs) but resolved against each task's `cwd`.
+    pi_outputs: HashMap<String, (u64, f64)>,
 }
 
 impl<'a> CloneFacts<'a> {
@@ -1224,12 +1614,24 @@ impl<'a> CloneFacts<'a> {
         // so a call it cancelled stays open in the fold until the next turn boundary, and a
         // session nobody types into again never reaches one.
         let tools = drop_interrupted(in_flight_tools(events), &silence);
+        let pi_tasks = read_pi_tasks(root);
+        let mut pi_outputs = HashMap::new();
+        for t in &pi_tasks {
+            if t.id.is_empty() {
+                continue;
+            }
+            if let Some(got) = pi_task_output(root, t, now) {
+                pi_outputs.insert(t.id.clone(), got);
+            }
+        }
         Self {
             silence,
             outputs: background_outputs(root, now),
             tools,
             stops: latest_live_stop(events),
             errors: current_api_errors(events),
+            pi_tasks,
+            pi_outputs,
         }
     }
 }
@@ -1264,7 +1666,7 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
         None => quiet <= MOVING_WINDOW_S,
     };
 
-    let out_tasks: Vec<Value> = stop
+    let mut out_tasks: Vec<Value> = stop
         .iter()
         .flat_map(|e| e.background_tasks.iter().flatten())
         .map(|task| {
@@ -1282,6 +1684,36 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
             })
         })
         .collect();
+    // Pi tasks the harness itself records, matched to this session by `cwd`. A task whose
+    // session is unknown (no `cwd` on either side) is attached anyway: dropping a real wake
+    // over a missing directory is the worse failure, and the clone-level OR stays correct
+    // either way. No wake flag is shown: the model judges the command alone,
+    // exactly like a Claude Code background task.
+    {
+        let cwd = session.pi_cwd.as_deref();
+        for t in &facts.pi_tasks {
+            let mine = match (cwd.filter(|c| !c.is_empty()), t.cwd.as_str()) {
+                (Some(want), got) if !got.is_empty() => got == want,
+                _ => true,
+            };
+            if !mine {
+                continue;
+            }
+            let got = facts.pi_outputs.get(&t.id);
+            out_tasks.push(json!({
+                "kind": "pi_task",
+                "what": t.command,
+                "description": t.name,
+                "task_status": t.status,
+                // When the task started, so the judge can tell a hung job from a slow
+                // one the same way it does for tool calls. Null when unknown.
+                "running_for_seconds": (t.started_ms > 0).then(|| ((now * 1000.0 - t.started_ms as f64) / 1000.0).max(0.0).round()),
+                "output_bytes": got.map(|(b, _)| *b),
+                "producing_output": got.is_some_and(|(_, age)| *age <= MOVING_WINDOW_S),
+                "output_still_for_seconds": got.map(|(_, age)| age.round()),
+            }));
+        }
+    }
 
     let out_tools: Vec<Value> = tools
         .iter()
@@ -2562,6 +2994,13 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     let (codex, codex_events) = read_codex_sessions(&root);
     sessions.extend(codex);
     events.extend(codex_events);
+    // Pi brings the same shape: its session file folds into hook-shaped events, and its
+    // `.pi/tasks` metadata answers the dev-server question directly (see [`PiTask`]).
+    // Gated on the sessions directory existing, so a clone without Pi reads nothing.
+    let (pi, pi_events, _) = read_pi_sessions(&root);
+    let pi_ids: HashSet<String> = pi.iter().map(|s| s.session_id.clone()).collect();
+    sessions.extend(pi);
+    events.extend(pi_events);
     let live: Vec<Session> = sessions.into_iter().filter(|s| s.alive).collect();
 
     let settled = |s: &Session| SessionCase {
@@ -2576,7 +3015,19 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     // Nothing else is read when every session settles from its own status: three quarters of
     // a fleet stops here, and the cheapest request is the one not made. An empty clone lands
     // here too, as an empty vec.
-    if clone_state(&live, true) != Verdict::Ask {
+    //
+    // Pi tasks suspend the shortcut: an idle-synthesized Pi session with a running wake task
+    // still needs the model to verify the wake claim against the command (a dev server left
+    // on default flags claims a wake it will never deliver). A session whose tasks are all
+    // terminal or wake-off is unaffected and settles here for free.
+    let pi_tasks_early: Vec<PiTask> = match live.iter().any(|s| pi_ids.contains(&s.session_id)) {
+        true => read_pi_tasks(&root),
+        false => Vec::new(),
+    };
+    let pi_wake_pending = live
+        .iter()
+        .any(|s| pi_ids.contains(&s.session_id) && pi_live_wake(&pi_tasks_early, s.pi_cwd.as_deref()).is_some());
+    if clone_state(&live, true) != Verdict::Ask && !pi_wake_pending {
         return Some(live.iter().map(settled).collect());
     }
 
@@ -2591,7 +3042,24 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     let ages = prompt_ages(&events, now);
     Some(
         live.iter()
-            .map(|s| match session_state(s) {
+            .map(|s| {
+                // A Pi session with a running wake task always asks, even synthesized idle:
+                // the wake flag is the launcher's claim, and only the model can check it
+                // against the command. The view carries both, plus any foreground call.
+                if pi_ids.contains(&s.session_id)
+                    && pi_live_wake(&facts.pi_tasks, s.pi_cwd.as_deref()).is_some()
+                {
+                    return SessionCase {
+                        session: s.session_id.clone(),
+                        verdict: Verdict::Ask,
+                        view: build_session_view(s, &facts, now),
+                        why: String::new(),
+                        status: s.status.clone(),
+                        waiting_for: s.waiting_for.clone(),
+                        prompt_age: ages.get(s.session_id.as_str()).copied(),
+                    };
+                }
+                match session_state(s) {
                 Verdict::Ask => SessionCase {
                     session: s.session_id.clone(),
                     verdict: Verdict::Ask,
@@ -2602,7 +3070,7 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
                     prompt_age: ages.get(s.session_id.as_str()).copied(),
                 },
                 _ => settled(s),
-            })
+            }})
             .collect(),
     )
 }
@@ -2665,6 +3133,246 @@ mod tests {
         assert_eq!(clone_state(&[session(Some("idle"), true)], true), Verdict::Stuck);
         let two = [session(Some("idle"), true), session(Some("idle"), true)];
         assert_eq!(clone_state(&two, true), Verdict::Stuck);
+    }
+
+    fn pi_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rmng-pi-stuck-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_pi_session(root: &Path, slug: &str, file: &str, body: &str) -> PathBuf {
+        let dir = root.join("home/rmng/.pi/agent/sessions").join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(file);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn write_pi_task(root: &Path, project: &str, run: &str, id: &str, body: &str) {
+        let dir = root.join("home/rmng").join(project).join(".pi/tasks").join(run);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), body).unwrap();
+    }
+
+    const PI_ID: &str = "01a07f33-9913-7397-ba86-9003a65261d2";
+
+    #[test]
+    fn pi_session_id_comes_from_after_the_last_underscore() {
+        assert_eq!(
+            pi_session_id(&format!("2026-09-08T04-08-03-092Z_{PI_ID}")),
+            Some(PI_ID)
+        );
+        assert_eq!(pi_session_id("not-a-session"), None);
+        assert_eq!(pi_session_id("2026-09-08T04-08-03-092Z_short"), None);
+    }
+
+    #[test]
+    fn a_pi_wake_needs_running_and_both_flags() {
+        let base = PiTask {
+            id: "t".into(),
+            status: "running".into(),
+            trigger: true,
+            notify: true,
+            ..Default::default()
+        };
+        assert!(base.wakes_agent());
+        // A wake without its notification never fires: the wake rides the notification.
+        assert!(!PiTask { notify: false, ..base.clone() }.wakes_agent());
+        assert!(!PiTask { trigger: false, ..base.clone() }.wakes_agent());
+        for done in ["completed", "failed", "killed"] {
+            assert!(!PiTask { status: done.into(), ..base.clone() }.wakes_agent());
+        }
+    }
+
+    #[test]
+    fn a_pi_wake_matches_by_cwd() {
+        let task = PiTask {
+            status: "running".into(),
+            trigger: true,
+            notify: true,
+            cwd: "/home/rmng/api".into(),
+            ..Default::default()
+        };
+        let tasks = [task];
+        assert!(pi_live_wake(&tasks, Some("/home/rmng/api")).is_some());
+        // A compile in one project must not keep another project's session awake.
+        assert!(pi_live_wake(&tasks, Some("/home/rmng/web")).is_none());
+        // No known session cwd: keep the wake rather than drop real work.
+        assert!(pi_live_wake(&tasks, None).is_some());
+    }
+
+    #[test]
+    fn a_pi_call_without_a_result_is_busy_and_a_closed_one_is_idle() {
+        let root = pi_root("open-vs-closed");
+        let open = format!(
+            "{{\"type\":\"session\",\"id\":\"{PI_ID}\",\"cwd\":\"/home/rmng/api\"}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\"}}],\"timestamp\":1000000}}}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"toolCall\",\"id\":\"c1\",\"name\":\"bash\",\"arguments\":{{\"command\":\"cargo build\"}}}}],\"timestamp\":1001000}}}}\n"
+        );
+        write_pi_session(&root, "--home-rmng-api--", &format!("2026-09-08T04-08-03-092Z_{PI_ID}.jsonl"), &open);
+        let (sessions, events, cwds) = read_pi_sessions(&root);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status.as_deref(), Some("busy"));
+        assert_eq!(sessions[0].pi_cwd.as_deref(), Some("/home/rmng/api"));
+        assert_eq!(cwds.get(PI_ID).map(String::as_str), Some("/home/rmng/api"));
+        // One open call folds exactly like a Claude PreToolUse without its Post.
+        assert_eq!(in_flight_tools(&events).len(), 1);
+
+        let closed = format!("{open}{{\"type\":\"message\",\"message\":{{\"role\":\"toolResult\",\"toolCallId\":\"c1\",\"toolName\":\"bash\",\"timestamp\":1002000}}}}\n");
+        write_pi_session(&root, "--home-rmng-api--", &format!("2026-09-08T04-08-03-092Z_{PI_ID}.jsonl"), &closed);
+        let (sessions, events, _) = read_pi_sessions(&root);
+        assert_eq!(sessions[0].status.as_deref(), Some("idle"));
+        assert!(in_flight_tools(&events).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pi_task_with_wake_set_counts_and_one_without_does_not() {
+        let root = pi_root("wake-vs-quiet");
+        write_pi_task(
+            &root,
+            "api",
+            "session-x-1",
+            "build1",
+            r#"{"id":"build1","name":"long build","command":"cargo build --release","cwd":"/home/rmng/api","status":"running","notifyOnCompletion":true,"triggerOnCompletion":true,"startTime":1000,"outputPath":".pi/tasks/session-x-1/build1.output"}"#,
+        );
+        write_pi_task(
+            &root,
+            "api",
+            "session-x-1",
+            "dev1",
+            r#"{"id":"dev1","name":"dev server","command":"npm run dev","cwd":"/home/rmng/api","status":"running","notifyOnCompletion":true,"triggerOnCompletion":false}"#,
+        );
+        // A finished wake is over: it must not hold anything awake.
+        write_pi_task(
+            &root,
+            "api",
+            "session-x-1",
+            "old1",
+            r#"{"id":"old1","command":"cargo test","cwd":"/home/rmng/api","status":"completed","notifyOnCompletion":true,"triggerOnCompletion":true}"#,
+        );
+        let tasks = read_pi_tasks(&root);
+        assert_eq!(tasks.len(), 3);
+        let wake = pi_live_wake(&tasks, Some("/home/rmng/api"));
+        assert_eq!(wake.map(|t| t.id.as_str()), Some("build1"));
+        // The dev server (no trigger) and the finished build never match.
+        assert!(tasks.iter().filter(|t| t.wakes_agent()).count() == 1);
+        assert!(pi_live_wake(&tasks, Some("/home/rmng/other")).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The full clone read against a fake home: an idle Pi session with a running wake task
+    /// must Ask (never file-Working), so the model verifies the wake claim against the
+    /// command. A dev server left on default flags claims a wake it never delivers.
+    #[test]
+    fn read_clone_asks_for_a_pi_wake_without_deciding() {
+        let base = pi_root("clone-shortcut");
+        // Fake container root: clone_root cuts the homes link at `/root/`.
+        let fake = base.join("proc/999/root/home/rmng");
+        std::fs::create_dir_all(fake.join(".pi/agent/sessions/--home-rmng-api--")).unwrap();
+        std::fs::create_dir_all(fake.join("apitest/.pi/tasks/session-x-1")).unwrap();
+        let session_body = format!(
+            "{{\"type\":\"session\",\"id\":\"{PI_ID}\",\"cwd\":\"/home/rmng/apitest\"}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\"}}],\"timestamp\":1000000}}}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"waiting on the build\"}}],\"timestamp\":1001000}}}}\n"
+        );
+        std::fs::write(
+            fake.join(".pi/agent/sessions/--home-rmng-api--").join(format!("t_{PI_ID}.jsonl")),
+            session_body,
+        )
+        .unwrap();
+        std::fs::write(
+            fake.join("apitest/.pi/tasks/session-x-1/b1.json"),
+            r#"{"id":"b1","name":"long build","command":"cargo build --release","cwd":"/home/rmng/apitest","status":"running","notifyOnCompletion":true,"triggerOnCompletion":true}"#,
+        )
+        .unwrap();
+        let data_dir = base.join("data");
+        std::fs::create_dir_all(data_dir.join("hosts")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&fake, data_dir.join("hosts").join("c1")).unwrap();
+        let cases = read_clone(data_dir.to_str().unwrap(), "c1").expect("home readable");
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].verdict, Verdict::Ask, "why: {}", cases[0].why);
+        let tasks = cases[0]
+            .view
+            .pointer("/background_tasks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].pointer("/wakes_agent").is_none(), "no flag in the view");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn read_clone_settles_a_nowake_pi_task_without_asking() {
+        let base = pi_root("clone-nowake");
+        let fake = base.join("proc/999/root/home/rmng");
+        std::fs::create_dir_all(fake.join(".pi/agent/sessions/--home-rmng-api--")).unwrap();
+        std::fs::create_dir_all(fake.join("apitest/.pi/tasks/session-x-1")).unwrap();
+        let session_body = format!(
+            "{{\"type\":\"session\",\"id\":\"{PI_ID}\",\"cwd\":\"/home/rmng/apitest\"}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\"}}],\"timestamp\":1000000}}}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"server is up\"}}],\"timestamp\":1001000}}}}\n"
+        );
+        std::fs::write(
+            fake.join(".pi/agent/sessions/--home-rmng-api--").join(format!("t_{PI_ID}.jsonl")),
+            session_body,
+        )
+        .unwrap();
+        std::fs::write(
+            fake.join("apitest/.pi/tasks/session-x-1/s1.json"),
+            r#"{"id":"s1","name":"dev server","command":"npm run dev","cwd":"/home/rmng/apitest","status":"running","notifyOnCompletion":true,"triggerOnCompletion":false}"#,
+        )
+        .unwrap();
+        let data_dir = base.join("data");
+        std::fs::create_dir_all(data_dir.join("hosts")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&fake, data_dir.join("hosts").join("c1")).unwrap();
+        let cases = read_clone(data_dir.to_str().unwrap(), "c1").expect("home readable");
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].verdict, Verdict::Stuck);
+        assert!(cases[0].view.is_null(), "no model view needed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A running task with the wake off is ignored entirely: the session settles Stuck from
+    /// files and the model is never asked. This is what keeps a dev server that declares
+    /// itself correctly from costing a model call per cache bucket.
+
+    #[test]
+    fn a_pi_wake_task_reaches_the_model_view_with_its_flag() {
+        let root = pi_root("view-flag");
+        write_pi_task(
+            &root,
+            "api",
+            "session-x-1",
+            "build1",
+            r#"{"id":"build1","name":"long build","command":"cargo build --release","cwd":"/home/rmng/api","status":"running","notifyOnCompletion":true,"triggerOnCompletion":true}"#,
+        );
+        let s = Session {
+            session_id: "pi-sid".into(),
+            status: Some("busy".into()),
+            pi_cwd: Some("/home/rmng/api".into()),
+            alive: true,
+            ..Default::default()
+        };
+        let events = vec![HookEvent {
+            hook_event_name: "PreToolUse".into(),
+            session_id: Some("pi-sid".into()),
+            tool_name: Some("bash".into()),
+            tool_use_id: Some("c9".into()),
+            ts: 1000.0,
+            ..Default::default()
+        }];
+        let view = view_of(&root, &s, &events, 1100.0);
+        let tasks = view.pointer("/background_tasks").and_then(Value::as_array).cloned().unwrap_or_default();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].pointer("/wakes_agent").is_none(), "no flag in the view");
+        assert_eq!(tasks[0].pointer("/what").and_then(Value::as_str), Some("cargo build --release"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
