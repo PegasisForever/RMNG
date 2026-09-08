@@ -17,7 +17,7 @@ use crate::app::App;
 use crate::provision::{
     self, HomeSource, PullProgress, clone_container_gen2, clone_key_env_vars,
     compose_clone_env, control_env_vars, delete_clone, fork_clone,
-    is_dns_label, migrate_one, preset_env_vars, preset_static_env, pull_template, rebase_clone,
+    is_dns_label, migrate_one, preset_env_vars, pull_template, rebase_clone,
 };
 
 const LOG_LIMIT: usize = 200;
@@ -49,8 +49,8 @@ pub struct LinearMeta {
 /// Everything the API hands to `start_clone`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CloneSpec {
-    /// The base image tag: create resolves it to a derived hash-tag (profile lines +
-    /// preset static env + base digest), building on miss.
+    /// Retired: the image used to come from the caller's picked base. The effective
+    /// preset's Dockerfile decides now; kept for payload compat and ignored.
     pub source_image: String,
     pub new_hostname: String,
     pub linear: Option<LinearMeta>,
@@ -299,9 +299,8 @@ pub fn next_free_hostname(app: &App, base: &str) -> String {
 /// concurrently (nothing on the source to lock), so there is no source-busy check — only the
 /// hostname's validity + uniqueness are gated.
 pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
-    if spec.source_image.trim().is_empty() {
-        return Err(JobError("a source image is required".into()));
-    }
+    // The preset Dockerfile decides the image; no caller-supplied base is needed.
+    let _ = spec.source_image.as_str();
     if !is_dns_label(&spec.new_hostname) {
         return Err(JobError(
             "new hostname must be a DNS label (lowercase letters, digits, hyphens)".into(),
@@ -382,26 +381,23 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         crate::provision::clone_key_env_vars(&app, &spec.new_hostname),
         &spec.env,
     );
-    // Gen-2 create: image = derived hash-tag built from the base tag + profile lines +
-    // preset static env (lazy build on miss); home = fresh dataset, or a clone of the
-    // template seed snapshot when the template carries default home content. Returns the
-    // resolved tag, recorded below as the clone's `base_tag`. The backing container's
-    // name is the clone id — that's how every later call addresses it.
+    // Gen-2 create: image = hash-tag built lazily from the effective preset's FULL
+    // Dockerfile text (verbatim, no FROM rewrite); home = fresh dataset, or a clone of
+    // the template seed snapshot when the template carries default home content.
+    // Returns the resolved tag, recorded below as the clone's `base_tag`. The backing
+    // container's name is the clone id — that's how every later call addresses it.
     let cfg = app.config();
-    let profile_lines = crate::provision::preset_lines(&app, spec.preset_name.as_deref());
-    let static_env = preset_static_env(&app, spec.preset_name.as_deref());
+    let dockerfile = crate::provision::preset_dockerfile(&app, spec.preset_name.as_deref());
     let home = match cfg.docker.seed_snapshot.clone().unwrap_or_default() {
         s if !s.trim().is_empty() => HomeSource::CloneFromSnapshot(s),
         _ => HomeSource::Create,
     };
     let image_ref = match clone_container_gen2(
         &app,
-        &spec.source_image,
+        &dockerfile,
         &spec.new_hostname,
         home,
         &env,
-        &profile_lines,
-        &static_env,
         &spec.agent_playbook,
         &spec.global_prompt,
         spec.headless,
@@ -1583,12 +1579,15 @@ pub async fn migrate_all_on_boot(app: App) {
     );
 }
 
-/// Warm a derived tag without creating (`POST /api/images/prebuild`): resolve + build on
-/// miss for the current template reference + profile lines. Drives a `Prebuild` op (no
-/// coarse pct table — the build streams step lines as messages).
-pub fn start_prebuild(app: &App) -> Result<Operation, JobError> {
-    let cfg = app.config();
-    let target = cfg.docker.template_reference.clone();
+/// Warm a preset image without creating (`POST /api/images/prebuild`): build the posted
+/// Dockerfile text on miss, discarding the tag. The preset card's rebuild button posts
+/// the editor's current text (which may be unsaved); saving is separate. Drives a
+/// `Prebuild` op (no coarse pct table — the build streams step lines as messages).
+pub fn start_prebuild(app: &App, dockerfile: String) -> Result<Operation, JobError> {
+    if dockerfile.trim().is_empty() {
+        return Err(JobError("a Dockerfile is required to prebuild".into()));
+    }
+    let target = wire::config::dockerfile_tag(&dockerfile);
     let st = app.store.get();
     if st.operations.iter().any(|o| {
         o.status == OperationStatus::Running
@@ -1601,12 +1600,12 @@ pub fn start_prebuild(app: &App) -> Result<Operation, JobError> {
     let op_id = op.id.clone();
     app.store.mutate(|s| s.operations.push(op));
     let app2 = app.clone();
-    tokio::spawn(async move { run_prebuild(app2, op_id).await });
+    tokio::spawn(async move { run_prebuild(app2, op_id, dockerfile).await });
     Ok(op_for_return)
 }
 
-async fn run_prebuild(app: App, op_id: String) {
-    let res = crate::derived::prebuild(&app, |step, msg| {
+async fn run_prebuild(app: App, op_id: String, dockerfile: String) {
+    let res = crate::derived::prebuild(&app, &dockerfile, |step, msg| {
         patch_op(&app, &op_id, |op| {
             op.step = step.to_string();
             op.message = msg.to_string();

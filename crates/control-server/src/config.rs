@@ -62,10 +62,7 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                 let Some(name) = r.get("name").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                let vars = r
-                    .get("vars")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
+                // Retired: presets carry a full Dockerfile now; legacy vars are dropped.
                 cfg.presets.push(wire::Preset {
                     name: name.to_string(),
                     labels: Vec::new(),
@@ -73,11 +70,9 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                     // Blank = no opinion; a legacy env-only preset never had an account default.
                     claude_account: String::new(),
                     codex_account: String::new(),
-                    vars,
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
-                    image: None,
-                    profile_lines: None,
+                    ..Default::default()
                 });
             }
         }
@@ -177,26 +172,20 @@ mod tests {
                 ..Default::default()
             },
         ];
-        // UI sends the full list: blank linearKey = keep stored, new row = added,
-        // omitted row ("gone") = deleted (with its key). Labels/vars replace.
+        // UI sends the full list: the key is stored verbatim (blank clears it), new row =
+        // added, omitted row ("gone") = deleted (with its key). Labels/Dockerfile replace.
         let incoming = serde_json::json!({
             "presets": [
                 { "name": "med", "labels": [" Backend ", ""], "linearKey": "",
-                  "vars": [{ "key": "A", "value": "1" }] },
+                  "dockerfile": "FROM base:x" },
                 { "name": "new", "labels": [], "linearKey": "NEW-KEY", "vars": [] },
             ],
         });
         let merged = merge_update(&base, incoming).unwrap();
         assert_eq!(merged.presets.len(), 2);
-        assert_eq!(merged.presets[0].linear_key, "OLD-MED"); // blank kept stored
+        assert_eq!(merged.presets[0].linear_key, ""); // blank clears the stored key
         assert_eq!(merged.presets[0].labels, vec!["Backend"]); // trimmed, blanks dropped
-        assert_eq!(
-            merged.presets[0].vars,
-            vec![EnvVar {
-                key: "A".into(),
-                value: "1".into()
-            }]
-        );
+        assert_eq!(merged.presets[0].dockerfile, "FROM base:x");
         assert_eq!(merged.presets[1].name, "new");
         assert_eq!(merged.presets[1].linear_key, "NEW-KEY");
         assert!(!merged.presets.iter().any(|p| p.name == "gone")); // omitted → deleted
@@ -236,7 +225,7 @@ mod tests {
         assert_eq!(cfg.presets.len(), 1);
         assert_eq!(cfg.presets[0].name, "old");
         assert!(cfg.presets[0].labels.is_empty() && cfg.presets[0].linear_key.is_empty());
-        assert_eq!(cfg.presets[0].vars[0].key, "A");
+        assert_eq!(cfg.presets[0].dockerfile, "FROM pegasis0/rmng-template:latest");
 
         // Legacy object-shaped `linear` also counts; existing presets are never clobbered.
         let raw = serde_json::json!({ "linear": { "we": "K1" }, "envPresets": [{ "name": "x" }] });
@@ -860,10 +849,10 @@ pub fn restart_required(old: &AppConfig, new: &AppConfig) -> bool {
         || old.chroma != new.chroma
 }
 
-/// Merge the UI's preset rows by name: a blank `linearKey` keeps the stored key of
-/// the same-named preset (write-only secret); labels/vars are replaced from the row;
-/// a preset absent from the list is deleted (along with its key).
-fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire::Preset> {
+/// Merge the UI's preset rows by name: every field is taken verbatim from the row
+/// (the Linear key is a regular visible field now — blank clears it); labels and the
+/// Dockerfile replace; a preset absent from the list is deleted.
+fn merge_presets(_base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire::Preset> {
     let mut out: Vec<wire::Preset> = Vec::new();
     for r in rows {
         let Some(name) = r.get("name").and_then(|v| v.as_str()) else {
@@ -885,19 +874,13 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
                     .collect()
             })
             .unwrap_or_default();
-        let vars: Vec<wire::EnvVar> = r
-            .get("vars")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let sent = r.get("linearKey").and_then(|v| v.as_str()).unwrap_or("");
-        let linear_key = if sent.is_empty() {
-            base.iter()
-                .find(|p| p.name == name)
-                .map(|p| p.linear_key.clone())
-                .unwrap_or_default()
-        } else {
-            sent.to_string()
-        };
+        // The Linear key is a regular visible field now: what the editor sends is what is
+        // stored, blank included (blank clears it). No keep-stored logic remains.
+        let linear_key = r
+            .get("linearKey")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let agent_playbook = r
             .get("agentPlaybook")
             .and_then(|v| v.as_str())
@@ -924,19 +907,17 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
             linear_key,
             claude_account: account("claudeAccount"),
             codex_account: account("codexAccount"),
-            vars,
             agent_playbook,
             global_prompt,
-            image: r
-                .get("image")
+            // Empty box resets to the default base Dockerfile (a Dockerfile without
+            // FROM cannot build, so there is no meaningful empty state to keep).
+            dockerfile: r
+                .get("dockerfile")
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            profile_lines: r
-                .get("profileLines")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+                .map(str::to_string)
+                .unwrap_or_else(|| "FROM pegasis0/rmng-template:latest".into()),
         });
     }
     out

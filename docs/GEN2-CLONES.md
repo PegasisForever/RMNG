@@ -15,15 +15,18 @@ This is an internal tool doc. Rough edges are fine where noted.
   `docker create`. Seconds plus boot, no file copy, no source downtime.
 - Rebase: swap the system image under a kept home dataset. Stop, create from the new
   tag with the same dataset, start, keep the old stopped container until ready passes.
-- No Commit: a template is base Dockerfile plus per-profile extra lines, built into a
-  derived image tag. No binary blobs, no golden clone, no always-on cost.
-- Lazy builds: the derived image builds on first create that needs it, keyed by a hash
-  of lines plus base digest. Same lines twice means one build. One lock per tag so
-  parallel creates share the build.
-- Per-profile static env moves into the Dockerfile lines as `ENV`. Only per-clone
-  dynamic keys (`RMNG_CONTROL_URL`, `RMNG_PROXY_KEY`, `machine-id`) stay create-time.
+- No Commit: a template is a preset's full Dockerfile, built into an image tag.
+  No binary blobs, no golden clone, no always-on cost.
+- Lazy builds: the preset image builds on first create that needs it, keyed by a hash
+  of the file text. Same text twice means one build; same text NEVER rebuilds (a base
+  release under the same tag does not invalidate it). Refresh is manual: edit the
+  Dockerfile or hit the preset's rebuild button. One lock per tag so parallel creates
+  share the build.
+- All static env lives in the Dockerfile as `ENV`, secrets included. Only per-clone
+  dynamic keys (`RMNG_CONTROL_URL`, `RMNG_PROXY_KEY`, `ANTHROPIC_MODEL`) plus the
+  Linear key (a visible preset field, injected at runtime) stay create-time.
 - Manual drift: experimental installs inside a running clone are transcribed into
-  profile lines by hand. Drift drops silently on fork, rebase, and migration.
+  the preset Dockerfile by hand. Drift drops silently on fork, rebase, and migration.
 - Browsing works stopped: the home dataset is a plain dir on the CT, so `data/hosts`
   and SMB keep working when the clone is stopped. Better than gen-1.
 
@@ -68,20 +71,21 @@ name on the clone row (new optional fields on `RmngClone`, serde-defaulted so ol
 `state.json` loads). No gen label: after migration every clone is gen-2, and the
 dataset mount itself marks one.
 
-### 3.3 Derived images
+### 3.3 Preset images
 
-- Profile lines are text per template in config/state, edited in Settings by anyone:
-  single user, trusted network, no auth.
-- A template may hold one home seed snapshot. Creates clone from it by default and
-  start with content; empty seed means a fresh home. Seed refresh is manual.
-- Tag = `rmng-p-<hash(lines + base digest)>`. Create checks the tag, builds on miss
-  with the existing buildkit setup, then proceeds. Base release changes the digest, so
-  the next create auto-rebuilds. Always latest: no picking old tags.
-- Build failure fails the create with logs attached. Fix lines or base, then retry.
-  Optional prebuild button warms a tag without creating.
-- Purge on delete: when no remaining clone (running or stopped old container)
-  references a tag, `rmi` it. Refcount is a scan of clone rows.
-- No secrets in lines. Linear keys and account picks stay on presets as today.
+- Each preset carries its own FULL Dockerfile, edited on its Settings card by anyone:
+  single user, trusted network, no auth. Default: `FROM pegasis0/rmng-template:latest`.
+  The FROM line may name any image, not only clone sources.
+- Tag = `rmng-p-<hash(file text)>`. Create ensures the tag, building the text VERBATIM
+  on miss (no FROM rewrite, no digest pinning, nothing appended). Same text twice means
+  one build; same text never rebuilds. The preset card's Rebuild button warms a tag
+  from the editor's current text without creating.
+- Build failure fails the create with logs attached. Fix the Dockerfile, then retry.
+- Purge on delete: when no remaining clone references a tag, `rmi` it. Refcount is a
+  scan of clone rows.
+- Secrets ARE allowed in the file (ENV lines bake into the layers). Accepted: anyone
+  with daemon access can read them from layer history. The Linear key stays OUT of the
+  file: it remains a preset field, injected at runtime as `LINEAR_API_KEY`.
 
 ### 3.4 Flows
 
@@ -90,10 +94,9 @@ dataset mount itself marks one.
   with the mount → write identity plus dynamic env → start → wait-ready. Failure trap
   destroys the container and the dataset, like today's volume cleanup.
 - Fork: `zfs snapshot <src>@<ts>` → `zfs clone` to new dataset → create from the
-  source's recorded base tag → start. The image always follows the effective preset
-  (picked, else the source's): its static env feeds derivation FROM the source tag,
-  so a different preset builds a new tag once and caches it, while the same preset
-  reuses the source tag with zero rebuild. Source keeps running. Overlay drift is
+  TARGET preset's Dockerfile (built lazily inside the create) → start. The source
+  contributes only its home. Same preset reuses the source tag with zero rebuild,
+  because the text hashes the same. Source keeps running. Overlay drift is
   silently dropped.
 - Rebase: record the old tag → stop → remove the old container (the name equals the
   id, so both cannot exist together) → create from the new tag with the SAME dataset,
@@ -106,10 +109,11 @@ dataset mount itself marks one.
 
 ### 3.5 Env and presets
 
-Static preset vars move into profile lines. The `/etc/environment` writer
-(`provision.rs` `clone_etc_environment_conf`) writes dynamic keys only. No retired-key
-cleanup: gen-2 images never carried the old keys. Presets keep Linear identity, account selection, ticket
-auto-select, playbook and prompt appends.
+All static env lives in the preset Dockerfile. The `/etc/environment` writer
+(`provision.rs` `clone_etc_environment_conf`) writes dynamic keys plus `LINEAR_API_KEY`
+only. Presets keep their name, Linear identity (a regular visible field now — blank
+clears it), account selection, ticket auto-select, Dockerfile, and playbook/prompt
+appends. No preset vars: the field is gone, old files ignore it.
 
 ### 3.6 Homes browsing plus cross-clone view
 
@@ -170,6 +174,10 @@ One window, one per-clone report of bytes plus pass or fail.
 - Fork, rebase, and migration silently drop overlay drift. No merge, no warning.
 - Fork takes the whole home, caches and all. Blocks are shared so disk is fine.
 - Any clone reads any home via `~/clones`, tokens included. Chosen over access control.
+- Secrets baked into preset images are readable from layer history by anyone with
+  daemon access. Accepted over a secrets pipeline.
+- Same Dockerfile text never rebuilds: a base release under the same tag does not
+  invalidate the preset image. Refresh is manual (edit or rebuild button).
 - Inner Docker state drops at migration and re-pulls.
 
 ## 7. UI (decided, not built)
@@ -181,11 +189,12 @@ home) or fork (snapshot plus clone of a live source). No other create path.
   always forks the selected clone (snapshot plus clone, source keeps running).
   No image picker in this modal.
 - Template create: separate button plus separate modal, for the bootstrap case
-  (first clone, clean start). Starts empty; the agent pulls the repo itself.
+  (first clone, clean start). Title plus preset only; the base shown comes from the
+  preset's FROM line. Starts empty; the agent pulls the repo itself.
   CLI/API template create stays regardless.
 - Seed snapshot: DELETED as redundant. Every modal create forks a live source,
   so the source snapshot covers starting content. Pending code removal:
   `seed_snapshot` config field plus the `CloneFromSnapshot` home-source path.
 - Clone menu: rebase lives here (target picker). No separate fork item; the
   new clone modal covers forking.
-- Open UI items: rebase target picker shape, prebuild button placement.
+- Open UI items: rebase target picker shape.

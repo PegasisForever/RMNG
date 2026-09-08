@@ -1507,15 +1507,23 @@ async fn images_pull(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
-/// `POST /api/images/prebuild` — warm the gen-2 derived tag for the current template
-/// reference + profile lines, without creating. Returns the driving Operation (kind
-/// `prebuild`), so the first real create finds the image present.
+/// `POST /api/images/prebuild` — warm a preset image without creating: build the posted
+/// Dockerfile text on miss. The preset card's rebuild button posts the editor's current
+/// text (which may be unsaved). Returns the driving Operation (kind `prebuild`).
 async fn images_prebuild(
     State(app): State<App>,
+    Json(body): Json<PrebuildReq>,
 ) -> Result<Json<Operation>, (StatusCode, String)> {
-    jobs::start_prebuild(&app)
+    jobs::start_prebuild(&app, body.dockerfile)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+#[derive(Deserialize)]
+struct PrebuildReq {
+    /// Full Dockerfile text to build (the preset editor's current text).
+    #[serde(default)]
+    dockerfile: String,
 }
 
 #[derive(Deserialize)]
@@ -3345,7 +3353,6 @@ mod tests {
             labels: vec!["we".into()],
             linear_key: "lin_w".into(),
             claude_account: "auto".into(),
-            vars: vec![wire::EnvVar { key: "REPO".into(), value: "acme".into() }],
             ..Default::default()
         }];
         *app.cfg.write().unwrap() = cfg;
@@ -3402,7 +3409,10 @@ mod tests {
         );
         assert_eq!(spec.preset_name.as_deref(), Some("work"));
         assert_eq!(spec.claude_account.as_deref(), Some("auto"));
-        assert!(spec.env.iter().any(|v| v.key == "REPO"));
+        // Preset vars are gone (all static env lives in the preset Dockerfile); the only
+        // runtime preset inject is the Linear key.
+        assert!(spec.env.iter().any(|v| v.key == "LINEAR_API_KEY" && v.value == "lin_w"));
+        assert_eq!(spec.env.len(), 1);
     }
 
     /// `workspace` is a convenience, not a second source of truth: an omitted one falls back to

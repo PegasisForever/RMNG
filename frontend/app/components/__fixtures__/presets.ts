@@ -16,11 +16,9 @@ export function makePreset(overrides: Partial<PresetRedacted> = {}): PresetRedac
     linearKey: "lin_api_fixture",
     claudeAccount: "",
     codexAccount: "",
-    vars: [],
     agentPlaybook: "",
     globalPrompt: "",
-    image: null,
-    profileLines: null,
+    dockerfile: "FROM pegasis0/rmng-template:latest",
     ...overrides,
   };
 }
@@ -47,7 +45,6 @@ export function makeClonePresets(): PresetRedacted[] {
       linearKey: "lin_api_fixture",
       // A preset that defaults its clones to a pool; Codex left with no default.
       claudeAccount: "group:pooled",
-      vars: [{ key: "NODE_ENV", value: "development" }],
     }),
     makePreset({
       name: "devtools",

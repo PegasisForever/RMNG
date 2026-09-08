@@ -97,14 +97,22 @@ export type ClonePayload = (
 
 export const activate = (id: string | null) =>
   postJson("/api/activate", { id });
-/** Start a clone from a source image (`image` = a canonical reference from
- *  `listImages`, e.g. `pegasis0/rmng-template:latest`). Returns the driving Operation so
- *  the caller can follow it; progress streams over /events. */
-export const duplicateClone = (image: string, payload: ClonePayload) =>
-  postJson("/api/clone", { image, ...payload }).then(
+/** Start a template clone (title + preset in `payload`). The server builds the
+ *  effective preset's Dockerfile into the clone image — no caller-supplied base.
+ *  Returns the driving Operation so the caller can follow it; progress streams
+ *  over /events. */
+export const duplicateClone = (payload: ClonePayload) =>
+  postJson("/api/clone", { image: "", ...payload }).then(
     (r) => (r as { op: Operation }).op,
   );
 export const deleteClone = (id: string) => postJson("/api/delete", { id });
+/** Warm a preset image without creating: build the posted Dockerfile text on miss.
+ *  The preset card's rebuild button posts the editor's current text (which may be
+ *  unsaved). Returns the driving Operation; progress streams over /events. */
+export const prebuildDockerfile = (dockerfile: string) =>
+  postJson("/api/images/prebuild", { dockerfile }).then(
+    (r) => (r as { op: Operation }).op,
+  );
 /** Fork a gen-2 clone from a live source clone. The server snapshots + clones the
  *  source home, derives the new clone id from the ticket identifier or title (like
  *  create does), and creates from the source's recorded base tag. Returns

@@ -116,7 +116,7 @@ pub struct EnvVar {
 /// every clone.
 /// NOT TS-exported: the browser reads [`PresetRedacted`], which carries the same
 /// `linear_key` verbatim and differs only in what a `PUT` may write back.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Preset {
     pub name: String,
@@ -143,8 +143,6 @@ pub struct Preset {
     /// Default Codex account, same forms. Independent of `claude_account`.
     #[serde(default)]
     pub codex_account: String,
-    #[serde(default)]
-    pub vars: Vec<EnvVar>,
     /// Optional per-preset text appended (after `"\n\n"`) to the global agent playbook for
     /// clones of this preset. Empty ⇒ no append. Non-secret. (Layer **d**: node-agent extra,
     /// this preset only.)
@@ -155,18 +153,30 @@ pub struct Preset {
     /// Empty ⇒ no append. Non-secret. (Layer **c**: global prompt, all agents, this preset only.)
     #[serde(default)]
     pub global_prompt: String,
-    /// Base image this preset's clones build from (a clone-source reference, e.g.
-    /// `pegasis0/rmng-template:latest`). Empty ⇒ fall back to the create/fork caller's
-    /// image (template modal default, or the fork source's recorded base). Non-secret.
-    #[serde(default)]
-    pub image: Option<String>,
-    /// Extra Dockerfile lines appended (after the `FROM <base>`) when building this
-    /// preset's derived image (`rmng-p-<hash>`). Edited in Settings by anyone (single
-    /// user, trusted network, no auth). `None`/empty falls back to
-    /// `docker.profile_lines`. No secrets here — Linear keys and account picks stay
-    /// on the preset's other fields.
-    #[serde(default)]
-    pub profile_lines: Option<String>,
+    /// The FULL Dockerfile this preset's clones build from, edited in Settings by
+    /// anyone (single user, trusted network, no auth). Defaults to
+    /// `FROM pegasis0/rmng-template:latest`. May hold secrets (ENV lines) — accepted:
+    /// baked layers are readable by anyone with daemon access. The Linear key stays
+    /// OUT: it remains a preset field, injected at runtime as `LINEAR_API_KEY`.
+    #[serde(default = "default_preset_dockerfile")]
+    pub dockerfile: String,
+}
+
+impl Default for Preset {
+    // A preset without Dockerfile text builds the base template: the default is the
+    // base Dockerfile, not an empty string (an empty Dockerfile cannot build).
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            labels: Vec::new(),
+            linear_key: String::new(),
+            claude_account: String::new(),
+            codex_account: String::new(),
+            agent_playbook: String::new(),
+            global_prompt: String::new(),
+            dockerfile: default_preset_dockerfile(),
+        }
+    }
 }
 
 impl Preset {
@@ -177,11 +187,9 @@ impl Preset {
             linear_key: self.linear_key.clone(),
             claude_account: self.claude_account.clone(),
             codex_account: self.codex_account.clone(),
-            vars: self.vars.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
-            image: self.image.clone(),
-            profile_lines: self.profile_lines.clone(),
+            dockerfile: self.dockerfile.clone(),
         }
     }
 }
@@ -206,11 +214,9 @@ pub struct PresetRedacted {
     /// not secrets, shown verbatim.
     pub claude_account: String,
     pub codex_account: String,
-    pub vars: Vec<EnvVar>,
     pub agent_playbook: String,
     pub global_prompt: String,
-    pub image: Option<String>,
-    pub profile_lines: Option<String>,
+    pub dockerfile: String,
 }
 
 /// A named pool of clone accounts (by email). A clone bound to a group sticks to its
@@ -288,12 +294,7 @@ pub struct DockerConfig {
     /// cannot grow unbounded. A change triggers a `rmng-buildkit` recreate at next boot.
     #[serde(default = "default_buildkit_cache_gb")]
     pub buildkit_cache_gb: u32,
-    /// Extra Dockerfile lines appended (after the `FROM <base>`) when building a gen-2
-    /// derived image (`rmng-p-<hash>`). Edited in Settings by anyone (single user,
-    /// trusted network, no auth); `None`/empty means the base image builds unchanged.
-    /// No secrets here — Linear keys and account picks stay on presets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_lines: Option<String>,
+    /// REMOVED `profile_lines`: presets carry their own full Dockerfile now.
     /// Template home seed snapshot (`<dataset>@<snap>`). A create clones the new home
     /// from it by default, so template clones start with content; empty means a fresh
     /// home. Seed refresh is manual.
@@ -344,6 +345,10 @@ fn default_homes_parent() -> String {
     "tank/rmng/homes".into()
 }
 
+fn default_preset_dockerfile() -> String {
+    "FROM pegasis0/rmng-template:latest".into()
+}
+
 impl Default for DockerConfig {
     fn default() -> Self {
         Self {
@@ -358,7 +363,6 @@ impl Default for DockerConfig {
             registry_image: default_registry_image(),
             buildkit_image: default_buildkit_image(),
             buildkit_cache_gb: default_buildkit_cache_gb(),
-            profile_lines: None,
             seed_snapshot: None,
             homes_parent: default_homes_parent(),
         }
@@ -375,38 +379,14 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Derived-image tag for gen-2 clones: `rmng-p-<16 hex>` over the profile lines, the
-/// static env folded into the build as `ENV`, and the base image digest. Same inputs
-/// twice mean one build; a base release changes the digest, so the next create
-/// auto-rebuilds. Always latest — old tags purge when unused, never picked.
-pub fn derived_tag(profile_lines: &str, static_env: &[(String, String)], base_digest: &str) -> String {
-    // Canonicalize so trivial formatting edits don't rebuild: trim trailing blank lines,
-    // sort env by key.
-    let mut env: Vec<(&str, &str)> = static_env
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    env.sort_unstable();
-    let mut input = String::new();
-    input.push_str(profile_lines.trim_end());
-    input.push('\0');
-    for (k, v) in &env {
-        input.push_str(k);
-        input.push('=');
-        input.push_str(v);
-        input.push('\0');
-    }
-    input.push_str(base_digest.trim());
-    format!("rmng-p-{:016x}", fnv1a64(input.as_bytes()))
-}
-
-/// True when `s` is a derived-image tag (`rmng-p-<16 hex>`, optional `:tag` suffix).
-/// Fork/rebase hand the source clone's recorded derived tag back as a base; the reuse
-/// rule in `clone_container_gen2` uses this to run it directly instead of re-deriving.
-pub fn is_derived_tag(s: &str) -> bool {
-    let bare = s.split_once(':').map(|(r, _)| r).unwrap_or(s);
-    let hex = bare.strip_prefix("rmng-p-").unwrap_or("");
-    hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+/// Derived-image tag for gen-2 clones: `rmng-p-<16 hex>` over the preset's FULL
+/// Dockerfile text. Same text twice means one build; same text NEVER rebuilds — a
+/// base release under the same tag does not invalidate it. Refresh is manual: edit
+/// the Dockerfile (any text change re-tags) or hit the preset's rebuild button.
+/// Old tags purge when unused, never picked.
+pub fn dockerfile_tag(dockerfile: &str) -> String {
+    // Canonicalize so trivial formatting edits don't rebuild: trim trailing blank lines.
+    format!("rmng-p-{:016x}", fnv1a64(dockerfile.trim_end().as_bytes()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -827,13 +807,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derived_tag_shape_matches_reuse_predicate() {
-        let tag = derived_tag("", &[], "repo@sha256:abc");
-        assert!(is_derived_tag(&tag), "{tag}");
-        assert!(is_derived_tag(&format!("{tag}:latest")));
-        assert!(!is_derived_tag("pegasis0/rmng-template:latest"));
-        assert!(!is_derived_tag("rmng-p-xyz"));
-        assert!(!is_derived_tag(""));
+    fn dockerfile_tag_shape() {
+        let tag = dockerfile_tag("FROM x:latest");
+        assert!(tag.starts_with("rmng-p-"), "{tag}");
+        assert_ne!(tag, dockerfile_tag("FROM x:latest\nRUN foo"));
+        // Trailing blank lines do not re-tag.
+        assert_eq!(tag, dockerfile_tag("FROM x:latest\n\n"));
     }
 
     #[test]
@@ -925,18 +904,18 @@ mod tests {
 
     #[test]
     fn preset_parses_with_serde_defaults() {
-        // A minimal preset (older env-preset shape: just name + vars) still parses;
-        // labels/linearKey default empty.
+        // A minimal preset still parses; labels/linearKey/dockerfile default empty.
+        // Retired keys (`vars`, `image`, `profileLines`) are ignored, so old files load.
         let c: AppConfig = serde_json::from_str(
             r#"{ "presets": [
                 { "name": "min", "vars": [{ "key": "A", "value": "1" }] },
-                { "name": "full", "labels": ["Frontend"], "linearKey": "K1", "vars": [] }
+                { "name": "full", "labels": ["Frontend"], "linearKey": "K1", "dockerfile": "FROM x:y" }
             ] }"#,
         )
         .unwrap();
         assert_eq!(c.presets.len(), 2);
         assert!(c.presets[0].labels.is_empty() && c.presets[0].linear_key.is_empty());
-        assert_eq!(c.presets[0].vars[0].key, "A");
+        assert_eq!(c.presets[0].dockerfile, "FROM pegasis0/rmng-template:latest");
         assert_eq!(c.presets[1].labels, vec!["Frontend"]);
         assert_eq!(c.presets[1].linear_key, "K1");
         // Round-trips as camelCase.
@@ -1004,14 +983,9 @@ mod tests {
                     linear_key: "lin_api_secret".into(),
                     claude_account: "group:pooled".into(),
                     codex_account: String::new(),
-                    vars: vec![EnvVar {
-                        key: "A".into(),
-                        value: "1".into(),
-                    }],
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
-                    image: None,
-                    profile_lines: None,
+                    dockerfile: "FROM x:latest".into(),
                 },
                 Preset {
                     name: "bare".into(),
@@ -1027,8 +1001,8 @@ mod tests {
         assert_eq!(r.presets.len(), 2);
         assert_eq!(r.presets[0].linear_key, "lin_api_secret");
         assert_eq!(r.presets[0].name, "med");
-        assert_eq!(r.presets[0].labels, vec!["Backend"]); // labels/vars pass through
-        assert_eq!(r.presets[0].vars.len(), 1);
+        assert_eq!(r.presets[0].labels, vec!["Backend"]); // labels pass through
+        assert_eq!(r.presets[0].dockerfile, "FROM x:latest");
         // Account defaults are not secrets — they pass through the redaction verbatim.
         assert_eq!(r.presets[0].claude_account, "group:pooled");
         assert_eq!(r.presets[0].codex_account, "");

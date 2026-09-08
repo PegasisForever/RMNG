@@ -1,8 +1,8 @@
 // Template-create dialog, network half. Title plus preset, nothing else: always
-// headed, always the preset's default accounts, always the last-used (else first)
-// template image. Submit files `POST /api/clone` in plain mode (title + preset).
+// headed, always the preset's default accounts, always the preset's Dockerfile (built
+// lazily at create). Submit files `POST /api/clone` in plain mode (title + preset).
 //
-// Gen-2 rule: this creates from a TEMPLATE image onto a fresh empty home dataset.
+// Gen-2 rule: this creates from a preset Dockerfile onto a fresh empty home dataset.
 // It never forks (the New clone dialog does that).
 //
 // Two things live here and nowhere below: the config read that supplies the presets,
@@ -13,29 +13,30 @@ import { useCallback, useEffect, useState } from "react";
 
 import { TemplateModalView } from "~/components/TemplateModalView";
 import { getConfig, type ClonePayload } from "~/lib/api";
-import {
-  lastCloneImage,
-  preferredCloneImage,
-} from "~/lib/lastCloneImage";
 import { opPhase } from "~/lib/cloneDraft";
 import type { Operation } from "~/lib/types";
-import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
+/** First FROM line of a Dockerfile, for the read-only base display. */
+function fromLine(dockerfile: string): string | null {
+  for (const line of dockerfile.split("\n")) {
+    const m = line.trim().match(/^FROM\s+(\S+)/i);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 export function TemplateModalContainer({
-  images,
   operations,
   onClose,
   onClone,
 }: {
-  /** Clone-source images to pick from (from `listImages`). */
-  images: ImageInfo[];
   /** Live operations from the SSE state — the started clone op is tracked through these. */
   operations: Operation[];
   onClose: () => void;
   /** Starts the clone and resolves with the driving Operation. The dialog stays open,
    *  showing its progress, until the operation settles. */
-  onClone: (image: string, payload: ClonePayload) => Promise<Operation>;
+  onClone: (payload: ClonePayload) => Promise<Operation>;
 }) {
   const [title, setTitle] = useState("");
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
@@ -56,14 +57,8 @@ export function TemplateModalContainer({
       });
   }, []);
 
-  // Base image: last one actually cloned from, else the first listed. No picker: the
-  // dialog is two fields, and the base rarely changes.
-  const image =
-    preferredCloneImage(images, lastCloneImage()) ?? images[0]?.reference ?? null;
   const valid =
-    image !== null &&
-    title.trim().length > 0 &&
-    (presets.length === 0 || preset !== "");
+    title.trim().length > 0 && (presets.length === 0 || preset !== "");
 
   // --- operation tracking ---------------------------------------------------------------
   // Once started, follow the op through the SSE frames and close only when it settles.
@@ -90,10 +85,11 @@ export function TemplateModalContainer({
   }, [opId, op, opSeen, failed]);
 
   const busy = starting || (!!opId && !failed);
-  const presetImage = presets.find((p) => p.name === preset)?.image ?? null;
+  const picked = presets.find((p) => p.name === preset);
+  const presetImage = picked ? fromLine(picked.dockerfile) : null;
 
   const submit = useCallback(() => {
-    if (!valid || busy || !image) return;
+    if (!valid || busy) return;
     // Clear the previous attempt so a retry after a failure tracks the NEW op, not the old
     // failed one (which is still in `operations` for another minute before it's pruned).
     setError(null);
@@ -105,11 +101,11 @@ export function TemplateModalContainer({
       plain: { title: title.trim(), message: "" },
       ...(preset ? { preset } : {}),
     };
-    onClone(image, payload)
+    onClone(payload)
       .then((started) => setOpId(started.id))
       .catch((e: Error) => setError(e.message))
       .finally(() => setStarting(false));
-  }, [valid, busy, image, title, preset, onClone]);
+  }, [valid, busy, title, preset, onClone]);
 
   return (
     <TemplateModalView

@@ -44,8 +44,8 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** The configured presets. `webapp` claims two team keys and defaults its clones to a pool;
- *  `platform` has no Linear key, which is what its unset badge says and what blocks a clone
- *  from opening a ticket under OPS. */
+ *  `platform` has a blank Linear key, which is what blocks a clone from opening a ticket
+ *  under OPS. */
 export const Default: Story = { args: { ...base() } };
 
 /** A preset being filled in. Everything is blank, including both account defaults: a new

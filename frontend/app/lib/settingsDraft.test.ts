@@ -31,7 +31,6 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       registryImage: "registry:2.8.3",
       buildkitImage: "moby/buildkit:v0.17.2",
       buildkitCacheGb: 40,
-      profileLines: null,
       seedSnapshot: null,
       homesParent: "tank/rmng/homes",
     },
@@ -46,12 +45,10 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
         linearKey: "lin_api_fixture",
         claudeAccount: "group:pooled",
         codexAccount: "",
-        vars: [{ key: "NODE_ENV", value: "development" }],
         agentPlaybook: "",
         globalPrompt: "",
-        image: null,
-        profileLines: null,
-      },
+        dockerfile: "FROM pegasis0/rmng-template:latest",
+        },
     ],
     chroma: "yuv420",
     gpuAcceleratedClones: true,
@@ -80,7 +77,10 @@ type Patch = {
     labels: string[];
     linearKey: string;
     claudeAccount: string;
-    vars: { key: string; value: string }[];
+    codexAccount: string;
+    agentPlaybook: string;
+    globalPrompt: string;
+    dockerfile: string;
   }[];
   judge: { codexModel: string; codexEmail: string | null };
 };
@@ -104,12 +104,11 @@ test("a preset's labels become the comma-separated string the operator types", (
   expect(settingsDraftFrom(config()).presets[0].labels).toBe("WE, frontend");
 });
 
-test("the stored Linear key never reaches the form, only whether there is one", () => {
-  // It is write-only: the server sends a boolean, and a blank input means "keep it".
+test("the stored Linear key reaches the form verbatim, as a regular visible field", () => {
+  // No write-only logic remains: what the editor sends is what is stored.
   const preset = settingsDraftFrom(config()).presets[0];
 
-  expect(preset.linearKey).toBe("");
-  expect(preset.keySet).toBe(true);
+  expect(preset.linearKey).toBe("lin_api_fixture");
 });
 
 test("a null pinned email becomes a blank field rather than the string null", () => {
@@ -127,7 +126,6 @@ test("the form never shares an array with the config it was seeded from", () => 
   const draft = settingsDraftFrom(c);
 
   expect(draft.claudeGroups[0].accounts).not.toBe(c.cloneGroups[0].accounts);
-  expect(draft.presets[0].vars[0]).not.toBe(c.presets[0].vars[0]);
   expect(draft.layoutPresets[0].monitors[0]).not.toBe(c.layoutPresets[0].monitors[0]);
   expect(draft.listen).not.toBe(c.listen);
 });
@@ -185,24 +183,17 @@ test("the labels string is split back into team keys, blanks dropped", () => {
   expect(patch(draft).presets[0].labels).toEqual(["WE", "frontend"]);
 });
 
-test("an env var with no key is dropped, and the key is trimmed", () => {
+test("a blank Dockerfile resets to the default base on save", () => {
   const draft = settingsDraftFrom(config());
-  draft.presets = [
-    {
-      ...draft.presets[0],
-      vars: [
-        { key: "  NODE_ENV  ", value: " development " },
-        { key: "   ", value: "orphan" },
-      ],
-    },
-  ];
+  draft.presets = [{ ...draft.presets[0], dockerfile: "   " }];
 
-  // Only the key is trimmed: a value's leading space can be meaningful.
-  expect(patch(draft).presets[0].vars).toEqual([{ key: "NODE_ENV", value: " development " }]);
+  expect(patch(draft).presets[0].dockerfile).toBe("FROM pegasis0/rmng-template:latest");
 });
 
-test("a blank Linear key is sent as-is, meaning keep the stored one", () => {
-  expect(patch(settingsDraftFrom(config())).presets[0].linearKey).toBe("");
+test("a blank Linear key is sent as-is, clearing the stored one", () => {
+  const draft = settingsDraftFrom(config());
+  draft.presets = [{ ...draft.presets[0], linearKey: "" }];
+  expect(patch(draft).presets[0].linearKey).toBe("");
 });
 
 test("a blank account default is sent as-is, because blank is a real answer", () => {

@@ -57,9 +57,9 @@ test("a pruned FAILED op stays failed rather than reading as done", () => {
 // --- preset resolution (mirrors the server, per tab) ---------------------------------
 
 const presets: PresetRedacted[] = [
-  { name: "work", labels: ["WE", "DEV"], linearKey: "lin_api_fixture", claudeAccount: "group:pooled", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "", image: null, profileLines: null },
-  { name: "side", labels: ["AW"], linearKey: "", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "", image: null, profileLines: null },
-  { name: "bare", labels: [], linearKey: "", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "", image: null, profileLines: null },
+  { name: "work", labels: ["WE", "DEV"], linearKey: "lin_api_fixture", claudeAccount: "group:pooled", codexAccount: "", agentPlaybook: "", globalPrompt: "", dockerfile: "FROM pegasis0/rmng-template:latest" },
+  { name: "side", labels: ["AW"], linearKey: "", claudeAccount: "", codexAccount: "", agentPlaybook: "", globalPrompt: "", dockerfile: "FROM pegasis0/rmng-template:latest" },
+  { name: "bare", labels: [], linearKey: "", claudeAccount: "", codexAccount: "", agentPlaybook: "", globalPrompt: "", dockerfile: "FROM pegasis0/rmng-template:latest" },
 ];
 
 test("the no-ticket tab uses the hand-picked preset", () => {
@@ -105,7 +105,7 @@ test("a key claimed by two presets goes to the first in config order", () => {
   // would, or the dialog names one preset and the clone gets another.
   const shadowed: PresetRedacted[] = [
     ...presets,
-    { name: "late", labels: ["WE"], linearKey: "lin_api_fixture", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "", image: null, profileLines: null },
+    { name: "late", labels: ["WE"], linearKey: "lin_api_fixture", claudeAccount: "", codexAccount: "", agentPlaybook: "", globalPrompt: "", dockerfile: "FROM pegasis0/rmng-template:latest" },
   ];
 
   expect(teamKeysOf(shadowed).find((t) => t.key === "we")?.preset.name).toBe("work");

@@ -45,7 +45,6 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       registryImage: "registry:2.8.3",
       buildkitImage: "moby/buildkit:v0.17.2",
       buildkitCacheGb: 40,
-      profileLines: null,
       seedSnapshot: null,
       homesParent: "tank/rmng/homes",
     },

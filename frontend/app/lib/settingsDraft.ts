@@ -53,14 +53,11 @@ export interface PresetDraft {
   name: string;
   labels: string;
   linearKey: string;
-  keySet: boolean;
   claudeAccount: string;
   codexAccount: string;
-  vars: { key: string; value: string }[];
   agentPlaybook: string;
   globalPrompt: string;
-  image: string;
-  profileLines: string;
+  dockerfile: string;
 }
 
 /** Everything the settings form can edit, as one model. */
@@ -108,14 +105,11 @@ export function newPreset(): PresetDraft {
     name: "",
     labels: "",
     linearKey: "",
-    keySet: false,
     claudeAccount: "",
     codexAccount: "",
-    vars: [{ key: "", value: "" }],
     agentPlaybook: "",
     globalPrompt: "",
-    image: "",
-    profileLines: "",
+    dockerfile: "FROM pegasis0/rmng-template:latest",
   };
 }
 
@@ -152,17 +146,12 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     presets: c.presets.map((p) => ({
       name: p.name,
       labels: p.labels.join(", "),
-      linearKey: "",
-      // The server vends the key itself now. The input stays write-only all the same: it
-      // exists to replace a key, not to read one back, and `""` still means "keep stored".
-      keySet: p.linearKey !== "",
+      linearKey: p.linearKey,
       claudeAccount: p.claudeAccount,
       codexAccount: p.codexAccount,
-      vars: p.vars.map((v) => ({ ...v })),
       agentPlaybook: p.agentPlaybook,
       globalPrompt: p.globalPrompt,
-      image: p.image ?? "",
-      profileLines: p.profileLines ?? "",
+      dockerfile: p.dockerfile ?? "FROM pegasis0/rmng-template:latest",
     })),
     hostnamePrefix: c.docker.hostnamePrefix,
     templateReference: c.docker.templateReference,
@@ -255,16 +244,14 @@ export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unk
       .map((p) => ({
         name: p.name.trim(),
         labels: p.labels.split(",").map((s) => s.trim()).filter(Boolean),
-        linearKey: p.linearKey, // "" = keep the stored key
+        linearKey: p.linearKey,
         // Unlike linearKey a blank here is MEANINGFUL ("no default — let the clone decide"),
         // so it is sent as-is rather than treated as "keep stored".
         claudeAccount: p.claudeAccount,
         codexAccount: p.codexAccount,
-        vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
-        image: p.image.trim(),
-        profileLines: p.profileLines,
+        dockerfile: p.dockerfile.trim() === "" ? "FROM pegasis0/rmng-template:latest" : p.dockerfile,
       })),
   };
 }

@@ -909,7 +909,6 @@ export function DashboardContainer({
 
       {templateOpen ? (
         <TemplateModalContainer
-          images={images}
           operations={state.operations}
           onClose={() => {
             setTemplateOpen(false);
@@ -926,8 +925,8 @@ export function DashboardContainer({
           // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
           // progress, and closes when the op settles. So this just starts it and hands the
           // Operation back — errors surface inside the dialog, not in the page banner.
-          onClone={(image, payload) =>
-            duplicateClone(image, payload).then((op) => {
+          onClone={(payload) =>
+            duplicateClone(payload).then((op) => {
               if (newCloneColumn) {
                 setPendingColumn({ columnId: newCloneColumn, target: op.target });
               }

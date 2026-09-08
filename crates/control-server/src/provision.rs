@@ -342,17 +342,17 @@ pub(crate) fn clone_key_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
     }]
 }
 
-/// The preset's env plus its Linear key as `LINEAR_API_KEY` (auths the clone's
-/// `linear` MCP). A `LINEAR_API_KEY` var set explicitly in the preset wins.
+/// The preset's Linear key as `LINEAR_API_KEY` (auths the clone's `linear` MCP).
+/// The key stays OUT of the preset Dockerfile (which may hold other secrets, baked
+/// into the image) and is injected at runtime instead.
 pub(crate) fn preset_env_vars(p: &wire::Preset) -> Vec<EnvVar> {
-    let mut vars = p.vars.clone();
-    if !p.linear_key.is_empty() && !vars.iter().any(|v| v.key == "LINEAR_API_KEY") {
-        vars.push(EnvVar {
-            key: "LINEAR_API_KEY".into(),
-            value: p.linear_key.clone(),
-        });
+    if p.linear_key.is_empty() {
+        return Vec::new();
     }
-    vars
+    vec![EnvVar {
+        key: "LINEAR_API_KEY".into(),
+        value: p.linear_key.clone(),
+    }]
 }
 
 /// The full var list a NEW clone's `/etc/environment` is built from, in precedence order
@@ -1170,65 +1170,27 @@ fn gen2_dynamic_env(env: &[EnvVar]) -> Vec<EnvVar> {
         .collect()
 }
 
-/// Split a composed create-time env list into the static vars that belong in the derived
-/// image (`ENV` at build time) versus the dynamic keys injected at create.
-fn split_static_env(env: &[EnvVar]) -> Vec<EnvVar> {
-    env.iter()
-        .filter(|v| !v.key.is_empty() && !GEN2_DYNAMIC_KEYS.contains(&v.key.as_str()))
-        .cloned()
-        .collect()
-}
-
-/// Static vars of the named preset (config), for the derived-image build. Unknown or
-/// unnamed preset ⇒ none.
-pub(crate) fn preset_static_env(app: &App, preset_name: Option<&str>) -> Vec<EnvVar> {
+/// Full Dockerfile text of the named preset (config). Unknown, unnamed, or empty ⇒
+/// the default base Dockerfile. Every create/fork/migrate resolves its image from
+/// this — never from a caller-supplied base.
+pub(crate) fn preset_dockerfile(app: &App, preset_name: Option<&str>) -> String {
     let name = preset_name.unwrap_or("").trim();
-    if name.is_empty() {
-        return Vec::new();
-    }
-    app.config()
-        .presets
-        .iter()
-        .find(|p| p.name == name)
-        .map(preset_env_vars)
-        .map(|vars| split_static_env(&vars))
-        .unwrap_or_default()
-}
-
-/// Effective Dockerfile lines for a preset: the preset's own `profile_lines` win;
-/// empty/missing falls back to the global `docker.profile_lines` default.
-pub(crate) fn preset_lines(app: &App, preset_name: Option<&str>) -> String {
-    let name = preset_name.unwrap_or("").trim();
-    if !name.is_empty() {
-        if let Some(lines) = app
-            .config()
+    let text = if name.is_empty() {
+        String::new()
+    } else {
+        app.config()
             .presets
             .iter()
             .find(|p| p.name == name)
-            .and_then(|p| p.profile_lines.clone())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        {
-            return lines;
-        }
+            .map(|p| p.dockerfile.clone())
+            .unwrap_or_default()
+    };
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        "FROM pegasis0/rmng-template:latest".to_string()
+    } else {
+        text
     }
-    app.config().docker.profile_lines.clone().unwrap_or_default()
-}
-
-/// Base image for a preset: the preset's own `image` wins; empty/missing means the
-/// caller decides (template default, or the fork source's recorded base).
-pub(crate) fn preset_image(app: &App, preset_name: Option<&str>) -> Option<String> {
-    let name = preset_name.unwrap_or("").trim();
-    if name.is_empty() {
-        return None;
-    }
-    app.config()
-        .presets
-        .iter()
-        .find(|p| p.name == name)
-        .and_then(|p| p.image.clone())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 /// How a gen-2 create sources the home dataset.
@@ -1309,29 +1271,25 @@ async fn destroy_half_built_clone(app: &App, hostname: &str, created_dataset: bo
     }
 }
 
-/// Create + start a gen-2 clone: home on its own dataset, image = derived tag.
+/// Create + start a gen-2 clone: home on its own dataset, image = preset Dockerfile.
 ///
-/// Steps: resolve tag (lazy hash-tag build) → `zfs create` (or clone from the template seed
-/// snapshot) → `docker create` with the dataset bind → identity/dynamic-env inject → ensure the empty
+/// Steps: ensure the preset image (lazy hash-tag build of the preset's full Dockerfile
+/// text) → `zfs create` (or clone from the template seed snapshot) → `docker create`
+/// with the dataset bind → identity/dynamic-env inject → ensure the empty
 /// `/home/rmng/clones` mountpoint → start → wait-ready (the [`clone_container_after_create`]
-/// tail, with dynamic-only env). Returns the resolved tag for the caller to record as
-/// `base_tag`. On failure the container, volumes, AND a dataset this call created are
-/// destroyed; a reused dataset is never touched.
+/// tail). Returns the resolved tag for the caller to record as `base_tag`. On failure
+/// the container, volumes, AND a dataset this call created are destroyed; a reused
+/// dataset is never touched.
 ///
-/// `env` is the composed create-time list; only the dynamic keys reach the clone (static
-/// preset vars move to profile lines in stage 3).
-///
-/// `profile_lines` + `static_env` feed the derived-image build: the operator's template text
-/// plus the preset's non-dynamic vars, composed as `FROM` + lines + `ENV`.
+/// `env` is the composed create-time list (control keys, `LINEAR_API_KEY`, dynamic
+/// per-clone keys); everything static lives in the Dockerfile, never here.
 #[allow(clippy::too_many_arguments)]
 pub async fn clone_container_gen2(
     app: &App,
-    base_tag: &str,
+    dockerfile: &str,
     hostname: &str,
     home: HomeSource,
     env: &[EnvVar],
-    profile_lines: &str,
-    static_env: &[EnvVar],
     agent_playbook: &str,
     global_prompt: &str,
     headless: bool,
@@ -1341,28 +1299,43 @@ pub async fn clone_container_gen2(
         bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
     }
     let docker = &app.docker;
-    // Reuse rule: a base that is already a local derived image (`rmng-p-*`, recorded on
-    // a live clone and handed back by fork/rebase) runs as-is. Re-deriving FROM it would
-    // stack a redundant layer, and the label gate below would reject it (images derived
-    // before the `LABEL rmng.image=1` stamp carry no label).
-    let tag = if wire::config::is_derived_tag(base_tag) && docker.image_exists(base_tag).await? {
-        on_progress("reuse", &format!("reusing derived image {base_tag}"));
-        base_tag.to_string()
-    } else {
-        // Canonicalize the base to its reference (label-gated: only clone sources qualify),
-        // so id-form input still records and builds from the same base.
-        let images = docker.list_rmng_images().await?;
-        let Some(base) = resolve_reference(&images, base_tag) else {
-            bail!("base image '{base_tag}' is not a clone source (missing the `rmng.image=1` label)");
-        };
-        let tag =
-            crate::derived::resolve_tag(app, &base, profile_lines, static_env, &mut on_progress)
-                .await?;
-        if tag.is_empty() {
-            bail!("a base image tag is required for a gen-2 clone");
-        }
-        tag
-    };
+    // The preset Dockerfile decides the image: same text twice means one build, and the
+    // tag is recorded below as `base_tag`. No label gate: FROM may name any image.
+    let tag = crate::derived::ensure_image(app, dockerfile, &mut on_progress).await?;
+    if tag.is_empty() {
+        bail!("a Dockerfile is required for a gen-2 clone");
+    }
+    clone_container_gen2_from_tag(
+        app,
+        &tag,
+        hostname,
+        home,
+        env,
+        agent_playbook,
+        global_prompt,
+        headless,
+        &mut on_progress,
+    )
+    .await
+}
+
+/// Create + start a gen-2 clone on an EXPLICIT local image tag (rebase + rollback).
+/// Same tail as [`clone_container_gen2`] minus the Dockerfile build: the tag must
+/// already exist locally (the preset rebuild button warms it).
+#[allow(clippy::too_many_arguments)]
+pub async fn clone_container_gen2_from_tag(
+    app: &App,
+    tag: &str,
+    hostname: &str,
+    home: HomeSource,
+    env: &[EnvVar],
+    agent_playbook: &str,
+    global_prompt: &str,
+    headless: bool,
+    mut on_progress: impl FnMut(&str, &str),
+) -> Result<String> {
+    let docker = &app.docker;
+    let tag = tag.to_string();
     let cfg = app.config();
 
     on_progress("queued", &format!("queued gen-2 clone {hostname}"));
@@ -1457,23 +1430,11 @@ pub async fn fork_clone(
     }
     let src = gen2_row(app, source_id)
         .ok_or_else(|| anyhow::anyhow!("unknown clone '{source_id}'"))?;
-    let src_preset = src.preset_name.clone();
-    let cfg = app.config();
-    let profile_lines = preset_lines(app, preset_name);
-    let static_env = preset_static_env(app, preset_name);
-    // Same preset as the source (the common case): run on the source tag as-is.
-    // Different preset: derive a new tag FROM the source tag with the new static
-    // env (build on miss, then cached). Either way the recorded tag below is the
-    // image the fork actually runs.
-    let base_tag = src.base_tag.ok_or_else(|| {
-        anyhow::anyhow!("clone '{source_id}' has no recorded base tag (not a gen-2 clone)")
-    })?;
-    let run_tag = if preset_name == src_preset.as_deref() {
-        base_tag
-    } else {
-        on_progress("derive", &format!("deriving image for preset '{}'", preset_name.unwrap_or("(none)")));
-        crate::derived::resolve_tag(app, &base_tag, &profile_lines, &static_env, &mut on_progress).await?
-    };
+    let dockerfile = preset_dockerfile(app, preset_name);
+    // The fork's image comes from the TARGET preset's Dockerfile (built lazily inside
+    // `clone_container_gen2`); the source contributes only its home dataset, snapshotted
+    // and cloned below. Same preset reuses the source tag with zero rebuild, because the
+    // text hashes the same.
 
     on_progress("snapshot", &format!("snapshotting {source_id}"));
     let ts = std::time::SystemTime::now()
@@ -1488,12 +1449,10 @@ pub async fn fork_clone(
     }
     match clone_container_gen2(
         app,
-        &run_tag,
+        &dockerfile,
         new_id,
         HomeSource::Reuse,
         env,
-        &profile_lines,
-        &static_env,
         agent_playbook,
         global_prompt,
         headless,
@@ -1501,7 +1460,7 @@ pub async fn fork_clone(
     )
     .await
     {
-        Ok(_) => Ok(run_tag),
+        Ok(tag) => Ok(tag),
         Err(e) => {
             destroy_half_built_clone(app, new_id, true).await;
             let _ = crate::zfs::destroy_snapshot_if_unreferenced(&homes_parent(app), &snap);
@@ -1533,21 +1492,25 @@ pub async fn rebase_clone(
         .as_ref()
         .and_then(|r| r.base_tag.clone())
         .ok_or_else(|| anyhow::anyhow!("clone '{host_id}' has no recorded base tag"))?;
-    let static_env = preset_static_env(app, row.as_ref().and_then(|r| r.preset_name.as_deref()));
-    let profile_lines = preset_lines(app, row.as_ref().and_then(|r| r.preset_name.as_deref()));
+    // Both tags run as-is: the new one was warmed by the preset rebuild button, the old
+    // one is still local (it purges only when unused, and this clone uses it). FROM may
+    // name any image — no label gate.
+    for t in [new_tag, &old_tag] {
+        if !app.docker.image_exists(t).await? {
+            bail!("image '{t}' is not present locally — prebuild it first");
+        }
+    }
 
     on_progress("stop", &format!("stopping {host_id} for rebase"));
     app.docker.stop_even_if_paused(host_id).await?;
     app.docker.remove_container(host_id).await?;
 
-    match clone_container_gen2(
+    match clone_container_gen2_from_tag(
         app,
         new_tag,
         host_id,
         HomeSource::Reuse,
         env,
-        &profile_lines,
-        &static_env,
         agent_playbook,
         global_prompt,
         headless,
@@ -1561,14 +1524,12 @@ pub async fn rebase_clone(
         }
         Err(e) => {
             on_progress("rollback", &format!("rebase failed; recreating from {old_tag}"));
-            if let Err(rb) = clone_container_gen2(
+            if let Err(rb) = clone_container_gen2_from_tag(
                 app,
                 &old_tag,
                 host_id,
                 HomeSource::Reuse,
                 env,
-                &profile_lines,
-                &static_env,
                 agent_playbook,
                 global_prompt,
                 headless,
@@ -1667,21 +1628,21 @@ async fn migrate_one_inner(
     }
 
     on_progress("recreate", "creating the gen-2 container (stopped)");
-    let static_env = split_static_env(env);
-    let profile_lines = app
-        .config()
-        .docker
-        .profile_lines
-        .clone()
-        .unwrap_or_default();
+    // Migration builds from the row preset's Dockerfile (or the default base when the
+    // row names none): the old `base_tag` arg is retired, kept only for signature compat.
+    let _ = base_tag;
+    let dockerfile = preset_dockerfile(
+        app,
+        gen2_row(app, host_id)
+            .as_ref()
+            .and_then(|r| r.preset_name.as_deref()),
+    );
     let tag = clone_container_gen2(
         app,
-        base_tag,
+        &dockerfile,
         host_id,
         HomeSource::Reuse,
         env,
-        &profile_lines,
-        &static_env,
         agent_playbook,
         global_prompt,
         headless,
@@ -1969,11 +1930,6 @@ mod tests {
         .map(|v| v.key)
         .collect();
         assert_eq!(got, vec!["RMNG_CONTROL_URL", "RMNG_PROXY_KEY", "ANTHROPIC_MODEL"]);
-        let stat: Vec<String> = split_static_env(&[env("ANTHROPIC_MODEL"), env("SOME_STATIC")])
-            .into_iter()
-            .map(|v| v.key)
-            .collect();
-        assert_eq!(stat, vec!["SOME_STATIC"]);
     }
 
     #[test]

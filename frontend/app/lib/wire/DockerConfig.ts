@@ -72,13 +72,7 @@ buildkitImage: string,
  */
 buildkitCacheGb: number, 
 /**
- * Extra Dockerfile lines appended (after the `FROM <base>`) when building a gen-2
- * derived image (`rmng-p-<hash>`). Edited in Settings by anyone (single user,
- * trusted network, no auth); `None`/empty means the base image builds unchanged.
- * No secrets here — Linear keys and account picks stay on presets.
- */
-profileLines: string | null, 
-/**
+ * REMOVED `profile_lines`: presets carry their own full Dockerfile now.
  * Template home seed snapshot (`<dataset>@<snap>`). A create clones the new home
  * from it by default, so template clones start with content; empty means a fresh
  * home. Seed refresh is manual.
