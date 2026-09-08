@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
 use wire::{
-    AppConfigRedacted, BoardColumn, ContainerStats, ControlState, CopyResult, ExecRequest, ExecResult,
+    AppConfigRedacted, BoardColumn, ContainerStats, ControlState, ExecRequest, ExecResult,
     ImageInfo, LedgerRange, LedgerSearch, Operation, RmngClone,
 };
 
@@ -52,8 +52,6 @@ pub struct CloneOpts<'a> {
     /// from the address it called on, so a clone spawning a clone nests with no flags.
     pub parent: Option<&'a str>,
     pub top_level: bool,
-    /// Directories to copy from the calling clone before readiness.
-    pub seed: &'a [String],
     pub agent_instructions: Option<&'a str>,
     pub claude_instructions: Option<&'a str>,
 }
@@ -72,6 +70,22 @@ pub struct LedgerFilter<'a> {
     pub agent: Option<&'a str>,
     /// Hits to return. Absent takes the server's default of 50.
     pub limit: Option<usize>,
+}
+
+/// Optional ticket/preset/account overrides for a gen-2 fork. Every field is
+/// `None` = inherit the source clone's binding.
+#[derive(Debug, Clone, Default)]
+pub struct ForkOpts<'a> {
+    pub preset: Option<&'a str>,
+    /// Ticket metadata override as a ready JSON object (camelCase keys:
+    /// workspace, ticket, ticketUrl, branch, displayName, label).
+    pub linear: Option<Value>,
+    pub claude_account: Option<&'a str>,
+    pub codex_account: Option<&'a str>,
+    pub first_message: Option<&'a str>,
+    pub agent_instructions: Option<&'a str>,
+    pub claude_instructions: Option<&'a str>,
+    pub headless: bool,
 }
 
 impl Client {
@@ -261,9 +275,6 @@ impl Client {
         if let Some(parent) = opts.parent.map(str::trim).filter(|p| !p.is_empty()) {
             obj.insert("parent".into(), json!(parent));
         }
-        if !opts.seed.is_empty() {
-            obj.insert("seed".into(), json!(opts.seed));
-        }
         if opts.top_level {
             obj.insert("topLevel".into(), json!(true));
         }
@@ -283,6 +294,42 @@ impl Client {
                 .cloned()
                 .ok_or_else(|| anyhow!("clone reply missing op"))?,
         )?)
+    }
+
+    /// Fork a gen-2 clone (snapshot + clone the source home).
+    pub async fn fork(&self, source: &str, new_id: &str, headless: bool) -> Result<Operation> {
+        self.post_json("/api/fork", &json!({ "source": source, "hostname": new_id, "headless": headless })).await
+    }
+
+    /// Fork with optional ticket/preset/account overrides (`None` = inherit the source).
+    /// Keys are camelCase to match the server's `ForkReq`.
+    pub async fn fork_with(&self, source: &str, new_id: &str, opts: &ForkOpts<'_>) -> Result<Operation> {
+        let mut body = json!({ "source": source, "hostname": new_id });
+        let obj = body.as_object_mut().unwrap();
+        if opts.headless {
+            obj.insert("headless".into(), json!(true));
+        }
+        for (k, v) in [
+            ("preset", opts.preset),
+            ("claudeAccount", opts.claude_account),
+            ("codexAccount", opts.codex_account),
+            ("firstMessage", opts.first_message),
+            ("agentInstructions", opts.agent_instructions),
+            ("claudeInstructions", opts.claude_instructions),
+        ] {
+            if let Some(v) = v.map(str::trim).filter(|v| !v.is_empty()) {
+                obj.insert(k.into(), json!(v));
+            }
+        }
+        if let Some(linear) = &opts.linear {
+            obj.insert("linear".into(), linear.clone());
+        }
+        self.post_json("/api/fork", &body).await
+    }
+
+    /// Rebase a gen-2 clone onto a new base tag (dataset + id kept).
+    pub async fn rebase(&self, id: &str, tag: &str) -> Result<Operation> {
+        self.post_json(&format!("/api/hosts/{id}/rebase"), &json!({ "tag": tag })).await
     }
 
     /// Destroy a managed clone (or unregister a plain clone).
@@ -310,12 +357,6 @@ impl Client {
     /// Pull the clone template (`None` = the configured default reference).
     pub async fn image_pull(&self, reference: Option<&str>) -> Result<Operation> {
         self.post_json("/api/images/pull", &json!({ "reference": reference }))
-            .await
-    }
-
-    /// Commit a running clone to a new clone-source image `<name>:latest`.
-    pub async fn image_commit(&self, host: &str, name: &str) -> Result<Operation> {
-        self.post_json("/api/images/commit", &json!({ "host": host, "name": name }))
             .await
     }
 
@@ -443,51 +484,6 @@ impl Client {
             &serde_json::to_value(req)?,
         )
         .await
-    }
-
-    /// Stream a tar archive into `host`, extracting it at `dst`.
-    ///
-    /// `body` is streamed rather than buffered, so the caller can hand over a `tar` child
-    /// process's stdout and never hold the archive in memory.
-    pub async fn clone_copy(
-        &self,
-        host: &str,
-        dst: &str,
-        body: reqwest::Body,
-    ) -> Result<CopyResult> {
-        let req = self
-            .http
-            .post(format!("{}/api/hosts/{host}/copy", self.base))
-            .query(&[("dst", dst)])
-            .header("content-type", "application/x-tar")
-            .body(body);
-        Ok(Self::check(req.send().await?).await?.json().await?)
-    }
-
-    /// Copy a directory between two clones without moving the bytes through this process.
-    ///
-    /// The server can already see both clone homes, so it does the copy locally and this
-    /// request carries nothing but the paths.
-    pub async fn clone_copy_from(
-        &self,
-        host: &str,
-        dst: &str,
-        from: &str,
-        excludes: &[String],
-        delete: bool,
-    ) -> Result<CopyResult> {
-        let mut query = vec![("dst", dst.to_string()), ("from", from.to_string())];
-        if !excludes.is_empty() {
-            query.push(("exclude", excludes.join(",")));
-        }
-        if delete {
-            query.push(("delete", "true".to_string()));
-        }
-        let req = self
-            .http
-            .post(format!("{}/api/hosts/{host}/copy", self.base))
-            .query(&query);
-        Ok(Self::check(req.send().await?).await?.json().await?)
     }
 
     /// Replace the board's columns wholesale.

@@ -20,4 +20,4 @@ linearKey: string,
  * Default account selections ([`Preset::claude_account`] / [`Preset::codex_account`]) —
  * not secrets, shown verbatim.
  */
-claudeAccount: string, codexAccount: string, vars: Array<EnvVar>, agentPlaybook: string, globalPrompt: string, };
+claudeAccount: string, codexAccount: string, vars: Array<EnvVar>, agentPlaybook: string, globalPrompt: string, image: string | null, profileLines: string | null, };

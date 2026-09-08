@@ -204,19 +204,11 @@ pub async fn apply_render_mode(app: &App, clone: &str, headless: bool) {
 /// would otherwise be born without `RMNG_CONTROL_URL` + the `XDG_*`/desktop vars (breaking bare
 /// `rmng …` in the viewer terminal). Safe to `.` because the control-server writes that file as
 /// plain unquoted `KEY=VALUE` lines (`clone_etc_environment_conf`).
-///
-/// `RETIRED_ENV_KEYS` are unset in the same breath, for the same reason in the opposite direction:
-/// they reach this shell from the container's `Config.Env`, an older clone-source image puts the
-/// dead `/cc` endpoint there, and the server would hand that endpoint to every agent ever typed
-/// into a pane. The create spec assigns them empty too, so this line only matters on a container
-/// created by an older control-server.
 fn headless_tmux_default_script() -> String {
-    let unsets = crate::clone_reconcile::RETIRED_ENV_KEYS.join(" ");
     format!(
         r#"set -e
 runuser -u rmng -- bash -lc '
 set -a; . /etc/environment; set +a
-unset {unsets}
 cat > ~/.tmux.conf <<EOF
 # RMNG: the viewer proxy attaches as a second client — size to the latest (viewer) client, not the
 # smallest, so a co-attached human shell never clamps the terminal grid.
@@ -302,10 +294,7 @@ pub(crate) fn base_session_env_vars() -> Vec<EnvVar> {
 ///
 /// **Nothing here points at an inference endpoint.** Agents talk to Anthropic/OpenAI directly,
 /// authenticated by the short-lived tokens the server writes into their credential files (see
-/// [`crate::claude::apply_clone_token`]). The group-proxy era's `ANTHROPIC_BASE_URL` +
-/// `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` are gone; `clone_reconcile::RETIRED_ENV_KEYS`
-/// is what strips them from clones that still carry them, since dropping a key here does not by
-/// itself remove it from a clone's existing `/etc/environment`.
+/// [`crate::claude::apply_clone_token`]).
 pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
     let cfg = app.config();
     let ev = |key: &str, value: String| EnvVar {
@@ -506,129 +495,7 @@ fn clone_pct(step: &str) -> Option<f64> {
 /// by the caller (`run_clone`), so this fn returning does NOT mean the clone is connectable
 /// yet. Returns the **canonical** image reference on success (`RmngClone.source`; see
 /// [`resolve_reference`] — the caller may have passed an id form, but state must always
-/// record the reference so the commit flow can stamp lineage). The container *name* is the
-/// hostname (== host id) — that's the clone's address (Docker DNS on the rmng bridge; its
-/// IP is plain Docker IPAM, never allocated or stored here). No id is returned or stored.
-/// On any failure BEFORE readiness, a cleanup trap removes the created container + its
-/// per-clone dind volume so a retry isn't blocked by a stale same-named container
-/// (gotcha #7).
-///
-/// `image` must be a clone source (`rmng.image=1`); `env` is the resolved control + preset
-/// env (control URLs first so a preset can still override). A pre-boot `upload_tar` injects
-/// the clone's identity: a fresh random `/etc/machine-id` (always, because a committed image
-/// carries a baked one), `/etc/environment`, and, when the preset sets `PATH`, the fish/profile
-/// preset-PATH rc (root-owned `/etc`). Pre-boot because the lingering user manager reads that
-/// environment about a second into the boot, and every session process inherits it for the life
-/// of the container. A second `upload_tar` after start carries what needs a running container.
-/// After start, when the preset set `PATH`,
-/// the bashrc marker block is appended via an exec (a plain tar can't append). wait-ready
-/// polls the mediaplane for the daemon's `Hello{clone_id == hostname}` ≤ 90 s; a timeout with
-/// the container still running SUCCEEDS with a warning in the op log; a dead container FAILS
-/// with a `docker logs` tail folded into the op log.
-pub async fn clone_container(
-    app: &App,
-    image: &str,
-    hostname: &str,
-    env: &[EnvVar],
-    agent_playbook: &str,
-    global_prompt: &str,
-    headless: bool,
-    mut on_progress: impl FnMut(&str, &str),
-) -> Result<String> {
-    if !is_dns_label(hostname) {
-        bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
-    }
-    let cfg = app.config();
-    let docker = &app.docker;
-
-    on_progress("queued", &format!("queued clone {hostname}"));
-
-    // Validate the source is actually a clone-source image (label rmng.image=1) — not just
-    // any image id. The image picker only offers labeled images, but a raw MCP/API caller
-    // could pass anything (reference, sha256: id, or bare id), so gate it here AND resolve
-    // whatever form was passed to the canonical reference — everything downstream
-    // (`RmngClone.source`, in-use accounting, delete guards) keys on the reference.
-    if !docker.image_exists(image).await? {
-        bail!("source image '{image}' does not exist");
-    }
-    let images = docker.list_rmng_images().await?;
-    let Some(reference) = resolve_reference(&images, image) else {
-        bail!("image '{image}' is not a clone source (missing the `rmng.image=1` label)");
-    };
-
-    // The rmng bridge is lazy; make sure it's up before joining it.
-    docker.ensure_network().await?;
-
-    // Create the container (name == clone id) from the CANONICAL reference (equivalent
-    // to the caller's input — same image — but keeps `docker ps`'s Image column
-    // readable). Its IP is Docker IPAM's business; the name is the address. A stale
-    // same-named container 409s here — the daemon message is surfaced verbatim
-    // (gotcha #7).
-    on_progress("create", &format!("creating container {hostname}"));
-    let spec = CreateSpec {
-        name: hostname.to_string(),
-        image: reference.clone(),
-        hostname: hostname.to_string(),
-        // Clone env lives ONLY in `/etc/environment` (written by `clone_container_after_create`
-        // below, from this same `env`), the single source of truth: the lingering `systemd --user`
-        // manager imports it via the `/usr/lib/environment.d/99-environment.conf -> /etc/environment`
-        // symlink, PAM applies it to SSH logins, and `rmng exec` seeds from the live user session
-        // (`systemctl --user show-environment`). Baking it into the container `Config.Env` too would
-        // only leak it into root / PID 1 — where `XDG_RUNTIME_DIR` and friends are wrong — with no
-        // consumer that can't already reach `/etc/environment`.
-        //
-        // `RETIRED_ENV_KEYS` are the one exception, and they are here to CANCEL what the image says
-        // rather than to add anything. An image committed during the group-proxy era carries the
-        // dead `/cc` endpoint in its own `ENV`, PID 1 inherits it, and so does every `docker exec`
-        // and every tmux server started from one. Docker cannot delete an image key, so the create
-        // spec assigns it empty, which Claude Code reads as unset.
-        env: crate::clone_reconcile::RETIRED_ENV_KEYS
-            .iter()
-            .map(|k| ((*k).to_string(), String::new()))
-            .collect(),
-        cpus: cfg.docker.clone_cpus,
-        memory_mb: cfg.docker.clone_memory_mb,
-        sock_source: sock_source_dir(app).await,
-    };
-    let container = docker.create_clone_container(&spec).await?;
-
-    // From here on, a failure must tear the half-built clone down. Run the rest under
-    // a guard that removes the container + its dind volumes on any early return.
-    match clone_container_after_create(
-        app,
-        &container,
-        hostname,
-        env,
-        agent_playbook,
-        global_prompt,
-        headless,
-        &mut on_progress,
-    )
-    .await
-    {
-        Ok(()) => {
-            // Shared build infra: optimistically apply the Hub mirror + remote buildx builder
-            // now (idempotent, best-effort; the buildinfra reconciler is the backstop if the
-            // inner dockerd isn't up yet). No-op when the feature is off.
-            crate::buildinfra::apply_to_clone(app, &container).await;
-            Ok(reference)
-        }
-        Err(e) => {
-            tracing::warn!("clone {hostname} failed after create; cleaning up: {e}");
-            docker.remove_container(&container).await.ok();
-            docker
-                .remove_volume(&crate::docker::DockerCtl::dind_volume_name(hostname))
-                .await
-                .ok();
-            docker
-                .remove_volume(&crate::docker::DockerCtl::ctd_volume_name(hostname))
-                .await
-                .ok();
-            Err(e)
-        }
-    }
-}
-
+/// record the reference so image in-use accounting stays canonical). The container *name* is the
 /// Apply one per-clone configuration step at create time, best-effort.
 ///
 /// Every step here is also a step the per-clone reconciler owns, and each one runs here purely
@@ -661,27 +528,7 @@ async fn seed_step(
     }
 }
 
-/// The agent-wrapper drop-in that clears the retired inference vars, applied once the clone is
-/// up rather than during `inject`.
-///
-/// Its script drives `systemctl --user`, so it needs the clone's user manager, and during
-/// `inject` there is none: the container started a second earlier. Measured on a live create,
-/// the inject-time attempt exited 1 and the reconciler then ran it 26 s later, restarting the
-/// agent-wrapper right through the first turn the kickoff had started. That restart is what the
-/// create-time run exists to avoid, so it belongs after wait-ready.
-pub(crate) async fn seed_wrapper_env(app: &App, id: &str) {
-    seed_step(
-        &app.docker,
-        id,
-        id,
-        "agent-wrapper env drop-in",
-        &crate::clone_reconcile::agent_wrapper_env_dropin_script(),
-        Some(crate::clone_reconcile::wrapper_env_stamp_entry()),
-    )
-    .await;
-}
-
-/// The inject → start → wait-ready tail of [`clone_container`], factored out so the caller
+/// The inject → start → wait-ready tail, factored out so the caller
 /// can run it under a cleanup trap.
 async fn clone_container_after_create(
     app: &App,
@@ -746,8 +593,7 @@ async fn clone_container_after_create(
     // therefore lost a race it could not win: seven clones on the production fleet ran their
     // terminals, editors and agents under the identity of their image's source clone, so
     // `rmng clone self` named that clone and a sub clone created from a terminal would have
-    // nested under it. `commit_clone_image` no longer bakes the key, and this write closes the
-    // window for every image that already does.
+    // nested under it. Gen-2 images are built from Dockerfiles and carry no clone identity.
     let preset_conf = clone_etc_environment_conf(env);
     let path_rc = preset_path_rc(&preset_conf);
     let mut identity: Vec<TarEntry> = vec![
@@ -1223,151 +1069,6 @@ pub async fn pull_template(
     Ok(remote.to_string())
 }
 
-// --- commit clone image ---------------------------------------------------------------
-
-/// Progress step → percentage for a commit-from-clone. Matches the plan's table.
-fn commit_pct(step: &str) -> Option<f64> {
-    Some(match step {
-        "queued" => 0.0,
-        "prepare" => 15.0,
-        "commit" => 40.0,
-        "done" => 100.0,
-        _ => return None,
-    })
-}
-
-/// Clear both halves of a clone's identity, right before its filesystem is snapshotted into an
-/// image: the machine-id, and the identity bearer in `/etc/environment`.
-///
-/// Neither belongs to anything built from the image. A baked `RMNG_PROXY_KEY` is read by the next
-/// clone's user manager during boot and handed to its whole desktop session, which then claims to
-/// be the clone the image came from; it is also a live bearer sitting in an image.
-const COMMIT_PREPARE_SCRIPT: &str = "sed -i '/^RMNG_PROXY_KEY=/d' /etc/environment 2>/dev/null || true\n\
-                                     truncate -s0 /etc/machine-id\n\
-                                     sync\n";
-
-/// Put the source clone's identity bearer back after the snapshot.
-///
-/// Appended only when absent, because a reconcile pass during the commit (which can run for
-/// minutes) may have rewritten `/etc/environment` already. Nothing needs restarting either way:
-/// a process started before the strip carries the value in its own environment and never saw
-/// the file change.
-fn commit_restore_script(key: &str) -> String {
-    format!(
-        "grep -q '^RMNG_PROXY_KEY=' /etc/environment || \
-         printf 'RMNG_PROXY_KEY=%s\\n' '{key}' >> /etc/environment\n"
-    )
-}
-
-/// Commit a RUNNING clone to a new clone-source image `<name>:latest`. Steps (→ pct):
-/// `queued` 0, `prepare` 15, `commit` 40, `done` 100. Returns the committed reference.
-///
-/// `prepare` clears both halves of the source clone's identity so the image cannot carry them:
-/// `/etc/machine-id`, and the `RMNG_PROXY_KEY` line in `/etc/environment`. `commit` freezes the
-/// container (`pause=true`), which can take minutes for a large clone, with the
-/// `rmng.image=1` and `rmng.created-from=<source>` labels. The key goes back afterwards.
-/// Volume mounts are excluded by `docker commit`, so the clone's inner-Docker state
-/// (`/var/lib/docker`) never enters the image (gotcha #11). Logs the baked-credentials
-/// warning (gotcha #10): any on-disk Claude token / secret in the clone's home travels into
-/// the image.
-pub async fn commit_clone_image(
-    app: &App,
-    container: &str,
-    name: &str,
-    source: &str,
-    mut on_progress: impl FnMut(&str, &str),
-) -> Result<String> {
-    if !is_dns_label(name) {
-        bail!("image name must be a DNS label (lowercase letters, digits, hyphens)");
-    }
-    let docker = &app.docker;
-    // The name is the full image repository (no `rmng/template` namespace); Docker's default
-    // `latest` tag makes the reference `<name>:latest`.
-    let reference = format!("{name}:latest");
-
-    on_progress("queued", &format!("queued commit → {reference}"));
-    if docker.image_exists(&reference).await? {
-        bail!("an image named '{reference}' already exists; pick another name or delete it first");
-    }
-
-    // Prepare: flush, then clear both halves of the source clone's identity so committed images
-    // don't carry them. The machine-id is regenerated on the next clone's first boot (
-    // `clone_container` injects a fresh one).
-    //
-    // `RMNG_PROXY_KEY` is the other half, and it used to travel. Every image ever committed from
-    // a clone holds that clone's live identity bearer in `/etc/environment`: `pega-template11`
-    // and `pega-template12` both carry `pega-template`'s. A clone born from such an image reads
-    // it during boot and hands it to its whole desktop session, so terminals, editors and agents
-    // all claim to be the image's source clone. It is also a bearer secret sitting in an image
-    // anyone can build a clone from.
-    //
-    // Stripping the line leaves the SOURCE clone briefly without it, which is why it goes back
-    // below. The reconciler is the backstop: it rewrites `/etc/environment` from the desired var
-    // list every pass, so even a server that dies mid-commit leaves the clone repaired within
-    // one interval.
-    on_progress(
-        "prepare",
-        "flushing filesystem + clearing the clone's identity",
-    );
-    let prep_code = docker
-        .exec_script(container, COMMIT_PREPARE_SCRIPT, &[], &[], |_s, line| {
-            tracing::debug!(target: "provision", "commit-prepare: {line}");
-        })
-        .await?;
-    if prep_code != 0 {
-        tracing::warn!("commit-prepare exited {prep_code} in {container} (non-fatal; proceeding)");
-    }
-
-    // The commit bakes whatever is on the clone's disk into the image — including any
-    // on-disk Claude credentials / secrets in the clone user's home (gotcha #10).
-    tracing::warn!(
-        "committing {container} → {reference}: on-disk credentials (e.g. \
-         ~/.claude/.credentials.json) in the clone are baked into the new image"
-    );
-    on_progress(
-        "commit",
-        "committing image (this can take minutes; on-disk credentials are baked in)",
-    );
-    let labels = vec![
-        (crate::docker::LABEL_IMAGE.to_string(), "1".to_string()),
-        (
-            crate::docker::LABEL_CREATED_FROM.to_string(),
-            source.to_string(),
-        ),
-        // `docker commit` INHERITS the parent image's labels, so a clone descended from
-        // the wizard base carries `rmng.base=1` — explicitly override it or every user
-        // commit wears the base badge and steals the picker preselect (found in E2E).
-        (crate::docker::LABEL_BASE.to_string(), "0".to_string()),
-    ];
-    let committed = docker
-        .commit(
-            container, name, /*set_boot_config=*/ true, /*pause=*/ true, &labels,
-        )
-        .await;
-
-    // Give the source clone its identity back, whether or not the commit worked.
-    let restore = commit_restore_script(&app.clone_keys.mint(container));
-    match docker
-        .exec_script(container, &restore, &[], &[], |_s, line| {
-            tracing::debug!(target: "provision", "commit-restore: {line}");
-        })
-        .await
-    {
-        Ok(0) => {}
-        Ok(code) => tracing::warn!(
-            "restoring {container}'s identity key after the commit exited {code}; the \
-             reconciler rewrites /etc/environment on its next pass"
-        ),
-        Err(e) => tracing::warn!(
-            "restoring {container}'s identity key after the commit failed: {e}; the \
-             reconciler rewrites /etc/environment on its next pass"
-        ),
-    }
-    committed?;
-
-    on_progress("done", &format!("image {reference} ready"));
-    Ok(reference)
-}
 
 // --- delete ---------------------------------------------------------------------------
 
@@ -1387,6 +1088,11 @@ fn delete_pct(step: &str) -> Option<f64> {
 /// `remove(force)` → remove the `rmng-dind-<clone>` inner-Docker volume. A 404/in-use on the
 /// volume is logged, not fatal (the container removal is what matters). `host_id` is both
 /// the container name to stop/remove and the volume-name stem (`rmng-dind-<host_id>`).
+///
+/// Gen-2 tail (no-op on gen-1 rows, which carry no `dataset`): destroy the home dataset
+/// (kept, with a warning, when fork clones still reference it), destroy the origin
+/// snapshot it was cloned from when nothing references it anymore, and remove the base
+/// image tag when no remaining clone row references it.
 pub async fn delete_clone(
     app: &App,
     host_id: &str,
@@ -1416,6 +1122,607 @@ pub async fn delete_clone(
     }
 
     on_progress("done", &format!("clone {host_id} destroyed"));
+
+    // Gen-2 tail: the row still exists (jobs.rs removes it after this returns), so the
+    // dataset + base tag are readable here. Everything below is best-effort cleanup —
+    // the container removal above is what matters.
+    if let Some(row) = gen2_row(app, host_id) {
+        if row.dataset.is_some() {
+            on_progress("remove", "destroying the home dataset");
+            let parent = homes_parent(app);
+            let origin = dataset_origin(&parent, host_id);
+            match crate::zfs::destroy(&parent, host_id, false) {
+                Ok(()) => {
+                    if let Some(snap) = origin.filter(|s| s != "-") {
+                        if let Err(e) = crate::zfs::destroy_snapshot_if_unreferenced(&parent, &snap) {
+                            tracing::warn!(
+                                "delete {host_id}: keeping origin snapshot {snap}: {e} (non-fatal)"
+                            );
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "delete {host_id}: keeping home dataset ({e}); fork clones may still \
+                     reference it (non-fatal)"
+                ),
+            }
+        }
+        if let Some(tag) = row.base_tag {
+            purge_image_if_unused(app, host_id, &tag).await;
+        }
+    }
+    Ok(())
+}
+
+// --- gen-2 clones ---------------------------------------------------------------------
+
+/// Create-time env keys that belong in a gen-2 clone's `/etc/environment`. Static preset
+/// vars live in the profile Dockerfile lines (stage 3); only per-clone dynamic keys are
+/// injected here. `ANTHROPIC_MODEL` is seeded at create (same value the reconciler
+/// enforces) so fresh clones have a model before the first reconcile pass.
+const GEN2_DYNAMIC_KEYS: [&str; 3] = ["RMNG_CONTROL_URL", "RMNG_PROXY_KEY", "ANTHROPIC_MODEL"];
+
+/// Filter create-time env down to the dynamic keys a gen-2 clone injects.
+fn gen2_dynamic_env(env: &[EnvVar]) -> Vec<EnvVar> {
+    env.iter()
+        .filter(|v| GEN2_DYNAMIC_KEYS.contains(&v.key.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Split a composed create-time env list into the static vars that belong in the derived
+/// image (`ENV` at build time) versus the dynamic keys injected at create.
+fn split_static_env(env: &[EnvVar]) -> Vec<EnvVar> {
+    env.iter()
+        .filter(|v| !v.key.is_empty() && !GEN2_DYNAMIC_KEYS.contains(&v.key.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Static vars of the named preset (config), for the derived-image build. Unknown or
+/// unnamed preset ⇒ none.
+pub(crate) fn preset_static_env(app: &App, preset_name: Option<&str>) -> Vec<EnvVar> {
+    let name = preset_name.unwrap_or("").trim();
+    if name.is_empty() {
+        return Vec::new();
+    }
+    app.config()
+        .presets
+        .iter()
+        .find(|p| p.name == name)
+        .map(preset_env_vars)
+        .map(|vars| split_static_env(&vars))
+        .unwrap_or_default()
+}
+
+/// Effective Dockerfile lines for a preset: the preset's own `profile_lines` win;
+/// empty/missing falls back to the global `docker.profile_lines` default.
+pub(crate) fn preset_lines(app: &App, preset_name: Option<&str>) -> String {
+    let name = preset_name.unwrap_or("").trim();
+    if !name.is_empty() {
+        if let Some(lines) = app
+            .config()
+            .presets
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.profile_lines.clone())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return lines;
+        }
+    }
+    app.config().docker.profile_lines.clone().unwrap_or_default()
+}
+
+/// Base image for a preset: the preset's own `image` wins; empty/missing means the
+/// caller decides (template default, or the fork source's recorded base).
+pub(crate) fn preset_image(app: &App, preset_name: Option<&str>) -> Option<String> {
+    let name = preset_name.unwrap_or("").trim();
+    if name.is_empty() {
+        return None;
+    }
+    app.config()
+        .presets
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.image.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// How a gen-2 create sources the home dataset.
+pub enum HomeSource {
+    /// Fresh `zfs create` for a new clone / migration.
+    Create,
+    /// `zfs clone` from a template seed snapshot (template carries default home content).
+    CloneFromSnapshot(String),
+    /// The dataset already exists (fork cloned it, rebase/migration created it) — use it.
+    Reuse,
+}
+
+/// The state row for a clone id, if it exists.
+fn gen2_row(app: &App, id: &str) -> Option<wire::RmngClone> {
+    app.store.get().hosts.iter().find(|h| h.id == id).cloned()
+}
+
+/// Configured ZFS homes parent (`docker.homes_parent`, default `tank/rmng/homes`).
+/// Read fresh per call — immediate-apply, never cached.
+fn homes_parent(app: &App) -> String {
+    app.config().docker.homes_parent.clone()
+}
+
+/// `zfs get origin` for a clone's dataset: the snapshot it was cloned from, if any.
+/// `None` for fresh datasets (origin `-`) and on any error. Provision-local (one `zfs`
+/// invocation, no destroy) so the wrapper module needs no read API.
+fn dataset_origin(parent: &str, clone_id: &str) -> Option<String> {
+    let ds = crate::zfs::dataset_name(parent, clone_id);
+    let out = std::process::Command::new("zfs")
+        .args(["get", "-H", "-o", "value", "origin", &ds])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if v.is_empty() || v == "-" {
+        None
+    } else {
+        Some(v)
+    }
+}
+
+/// `remove_image(tag)` when no remaining clone row (other than `except_id`) references it.
+/// Best-effort: logs, never fails the caller (a 409 means still in use — keep it).
+async fn purge_image_if_unused(app: &App, except_id: &str, tag: &str) {
+    let used = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .any(|h| h.id != except_id && h.base_tag.as_deref() == Some(tag));
+    if used {
+        return;
+    }
+    if let Err(e) = app.docker.remove_image(tag).await {
+        tracing::warn!("keeping image {tag}: {e} (non-fatal)");
+    }
+}
+
+/// Remove a half-built gen-2 clone: container + dind/ctd volumes, and the dataset when
+/// this call created it (never on [`HomeSource::Reuse`] — that dataset holds a live home).
+async fn destroy_half_built_clone(app: &App, hostname: &str, created_dataset: bool) {
+    let docker = &app.docker;
+    docker.remove_container(hostname).await.ok();
+    docker
+        .remove_volume(&crate::docker::DockerCtl::dind_volume_name(hostname))
+        .await
+        .ok();
+    docker
+        .remove_volume(&crate::docker::DockerCtl::ctd_volume_name(hostname))
+        .await
+        .ok();
+    if created_dataset {
+        if let Err(e) = crate::zfs::destroy(&homes_parent(app), hostname, false) {
+            tracing::warn!("cleanup for {hostname}: keeping dataset: {e} (non-fatal)");
+        }
+    }
+}
+
+/// Create + start a gen-2 clone: home on its own dataset, image = derived tag.
+///
+/// Steps: resolve tag (lazy hash-tag build) → `zfs create` (or clone from the template seed
+/// snapshot) → `docker create` with the dataset bind → identity/dynamic-env inject → ensure the empty
+/// `/home/rmng/clones` mountpoint → start → wait-ready (the [`clone_container_after_create`]
+/// tail, with dynamic-only env). Returns the resolved tag for the caller to record as
+/// `base_tag`. On failure the container, volumes, AND a dataset this call created are
+/// destroyed; a reused dataset is never touched.
+///
+/// `env` is the composed create-time list; only the dynamic keys reach the clone (static
+/// preset vars move to profile lines in stage 3).
+///
+/// `profile_lines` + `static_env` feed the derived-image build: the operator's template text
+/// plus the preset's non-dynamic vars, composed as `FROM` + lines + `ENV`.
+#[allow(clippy::too_many_arguments)]
+pub async fn clone_container_gen2(
+    app: &App,
+    base_tag: &str,
+    hostname: &str,
+    home: HomeSource,
+    env: &[EnvVar],
+    profile_lines: &str,
+    static_env: &[EnvVar],
+    agent_playbook: &str,
+    global_prompt: &str,
+    headless: bool,
+    mut on_progress: impl FnMut(&str, &str),
+) -> Result<String> {
+    if !is_dns_label(hostname) {
+        bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
+    }
+    let docker = &app.docker;
+    // Reuse rule: a base that is already a local derived image (`rmng-p-*`, recorded on
+    // a live clone and handed back by fork/rebase) runs as-is. Re-deriving FROM it would
+    // stack a redundant layer, and the label gate below would reject it (images derived
+    // before the `LABEL rmng.image=1` stamp carry no label).
+    let tag = if wire::config::is_derived_tag(base_tag) && docker.image_exists(base_tag).await? {
+        on_progress("reuse", &format!("reusing derived image {base_tag}"));
+        base_tag.to_string()
+    } else {
+        // Canonicalize the base to its reference (label-gated: only clone sources qualify),
+        // so id-form input still records and builds from the same base.
+        let images = docker.list_rmng_images().await?;
+        let Some(base) = resolve_reference(&images, base_tag) else {
+            bail!("base image '{base_tag}' is not a clone source (missing the `rmng.image=1` label)");
+        };
+        let tag =
+            crate::derived::resolve_tag(app, &base, profile_lines, static_env, &mut on_progress)
+                .await?;
+        if tag.is_empty() {
+            bail!("a base image tag is required for a gen-2 clone");
+        }
+        tag
+    };
+    let cfg = app.config();
+
+    on_progress("queued", &format!("queued gen-2 clone {hostname}"));
+    if !docker.image_exists(&tag).await? {
+        bail!("base image '{tag}' does not exist");
+    }
+    docker.ensure_network().await?;
+
+    on_progress("create", &format!("creating home dataset for {hostname}"));
+    let parent = cfg.docker.homes_parent.clone();
+    let created_dataset = match home {
+        HomeSource::Create => {
+            crate::zfs::create(&parent, hostname)?;
+            true
+        }
+        HomeSource::CloneFromSnapshot(ref snap) => {
+            crate::zfs::clone_dataset(&parent, snap, hostname)?;
+            true
+        }
+        HomeSource::Reuse => false,
+    };
+
+    on_progress("create", &format!("creating container {hostname}"));
+    let spec = CreateSpec {
+        name: hostname.to_string(),
+        image: tag.clone(),
+        hostname: hostname.to_string(),
+        // Clone env lives only in `/etc/environment`. Gen-2 images are built from Dockerfiles
+        // and carry no stale `Config.Env`, so nothing needs cancelling here.
+        env: Vec::new(),
+        cpus: cfg.docker.clone_cpus,
+        memory_mb: cfg.docker.clone_memory_mb,
+        sock_source: sock_source_dir(app).await,
+        dataset_dir: Some(crate::zfs::dataset_dir(hostname)),
+        homes_dir: crate::zfs::HOMES_DIR.to_string(),
+    };
+    let container = match docker.create_clone_container(&spec).await {
+        Ok(c) => c,
+        Err(e) => {
+            destroy_half_built_clone(app, hostname, created_dataset).await;
+            return Err(e);
+        }
+    };
+
+    // Dynamic keys only: static preset env moved to the profile Dockerfile lines.
+    let dyn_env = gen2_dynamic_env(env);
+    match clone_container_after_create(
+        app,
+        &container,
+        hostname,
+        &dyn_env,
+        agent_playbook,
+        global_prompt,
+        headless,
+        &mut on_progress,
+    )
+    .await
+    {
+        Ok(()) => {
+            crate::buildinfra::apply_to_clone(app, &container).await;
+            Ok(tag)
+        }
+        Err(e) => {
+            tracing::warn!("gen-2 clone {hostname} failed after create; cleaning up: {e}");
+            destroy_half_built_clone(app, hostname, created_dataset).await;
+            Err(e)
+        }
+    }
+}
+
+/// Fork a gen-2 clone: snapshot the source home, clone it for the new id, create from the
+/// source's recorded base tag. The source keeps running. Overlay drift is silently dropped
+/// (fork copies the dataset only). Returns the new clone's tag.
+#[allow(clippy::too_many_arguments)]
+pub async fn fork_clone(
+    app: &App,
+    source_id: &str,
+    new_id: &str,
+    env: &[EnvVar],
+    agent_playbook: &str,
+    global_prompt: &str,
+    headless: bool,
+    // Effective preset (payload override wins, else the source's). The fork image
+    // ALWAYS follows this preset: its static env feeds derivation from the source's
+    // recorded base, so a different preset builds a new tag (cached after the first
+    // build) while the same preset reuses the source tag with zero rebuild.
+    preset_name: Option<&str>,
+    mut on_progress: impl FnMut(&str, &str),
+) -> Result<String> {
+    if !is_dns_label(new_id) {
+        bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
+    }
+    let src = gen2_row(app, source_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown clone '{source_id}'"))?;
+    let src_preset = src.preset_name.clone();
+    let cfg = app.config();
+    let profile_lines = preset_lines(app, preset_name);
+    let static_env = preset_static_env(app, preset_name);
+    // Same preset as the source (the common case): run on the source tag as-is.
+    // Different preset: derive a new tag FROM the source tag with the new static
+    // env (build on miss, then cached). Either way the recorded tag below is the
+    // image the fork actually runs.
+    let base_tag = src.base_tag.ok_or_else(|| {
+        anyhow::anyhow!("clone '{source_id}' has no recorded base tag (not a gen-2 clone)")
+    })?;
+    let run_tag = if preset_name == src_preset.as_deref() {
+        base_tag
+    } else {
+        on_progress("derive", &format!("deriving image for preset '{}'", preset_name.unwrap_or("(none)")));
+        crate::derived::resolve_tag(app, &base_tag, &profile_lines, &static_env, &mut on_progress).await?
+    };
+
+    on_progress("snapshot", &format!("snapshotting {source_id}"));
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let snap = crate::zfs::snapshot(&homes_parent(app), source_id, &format!("fork-{new_id}-{ts}"))?;
+    on_progress("clone-home", &format!("cloning home for {new_id}"));
+    if let Err(e) = crate::zfs::clone_dataset(&homes_parent(app), &snap, new_id) {
+        let _ = crate::zfs::destroy_snapshot_if_unreferenced(&homes_parent(app), &snap);
+        return Err(e);
+    }
+    match clone_container_gen2(
+        app,
+        &run_tag,
+        new_id,
+        HomeSource::Reuse,
+        env,
+        &profile_lines,
+        &static_env,
+        agent_playbook,
+        global_prompt,
+        headless,
+        &mut on_progress,
+    )
+    .await
+    {
+        Ok(_) => Ok(run_tag),
+        Err(e) => {
+            destroy_half_built_clone(app, new_id, true).await;
+            let _ = crate::zfs::destroy_snapshot_if_unreferenced(&homes_parent(app), &snap);
+            Err(e)
+        }
+    }
+}
+
+/// Progress sink for rollback recreates (nothing to report to a failed op).
+fn noop_progress(_step: &str, _msg: &str) {}
+
+/// Rebase a gen-2 clone onto a new base tag, keeping the SAME dataset and id. The old
+/// container cannot stay (name == id), so: record old tag → stop → remove → create from
+/// the new tag → wait-ready. Healthy: purge the old tag when unused. Failed: auto-recreate
+/// from the old tag on the same dataset, then report the rebase error. Returns the new tag.
+#[allow(clippy::too_many_arguments)]
+pub async fn rebase_clone(
+    app: &App,
+    host_id: &str,
+    new_tag: &str,
+    env: &[EnvVar],
+    agent_playbook: &str,
+    global_prompt: &str,
+    headless: bool,
+    mut on_progress: impl FnMut(&str, &str),
+) -> Result<String> {
+    let row = gen2_row(app, host_id);
+    let old_tag = row
+        .as_ref()
+        .and_then(|r| r.base_tag.clone())
+        .ok_or_else(|| anyhow::anyhow!("clone '{host_id}' has no recorded base tag"))?;
+    let static_env = preset_static_env(app, row.as_ref().and_then(|r| r.preset_name.as_deref()));
+    let profile_lines = preset_lines(app, row.as_ref().and_then(|r| r.preset_name.as_deref()));
+
+    on_progress("stop", &format!("stopping {host_id} for rebase"));
+    app.docker.stop_even_if_paused(host_id).await?;
+    app.docker.remove_container(host_id).await?;
+
+    match clone_container_gen2(
+        app,
+        new_tag,
+        host_id,
+        HomeSource::Reuse,
+        env,
+        &profile_lines,
+        &static_env,
+        agent_playbook,
+        global_prompt,
+        headless,
+        &mut on_progress,
+    )
+    .await
+    {
+        Ok(tag) => {
+            purge_image_if_unused(app, host_id, &old_tag).await;
+            Ok(tag)
+        }
+        Err(e) => {
+            on_progress("rollback", &format!("rebase failed; recreating from {old_tag}"));
+            if let Err(rb) = clone_container_gen2(
+                app,
+                &old_tag,
+                host_id,
+                HomeSource::Reuse,
+                env,
+                &profile_lines,
+                &static_env,
+                agent_playbook,
+                global_prompt,
+                headless,
+                noop_progress,
+            )
+            .await
+            {
+                anyhow::bail!(
+                    "rebase to {new_tag} failed: {e:#}; rollback to {old_tag} also failed: {rb:#}"
+                );
+            }
+            anyhow::bail!("rebase to {new_tag} failed: {e:#} (rolled back to {old_tag})");
+        }
+    }
+}
+
+/// One clone's migration step (stage-3 boot loop calls this per gen-1 row, one at a time):
+/// `zfs create` → copy `/home/rmng` out of the STOPPED old container into the dataset →
+/// remove the old container (fresh dind/ctd volumes on recreate) → create the gen-2
+/// container from the base tag with fresh identity/dynamic env → stop it (migrated clones
+/// start with the fleet, not during the window). Returns the copied bytes for the report.
+///
+/// Account token re-push is NOT done here: stage 3 reads the stored selections and calls
+/// `crate::claude::push_account_to_clone` / `crate::codex::push_account_to_clone` after
+/// the fleet starts (those need running clones).
+#[allow(clippy::too_many_arguments)]
+pub async fn migrate_one(
+    app: &App,
+    host_id: &str,
+    base_tag: &str,
+    env: &[EnvVar],
+    agent_playbook: &str,
+    global_prompt: &str,
+    headless: bool,
+    mut on_progress: impl FnMut(&str, &str),
+) -> Result<MigrateReport> {
+    if !is_dns_label(host_id) {
+        bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
+    }
+    on_progress("queued", &format!("queued migration of {host_id}"));
+    match migrate_one_inner(
+        app,
+        host_id,
+        base_tag,
+        env,
+        agent_playbook,
+        global_prompt,
+        headless,
+        &mut on_progress,
+    )
+    .await
+    {
+        Ok(report) => Ok(report),
+        Err(e) => {
+            // One-shot window under a whole-LXC backup: leave no half-built dataset.
+            let _ = crate::zfs::destroy(&homes_parent(app), host_id, false);
+            Err(e)
+        }
+    }
+}
+
+/// Copied home bytes + resolved derived tag, for the per-clone migration report.
+pub struct MigrateReport {
+    pub bytes: u64,
+    pub tag: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn migrate_one_inner(
+    app: &App,
+    host_id: &str,
+    base_tag: &str,
+    env: &[EnvVar],
+    agent_playbook: &str,
+    global_prompt: &str,
+    headless: bool,
+    on_progress: &mut impl FnMut(&str, &str),
+) -> Result<MigrateReport> {
+    on_progress("create", "creating the home dataset");
+    crate::zfs::create(&homes_parent(app), host_id)?;
+
+    on_progress("copy", "copying /home/rmng out of the old container");
+    let tar = app.docker.download_home_tar(host_id, "/home/rmng").await?;
+    let bytes = tar.len() as u64;
+    extract_home_tar(&tar, &crate::zfs::dataset_dir(host_id))?;
+
+    on_progress("recreate", "removing the old container");
+    app.docker.remove_container(host_id).await?;
+    for volume in [
+        crate::docker::DockerCtl::dind_volume_name(host_id),
+        crate::docker::DockerCtl::ctd_volume_name(host_id),
+    ] {
+        if let Err(e) = app.docker.remove_volume(&volume).await {
+            tracing::warn!("migrate {host_id}: removing volume {volume}: {e} (non-fatal)");
+        }
+    }
+
+    on_progress("recreate", "creating the gen-2 container (stopped)");
+    let static_env = split_static_env(env);
+    let profile_lines = app
+        .config()
+        .docker
+        .profile_lines
+        .clone()
+        .unwrap_or_default();
+    let tag = clone_container_gen2(
+        app,
+        base_tag,
+        host_id,
+        HomeSource::Reuse,
+        env,
+        &profile_lines,
+        &static_env,
+        agent_playbook,
+        global_prompt,
+        headless,
+        &mut *on_progress,
+    )
+    .await?;
+
+    on_progress("stop", "stopping the migrated clone");
+    app.docker.stop_even_if_paused(host_id).await?;
+    on_progress("done", &format!("clone {host_id} migrated ({bytes} bytes)"));
+    Ok(MigrateReport { bytes, tag })
+}
+
+/// Extract a daemon `download_from_container` tar of `/home/rmng` into the dataset dir.
+/// The archive roots every entry under the basename (`rmng/...`), so the first component
+/// is stripped. Runs as CT root, preserving the archived owners/modes. Entries escaping
+/// the destination (`..`, absolute) are refused.
+fn extract_home_tar(tar_bytes: &[u8], dest: &str) -> Result<()> {
+    let mut archive = tar::Archive::new(tar_bytes);
+    archive.set_preserve_permissions(true);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        let mut comps = path.components();
+        comps.next(); // strip the `rmng/` top-level dir
+        let rel: std::path::PathBuf = comps.collect();
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        if rel.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        }) {
+            anyhow::bail!("refusing to extract {rel:?} outside the dataset");
+        }
+        entry.unpack(std::path::Path::new(dest).join(rel))?;
+    }
     Ok(())
 }
 
@@ -1480,6 +1787,20 @@ fn unarchive_pct(step: &str) -> Option<f64> {
     })
 }
 
+/// Progress step → percentage for a gen-2 one-shot migration. Matches the `migrate_one`
+/// step keys.
+fn migrate_pct(step: &str) -> Option<f64> {
+    Some(match step {
+        "queued" => 0.0,
+        "create" => 10.0,
+        "copy" => 30.0,
+        "recreate" => 60.0,
+        "stop" => 90.0,
+        "done" => 100.0,
+        _ => return None,
+    })
+}
+
 // --- claude-import backend ------------------------------------------------------------
 
 /// Run one [`claude-import.sh`] op (`status`|`read`|`clear`|`apply`) inside clone `container`
@@ -1499,6 +1820,17 @@ pub async fn run_clone_op(app: &App, container: &str, op: &str, extra: &[&str]) 
 /// key to the operation's coarse percentage without re-deriving it. (Monitors-apply is
 /// intentionally NOT an Operation — web.rs streams its `[ct]` lines directly — so there is
 /// no monitors table here.)
+/// Progress step → percentage for a commit-from-clone, kept so old `Commit` ops in state
+/// still render. No new commit ops can be filed: the commit path is deleted.
+fn commit_pct(step: &str) -> Option<f64> {
+    Some(match step {
+        "queued" => 0.0,
+        "prepare" => 15.0,
+        "commit" => 40.0,
+        "done" => 100.0,
+        _ => return None,
+    })
+}
 pub fn step_pct(kind: wire::OperationKind, step: &str) -> Option<f64> {
     match kind {
         wire::OperationKind::Clone => clone_pct(step),
@@ -1509,6 +1841,9 @@ pub fn step_pct(kind: wire::OperationKind, step: &str) -> Option<f64> {
         wire::OperationKind::Unarchive => unarchive_pct(step),
         // Self-update has no provision step table — `jobs::run_update` drives its pct directly.
         wire::OperationKind::Update => None,
+        wire::OperationKind::Migrate => migrate_pct(step),
+        // Prebuild drives its own pct (build streaming has no coarse table).
+        wire::OperationKind::Prebuild => None,
     }
 }
 
@@ -1587,6 +1922,58 @@ mod tests {
         assert_eq!(resolve_reference(&images, ""), None);
         // Empty image list → None.
         assert_eq!(resolve_reference(&[], "rmng/template:base"), None);
+    }
+
+    #[test]
+    fn resolve_reference_resolves_alias_tags() {
+        // list_rmng_images emits one ImageInfo per RepoTag: same id, different
+        // reference. An alias tag must resolve to itself (the alias-tag quirk).
+        const HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let img = |reference: &str| wire::ImageInfo {
+            id: format!("sha256:{HEX}"),
+            reference: reference.into(),
+            size_bytes: 0,
+            created_at: String::new(),
+            base: false,
+            created_from: None,
+            in_use_by: Vec::new(),
+        };
+        let images = vec![img("repo:canonical"), img("repo:alias")];
+        assert_eq!(
+            resolve_reference(&images, "repo:alias").as_deref(),
+            Some("repo:alias")
+        );
+        assert_eq!(
+            resolve_reference(&images, "repo:canonical").as_deref(),
+            Some("repo:canonical")
+        );
+    }
+
+    #[test]
+    fn gen2_dynamic_env_keeps_model_key() {
+        // ANTHROPIC_MODEL is seeded at create so fresh clones have a model before the
+        // first reconcile pass; static keys stay out (they bake into the image).
+        let env = |key: &str| wire::EnvVar {
+            key: key.into(),
+            value: "v".into(),
+        };
+        let got: Vec<String> = gen2_dynamic_env(
+            &[
+                env("RMNG_CONTROL_URL"),
+                env("RMNG_PROXY_KEY"),
+                env("ANTHROPIC_MODEL"),
+                env("SOME_STATIC"),
+            ],
+        )
+        .into_iter()
+        .map(|v| v.key)
+        .collect();
+        assert_eq!(got, vec!["RMNG_CONTROL_URL", "RMNG_PROXY_KEY", "ANTHROPIC_MODEL"]);
+        let stat: Vec<String> = split_static_env(&[env("ANTHROPIC_MODEL"), env("SOME_STATIC")])
+            .into_iter()
+            .map(|v| v.key)
+            .collect();
+        assert_eq!(stat, vec!["SOME_STATIC"]);
     }
 
     #[test]
@@ -1684,37 +2071,14 @@ mod tests {
     /// inherits, fixed for the life of the server. `/etc/environment` is sourced into it, so the
     /// retired keys have to be unset AFTER that source, not before.
     #[test]
-    fn headless_tmux_script_unsets_the_retired_keys_after_sourcing_etc_environment() {
+    fn headless_tmux_script_sources_etc_environment_and_starts_a_session() {
         let script = headless_tmux_default_script();
-        let source = script.find(". /etc/environment").expect("no /etc/environment source");
-        let unset = script.find("\nunset ").expect("retired keys are never unset");
-        assert!(source < unset, "the unset must follow the source:\n{script}");
-        for key in crate::clone_reconcile::RETIRED_ENV_KEYS {
-            assert!(script[unset..].contains(key), "{key} not unset:\n{script}");
-        }
+        assert!(script.contains(". /etc/environment"), "{script}");
         // The session is still created, and the window-size option still applied.
         assert!(script.contains("tmux new-session -d -s main -c /home/rmng"), "{script}");
         assert!(script.contains("window-size latest"), "{script}");
-        // RMNG_PROXY_KEY and the control URL must survive, or `rmng` breaks in every pane.
-        assert!(!script.contains("RMNG_PROXY_KEY"), "identity key unset:\n{script}");
-    }
-
-    /// The image must carry neither half of the source clone's identity, and the clone must get
-    /// its bearer back afterwards. Every image committed before this, `pega-template11` and
-    /// `pega-template12` included, holds `pega-template`'s key in `/etc/environment`.
-    #[test]
-    fn a_commit_takes_the_identity_out_and_puts_it_back() {
-        assert!(
-            COMMIT_PREPARE_SCRIPT.contains("sed -i '/^RMNG_PROXY_KEY=/d' /etc/environment"),
-            "the identity bearer is baked into the image:\n{COMMIT_PREPARE_SCRIPT}"
-        );
-        assert!(
-            COMMIT_PREPARE_SCRIPT.contains("truncate -s0 /etc/machine-id"),
-            "the machine-id is baked into the image:\n{COMMIT_PREPARE_SCRIPT}"
-        );
-        let restore = commit_restore_script("deadbeef");
-        assert!(restore.contains("grep -q '^RMNG_PROXY_KEY=' /etc/environment ||"), "{restore}");
-        assert!(restore.contains("'deadbeef'"), "{restore}");
+        // Gen-2 images carry no stale Config.Env, so no key cancellations remain.
+        assert!(!script.contains("unset "), "stale cancellation:\n{script}");
     }
 
     #[test]

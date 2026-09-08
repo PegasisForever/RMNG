@@ -135,6 +135,29 @@ export function SettingsPresetList({
             + Add variable
           </button>
           <div className="mt-2">
+            <Field label="Base image for this preset's clones (blank = template default)">
+              <input
+                value={p.image}
+                onChange={(e) => replace(i, { image: e.target.value })}
+                spellCheck={false}
+                placeholder="pegasis0/rmng-template:latest"
+                className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+              />
+            </Field>
+          </div>
+          <div className="mt-2">
+            <Field label="Extra Dockerfile lines for this preset (appended after FROM; blank = global default)">
+              <textarea
+                value={p.profileLines}
+                onChange={(e) => replace(i, { profileLines: e.target.value })}
+                spellCheck={false}
+                rows={4}
+                placeholder={"RUN apt-get update && apt-get install -y foo"}
+                className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+              />
+            </Field>
+          </div>
+          <div className="mt-2">
             <Field label="Extra global prompt for this preset (appended to the global agent prompt, for every agent)">
               <textarea
                 value={p.globalPrompt}

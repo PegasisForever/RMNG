@@ -42,7 +42,6 @@ const meta = {
     selected: false,
     onSelect: fn(),
     onDelete: fn(),
-    onCommit: fn(),
     onChangeAccount: fn(),
     onPortForward: fn(),
     onArchive: fn(),

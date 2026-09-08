@@ -124,4 +124,16 @@ parent: string | null,
  * viewer runs the listeners and reports status out-of-band (volatile `forwards`
  * SSE event, never stored here).
  */
-forwards: Array<PortForward>, };
+forwards: Array<PortForward>, 
+/**
+ * Gen-2 home dataset name, e.g. `tank/rmng/homes/<id>`. `None` on pre-gen-2 rows
+ * (serde-defaulted so old `state.json` loads); the dataset bind mount on the
+ * container marks a gen-2 clone, no separate gen label is kept.
+ */
+dataset: string | null, 
+/**
+ * Derived image tag this clone was created from (`rmng-p-<hash>`). Recorded so
+ * fork and rebase resolve the same base, and delete can purge the tag when no
+ * remaining clone references it.
+ */
+baseTag: string | null, };

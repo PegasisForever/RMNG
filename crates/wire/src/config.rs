@@ -155,6 +155,18 @@ pub struct Preset {
     /// Empty ⇒ no append. Non-secret. (Layer **c**: global prompt, all agents, this preset only.)
     #[serde(default)]
     pub global_prompt: String,
+    /// Base image this preset's clones build from (a clone-source reference, e.g.
+    /// `pegasis0/rmng-template:latest`). Empty ⇒ fall back to the create/fork caller's
+    /// image (template modal default, or the fork source's recorded base). Non-secret.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Extra Dockerfile lines appended (after the `FROM <base>`) when building this
+    /// preset's derived image (`rmng-p-<hash>`). Edited in Settings by anyone (single
+    /// user, trusted network, no auth). `None`/empty falls back to
+    /// `docker.profile_lines`. No secrets here — Linear keys and account picks stay
+    /// on the preset's other fields.
+    #[serde(default)]
+    pub profile_lines: Option<String>,
 }
 
 impl Preset {
@@ -168,6 +180,8 @@ impl Preset {
             vars: self.vars.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
+            image: self.image.clone(),
+            profile_lines: self.profile_lines.clone(),
         }
     }
 }
@@ -195,6 +209,8 @@ pub struct PresetRedacted {
     pub vars: Vec<EnvVar>,
     pub agent_playbook: String,
     pub global_prompt: String,
+    pub image: Option<String>,
+    pub profile_lines: Option<String>,
 }
 
 /// A named pool of clone accounts (by email). A clone bound to a group sticks to its
@@ -272,6 +288,23 @@ pub struct DockerConfig {
     /// cannot grow unbounded. A change triggers a `rmng-buildkit` recreate at next boot.
     #[serde(default = "default_buildkit_cache_gb")]
     pub buildkit_cache_gb: u32,
+    /// Extra Dockerfile lines appended (after the `FROM <base>`) when building a gen-2
+    /// derived image (`rmng-p-<hash>`). Edited in Settings by anyone (single user,
+    /// trusted network, no auth); `None`/empty means the base image builds unchanged.
+    /// No secrets here — Linear keys and account picks stay on presets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_lines: Option<String>,
+    /// Template home seed snapshot (`<dataset>@<snap>`). A create clones the new home
+    /// from it by default, so template clones start with content; empty means a fresh
+    /// home. Seed refresh is manual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_snapshot: Option<String>,
+    /// Parent ZFS dataset for all gen-2 clone homes (`<this>/<clone-id>`), mounted
+    /// into the outer CT once at `/srv/rmng-homes`. Per-machine: the pool name differs
+    /// per host (e.g. `tank/rmng/homes` vs `rpool/rmng/homes`). Immediate-apply (read
+    /// fresh per zfs call); changing it does not move existing datasets.
+    #[serde(default = "default_homes_parent")]
+    pub homes_parent: String,
 }
 
 fn default_docker_socket() -> String {
@@ -307,6 +340,9 @@ fn default_buildkit_image() -> String {
 fn default_buildkit_cache_gb() -> u32 {
     40
 }
+fn default_homes_parent() -> String {
+    "tank/rmng/homes".into()
+}
 
 impl Default for DockerConfig {
     fn default() -> Self {
@@ -322,8 +358,55 @@ impl Default for DockerConfig {
             registry_image: default_registry_image(),
             buildkit_image: default_buildkit_image(),
             buildkit_cache_gb: default_buildkit_cache_gb(),
+            profile_lines: None,
+            seed_snapshot: None,
+            homes_parent: default_homes_parent(),
         }
     }
+}
+
+/// FNV-1a 64 over bytes (stable across restarts, no new deps for `wire`).
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Derived-image tag for gen-2 clones: `rmng-p-<16 hex>` over the profile lines, the
+/// static env folded into the build as `ENV`, and the base image digest. Same inputs
+/// twice mean one build; a base release changes the digest, so the next create
+/// auto-rebuilds. Always latest — old tags purge when unused, never picked.
+pub fn derived_tag(profile_lines: &str, static_env: &[(String, String)], base_digest: &str) -> String {
+    // Canonicalize so trivial formatting edits don't rebuild: trim trailing blank lines,
+    // sort env by key.
+    let mut env: Vec<(&str, &str)> = static_env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    env.sort_unstable();
+    let mut input = String::new();
+    input.push_str(profile_lines.trim_end());
+    input.push('\0');
+    for (k, v) in &env {
+        input.push_str(k);
+        input.push('=');
+        input.push_str(v);
+        input.push('\0');
+    }
+    input.push_str(base_digest.trim());
+    format!("rmng-p-{:016x}", fnv1a64(input.as_bytes()))
+}
+
+/// True when `s` is a derived-image tag (`rmng-p-<16 hex>`, optional `:tag` suffix).
+/// Fork/rebase hand the source clone's recorded derived tag back as a base; the reuse
+/// rule in `clone_container_gen2` uses this to run it directly instead of re-deriving.
+pub fn is_derived_tag(s: &str) -> bool {
+    let bare = s.split_once(':').map(|(r, _)| r).unwrap_or(s);
+    let hex = bare.strip_prefix("rmng-p-").unwrap_or("");
+    hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -744,6 +827,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn derived_tag_shape_matches_reuse_predicate() {
+        let tag = derived_tag("", &[], "repo@sha256:abc");
+        assert!(is_derived_tag(&tag), "{tag}");
+        assert!(is_derived_tag(&format!("{tag}:latest")));
+        assert!(!is_derived_tag("pegasis0/rmng-template:latest"));
+        assert!(!is_derived_tag("rmng-p-xyz"));
+        assert!(!is_derived_tag(""));
+    }
+
+    #[test]
     fn defaults_are_sane() {
         let c = AppConfig::default();
         assert_eq!(c.listen.web, 9000);
@@ -759,6 +852,7 @@ mod tests {
         assert_eq!(c.docker.clone_cpus, 16);
         assert_eq!(c.docker.clone_memory_mb, 32768);
         assert_eq!(c.docker.template_reference, "pegasis0/rmng-template:latest");
+        assert_eq!(c.docker.homes_parent, "tank/rmng/homes");
         // Missing keys fall back to the same defaults (older config.json stays valid).
         let d: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(d.static_dir, "");
@@ -916,6 +1010,8 @@ mod tests {
                     }],
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
+                    image: None,
+                    profile_lines: None,
                 },
                 Preset {
                     name: "bare".into(),

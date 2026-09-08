@@ -16,11 +16,11 @@ mod clonekey;
 mod clone_reconcile;
 mod codex;
 mod config;
+mod derived;
 mod docker;
 mod files;
 mod forward;
 mod homes;
-mod seed;
 mod jobs;
 mod ledger;
 mod mediaplane;
@@ -39,6 +39,7 @@ mod termplane;
 mod token_unmigrate;
 mod update;
 mod web;
+mod zfs;
 
 use std::sync::Arc;
 
@@ -74,6 +75,11 @@ async fn main() -> Result<()> {
     let store = Arc::new(state::StateStore::load(config::state_path(&cfg))?);
     state::spawn_watcher(store.clone());
 
+    // Self-heal the ZFS device node (see zfs::ensure_dev_zfs): /dev is tmpfs, so the
+    // node vanishes on CT reboot, and the host node must not be bind-mounted in.
+    // Non-fatal by design.
+    zfs::ensure_dev_zfs();
+
     // Snapshot each clone's retired `group` binding BEFORE anything mutates the state store.
     // `RmngClone` has no such field any more, so the first `store.mutate` below persists
     // `state.json` without it and the binding is unrecoverable — see `read_raw_clone_pools`.
@@ -91,7 +97,7 @@ async fn main() -> Result<()> {
     // Non-fatal: a down daemon / failed check must NOT stop the server booting — the wizard
     // is exactly where the operator fixes those. `ensure_network` only runs here once setup
     // is latched complete (the network is lazy).
-    // Bounded: the shared bollard client's request timeout is 1 h (a base-image commit
+    // Bounded: the shared bollard client's request timeout is 1 h (a derived-image build
     // legitimately runs that long), so a wedged-but-connectable daemon would otherwise
     // block THIS await — and with it the whole server boot — for up to an hour.
     // Runs BEFORE `reconcile_pending`: self_setup is what populates the cached env report with
@@ -247,6 +253,11 @@ async fn main() -> Result<()> {
     boot::run_late_boot(
         mediaplane::init,
         move || {
+            // Gen-2 one-shot migration FIRST: any gen-1 row (managed, no dataset) is
+            // migrated one clone at a time, with one Migrate op per clone in the jobs
+            // UI. The fleet stops for the window and (non-archived) restarts after.
+            // No gen-1 rows ⇒ no-op. Runs under the whole-LXC backup.
+            tokio::spawn(jobs::migrate_all_on_boot(app_for_bg.clone()));
             // Background loops: the per-clone agent-state monitor poller, the clone-home reconciler
             // (the Docker-port successor to the Proxmox-era sshfs mount loop — it symlinks
             // data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so every clone's home is browsable

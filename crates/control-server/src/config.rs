@@ -76,6 +76,8 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                     vars,
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
+                    image: None,
+                    profile_lines: None,
                 });
             }
         }
@@ -925,6 +927,16 @@ fn merge_presets(base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire:
             vars,
             agent_playbook,
             global_prompt,
+            image: r
+                .get("image")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            profile_lines: r
+                .get("profileLines")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         });
     }
     out

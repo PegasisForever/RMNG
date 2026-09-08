@@ -18,7 +18,7 @@ import { useSearchParams } from "react-router";
 import { AppShellV2, type SideFocus } from "~/components/AppShellV2";
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
 import { CloneModalContainer } from "~/components/CloneModalContainer";
-import { CommitImageModal } from "~/components/CommitImageModal";
+import { TemplateModalContainer } from "~/components/TemplateModalContainer";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
@@ -52,12 +52,12 @@ import {
   activate,
   activateLayout,
   archiveClone,
-  duplicateClone,
-  commitImage,
+  forkClone,
   deleteClaudeAccount,
   deleteCodexAccount,
   deleteClone,
   deleteImage,
+  duplicateClone,
   getConfig,
   getUpdateStatus,
   listImages,
@@ -163,14 +163,13 @@ export function DashboardContainer({
 
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // The shared cosmetic account order and the live clock. Both are session reads, so they
   // are resolved here and handed down: the rail's usage bars and the settings account lists
   // then draw from props alone, and both stay in step because they read one subscription.
   const { acctOrder } = useAccountOrder();
   const now = useNow();
-  const [commitClone, setCommitClone] = useState<Clone | null>(null);
-  const [committing, setCommitting] = useState(false);
   const [changeClone, setChangeClone] = useState<Clone | null>(null);
   const [changing, setChanging] = useState(false);
   // The group an "add account" OAuth login is in flight for (null = modal closed).
@@ -580,14 +579,6 @@ export function DashboardContainer({
       });
   };
 
-  // The selected clone, when it can actually parent a sub clone: managed, running, and
-  // top-level (sub clones are one level deep, and the server rejects a sub clone as a parent).
-  // An archived parent is refused too: provisioning a sub clone execs into the parent.
-  const subCloneParent =
-    selectedClone?.managed && !selectedClone.parent && !selectedClone.archived
-      ? selectedClone
-      : null;
-
   // Clones per column, for the settings editor's counts (unfiled ones ride the first).
   const columnCounts = Object.fromEntries(
     resolveColumns(columns, state.hosts).map((c) => [c.id, c.cloneIds.length]),
@@ -753,6 +744,10 @@ export function DashboardContainer({
           activeLayout: state.activeLayout ?? "",
           onActivateLayout: (name) => run(activateLayout(name)),
           onOpenSettings: () => setSettingsOpen(true),
+          onNewTemplateClone: () => {
+            setNewCloneColumn(null);
+            setTemplateOpen(true);
+          },
           onImportAccount: () => openImport(null),
           onReplaceAccount: (account) => openImport(account),
           onRefresh: () => {
@@ -795,7 +790,6 @@ export function DashboardContainer({
               : `Remove ${clone.id}? This unregisters the clone.`;
             if (confirm(msg)) run(deleteClone(clone.id));
           },
-          onCommitClone: (clone) => setCommitClone(clone),
           onChangeAccountClone: (clone) => setChangeClone(clone),
           onPortForwardClone: (clone) => {
             setForwardError(null);
@@ -877,10 +871,9 @@ export function DashboardContainer({
 
       {cloneOpen ? (
         <CloneModalContainer
-          images={images}
-          imagesLoading={imagesLoading}
+          clones={state.hosts}
+          clonesLoading={false}
           operations={state.operations}
-          parentCandidate={subCloneParent}
           accounts={accounts}
           initialTicket={ticketPrefill}
           onClose={() => {
@@ -900,13 +893,44 @@ export function DashboardContainer({
           // Operation back — errors surface inside the dialog, not in the page banner.
           // The op's target is the new clone's id, which is how it reaches the column
           // whose button opened this.
-          onClone={(image, payload) =>
-            duplicateClone(image, payload).then((op) => {
+          onFork={(source, headless, payload) =>
+            forkClone(source, headless, payload).then((op) => {
               if (newCloneColumn) {
                 setPendingColumn({ columnId: newCloneColumn, target: op.target });
               }
               // The op's target is the new clone's id; `onClose` selects it once the
               // dialog settles, so making a clone leaves the operator looking at it.
+              setNewClone(op.target);
+              return op;
+            })
+          }
+        />
+      ) : null}
+
+      {templateOpen ? (
+        <TemplateModalContainer
+          images={images}
+          operations={state.operations}
+          onClose={() => {
+            setTemplateOpen(false);
+            setNewCloneColumn(null);
+            setTicketPrefill("");
+            // Land on the clone that was just made. The dialog only closes once its
+            // operation has settled, so by the time this runs the clone either exists or
+            // the create failed — hence the check, so a failed create leaves the current
+            // selection alone rather than pointing at a clone that never appeared.
+            const made = newClone ? clonesById.get(newClone) : null;
+            if (made) selectClone(made);
+            setNewClone(null);
+          }}
+          // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
+          // progress, and closes when the op settles. So this just starts it and hands the
+          // Operation back — errors surface inside the dialog, not in the page banner.
+          onClone={(image, payload) =>
+            duplicateClone(image, payload).then((op) => {
+              if (newCloneColumn) {
+                setPendingColumn({ columnId: newCloneColumn, target: op.target });
+              }
               setNewClone(op.target);
               return op;
             })
@@ -962,23 +986,6 @@ export function DashboardContainer({
         />
       ) : null}
 
-      {commitClone ? (
-        <CommitImageModal
-          cloneId={commitClone.id}
-          busy={committing}
-          onClose={() => setCommitClone(null)}
-          onCommit={(name) => {
-            setCommitting(true);
-            commitImage(commitClone.id, name)
-              .then(() => setError(null))
-              .catch((e: Error) => setError(e.message))
-              .finally(() => {
-                setCommitting(false);
-                setCommitClone(null);
-              });
-          }}
-        />
-      ) : null}
 
       {importOpen ? (
         <ImportAccountModalContainer

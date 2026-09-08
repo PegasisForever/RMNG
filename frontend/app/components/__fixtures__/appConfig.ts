@@ -44,6 +44,9 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
       registryImage: "registry:2.8.3",
       buildkitImage: "moby/buildkit:v0.17.2",
       buildkitCacheGb: 40,
+      profileLines: null,
+      seedSnapshot: null,
+      homesParent: "tank/rmng/homes",
     },
     claude: {
       pollSecs: BigInt(600),

@@ -119,7 +119,7 @@ RUN apt-get update \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
       gstreamer1.0-gl \
       libva2 libva-drm2 va-driver-all libdrm2 \
-      ca-certificates samba openssh-server rclone \
+      ca-certificates samba openssh-server rclone zfsutils-linux \
  && rm -rf /var/lib/apt/lists/*
 
 # Local `rmng` account at uid/gid 1000 for the SMB share. `force user = rmng` in smb.conf

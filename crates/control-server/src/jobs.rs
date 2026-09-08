@@ -15,8 +15,9 @@ use wire::{RmngClone, Operation, OperationKind, OperationStatus};
 
 use crate::app::App;
 use crate::provision::{
-    self, PullProgress, clone_container, commit_clone_image, control_env_vars, delete_clone,
-    is_dns_label, pull_template,
+    self, HomeSource, PullProgress, clone_container_gen2, clone_key_env_vars,
+    compose_clone_env, control_env_vars, delete_clone, fork_clone,
+    is_dns_label, migrate_one, preset_env_vars, preset_static_env, pull_template, rebase_clone,
 };
 
 const LOG_LIMIT: usize = 200;
@@ -33,7 +34,8 @@ impl std::fmt::Display for JobError {
 impl std::error::Error for JobError {}
 
 /// Linear ticket metadata stamped onto a cloned `RmngClone`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinearMeta {
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`).
     pub workspace: Option<String>,
@@ -47,8 +49,8 @@ pub struct LinearMeta {
 /// Everything the API hands to `start_clone`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CloneSpec {
-    pub seed: Option<crate::seed::SeedSpec>,
-    /// The clone-source image reference (e.g. `pegasis0/rmng-template:latest`) or id to clone from.
+    /// The base image tag: create resolves it to a derived hash-tag (profile lines +
+    /// preset static env + base digest), building on miss.
     pub source_image: String,
     pub new_hostname: String,
     pub linear: Option<LinearMeta>,
@@ -110,6 +112,9 @@ fn make_op(kind: OperationKind, target: &str, source: Option<&str>) -> Operation
         OperationKind::Archive => format!("queued archive of {target}"),
         OperationKind::Unarchive => format!("queued unarchive of {target}"),
         OperationKind::Update => "queued control-server update".to_string(),
+        // Stage 2 owns the migrate flow; the label keeps filed ops readable meanwhile.
+        OperationKind::Migrate => format!("queued migration of {target}"),
+        OperationKind::Prebuild => format!("queued derived-image build → {target}"),
     };
     Operation {
         id: new_op_id(),
@@ -377,15 +382,26 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         crate::provision::clone_key_env_vars(&app, &spec.new_hostname),
         &spec.env,
     );
-    // `image_ref` is the CANONICAL reference of the image actually used (the caller may have
-    // passed an id form — MCP/raw API); `RmngClone.source` must record the reference so the
-    // commit flow can stamp lineage. The backing container's name is the clone id — that's
-    // how every later call (dials, redeploy, credential ops, delete) addresses it.
-    let image_ref = match clone_container(
+    // Gen-2 create: image = derived hash-tag built from the base tag + profile lines +
+    // preset static env (lazy build on miss); home = fresh dataset, or a clone of the
+    // template seed snapshot when the template carries default home content. Returns the
+    // resolved tag, recorded below as the clone's `base_tag`. The backing container's
+    // name is the clone id — that's how every later call addresses it.
+    let cfg = app.config();
+    let profile_lines = crate::provision::preset_lines(&app, spec.preset_name.as_deref());
+    let static_env = preset_static_env(&app, spec.preset_name.as_deref());
+    let home = match cfg.docker.seed_snapshot.clone().unwrap_or_default() {
+        s if !s.trim().is_empty() => HomeSource::CloneFromSnapshot(s),
+        _ => HomeSource::Create,
+    };
+    let image_ref = match clone_container_gen2(
         &app,
         &spec.source_image,
         &spec.new_hostname,
+        home,
         &env,
+        &profile_lines,
+        &static_env,
         &spec.agent_playbook,
         &spec.global_prompt,
         spec.headless,
@@ -416,21 +432,6 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // (`progress` at the top of this fn was moved into `clone_container`; make a fresh one for
     // the remaining `accounts` step.)
     let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
-
-    if let Some(seed) = &spec.seed {
-        progress("seed", "copying directories from the source clone");
-        let started = std::time::Instant::now();
-        if let Err(error) = crate::seed::copy(&app, seed, &spec.new_hostname).await {
-            return fail_op(&app, &op_id, format!("seed failed: {error:#}"));
-        }
-        progress(
-            "seed",
-            &format!(
-                "copied seed directories in {:.2} seconds",
-                started.elapsed().as_secs_f64()
-            ),
-        );
-    }
 
     progress("accounts", "assigning agent accounts");
 
@@ -584,9 +585,6 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // The home symlink is the one with reach: SMB browsing, the file API, token accounting, the
     // transcript ledger and activity detection all read a clone through it.
     progress("settle", "attaching the shared folder, home link and SSH access");
-    // Needs the clone's user manager, which is why it is here and not with the other
-    // container-local steps in `inject`. See [`crate::provision::seed_wrapper_env`].
-    crate::provision::seed_wrapper_env(&app, &spec.new_hostname).await;
     crate::shared::ensure_now(&app, &spec.new_hostname).await;
     crate::homes::ensure_now(&app, &spec.new_hostname).await;
     // Before the store write below, so the bastion's forward allowlist and the clone's own
@@ -610,6 +608,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             password: "rmng".into(),
             managed: true,
             source: Some(image_ref.clone()),
+            dataset: Some(spec.new_hostname.clone()),
+            base_tag: Some(image_ref.clone()),
             claude_selection: claude_selection.clone(),
             claude_account_email: claude_account_email.clone(),
             claude_group: claude_group.clone(),
@@ -844,84 +844,6 @@ async fn run_update(app: App, op_id: String, reference: String) {
     });
 }
 
-/// Validate + register a commit-from-clone op, then drive it in the background. Guards:
-/// the clone is a managed clone, the target tag is free (no existing image AND no in-flight
-/// commit racing for it), and the clone has no operation already in flight.
-pub fn start_commit(app: &App, host_id: &str, name: &str) -> Result<Operation, JobError> {
-    if !is_dns_label(name) {
-        return Err(JobError(
-            "image name must be a DNS label (lowercase letters, digits, hyphens)".into(),
-        ));
-    }
-    let st = app.store.get();
-    let host = st
-        .hosts
-        .iter()
-        .find(|h| h.id == host_id)
-        .cloned()
-        .ok_or_else(|| JobError(format!("unknown clone '{host_id}'")))?;
-    if !host.managed {
-        return Err(JobError(format!(
-            "'{host_id}' is not a managed clone — only clones can be committed"
-        )));
-    }
-    let reference = format!("{name}:latest");
-    // Reject a tag already targeted by another running commit/pull (a race the pure
-    // `image_exists` check in provision can't see yet). The existing-image check happens in
-    // provision (needs the daemon); here we only guard the in-flight duplicate.
-    if st.operations.iter().any(|o| {
-        o.status == OperationStatus::Running
-            && matches!(o.kind, OperationKind::Commit | OperationKind::Pull)
-            && o.target == name
-    }) {
-        return Err(JobError(format!(
-            "an image named '{name}' is already being built"
-        )));
-    }
-    if st
-        .operations
-        .iter()
-        .any(|o| o.status == OperationStatus::Running && o.target == host_id)
-    {
-        return Err(JobError(format!(
-            "'{host_id}' already has an operation in flight"
-        )));
-    }
-
-    // Target = the image name (what's being produced); source = the clone it's committed from.
-    let op = make_op(OperationKind::Commit, name, Some(host_id));
-    let (ret, op_id) = (op.clone(), op.id.clone());
-    app.store.mutate(|s| s.operations.push(op));
-
-    let app2 = app.clone();
-    let host_id = host_id.to_string();
-    let (name, source) = (name.to_string(), host.source.clone().unwrap_or_default());
-    tokio::spawn(async move { run_commit(app2, op_id, host_id, name, source, reference).await });
-    Ok(ret)
-}
-
-async fn run_commit(
-    app: App,
-    op_id: String,
-    host_id: String,
-    name: String,
-    source: String,
-    reference: String,
-) {
-    let progress = op_progress(&app, &op_id, OperationKind::Commit);
-    if let Err(e) = commit_clone_image(&app, &host_id, &name, &source, progress).await {
-        return fail_op(&app, &op_id, e.to_string());
-    }
-    patch_op(&app, &op_id, |op| {
-        op.status = OperationStatus::Done;
-        op.step = "done".into();
-        op.pct = 100.0;
-        op.message = format!("image {reference} ready");
-        op.finished_at = Some(now_ms());
-    });
-    schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
-}
-
 /// Validate + register a delete op, then drive it in the background. A managed clone is
 /// torn down through `provision::delete_clone` (container name == clone id); an unmanaged
 /// row (a legacy/plain clone) is simply removed from state.
@@ -1012,6 +934,703 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
     crate::chat::delete_chat(&dd, &host_id);
     // Anything the operator queued for a clone that no longer exists can never be delivered.
     crate::chat::delete_schedules(&dd, &host_id);
+}
+
+/// Everything a gen-2 fork/rebase/migrate needs from the source row's preset: the clone's
+/// full session env (control URL + per-clone identity key + preset vars; the gen-2 create
+/// path filters it to dynamic keys for inject and static keys for the image build).
+async fn gen2_create_env(app: &App, preset_name: Option<&str>, new_id: &str) -> Vec<wire::EnvVar> {
+    let vars: Vec<wire::EnvVar> = app
+        .config()
+        .presets
+        .iter()
+        .find(|p| Some(p.name.as_str()) == preset_name)
+        .map(preset_env_vars)
+        .unwrap_or_default();
+    compose_clone_env(
+        control_env_vars(app).await,
+        clone_key_env_vars(app, new_id),
+        &vars,
+    )
+}
+
+fn gen2_playbook_prompt(app: &App, preset_name: Option<&str>) -> (String, String) {
+    let preset = app
+        .config()
+        .presets
+        .into_iter()
+        .find(|p| Some(p.name.as_str()) == preset_name);
+    let cfg = app.config();
+    (
+        crate::web::compose_playbook(&cfg, preset.as_ref()),
+        crate::web::compose_global_prompt(&cfg, preset.as_ref()),
+    )
+}
+
+/// Everything the API hands to `start_fork`. Every payload field is optional:
+/// `None` inherits the source clone's binding (preset, ticket context, accounts).
+/// Mirrors the matching `CloneSpec` fields without touching the create path.
+#[derive(Debug, Clone, Default)]
+pub struct ForkSpec {
+    pub source_id: String,
+    pub new_hostname: String,
+    pub headless: bool,
+    pub preset_name: Option<String>,
+    pub linear: Option<LinearMeta>,
+    pub claude_account: Option<String>,
+    pub codex_account: Option<String>,
+    pub first_message: Option<String>,
+    pub agent_instructions: Option<String>,
+    pub claude_instructions: Option<String>,
+}
+
+/// Fork a gen-2 clone: snapshot + clone the source home, create from its recorded base
+/// tag. The fork inherits the source's preset, accounts, and ticket context; guard: no
+/// Running op on either end, and the new hostname is valid + unused.
+pub fn start_fork(app: &App, spec: ForkSpec) -> Result<Operation, JobError> {
+    let st = app.store.get();
+    let source_id = spec.source_id.as_str();
+    let new_id = spec.new_hostname.as_str();
+    let src = st.hosts.iter().find(|h| h.id == source_id).cloned();
+    let Some(src) = src else {
+        return Err(JobError(format!("unknown clone '{source_id}'")));
+    };
+    if !src.managed {
+        return Err(JobError(format!("'{source_id}' is not a managed clone")));
+    }
+    if src.base_tag.is_none() {
+        return Err(JobError(format!("'{source_id}' is not a gen-2 clone (no base tag)")));
+    }
+    if !is_dns_label(new_id) {
+        return Err(JobError(
+            "new hostname must be a DNS label (lowercase letters, digits, hyphens)".into(),
+        ));
+    }
+    if st.hosts.iter().any(|h| h.id == new_id) {
+        return Err(JobError(format!("a clone named '{new_id}' already exists")));
+    }
+    if st.operations.iter().any(|o| {
+        o.status == OperationStatus::Running && (o.target == new_id || o.target == source_id)
+    }) {
+        return Err(JobError(format!(
+            "'{source_id}' or '{new_id}' already has an operation in flight"
+        )));
+    }
+    let op = make_op(OperationKind::Clone, new_id, Some(source_id));
+    let op_for_return = op.clone();
+    let op_id = op.id.clone();
+    app.store.mutate(|s| s.operations.push(op));
+    let app2 = app.clone();
+    tokio::spawn(async move { run_fork(app2, op_id, spec).await });
+    Ok(op_for_return)
+}
+
+async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
+    let source_id = spec.source_id.clone();
+    let new_id = spec.new_hostname.clone();
+    let headless = spec.headless;
+    let progress = op_progress(&app, &op_id, OperationKind::Clone);
+    let src = match app.store.get().hosts.into_iter().find(|h| h.id == source_id) {
+        Some(h) => h,
+        None => return fail_op(&app, &op_id, format!("unknown clone '{source_id}'")),
+    };
+    // Payload wins, source fills the gaps: an explicit preset re-derives env/playbook,
+    // otherwise the source's preset drives the fork (unchanged legacy behavior).
+    let preset_name = spec.preset_name.clone().or(src.preset_name.clone());
+    let env = gen2_create_env(&app, preset_name.as_deref(), &new_id).await;
+    let (playbook, prompt) = gen2_playbook_prompt(&app, preset_name.as_deref());
+    let base_tag = match fork_clone(
+        &app,
+        &source_id,
+        &new_id,
+        &env,
+        &playbook,
+        &prompt,
+        headless,
+        preset_name.as_deref(),
+        progress,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
+    };
+
+    let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
+    progress("accounts", "assigning agent accounts");
+    // Explicit payload selections are resolved exactly like the create path (group /
+    // account / auto-pending / none, token pushed or credentials cleared). Omitted
+    // fields inherit the source's bindings with the tokens pushed fresh (short-lived —
+    // never copied from the source's files). Best-effort per provider: logged, not fatal.
+    let mut claude_selection = src.claude_selection.clone();
+    let mut claude_account_email = src.claude_account_email.clone();
+    let mut claude_group = src.claude_group.clone();
+    if spec.claude_account.is_some() {
+        let selection = crate::claude::normalize_selection(spec.claude_account.as_deref());
+        if let Some(assignment) =
+            crate::claude::resolve_assignment(&app, spec.claude_account.as_deref(), None)
+        {
+            let (group, account, pending_auto) = match assignment {
+                crate::claude::Assignment::Group { name, initial } => {
+                    (Some(name), Some(initial), false)
+                }
+                crate::claude::Assignment::Account(a) => (None, Some(a), false),
+                crate::claude::Assignment::AutoPending => (None, None, true),
+                crate::claude::Assignment::None => (None, None, false),
+            };
+            claude_selection = Some(selection);
+            claude_account_email = account.clone();
+            claude_group = group.clone();
+            match account {
+                None if pending_auto => patch_op(&app, &op_id, |op| {
+                    op.log.push("account: auto (pending imported account)".into())
+                }),
+                None => match crate::claude::clear_clone_token(&app, &new_id).await {
+                    Ok(()) => {
+                        app.claude.forget_pushed(&new_id);
+                        patch_op(&app, &op_id, |op| {
+                            op.log.push("account: none (credentials cleared)".into())
+                        })
+                    }
+                    Err(e) => {
+                        tracing::warn!("fork {new_id}: clear_clone_token failed: {e}");
+                        patch_op(&app, &op_id, |op| {
+                            op.log.push(format!(
+                                "account: none — failed to clear credentials: {e}"
+                            ))
+                        });
+                    }
+                },
+                Some(email) => {
+                    match crate::claude::push_account_to_clone(&app, &new_id, &email).await
+                    {
+                        Ok(()) => patch_op(&app, &op_id, |op| {
+                            op.log.push(format!("account: assigned {email}"))
+                        }),
+                        Err(e) => {
+                            tracing::warn!("fork {new_id}: Claude assign failed: {e}");
+                            patch_op(&app, &op_id, |op| {
+                                op.log.push(format!("account: failed to assign {email}: {e}"))
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // resolve_assignment returning None keeps the inherited locals above.
+    } else if let Some(email) = src.claude_account_email.clone() {
+        match crate::claude::push_account_to_clone(&app, &new_id, &email).await {
+            Ok(()) => patch_op(&app, &op_id, |op| {
+                op.log.push(format!("account: inherited {email} from {source_id}"))
+            }),
+            Err(e) => {
+                tracing::warn!("fork {new_id}: inheriting Claude account failed: {e}");
+                patch_op(&app, &op_id, |op| {
+                    op.log.push(format!("account: failed to inherit {email}: {e}"))
+                });
+            }
+        }
+    }
+    let mut codex_selection = src.codex_selection.clone();
+    let mut codex_account_email = src.codex_account_email.clone();
+    let mut codex_group = src.codex_group.clone();
+    if spec.codex_account.is_some() {
+        let selection = crate::codex::normalize_selection(spec.codex_account.as_deref());
+        if let Some(assignment) =
+            crate::codex::resolve_assignment(&app, spec.codex_account.as_deref(), None)
+        {
+            let (group, account, pending_auto) = match assignment {
+                crate::codex::Assignment::Group { name, initial } => {
+                    (Some(name), Some(initial), false)
+                }
+                crate::codex::Assignment::Account(a) => (None, Some(a), false),
+                crate::codex::Assignment::AutoPending => (None, None, true),
+                crate::codex::Assignment::None => (None, None, false),
+            };
+            codex_selection = Some(selection);
+            codex_account_email = account.clone();
+            codex_group = group.clone();
+            match account {
+                None if pending_auto => patch_op(&app, &op_id, |op| {
+                    op.log
+                        .push("codex account: auto (pending imported account)".into())
+                }),
+                None => match crate::codex::clear_clone_token(&app, &new_id).await {
+                    Ok(()) => {
+                        app.codex.forget_pushed(&new_id);
+                        patch_op(&app, &op_id, |op| {
+                            op.log.push("codex account: none (credentials cleared)".into())
+                        })
+                    }
+                    Err(e) => {
+                        tracing::warn!("fork {new_id}: codex clear failed: {e}");
+                        patch_op(&app, &op_id, |op| {
+                            op.log.push(format!(
+                                "codex account: none — failed to clear credentials: {e}"
+                            ))
+                        });
+                    }
+                },
+                Some(email) => {
+                    match crate::codex::push_account_to_clone(&app, &new_id, &email).await
+                    {
+                        Ok(()) => patch_op(&app, &op_id, |op| {
+                            op.log.push(format!("codex account: assigned {email}"))
+                        }),
+                        Err(e) => {
+                            tracing::warn!("fork {new_id}: Codex assign failed: {e}");
+                            patch_op(&app, &op_id, |op| {
+                                op.log.push(format!(
+                                    "codex account: failed to assign {email}: {e}"
+                                ))
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    } else if let Some(email) = src.codex_account_email.clone() {
+        match crate::codex::push_account_to_clone(&app, &new_id, &email).await {
+            Ok(()) => patch_op(&app, &op_id, |op| {
+                op.log.push(format!("codex account: inherited {email} from {source_id}"))
+            }),
+            Err(e) => {
+                tracing::warn!("fork {new_id}: inheriting Codex account failed: {e}");
+                patch_op(&app, &op_id, |op| {
+                    op.log.push(format!("codex account: failed to inherit {email}: {e}"))
+                });
+            }
+        }
+    }
+
+    progress("settle", "attaching the shared folder, home link and SSH access");
+    crate::shared::ensure_now(&app, &new_id).await;
+    crate::homes::ensure_now(&app, &new_id).await;
+    crate::ssh::allow_clone_now(&app, &new_id).await;
+
+    let daemon_up = app.media.is_connected(&new_id);
+    let dataset = crate::zfs::dataset_name(&app.config().docker.homes_parent, &new_id);
+    // Payload linear metadata replaces the source's ticket context wholesale when
+    // present (a plain-mode fork clears the source ticket); without it the source
+    // context carries over field for field.
+    let linear = spec.linear.clone();
+    let first_message = spec.first_message.clone();
+    let agent_instructions = spec.agent_instructions.clone();
+    let claude_instructions = spec.claude_instructions.clone();
+    let (linear_workspace, linear_ticket, linear_ticket_url, linear_branch, display_name, linear_label) =
+        match &linear {
+            Some(m) => (
+                m.workspace.clone(),
+                m.ticket.clone(),
+                m.ticket_url.clone(),
+                m.branch.clone(),
+                m.display_name.clone(),
+                m.label.clone(),
+            ),
+            None => (
+                src.linear_workspace.clone(),
+                src.linear_ticket.clone(),
+                src.linear_ticket_url.clone(),
+                src.linear_branch.clone(),
+                src.display_name.clone(),
+                src.linear_label.clone(),
+            ),
+        };
+    // Cloned before the row write below moves the tuple fields into the closure.
+    let ticket_url = linear_ticket_url.clone();
+    app.store.mutate(|s| {
+        let host = RmngClone {
+            id: new_id.clone(),
+            host: new_id.clone(),
+            port: 3389,
+            username: "rmng".into(),
+            password: "rmng".into(),
+            managed: true,
+            source: Some(base_tag.clone()),
+            dataset: Some(dataset),
+            base_tag: Some(base_tag.clone()),
+            claude_selection: claude_selection.clone(),
+            claude_account_email: claude_account_email.clone(),
+            claude_group: claude_group.clone(),
+            codex_selection: codex_selection.clone(),
+            codex_account_email: codex_account_email.clone(),
+            codex_group: codex_group.clone(),
+            preset_name: preset_name.clone(),
+            headless,
+            linear_workspace,
+            linear_ticket,
+            linear_ticket_url,
+            linear_branch,
+            display_name,
+            linear_label,
+            ..Default::default()
+        };
+        s.hosts.insert(0, host);
+        if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
+            op.status = OperationStatus::Done;
+            op.step = "done".into();
+            op.pct = 100.0;
+            op.message = if daemon_up {
+                format!("clone {new_id} forked from {source_id}")
+            } else {
+                format!(
+                    "clone {new_id} forked but its daemon hasn't registered yet (still booting; \
+                     check it in the UI)"
+                )
+            };
+            op.finished_at = Some(now_ms());
+        }
+    });
+    schedule_prune(app.clone(), op_id.clone(), PRUNE_DONE_MS);
+
+    // Kick off the agent, mirroring the create tail: an explicit ticket URL or first
+    // message starts work on the fork; a pure inherit (no payload, no source ticket)
+    // stays quiet.
+    let has_msg = first_message
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if ticket_url.is_some() || has_msg {
+        if let Some(host) = app
+            .store
+            .get()
+            .hosts
+            .into_iter()
+            .find(|h| h.id == new_id)
+        {
+            tokio::spawn(crate::chat::kickoff_agent(
+                app.clone(),
+                host,
+                crate::chat::KickoffOpts {
+                    ticket_url,
+                    message: first_message.clone(),
+                    agent_instructions: agent_instructions.clone(),
+                    claude_instructions: claude_instructions.clone(),
+                },
+            ));
+        }
+    }
+}
+
+/// Rebase a gen-2 clone onto a new base tag, keeping its dataset and id. Guard: the row
+/// must carry a base tag (gen-2), and no Running op on the clone.
+pub fn start_rebase(app: &App, host_id: &str, new_tag: &str) -> Result<Operation, JobError> {
+    let st = app.store.get();
+    let row = st.hosts.iter().find(|h| h.id == host_id).cloned();
+    let Some(row) = row else {
+        return Err(JobError(format!("unknown clone '{host_id}'")));
+    };
+    if !row.managed {
+        return Err(JobError(format!("'{host_id}' is not a managed clone")));
+    }
+    if row.base_tag.is_none() {
+        return Err(JobError(format!("'{host_id}' is not a gen-2 clone (no base tag)")));
+    }
+    let new_tag = new_tag.trim().to_string();
+    if new_tag.is_empty() {
+        return Err(JobError("a base image tag is required".into()));
+    }
+    if st
+        .operations
+        .iter()
+        .any(|o| o.status == OperationStatus::Running && o.target == host_id)
+    {
+        return Err(JobError(format!(
+            "'{host_id}' already has an operation in flight"
+        )));
+    }
+    let op = make_op(OperationKind::Clone, host_id, Some(&new_tag));
+    let op_for_return = op.clone();
+    let op_id = op.id.clone();
+    app.store.mutate(|s| s.operations.push(op));
+    let (app2, host_id) = (app.clone(), host_id.to_string());
+    tokio::spawn(async move { run_rebase(app2, op_id, host_id, new_tag).await });
+    Ok(op_for_return)
+}
+
+async fn run_rebase(app: App, op_id: String, host_id: String, new_tag: String) {
+    let progress = op_progress(&app, &op_id, OperationKind::Clone);
+    let row = match app.store.get().hosts.into_iter().find(|h| h.id == host_id) {
+        Some(h) => h,
+        None => return fail_op(&app, &op_id, format!("unknown clone '{host_id}'")),
+    };
+    let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await;
+    let (playbook, prompt) = gen2_playbook_prompt(&app, row.preset_name.as_deref());
+    match rebase_clone(
+        &app,
+        &host_id,
+        &new_tag,
+        &env,
+        &playbook,
+        &prompt,
+        row.headless,
+        progress,
+    )
+    .await
+    {
+        Ok(tag) => {
+            app.store.mutate(|s| {
+                if let Some(h) = s.hosts.iter_mut().find(|h| h.id == host_id) {
+                    h.base_tag = Some(tag.clone());
+                    h.source = Some(tag.clone());
+                }
+                if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
+                    op.status = OperationStatus::Done;
+                    op.step = "done".into();
+                    op.pct = 100.0;
+                    op.message = format!("clone {host_id} rebased onto {tag}");
+                    op.finished_at = Some(now_ms());
+                }
+            });
+            schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+        }
+        Err(e) => fail_op(&app, &op_id, format!("{e:#}")),
+    }
+}
+
+/// Migrate one gen-1 clone (managed row without a dataset). Files a `Migrate` op and
+/// drives it; the clone stays STOPPED — the boot loop starts the fleet after the window.
+/// Guard: row must exist, be managed, and have no dataset yet; no Running op on it.
+pub fn start_migrate(app: &App, host_id: &str) -> Result<Operation, JobError> {
+    let st = app.store.get();
+    let row = st.hosts.iter().find(|h| h.id == host_id).cloned();
+    let Some(row) = row else {
+        return Err(JobError(format!("unknown clone '{host_id}'")));
+    };
+    if !row.managed {
+        return Err(JobError(format!("'{host_id}' is not a managed clone")));
+    }
+    if row.dataset.is_some() {
+        return Err(JobError(format!("'{host_id}' is already a gen-2 clone")));
+    }
+    if st
+        .operations
+        .iter()
+        .any(|o| o.status == OperationStatus::Running && o.target == host_id)
+    {
+        return Err(JobError(format!(
+            "'{host_id}' already has an operation in flight"
+        )));
+    }
+    let op = make_op(OperationKind::Migrate, host_id, None);
+    let op_for_return = op.clone();
+    let op_id = op.id.clone();
+    app.store.mutate(|s| s.operations.push(op));
+    let (app2, host_id) = (app.clone(), host_id.to_string());
+    tokio::spawn(async move { run_migrate(app2, op_id, host_id).await });
+    Ok(op_for_return)
+}
+
+async fn run_migrate(app: App, op_id: String, host_id: String) {
+    let mut progress = op_progress(&app, &op_id, OperationKind::Migrate);
+    let row = match app.store.get().hosts.into_iter().find(|h| h.id == host_id) {
+        Some(h) => h,
+        None => return fail_op(&app, &op_id, format!("unknown clone '{host_id}'")),
+    };
+    let Some(base) = row.source.clone() else {
+        return fail_op(&app, &op_id, format!("clone '{host_id}' has no source image"));
+    };
+    // The home copy needs a stable source: stop it first (best-effort — it may already
+    // be stopped; the boot loop stops the whole fleet beforehand anyway).
+    progress("stop", &format!("stopping {host_id} for migration"));
+    if let Err(e) = app.docker.stop_even_if_paused(&host_id).await {
+        tracing::warn!("migrate {host_id}: pre-stop failed: {e} (continuing)");
+    }
+    let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await;
+    // Playbook/prompt injects are skipped: the copied home already carries the files the
+    // gen-1 create wrote; re-injecting would only rewrite identical content.
+    match migrate_one(&app, &host_id, &base, &env, "", "", row.headless, progress).await {
+        Ok(report) => {
+            let dataset = crate::zfs::dataset_name(&app.config().docker.homes_parent, &host_id);
+            app.store.mutate(|s| {
+                if let Some(h) = s.hosts.iter_mut().find(|h| h.id == host_id) {
+                    h.dataset = Some(dataset);
+                    h.base_tag = Some(report.tag.clone());
+                    h.source = Some(report.tag.clone());
+                }
+                if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
+                    op.status = OperationStatus::Done;
+                    op.step = "done".into();
+                    op.pct = 100.0;
+                    op.message =
+                        format!("clone {host_id} migrated ({} bytes)", report.bytes);
+                    op.finished_at = Some(now_ms());
+                }
+            });
+            schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+        }
+        Err(e) => fail_op(&app, &op_id, format!("{e:#}")),
+    }
+}
+
+/// Wait until op `op_id` leaves `Running` (poll 5 s). The boot loop runs migrations one
+/// at a time through the same `start_migrate` path the API uses, so the jobs UI shows
+/// each clone's progress while the window runs.
+async fn wait_op_terminal(app: &App, op_id: &str) {
+    loop {
+        let running = app
+            .store
+            .get()
+            .operations
+            .iter()
+            .any(|o| o.id == op_id && o.status == OperationStatus::Running);
+        if !running {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
+/// Boot one-shot: migrate every gen-1 row (managed, no dataset) to gen-2, one clone at a
+/// time. No gen-1 rows ⇒ no-op. Runs under the whole-LXC backup: per-clone failures log
+/// and continue with one retry at the end; the fleet (non-archived) starts after the
+/// window, with stored account tokens re-pushed onto the running clones.
+pub async fn migrate_all_on_boot(app: App) {
+    let gen1: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| h.managed && h.dataset.is_none())
+        .map(|h| h.id)
+        .collect();
+    if gen1.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        "gen-2 migration: {} gen-1 clone(s) detected, migrating one at a time: {}",
+        gen1.len(),
+        gen1.join(", ")
+    );
+    // Stable source for the home copies: stop the whole fleet first (best-effort).
+    for h in app.store.get().hosts.into_iter().filter(|h| h.managed && !h.archived) {
+        if let Err(e) = app.docker.stop_even_if_paused(&h.id).await {
+            tracing::warn!("migrate: pre-stopping {} failed: {e} (continuing)", h.id);
+        }
+    }
+    let mut failed: Vec<String> = Vec::new();
+    let mut pass = 0;
+    for id in gen1.clone() {
+        match start_migrate(&app, &id) {
+            Ok(op) => {
+                wait_op_terminal(&app, &op.id).await;
+                let ok = app.store.get().operations.iter().any(|o| {
+                    o.id == op.id && o.status == OperationStatus::Done
+                });
+                if ok {
+                    pass += 1;
+                } else {
+                    failed.push(id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("migrate {id}: could not file op: {e}");
+                failed.push(id);
+            }
+        }
+    }
+    // One retry pass for the failures.
+    let mut retry_failed: Vec<String> = Vec::new();
+    for id in failed {
+        match start_migrate(&app, &id) {
+            Ok(op) => {
+                wait_op_terminal(&app, &op.id).await;
+                let ok = app.store.get().operations.iter().any(|o| {
+                    o.id == op.id && o.status == OperationStatus::Done
+                });
+                if ok {
+                    pass += 1;
+                } else {
+                    retry_failed.push(id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("migrate {id}: retry could not file op: {e}");
+                retry_failed.push(id);
+            }
+        }
+    }
+    // Start the fleet: every migrated non-archived clone, then re-push its stored
+    // account tokens (those need running clones). Best-effort per clone.
+    let mut started = 0;
+    for h in app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| h.managed && !h.archived && h.dataset.is_some())
+    {
+        if let Err(e) = app.docker.start_container(&h.id).await {
+            tracing::warn!("migrate: starting {} failed: {e} (continuing)", h.id);
+            continue;
+        }
+        started += 1;
+        if let Some(email) = h.claude_account_email {
+            if let Err(e) = crate::claude::push_account_to_clone(&app, &h.id, &email).await {
+                tracing::warn!("migrate: re-pushing Claude account to {} failed: {e}", h.id);
+            }
+        }
+        if let Some(email) = h.codex_account_email {
+            if let Err(e) = crate::codex::push_account_to_clone(&app, &h.id, &email).await {
+                tracing::warn!("migrate: re-pushing Codex account to {} failed: {e}", h.id);
+            }
+        }
+    }
+    tracing::warn!(
+        "gen-2 migration: {pass} passed, {} failed ({}), {started} started",
+        retry_failed.len(),
+        retry_failed.join(", "),
+    );
+}
+
+/// Warm a derived tag without creating (`POST /api/images/prebuild`): resolve + build on
+/// miss for the current template reference + profile lines. Drives a `Prebuild` op (no
+/// coarse pct table — the build streams step lines as messages).
+pub fn start_prebuild(app: &App) -> Result<Operation, JobError> {
+    let cfg = app.config();
+    let target = cfg.docker.template_reference.clone();
+    let st = app.store.get();
+    if st.operations.iter().any(|o| {
+        o.status == OperationStatus::Running
+            && (o.kind == OperationKind::Prebuild || o.target == target)
+    }) {
+        return Err(JobError("a prebuild or pull is already in flight".into()));
+    }
+    let op = make_op(OperationKind::Prebuild, &target, None);
+    let op_for_return = op.clone();
+    let op_id = op.id.clone();
+    app.store.mutate(|s| s.operations.push(op));
+    let app2 = app.clone();
+    tokio::spawn(async move { run_prebuild(app2, op_id).await });
+    Ok(op_for_return)
+}
+
+async fn run_prebuild(app: App, op_id: String) {
+    let res = crate::derived::prebuild(&app, |step, msg| {
+        patch_op(&app, &op_id, |op| {
+            op.step = step.to_string();
+            op.message = msg.to_string();
+            op.log.push(format!("{step}: {msg}"));
+            if op.log.len() > LOG_LIMIT {
+                let drop = op.log.len() - LOG_LIMIT;
+                op.log.drain(0..drop);
+            }
+        });
+    })
+    .await;
+    match res {
+        Ok(tag) => {
+            patch_op(&app, &op_id, |op| {
+                op.status = OperationStatus::Done;
+                op.step = "done".into();
+                op.pct = 100.0;
+                op.message = format!("derived image {tag} ready");
+                op.finished_at = Some(now_ms());
+            });
+            schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+        }
+        Err(e) => fail_op(&app, &op_id, format!("{e:#}")),
+    }
 }
 
 /// Stop a managed clone without removing its container, volumes, or per-clone files.

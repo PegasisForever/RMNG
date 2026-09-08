@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path as AxPath, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path as AxPath, State},
     http::{HeaderMap, StatusCode, header},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
@@ -56,6 +56,8 @@ pub fn router(app: App) -> Router {
         // one mute covers every tab and the phone.
         .route("/api/clones/muted", put(muted_put))
         .route("/api/clone", post(clone))
+        .route("/api/fork", post(fork))
+        .route("/api/hosts/:id/rebase", post(rebase))
         .route("/api/layout/activate", post(layout_activate))
         .route("/api/delete", post(delete))
         .route("/api/notes/:id", get(notes_get).put(notes_save))
@@ -75,7 +77,7 @@ pub fn router(app: App) -> Router {
         .route("/api/server/restart", post(server_restart))
         .route("/api/images", get(images_list))
         .route("/api/images/pull", post(images_pull))
-        .route("/api/images/commit", post(images_commit))
+        .route("/api/images/prebuild", post(images_prebuild))
         .route("/api/images/delete", post(images_delete))
         .route("/api/chat/:id", get(chat_get).post(chat_send))
         .route("/api/chat/:id/events", get(chat_events))
@@ -90,12 +92,6 @@ pub fn router(app: App) -> Router {
         .route("/api/hosts/:id/unarchive", post(unarchive))
         .route("/api/hosts/:id/mcp", post(clone_mcp))
         .route("/api/hosts/:id/exec", post(clone_exec))
-        // The tar stream `rmng clone cp` sends is a whole project directory, so this one
-        // route opts out of the router's 64MB cap below and is never buffered.
-        .route(
-            "/api/hosts/:id/copy",
-            post(clone_copy).layer(DefaultBodyLimit::disable()),
-        )
         .route("/api/self", get(clone_self))
         // Claude + Codex accounts. The server owns each account's OAuth refresh lifecycle and
         // pushes only short-lived access tokens into clones; these twelve are symmetric across
@@ -683,12 +679,8 @@ fn merge_env(base: &mut Vec<String>, overrides: &[String]) {
 /// isn't reachable yet — a still-booting clone — in which case the exec simply runs without the
 /// session env.
 ///
-/// Whatever the manager reports, the result always ends with
-/// [`crate::clone_reconcile::retired_env_neutralizers`]. A clone built from a proxy-era image
-/// carries the dead `/cc` endpoint in its container `Config.Env`, a `docker exec` inherits that, and
-/// `show-environment` cannot override it because the manager no longer lists the key at all. An
-/// explicit empty assignment does override it, so an agent started through `rmng exec` or through a
-/// `termplane` terminal reaches Anthropic directly.
+/// Whatever the manager reports is the result: gen-2 images carry no stale container
+/// `Config.Env`, so nothing needs cancelling on top of the session env.
 pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String> {
     // `show-environment` talks to the per-user bus, which needs XDG_RUNTIME_DIR; the agent user's
     // runtime dir is the fixed `/run/user/<uid>`.
@@ -698,7 +690,7 @@ pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String
         "show-environment".to_string(),
     ];
     let runtime = format!("XDG_RUNTIME_DIR=/run/user/{DESKTOP_UID}");
-    let mut env = match app
+    let env = match app
         .docker
         .exec_capture(clone_id, &cmd, DESKTOP_UID, None, &[runtime], None)
         .await
@@ -718,7 +710,6 @@ pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String
             Vec::new()
         }
     };
-    merge_env(&mut env, &crate::clone_reconcile::retired_env_neutralizers());
     env
 }
 
@@ -788,129 +779,6 @@ async fn clone_exec(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(result))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CopyQuery {
-    /// Absolute path inside the clone to extract the archive at.
-    dst: String,
-    /// Run-as user for the `mkdir` that precedes the extract. Defaults to the agent user,
-    /// so the directory it creates belongs to the agent rather than to root.
-    user: Option<String>,
-    /// `<clone>:<absolute-path>` to copy from, when the source is another clone this server
-    /// can already see. Set, the request carries no body and nothing crosses a socket.
-    from: Option<String>,
-    /// Comma-separated directory names to leave out, anchored at the top of the source.
-    /// Out-of-band copies only; a streamed archive is filtered by the sender's `tar`.
-    exclude: Option<String>,
-    /// Make the destination match the source, deleting what the source does not have.
-    /// Requires `from`, since a streamed archive says what it holds and never what it lacks.
-    delete: Option<bool>,
-}
-
-/// `POST /api/hosts/:id/copy?dst=<abs path>` — extract a tar stream inside the clone.
-///
-/// The body is the archive itself rather than JSON, and the route disables the router's
-/// body cap, so a whole project directory streams from the caller through this process to
-/// the Docker daemon without being buffered anywhere along the way. That is the difference
-/// from `/exec`, whose stdin is base64 inside a JSON body and therefore bounded.
-///
-/// Ownership is whatever the archive records, which means a tar written by the calling
-/// clone's agent user arrives owned by the same uid on the other side.
-async fn clone_copy(
-    State(app): State<App>,
-    AxPath(id): AxPath<String>,
-    Query(q): Query<CopyQuery>,
-    body: axum::body::Body,
-) -> Result<Json<wire::CopyResult>, (StatusCode, String)> {
-    if !q.dst.starts_with('/') {
-        return Err((StatusCode::BAD_REQUEST, "dst must be an absolute path".into()));
-    }
-    let host = clone_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))?;
-    if host.archived {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("clone '{id}' is archived; unarchive it first"),
-        ));
-    }
-
-    // Source named: both ends are clone homes this server can reach, so the copy happens
-    // here and the request body is empty.
-    if let Some(spec) = q.from.clone() {
-        let (src_clone, src_path) = spec.split_once(':').ok_or((
-            StatusCode::BAD_REQUEST,
-            "from must be <clone>:<absolute-path>".to_string(),
-        ))?;
-        if clone_by_id(&app, src_clone).is_none() {
-            return Err((StatusCode::NOT_FOUND, format!("no clone '{src_clone}'")));
-        }
-        // A caller mistake, so it is answered as one rather than as a copy that failed.
-        // `copy_between` refuses this too, for callers that do not come through here.
-        if q.delete.unwrap_or(false) && crate::homes::is_home_root(&q.dst) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("refusing to sync onto {id}:{} itself; name a directory inside it", q.dst),
-            ));
-        }
-        let excludes: Vec<String> = q
-            .exclude
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-        let bytes = crate::homes::copy_between(
-            &app,
-            src_clone,
-            src_path,
-            &host.id,
-            &q.dst,
-            &excludes,
-            q.delete.unwrap_or(false),
-        )
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-        tracing::info!("clone {id}: copied {bytes} bytes from {spec} into {}", q.dst);
-        return Ok(Json(wire::CopyResult { bytes, dst: q.dst }));
-    }
-
-    // The daemon's extract fails on a missing directory rather than creating one, and a
-    // directory made by root would leave the agent unable to write in its own project.
-    let user = q.user.clone().unwrap_or_else(|| DESKTOP_UID.to_string());
-    let mkdir = vec!["mkdir".to_string(), "-p".to_string(), q.dst.clone()];
-    let made = app
-        .docker
-        .exec_capture(&host.id, &mkdir, &user, None, &[], None)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-    if made.exit_code != 0 {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("mkdir -p {} failed: {}", q.dst, made.stderr.trim()),
-        ));
-    }
-
-    // Counted as it passes, which is all this process ever knows about the archive.
-    let seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let tally = seen.clone();
-    let stream = body.into_data_stream().map(move |chunk| {
-        chunk
-            .inspect(|b| {
-                tally.fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
-            })
-            .map_err(std::io::Error::other)
-    });
-    app.docker
-        .upload_tar_stream(&host.id, &q.dst, stream)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    let bytes = seen.load(std::sync::atomic::Ordering::Relaxed);
-    tracing::info!("clone {id}: copied {bytes} bytes into {}", q.dst);
-    Ok(Json(wire::CopyResult { bytes, dst: q.dst }))
 }
 
 /// The managed clone reachable at `ip` on the rmng bridge, when exactly one is.
@@ -1233,7 +1101,6 @@ impl ResolvedIssue {
 /// Everything a ticket-backed clone request carries that is neither the issue nor the preset.
 /// Grouped so [`ticket_clone_spec`] takes one argument for them instead of seven.
 struct CloneRequestCommon {
-    seed: Option<crate::seed::SeedSpec>,
     image: String,
     claude_account: Option<String>,
     codex_account: Option<String>,
@@ -1348,8 +1215,6 @@ async fn clone(
     // checkbox sends `parent`, so this is NOT fleet-CLI-only — resolving it here rather than
     // inside the hostname branch is what makes that checkbox work in the UI create modes.
     let parent = resolve_parent(&app, &body, &headers, peer.map(|p| p.0.ip()))?;
-    let seed = crate::seed::parse(&app, body.get("seed"), caller_clone(&app, &headers, peer.map(|p| p.0.ip())))
-        .map_err(|error| bad(error.to_string()))?;
 
     // Raw hostname clone (fleet CLI): the caller owns the exact hostname; no ticket, no
     // derived display name. A preset is optional — fleet workers usually need none; an
@@ -1376,7 +1241,6 @@ async fn clone(
             &cfg.presets,
         );
         let spec = CloneSpec {
-            seed,
             source_image: image,
             new_hostname: hostname,
             linear: None,
@@ -1428,7 +1292,6 @@ async fn clone(
         let (hostname, display) =
             derive_hostname(&app, &naming::plain_hostname_base(&prefix, &title), &title);
         let spec = CloneSpec {
-            seed,
             source_image: image,
             new_hostname: hostname,
             linear: Some(LinearMeta {
@@ -1460,7 +1323,6 @@ async fn clone(
     }
 
     let common = CloneRequestCommon {
-        seed,
         image,
         claude_account,
         codex_account,
@@ -1515,7 +1377,6 @@ fn ticket_clone_spec(
     let base = naming::ticket_hostname_base(hostname_prefix, &issue.identifier);
     let (hostname, display) = derive_hostname(app, &base, &issue.title);
     CloneSpec {
-        seed: common.seed,
         source_image: common.image,
         new_hostname: hostname,
         linear: Some(LinearMeta {
@@ -1646,21 +1507,13 @@ async fn images_pull(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
-#[derive(Deserialize)]
-struct CommitReq {
-    /// Clone id of the managed clone to commit.
-    host: String,
-    /// DNS-label image name — becomes the full repo of the committed image (`<name>:latest`).
-    name: String,
-}
-
-/// `POST /api/images/commit` — commit a running clone to a new clone-source image
-/// `<name>:latest` (the name is the full repo). Returns the driving Operation (kind `commit`).
-async fn images_commit(
+/// `POST /api/images/prebuild` — warm the gen-2 derived tag for the current template
+/// reference + profile lines, without creating. Returns the driving Operation (kind
+/// `prebuild`), so the first real create finds the image present.
+async fn images_prebuild(
     State(app): State<App>,
-    Json(req): Json<CommitReq>,
 ) -> Result<Json<Operation>, (StatusCode, String)> {
-    jobs::start_commit(&app, &req.host, &req.name)
+    jobs::start_prebuild(&app)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
@@ -1743,6 +1596,101 @@ async fn unarchive(
     AxPath(id): AxPath<String>,
 ) -> Result<Json<Operation>, (StatusCode, String)> {
     jobs::start_unarchive(&app, &id)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForkReq {
+    /// Source gen-2 clone id.
+    source: String,
+    /// New clone id (DNS label, must be unused). Omitted = derive server-side from
+    /// the ticket identifier or title, like create does (uniqueness needs the live
+    /// clone list, which no client can see).
+    #[serde(default)]
+    hostname: Option<String>,
+    /// Headless (no desktop) fork.
+    #[serde(default)]
+    headless: bool,
+    /// Preset name override (`None` = inherit the source preset).
+    #[serde(default)]
+    preset: Option<String>,
+    /// Ticket metadata override (`None` = inherit the source ticket context).
+    #[serde(default)]
+    linear: Option<jobs::LinearMeta>,
+    /// Claude account selection override (`None` = inherit).
+    #[serde(default)]
+    claude_account: Option<String>,
+    /// Codex account selection override (`None` = inherit).
+    #[serde(default)]
+    codex_account: Option<String>,
+    /// First message override for the agent kickoff.
+    #[serde(default)]
+    first_message: Option<String>,
+    /// Instruction overrides for the agent kickoff.
+    #[serde(default)]
+    agent_instructions: Option<String>,
+    #[serde(default)]
+    claude_instructions: Option<String>,
+}
+
+/// `POST /api/fork` — fork a gen-2 clone (`{ source }` plus the optional
+/// ticket/preset/account overrides above): snapshot + clone the source home, create
+/// from its recorded base tag. Returns the driving Operation.
+async fn fork(
+    State(app): State<App>,
+    Json(req): Json<ForkReq>,
+) -> Result<Json<Operation>, (StatusCode, String)> {
+    let cfg = app.config();
+    let prefix = cfg.docker.hostname_prefix.as_str();
+    let hostname = match req.hostname.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()) {
+        Some(h) => h,
+        None => {
+            let base = match req.linear.as_ref().and_then(|l| l.ticket.clone()).filter(|t| !t.is_empty()) {
+                Some(ticket) => naming::ticket_hostname_base(prefix, &ticket),
+                None => {
+                    let title = req.linear.as_ref().and_then(|l| l.display_name.clone()).unwrap_or_default();
+                    naming::plain_hostname_base(prefix, &title)
+                }
+            };
+            derive_hostname(&app, &base, "").0
+        }
+    };
+    jobs::start_fork(
+        &app,
+        jobs::ForkSpec {
+            source_id: req.source.trim().to_string(),
+            new_hostname: hostname,
+            headless: req.headless,
+            preset_name: req.preset,
+            linear: req.linear,
+            claude_account: req.claude_account,
+            codex_account: req.codex_account,
+            first_message: req.first_message,
+            agent_instructions: req.agent_instructions,
+            claude_instructions: req.claude_instructions,
+        },
+    )
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+#[derive(Deserialize)]
+struct RebaseReq {
+    /// New base image tag for the clone's system image (dataset + id kept).
+    tag: String,
+}
+
+/// `POST /api/hosts/:id/rebase` — rebase a gen-2 clone onto a new base tag (`{ tag }`).
+/// The old container is replaced (name == id); on failure the old tag auto-recreates.
+/// Returns the driving Operation.
+async fn rebase(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+    Json(req): Json<RebaseReq>,
+) -> Result<Json<Operation>, (StatusCode, String)> {
+    jobs::start_rebase(&app, &id, &req.tag)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
@@ -3429,7 +3377,6 @@ mod tests {
 
         let issue = ResolvedIssue::from_body(&issue_body()).unwrap();
         let common = CloneRequestCommon {
-            seed: None,
             image: "tmpl:latest".into(),
             claude_account: None,
             codex_account: None,
@@ -4012,35 +3959,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("cmd"), "msg: {}", err.1);
-    }
-
-    #[tokio::test]
-    async fn clone_copy_rejects_a_relative_destination() {
-        let app = test_app();
-        let err = clone_copy(
-            State(app.clone()),
-            AxPath("anything".into()),
-            Query(CopyQuery { dst: "home/rmng/proj".into(), user: None, from: None, exclude: None, delete: None }),
-            axum::body::Body::empty(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("absolute"), "msg: {}", err.1);
-    }
-
-    #[tokio::test]
-    async fn clone_copy_unknown_clone_is_404() {
-        let app = test_app();
-        let err = clone_copy(
-            State(app.clone()),
-            AxPath("ghost".into()),
-            Query(CopyQuery { dst: "/home/rmng/proj".into(), user: None, from: None, exclude: None, delete: None }),
-            axum::body::Body::empty(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
     /// Two managed clones on the rmng bridge, addressed the way Docker's IPAM addresses them.

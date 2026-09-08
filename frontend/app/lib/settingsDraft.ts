@@ -59,6 +59,8 @@ export interface PresetDraft {
   vars: { key: string; value: string }[];
   agentPlaybook: string;
   globalPrompt: string;
+  image: string;
+  profileLines: string;
 }
 
 /** Everything the settings form can edit, as one model. */
@@ -112,6 +114,8 @@ export function newPreset(): PresetDraft {
     vars: [{ key: "", value: "" }],
     agentPlaybook: "",
     globalPrompt: "",
+    image: "",
+    profileLines: "",
   };
 }
 
@@ -157,6 +161,8 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       vars: p.vars.map((v) => ({ ...v })),
       agentPlaybook: p.agentPlaybook,
       globalPrompt: p.globalPrompt,
+      image: p.image ?? "",
+      profileLines: p.profileLines ?? "",
     })),
     hostnamePrefix: c.docker.hostnamePrefix,
     templateReference: c.docker.templateReference,
@@ -257,6 +263,8 @@ export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unk
         vars: p.vars.filter((v) => v.key.trim()).map((v) => ({ key: v.key.trim(), value: v.value })),
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
+        image: p.image.trim(),
+        profileLines: p.profileLines,
       })),
   };
 }

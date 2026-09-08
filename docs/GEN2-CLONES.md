@@ -39,13 +39,25 @@ push goes over SMB. Partial-dir copy has no replacement: fork takes the whole ho
 
 ### 3.1 Host and outer CT
 
-- Outer CT becomes privileged (one-way trip, see §5). Pass `/dev/zfs` in, install
-  `zfsutils-linux` at the exact host version, keep `nesting=1,keyctl=1,fuse=1` and
-  `apparmor unconfined`. Check `zfs list` works inside the CT.
-- Host layout: one parent dataset, e.g. `tank/rmng/homes`, mounted into the CT once at
-  `/srv/rmng-homes`. One child dataset per gen-2 clone: `tank/rmng/homes/<id>`.
+- Outer CT becomes privileged (one-way trip, see §5). Do NOT bind-mount host
+  `/dev/zfs` (`lxc.mount.entry` for it breaks nested container mount joins: every
+  `docker exec` silently lands on CT files). Instead pass `lxc.cgroup2.devices.allow:
+  c 10:249 rwm` and create the node inside the CT with `mknod /dev/zfs c 10 249`
+  (find the major:minor via host `ls -l /dev/zfs`). The node lives on the CT `/dev`
+  tmpfs, so the control-server re-creates it at boot when missing. Install
+  `zfsutils-linux`, keep `nesting=1,keyctl=1,fuse=1`. No `apparmor unconfined`
+  line (default profile). Check `zfs list` works inside the CT.
+- Host layout: one parent dataset, e.g. `tank/rmng/homes` (pool name differs per
+  host: `docker.homes_parent` config knob, default `tank/rmng/homes`), mounted into
+  the CT once at `/srv/rmng-homes`. One child dataset per gen-2 clone:
+  `<parent>/<id>`, created with `-o mountpoint=/srv/rmng-homes/<id>` so it lands
+  under the bind (children otherwise auto-mount at the pool path).
+- The rmng container bind-mounts the homes dir `rshared`
+  (`-v /srv/rmng-homes:/srv/rmng-homes:rshared`). LOAD-BEARING: datasets are
+  created from inside that container, and only a shared bind propagates their
+  mounts into dockerd's namespace (plus server-side home reads/writes).
 - The CT root can now destroy any pool dataset. All ZFS calls go through one wrapper
-  script locked to the `tank/rmng/homes/*` subtree. No raw `zfs destroy` anywhere else.
+  locked to the configured parent subtree. No raw `zfs destroy` anywhere else.
 
 ### 3.2 Gen-2 container spec
 
@@ -78,7 +90,10 @@ dataset mount itself marks one.
   with the mount → write identity plus dynamic env → start → wait-ready. Failure trap
   destroys the container and the dataset, like today's volume cleanup.
 - Fork: `zfs snapshot <src>@<ts>` → `zfs clone` to new dataset → create from the
-  source's recorded base tag → start. Source keeps running. Overlay drift is
+  source's recorded base tag → start. The image always follows the effective preset
+  (picked, else the source's): its static env feeds derivation FROM the source tag,
+  so a different preset builds a new tag once and caches it, while the same preset
+  reuses the source tag with zero rebuild. Source keeps running. Overlay drift is
   silently dropped.
 - Rebase: record the old tag → stop → remove the old container (the name equals the
   id, so both cannot exist together) → create from the new tag with the SAME dataset,
@@ -156,3 +171,21 @@ One window, one per-clone report of bytes plus pass or fail.
 - Fork takes the whole home, caches and all. Blocks are shared so disk is fine.
 - Any clone reads any home via `~/clones`, tokens included. Chosen over access control.
 - Inner Docker state drops at migration and re-pulls.
+
+## 7. UI (decided, not built)
+
+Clones come into being exactly two ways: template create (base image plus empty
+home) or fork (snapshot plus clone of a live source). No other create path.
+
+- New clone modal: source picker lists CLONES only, never templates. Creating
+  always forks the selected clone (snapshot plus clone, source keeps running).
+  No image picker in this modal.
+- Template create: separate button plus separate modal, for the bootstrap case
+  (first clone, clean start). Starts empty; the agent pulls the repo itself.
+  CLI/API template create stays regardless.
+- Seed snapshot: DELETED as redundant. Every modal create forks a live source,
+  so the source snapshot covers starting content. Pending code removal:
+  `seed_snapshot` config field plus the `CloneFromSnapshot` home-source path.
+- Clone menu: rebase lives here (target picker). No separate fork item; the
+  new clone modal covers forking.
+- Open UI items: rebase target picker shape, prebuild button placement.

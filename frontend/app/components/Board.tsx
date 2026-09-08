@@ -97,7 +97,6 @@ export interface BoardProps {
 
   onSelectClone: (clone: Clone) => void;
   onDeleteClone: (clone: Clone) => void;
-  onCommitClone: (clone: Clone) => void;
   onChangeAccountClone: (clone: Clone) => void;
   onPortForwardClone: (clone: Clone) => void;
   /** A card was dropped into a column flagged `archive` and is not archived yet. */
@@ -226,7 +225,6 @@ export function Board({
   gutterRight = false,
   onSelectClone,
   onDeleteClone,
-  onCommitClone,
   onChangeAccountClone,
   onPortForwardClone,
   onArchiveClone,
@@ -312,7 +310,6 @@ export function Board({
     bastionPort,
     onSelect: () => onSelectClone(clone),
     onDelete: () => onDeleteClone(clone),
-    onCommit: () => onCommitClone(clone),
     onChangeAccount: () => onChangeAccountClone(clone),
     onPortForward: () => onPortForwardClone(clone),
     onArchive: () => onArchiveClone(clone),

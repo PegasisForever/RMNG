@@ -115,6 +115,12 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             }
             CloneCmd::Archive { clone, wait } => commands::archive(client, clone, wait, json).await,
             CloneCmd::Restore { clone, wait } => commands::restore(client, clone, wait, json).await,
+            CloneCmd::Fork { source, new_id, headless, preset, claude_account, codex_account, message, wait } => {
+                commands::fork(client, source, new_id, *headless, preset.clone(), claude_account.clone(), codex_account.clone(), message.clone(), wait, json).await
+            }
+            CloneCmd::Rebase { clone, tag, wait } => {
+                commands::rebase(client, clone, tag, wait, json).await
+            }
             CloneCmd::Ssh { clone } => commands::clone_ssh(client, clone, json).await,
             CloneCmd::Exec {
                 clone,
@@ -135,12 +141,6 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                     json,
                 )
                 .await
-            }
-            CloneCmd::Cp { src, dest, exclude } => {
-                commands::clone_cp(client, src, dest, exclude, false, json).await
-            }
-            CloneCmd::Sync { src, dest, exclude } => {
-                commands::clone_cp(client, src, dest, exclude, true, json).await
             }
             CloneCmd::Myself => commands::clone_self(client, json).await,
             CloneCmd::Select { clone, none } => {

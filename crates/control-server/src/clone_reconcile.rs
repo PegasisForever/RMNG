@@ -368,47 +368,6 @@ pub(crate) fn claude_model_env_var() -> wire::EnvVar {
     }
 }
 
-/// Env keys RMNG used to write into `/etc/environment` and no longer does.
-///
-/// [`etc_environment_sync_script`] builds its strip-list from the **desired** keys, so a key we
-/// simply stop emitting is never removed from a clone that already has it — it would survive
-/// forever. These four are the group-proxy era's inference wiring: `ANTHROPIC_BASE_URL` points at
-/// the `rmng-cliproxy` container, which no longer exists, so a clone that kept it would fail every
-/// agent request with no self-heal. Listing them here strips them (they are never re-appended),
-/// and the resulting change trips [`ENV_CHANGED_MARKER`] → the agent-wrapper restart, which is the
-/// only thing that can update an already-running wrapper's frozen process environment.
-///
-/// `RMNG_PROXY_KEY` is deliberately NOT here: it outlived the proxy as the clone's identity token
-/// (sub-clone parent detection in `web.rs`, and clone↔clone SSH in the fleet CLI).
-///
-/// `/etc/environment` is one of three carriers. The other two are the container's own `Config.Env`,
-/// inherited from a clone-source image committed during the proxy era, and a tmux server that froze
-/// that env when it started. [`retired_env_neutralizers`] covers the first,
-/// [`tmux_retired_env_scrub_script`] the second.
-pub(crate) const RETIRED_ENV_KEYS: &[&str] = &[
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-];
-
-/// [`RETIRED_ENV_KEYS`] as empty `KEY=` assignments, for the two places an env list overrides the
-/// container's `Config.Env`: a clone's create spec, and every `docker exec` that can start an agent.
-///
-/// A clone-source image committed during the group-proxy era carries the dead endpoint in its own
-/// `ENV`, so every container built from it is born with `ANTHROPIC_BASE_URL=http://…/cc` on PID 1.
-/// The control-server serves no `/cc` route: its static handler answers a POST there with
-/// `405 Method Not Allowed` and an empty body, which Claude Code prints as
-/// `API Error: 405 status code (no body)`.
-///
-/// Empty rather than absent, because neither Docker nor tmux can delete an inherited key. An
-/// override can only give it another value. Claude Code reads an empty `ANTHROPIC_BASE_URL` as
-/// unset and falls back to the credentials file, the same trick
-/// [`agent_wrapper_env_dropin_script`] plays with `Environment=KEY=`.
-pub(crate) fn retired_env_neutralizers() -> Vec<String> {
-    RETIRED_ENV_KEYS.iter().map(|k| format!("{k}=")).collect()
-}
-
 /// Merge the managed MCP tables into a clone's `~/.codex/config.toml`, preserving everything
 /// else in the file.
 ///
@@ -429,8 +388,8 @@ pub(crate) fn retired_env_neutralizers() -> Vec<String> {
 /// TOML tables RMNG used to write into `~/.codex/config.toml` and no longer does, plus the bare
 /// top-level keys that went with them.
 ///
-/// The same trap as [`RETIRED_ENV_KEYS`], one file over: a merge that only replaces what it
-/// currently emits never removes what it USED to emit. The group-proxy era pointed Codex at the
+/// The same trap as a merge that only replaces what it currently emits: it never removes
+/// what it USED to emit. The group-proxy era pointed Codex at the
 /// `/cc/v1` router with `model_provider = "rmng"` + a `[model_providers.rmng]` block; that route
 /// now 404s, and an explicit `model_provider` beats the `~/.codex/auth.json` the server writes —
 /// so leaving them behind means Codex is authenticated and still broken, on every clone, forever.
@@ -551,11 +510,10 @@ A sub clone cannot be filed: it is drawn under its parent's card, so move the pa
 
 - `rmng clone ssh <clone>` — print a ready-to-paste `ssh` command for a clone.
 - `rmng clone self` — this clone's own record (its id, image, address and accounts).
-- `rmng clone cp <src> <clone>:<dst>` — copy a directory into another clone. Naming both ends
-  as clones (`<clone>:<path>`) has the server do the copy between the two homes it can already
-  see, which is the fast path for a big tree; a local source streams instead.
-  `rmng clone sync` is the same but makes the destination match, deleting what the source does
-  not have. Both take `--exclude <name>`, anchored at the top of the source.
+- `rmng clone fork <source> <new-id>` — snapshot + clone the source home, create from its
+  recorded base tag. Whole-home only; there is no partial-dir copy.
+- Every clone sees every home at `~/clones/<id>` — read or copy straight across, no
+  server round-trip.
 - `rmng clone exec <clone> -- <argv…>` — run one non-interactive command inside another clone
   (docker-exec style). Flags: `-u <user>`, `-w <dir>`, `-e KEY=VAL` (repeatable), `-d`/`--detach`
   (fire-and-forget: return immediately, no captured output). Passes through the command's exit
@@ -673,7 +631,7 @@ the odds are good that another clone hit the same wall, and its reasoning is sti
 ## Images & accounts
 
 - `rmng image ls` — list clone-source images. `rmng image pull [ref]`,
-  `rmng image commit <clone> --as <name>`, `rmng image rm <ref>`.
+  `rmng image rm <ref>`. Templates are profile Dockerfile lines, built lazily.
 - `rmng account ls [--provider claude|codex]` — list imported accounts + usage windows.
 - `rmng account rm <email> [--codex]` — delete an imported account, moving any clones off it.
 
@@ -685,8 +643,8 @@ the odds are good that another clone hit the same wall, and its reasoning is sti
 - `rmng clone select <clone>` points the operator's *viewer* at a clone — it does NOT change
   which clone your other commands target. `rmng clone select --none` clears the selection.
 - `--wait` and `--timeout <secs>` are not create-only. Both also work on `rmng clone rm`,
-  `rmng clone archive`, `rmng clone restore`, `rmng image pull`, and `rmng image commit`.
-  Use `--wait` on a commit or a pull, which can run for many minutes.
+  `rmng clone archive`, `rmng clone restore`, and `rmng image pull`.
+  Use `--wait` on a pull, which can run for many minutes.
 "#;
 
 /// The `rmng-cli` skill TarEntries: the same SKILL.md at both skill locations.
@@ -1186,152 +1144,6 @@ fn monitors_csv(monitors: &[wire::MonitorSpec]) -> String {
         .join(",")
 }
 
-/// Write the systemd drop-in that clears the retired inference vars from the agent-wrapper's
-/// environment, then restart it.
-///
-/// [`RETIRED_ENV_KEYS`] rewrites `/etc/environment`, which is enough for anything behind a PAM
-/// login (an SSH session, a fresh GUI login). It is NOT enough for the agent-wrapper: the same
-/// vars were also baked into the CONTAINER's `Config.Env` at create time
-/// (`docker::CreateSpec::env`), Docker environment is immutable without recreating the container,
-/// and systemd inherits it from PID 1. So the wrapper kept dialling the dead `/cc` router and
-/// every chat turn failed with `API Error: 405` — while a shell in the same clone worked fine,
-/// which is exactly the sort of split that wastes an afternoon.
-///
-/// `Environment=KEY=` (empty, no value) is the fix: a unit-level assignment overrides the
-/// inherited one, and Claude Code treats an empty `ANTHROPIC_BASE_URL` as unset, falling back to
-/// the credentials file the server injects. `UnsetEnvironment=` would be cleaner but is systemd
-/// ≥ 248 and applies after `Environment=`, so this form is both older-safe and unambiguous.
-pub(crate) fn agent_wrapper_env_dropin_script() -> String {
-    let unsets = RETIRED_ENV_KEYS
-        .iter()
-        .map(|k| format!("Environment={k}=\n"))
-        .collect::<String>();
-    // The user manager caches `/etc/environment` at ITS startup, via the
-    // `environment.d` → `/etc/environment` symlink and systemd's environment-generator. Rewriting
-    // the file does not touch that cache, and neither does the drop-in above — which reaches only
-    // `agent-wrapper.service`.
-    //
-    // That cache is not inert: `web::desktop_session_env` harvests
-    // `systemctl --user show-environment` and seeds it into every `rmng exec` and every termplane
-    // tmux terminal. So without this, the reconciler cleans `/etc/environment` while the exec path
-    // keeps re-injecting the dead endpoint into every new shell — forever, since the cache clears
-    // only on container restart. Measured on CT 105 before the fix: 33 of 35 clones dirty.
-    let unset_args = RETIRED_ENV_KEYS.join(" ");
-    format!(
-        r#"set -e
-d=/home/rmng/.config/systemd/user/agent-wrapper.service.d
-install -d -o rmng -g rmng -m755 "$d"
-cat > "$d/10-rmng-retired-env.conf" <<'RMNG_DROPIN'
-# Managed by RMNG. Clears inference vars baked into the container's Docker Env by an older
-# control-server; those cannot be removed by rewriting /etc/environment.
-[Service]
-{unsets}RMNG_DROPIN
-chown rmng:rmng "$d/10-rmng-retired-env.conf"
-chmod 644 "$d/10-rmng-retired-env.conf"
-runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload
-# Drop the retired keys from the user manager's own cached environment block, so
-# `show-environment` (and everything seeded from it) stops handing out a dead endpoint.
-# Best-effort: a clone whose user manager is not up yet gets it on the next pass.
-runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user unset-environment {unset_args} || true
-runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart agent-wrapper.service
-"#
-    )
-}
-
-/// Drop the retired inference vars from a running tmux server's environment.
-///
-/// tmux fixes its environment when the SERVER starts and copies it into every session and window
-/// opened afterwards, so a server started from a poisoned `Config.Env` serves the dead `/cc`
-/// endpoint for as long as it lives. Typing `claude` into a pane is how a parent clone starts the
-/// agent in a sub clone it just created, and on `dev395-assistant` that produced a clone whose
-/// every turn answered `API Error: 405` while the same clone's agent-wrapper was healthy. The
-/// wrapper has the systemd drop-in, the tmux server has nothing.
-///
-/// `set-environment -gu` removes the key from the global environment; the per-session `-u` covers a
-/// session that copied it before this ran. Measured against tmux 3.4: a window opened after the
-/// scrub has the key absent, in the same session that carried it a moment earlier.
-///
-/// Panes that already exist keep their frozen copy, since a process environment cannot be rewritten
-/// from outside. This makes a relaunch clean; it cannot heal the Claude already running in a pane.
-///
-/// Unstamped, because a tmux server can be killed and restarted at any time and comes back with
-/// whatever env started it. Exits 0 on a clone with no tmux server, which is most of them.
-pub(crate) fn tmux_retired_env_scrub_script() -> String {
-    let keys = RETIRED_ENV_KEYS.join(" ");
-    format!(
-        r#"set -e
-tmux() {{ runuser -u rmng -- tmux "$@"; }}
-tmux list-sessions >/dev/null 2>&1 || exit 0
-for k in {keys}; do
-  tmux set-environment -g -u "$k" 2>/dev/null || true
-done
-for s in $(tmux list-sessions -F '#{{session_name}}' 2>/dev/null); do
-  for k in {keys}; do
-    tmux set-environment -t "$s" -u "$k" 2>/dev/null || true
-  done
-done
-"#
-    )
-}
-
-fn wrapper_env_stamp_path() -> &'static str {
-    "etc/rmng/wrapper-env"
-}
-
-/// Stamp value — bumped by editing [`RETIRED_ENV_KEYS`], so the drop-in is rewritten exactly
-/// when its content would differ.
-///
-/// `v2` adds the `systemctl --user unset-environment` step. The version prefix is what forces
-/// clones already stamped `v1` to re-run: the key list alone is unchanged, so without the bump
-/// every clone that had reconciled once would keep its stale manager environment forever — the
-/// exact shape of the bug this step fixes.
-fn wrapper_env_desired() -> String {
-    format!("v2 {}", RETIRED_ENV_KEYS.join(","))
-}
-
-/// The stamp that marks the drop-in applied. `pub(crate)` so the create path can write it after
-/// running the same script, which stops the reconciler restarting a brand-new clone's
-/// agent-wrapper 30 s in, right through the first turn the kickoff started.
-pub(crate) fn wrapper_env_stamp_entry() -> TarEntry {
-    TarEntry {
-        path: wrapper_env_stamp_path().to_string(),
-        data: format!("{}\n", wrapper_env_desired()).into_bytes(),
-        mode: 0o644,
-        uid: 0,
-        gid: 0,
-    }
-}
-
-/// Apply the drop-in once per clone, stamped.
-///
-/// Deliberately NOT gated on `/etc/environment` having changed. That gate is right for the
-/// restart-to-pick-up-new-values case, but the baked container env is a SEPARATE problem: on a
-/// clone whose `/etc/environment` is already correct — every clone that has reconciled once —
-/// the gate never fires and the drop-in would never be written. That is exactly what happened on
-/// the first CT 106 migration.
-async fn ensure_wrapper_env_dropin(app: &App, clone_id: &str) -> Result<bool> {
-    let desired = wrapper_env_desired();
-    if read_stamp(app, clone_id, wrapper_env_stamp_path(), "wrapper env")
-        .await?
-        .as_deref()
-        == Some(desired.as_str())
-    {
-        return Ok(false);
-    }
-    exec_ok(
-        app,
-        clone_id,
-        &agent_wrapper_env_dropin_script(),
-        "clear retired vars from agent-wrapper",
-    )
-    .await?;
-    app.docker
-        .upload_tar(clone_id, vec![wrapper_env_stamp_entry()])
-        .await
-        .with_context(|| format!("{clone_id}: writing wrapper env stamp"))?;
-    Ok(true)
-}
-
 fn restart_agent_wrapper_script() -> &'static str {
     r#"set -e
 runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart agent-wrapper.service
@@ -1420,9 +1232,7 @@ echo "installed polkit sudo-group rule at $dest"
 
 fn etc_environment_sync_script(desired_env: &str) -> String {
     let desired_b64 = B64.encode(desired_env);
-    // One `KEY` per line, appended to the strip-list below. These are stripped but never
-    // re-appended, which is what actually removes a key we no longer emit — see RETIRED_ENV_KEYS.
-    let retired = RETIRED_ENV_KEYS.join("\n");
+    // Gen-2 images carry no stale env, so the strip-list is exactly the desired keys.
     format!(
         r#"set -e
 etc=/etc/environment
@@ -1445,10 +1255,7 @@ if [ -f "$legacy" ]; then
   cat "$tmp" > "$base"
   awk '/^[A-Za-z_][A-Za-z0-9_]*=/' "$legacy" >> "$base"
 fi
-{{ grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$desired" | sed 's/=.*//'; cat <<'RMNG_RETIRED_KEYS'
-{retired}
-RMNG_RETIRED_KEYS
-}} | sed '/^$/d' | sort -u > "$keys_file"
+grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$desired" | sed 's/=.*//' | sed '/^$/d' | sort -u > "$keys_file"
 awk -F= 'NR==FNR {{ drop[$1]=1; next }} !($1 in drop)' "$keys_file" "$base" > "$tmp"
 if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | wc -l)" -eq 0 ]; then
   printf '\n' >> "$tmp"
@@ -1977,30 +1784,6 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         // reference in its MCP config, so its `linear` server needs the value itself.
         let linear_key = env_value(&desired_env, "LINEAR_API_KEY");
         let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
-        // Clear the retired inference vars from the agent-wrapper's unit environment. Stamped
-        // and independent of the env-change gate below: the vars this removes come from the
-        // container's baked Docker Env, not from /etc/environment, so a clone whose file is
-        // already correct still needs it.
-        match ensure_wrapper_env_dropin(app, id).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:wrapper-env"));
-                tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: cleared retired inference vars from the agent-wrapper unit"
-                );
-            }
-            Ok(false) => {
-                warned.remove(&format!("{id}:wrapper-env"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:wrapper-env")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: agent-wrapper env drop-in failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: agent-wrapper env drop-in still failing: {e:#}");
-                }
-            }
-        }
-
         let env_script = etc_environment_sync_script(&desired_env);
         match exec_ok_marked(
             app,
@@ -2038,22 +1821,6 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                     tracing::warn!(target: "clone_reconcile", "clone {id}: /etc/environment reconcile failed: {e:#}");
                 } else {
                     tracing::debug!(target: "clone_reconcile", "clone {id}: /etc/environment reconcile still failing: {e:#}");
-                }
-            }
-        }
-
-        // The third carrier of the retired vars, after `/etc/environment` and the wrapper unit: a
-        // tmux server that froze the container's `Config.Env` at its own start. Unconditional and
-        // cheap, because a clone with no tmux server exits 0 at the first line.
-        match exec_ok(app, id, &tmux_retired_env_scrub_script(), "scrub retired vars from tmux").await {
-            Ok(()) => {
-                warned.remove(&format!("{id}:tmux-env"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:tmux-env")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: tmux env scrub failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: tmux env scrub still failing: {e:#}");
                 }
             }
         }
@@ -2354,111 +2121,6 @@ mod tests {
         );
     }
 
-    /// The agent-wrapper must have the retired inference vars cleared at the UNIT level.
-    ///
-    /// Rewriting `/etc/environment` is not enough for it: the same vars were baked into the
-    /// container's Docker `Config.Env` at create time, that is immutable without recreating the
-    /// container, and systemd inherits it from PID 1. On the first real migration this left the
-    /// wrapper dialling the dead `/cc` router — every chat turn `API Error: 405` — while an SSH
-    /// shell into the same clone worked, because PAM sessions read the (already fixed) file.
-    #[test]
-    fn wrapper_restart_clears_the_baked_inference_vars() {
-        let script = agent_wrapper_env_dropin_script();
-        // A drop-in, not an edit of the template-owned unit — so this reaches existing clones
-        // without a template rebuild and cannot be clobbered by one.
-        assert!(script.contains("agent-wrapper.service.d"), "{script}");
-        assert!(script.contains("[Service]"));
-        // Every retired key is assigned empty at the unit level, which overrides the inherited
-        // container env. Claude Code treats an empty base URL as unset and falls back to the
-        // credentials file the server injects.
-        for key in RETIRED_ENV_KEYS {
-            assert!(
-                script.contains(&format!("Environment={key}=\n")),
-                "retired key {key} not cleared for the wrapper:\n{script}"
-            );
-        }
-        // `RMNG_PROXY_KEY` is the clone's identity and must NOT be cleared — the baked copy is
-        // stale, but the unit inherits the current one from /etc/environment via the session.
-        assert!(!script.contains("Environment=RMNG_PROXY_KEY="), "identity key was cleared");
-        // daemon-reload before restart, or the drop-in would not take effect until next boot.
-        let reload = script.find("daemon-reload").expect("no daemon-reload");
-        let restart = script.find("restart agent-wrapper").expect("no restart");
-        assert!(reload < restart, "daemon-reload must precede the restart");
-
-        // The drop-in fixes only agent-wrapper.service. The user MANAGER caches
-        // /etc/environment at its own startup, and `web::desktop_session_env` harvests that cache
-        // into every `rmng exec` and tmux terminal — so without an explicit unset, the reconciler
-        // cleans the file while the exec path keeps handing out the dead endpoint, forever.
-        // Measured on CT 105: 33 of 35 clones carried it.
-        let unset = script.find("unset-environment").expect("manager env is never cleared");
-        for key in RETIRED_ENV_KEYS {
-            assert!(
-                script[unset..].contains(key),
-                "retired key {key} not unset from the user manager env:\n{script}"
-            );
-        }
-        assert!(
-            !script[unset..].contains("RMNG_PROXY_KEY"),
-            "the identity key must survive the manager-env unset"
-        );
-    }
-
-    /// A tmux server freezes its environment when it starts, so the drop-in above does nothing for
-    /// an agent typed into a pane. That is how a parent clone starts the agent in a sub clone it
-    /// just created, and on `dev395-assistant` it produced a clone whose every turn answered
-    /// `API Error: 405` while the same clone's agent-wrapper was healthy.
-    #[test]
-    fn tmux_scrub_clears_the_retired_keys_from_a_running_server() {
-        let script = tmux_retired_env_scrub_script();
-        // No server is the common case (a headed clone opens one only when a terminal is used),
-        // and it must be a silent success, not a per-pass warning on most of the fleet.
-        assert!(script.contains("list-sessions >/dev/null 2>&1 || exit 0"), "{script}");
-        // tmux runs as the clone user; the reconciler's exec is root.
-        assert!(script.contains("runuser -u rmng -- tmux"), "{script}");
-        assert!(script.contains(r#"set-environment -g -u "$k""#), "{script}");
-        // Per-session too: a session created before the scrub carries its own copy, which shadows
-        // the global one for every window opened in it afterwards.
-        assert!(script.contains(r#"set-environment -t "$s" -u "$k""#), "{script}");
-        for key in RETIRED_ENV_KEYS {
-            assert!(script.contains(key), "retired key {key} is never scrubbed:\n{script}");
-        }
-        // The identity key stays, or `rmng` breaks in every new pane.
-        assert!(!script.contains("RMNG_PROXY_KEY"), "identity key scrubbed:\n{script}");
-    }
-
-    /// Every carrier of a retired key needs the same empty-assignment trick, because neither Docker
-    /// nor systemd nor tmux can delete an inherited key, only give it another value.
-    #[test]
-    fn retired_env_neutralizers_are_empty_assignments_for_every_key() {
-        let n = retired_env_neutralizers();
-        assert_eq!(n.len(), RETIRED_ENV_KEYS.len());
-        for key in RETIRED_ENV_KEYS {
-            assert!(n.contains(&format!("{key}=")), "no neutralizer for {key}: {n:?}");
-        }
-        // `KEY=` and not `KEY`, or `merge_env` cannot key it and Docker rejects it.
-        for e in &n {
-            assert!(e.ends_with('='), "not an assignment: {e}");
-            assert_eq!(e.matches('=').count(), 1, "not a bare empty assignment: {e}");
-        }
-    }
-
-    /// The stamp gates the drop-in per clone, so its VERSION is what makes an already-stamped
-    /// clone re-run a changed script. Editing the script without bumping the version silently
-    /// skips every clone that has reconciled before — which is precisely the fleet you are
-    /// trying to fix.
-    #[test]
-    fn wrapper_env_stamp_version_tracks_the_script() {
-        let desired = wrapper_env_desired();
-        assert!(
-            desired.starts_with("v2 "),
-            "bump this test with the stamp; v1 predates the manager-env unset: {desired}"
-        );
-        // The key list rides along, so adding a retired key also re-stamps.
-        for key in RETIRED_ENV_KEYS {
-            assert!(desired.contains(key), "stamp does not cover {key}: {desired}");
-        }
-    }
-
     /// NOTHING the reconciler runs may delete a clone's provider credential files.
     ///
     /// The group-proxy era had a step that did exactly that (`dead_creds_cleanup_script`) —
@@ -2593,7 +2255,7 @@ mod tests {
 
         // The group-proxy era's dead wiring must be REMOVED, not merely left alone. A merge that
         // only replaces what it currently emits never removes what it used to — the same trap
-        // RETIRED_ENV_KEYS exists for. `model_provider = "rmng"` beats the `~/.codex/auth.json`
+        // a retired-keys list once solved. `model_provider = "rmng"` beats the `~/.codex/auth.json`
         // the server writes, and its `base_url` is a route that now 404s, so leaving these behind
         // means Codex is authenticated and still broken. This body is a real production clone's.
         std::fs::write(
@@ -2651,7 +2313,6 @@ mod tests {
             ("cursor_mcp", cursor_mcp_script(false, "lin_key")),
             ("cursor_mcp_headless", cursor_mcp_script(true, "lin_key")),
             ("etc_environment_sync", etc_environment_sync_script("A=1\n")),
-            ("tmux_retired_env_scrub", tmux_retired_env_scrub_script()),
             ("claude_hook", claude_hook_script()),
         ];
         for (name, body) in scripts {
@@ -2962,23 +2623,19 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).contains(ENV_CHANGED_MARKER)
     }
 
-    /// A key RMNG stops emitting is NOT removed by the desired-keys strip-list — it would
-    /// survive on the clone forever. `ANTHROPIC_BASE_URL` pointing at the deleted
-    /// `rmng-cliproxy` container would then fail every agent request with no self-heal, so
-    /// [`RETIRED_ENV_KEYS`] must strip it while leaving operator-owned lines untouched.
+    /// The sync converges `/etc/environment` onto the desired keys while leaving
+    /// operator-owned lines untouched. Gen-2 images never carried the old proxy-era
+    /// inference wiring, so there is no retired-keys strip-list anymore: a key that is
+    /// neither desired nor operator-owned stays as-is.
     #[test]
-    fn env_sync_strips_retired_keys_but_keeps_operator_lines() {
-        let dir = std::env::temp_dir().join(format!("rmng-envretire-{}", std::process::id()));
+    fn env_sync_converges_desired_keys_but_keeps_operator_lines() {
+        let dir = std::env::temp_dir().join(format!("rmng-envsync-converge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let etc = dir.join("environment");
-        // A clone as the group-proxy era left it, plus the operator's own customizations.
         std::fs::write(
             &etc,
             "# operator's own notes\n\
-             ANTHROPIC_BASE_URL=http://rmng-cliproxy:9010/cc\n\
-             CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\n\
-             ANTHROPIC_AUTH_TOKEN=deadbeef\n\
              RMNG_PROXY_KEY=keepme\n\
              MY_OWN_VAR=hello\n\
              export EDITOR=vim\n",
@@ -2990,15 +2647,9 @@ mod tests {
             &etc,
             "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n",
         );
-        assert!(changed, "stripping dead keys is a change; the agent-wrapper must restart");
+        assert!(changed, "converging is a change; the agent-wrapper must restart");
         let body = std::fs::read_to_string(&etc).unwrap();
 
-        // The dead group-proxy wiring is gone.
-        assert!(!body.contains("ANTHROPIC_BASE_URL"), "stale proxy URL survived:\n{body}");
-        assert!(!body.contains("ANTHROPIC_AUTH_TOKEN"), "stale router token survived:\n{body}");
-        assert!(!body.contains("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"), "{body}");
-        // `RMNG_PROXY_KEY` outlived the proxy as the clone's identity token — it must NOT be
-        // treated as retired (sub-clone parent detection + clone↔clone SSH both read it).
         assert!(body.contains("RMNG_PROXY_KEY=keepme"), "identity key was dropped:\n{body}");
         assert!(body.contains("RMNG_CONTROL_URL=http://rmng-control:9000"), "{body}");
         // Operator-owned content is never touched.

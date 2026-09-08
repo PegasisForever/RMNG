@@ -8,7 +8,11 @@
 #   docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
+#     -v /srv/rmng-homes:/srv/rmng-homes:rshared \
 #     -p 9000:9000 -p 9001:9001 -p 9005:9005 -p 445:445 -p 2222:2222 rmng:latest
+# The rshared homes bind is LOAD-BEARING for gen-2: home datasets are created from
+# inside this container, and only a shared bind propagates their mounts into dockerd's
+# namespace (plus server-side home reads/writes).
 
 services:
   rmng:
@@ -35,6 +39,9 @@ services:
       # mounted into every clone at /srv/rmng-sock, so clone-daemons can reach the
       # control-server's media plane. Must be a named volume (not bind) so clones share it.
       - rmng-sock:/srv/rmng-sock
+      # Gen-2 home datasets. LOAD-BEARING: rshared propagates dataset mounts created
+      # inside this container into dockerd's namespace (plus server-side home reads).
+      - /srv/rmng-homes:/srv/rmng-homes:rshared
     ports:
       # 9000 web/API, 9001 video, 9005 forward, 445 SMB, 2222 SSH bastion.
       - "9000:9000"

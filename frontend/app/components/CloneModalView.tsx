@@ -1,13 +1,15 @@
-// The clone dialog's markup: a source image, one of three ticket modes, the account
-// overrides, and the button bar. It renders from props alone — no config fetch, no clone POST,
-// no operation stream — so every state it can be in is a story. CloneModalContainer owns all
-// three of those and hands the results down.
+// The clone dialog's markup: a source clone to fork, one of
+// three ticket modes, the account overrides, and the button bar. It renders from props
+// alone — no config fetch, no fork POST, no operation stream — so every state it can be
+// in is a story. CloneModalContainer owns all three of those and hands the results down.
+//
+// Gen-2 rule: this dialog ALWAYS forks. Its source is a live clone id, never a template
+// image (template create has its own modal).
 //
 // The form is one editable model (`CloneDraft`) plus a single `onDraftChange`, rather than
 // thirty value/onChange pairs. What is NOT in the draft is everything the server decides:
 // the presets, the team keys, the preset a ticket prefix resolved to, whether the request
 // would be rejected for a missing Linear key, and whether the button may fire at all.
-import { ImagePicker } from "~/components/ImagePicker";
 import { OperationProgress } from "~/components/OperationProgress";
 import { CloneAccountFields } from "~/components/CloneAccountFields";
 import { CloneExistingTicketFields, type ParsedTicket } from "~/components/CloneExistingTicketFields";
@@ -19,7 +21,6 @@ import { cloneField, cloneLabel } from "~/components/cloneFieldStyles";
 import type { CloneDraft, TeamKey } from "~/lib/cloneDraft";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
-import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import { useModalEscape } from "~/lib/useModalEscape";
 
@@ -31,13 +32,10 @@ export interface CloneModalViewProps {
   /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
   onDraftChange: <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) => void;
 
-  /** Clone-source images to pick from (from `listImages`). */
-  images: ImageInfo[];
-  imagesLoading: boolean;
-  /** Wall-clock milliseconds, for the age each image row shows. Captured when the dialog
-   *  opens rather than read per render: an image's age has no reason to tick, and a leaf
-   *  that read the clock would draw something different in every story run. */
-  now: number;
+  /** Live clones to fork from. The container passes only forkable rows (managed, not
+   *  archived); an empty list is the empty state, not an error. */
+  clones: Clone[];
+  clonesLoading: boolean;
   /** Imported accounts, both providers in one flat list, so the two pickers can label each
    *  option with its usage. */
   accounts: ClaudeUsage[];
@@ -55,21 +53,18 @@ export interface CloneModalViewProps {
   preset: PresetRedacted | undefined;
   /** The request this tab would send needs a Linear API key nobody has configured. */
   linearKeyMissing: boolean;
-  /** The currently selected clone, offered as a sub-clone parent. Null = nothing selected, or
-   *  the selection can't be a parent (unmanaged, or already a sub clone). */
-  parentCandidate: Clone | null;
 
   /** The markdown editor for the New-ticket body, as a slot: the real one is browser-only and
    *  lazy-loaded, so the container decides when and how it mounts. */
   descriptionEditor: ReactNode;
 
-  /** The Clone button may fire. */
+  /** The Fork button may fire. */
   valid: boolean;
-  /** A clone is being started, or one is running. Locks the form and both buttons. */
+  /** A fork is being started, or one is running. Locks the form and both buttons. */
   busy: boolean;
   /** The failed attempt, in the dialog's own words rather than the page banner's. */
   error: string | null;
-  /** The clone operation this dialog started, once it shows up in the live op list. */
+  /** The fork operation this dialog started, once it shows up in the live op list. */
   operation: Operation | null;
   onSubmit: () => void;
   onClose: () => void;
@@ -78,9 +73,8 @@ export interface CloneModalViewProps {
 export function CloneModalView({
   draft,
   onDraftChange,
-  images,
-  imagesLoading,
-  now,
+  clones,
+  clonesLoading,
   accounts,
   claudeGroups,
   codexGroups,
@@ -89,7 +83,6 @@ export function CloneModalView({
   parsedTicket,
   preset,
   linearKeyMissing,
-  parentCandidate,
   descriptionEditor,
   valid,
   busy,
@@ -100,7 +93,7 @@ export function CloneModalView({
 }: CloneModalViewProps) {
   // Escape closes regardless of focus — a document-level listener since the backdrop click no
   // longer does (see below). Guarded the same as the backdrop was: no closing out from under a
-  // running clone operation. While `busy` the dialog still holds its slot in the Escape stack,
+  // running fork operation. While `busy` the dialog still holds its slot in the Escape stack,
   // so the keypress is swallowed rather than falling through to whatever is mounted beneath.
   useModalEscape(onClose, !busy);
 
@@ -108,7 +101,8 @@ export function CloneModalView({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
       {/* Backdrop is inert — clicking it must not close the dialog (nor could it while
           `busy`); only Cancel/Escape do, both guarded against closing over a running
-          clone operation. One height for every tab. The pin is on the whole scroll body,
+          clone operation. This dialog always forks: the button files a fork of the picked
+          source clone. One height for every tab. The pin is on the whole scroll body,
           not on the tab-specific block: the tabs also differ BELOW that block (No ticket
           shows no preset line and no instruction overrides), so pinning only the block
           still left this tab shorter. 49.5rem is the tallest tab (New ticket, ~786px);
@@ -121,15 +115,25 @@ export function CloneModalView({
         </h3>
 
         <div className="h-[49.5rem] min-h-0 shrink overflow-y-auto pr-0.5">
-          <div className="mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
-            Source image
-            <ImagePicker
-              images={images}
-              loading={imagesLoading}
-              value={draft.image}
-              now={now}
-              onChange={(reference) => onDraftChange("image", reference)}
-            />
+          <div className="mt-3 space-y-2">
+            <label className={`${cloneLabel} font-medium`}>
+              Source clone to fork
+              <select
+                value={draft.source ?? ""}
+                disabled={busy || clonesLoading}
+                onChange={(e) => onDraftChange("source", e.target.value || null)}
+                className={cloneField}
+              >
+                <option value="" disabled>
+                  {clonesLoading ? "Loading clones…" : clones.length === 0 ? "No forkable clones — use template create" : "Pick a clone"}
+                </option>
+                {clones.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.id}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
 
           <div className="mt-3">
@@ -231,10 +235,7 @@ export function CloneModalView({
 
           <CloneOptionsRow
             headless={draft.headless}
-            parentCandidate={parentCandidate}
-            asSubClone={draft.asSubClone}
             onHeadlessChange={(headless) => onDraftChange("headless", headless)}
-            onAsSubCloneChange={(asSubClone) => onDraftChange("asSubClone", asSubClone)}
           />
         </div>
 
@@ -263,7 +264,7 @@ export function CloneModalView({
             disabled={!valid || busy}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
-            {busy ? "Cloning…" : draft.mode === "create" ? "Create & clone" : "Clone"}
+            {busy ? "Forking…" : "Fork clone"}
           </button>
         </div>
       </div>

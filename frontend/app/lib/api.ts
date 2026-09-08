@@ -93,7 +93,7 @@ export type ClonePayload = (
       claudeInstructions?: string;
     })
   | { plain: { title: string; message: string } }
-) & { group?: string; preset?: string; headless?: boolean; parent?: string };
+) & { group?: string; preset?: string; headless?: boolean; parent?: string; claudeAccount?: string; codexAccount?: string };
 
 export const activate = (id: string | null) =>
   postJson("/api/activate", { id });
@@ -105,6 +105,43 @@ export const duplicateClone = (image: string, payload: ClonePayload) =>
     (r) => (r as { op: Operation }).op,
   );
 export const deleteClone = (id: string) => postJson("/api/delete", { id });
+/** Fork a gen-2 clone from a live source clone. The server snapshots + clones the
+ *  source home, derives the new clone id from the ticket identifier or title (like
+ *  create does), and creates from the source's recorded base tag. Returns
+ *  the driving Operation so the caller can follow it; progress streams over /events. */
+export interface ForkPayload {
+  preset?: string;
+  linear?: {
+    workspace?: string;
+    ticket?: string;
+    ticketUrl?: string;
+    branch?: string;
+    displayName?: string;
+    label?: string;
+  };
+  claudeAccount?: string;
+  codexAccount?: string;
+  firstMessage?: string;
+  agentInstructions?: string;
+  claudeInstructions?: string;
+}
+
+export const forkClone = (
+  source: string,
+  headless?: boolean,
+  payload?: ForkPayload,
+) =>
+  postJson("/api/fork", {
+    source,
+    ...(headless ? { headless } : {}),
+    ...(payload?.preset ? { preset: payload.preset } : {}),
+    ...(payload?.linear ? { linear: payload.linear } : {}),
+    ...(payload?.claudeAccount ? { claudeAccount: payload.claudeAccount } : {}),
+    ...(payload?.codexAccount ? { codexAccount: payload.codexAccount } : {}),
+    ...(payload?.firstMessage ? { firstMessage: payload.firstMessage } : {}),
+    ...(payload?.agentInstructions ? { agentInstructions: payload.agentInstructions } : {}),
+    ...(payload?.claudeInstructions ? { claudeInstructions: payload.claudeInstructions } : {}),
+  }).then((r) => (r as { op: Operation }).op);
 /** Gracefully stop a managed clone while retaining its container and per-clone data. */
 export const archiveClone = (id: string) =>
   postJson(`/api/hosts/${encodeURIComponent(id)}/archive`, {});
@@ -170,10 +207,6 @@ export const listImages = () => getJson("/api/images") as Promise<ImageInfo[]>;
  *  driving Operation (kind `pull`); progress streams over /events. */
 export const pullTemplate = (reference?: string) =>
   postJson("/api/images/pull", { reference });
-/** Commit a running clone to a new clone-source image `<name>:latest` (the name you give it
- *  is the full repo). Returns the driving Operation (kind `commit`); streams over /events. */
-export const commitImage = (host: string, name: string) =>
-  postJson("/api/images/commit", { host, name });
 /** Remove a clone-source image by reference. 409 (with a "…in use by…" message)
  *  when a live clone or a running op still references it. */
 export const deleteImage = (reference: string) =>

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use control_client::{Client, CloneOpts, LedgerFilter};
@@ -228,7 +228,6 @@ fn clone_opts<'a>(
         headless: common.headless,
         parent: common.parent.as_deref(),
         top_level: common.top_level,
-        seed: &common.seed,
         agent_instructions: agent_instructions.map(String::as_str),
         claude_instructions: claude_instructions.map(String::as_str),
     }
@@ -394,103 +393,6 @@ pub async fn clone_create_plain(
     started(client, op, &common.wait, json, "clone", true).await
 }
 
-/// `rmng clone cp <src-dir> <clone>:<dst-dir> [--exclude NAME]` — copy a directory into a
-/// clone at an absolute path.
-///
-/// `tar` writes to a pipe and that pipe is the request body, so the archive streams from
-/// here to the server to the Docker daemon and is never held whole by any of the three.
-/// Nothing is copied back and nothing on the far side is deleted: an existing directory
-/// receives the files on top of what it already has.
-///
-/// Excludes are anchored at the top of SRC and match a directory there and nowhere deeper.
-/// Unanchored, `--exclude dist` would also strike every `node_modules/*/dist`, which holds
-/// the package code, and the copy would look complete while importing nothing.
-pub async fn clone_cp(
-    client: &Client,
-    src: &str,
-    dest: &str,
-    exclude: &[String],
-    delete: bool,
-    json: bool,
-) -> Result<u8> {
-    let (clone, dst) = split_clone_path(dest)
-        .ok_or_else(|| anyhow!("destination must be <clone>:<absolute-path>, got '{dest}'"))?;
-
-    // A clone-qualified source is one the server can reach on its own, so it does the whole
-    // copy locally and this process moves no bytes at all. That is the path for a large tree.
-    if let Some((src_clone, src_path)) = split_clone_path(src) {
-        let res = client
-            .clone_copy_from(clone, dst, &format!("{src_clone}:{src_path}"), exclude, delete)
-            .await?;
-        if json {
-            emit_json(&res)?;
-        } else {
-            let verb = if delete { "synced" } else { "copied" };
-            println!(
-                "{verb} {} from {src_clone}:{src_path} to {clone}:{}",
-                human_size(res.bytes),
-                res.dst
-            );
-        }
-        return Ok(0);
-    }
-
-    // Deleting at the destination means knowing everything the source holds, and a streamed
-    // archive only ever tells the server what it contains, never what it lacks.
-    if delete {
-        bail!("sync needs a clone source (<clone>:<path>), got '{src}'; use `clone cp` to send a local directory");
-    }
-    if !std::path::Path::new(src).is_dir() {
-        bail!("source '{src}' is not a directory");
-    }
-
-    let mut tar = tokio::process::Command::new("tar");
-    tar.arg("-cf").arg("-").arg("-C").arg(src).arg("--anchored");
-    for name in exclude {
-        tar.arg(format!("--exclude=./{}", name.trim_start_matches("./")));
-    }
-    tar.arg(".").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let mut child = tar.spawn().context("spawning tar")?;
-    let stdout = child.stdout.take().expect("piped");
-
-    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(stdout));
-    let sent = client.clone_copy(clone, dst, body).await;
-
-    // tar's own failure is the more useful message when both ends fail, so it is read first.
-    let status = child.wait().await.context("waiting for tar")?;
-    let res = match (sent, status.success()) {
-        (_, false) => {
-            let mut err = String::new();
-            if let Some(mut e) = child.stderr.take() {
-                use tokio::io::AsyncReadExt;
-                let _ = e.read_to_string(&mut err).await;
-            }
-            bail!("tar failed ({status}): {}", err.trim());
-        }
-        (Err(e), _) => return Err(e),
-        (Ok(res), true) => res,
-    };
-
-    if json {
-        emit_json(&res)?;
-    } else {
-        println!("copied {} to {clone}:{}", human_size(res.bytes), res.dst);
-    }
-    Ok(0)
-}
-
-/// Split `<clone>:<absolute-path>`, when that is what the argument is.
-///
-/// A local path never matches: it either has no colon, or its colon sits inside a path
-/// segment rather than after a bare clone id.
-fn split_clone_path(s: &str) -> Option<(&str, &str)> {
-    let (clone, path) = s.split_once(':')?;
-    if clone.is_empty() || clone.contains('/') || !path.starts_with('/') {
-        return None;
-    }
-    Some((clone, path))
-}
-
 /// `rmng clone self` — the calling clone's own record.
 ///
 /// The server answers from the address the request arrives on, which for a clone is the one
@@ -536,6 +438,49 @@ pub async fn clone_rm(
     }
     let op = client.delete(clone).await?;
     started(client, op, wait, json, "delete", false).await
+}
+
+/// `rmng clone fork <source> <new-id>` — snapshot + clone the source home, create from
+/// its recorded base tag.
+pub async fn fork(
+    client: &Client,
+    source: &str,
+    new_id: &str,
+    headless: bool,
+    preset: Option<String>,
+    claude_account: Option<String>,
+    codex_account: Option<String>,
+    message: Option<String>,
+    wait: &WaitArgs,
+    json: bool,
+) -> Result<u8> {
+    let op = client
+        .fork_with(
+            source,
+            new_id,
+            &control_client::ForkOpts {
+                preset: preset.as_deref(),
+                claude_account: claude_account.as_deref(),
+                codex_account: codex_account.as_deref(),
+                first_message: message.as_deref(),
+                headless,
+                ..Default::default()
+            },
+        )
+        .await?;
+    started(client, op, wait, json, "fork", false).await
+}
+
+/// `rmng clone rebase <clone> --tag <tag>` — new system image under the kept home.
+pub async fn rebase(
+    client: &Client,
+    clone: &str,
+    tag: &str,
+    wait: &WaitArgs,
+    json: bool,
+) -> Result<u8> {
+    let op = client.rebase(clone, tag).await?;
+    started(client, op, wait, json, "rebase", false).await
 }
 
 pub async fn archive(client: &Client, clone: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
@@ -640,14 +585,6 @@ pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
         ImageCmd::Pull { reference, wait } => {
             let op = client.image_pull(reference.as_deref()).await?;
             started(client, op, wait, json, "pull", false).await
-        }
-        ImageCmd::Commit {
-            clone,
-            as_name,
-            wait,
-        } => {
-            let op = client.image_commit(clone, as_name).await?;
-            started(client, op, wait, json, "commit", false).await
         }
         ImageCmd::Rm { reference } => {
             client.image_delete(reference).await?;

@@ -271,6 +271,16 @@ pub struct RmngClone {
     /// SSE event, never stored here).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<PortForward>,
+    /// Gen-2 home dataset name, e.g. `tank/rmng/homes/<id>`. `None` on pre-gen-2 rows
+    /// (serde-defaulted so old `state.json` loads); the dataset bind mount on the
+    /// container marks a gen-2 clone, no separate gen label is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+    /// Derived image tag this clone was created from (`rmng-p-<hash>`). Recorded so
+    /// fork and rebase resolve the same base, and delete can purge the tag when no
+    /// remaining clone references it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -288,6 +298,11 @@ pub enum OperationKind {
     #[serde(alias = "bootstrap")]
     Pull,
     Commit,
+    /// Gen-2 one-shot migration of a gen-1 clone (home copy into a fresh dataset +
+    /// container recreate). Auto-filed on boot of the gen-2 server version.
+    Migrate,
+    /// Warm a gen-2 derived image tag without creating (`POST /api/images/prebuild`).
+    Prebuild,
     /// Self-update the control-server: pull a new image + swap the running container.
     Update,
 }

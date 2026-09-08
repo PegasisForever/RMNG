@@ -43,11 +43,7 @@ pub struct ExecResult {
     pub stderr: String,
 }
 
-/// The result of `rmng clone cp`: a tar stream extracted inside a clone.
-///
-/// Unlike [`ExecResult`] this carries no output, because the archive is passed to the
-/// Docker daemon frame by frame and never lands in the control-server's memory. `bytes`
-/// is what the server forwarded, which is the only thing it is in a position to count.
+/// The result of a clone-to-clone copy (retired with `rmng clone cp`): bytes moved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CopyResult {

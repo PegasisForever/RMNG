@@ -41,7 +41,7 @@ use bollard::models::{
     RestartPolicyNameEnum, VolumeCreateOptions,
 };
 use bollard::query_parameters::{
-    CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
     ListImagesOptionsBuilder, RemoveContainerOptionsBuilder,
     RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder,
     StopContainerOptionsBuilder,
@@ -306,6 +306,13 @@ pub struct CreateSpec {
     /// The shared clone media socket *directory* on the host to bind at `/srv/rmng-sock`.
     /// The daemon path is `<this>/clones.sock`; empty skips the mount (dev/test).
     pub sock_source: String,
+    /// Gen-2 home dataset dir on the CT (e.g. `/srv/rmng-homes/<id>`), bound at
+    /// `/home/rmng`. `None` keeps the legacy overlay home (gen-1 behavior).
+    pub dataset_dir: Option<String>,
+    /// Gen-2 homes parent dir on the CT (e.g. `/srv/rmng-homes`), bound at
+    /// `/home/rmng/clones` so every clone sees every home. Only used with
+    /// `dataset_dir`; empty skips the mount.
+    pub homes_dir: String,
 }
 
 /// A desired shared-infra container, the input to [`DockerCtl::ensure_infra_container`].
@@ -1258,18 +1265,22 @@ impl DockerCtl {
         let summaries = self.daemon()?.list_images(Some(opts)).await.context("listing rmng images")?;
         let mut out: Vec<ImageInfo> = summaries
             .into_iter()
-            .map(|s| {
-                let reference =
-                    s.repo_tags.first().cloned().unwrap_or_else(|| s.id.clone());
-                ImageInfo {
-                    id: s.id,
+            .flat_map(|s| {
+                // One row per RepoTag: an image tagged `:latest` + alias resolves via
+                // either tag in `resolve_reference`. Empty tag list falls back to the id.
+                let mut tags = s.repo_tags.clone();
+                if tags.is_empty() {
+                    tags.push(s.id.clone());
+                }
+                tags.into_iter().map(move |reference| ImageInfo {
+                    id: s.id.clone(),
                     reference,
                     size_bytes: s.size,
                     created_at: epoch_to_rfc3339(s.created),
                     base: s.labels.get(LABEL_BASE).map(|v| v == "1").unwrap_or(false),
                     created_from: s.labels.get(LABEL_CREATED_FROM).cloned(),
                     in_use_by: Vec::new(),
-                }
+                })
             })
             .collect();
         // Newest first (created is epoch seconds).
@@ -1277,51 +1288,56 @@ impl DockerCtl {
         Ok(out)
     }
 
-    /// Commit a container to an image at `<name>:latest` — the user-supplied name is the
-    /// full repository (no `rmng/template` namespace); Docker defaults the tag to `latest`.
-    /// With `set_boot_config`,
-    /// bakes the systemd-PID-1 boot overrides so clones off this image stop cleanly
-    /// (gotcha #5): Entrypoint `/sbin/init`, Cmd cleared, `StopSignal=SIGRTMIN+3`, and
-    /// `container=docker` in Env. `labels` are always applied (merged over the boot
-    /// env-derived config); `pause` freezes the container during the commit. Returns the
-    /// new image id. Note: `docker commit` excludes volume mounts, so the clone's inner
-    /// Docker state never enters the image (gotcha #11).
-    pub async fn commit(
+    /// Build `tag` from an in-memory Dockerfile via the local daemon (`FROM` + profile
+    /// lines + `ENV`, rendered by `crate::derived`). Streams step lines into `on_step`;
+    /// any daemon error item fails with the collected log attached. `forcerm` + `pull`
+    /// so a re-pushed base really rebuilds and no intermediate containers linger.
+    pub async fn build_derived_image(
         &self,
-        container: &str,
-        name: &str,
-        set_boot_config: bool,
-        pause: bool,
-        labels: &[(String, String)],
-    ) -> Result<String> {
-        let opts = CommitContainerOptionsBuilder::new()
-            .container(container)
-            // The user's name IS the repository — no `rmng/template` prefix. Docker requires
-            // a tag, so we default it to `latest` (image lists show `<name>:latest`).
-            .repo(name)
-            .tag("latest")
-            .pause(pause)
-            .build();
-
-        let mut label_map: HashMap<String, String> = labels.iter().cloned().collect();
-        // Every RMNG image is a clone source by definition.
-        label_map.entry(LABEL_IMAGE.to_string()).or_insert_with(|| "1".to_string());
-
-        let mut config = ContainerConfig { labels: Some(label_map), ..Default::default() };
-        if set_boot_config {
-            config.entrypoint = Some(vec!["/sbin/init".to_string()]);
-            config.cmd = Some(Vec::new()); // clear inherited Cmd
-            config.stop_signal = Some("SIGRTMIN+3".to_string());
-            config.env = Some(vec!["container=docker".to_string()]);
+        tag: &str,
+        dockerfile: &str,
+        mut on_step: impl FnMut(&str),
+    ) -> Result<()> {
+        let mut tar_bytes: Vec<u8> = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(dockerfile.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "Dockerfile", dockerfile.as_bytes())
+                .context("packing derived Dockerfile")?;
+            builder.into_inner().context("finishing build context")?;
         }
-
-        let res = self
-            .daemon()?
-            .commit_container(opts, config)
-            .await
-            .with_context(|| format!("committing {container} to {name}:latest"))?;
-        tracing::info!(target: "docker", "committed {container} -> {name}:latest ({})", short_id(&res.id));
-        Ok(res.id)
+        let options = bollard::query_parameters::BuildImageOptionsBuilder::default()
+            .dockerfile("Dockerfile")
+            .t(tag)
+            .rm(true)
+            .forcerm(true)
+            .pull("1")
+            .build();
+        let daemon = self.daemon()?;
+        let mut stream =
+            daemon.build_image(options, None, Some(bollard::body_full(tar_bytes.into())));
+        let mut log: Vec<String> = Vec::new();
+        while let Some(item) = stream.next().await {
+            let info = item.map_err(|e| anyhow!("building {tag}: {e}"))?;
+            if let Some(err) = info.error.as_deref().filter(|s| !s.is_empty()) {
+                log.push(format!("error: {err}"));
+                bail!("building {tag} failed:\n{}", log.join("\n"));
+            }
+            if let Some(step) = info.stream.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if log.len() < 200 {
+                    log.push(step.to_string());
+                }
+                on_step(step);
+            }
+        }
+        if !self.image_exists(tag).await? {
+            bail!("building {tag} failed (no error line, image missing):\n{}", log.join("\n"));
+        }
+        Ok(())
     }
 
     /// Remove an image by reference/id. **No force** — a daemon 409 (still in use by a
@@ -1414,6 +1430,26 @@ impl DockerCtl {
         // clones created after the probe saw lxcfs get them; existing containers are
         // untouched.
         mounts.extend(lxcfs_proc_mounts(self.env.read().await.lxcfs_ok));
+        // Gen-2 home: the clone's own dataset at /home/rmng, plus the homes parent
+        // at /home/rmng/clones for the cross-clone view. Absent = gen-1 overlay home.
+        if let Some(dir) = spec.dataset_dir.as_deref().filter(|s| !s.trim().is_empty()) {
+            mounts.push(Mount {
+                target: Some("/home/rmng".to_string()),
+                source: Some(dir.to_string()),
+                typ: Some(MountTypeEnum::BIND),
+                ..Default::default()
+            });
+            if !spec.homes_dir.trim().is_empty() {
+                mounts.push(Mount {
+                    target: Some("/home/rmng/clones".to_string()),
+                    source: Some(spec.homes_dir.clone()),
+                    typ: Some(MountTypeEnum::BIND),
+                    // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
+                    // copies straight across any home. No `read_only` here.
+                    ..Default::default()
+                });
+            }
+        }
 
         let mem = (spec.memory_mb as i64) * 1024 * 1024;
         let host_config = HostConfig {
@@ -1884,36 +1920,29 @@ impl DockerCtl {
         Ok(())
     }
 
-    /// Extract a tar stream inside a running container, at `dst`.
-    ///
-    /// The archive is handed to the daemon frame by frame, so a caller can push a
-    /// multi-hundred-megabyte project through without it ever being held in this
-    /// process. That is the whole difference from [`Docker::upload_tar`], which builds
-    /// its archive in memory and suits the small provisioning payloads it serves.
-    ///
-    /// `dst` has to exist already, because the daemon's extract does not create it.
-    /// Ownership comes from the archive rather than from the running user, so a tar
-    /// written by uid 1000 lands owned by uid 1000.
-    pub async fn upload_tar_stream<S>(&self, container: &str, dst: &str, body: S) -> Result<()>
-    where
-        S: futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static,
-    {
-        self.daemon()?
-            .upload_to_container(
-                container,
-                Some(
-                    bollard::query_parameters::UploadToContainerOptionsBuilder::new()
-                        .path(dst)
-                        .build(),
-                ),
-                bollard::body_try_stream(body),
-            )
-            .await
-            .with_context(|| format!("streaming tar to {container}:{dst}"))?;
-        Ok(())
-    }
-
     // --- exec -------------------------------------------------------------------------
+
+    /// Download a tar archive of `path` inside a container (works on a STOPPED
+    /// container too — the daemon reads the filesystem, not the process). Used by the
+    /// gen-2 migration to copy `/home/rmng` out of a stopped gen-1 container into its
+    /// fresh dataset; the caller extracts the bytes itself.
+    pub async fn download_home_tar(&self, container: &str, path: &str) -> Result<Vec<u8>> {
+        let mut stream = self.daemon()?.download_from_container(
+            container,
+            Some(
+                bollard::query_parameters::DownloadFromContainerOptionsBuilder::new()
+                    .path(path)
+                    .build(),
+            ),
+        );
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let bytes =
+                chunk.with_context(|| format!("downloading {path} from {container}"))?;
+            buf.extend_from_slice(&bytes);
+        }
+        Ok(buf)
+    }
 
     /// The next chunk from an exec's output stream, or an error once it is clear none is
     /// coming.

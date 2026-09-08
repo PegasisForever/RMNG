@@ -1,32 +1,22 @@
-// Clone dialog, network half. Pick a clone-source image, then one of three ticket modes:
+// Clone dialog, network half. Pick a live clone to fork, then one of three ticket modes:
 // paste an existing Linear ticket (link or `WE-142`); create a new ticket (team key + title +
 // rich-text description); or a plain no-ticket clone (title + optional first message).
 //
-// Four things live here and nowhere below: the config read that supplies the presets and the
-// account pools, the Linear round trip that turns a ticket mode into a real issue, the clone
-// POST, and the operation the POST returns. The dialog stays open on that operation and closes
-// only when it settles, which is why the op list is a prop rather than something the View could
-// ever have. The markup is CloneModalView.
+// Gen-2 rule: this dialog ALWAYS forks. The source picker lists live clones, never template
+// images (template create has its own modal), and submit files `POST /api/fork` with the
+// ticket mode's answer plus preset/accounts/instructions; omitted fields inherit the
+// source's bindings server-side. Key handling, account fields, and instruction boxes
+// below feed that payload.
 //
-// **Both ticket modes talk to Linear from here.** The existing-ticket tab looks the issue up by
-// identifier, the new-ticket tab opens one, and either way it is moved to In Progress and the
-// resolved metadata is posted to `/api/clone`. The server holds no key and makes no call. The
-// move is best effort, the same as the server call it replaces: a workflow column is not worth
-// failing a clone over.
-//
-// **The preset is never picked by hand in the ticket modes** — it follows the team key
-// (`pick_preset_by_prefix`, mirrored client-side in `~/lib/cloneDraft`), and the dialog shows
-// which one resolved. The account group follows the resolved preset's default; the group
-// control is an *override* that only matters when the operator wants a different pool.
-//
-// The hostname derives from the ticket id (`WE-142` → `pega-we-142`) or the title slug. That
-// one step stays server-side in every mode: it needs the live clone list to guarantee the
-// hostname is free, which no client can see.
+// Three things live here and nowhere below: the config read that supplies the presets and
+// the account pools, the fork POST, and the operation the POST returns. The dialog stays
+// open on that operation and closes only when it settles, which is why the op list is a
+// prop rather than something the View could ever have. The markup is CloneModalView.
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 import { CloneModalView } from "~/components/CloneModalView";
-import { getConfig, type ClonePayload } from "~/lib/api";
-import { toLinearMarkdown } from "~/lib/linear/assets";
+import { getConfig } from "~/lib/api";
+import { keysForTeam, issueCreate } from "~/lib/linear/mutations";
 import {
   cloneLinearMeta,
   ensureInProgress,
@@ -35,12 +25,8 @@ import {
   resolvedFromTicket,
   type ResolvedIssue,
 } from "~/lib/linear/issues";
-import { issueCreate, keysForTeam } from "~/lib/linear/mutations";
-import {
-  lastCloneImage,
-  preferredCloneImage,
-  rememberCloneImage,
-} from "~/lib/lastCloneImage";
+import { toLinearMarkdown } from "~/lib/linear/assets";
+import type { ForkPayload } from "~/lib/api";
 import {
   cloneDraftValid,
   emptyCloneDraft,
@@ -52,7 +38,6 @@ import {
 } from "~/lib/cloneDraft";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
-import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import { parseTicketInput } from "~/lib/workspace";
 
@@ -61,53 +46,55 @@ import { parseTicketInput } from "~/lib/workspace";
 const MarkdownEditorContainer = lazy(() => import("~/components/MarkdownEditorContainer"));
 
 export function CloneModalContainer({
-  images,
-  imagesLoading,
+  clones,
+  clonesLoading,
   operations,
-  parentCandidate,
   accounts,
   initialTicket = "",
+  initialSource = null,
   onClose,
-  onClone,
+  onFork,
 }: {
-  /** Clone-source images to pick from (from `listImages`). */
-  images: ImageInfo[];
-  imagesLoading: boolean;
-  /** Live operations from the SSE state — the started clone op is tracked through these. */
+  /** Live clones to fork from; the dialog shows only forkable rows (managed, not archived). */
+  clones: Clone[];
+  clonesLoading: boolean;
+  /** Live operations from the SSE state — the started fork op is tracked through these. */
   operations: Operation[];
-  /** The currently selected clone, offered as a sub-clone parent. Null = nothing selected,
-   *  or the selection can't be a parent (unmanaged, or already a sub clone). */
-  parentCandidate: Clone | null;
   /** Imported accounts (both providers), so the two pickers can label each with its usage. */
   accounts: ClaudeUsage[];
   /** Seeds the existing-ticket field, e.g. from a ticket dragged onto a board column. A
    *  Linear URL is enough: the same parser reads an id out of a link or a bare `WE-142`,
    *  so the preset auto-selects from it exactly as it would from typing. */
   initialTicket?: string;
+  /** Pre-selects a source clone, e.g. from the clone's own menu. Null = pick by hand. */
+  initialSource?: string | null;
   onClose: () => void;
-  /** Starts the clone and resolves with the driving Operation. The dialog stays open,
-   *  showing its progress, until the operation settles. */
-  onClone: (image: string, payload: ClonePayload) => Promise<Operation>;
+  /** Starts the fork and resolves with the driving Operation. The dialog stays open,
+   *  showing its progress, until the operation settles. Payload carries the ticket
+   *  mode's answer plus preset/accounts/instructions; omitted fields inherit server-side. */
+  onFork: (source: string, headless: boolean, payload: ForkPayload) => Promise<Operation>;
 }) {
-  const [draft, setDraft] = useState<CloneDraft>(() => emptyCloneDraft(initialTicket));
+  const [draft, setDraft] = useState<CloneDraft>(() => ({
+    ...emptyCloneDraft(initialTicket),
+    source: initialSource,
+  }));
   const update = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>
       setDraft((d) => ({ ...d, [key]: value })),
     [],
   );
-  // The instant the dialog opened, for the image rows' ages. It does not tick: an image is
-  // days old and nobody keeps this dialog open long enough for "6d ago" to turn into "7d".
-  const [now] = useState(() => Date.now());
-
-  // Which image a fresh dialog starts on. This is a session read (the last image actually
-  // cloned from, remembered in localStorage), so it is resolved here and the picker is told
-  // the answer. It re-runs when the list arrives, and skips whenever the operator has already
-  // picked one that still exists.
+  // Only live managed clones can be forked: archived ones are stopped and retained, and
+  // unmanaged rows are not ours to snapshot. Pre-select the first forkable row on a fresh
+  // dialog, and skip whenever the operator has already picked one that still qualifies.
+  const sources = useMemo(
+    () => clones.filter((c) => c.managed && !c.archived),
+    [clones],
+  );
   useEffect(() => {
-    if (draft.image && images.some((i) => i.reference === draft.image)) return;
-    const preferred = preferredCloneImage(images, lastCloneImage());
-    if (preferred) update("image", preferred);
-  }, [images, draft.image, update]);
+    if (draft.source && sources.some((c) => c.id === draft.source)) return;
+    if (sources.length > 0) update("source", sources[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clones]);
 
   // Account pools and presets (from config).
   const [claudeGroups, setClaudeGroups] = useState<CloneGroup[]>([]);
@@ -116,7 +103,7 @@ export function CloneModalContainer({
   // Config settled (loaded or failed). `presets` starts empty, which is indistinguishable
   // from "none configured" — without this the missing-key warning flashes on every open.
   const [configLoaded, setConfigLoaded] = useState(false);
-  // The started clone operation: its id once the POST returns, plus a local error.
+  // The started fork operation: its id once the POST returns, plus a local error.
   const [opId, setOpId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -178,7 +165,7 @@ export function CloneModalContainer({
     if (op) setOpSeen(true);
     if (op?.status === "error") {
       setFailed(true);
-      setError(op.message || "the clone failed");
+      setError(op.message || "the fork failed");
     }
   }, [op]);
   useEffect(() => {
@@ -200,7 +187,7 @@ export function CloneModalContainer({
     <p className="px-3 text-xs text-slate-400 dark:text-slate-500">Loading editor…</p>
   );
 
-  /** The issue this clone is for, and the key proven to reach it.
+  /** The issue this fork is for, and the key proven to reach it.
    *
    *  Existing-ticket looks it up by identifier across every configured key. New-ticket opens
    *  one with the key of the preset that claims the team. Both answer the same pair, so the
@@ -215,57 +202,51 @@ export function CloneModalContainer({
     }
     const team = draft.team.trim();
     const key = keysForTeam(presets, team)[0] ?? "";
-    // The editor holds every pasted image behind `/api/linear/asset`, because that is the only
-    // source an `<img>` on this page can load. Linear gets the `uploads.linear.app` URL back,
-    // so the issue reads correctly for everyone who is not on this LAN. This is the last place
-    // the body is ours.
     const ticket = await issueCreate(key, {
       team,
       title: draft.title.trim(),
       description: toLinearMarkdown(draft.description),
       ...(draft.priority > 0 ? { priority: draft.priority } : {}),
-      // No assignee: `issueCreate` falls back to the key's own owner, which is you, and the
-      // clone about to be made is yours.
     });
     return { issue: resolvedFromTicket(ticket), key };
   }
 
-  /** What `POST /api/clone` is sent, once Linear has answered.
+  /** What `POST /api/fork` is sent, once Linear has answered.
    *
-   *  The no-ticket tab reaches no network here at all. It has no issue to resolve, and its
-   *  payload is the same one it has always sent. */
-  async function buildPayload(
-    common: { claudeAccount?: string; codexAccount?: string; headless?: boolean; parent?: string },
-    extra: { agentInstructions?: string; claudeInstructions?: string },
-  ): Promise<ClonePayload> {
+   *  The no-ticket tab reaches no network here at all. Ticket tabs resolve the issue,
+   *  move it to In Progress best-effort, and send its metadata; the server applies it
+   *  onto the fork, replacing the source's ticket context. */
+  async function buildForkPayload(): Promise<ForkPayload> {
+    const base: ForkPayload = {
+      ...(preset ? { preset: preset.name } : {}),
+      ...(draft.claudeAccount ? { claudeAccount: draft.claudeAccount } : {}),
+      ...(draft.codexAccount ? { codexAccount: draft.codexAccount } : {}),
+      ...(draft.mode !== "plain" && draft.agentInstructions.trim()
+        ? { agentInstructions: draft.agentInstructions.trim() }
+        : {}),
+      ...(draft.mode !== "plain" && draft.claudeInstructions.trim()
+        ? { claudeInstructions: draft.claudeInstructions.trim() }
+        : {}),
+    };
     if (draft.mode === "plain") {
       return {
-        plain: { title: draft.title.trim(), message: draft.message.trim() },
-        preset: draft.plainPreset || undefined,
-        ...common,
+        ...base,
+        linear: { displayName: draft.title.trim() || undefined },
+        ...(draft.message.trim() ? { firstMessage: draft.message.trim() } : {}),
       };
     }
     const { issue, key } = await resolveIssue();
-    // Best effort, exactly as the server call it replaces was: it only warned. A ticket that
-    // will not move is still a ticket worth cloning.
     try {
       await ensureInProgress(key, issue);
     } catch (e) {
       console.warn(`could not move ${issue.identifier} to In Progress:`, e);
     }
-    return {
-      linear: cloneLinearMeta(issue),
-      ...extra,
-      // Omitted when no preset claims the team, which leaves the server to auto-select by the
-      // ticket's prefix, the same fallback the `{ticket}` mode has always relied on.
-      preset: preset?.name,
-      ...common,
-    };
+    return { ...base, linear: cloneLinearMeta(issue) };
   }
 
   function submit() {
-    const image = draft.image;
-    if (!valid || busy || !image) return;
+    const source = draft.source;
+    if (!valid || busy || !source) return;
     // Clear the previous attempt so a retry after a failure tracks the NEW op, not the old
     // failed one (which is still in `operations` for another minute before it's pruned).
     setError(null);
@@ -273,24 +254,12 @@ export function CloneModalContainer({
     setOpSeen(false);
     setFailed(false);
     setStarting(true);
-    // A blank override means "let the server resolve it" (preset default → first group),
-    // so it's omitted rather than sent as an empty name.
-    const common = {
-      claudeAccount: draft.claudeAccount || undefined,
-      codexAccount: draft.codexAccount || undefined,
-      headless: draft.headless || undefined,
-      parent: draft.asSubClone && parentCandidate ? parentCandidate.id : undefined,
-    };
-    const extra: { agentInstructions?: string; claudeInstructions?: string } = {};
-    if (draft.agentInstructions.trim()) extra.agentInstructions = draft.agentInstructions.trim();
-    if (draft.claudeInstructions.trim()) extra.claudeInstructions = draft.claudeInstructions.trim();
-
-    buildPayload(common, extra)
-      .then((payload) => onClone(image, payload))
-      .then((started) => {
-        rememberCloneImage(image);
-        setOpId(started.id);
-      })
+    // Ticket tabs resolve Linear first (existing: lookup, new: open + move to In
+    // Progress); the answer rides the fork payload and replaces the source context.
+    // Plain mode sends only its display name + optional first message.
+    buildForkPayload()
+      .then((payload) => onFork(source, draft.headless, payload))
+      .then((started) => setOpId(started.id))
       .catch((e: Error) => setError(e.message))
       .finally(() => setStarting(false));
   }
@@ -299,9 +268,8 @@ export function CloneModalContainer({
     <CloneModalView
       draft={draft}
       onDraftChange={update}
-      images={images}
-      imagesLoading={imagesLoading}
-      now={now}
+      clones={sources}
+      clonesLoading={clonesLoading}
       accounts={accounts}
       claudeGroups={claudeGroups}
       codexGroups={codexGroups}
@@ -310,7 +278,6 @@ export function CloneModalContainer({
       parsedTicket={parsedTicket}
       preset={preset}
       linearKeyMissing={keyMissing}
-      parentCandidate={parentCandidate}
       descriptionEditor={
         // Held back until the config lands, because the key is what decides where a pasted
         // image goes. An editor mounted without one uploads to this server's `/uploads`, and

@@ -1,19 +1,17 @@
 // The clone dialog's form model, as a story hands it over.
 //
-// The base is the real initial state (`emptyCloneDraft`) with a source image already picked,
-// because that is what the operator sees a beat after the dialog opens: the picker chooses
-// the last-cloned-from image on its own, and nothing else is filled in. Layer a tab and its
-// fields on top of that.
+// The base is the real initial state (`emptyCloneDraft`) with a source clone already
+// picked, because that is what the operator sees a beat after the dialog opens: the picker
+// chooses the first forkable clone on its own. The new clone id is derived server-side
+// from the ticket or title, so no id field exists. Layer a tab and its fields on top of that.
 
 import { emptyCloneDraft, type CloneDraft } from "~/lib/cloneDraft";
 
-import { makeImage } from "./images";
-
-/** The image reference the picker settles on, matching the base image fixture. */
-export const cloneImage: string = makeImage().reference;
+/** The source clone id the picker settles on, matching the first clone fixture. */
+export const cloneSource: string = "pega-we-142";
 
 export function makeCloneDraft(overrides: Partial<CloneDraft> = {}): CloneDraft {
-  return { ...emptyCloneDraft(), image: cloneImage, ...overrides };
+  return { ...emptyCloneDraft(), source: cloneSource, ...overrides };
 }
 
 /** A Linear link of the shape a dragged ticket card seeds the field with. The parser reads an

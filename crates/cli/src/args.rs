@@ -70,9 +70,6 @@ pub struct CreateArgs {
     /// Clone-source image reference to create from (see `rmng image ls`)
     #[arg(long)]
     pub from: String,
-    /// Copy this directory from the calling clone before the new clone becomes ready. Repeat for multiple directories.
-    #[arg(long, value_name = "PATH")]
-    pub seed: Vec<String>,
     /// Claude account for the new clone: an email, `auto`, `none`, or `group:<pool>`.
     /// Omitted inherits the parent's selection (inside a clone), else `auto`.
     #[arg(long)]
@@ -211,6 +208,44 @@ pub enum CloneCmd {
         #[command(flatten)]
         wait: WaitArgs,
     },
+    /// Fork a gen-2 clone: snapshot + clone the source home, create from its recorded
+    /// base tag (`rmng clone fork <source> <new-id>`).
+    Fork {
+        /// Source gen-2 clone id
+        source: String,
+        /// New clone id (DNS label, must be unused)
+        new_id: String,
+        /// Headless (no desktop) fork
+        #[arg(long)]
+        headless: bool,
+        /// Env preset name override (omitted inherits the source preset)
+        #[arg(long)]
+        preset: Option<String>,
+        /// Claude account override: an email, `auto`, `none`, or `group:<pool>`
+        /// (omitted inherits the source selection)
+        #[arg(long)]
+        claude_account: Option<String>,
+        /// Codex account override, same forms
+        #[arg(long)]
+        codex_account: Option<String>,
+        /// First message sent to the fork's agent on boot
+        /// (omitted sends nothing unless a ticket URL is inherited)
+        #[arg(long)]
+        message: Option<String>,
+        #[command(flatten)]
+        wait: WaitArgs,
+    },
+    /// Rebase a gen-2 clone onto a new base tag, keeping its dataset and id
+    /// (`rmng clone rebase <clone> --tag <tag>`).
+    Rebase {
+        /// Clone id
+        clone: String,
+        /// New base image tag for the clone's system image
+        #[arg(long)]
+        tag: String,
+        #[command(flatten)]
+        wait: WaitArgs,
+    },
     /// Print the ready-to-paste `ssh` command for a clone
     Ssh {
         /// Clone id
@@ -236,27 +271,6 @@ pub enum CloneCmd {
         /// The command argv, after `--` (e.g. `rmng clone exec c -- ls -la`)
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
-    },
-    /// Copy a directory from this machine into a clone (`rmng clone cp ./src c:/home/rmng/src`)
-    Cp {
-        /// Source directory on this machine
-        src: String,
-        /// Destination as `<clone>:<absolute-path>`
-        dest: String,
-        /// Directory name to leave out, anchored at the top of SRC (repeatable)
-        #[arg(long)]
-        exclude: Vec<String>,
-    },
-    /// Like `cp`, but make the destination match: files it has and the source does not are deleted
-    Sync {
-        /// Source as `<clone>:<absolute-path>` (a local source is not supported here)
-        src: String,
-        /// Destination as `<clone>:<absolute-path>`
-        dest: String,
-        /// Directory name to leave out, anchored at the top of SRC (repeatable). An excluded
-        /// name is left alone at the destination rather than deleted
-        #[arg(long)]
-        exclude: Vec<String>,
     },
     /// Print the calling clone's own record (fails outside a clone)
     #[command(name = "self")]
@@ -295,16 +309,6 @@ pub enum ImageCmd {
     Pull {
         /// Registry reference (e.g. pegasis0/rmng-template:latest)
         reference: Option<String>,
-        #[command(flatten)]
-        wait: WaitArgs,
-    },
-    /// Commit a running clone to a new clone-source image `<name>:latest`
-    Commit {
-        /// Clone id to commit
-        clone: String,
-        /// Image name (DNS label; becomes the repo of `<name>:latest`)
-        #[arg(long = "as", value_name = "NAME")]
-        as_name: String,
         #[command(flatten)]
         wait: WaitArgs,
     },
@@ -828,19 +832,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn image_commit_takes_name_as_flag() {
-        let cli = Cli::parse_from(["rmng", "image", "commit", "w-cp", "--as", "myimg"]);
-        assert!(matches!(
-            cli.cmd,
-            Cmd::Image(ImageCmd::Commit { ref clone, ref as_name, .. })
-                if clone == "w-cp" && as_name == "myimg"
-        ));
-        // --as is required.
-        assert!(Cli::try_parse_from(["rmng", "image", "commit", "w-cp"]).is_err());
-    }
-
-    #[test]
+        #[test]
     fn account_ls_provider_enum() {
         let cli = Cli::parse_from(["rmng", "account", "ls", "--provider", "codex"]);
         assert!(matches!(
@@ -849,31 +841,6 @@ mod tests {
         ));
         // Bad provider rejected.
         assert!(Cli::try_parse_from(["rmng", "account", "ls", "--provider", "bogus"]).is_err());
-    }
-
-    #[test]
-    fn clone_create_accepts_multiple_seed_directories() {
-        let cli = Cli::parse_from(["rmng", "clone", "create", "seed-test", "--from", "template:latest", "--seed", "/home/rmng/project", "--seed", "/home/rmng/tools"]);
-        let Cmd::Clone(CloneCmd::Create { common, .. }) = cli.cmd else { panic!("expected clone create") };
-        assert_eq!(common.seed, vec!["/home/rmng/project", "/home/rmng/tools"]);
-    }
-
-    #[test]
-    fn clone_cp_takes_a_clone_qualified_destination() {
-        let cli = Cli::parse_from([
-            "rmng", "clone", "cp", "/home/rmng/proj", "agt-1:/home/rmng/proj", "--exclude",
-            "target", "--exclude", "dist",
-        ]);
-        match cli.cmd {
-            Cmd::Clone(CloneCmd::Cp { src, dest, exclude }) => {
-                assert_eq!(src, "/home/rmng/proj");
-                assert_eq!(dest, "agt-1:/home/rmng/proj");
-                assert_eq!(exclude, vec!["target".to_string(), "dist".to_string()]);
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-        // Both positionals are required.
-        assert!(Cli::try_parse_from(["rmng", "clone", "cp", "/only/src"]).is_err());
     }
 
     #[test]
@@ -910,23 +877,6 @@ mod tests {
         match cli.cmd {
             Cmd::Clone(CloneCmd::CreatePlain { common, .. }) => {
                 assert_eq!(common.column.as_deref(), Some("Done"));
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn clone_sync_is_a_separate_verb_from_cp() {
-        match Cli::parse_from([
-            "rmng", "clone", "sync", "a:/home/rmng/proj", "b:/home/rmng/proj",
-            "--exclude", "target",
-        ])
-        .cmd
-        {
-            Cmd::Clone(CloneCmd::Sync { src, dest, exclude }) => {
-                assert_eq!(src, "a:/home/rmng/proj");
-                assert_eq!(dest, "b:/home/rmng/proj");
-                assert_eq!(exclude, vec!["target".to_string()]);
             }
             other => panic!("wrong cmd: {other:?}"),
         }

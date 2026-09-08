@@ -19,6 +19,8 @@ export function makePreset(overrides: Partial<PresetRedacted> = {}): PresetRedac
     vars: [],
     agentPlaybook: "",
     globalPrompt: "",
+    image: null,
+    profileLines: null,
     ...overrides,
   };
 }

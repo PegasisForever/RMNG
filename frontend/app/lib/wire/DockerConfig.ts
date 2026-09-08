@@ -70,4 +70,24 @@ buildkitImage: string,
  * BuildKit cache GC ceiling in GiB (`keepBytes`). Caps the shared layer cache so it
  * cannot grow unbounded. A change triggers a `rmng-buildkit` recreate at next boot.
  */
-buildkitCacheGb: number, };
+buildkitCacheGb: number, 
+/**
+ * Extra Dockerfile lines appended (after the `FROM <base>`) when building a gen-2
+ * derived image (`rmng-p-<hash>`). Edited in Settings by anyone (single user,
+ * trusted network, no auth); `None`/empty means the base image builds unchanged.
+ * No secrets here — Linear keys and account picks stay on presets.
+ */
+profileLines: string | null, 
+/**
+ * Template home seed snapshot (`<dataset>@<snap>`). A create clones the new home
+ * from it by default, so template clones start with content; empty means a fresh
+ * home. Seed refresh is manual.
+ */
+seedSnapshot: string | null, 
+/**
+ * Parent ZFS dataset for all gen-2 clone homes (`<this>/<clone-id>`), mounted
+ * into the outer CT once at `/srv/rmng-homes`. Per-machine: the pool name differs
+ * per host (e.g. `tank/rmng/homes` vs `rpool/rmng/homes`). Immediate-apply (read
+ * fresh per zfs call); changing it does not move existing datasets.
+ */
+homesParent: string, };

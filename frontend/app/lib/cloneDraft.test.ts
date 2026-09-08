@@ -57,9 +57,9 @@ test("a pruned FAILED op stays failed rather than reading as done", () => {
 // --- preset resolution (mirrors the server, per tab) ---------------------------------
 
 const presets: PresetRedacted[] = [
-  { name: "work", labels: ["WE", "DEV"], linearKey: "lin_api_fixture", claudeAccount: "group:pooled", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "" },
-  { name: "side", labels: ["AW"], linearKey: "", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "" },
-  { name: "bare", labels: [], linearKey: "", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "" },
+  { name: "work", labels: ["WE", "DEV"], linearKey: "lin_api_fixture", claudeAccount: "group:pooled", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "", image: null, profileLines: null },
+  { name: "side", labels: ["AW"], linearKey: "", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "", image: null, profileLines: null },
+  { name: "bare", labels: [], linearKey: "", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "", image: null, profileLines: null },
 ];
 
 test("the no-ticket tab uses the hand-picked preset", () => {
@@ -105,7 +105,7 @@ test("a key claimed by two presets goes to the first in config order", () => {
   // would, or the dialog names one preset and the clone gets another.
   const shadowed: PresetRedacted[] = [
     ...presets,
-    { name: "late", labels: ["WE"], linearKey: "lin_api_fixture", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "" },
+    { name: "late", labels: ["WE"], linearKey: "lin_api_fixture", claudeAccount: "", codexAccount: "", vars: [], agentPlaybook: "", globalPrompt: "", image: null, profileLines: null },
   ];
 
   expect(teamKeysOf(shadowed).find((t) => t.key === "we")?.preset.name).toBe("work");
@@ -157,7 +157,7 @@ test("looking a ticket up needs ANY preset's key", () => {
 
 const draft = (overrides: Partial<CloneDraft> = {}): CloneDraft => ({
   ...emptyCloneDraft(),
-  image: "pegasis0/rmng-template:latest",
+  source: "pega-we-142",
   ...overrides,
 });
 
@@ -178,11 +178,11 @@ const check = (
     ...overrides,
   });
 
-test("no source image blocks every tab", () => {
-  // The image is the one field shared by all three requests, and the picker can be empty.
-  expect(check(draft({ image: null }), { ticketParsed: true, preset: work })).toBe(false);
-  expect(check(draft({ image: null, mode: "create", team: "we", title: "x" }))).toBe(false);
-  expect(check(draft({ image: null, mode: "plain", title: "x", plainPreset: "work" }))).toBe(false);
+test("no source clone blocks every tab", () => {
+  // The source is the one field shared by all three requests, and the picker can be empty.
+  expect(check(draft({ source: null }), { ticketParsed: true, preset: work })).toBe(false);
+  expect(check(draft({ source: null, mode: "create", team: "we", title: "x" }))).toBe(false);
+  expect(check(draft({ source: null, mode: "plain", title: "x", plainPreset: "work" }))).toBe(false);
 });
 
 test("an existing ticket needs both a parse and a preset that claims its prefix", () => {

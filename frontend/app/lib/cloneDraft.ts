@@ -14,8 +14,9 @@ export type CloneMode = "existing" | "create" | "plain";
 /** Everything the operator can type or pick in the dialog. One editable model, edited through
  *  a single `updateField`, so the View takes two props for the form instead of thirty. */
 export interface CloneDraft {
-  /** Clone-source image reference; null until the picker settles on one. */
-  image: string | null;
+  /** Source clone id to fork; null until the picker settles on one. Gen-2 rule: the
+   *  dialog always forks a live clone, never a template image. */
+  source: string | null;
   mode: CloneMode;
   /** Existing-ticket tab: a Linear link or a bare `WE-142`. */
   ticket: string;
@@ -46,15 +47,13 @@ export interface CloneDraft {
   plainPreset: string;
   /** Headless clone: no desktop, so the viewer shows a tmux tab view instead of a stream. */
   headless: boolean;
-  /** Nest the new clone under the offered parent. */
-  asSubClone: boolean;
 }
 
 /** The form as the dialog opens it. `ticket` is seeded when something opened the dialog with
  *  a ticket in hand (a card dragged onto a column, or a ticket's own menu). */
 export function emptyCloneDraft(ticket = ""): CloneDraft {
   return {
-    image: null,
+    source: null,
     mode: "existing",
     ticket,
     team: "",
@@ -68,7 +67,6 @@ export function emptyCloneDraft(ticket = ""): CloneDraft {
     codexAccount: "",
     plainPreset: "",
     headless: false,
-    asSubClone: false,
   };
 }
 
@@ -148,9 +146,9 @@ export function linearKeyMissing(
 }
 
 /**
- * Whether the Clone button may fire.
+ * Whether the Fork button may fire.
  *
- * A source image is always required; then: `existing` needs a parseable ticket AND a preset
+ * A source clone is always required; then: `existing` needs a parseable ticket AND a preset
  * that claims its prefix — with the preset dropdown gone there is no way to override the
  * auto-selection, so a prefix nothing claims is a request the server would 400; `create` needs
  * a team key + title; `plain` a title + a preset whenever any are configured.
@@ -162,12 +160,15 @@ export function cloneDraftValid(
     preset,
     ticketParsed,
     keyMissing,
+    needsSource = true,
   }: {
     presets: PresetRedacted[];
     preset: PresetRedacted | undefined;
     /** Whether `parseTicketInput` found an id in `draft.ticket`. */
     ticketParsed: boolean;
     keyMissing: boolean;
+    /** False for template create, which picks an image instead of a source clone. */
+    needsSource?: boolean;
   },
 ): boolean {
   const modeValid =
@@ -176,7 +177,7 @@ export function cloneDraftValid(
       : draft.mode === "create"
         ? draft.title.trim().length > 0 && draft.team.trim().length > 0
         : draft.title.trim().length > 0 && (presets.length === 0 || !!draft.plainPreset);
-  return !!draft.image && modeValid && !keyMissing;
+  return (!needsSource || !!draft.source) && modeValid && !keyMissing;
 }
 
 /** What the dialog should do about the clone operation it started. */

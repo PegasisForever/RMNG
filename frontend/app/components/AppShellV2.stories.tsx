@@ -113,6 +113,7 @@ function NotesFixture() {
 // than rendering it on top of the board. The page story then shows the page, and every state
 // a dialog can be in lives in one place instead of being reachable only through here.
 const toCloneModal = makeStoryLink("Clone/Components/CloneModalView", "Default");
+const toTemplateModal = makeStoryLink("Clone/Components/TemplateModalView", "Default");
 const toCloneModalFromTicket = makeStoryLink("Clone/Components/CloneModalView", "FromTicket");
 const toSettings = makeStoryLink("Settings/Components/SettingsPanelView", "Default");
 const toImportAccount = makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn");
@@ -172,6 +173,7 @@ function makeRail() {
     activeLayout: "Default",
     onActivateLayout: fn(),
     onOpenSettings: toSettings,
+    onNewTemplateClone: toTemplateModal,
     onImportAccount: toImportAccount,
     onReplaceAccount: toImportAccount,
     onRefresh: fn(),
@@ -219,7 +221,6 @@ function makeBoard() {
     bastionPort: 2222,
     onSelectClone: fn(),
     onDeleteClone: fn(),
-    onCommitClone: fn(),
     onChangeAccountClone: toChangeAccount,
     onPortForwardClone: toPortForward,
     onArchiveClone: fn(),

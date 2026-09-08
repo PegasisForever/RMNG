@@ -12,7 +12,6 @@ import {
 } from "./__fixtures__/accounts";
 import { cloneTicketUrl, makeCloneDraft } from "./__fixtures__/cloneDialog";
 import { makeCloneWorking } from "./__fixtures__/clones";
-import { imagesNow, makeImages } from "./__fixtures__/images";
 import { makeOperation } from "./__fixtures__/operations";
 import { makeClonePresets } from "./__fixtures__/presets";
 import {
@@ -64,12 +63,16 @@ function form(draft: CloneDraft, presets: PresetRedacted[] = makeClonePresets())
  *  into state today, but a builder called once at module load is the shape that starts
  *  leaking the moment something does, so each story gets its own. */
 function sources() {
+  const clones = [
+    makeCloneWorking(),
+    makeCloneWorking({ id: "pega-dev-88", linearTicket: undefined }),
+    makeCloneWorking({ id: "pega-ops-7", linearTicket: undefined }),
+  ];
   return {
-    images: makeImages(),
+    clones,
     accounts: makeClaudeAccounts(accountsNow),
     claudeGroups: makeCloneGroups(),
     codexGroups: makeCodexGroups(),
-    parentCandidate: makeCloneWorking(),
   };
 }
 
@@ -89,10 +92,7 @@ const meta = {
   parameters: { layout: "fullscreen" },
   args: {
     ...sources(),
-    imagesLoading: false,
-    // The clock the image rows' ages are measured against, pinned to the same instant the
-    // image fixtures are written for.
-    now: imagesNow,
+    clonesLoading: false,
     descriptionEditor,
     busy: false,
     error: null,
@@ -107,19 +107,19 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** How the dialog opens from a column's own New clone button: an image already picked, the
- *  Existing-ticket tab, and nothing typed. Clone is dead until a ticket parses. */
+/** How the dialog opens from a column's own New clone button: a source clone already
+ *  picked and the Existing-ticket tab. Fork stays dead until a ticket parses. */
 export const Default: Story = { args: { ...sources() } };
 
 /** Opened by a ticket — dragged onto a column, or from the ticket panel's own button. The
- *  link is already in the field, so the id, the hostname and the preset are all resolved
- *  before the operator has done anything, and Clone is live. */
+ *  link is already in the field, so the preset and the button resolve before the operator
+ *  has done anything else, and Fork is live. */
 export const FromTicket: Story = {
   args: { ...sources(), ...form(makeCloneDraft({ ticket: cloneTicketUrl })) },
 };
 
 /** The New-ticket tab. The team dropdown is also the preset selector, so the resolved-preset
- *  line is gone; the description editor takes its place, and the button reads Create & clone. */
+ *  line is gone; the description editor takes its place, and the button reads Fork clone. */
 export const NewTicket: Story = {
   args: {
     ...sources(),
@@ -146,7 +146,7 @@ export const NoTicket: Story = {
 
 /** A validation failure the operator cannot type their way out of: creating a ticket needs
  *  the resolved preset's own Linear key, and this team's preset has none. The warning names
- *  the preset and Clone stays dead until they pick another team or add the key. */
+ *  the preset and Fork stays dead until they pick another team or add the key. */
 export const MissingLinearKey: Story = {
   args: {
     ...sources(),
@@ -154,14 +154,14 @@ export const MissingLinearKey: Story = {
   },
 };
 
-/** The clone is running. The form and both buttons lock, Escape is swallowed rather than
+/** The fork is running. The form and both buttons lock, Escape is swallowed rather than
  *  closing over the operation, and the op's own progress renders under the fields. */
-export const Cloning: Story = {
+export const Forking: Story = {
   args: {
     ...sources(),
     ...form(makeCloneDraft({ ticket: cloneTicketUrl })),
     busy: true,
-    operation: makeOperation({ target: "pega-we-142", source: makeImages()[0].reference }),
+    operation: makeOperation({ target: "pega-we-143", source: "pega-we-142" }),
   },
 };
 
@@ -171,12 +171,12 @@ export const WithError: Story = {
   args: {
     ...sources(),
     ...form(makeCloneDraft({ ticket: cloneTicketUrl })),
-    error: "clone: no image named pegasis0/rmng-template:latest",
+    error: "fork: a clone named 'pega-we-143' already exists",
   },
 };
 
 /** The dialog wired to local state instead of the container: every field edits, switching
- *  tabs re-derives the preset and the Clone button, and Clone runs a stand-in operation that
+ *  tabs re-derives the preset and the Fork button, and Fork runs a stand-in operation that
  *  finishes after a beat. */
 export const Interactive: Story = {
   args: { ...sources() },
