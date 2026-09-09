@@ -1310,6 +1310,10 @@ async fn run_rebase(app: App, op_id: String, host_id: String, preset_name: Strin
         };
     let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await;
     let (playbook, prompt) = gen2_playbook_prompt(&app, row.preset_name.as_deref());
+    // An archived clone rests stopped, but the swap below boots a container (and the
+    // rollback arm recreates one too). Remember the rest state and put it back down
+    // afterwards; if the stop fails the archived-state reconciler stops it instead.
+    let was_archived = row.archived;
     match rebase_clone(
         &app,
         &host_id,
@@ -1323,6 +1327,14 @@ async fn run_rebase(app: App, op_id: String, host_id: String, preset_name: Strin
     .await
     {
         Ok(tag) => {
+            if was_archived {
+                if let Err(e) = app.docker.stop_even_if_paused(&host_id).await {
+                    tracing::warn!(
+                        target: "clone",
+                        "rebase of archived clone '{host_id}': rest stop failed: {e:#}"
+                    );
+                }
+            }
             app.store.mutate(|s| {
                 if let Some(h) = s.hosts.iter_mut().find(|h| h.id == host_id) {
                     h.base_tag = Some(tag.clone());
@@ -1332,13 +1344,28 @@ async fn run_rebase(app: App, op_id: String, host_id: String, preset_name: Strin
                     op.status = OperationStatus::Done;
                     op.step = "done".into();
                     op.pct = 100.0;
-                    op.message = format!("clone {host_id} rebased onto {tag}");
+                    op.message = if was_archived {
+                        format!("clone {host_id} rebased onto {tag} (stays archived)")
+                    } else {
+                        format!("clone {host_id} rebased onto {tag}")
+                    };
                     op.finished_at = Some(now_ms());
                 }
             });
             schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
         }
-        Err(e) => fail_op(&app, &op_id, format!("{e:#}")),
+        Err(e) => {
+            if was_archived {
+                // The rollback recreates from the old tag, which also boots: rest it.
+                if let Err(rb) = app.docker.stop_even_if_paused(&host_id).await {
+                    tracing::warn!(
+                        target: "clone",
+                        "rebase of archived clone '{host_id}': rest stop failed: {rb:#}"
+                    );
+                }
+            }
+            fail_op(&app, &op_id, format!("{e:#}"))
+        }
     }
 }
 

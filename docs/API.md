@@ -35,12 +35,13 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | PUT | `/api/board` | Replace the board's columns | 200 `ControlState` |
 | PUT | `/api/tickets/order` | Replace the ticket column's arrangement | 200 `ControlState` |
 | PUT | `/api/clones/muted` | Replace the set of clones whose notifications are silenced | 200 `ControlState` |
-| POST | `/api/clone` | Start a clone from an image (resolved Linear ticket / plain / raw hostname) | 200 `{ok, op}` |
+| POST | `/api/clone` | Start a template clone from a preset (`{ plain: { title, message } }` + `preset`) | 200 `{ok, op}` |
+| POST | `/api/fork` | Fork a live gen-2 clone (snapshot + copy its home; name derives server-side) | 200 `{ok, op}` |
+| POST | `/api/hosts/:id/rebase` | Swap a clone's system image to a preset's image (dataset + id kept) | 200 `{ok, op}` |
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
 | PUT | `/api/hosts/:id/forwards` | Replace a clone's port-forward rules | 200 `ControlState` |
-| POST | `/api/hosts/:id/copy?dst=` | Extract a streamed tar archive inside a clone | 200 `CopyResult` |
 | GET | `/api/self` | The calling clone's own record, by the address it called from | 200 `Clone` / 404 |
 | POST | `/api/layout/activate` | Make a layout preset active and live-apply it to the selected clone | 200 `{ok,applied,errors}` |
 | POST | `/api/images/prebuild` | Warm a preset image without creating (build posted Dockerfile on miss) | 200 `{ok,op}` |
@@ -711,6 +712,55 @@ shared folder and the home symlink are all gone even though the clone itself is 
 operation re-applies those three plus the bastion allowlist entry before it finishes, the same
 set the create job settles (see
 [Nothing is still pending](#nothing-is-still-pending-when-the-operation-reaches-100)).
+
+### `POST /api/fork`
+
+Fork a live gen-2 clone: snapshot its home dataset, copy it, and create from the source's
+recorded base tag. The source keeps running. Runs async — returns `{ "ok": true, "op":
+Operation }`; progress over `/events`.
+
+Body (`source` required, everything else an override — each omitted field inherits the
+source value, except `linear`, which when present replaces the source ticket context
+wholesale):
+
+```jsonc
+{
+  "source": "pega-we-1",
+  "headless": false,          // no desktop
+  "preset": "<name>",         // preset override
+  "linear": {                 // ticket metadata override
+    "workspace": "we",       // lowercase team key
+    "ticket": "WE-142",      // drives the derived hostname when present
+    "ticketUrl": "https://…",
+    "branch": "…",
+    "displayName": "…",      // the only name field; plain forks send just this
+    "label": "…"
+  },
+  "claudeAccount": "a@b.com", // account selection override: email, "auto",
+                                // "none", or "group:<pool>"
+  "codexAccount": "a@b.com",  // the Codex twin, same forms
+  "firstMessage": "do X",     // first agent message; omitted ⇒ none sent
+  "agentInstructions": "...",
+  "claudeInstructions": "..."
+}
+```
+
+The new hostname always derives server-side (ticket id, else title, else empty stem —
+uniqueness needs the live clone list, which no client can see). Unknown or unmanaged
+sources, non-gen-2 sources, and unknown preset overrides return `400`.
+
+### `POST /api/hosts/:id/rebase`
+
+Rebase a gen-2 clone onto a preset's image: the old container is replaced (name == id)
+while the dataset, the id, and the clone's own preset bindings stay. Env and playbook stay
+on the clone's bindings — rebase swaps the image only, never the preset. On failure the
+old tag auto-recreates. An archived clone stays archived (its container is stopped again
+after the swap). Runs async — returns `{ "ok": true, "op": Operation }`; build progress
+streams over `/events`.
+
+Body: `{ "preset": "<name>" }` (required, must name an existing preset),
+`{ "rebuild": true }` forces a fresh image build even when the tag exists. Unknown,
+unmanaged, non-gen-2, or concurrently-operated clones return `400`.
 
 ---
 

@@ -22,6 +22,11 @@ struct Inner {
     state: ControlState,
     /// Canonical file serialization (pretty + trailing newline) — the watcher gate.
     serialized_file: String,
+    /// Set when the last disk read failed to parse. While set, `mutate` applies
+    /// changes in memory and broadcasts them but refuses to persist: writing the
+    /// in-memory state over a corrupt file would destroy the fleet record for
+    /// good. A later healthy read (boot or watcher reload) clears it.
+    degraded: bool,
 }
 
 fn to_file(state: &ControlState) -> String {
@@ -38,10 +43,9 @@ fn to_sse(state: &ControlState) -> String {
 impl StateStore {
     pub fn load(path: PathBuf) -> Result<Self> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        let state = read_from_disk(&path);
+        let (state, healthy) = read_from_disk(&path);
         let serialized_file = to_file(&state);
         // Non-`managed` clones are legacy/unmanaged rows (an old `state.json` whose
         // `ctid`/`container` keys serde dropped, or hand-added plain clones): they carry
@@ -56,7 +60,15 @@ impl StateStore {
             "state loaded"
         );
         let (tx, _) = broadcast::channel(64);
-        Ok(Self { inner: RwLock::new(Inner { state, serialized_file }), tx, path })
+        Ok(Self {
+            inner: RwLock::new(Inner {
+                state,
+                serialized_file,
+                degraded: !healthy,
+            }),
+            tx,
+            path,
+        })
     }
 
     pub fn get(&self) -> ControlState {
@@ -75,12 +87,20 @@ impl StateStore {
     }
 
     /// Apply `f` to a draft, persist atomically, broadcast. Returns the new state.
+    ///
+    /// While `degraded` (the last disk read failed to parse) the draft is applied
+    /// in memory and broadcast but NOT persisted, so a corrupt `state.json` can
+    /// never be overwritten with an empty fleet.
     pub fn mutate(&self, f: impl FnOnce(&mut ControlState)) -> ControlState {
         let mut inner = self.inner.write().unwrap();
         let mut draft = inner.state.clone();
         f(&mut draft);
         let file = to_file(&draft);
-        if let Err(e) = persist(&self.path, &file) {
+        if inner.degraded {
+            tracing::error!(
+                "refusing to persist state while the last disk read failed; fix state.json"
+            );
+        } else if let Err(e) = persist(&self.path, &file) {
             tracing::error!("persist failed: {e:#}");
         }
         inner.state = draft.clone();
@@ -99,7 +119,19 @@ impl StateStore {
     /// every filesystem event on the data dir.
     fn reload_if_changed(&self) {
         let mut inner = self.inner.write().unwrap();
-        let disk = read_from_disk(&self.path);
+        let (disk, healthy) = read_from_disk(&self.path);
+        if !healthy {
+            // A corrupt file must never replace memory: that would blank the fleet
+            // in memory, and the next mutate would once have persisted it. Stay
+            // degraded (persist stays refused) until a healthy read arrives.
+            if !inner.degraded {
+                tracing::error!(
+                    "state.json no longer parses; keeping in-memory state and refusing to persist"
+                );
+            }
+            inner.degraded = true;
+            return;
+        }
         let disk_file = to_file(&disk);
         if disk_file == inner.serialized_file {
             return;
@@ -111,18 +143,27 @@ impl StateStore {
         );
         inner.state = disk.clone();
         inner.serialized_file = disk_file;
+        inner.degraded = false;
         drop(inner);
         let _ = self.tx.send(to_sse(&disk));
     }
 }
 
-fn read_from_disk(path: &Path) -> ControlState {
+/// Read the state file. Returns the state plus whether it parsed: a missing file
+/// is a healthy empty state (first boot), but a present-but-unparseable file is
+/// corrupt and must never be written back over.
+fn read_from_disk(path: &Path) -> (ControlState, bool) {
     match std::fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-            tracing::warn!("state.json parse error ({e}); using empty state");
-            ControlState::default()
-        }),
-        Err(_) => ControlState::default(),
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(state) => (state, true),
+            Err(e) => {
+                tracing::error!(
+                    "state.json parse error ({e}); running without persisting until it parses again"
+                );
+                (ControlState::default(), false)
+            }
+        },
+        Err(_) => (ControlState::default(), true),
     }
 }
 
@@ -138,7 +179,10 @@ pub fn spawn_watcher(store: std::sync::Arc<StateStore>) {
     use notify::{Event, RecursiveMode, Watcher};
 
     let path = store.path.clone();
-    let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| {
@@ -191,11 +235,20 @@ mod tests {
         for body in [to_file(&state), to_sse(&state)] {
             let v: serde_json::Value = serde_json::from_str(&body).unwrap();
             let host = &v["hosts"][0];
-            assert_eq!(host["monitorState"], "idle", "the wire vocabulary is unchanged");
-            assert_eq!(host["activityUnknown"], true, "and the truth rides beside it");
+            assert_eq!(
+                host["monitorState"], "idle",
+                "the wire vocabulary is unchanged"
+            );
+            assert_eq!(
+                host["activityUnknown"], true,
+                "and the truth rides beside it"
+            );
         }
         // The in-memory reading is untouched by writing it out.
-        assert_eq!(state.hosts[0].monitor_state, Some(wire::MonitorState::Unknown));
+        assert_eq!(
+            state.hosts[0].monitor_state,
+            Some(wire::MonitorState::Unknown)
+        );
     }
 
     /// A clone that is genuinely idle must not be mistaken for one we cannot read.
@@ -209,7 +262,10 @@ mod tests {
         }];
         let v: serde_json::Value = serde_json::from_str(&to_file(&state)).unwrap();
         assert_eq!(v["hosts"][0]["monitorState"], "idle");
-        assert_eq!(v["hosts"][0]["activityUnknown"], false, "a real idle is not a missing one");
+        assert_eq!(
+            v["hosts"][0]["activityUnknown"], false,
+            "a real idle is not a missing one"
+        );
     }
     use wire::RmngClone;
 
@@ -240,7 +296,11 @@ mod tests {
         for i in 0..8 {
             state.clone_tokens.insert(
                 format!("clone-{i}"),
-                wire::CloneTokens { input_tokens: i, output_tokens: i, fable_active: false },
+                wire::CloneTokens {
+                    input_tokens: i,
+                    output_tokens: i,
+                    fable_active: false,
+                },
             );
         }
         let written = to_file(&state);
@@ -258,7 +318,12 @@ mod tests {
         let path = temp_path();
         let store = StateStore::load(path.clone()).unwrap();
         store.mutate(|s| {
-            s.hosts.push(RmngClone { id: "h1".into(), host: "1.2.3.4".into(), port: 3389, ..Default::default() });
+            s.hosts.push(RmngClone {
+                id: "h1".into(),
+                host: "1.2.3.4".into(),
+                port: 3389,
+                ..Default::default()
+            });
             s.selected = Some("h1".into());
         });
         // round-trips from disk
@@ -268,7 +333,6 @@ mod tests {
         assert_eq!(st.selected.as_deref(), Some("h1"));
         let _ = std::fs::remove_file(&path);
     }
-
 
     #[test]
     fn legacy_state_loads_clones_as_unmanaged() {
@@ -299,6 +363,33 @@ mod tests {
         let (snapshot, _rx) = store.subscribe();
         let parsed: ControlState = serde_json::from_str(&snapshot).unwrap();
         assert_eq!(parsed.selected.as_deref(), Some("x"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A corrupt state file must never be overwritten with an empty fleet: while the
+    /// last disk read failed to parse, `mutate` applies in memory only. A later
+    /// healthy read (e.g. the operator fixing the file by hand) clears the guard
+    /// and persisting resumes.
+    #[test]
+    fn corrupt_state_is_never_persisted_over() {
+        let path = temp_path();
+        std::fs::write(&path, "{ this is not json").unwrap();
+        let store = StateStore::load(path.clone()).unwrap();
+        // In memory the server runs on (empty, like before) and mutations apply.
+        let st = store.mutate(|s| s.selected = Some("x".into()));
+        assert_eq!(st.selected.as_deref(), Some("x"));
+        // But the corrupt bytes on disk are untouched.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{ this is not json"
+        );
+        // The operator fixes the file by hand; the watcher reload picks it up and
+        // the guard clears, so the next mutation persists again.
+        std::fs::write(&path, to_file(&ControlState::default())).unwrap();
+        store.reload_if_changed();
+        store.mutate(|s| s.selected = Some("y".into()));
+        let reloaded = StateStore::load(path.clone()).unwrap();
+        assert_eq!(reloaded.get().selected.as_deref(), Some("y"));
         let _ = std::fs::remove_file(&path);
     }
 }
