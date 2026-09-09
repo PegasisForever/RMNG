@@ -99,14 +99,33 @@ loses the completed setup. Read the live run config first, because `RUST_LOG` dr
 $SSH root@10.0.0.100 "pct exec 101 -- docker inspect rmng --format '{{json .Config.Env}}'"
 ```
 
-Then recreate with that exact value:
+Then recreate with that exact value. The `/srv/rmng-homes` bind MUST stay `:shared`
+(and the host path must be a shared mount — see below), or clone creation fails:
+the server creates each clone's ZFS dataset from inside its own mount namespace,
+and only a shared bind propagates that mount to the host mount namespace where
+the Docker daemon resolves bind sources. Without it `docker create` fails with
+`bind source path does not exist: /srv/rmng-homes/<id>`.
 
 ```sh
 $SSH root@10.0.0.100 'pct exec 101 -- bash -lc "docker rm -f rmng >/dev/null 2>&1; \
   docker run -d --name rmng --privileged --pid=host --restart unless-stopped \
   -p 445:445 -p 2222:2222 -p 9000:9000 -p 9001:9001 -p 9005:9005 \
   -v /var/run/docker.sock:/var/run/docker.sock -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
+  -v /srv/rmng-homes:/srv/rmng-homes:shared \
   -e RUST_LOG=info,tower_http=warn,clip=debug,rmng_control_server::mediaplane=debug rmng:latest"'
+```
+
+After a CT reboot (or if `/srv/rmng-homes` was ever recreated as a plain directory),
+re-establish the shared mount BEFORE recreating, then verify propagation:
+
+```sh
+$SSH root@10.0.0.100 'pct exec 101 -- bash -lc "mount --bind /srv/rmng-homes /srv/rmng-homes \
+  && mount --make-shared /srv/rmng-homes"'
+# Verify: a dataset created inside the container must be visible on the host.
+$SSH root@10.0.0.100 'pct exec 101 -- bash -lc "docker exec rmng zfs create \
+  -o mountpoint=/srv/rmng-homes/probe rpool/rmng-homes/probe \
+  && ls -d /srv/rmng-homes/probe \
+  && docker exec rmng zfs destroy rpool/rmng-homes/probe"'
 ```
 
 Restarting resets in-memory state and drops every dashboard connection. Within about a

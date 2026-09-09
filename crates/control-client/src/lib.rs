@@ -141,6 +141,24 @@ impl Client {
         Ok(Self::check(resp).await?.json().await?)
     }
 
+    /// POST an op-starting endpoint. Clone/fork/rebase/prebuild answer
+    /// `{"ok": true, "op": {...}}` (the dashboard reads `.op` off the same
+    /// envelope), so unwrap it here rather than in every caller.
+    async fn post_op(&self, path: &str, body: &Value) -> Result<Operation> {
+        let resp = self
+            .http
+            .post(format!("{}{path}", self.base))
+            .json(body)
+            .send()
+            .await?;
+        let v: Value = Self::check(resp).await?.json().await?;
+        Ok(serde_json::from_value(
+            v.get("op")
+                .cloned()
+                .ok_or_else(|| anyhow!("{} reply missing op", path))?,
+        )?)
+    }
+
     /// Current fleet state, single-shot. `GET /api/state`; falls back to reading the
     /// first default `/events` frame against a server predating the endpoint. That
     /// fallback triggers on a non-JSON reply, not just 404 — an old server serves the
@@ -238,22 +256,13 @@ impl Client {
                 .unwrap()
                 .insert("preset".into(), json!(p));
         }
-        let req = self
-            .http
-            .post(format!("{}/api/clone", self.base))
-            .json(&body);
-        let v: Value = Self::check(req.send().await?).await?.json().await?;
-        Ok(serde_json::from_value(
-            v.get("op")
-                .cloned()
-                .ok_or_else(|| anyhow!("clone reply missing op"))?,
-        )?)
+        self.post_op("/api/clone", &body).await
     }
 
     /// Fork a gen-2 clone (snapshot + clone the source home). The new hostname
     /// always derives server-side from the ticket or title.
     pub async fn fork(&self, source: &str, headless: bool) -> Result<Operation> {
-        self.post_json(
+        self.post_op(
             "/api/fork",
             &json!({ "source": source, "headless": headless }),
         )
@@ -283,13 +292,13 @@ impl Client {
         if let Some(linear) = &opts.linear {
             obj.insert("linear".into(), linear.clone());
         }
-        self.post_json("/api/fork", &body).await
+        self.post_op("/api/fork", &body).await
     }
 
     /// Rebase a gen-2 clone onto a preset's image (dataset + id kept). `rebuild`
     /// forces a fresh image build even when the tag exists.
     pub async fn rebase(&self, id: &str, preset: &str, rebuild: bool) -> Result<Operation> {
-        self.post_json(
+        self.post_op(
             &format!("/api/hosts/{id}/rebase"),
             &json!({ "preset": preset, "rebuild": rebuild }),
         )
