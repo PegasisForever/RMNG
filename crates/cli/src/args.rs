@@ -2,7 +2,7 @@
 //! clones is the desktop MCP's job (computer use), and code moves via git.
 //!
 //! Structure is uniform **noun → verb**: `rmng <noun> <verb> [<clone>] [flags]`. The nouns are
-//! `clone` (the fleet unit), `image`, `account`, `op`, and `desktop`. One list verb (`ls`), one
+//! `clone` (the fleet unit), `account`, `op`, `ledger`, `board`, and `desktop`. One list verb (`ls`), one
 //! destroy verb (`rm`); the target is always a positional `<clone>`.
 
 use std::path::PathBuf;
@@ -38,13 +38,10 @@ pub enum Cmd {
     /// Manage clones (the fleet unit): ls / create-* / rm / archive / restore / ssh / exec / …
     #[command(subcommand)]
     Clone(CloneCmd),
-    /// Clone-source image operations
-    #[command(subcommand)]
-    Image(ImageCmd),
     /// Imported-account operations
     #[command(subcommand)]
     Account(AccountCmd),
-    /// Operation (clone / delete / archive / pull / commit / update) inspection
+    /// Operation (clone / delete / archive / restore / fork / rebase / prebuild / update) inspection
     #[command(subcommand)]
     Op(OpCmd),
     /// Search the distilled transcripts of every clone, retired clones included
@@ -67,9 +64,6 @@ pub enum Cmd {
 /// below its three tabs.
 #[derive(Args, Debug)]
 pub struct CreateArgs {
-    /// Clone-source image reference to create from (see `rmng image ls`)
-    #[arg(long)]
-    pub from: String,
     /// Claude account for the new clone: an email, `auto`, `none`, or `group:<pool>`.
     /// Omitted inherits the parent's selection (inside a clone), else `auto`.
     #[arg(long)]
@@ -301,24 +295,6 @@ pub enum BoardCmd {
     },
 }
 
-#[derive(Subcommand, Debug)]
-pub enum ImageCmd {
-    /// List clone-source images
-    Ls,
-    /// Pull the clone template from a registry (default: the configured reference)
-    Pull {
-        /// Registry reference (e.g. pegasis0/rmng-template:latest)
-        reference: Option<String>,
-        #[command(flatten)]
-        wait: WaitArgs,
-    },
-    /// Remove a clone-source image (fails while clones use it)
-    Rm {
-        /// Image reference or id
-        reference: String,
-    },
-}
-
 /// Account provider filter for `rmng account ls --provider <p>`.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 #[value(rename_all = "lower")]
@@ -358,7 +334,7 @@ pub enum AccountCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum OpCmd {
-    /// List operations (clone / delete / archive / restore / pull / commit / update)
+    /// List operations (clone / delete / archive / restore / fork / rebase / prebuild / update)
     Ls,
     /// Wait for an operation to reach a terminal state
     Wait {
@@ -461,8 +437,14 @@ impl ResolutionArgs {
         let (w, h) = s
             .split_once(['x', 'X'])
             .ok_or_else(|| format!("--resolution: expected WxH, got '{s}'"))?;
-        let w: i32 = w.trim().parse().map_err(|e| format!("--resolution: bad W: {e}"))?;
-        let h: i32 = h.trim().parse().map_err(|e| format!("--resolution: bad H: {e}"))?;
+        let w: i32 = w
+            .trim()
+            .parse()
+            .map_err(|e| format!("--resolution: bad W: {e}"))?;
+        let h: i32 = h
+            .trim()
+            .parse()
+            .map_err(|e| format!("--resolution: bad H: {e}"))?;
         if w <= 0 || h <= 0 {
             return Err("--resolution: W and H must be > 0".into());
         }
@@ -613,13 +595,24 @@ mod tests {
     #[test]
     fn clone_create_positional_hostname_and_from() {
         let cli = Cli::parse_from([
-            "rmng", "clone", "create", "w-cp", "--from", "tmpl:latest", "--claude-account", "pooled",
-            "--wait", "--timeout", "120",
+            "rmng",
+            "clone",
+            "create",
+            "w-cp",
+            "--claude-account",
+            "pooled",
+            "--wait",
+            "--timeout",
+            "120",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::Create { hostname, preset, no_preset, common }) => {
+            Cmd::Clone(CloneCmd::Create {
+                hostname,
+                preset,
+                no_preset,
+                common,
+            }) => {
                 assert_eq!(hostname, "w-cp");
-                assert_eq!(common.from, "tmpl:latest");
                 assert_eq!(common.claude_account.as_deref(), Some("pooled"));
                 assert!(!no_preset && !common.headless && !common.top_level);
                 assert_eq!(preset, None);
@@ -639,11 +632,21 @@ mod tests {
     #[test]
     fn clone_create_verbs_mirror_the_dialog_tabs() {
         let cli = Cli::parse_from([
-            "rmng", "clone", "create-from-ticket", "WE-142", "--from", "t:1", "--wait",
-            "--agent-instructions", "be brief",
+            "rmng",
+            "clone",
+            "create-from-ticket",
+            "WE-142",
+            "--wait",
+            "--agent-instructions",
+            "be brief",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::CreateFromTicket { ticket, agent_instructions, common, .. }) => {
+            Cmd::Clone(CloneCmd::CreateFromTicket {
+                ticket,
+                agent_instructions,
+                common,
+                ..
+            }) => {
                 assert_eq!(ticket, "WE-142");
                 assert_eq!(agent_instructions.as_deref(), Some("be brief"));
                 assert!(common.wait.wait);
@@ -652,39 +655,75 @@ mod tests {
         }
         assert!(
             Cli::try_parse_from([
-                "rmng", "clone", "create-from-ticket", "WE-1", "--from", "t:1", "--preset", "p",
+                "rmng",
+                "clone",
+                "create-from-ticket",
+                "WE-1",
+                "--preset",
+                "p",
             ])
             .is_err(),
             "the ticket verb must not accept --preset (the server auto-selects it)"
         );
 
         let cli = Cli::parse_from([
-            "rmng", "clone", "create-with-new-ticket", "--from", "t:1", "--team", "we", "--title", "Fix it",
-            "--description", "# heading",
+            "rmng",
+            "clone",
+            "create-with-new-ticket",
+            "--team",
+            "we",
+            "--title",
+            "Fix it",
+            "--description",
+            "# heading",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::CreateWithNewTicket { team, title, description, common, .. }) => {
+            Cmd::Clone(CloneCmd::CreateWithNewTicket {
+                team,
+                title,
+                description,
+                ..
+            }) => {
                 assert_eq!((team.as_str(), title.as_str()), ("we", "Fix it"));
                 assert_eq!(description.as_deref(), Some("# heading"));
-                assert_eq!(common.from, "t:1");
             }
             other => panic!("wrong cmd: {other:?}"),
         }
         // --team and --title are required; --description ⊕ --description-file.
-        assert!(Cli::try_parse_from(["rmng", "clone", "create-with-new-ticket", "--from", "t:1"]).is_err());
+        assert!(Cli::try_parse_from(["rmng", "clone", "create-with-new-ticket"]).is_err());
         assert!(
             Cli::try_parse_from([
-                "rmng", "clone", "create-with-new-ticket", "--from", "t:1", "--team", "we", "--title", "x",
-                "--description", "a", "--description-file", "b",
+                "rmng",
+                "clone",
+                "create-with-new-ticket",
+                "--team",
+                "we",
+                "--title",
+                "x",
+                "--description",
+                "a",
+                "--description-file",
+                "b",
             ])
             .is_err()
         );
 
         let cli = Cli::parse_from([
-            "rmng", "clone", "create-plain", "--from", "t:1", "--title", "scratch", "--preset", "p1",
+            "rmng",
+            "clone",
+            "create-plain",
+            "--title",
+            "scratch",
+            "--preset",
+            "p1",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::CreatePlain { title, preset, message, .. }) => {
+            Cmd::Clone(CloneCmd::CreatePlain {
+                title,
+                preset,
+                message,
+                ..
+            }) => {
                 assert_eq!(title, "scratch");
                 assert_eq!(preset.as_deref(), Some("p1"));
                 assert_eq!(message, None);
@@ -696,9 +735,17 @@ mod tests {
         // / `clone plain` didn't say they created anything. These verbs were only ever in
         // unreleased commits, so there's nothing to keep working.
         for old in [
-            vec!["rmng", "clone", "ticket", "WE-1", "--from", "t:1"],
-            vec!["rmng", "clone", "new-ticket", "--from", "t:1", "--team", "we", "--title", "t"],
-            vec!["rmng", "clone", "plain", "--from", "t:1", "--title", "t"],
+            vec!["rmng", "clone", "ticket", "WE-1"],
+            vec![
+                "rmng",
+                "clone",
+                "new-ticket",
+                "--team",
+                "we",
+                "--title",
+                "t",
+            ],
+            vec!["rmng", "clone", "plain", "--title", "t"],
         ] {
             assert!(
                 Cli::try_parse_from(&old).is_err(),
@@ -712,7 +759,10 @@ mod tests {
     fn read_text_prefers_inline_over_file() {
         let inline = "inline body".to_string();
         let missing = PathBuf::from("/nonexistent/rmng-test");
-        assert_eq!(read_text(Some(&inline), Some(&missing)).unwrap(), "inline body");
+        assert_eq!(
+            read_text(Some(&inline), Some(&missing)).unwrap(),
+            "inline body"
+        );
         assert_eq!(read_text(None, None).unwrap(), "");
         // A real file is read verbatim, newlines and all — the whole point of the flag.
         let path = std::env::temp_dir().join("rmng-read-text-test.md");
@@ -726,16 +776,30 @@ mod tests {
         // --parent ⊕ --top-level, --preset ⊕ --no-preset. Opting out of an account needs no
         // flag of its own: `--claude-account none` / `--codex-account none` says it, per
         // provider, in the same vocabulary every other account value uses.
-        assert!(Cli::try_parse_from([
-            "rmng", "clone", "create", "w-x", "--from", "i", "--parent", "p", "--top-level",
-        ])
-        .is_err());
-        assert!(Cli::try_parse_from([
-            "rmng", "clone", "create", "w-x", "--from", "i", "--preset", "p", "--no-preset",
-        ])
-        .is_err());
-        // --from is required.
-        assert!(Cli::try_parse_from(["rmng", "clone", "create", "w-x"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "rmng",
+                "clone",
+                "create",
+                "w-x",
+                "--parent",
+                "p",
+                "--top-level",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rmng",
+                "clone",
+                "create",
+                "w-x",
+                "--preset",
+                "p",
+                "--no-preset",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -752,8 +816,16 @@ mod tests {
     fn ledger_search_needs_a_pattern_and_takes_its_filters() {
         assert!(Cli::try_parse_from(["rmng", "ledger", "search"]).is_err());
         let cli = Cli::parse_from([
-            "rmng", "ledger", "search", "va-api", "--clone", "pega-we-142", "--since", "2d",
-            "--limit", "5",
+            "rmng",
+            "ledger",
+            "search",
+            "va-api",
+            "--clone",
+            "pega-we-142",
+            "--since",
+            "2d",
+            "--limit",
+            "5",
         ]);
         assert!(matches!(
             cli.cmd,
@@ -768,12 +840,25 @@ mod tests {
         assert!(matches!(
             bare.cmd,
             Cmd::Ledger(LedgerCmd::Search {
-                clone: None, since: None, limit: 50, sidechain: false, no_sidechain: false, ..
+                clone: None,
+                since: None,
+                limit: 50,
+                sidechain: false,
+                no_sidechain: false,
+                ..
             })
         ));
 
         // One subagent's run, and the conversation without any of them.
-        let one = Cli::parse_from(["rmng", "ledger", "search", "x", "--agent", "a7", "--sidechain"]);
+        let one = Cli::parse_from([
+            "rmng",
+            "ledger",
+            "search",
+            "x",
+            "--agent",
+            "a7",
+            "--sidechain",
+        ]);
         assert!(matches!(
             one.cmd,
             Cmd::Ledger(LedgerCmd::Search { ref agent, sidechain: true, .. })
@@ -782,12 +867,23 @@ mod tests {
         let main_only = Cli::parse_from(["rmng", "ledger", "search", "x", "--no-sidechain"]);
         assert!(matches!(
             main_only.cmd,
-            Cmd::Ledger(LedgerCmd::Search { no_sidechain: true, sidechain: false, .. })
+            Cmd::Ledger(LedgerCmd::Search {
+                no_sidechain: true,
+                sidechain: false,
+                ..
+            })
         ));
         // The two are opposites, so asking for both is an error rather than a silent winner.
         assert!(
-            Cli::try_parse_from(["rmng", "ledger", "search", "x", "--sidechain", "--no-sidechain"])
-                .is_err()
+            Cli::try_parse_from([
+                "rmng",
+                "ledger",
+                "search",
+                "x",
+                "--sidechain",
+                "--no-sidechain"
+            ])
+            .is_err()
         );
     }
 
@@ -795,7 +891,13 @@ mod tests {
     fn ledger_read_takes_a_clone_a_session_and_a_range() {
         assert!(Cli::try_parse_from(["rmng", "ledger", "read", "pega-we-142"]).is_err());
         let cli = Cli::parse_from([
-            "rmng", "ledger", "read", "pega-we-142", "sess-1", "--offset", "4096",
+            "rmng",
+            "ledger",
+            "read",
+            "pega-we-142",
+            "sess-1",
+            "--offset",
+            "4096",
         ]);
         assert!(matches!(
             cli.cmd,
@@ -818,7 +920,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn op_ls_and_wait() {
         assert!(matches!(
@@ -832,12 +933,14 @@ mod tests {
         ));
     }
 
-        #[test]
+    #[test]
     fn account_ls_provider_enum() {
         let cli = Cli::parse_from(["rmng", "account", "ls", "--provider", "codex"]);
         assert!(matches!(
             cli.cmd,
-            Cmd::Account(AccountCmd::Ls { provider: Some(Provider::Codex) })
+            Cmd::Account(AccountCmd::Ls {
+                provider: Some(Provider::Codex)
+            })
         ));
         // Bad provider rejected.
         assert!(Cli::try_parse_from(["rmng", "account", "ls", "--provider", "bogus"]).is_err());
@@ -862,9 +965,7 @@ mod tests {
 
     #[test]
     fn every_create_verb_can_name_a_column() {
-        let cli = Cli::parse_from([
-            "rmng", "clone", "create", "c1", "--from", "img", "--column", "In Progress",
-        ]);
+        let cli = Cli::parse_from(["rmng", "clone", "create", "c1", "--column", "In Progress"]);
         match cli.cmd {
             Cmd::Clone(CloneCmd::Create { common, .. }) => {
                 assert_eq!(common.column.as_deref(), Some("In Progress"));
@@ -872,7 +973,13 @@ mod tests {
             other => panic!("wrong cmd: {other:?}"),
         }
         let cli = Cli::parse_from([
-            "rmng", "clone", "create-plain", "--from", "img", "--title", "t", "--column", "Done",
+            "rmng",
+            "clone",
+            "create-plain",
+            "--title",
+            "t",
+            "--column",
+            "Done",
         ]);
         match cli.cmd {
             Cmd::Clone(CloneCmd::CreatePlain { common, .. }) => {
@@ -898,7 +1005,14 @@ mod tests {
             "-d", "--", "env",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::Exec { clone, user, workdir, env, detach, cmd }) => {
+            Cmd::Clone(CloneCmd::Exec {
+                clone,
+                user,
+                workdir,
+                env,
+                detach,
+                cmd,
+            }) => {
                 assert_eq!(clone, "c");
                 assert_eq!(user.as_deref(), Some("root"));
                 assert_eq!(workdir.as_deref(), Some("/srv"));
@@ -915,7 +1029,13 @@ mod tests {
     fn desktop_click_parses_verb_and_coords() {
         let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "click", "10", "20"]);
         match cli.cmd {
-            Cmd::Desktop { clone, cmd: DesktopCmd::Click { x, y, monitor, out, .. } } => {
+            Cmd::Desktop {
+                clone,
+                cmd:
+                    DesktopCmd::Click {
+                        x, y, monitor, out, ..
+                    },
+            } => {
                 assert_eq!(clone, "w-cp");
                 assert_eq!((x, y), (Some(10), Some(20)));
                 assert_eq!(monitor, None);
@@ -938,29 +1058,66 @@ mod tests {
         let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "right-click", "5", "6"]);
         assert!(matches!(
             cli.cmd,
-            Cmd::Desktop { cmd: DesktopCmd::RightClick { x: Some(5), y: Some(6), .. }, .. }
+            Cmd::Desktop {
+                cmd: DesktopCmd::RightClick {
+                    x: Some(5),
+                    y: Some(6),
+                    ..
+                },
+                ..
+            }
         ));
         assert!(matches!(
             Cli::parse_from(["rmng", "desktop", "w-cp", "middle-click"]).cmd,
-            Cmd::Desktop { cmd: DesktopCmd::MiddleClick { .. }, .. }
+            Cmd::Desktop {
+                cmd: DesktopCmd::MiddleClick { .. },
+                ..
+            }
         ));
         assert!(matches!(
             Cli::parse_from(["rmng", "desktop", "w-cp", "double-click"]).cmd,
-            Cmd::Desktop { cmd: DesktopCmd::DoubleClick { .. }, .. }
+            Cmd::Desktop {
+                cmd: DesktopCmd::DoubleClick { .. },
+                ..
+            }
         ));
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "move-window", "2946527525", "--mode", "maximize"]);
+        let cli = Cli::parse_from([
+            "rmng",
+            "desktop",
+            "w-cp",
+            "move-window",
+            "2946527525",
+            "--mode",
+            "maximize",
+        ]);
         assert!(matches!(
             cli.cmd,
-            Cmd::Desktop { cmd: DesktopCmd::MoveWindow { id: 2946527525, .. }, .. }
+            Cmd::Desktop {
+                cmd: DesktopCmd::MoveWindow { id: 2946527525, .. },
+                ..
+            }
         ));
     }
 
     #[test]
     fn desktop_click_accepts_resolution() {
-        let cli =
-            Cli::parse_from(["rmng", "desktop", "w-cp", "click", "500", "500", "--resolution", "1280x720"]);
+        let cli = Cli::parse_from([
+            "rmng",
+            "desktop",
+            "w-cp",
+            "click",
+            "500",
+            "500",
+            "--resolution",
+            "1280x720",
+        ]);
         match cli.cmd {
-            Cmd::Desktop { cmd: DesktopCmd::Click { x, y, resolution, .. }, .. } => {
+            Cmd::Desktop {
+                cmd: DesktopCmd::Click {
+                    x, y, resolution, ..
+                },
+                ..
+            } => {
                 // Coordinates are forwarded verbatim — the daemon owns the scaling now.
                 assert_eq!((x, y), (Some(500), Some(500)));
                 assert_eq!(resolution.resolution_arg(), Ok(Some("1280x720".into())));
@@ -973,7 +1130,10 @@ mod tests {
     fn desktop_screenshot_accepts_native() {
         let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "screenshot", "--native"]);
         match cli.cmd {
-            Cmd::Desktop { cmd: DesktopCmd::Screenshot { resolution, .. }, .. } => {
+            Cmd::Desktop {
+                cmd: DesktopCmd::Screenshot { resolution, .. },
+                ..
+            } => {
                 assert_eq!(resolution.resolution_arg(), Ok(Some("native".into())));
             }
             other => panic!("wrong cmd: {other:?}"),
@@ -986,7 +1146,13 @@ mod tests {
     fn desktop_rejects_resolution_and_native_together() {
         assert!(
             Cli::try_parse_from([
-                "rmng", "desktop", "w-cp", "screenshot", "--resolution", "1280x720", "--native",
+                "rmng",
+                "desktop",
+                "w-cp",
+                "screenshot",
+                "--resolution",
+                "1280x720",
+                "--native",
             ])
             .is_err()
         );
@@ -1001,8 +1167,15 @@ mod tests {
     #[test]
     fn resolution_arg_accepts_either_x_case() {
         for s in ["1280x720", "1280X720", " 1280 x 720 "] {
-            let r = ResolutionArgs { resolution: Some(s.into()), native: false };
-            assert_eq!(r.resolution_arg(), Ok(Some("1280x720".into())), "input {s:?}");
+            let r = ResolutionArgs {
+                resolution: Some(s.into()),
+                native: false,
+            };
+            assert_eq!(
+                r.resolution_arg(),
+                Ok(Some("1280x720".into())),
+                "input {s:?}"
+            );
         }
     }
 
@@ -1010,8 +1183,13 @@ mod tests {
     /// to native and silently put the caller's clicks in the wrong space.
     #[test]
     fn resolution_arg_rejects_malformed_values() {
-        for bad in ["1920", "1920x", "x1080", "0x1080", "1920x0", "-1x-1", "axb", ""] {
-            let r = ResolutionArgs { resolution: Some(bad.into()), native: false };
+        for bad in [
+            "1920", "1920x", "x1080", "0x1080", "1920x0", "-1x-1", "axb", "",
+        ] {
+            let r = ResolutionArgs {
+                resolution: Some(bad.into()),
+                native: false,
+            };
             assert!(r.resolution_arg().is_err(), "should reject {bad:?}");
         }
     }
@@ -1022,8 +1200,14 @@ mod tests {
             resolve_server(Some("http://flag:1/".into()), Some("http://env:2".into())),
             "http://flag:1"
         );
-        assert_eq!(resolve_server(None, Some("http://env:2".into())), "http://env:2");
+        assert_eq!(
+            resolve_server(None, Some("http://env:2".into())),
+            "http://env:2"
+        );
         assert_eq!(resolve_server(None, None), "http://localhost:9000");
-        assert_eq!(resolve_server(Some("  ".into()), None), "http://localhost:9000");
+        assert_eq!(
+            resolve_server(Some("  ".into()), None),
+            "http://localhost:9000"
+        );
     }
 }

@@ -15,10 +15,9 @@
 //!
 //! Guest scripts are embedded (`include_str!`) and streamed over `docker exec bash -s`:
 //! [`crate::docker::DockerCtl::exec_script`]. Binaries (clone-daemon, agent-wrapper) are
-//! pushed via `upload_tar`. The clone TEMPLATE itself is no longer built in-product — it is
-//! pulled from a registry by [`pull_template`] (the retired in-product bootstrap ran
-//! `provision-clone.sh` inside a build container; that recipe now lives in
-//! `template/Dockerfile` + `template/setup/`, published as a Docker image).
+//! pushed via `upload_tar`. Clone images are gen-2 preset builds (`crate::derived` builds
+//! each preset's Dockerfile into a hash tag on demand); the retired gen-1 registry-template
+//! pull is gone.
 
 use anyhow::{Result, bail};
 use std::time::{Duration, Instant};
@@ -26,7 +25,7 @@ use std::time::{Duration, Instant};
 use wire::EnvVar;
 
 use crate::app::App;
-use crate::docker::{CLONE_USER, CreateSpec, PullEvent, TarEntry};
+use crate::docker::{CLONE_USER, CreateSpec, TarEntry};
 
 /// The clone user's uid/gid inside every image (created uid 1000 by `template/setup/30-user.sh`
 /// at template build).
@@ -172,7 +171,11 @@ pub async fn apply_render_mode(app: &App, clone: &str, headless: bool) {
     if headless {
         return;
     }
-    let want = if app.config().gpu_accelerated_clones { "yes" } else { "no" };
+    let want = if app.config().gpu_accelerated_clones {
+        "yes"
+    } else {
+        "no"
+    };
     let args = [want.to_string()];
     let res = app
         .docker
@@ -205,8 +208,7 @@ pub async fn apply_render_mode(app: &App, clone: &str, headless: bool) {
 /// `rmng …` in the viewer terminal). Safe to `.` because the control-server writes that file as
 /// plain unquoted `KEY=VALUE` lines (`clone_etc_environment_conf`).
 fn headless_tmux_default_script() -> String {
-    format!(
-        r#"set -e
+    r#"set -e
 runuser -u rmng -- bash -lc '
 set -a; . /etc/environment; set +a
 cat > ~/.tmux.conf <<EOF
@@ -218,7 +220,7 @@ tmux has-session -t main 2>/dev/null || tmux new-session -d -s main -c /home/rmn
 tmux set-option -g window-size latest 2>/dev/null || true
 '
 "#
-    )
+    .to_string()
 }
 
 // --- pure ports -----------------------------------------------------------------------
@@ -248,26 +250,6 @@ fn fresh_machine_id() -> Result<Vec<u8>> {
     let mut s: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     s.push('\n');
     Ok(s.into_bytes())
-}
-
-/// Resolve a caller-supplied image — a repo-tag reference (e.g. `pegasis0/rmng-template:latest`),
-/// a full `sha256:…` id, or a bare 64-hex id — to the **canonical** [`wire::ImageInfo`] `reference`
-/// of the matching clone-source image. `None` when nothing in the listed clone sources
-/// matches (i.e. the input isn't a labeled `rmng.image=1` image at all).
-///
-/// This is what keeps the created container's `Image` column canonical regardless of the
-/// caller's input form: the in-use accounting (web.rs `fill_in_use_by`) and the
-/// images-delete 409 guard both compare `ManagedContainer.image == ImageInfo.reference`,
-/// so a clone created from an id form must still be created FROM the reference — otherwise
-/// its base image would show as unused and be deletable under live clones. `RmngClone.source`
-/// records it too (commit lineage).
-pub fn resolve_reference(images: &[wire::ImageInfo], input: &str) -> Option<String> {
-    images
-        .iter()
-        .find(|i| {
-            i.reference == input || i.id == input || i.id.strip_prefix("sha256:") == Some(input)
-        })
-        .map(|i| i.reference.clone())
 }
 
 /// Base desktop session env every clone needs before its preset/control values are added.
@@ -421,7 +403,7 @@ fn preset_path_rc(env_text: &str) -> Option<PresetPathRc> {
     let path_val = env_text
         .lines()
         .filter_map(|l| l.strip_prefix("PATH="))
-        .last()?;
+        .next_back()?;
     // Reversed, quoted, `$PATH`/empty tokens dropped — the fish/sh loops each PREPEND in
     // turn, so reversing makes the listed left-to-right order win.
     let mut rev: Vec<String> = Vec::new();
@@ -493,9 +475,7 @@ fn clone_pct(step: &str) -> Option<f64> {
 /// `ready` 80 — `ready` is this fn's TERMINAL step (daemon registered, or timed-out
 /// still-booting). The remaining `monitors` 85 / `accounts` 95 / `done` 100 steps are driven
 /// by the caller (`run_clone`), so this fn returning does NOT mean the clone is connectable
-/// yet. Returns the **canonical** image reference on success (`RmngClone.source`; see
-/// [`resolve_reference`] — the caller may have passed an id form, but state must always
-/// record the reference so image in-use accounting stays canonical). The container *name* is the
+/// yet. Returns the image reference on success (`RmngClone.source`). The container *name* is the
 /// Apply one per-clone configuration step at create time, best-effort.
 ///
 /// Every step here is also a step the per-clone reconciler owns, and each one runs here purely
@@ -635,11 +615,17 @@ async fn clone_container_after_create(
             gid: 0,
         });
     }
-    on_progress("inject", "injecting machine-id + preset env + PATH rc (pre-boot)");
+    on_progress(
+        "inject",
+        "injecting machine-id + preset env + PATH rc (pre-boot)",
+    );
     docker.upload_tar(container, identity).await?;
 
     // systemd PID 1 comes up, and the user manager with it, now reading the env written above.
-    on_progress("inject", "starting container to inject the rest of the preset");
+    on_progress(
+        "inject",
+        "starting container to inject the rest of the preset",
+    );
     docker.start_container(container).await?;
 
     // Render mode: install the boot hook and, on a CPU clone, take the GPU away and restart
@@ -652,11 +638,20 @@ async fn clone_container_after_create(
     // the lingering user manager already started in the boot race (see `HEADLESS_DISABLE_SCRIPT`).
     // `agent-wrapper` is left enabled. Runs before the ~seconds of Codex/env injects below.
     if headless {
-        on_progress("inject", "headless: removing desktop units (gnome-headless + clone-daemon + session-holder)");
+        on_progress(
+            "inject",
+            "headless: removing desktop units (gnome-headless + clone-daemon + session-holder)",
+        );
         let code = docker
-            .exec_script(container, HEADLESS_DISABLE_SCRIPT, &[], &[], |_stream, line| {
-                tracing::debug!(target: "provision", "headless-disable: {line}");
-            })
+            .exec_script(
+                container,
+                HEADLESS_DISABLE_SCRIPT,
+                &[],
+                &[],
+                |_stream, line| {
+                    tracing::debug!(target: "provision", "headless-disable: {line}");
+                },
+            )
             .await
             .unwrap_or(0);
         if code != 0 {
@@ -741,7 +736,10 @@ async fn clone_container_after_create(
         Err(e) => tracing::warn!("clone {hostname}: ssh material skipped: {e}"),
     }
 
-    on_progress("inject", "injecting the agent playbook + Codex parity + SSH material");
+    on_progress(
+        "inject",
+        "injecting the agent playbook + Codex parity + SSH material",
+    );
     docker.upload_tar(container, entries).await?;
 
     // Interactive Claude Code reads MCP servers from ~/.claude.json (state-bearing → jq merge, not
@@ -796,7 +794,10 @@ async fn clone_container_after_create(
     // the reconciler applies to every clone; running them now means a clone's first `sudo` and
     // its first `/tmp` write behave like an old clone's, not like an unreconciled one's.
     // Content-idempotent rather than stamped, so there is nothing to record.
-    on_progress("inject", "masking tmp.mount + installing the polkit sudo rule");
+    on_progress(
+        "inject",
+        "masking tmp.mount + installing the polkit sudo rule",
+    );
     seed_step(
         docker,
         container,
@@ -815,7 +816,6 @@ async fn clone_container_after_create(
         None,
     )
     .await;
-
 
     // The activity probe, so the new clone reports working-vs-stuck from its first turn
     // rather than from the reconciler's first pass 30s later. Stamped the same way, and
@@ -879,15 +879,26 @@ async fn clone_container_after_create(
     // for one. Start the default `main` tmux session (idempotent; the viewer shows it as the
     // first tab and `termplane` self-heals a missing session on select) and report ready.
     if headless {
-        on_progress("wait-ready", "headless clone — starting default tmux session");
+        on_progress(
+            "wait-ready",
+            "headless clone — starting default tmux session",
+        );
         let code = docker
-            .exec_script(container, &headless_tmux_default_script(), &[], &[], |_stream, line| {
-                tracing::debug!(target: "provision", "headless-tmux: {line}");
-            })
+            .exec_script(
+                container,
+                &headless_tmux_default_script(),
+                &[],
+                &[],
+                |_stream, line| {
+                    tracing::debug!(target: "provision", "headless-tmux: {line}");
+                },
+            )
             .await
             .unwrap_or(0);
         if code != 0 {
-            tracing::warn!("clone {hostname}: default tmux session start exited {code} (non-fatal)");
+            tracing::warn!(
+                "clone {hostname}: default tmux session start exited {code} (non-fatal)"
+            );
         }
         on_progress("ready", &format!("headless clone {hostname} up"));
         return Ok(());
@@ -928,147 +939,6 @@ async fn clone_container_after_create(
         tokio::time::sleep(WAIT_READY_POLL).await;
     }
 }
-
-// --- template pull --------------------------------------------------------------------
-
-/// A template-pull progress event. Unlike the shared `(step, msg)` callback the clone /
-/// commit / delete flows use, the pull emits a coarse STEP transition (jobs maps it to the
-/// [`pull_pct`] table), a fine byte-progress PCT inside the long `pull` step (so the
-/// aggregate download fraction reaches the op bar without a log line per byte tick), or a
-/// per-layer status LOG line (message + op log, no pct move) — the same volume-capped
-/// per-(layer, status) transitions the retired in-product bootstrap logged.
-#[derive(Debug, Clone)]
-pub enum PullProgress {
-    /// A coarse step transition (`queued`/`pull`/`verify`/`done`); maps to [`pull_pct`].
-    Step { step: String, msg: String },
-    /// Fine byte progress inside the `pull` step: an absolute pct (2–90) + a message.
-    Pct { pct: f64, msg: String },
-    /// A per-layer pull status line (`docker.rs`'s deduped `PullEvent::Status`): pushed to the
-    /// op log + the message, WITHOUT moving `step` off `"pull"` or touching `pct` (pct stays
-    /// byte-driven via [`PullProgress::Pct`]).
-    Log { msg: String },
-}
-
-/// Progress step → percentage for a template pull. The `pull` step's 2–90 span is filled by
-/// [`pull_template`] itself from aggregate byte progress (`2 + frac·88`), so the table only
-/// pins the coarse floors.
-fn pull_pct(step: &str) -> Option<f64> {
-    Some(match step {
-        "queued" => 0.0,
-        "pull" => 2.0,
-        "verify" => 91.0,
-        "done" => 100.0,
-        _ => return None,
-    })
-}
-
-/// Pull the clone template from `remote_ref` (a registry `repo:tag`) and return that same
-/// reference as the canonical clone-source ref clones are created FROM. No local retag: the
-/// pulled image keeps its own repo:tag (e.g. `pegasis0/rmng-template:latest`), which is what
-/// the image picker lists and what `createClone` passes back. This REPLACES the retired
-/// in-product bootstrap (which provisioned a base from `ubuntu` inside a build container); the
-/// template is now built by `template/Dockerfile` and published to a registry.
-///
-/// Steps (→ pct): `queued` 0, `pull` 2–90 (aggregate byte progress via [`PullProgress::Pct`]),
-/// `verify` 91, `done` 100. Returns the pulled reference.
-///
-/// The pulled image must carry `rmng.image=1` — else it isn't an RMNG template and would just
-/// sit around unused (it never enters the picker, which filters on that label). A non-standard
-/// `StopSignal` only WARNs (clones off it hang 20 s on stop, but that's no reason to refuse the
-/// pull). Re-pulling the same `repo:tag` naturally moves the local tag onto the fresh image
-/// (standard `docker pull`) — that IS the refresh, so there's nothing to guard.
-pub async fn pull_template(
-    app: &App,
-    remote_ref: &str,
-    mut on_progress: impl FnMut(PullProgress),
-) -> Result<String> {
-    let remote = remote_ref.trim();
-    if remote.is_empty() {
-        bail!("a template reference is required");
-    }
-    if remote.chars().any(char::is_whitespace) {
-        bail!("template reference '{remote}' must not contain whitespace");
-    }
-    // A `repo@sha256:…` digest ref is mis-split by `split_reference` (it treats the digest's
-    // own `:` as the tag separator), so refuse it — pull a `repo:tag` reference instead.
-    if remote.contains('@') {
-        bail!(
-            "digest references ('{remote}') aren't supported — pull a repo:tag reference instead"
-        );
-    }
-
-    let docker = &app.docker;
-
-    on_progress(PullProgress::Step {
-        step: "queued".into(),
-        msg: format!("queued template pull {remote}"),
-    });
-
-    // Pull (2–90%): map the aggregate byte fraction onto `2 + frac·88`. `Status` lines (already
-    // deduped per-(layer, status) transition by `pull_image`) land in the op LOG + message, as
-    // the retired in-product bootstrap logged them — same formatting, without moving pct;
-    // `Bytes` drives the fine pct + message with NO log line (it fires up to ~100 times per
-    // pull, which would swamp the log). A daemon error (e.g. a Docker Hub rate limit) is
-    // surfaced verbatim by `pull_image` (gotcha #9).
-    on_progress(PullProgress::Step {
-        step: "pull".into(),
-        msg: format!("pulling {remote}"),
-    });
-    {
-        let on_progress = &mut on_progress;
-        docker
-            .pull_image(remote, |event| match event {
-                PullEvent::Status { layer, status } => {
-                    let msg = if layer.is_empty() {
-                        status
-                    } else {
-                        format!("{layer}: {status}")
-                    };
-                    on_progress(PullProgress::Log { msg });
-                }
-                PullEvent::Bytes { frac } => {
-                    let pct = 2.0 + frac * 88.0;
-                    on_progress(PullProgress::Pct {
-                        pct,
-                        msg: format!("pulling {remote}: {}%", (frac * 100.0) as i64),
-                    });
-                }
-            })
-            .await?;
-    }
-
-    // Verify (91%): the pulled image must be an RMNG template (`rmng.image=1`) — else it isn't
-    // a clone source and would just sit around unlisted (the picker filters on this label).
-    on_progress(PullProgress::Step {
-        step: "verify".into(),
-        msg: format!("verifying {remote} is an RMNG template"),
-    });
-    let labels = docker.image_labels(remote).await?;
-    if labels.get(crate::docker::LABEL_IMAGE).map(String::as_str) != Some("1") {
-        bail!(
-            "'{remote}' is not an RMNG template (missing the `{}=1` label) — build one with \
-             template/Dockerfile and push it, then pull that reference",
-            crate::docker::LABEL_IMAGE
-        );
-    }
-    // A template SHOULD carry StopSignal=SIGRTMIN+3 so clones stop cleanly (gotcha #5); warn
-    // if it doesn't, but don't refuse an otherwise-valid template over it.
-    match docker.image_stop_signal(remote).await? {
-        Some(sig) if sig == "SIGRTMIN+3" => {}
-        other => tracing::warn!(
-            "template {remote} StopSignal is {:?} (expected SIGRTMIN+3); clones off it may hang \
-             20s on stop before SIGKILL",
-            other.as_deref().unwrap_or("<unset>")
-        ),
-    }
-
-    on_progress(PullProgress::Step {
-        step: "done".into(),
-        msg: format!("template {remote} ready"),
-    });
-    Ok(remote.to_string())
-}
-
 
 // --- delete ---------------------------------------------------------------------------
 
@@ -1134,7 +1004,8 @@ pub async fn delete_clone(
             match crate::zfs::destroy(&parent, host_id, false) {
                 Ok(()) => {
                     if let Some(snap) = origin.filter(|s| s != "-") {
-                        if let Err(e) = crate::zfs::destroy_snapshot_if_unreferenced(&parent, &snap) {
+                        if let Err(e) = crate::zfs::destroy_snapshot_if_unreferenced(&parent, &snap)
+                        {
                             tracing::warn!(
                                 "delete {host_id}: keeping origin snapshot {snap}: {e} (non-fatal)"
                             );
@@ -1298,7 +1169,7 @@ pub async fn clone_container_gen2(
     if !is_dns_label(hostname) {
         bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
     }
-    let docker = &app.docker;
+    let _docker = &app.docker;
     // The preset Dockerfile decides the image: same text twice means one build, and the
     // tag is recorded below as `base_tag`. No label gate: FROM may name any image.
     let tag = crate::derived::ensure_image(app, dockerfile, false, &mut on_progress).await?;
@@ -1428,8 +1299,8 @@ pub async fn fork_clone(
     if !is_dns_label(new_id) {
         bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
     }
-    let src = gen2_row(app, source_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown clone '{source_id}'"))?;
+    let _src =
+        gen2_row(app, source_id).ok_or_else(|| anyhow::anyhow!("unknown clone '{source_id}'"))?;
     let dockerfile = preset_dockerfile(app, preset_name);
     // The fork's image comes from the TARGET preset's Dockerfile (built lazily inside
     // `clone_container_gen2`); the source contributes only its home dataset, snapshotted
@@ -1441,7 +1312,11 @@ pub async fn fork_clone(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let snap = crate::zfs::snapshot(&homes_parent(app), source_id, &format!("fork-{new_id}-{ts}"))?;
+    let snap = crate::zfs::snapshot(
+        &homes_parent(app),
+        source_id,
+        &format!("fork-{new_id}-{ts}"),
+    )?;
     on_progress("clone-home", &format!("cloning home for {new_id}"));
     if let Err(e) = crate::zfs::clone_dataset(&homes_parent(app), &snap, new_id) {
         let _ = crate::zfs::destroy_snapshot_if_unreferenced(&homes_parent(app), &snap);
@@ -1523,7 +1398,10 @@ pub async fn rebase_clone(
             Ok(tag)
         }
         Err(e) => {
-            on_progress("rollback", &format!("rebase failed; recreating from {old_tag}"));
+            on_progress(
+                "rollback",
+                &format!("rebase failed; recreating from {old_tag}"),
+            );
             if let Err(rb) = clone_container_gen2_from_tag(
                 app,
                 &old_tag,
@@ -1792,6 +1670,18 @@ fn commit_pct(step: &str) -> Option<f64> {
         _ => return None,
     })
 }
+/// Progress step → percentage for the retired gen-1 template pull. Kept so old persisted
+/// `Pull` operations still render; no new ones are created.
+fn pull_pct(step: &str) -> Option<f64> {
+    Some(match step {
+        "queued" => 0.0,
+        "pull" => 2.0,
+        "verify" => 91.0,
+        "done" => 100.0,
+        _ => return None,
+    })
+}
+
 pub fn step_pct(kind: wire::OperationKind, step: &str) -> Option<f64> {
     match kind {
         wire::OperationKind::Clone => clone_pct(step),
@@ -1845,72 +1735,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_reference_canonicalizes_every_input_form() {
-        const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let img = |reference: &str, hex: &str| wire::ImageInfo {
-            id: format!("sha256:{hex}"),
-            reference: reference.into(),
-            size_bytes: 0,
-            created_at: String::new(),
-            base: false,
-            created_from: None,
-            in_use_by: Vec::new(),
-        };
-        let images = vec![
-            img("rmng/template:base", HEX_A),
-            img("rmng/template:dev", HEX_B),
-        ];
-
-        // Repo-tag reference → itself.
-        assert_eq!(
-            resolve_reference(&images, "rmng/template:base").as_deref(),
-            Some("rmng/template:base")
-        );
-        // Full `sha256:` id → its reference.
-        assert_eq!(
-            resolve_reference(&images, &format!("sha256:{HEX_B}")).as_deref(),
-            Some("rmng/template:dev")
-        );
-        // Bare 64-hex id (prefix-stripped form) → its reference.
-        assert_eq!(
-            resolve_reference(&images, HEX_A).as_deref(),
-            Some("rmng/template:base")
-        );
-        // No match (unknown reference, unknown id, empty) → None.
-        assert_eq!(resolve_reference(&images, "rmng/template:nope"), None);
-        assert_eq!(resolve_reference(&images, "sha256:cccc"), None);
-        assert_eq!(resolve_reference(&images, ""), None);
-        // Empty image list → None.
-        assert_eq!(resolve_reference(&[], "rmng/template:base"), None);
-    }
-
-    #[test]
-    fn resolve_reference_resolves_alias_tags() {
-        // list_rmng_images emits one ImageInfo per RepoTag: same id, different
-        // reference. An alias tag must resolve to itself (the alias-tag quirk).
-        const HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let img = |reference: &str| wire::ImageInfo {
-            id: format!("sha256:{HEX}"),
-            reference: reference.into(),
-            size_bytes: 0,
-            created_at: String::new(),
-            base: false,
-            created_from: None,
-            in_use_by: Vec::new(),
-        };
-        let images = vec![img("repo:canonical"), img("repo:alias")];
-        assert_eq!(
-            resolve_reference(&images, "repo:alias").as_deref(),
-            Some("repo:alias")
-        );
-        assert_eq!(
-            resolve_reference(&images, "repo:canonical").as_deref(),
-            Some("repo:canonical")
-        );
-    }
-
-    #[test]
     fn gen2_dynamic_env_keeps_model_key() {
         // ANTHROPIC_MODEL is seeded at create so fresh clones have a model before the
         // first reconcile pass; static keys stay out (they bake into the image).
@@ -1918,18 +1742,19 @@ mod tests {
             key: key.into(),
             value: "v".into(),
         };
-        let got: Vec<String> = gen2_dynamic_env(
-            &[
-                env("RMNG_CONTROL_URL"),
-                env("RMNG_PROXY_KEY"),
-                env("ANTHROPIC_MODEL"),
-                env("SOME_STATIC"),
-            ],
-        )
+        let got: Vec<String> = gen2_dynamic_env(&[
+            env("RMNG_CONTROL_URL"),
+            env("RMNG_PROXY_KEY"),
+            env("ANTHROPIC_MODEL"),
+            env("SOME_STATIC"),
+        ])
         .into_iter()
         .map(|v| v.key)
         .collect();
-        assert_eq!(got, vec!["RMNG_CONTROL_URL", "RMNG_PROXY_KEY", "ANTHROPIC_MODEL"]);
+        assert_eq!(
+            got,
+            vec!["RMNG_CONTROL_URL", "RMNG_PROXY_KEY", "ANTHROPIC_MODEL"]
+        );
     }
 
     #[test]
@@ -1945,9 +1770,12 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("rmng-prov-ssh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let e =
-            crate::ssh::clone_ssh_tar_entries(dir.to_str().unwrap(), "c1", &["ssh-ed25519 A a".into()])
-                .unwrap();
+        let e = crate::ssh::clone_ssh_tar_entries(
+            dir.to_str().unwrap(),
+            "c1",
+            &["ssh-ed25519 A a".into()],
+        )
+        .unwrap();
         assert!(e.iter().any(|t| t.path == "home/rmng/.ssh/authorized_keys"
             && t.mode == 0o600
             && t.uid == 1000));
@@ -1955,8 +1783,11 @@ mod tests {
         // (a managed `Host *` there leaked clone-local User/IdentityFile onto every destination),
         // and no PRIVATE key may land in ~/.ssh — gcr-ssh-agent adopts anything it finds there
         // into the login keyring and then crashes on it, wedging all ssh/git in the clone.
-        let home: Vec<&str> =
-            e.iter().map(|t| t.path.as_str()).filter(|p| p.starts_with("home/")).collect();
+        let home: Vec<&str> = e
+            .iter()
+            .map(|t| t.path.as_str())
+            .filter(|p| p.starts_with("home/"))
+            .collect();
         assert_eq!(
             home,
             vec!["home/rmng/.ssh/authorized_keys"],
@@ -2031,7 +1862,10 @@ mod tests {
         let script = headless_tmux_default_script();
         assert!(script.contains(". /etc/environment"), "{script}");
         // The session is still created, and the window-size option still applied.
-        assert!(script.contains("tmux new-session -d -s main -c /home/rmng"), "{script}");
+        assert!(
+            script.contains("tmux new-session -d -s main -c /home/rmng"),
+            "{script}"
+        );
         assert!(script.contains("window-size latest"), "{script}");
         // Gen-2 images carry no stale Config.Env, so no key cancellations remain.
         assert!(!script.contains("unset "), "stale cancellation:\n{script}");
@@ -2133,8 +1967,14 @@ mod tests {
     fn render_mode_script_records_installs_and_only_then_switches() {
         let s = RENDER_MODE_SCRIPT;
         assert!(s.contains("/etc/rmng/render-mode"), "no marker written");
-        assert!(s.contains("systemctl enable rmng-render-mode.service"), "boot hook not enabled");
-        assert!(s.contains("WantedBy=sysinit.target"), "hook runs too late to matter");
+        assert!(
+            s.contains("systemctl enable rmng-render-mode.service"),
+            "boot hook not enabled"
+        );
+        assert!(
+            s.contains("WantedBy=sysinit.target"),
+            "hook runs too late to matter"
+        );
         assert!(
             s.contains(r#"if [ "$want_gpu" = "$have_gpu" ]"#),
             "the script must no-op when the mode already matches"
@@ -2142,6 +1982,9 @@ mod tests {
         // The session restart belongs after that check, so a matching clone is left alone.
         let check = s.find(r#"if [ "$want_gpu" = "$have_gpu" ]"#).unwrap();
         let restart = s.find("systemctl --user restart").unwrap();
-        assert!(restart > check, "the session is restarted before the no-op check");
+        assert!(
+            restart > check,
+            "the session is restarted before the no-op check"
+        );
     }
 }

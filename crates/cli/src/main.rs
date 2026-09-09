@@ -27,7 +27,10 @@ async fn main() {
                 // Under --json, errors are JSON too (on stderr) so an agent parses one shape for
                 // success and failure. Exit code is unchanged (1 for a transport/API error).
                 let hint = if transport {
-                    format!("set --server or $RMNG_CONTROL_URL (server: {})", client.base())
+                    format!(
+                        "set --server or $RMNG_CONTROL_URL (server: {})",
+                        client.base()
+                    )
                 } else {
                     String::new()
                 };
@@ -59,8 +62,15 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 no_preset,
                 common,
             } => {
-                commands::clone_create(client, hostname, preset.as_deref(), *no_preset, common, json)
-                    .await
+                commands::clone_create(
+                    client,
+                    hostname,
+                    preset.as_deref(),
+                    *no_preset,
+                    common,
+                    json,
+                )
+                .await
             }
             CloneCmd::CreateFromTicket {
                 ticket,
@@ -108,15 +118,37 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 common,
             } => {
                 let body = args::read_text(message.as_ref(), message_file.as_ref())?;
-                commands::clone_create_plain(client, title, &body, preset.as_deref(), common, json).await
+                commands::clone_create_plain(client, title, &body, preset.as_deref(), common, json)
+                    .await
             }
             CloneCmd::Rm { clone, yes, wait } => {
                 commands::clone_rm(client, clone, *yes, wait, json).await
             }
             CloneCmd::Archive { clone, wait } => commands::archive(client, clone, wait, json).await,
             CloneCmd::Restore { clone, wait } => commands::restore(client, clone, wait, json).await,
-            CloneCmd::Fork { source, new_id, headless, preset, claude_account, codex_account, message, wait } => {
-                commands::fork(client, source, new_id, *headless, preset.clone(), claude_account.clone(), codex_account.clone(), message.clone(), wait, json).await
+            CloneCmd::Fork {
+                source,
+                new_id,
+                headless,
+                preset,
+                claude_account,
+                codex_account,
+                message,
+                wait,
+            } => {
+                commands::fork(
+                    client,
+                    source,
+                    new_id,
+                    *headless,
+                    preset.clone(),
+                    claude_account.clone(),
+                    codex_account.clone(),
+                    message.clone(),
+                    wait,
+                    json,
+                )
+                .await
             }
             CloneCmd::Rebase { clone, tag, wait } => {
                 commands::rebase(client, clone, tag, wait, json).await
@@ -147,7 +179,6 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 commands::select(client, clone.as_deref(), *none, json).await
             }
         },
-        Cmd::Image(cmd) => commands::image(client, cmd, json).await,
         Cmd::Account(cmd) => commands::account(client, cmd, json).await,
         Cmd::Op(cmd) => match cmd {
             OpCmd::Ls => commands::op_ls(client, json).await,

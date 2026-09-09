@@ -11,13 +11,13 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wire::{RmngClone, Operation, OperationKind, OperationStatus};
+use wire::{Operation, OperationKind, OperationStatus, RmngClone};
 
 use crate::app::App;
 use crate::provision::{
-    self, HomeSource, PullProgress, clone_container_gen2, clone_key_env_vars,
-    compose_clone_env, control_env_vars, delete_clone, fork_clone,
-    is_dns_label, migrate_one, preset_env_vars, pull_template, rebase_clone,
+    self, HomeSource, clone_container_gen2, clone_key_env_vars, compose_clone_env,
+    control_env_vars, delete_clone, fork_clone, is_dns_label, migrate_one, preset_env_vars,
+    rebase_clone,
 };
 
 const LOG_LIMIT: usize = 200;
@@ -179,51 +179,6 @@ fn op_progress(app: &App, op_id: &str, kind: OperationKind) -> impl FnMut(&str, 
                 op.log.drain(0..drop);
             }
         });
-    }
-}
-
-/// The pull-flow analogue of [`op_progress`]: consumes [`PullProgress`] directly (the pull
-/// flow doesn't use the shared `(step, msg)` callback). A `Step` transition sets the
-/// step/message + a log line and raises the pct to the `pull_pct` floor; a `Pct` byte tick
-/// raises the bar (monotonic `max`) + updates the message with NO log line — a single pull
-/// emits up to ~100 byte ticks, which would swamp the op log; a `Log` line (per-layer pull
-/// status) pushes to the op log + updates the message WITHOUT touching `step` or `pct` — it
-/// fires mid-`"pull"` step, same as the old bootstrap's per-layer log lines.
-fn pull_op_progress(app: &App, op_id: &str) -> impl FnMut(PullProgress) {
-    let app = app.clone();
-    let op_id = op_id.to_string();
-    move |ev: PullProgress| match ev {
-        PullProgress::Step { step, msg } => {
-            let pct = provision::step_pct(OperationKind::Pull, &step);
-            patch_op(&app, &op_id, |op| {
-                op.step = step;
-                if let Some(p) = pct {
-                    op.pct = op.pct.max(p);
-                }
-                op.log.push(format!("{}: {msg}", op.step));
-                op.message = msg;
-                if op.log.len() > LOG_LIMIT {
-                    let drop = op.log.len() - LOG_LIMIT;
-                    op.log.drain(0..drop);
-                }
-            });
-        }
-        PullProgress::Pct { pct, msg } => {
-            patch_op(&app, &op_id, |op| {
-                op.pct = op.pct.max(pct);
-                op.message = msg;
-            });
-        }
-        PullProgress::Log { msg } => {
-            patch_op(&app, &op_id, |op| {
-                op.log.push(format!("{}: {msg}", op.step));
-                op.message = msg;
-                if op.log.len() > LOG_LIMIT {
-                    let drop = op.log.len() - LOG_LIMIT;
-                    op.log.drain(0..drop);
-                }
-            });
-        }
     }
 }
 
@@ -580,7 +535,10 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     //
     // The home symlink is the one with reach: SMB browsing, the file API, token accounting, the
     // transcript ledger and activity detection all read a clone through it.
-    progress("settle", "attaching the shared folder, home link and SSH access");
+    progress(
+        "settle",
+        "attaching the shared folder, home link and SSH access",
+    );
     crate::shared::ensure_now(&app, &spec.new_hostname).await;
     crate::homes::ensure_now(&app, &spec.new_hostname).await;
     // Before the store write below, so the bastion's forward allowlist and the clone's own
@@ -677,46 +635,6 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             ));
         }
     }
-}
-
-/// Pull the clone template from `reference` (a registry `repo:tag`) — no local retag; the
-/// pulled image keeps its own `repo:tag`, which becomes the clone-source reference. Drives a
-/// `Pull`-kind Operation with the reference as its target; no clone is registered (a template
-/// is not a clone). Guard: no op is already in flight for the same reference.
-pub fn start_pull(app: &App, reference: &str) -> Result<Operation, JobError> {
-    let st = app.store.get();
-    if st
-        .operations
-        .iter()
-        .any(|o| o.status == OperationStatus::Running && o.target == reference)
-    {
-        return Err(JobError(format!("'{reference}' is already being pulled")));
-    }
-    let op = make_op(OperationKind::Pull, reference, None);
-    let (ret, op_id) = (op.clone(), op.id.clone());
-    app.store.mutate(|s| s.operations.push(op));
-    let (app2, reference) = (app.clone(), reference.to_string());
-    tokio::spawn(async move { run_pull(app2, op_id, reference).await });
-    Ok(ret)
-}
-
-async fn run_pull(app: App, op_id: String, reference: String) {
-    let progress = pull_op_progress(&app, &op_id);
-    let pulled_ref = match pull_template(&app, &reference, progress).await {
-        Ok(r) => r,
-        // `{e:#}` (not `e.to_string()`, which prints only the outermost context) — a pull
-        // failure's useful part is usually the daemon's verbatim message (e.g. "pull access
-        // denied … repository does not exist"), buried under a `with_context` layer.
-        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
-    };
-    patch_op(&app, &op_id, |op| {
-        op.status = OperationStatus::Done;
-        op.step = "done".into();
-        op.pct = 100.0;
-        op.message = format!("template {pulled_ref} ready");
-        op.finished_at = Some(now_ms());
-    });
-    schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
 }
 
 /// Validate + register a control-server self-update op, then drive it in the background.
@@ -995,7 +913,9 @@ pub fn start_fork(app: &App, spec: ForkSpec) -> Result<Operation, JobError> {
         return Err(JobError(format!("'{source_id}' is not a managed clone")));
     }
     if src.base_tag.is_none() {
-        return Err(JobError(format!("'{source_id}' is not a gen-2 clone (no base tag)")));
+        return Err(JobError(format!(
+            "'{source_id}' is not a gen-2 clone (no base tag)"
+        )));
     }
     if !is_dns_label(new_id) {
         return Err(JobError(
@@ -1026,7 +946,13 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     let new_id = spec.new_hostname.clone();
     let headless = spec.headless;
     let progress = op_progress(&app, &op_id, OperationKind::Clone);
-    let src = match app.store.get().hosts.into_iter().find(|h| h.id == source_id) {
+    let src = match app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .find(|h| h.id == source_id)
+    {
         Some(h) => h,
         None => return fail_op(&app, &op_id, format!("unknown clone '{source_id}'")),
     };
@@ -1079,7 +1005,8 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
             claude_group = group.clone();
             match account {
                 None if pending_auto => patch_op(&app, &op_id, |op| {
-                    op.log.push("account: auto (pending imported account)".into())
+                    op.log
+                        .push("account: auto (pending imported account)".into())
                 }),
                 None => match crate::claude::clear_clone_token(&app, &new_id).await {
                     Ok(()) => {
@@ -1091,22 +1018,21 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
                     Err(e) => {
                         tracing::warn!("fork {new_id}: clear_clone_token failed: {e}");
                         patch_op(&app, &op_id, |op| {
-                            op.log.push(format!(
-                                "account: none — failed to clear credentials: {e}"
-                            ))
+                            op.log
+                                .push(format!("account: none — failed to clear credentials: {e}"))
                         });
                     }
                 },
                 Some(email) => {
-                    match crate::claude::push_account_to_clone(&app, &new_id, &email).await
-                    {
+                    match crate::claude::push_account_to_clone(&app, &new_id, &email).await {
                         Ok(()) => patch_op(&app, &op_id, |op| {
                             op.log.push(format!("account: assigned {email}"))
                         }),
                         Err(e) => {
                             tracing::warn!("fork {new_id}: Claude assign failed: {e}");
                             patch_op(&app, &op_id, |op| {
-                                op.log.push(format!("account: failed to assign {email}: {e}"))
+                                op.log
+                                    .push(format!("account: failed to assign {email}: {e}"))
                             });
                         }
                     }
@@ -1117,12 +1043,14 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     } else if let Some(email) = src.claude_account_email.clone() {
         match crate::claude::push_account_to_clone(&app, &new_id, &email).await {
             Ok(()) => patch_op(&app, &op_id, |op| {
-                op.log.push(format!("account: inherited {email} from {source_id}"))
+                op.log
+                    .push(format!("account: inherited {email} from {source_id}"))
             }),
             Err(e) => {
                 tracing::warn!("fork {new_id}: inheriting Claude account failed: {e}");
                 patch_op(&app, &op_id, |op| {
-                    op.log.push(format!("account: failed to inherit {email}: {e}"))
+                    op.log
+                        .push(format!("account: failed to inherit {email}: {e}"))
                 });
             }
         }
@@ -1155,7 +1083,8 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
                     Ok(()) => {
                         app.codex.forget_pushed(&new_id);
                         patch_op(&app, &op_id, |op| {
-                            op.log.push("codex account: none (credentials cleared)".into())
+                            op.log
+                                .push("codex account: none (credentials cleared)".into())
                         })
                     }
                     Err(e) => {
@@ -1168,17 +1097,15 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
                     }
                 },
                 Some(email) => {
-                    match crate::codex::push_account_to_clone(&app, &new_id, &email).await
-                    {
+                    match crate::codex::push_account_to_clone(&app, &new_id, &email).await {
                         Ok(()) => patch_op(&app, &op_id, |op| {
                             op.log.push(format!("codex account: assigned {email}"))
                         }),
                         Err(e) => {
                             tracing::warn!("fork {new_id}: Codex assign failed: {e}");
                             patch_op(&app, &op_id, |op| {
-                                op.log.push(format!(
-                                    "codex account: failed to assign {email}: {e}"
-                                ))
+                                op.log
+                                    .push(format!("codex account: failed to assign {email}: {e}"))
                             });
                         }
                     }
@@ -1188,18 +1115,23 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     } else if let Some(email) = src.codex_account_email.clone() {
         match crate::codex::push_account_to_clone(&app, &new_id, &email).await {
             Ok(()) => patch_op(&app, &op_id, |op| {
-                op.log.push(format!("codex account: inherited {email} from {source_id}"))
+                op.log
+                    .push(format!("codex account: inherited {email} from {source_id}"))
             }),
             Err(e) => {
                 tracing::warn!("fork {new_id}: inheriting Codex account failed: {e}");
                 patch_op(&app, &op_id, |op| {
-                    op.log.push(format!("codex account: failed to inherit {email}: {e}"))
+                    op.log
+                        .push(format!("codex account: failed to inherit {email}: {e}"))
                 });
             }
         }
     }
 
-    progress("settle", "attaching the shared folder, home link and SSH access");
+    progress(
+        "settle",
+        "attaching the shared folder, home link and SSH access",
+    );
     crate::shared::ensure_now(&app, &new_id).await;
     crate::homes::ensure_now(&app, &new_id).await;
     crate::ssh::allow_clone_now(&app, &new_id).await;
@@ -1213,25 +1145,31 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     let first_message = spec.first_message.clone();
     let agent_instructions = spec.agent_instructions.clone();
     let claude_instructions = spec.claude_instructions.clone();
-    let (linear_workspace, linear_ticket, linear_ticket_url, linear_branch, display_name, linear_label) =
-        match &linear {
-            Some(m) => (
-                m.workspace.clone(),
-                m.ticket.clone(),
-                m.ticket_url.clone(),
-                m.branch.clone(),
-                m.display_name.clone(),
-                m.label.clone(),
-            ),
-            None => (
-                src.linear_workspace.clone(),
-                src.linear_ticket.clone(),
-                src.linear_ticket_url.clone(),
-                src.linear_branch.clone(),
-                src.display_name.clone(),
-                src.linear_label.clone(),
-            ),
-        };
+    let (
+        linear_workspace,
+        linear_ticket,
+        linear_ticket_url,
+        linear_branch,
+        display_name,
+        linear_label,
+    ) = match &linear {
+        Some(m) => (
+            m.workspace.clone(),
+            m.ticket.clone(),
+            m.ticket_url.clone(),
+            m.branch.clone(),
+            m.display_name.clone(),
+            m.label.clone(),
+        ),
+        None => (
+            src.linear_workspace.clone(),
+            src.linear_ticket.clone(),
+            src.linear_ticket_url.clone(),
+            src.linear_branch.clone(),
+            src.display_name.clone(),
+            src.linear_label.clone(),
+        ),
+    };
     // Cloned before the row write below moves the tuple fields into the closure.
     let ticket_url = linear_ticket_url.clone();
     app.store.mutate(|s| {
@@ -1287,13 +1225,7 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
         .map(str::trim)
         .is_some_and(|s| !s.is_empty());
     if ticket_url.is_some() || has_msg {
-        if let Some(host) = app
-            .store
-            .get()
-            .hosts
-            .into_iter()
-            .find(|h| h.id == new_id)
-        {
+        if let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == new_id) {
             tokio::spawn(crate::chat::kickoff_agent(
                 app.clone(),
                 host,
@@ -1327,7 +1259,9 @@ pub fn start_rebase(
         return Err(JobError(format!("'{host_id}' is not a managed clone")));
     }
     if row.base_tag.is_none() {
-        return Err(JobError(format!("'{host_id}' is not a gen-2 clone (no base tag)")));
+        return Err(JobError(format!(
+            "'{host_id}' is not a gen-2 clone (no base tag)"
+        )));
     }
     let preset_name = preset_name.trim().to_string();
     if preset_name.is_empty() {
@@ -1364,10 +1298,11 @@ async fn run_rebase(app: App, op_id: String, host_id: String, preset_name: Strin
     // this op); env/playbook stay on the clone's own bindings — rebase swaps the image
     // only, never the preset.
     let dockerfile = crate::provision::preset_dockerfile(&app, Some(&preset_name));
-    let new_tag = match crate::derived::ensure_image(&app, &dockerfile, rebuild, &mut progress).await {
-        Ok(t) => t,
-        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
-    };
+    let new_tag =
+        match crate::derived::ensure_image(&app, &dockerfile, rebuild, &mut progress).await {
+            Ok(t) => t,
+            Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
+        };
     let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await;
     let (playbook, prompt) = gen2_playbook_prompt(&app, row.preset_name.as_deref());
     match rebase_clone(
@@ -1442,7 +1377,11 @@ async fn run_migrate(app: App, op_id: String, host_id: String) {
         None => return fail_op(&app, &op_id, format!("unknown clone '{host_id}'")),
     };
     let Some(base) = row.source.clone() else {
-        return fail_op(&app, &op_id, format!("clone '{host_id}' has no source image"));
+        return fail_op(
+            &app,
+            &op_id,
+            format!("clone '{host_id}' has no source image"),
+        );
     };
     // The home copy needs a stable source: stop it first (best-effort — it may already
     // be stopped; the boot loop stops the whole fleet beforehand anyway).
@@ -1466,8 +1405,7 @@ async fn run_migrate(app: App, op_id: String, host_id: String) {
                     op.status = OperationStatus::Done;
                     op.step = "done".into();
                     op.pct = 100.0;
-                    op.message =
-                        format!("clone {host_id} migrated ({} bytes)", report.bytes);
+                    op.message = format!("clone {host_id} migrated ({} bytes)", report.bytes);
                     op.finished_at = Some(now_ms());
                 }
             });
@@ -1517,7 +1455,13 @@ pub async fn migrate_all_on_boot(app: App) {
         gen1.join(", ")
     );
     // Stable source for the home copies: stop the whole fleet first (best-effort).
-    for h in app.store.get().hosts.into_iter().filter(|h| h.managed && !h.archived) {
+    for h in app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| h.managed && !h.archived)
+    {
         if let Err(e) = app.docker.stop_even_if_paused(&h.id).await {
             tracing::warn!("migrate: pre-stopping {} failed: {e} (continuing)", h.id);
         }
@@ -1528,9 +1472,12 @@ pub async fn migrate_all_on_boot(app: App) {
         match start_migrate(&app, &id) {
             Ok(op) => {
                 wait_op_terminal(&app, &op.id).await;
-                let ok = app.store.get().operations.iter().any(|o| {
-                    o.id == op.id && o.status == OperationStatus::Done
-                });
+                let ok = app
+                    .store
+                    .get()
+                    .operations
+                    .iter()
+                    .any(|o| o.id == op.id && o.status == OperationStatus::Done);
                 if ok {
                     pass += 1;
                 } else {
@@ -1549,9 +1496,12 @@ pub async fn migrate_all_on_boot(app: App) {
         match start_migrate(&app, &id) {
             Ok(op) => {
                 wait_op_terminal(&app, &op.id).await;
-                let ok = app.store.get().operations.iter().any(|o| {
-                    o.id == op.id && o.status == OperationStatus::Done
-                });
+                let ok = app
+                    .store
+                    .get()
+                    .operations
+                    .iter()
+                    .any(|o| o.id == op.id && o.status == OperationStatus::Done);
                 if ok {
                     pass += 1;
                 } else {
@@ -1976,46 +1926,6 @@ mod tests {
                 .iter()
                 .any(|o| o.status == OperationStatus::Running)
         );
-    }
-
-    /// Per-layer pull `Status` events (surfaced to `pull_op_progress` as [`PullProgress::Log`])
-    /// must reach the op LOG + message like the retired bootstrap's pull logging did, but
-    /// without moving `step` off `"pull"` or perturbing the byte-driven `pct` — that's owned
-    /// exclusively by [`PullProgress::Pct`] (`Bytes` events), which must stay message-only.
-    #[tokio::test]
-    async fn pull_log_event_reaches_op_log_without_moving_pct_or_step() {
-        let app = test_app();
-        app.store
-            .mutate(|s| s.operations.push(running_op("op_a", "tpl-a")));
-        let mut progress = pull_op_progress(&app, "op_a");
-
-        progress(PullProgress::Log {
-            msg: "aaaaaaaaaaaa: Downloading".into(),
-        });
-
-        let st = app.store.get();
-        let op = st.operations.iter().find(|o| o.id == "op_a").unwrap();
-        assert_eq!(op.step, "pull"); // unmoved
-        assert_eq!(op.pct, 40.0); // unmoved — pct stays byte-driven
-        assert_eq!(op.message, "aaaaaaaaaaaa: Downloading");
-        assert!(
-            op.log
-                .iter()
-                .any(|l| l == "pull: aaaaaaaaaaaa: Downloading")
-        );
-
-        // A subsequent `Pct` (Bytes) tick updates pct + message but must NOT add a log line —
-        // the log stays exactly as the `Log` event left it.
-        let log_len_before = op.log.len();
-        progress(PullProgress::Pct {
-            pct: 50.0,
-            msg: "pulling docker.io/x:y: 55%".into(),
-        });
-        let st = app.store.get();
-        let op = st.operations.iter().find(|o| o.id == "op_a").unwrap();
-        assert_eq!(op.pct, 50.0);
-        assert_eq!(op.message, "pulling docker.io/x:y: 55%");
-        assert_eq!(op.log.len(), log_len_before); // no new log line from a Pct/Bytes tick
     }
 
     /// The self-update swap kills the server, aborting every in-flight clone/pull/commit, so

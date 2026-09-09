@@ -64,7 +64,7 @@ docker run -d --name rmng --privileged --init --pid host --restart unless-stoppe
 What each piece is for:
 
 | Flag / mount | Why |
-|---|---|
+| --- | --- |
 | `--privileged` | the control-server orchestrates **privileged** clone containers (nested Docker) on the same daemon |
 | `--init` | PID-1 reaper for the short-lived exec/tar helpers the server spawns |
 | `--pid host` | share the host PID namespace so clone PIDs are visible — that's what lets the reconciler find each clone's **uid-1000** process (matched by mount namespace via `/proc/<pid>/ns/mnt`) and link the browse target, served both as the `clones` SMB share and at the host path. Omitting it disables **only** that feature (the server warns once) |
@@ -90,11 +90,10 @@ broken `docker.sock` is surfaced as a failing row in the wizard's environment ch
 
 Open `http://<host>:9000`. A fresh deploy ships `config.json` with `"setupComplete": false`,
 so the web UI opens the **first-run setup wizard** instead of the dashboard. There is no
-grandfather rule: an old `config.json` re-runs the wizard (new machine, no `rmng` network /
-template pulled yet); a stale `proxmox` block is scrubbed on load and its `hostnamePrefix` is
+grandfather rule: an old `config.json` re-runs the wizard (new machine, no `rmng` network yet); a stale `proxmox` block is scrubbed on load and its `hostnamePrefix` is
 carried into `docker.hostnamePrefix`.
 
-The wizard walks four things:
+The wizard walks three things:
 
 1. **Environment checklist** (`GET /api/setup/env`) — pass/fail rows: **Docker daemon**
    reachable, **control-server container** detected (info; absence = dev mode), **clone media
@@ -103,15 +102,7 @@ The wizard walks four things:
 2. **Server settings** — the one-time `docker.subnet` (IPv4 CIDR, validated `/16`–`/24`,
    default `10.99.0.0/24`), `docker.hostnamePrefix` (e.g. `pega-`), monitor layout, listen
    ports, and per-clone limits (`docker.cloneCpus`, `docker.cloneMemoryMb`).
-3. **Download template** (`POST /api/images/pull {reference?}`) — pulls the pre-built
-   clone template (headless GNOME + clone-daemon + agent-wrapper + patched gnome-shell, built
-   on `ubuntu:26.04`) from a registry. The pulled image keeps its own `repo:tag` as the
-   clone-source reference (no local retag); `reference` defaults to the configured
-   `docker.templateReference` (`pegasis0/rmng-template:latest`) and is editable in the wizard.
-   Aggregate byte progress streams over the driving `Operation` (kind `pull`). This step is
-   **skippable** ("Skip for now") — pull a template later from the Images panel. See
-   [Publishing the template](#publishing-the-template) for how that image is built.
-4. **Finish** — latches `setupComplete: true`, which is where the lazy `rmng` bridge network
+3. **Finish** — latches `setupComplete: true`, which is where the lazy `rmng` bridge network
    is first materialized (`.1` gateway, `.2` control-server, `.10+` clone pool).
 
 Afterward, use **Settings** to create presets (Linear key + labels + env vars), Claude and Codex
@@ -220,6 +211,7 @@ reconciler migrates the mirror config + builder onto every running clone within 
 no clone restart). Existing clones created before the upgrade are migrated the same way.
 
 **Operator notes**
+
 - Builds run on the shared `rmng-buildkit` daemon, so a build is **not** bounded by a single
   clone's CPU/memory limit and competes fleet-wide (fine for a small trusted fleet).
 - If `rmng-buildkit` is down, in-clone `docker build` fails until it is back; the clone's local
@@ -231,35 +223,25 @@ no clone restart). Existing clones created before the upgrade are migrated the s
 
 ## Images & clones
 
-RMNG uses **image-only templates** — there is no golden-CT / CoW model. A clone-source image
-is any image labeled `rmng.image=1`, identified by its own `repo:tag` (e.g.
-`pegasis0/rmng-template:latest`):
+Gen-2 clones build their image from the preset Dockerfile on demand — there is no
+golden-CT / CoW model and no image picker. Each preset carries a full Dockerfile, built
+into a `rmng-p-<hash>` tag on first use (`POST /api/images/prebuild` warms one without
+creating). The stock base those Dockerfiles build `FROM` is published as
+`pegasis0/rmng-template:latest` — see
+[Publishing the template](#publishing-the-template) for how it's built. Unused tags are
+purged automatically when the last clone on them is deleted.
 
-- **Pull a template**: `POST /api/images/pull {reference?}` (the wizard's step 3,
-  "Download template"; also the pull affordance in the Images panel later). The pulled image
-  keeps its own `repo:tag` as the clone-source reference (no retag); `reference` defaults to
-  `config.docker.templateReference`. The stock published template already carries `rmng.base=1`
-  (baked in by `template/Dockerfile`). See
-  [Publishing the template](#publishing-the-template) for how it's built.
-- **List images**: `GET /api/images` — each with the ids of live clones running on it.
-- **Clone from an image**: `POST /api/clone` takes `image` (a `repo:tag` reference such as
-  `pegasis0/rmng-template:latest` from the image list) plus a task mode (Linear ticket / new
-  ticket / plain). The clone joins the `rmng` bridge (addressed by container name — Docker DNS;
-  its IP is plain Docker IPAM) with fixed `rmng`/`rmng` credentials, its `/etc/environment`
-  preset env, and the Claude and/or Codex account its selections resolve to (defaulting to
-  `auto` for both, so a new clone gets an account rather than none).
-- **Commit a clone to a new image**: `POST /api/images/commit {host, name}` — freezes the
-  running clone and commits it to `<name>:latest` (the name is the full repo; `rmng.created-from`
-  records lineage). On-disk credentials in the clone's home are baked into the image (logged as
-  a warning).
-- **Delete an image**: `POST /api/images/delete {reference}` — 409 if any clone still runs on
-  it or a running pull/commit is in flight.
+- **Clone from a preset**: `POST /api/clone` takes a task mode (Linear ticket / new
+  ticket / plain) plus a preset. The clone joins the `rmng` bridge (addressed by container
+  name — Docker DNS; its IP is plain Docker IPAM) with fixed `rmng`/`rmng` credentials,
+  its `/etc/environment` preset env, and the Claude and/or Codex account its selections
+  resolve to (defaulting to `auto` for both, so a new clone gets an account rather than
+  none).
 
 ## Publishing the template
 
 The clone template (`pegasis0/rmng-template` by default) is a **separate image** from the
-control-server image — it's what `POST /api/images/pull` downloads and what every clone is
-created FROM. It replaces the old in-product bootstrap (the control-server used to run
+control-server image — it's the base every preset Dockerfile builds `FROM`. It replaces the old in-product bootstrap (the control-server used to run
 `provision-clone.sh` inside a privileged build container over `docker exec`, then commit the
 result); that recipe now lives in [`template/setup/`](../template/setup/) as ordered phase
 scripts (`lib.sh` shared helpers, then `10-desktop.sh`, `15-gnome-patch.sh`, `20-toolbox.sh`,
@@ -287,25 +269,18 @@ docker push pegasis0/rmng-template:latest
 ```
 
 **Versioning**: every publish tags an immutable dated `:YYYYMMDD` **and** repoints the moving
-`:latest`. Nothing is ever overwritten — a rollback is just pointing `docker.templateReference`
-(Settings, or the pull body's `reference`) at a prior dated tag and pulling again.
+`:latest`. Nothing is ever overwritten — a rollback is just naming a prior dated tag in the
+preset Dockerfile's `FROM` line (any text change re-tags the derived image).
 
-**A multi-tagged image only untags on the first delete.** `pull_template` does **not** retag —
-the pulled image keeps its own `repo:tag` (e.g. `pegasis0/rmng-template:latest`) as the
-clone-source reference. But if the same image carries more than one tag (say you pulled both
-`:latest` and a dated `:20260703`), `POST /api/images/delete {reference: "…:latest"}` only
-removes that one tag; the underlying layers aren't freed while another tag still references
-them, and `GET /api/images` re-lists the same row under whichever tag remains. Delete it again
-— using the reference the row now shows — to actually free the layers.
+**A multi-tagged image only untags on the first delete.** If the same image carries more
+than one tag (say `:latest` and a dated `:20260703`), `docker rmi` on one reference only
+removes that tag; the layers persist while another tag references them.
 
-**DinD × images are decoupled** (a semantic change from the old LVM-snapshot behavior):
-`docker commit` **excludes volume mounts**, and each clone's inner Docker (`/var/lib/docker`)
-lives on its per-clone `rmng-dind-<id>` volume. So a clone's inner-Docker state (pulled
-images, build cache, running inner containers) **never travels into a committed image** —
-every clone always starts with an **empty inner Docker**. Daemon config / compose files in
-the clone user's `$HOME` **do** travel (they're on the image filesystem, not the volume). If
-you ever need seeded inner state, bake it into the template build; commit-from-clone can't
-carry it.
+**DinD × images are decoupled**: each clone's inner Docker (`/var/lib/docker`)
+lives on its per-clone `rmng-dind-<id>` volume, so a clone's inner-Docker state (pulled
+images, build cache, running inner containers) is never part of any image — every clone
+always starts with an **empty inner Docker**. If you ever need seeded inner state, bake it
+into the template build.
 
 ## Upgrades
 
@@ -417,7 +392,7 @@ One directory that every clone and every SMB client sees at once. Drop a file in
 front of the whole fleet.
 
 | Where | Path |
-|---|---|
+| --- | --- |
 | Over SMB | `smb://<docker-host>/shared`, same `rmng`/`rmng` credential as `clones` |
 | Inside every clone | `/home/rmng/shared` |
 | On the control-server | `data/shared` (`/data/data/shared` in the container) |
@@ -569,7 +544,7 @@ builds the clone template (no patched gnome-shell, nothing under `template/`). T
 feeding one runtime stage:
 
 | Stage | Produces |
-|---|---|
+| --- | --- |
 | `bun-build` | the frontend (`frontend/build/client`) + `agent-wrapper` (`bun build --compile`) |
 | `rust-build` | `clone-daemon` + `control-server` (`cargo build --release`) |
 | `runtime` | `ubuntu:26.04` + GStreamer/VA runtime + the payloads below |
@@ -615,7 +590,7 @@ AMD-encoded streams).
 ### Local (on your laptop)
 
 | You changed | Build & run locally | See the result |
-|---|---|---|
+| --- | --- | --- |
 | **`viewer`** | `RMNG_VIDEO=<host>:9001 cargo run -p viewer` | GUI window streaming the server's *selected clone* |
 | **`viewer`**, no display | `RMNG_VIDEO=<host>:9001 RMNG_DUMP=frame.png cargo run -p viewer -- --headless` | per-monitor fps in the logs; `frame.png` = one decoded frame |
 | **frontend** | `cd frontend && bun run dev` | Vite dev server + HMR; proxies `/api` + `/events` to a running backend |
@@ -638,8 +613,8 @@ Two options for exercising the full clone/capture/encode path against a local Do
   CWD-relative. The expected hashes are pinned once at server start (see the dev caveat in
   [Upgrades](#upgrades)) — restart the dev server after restaging `embedded-bin/`.
 
-Then, from the dashboard: pull a template (`POST /api/images/pull`), clone from it
-(`POST /api/clone`), select the clone, and point the viewer at the host. After a
+Then, from the dashboard: create a clone (`POST /api/clone` — its preset image builds on
+demand), select the clone, and point the viewer at the host. After a
 `clone-daemon` / `agent-wrapper` change, restage `embedded-bin/` and restart the dev server —
 the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no manual step.
 
@@ -680,9 +655,6 @@ inherits it (there's no per-install control-server payload any more; see
   corrects the template's baked-in `RMNG_MONITORS` boot value before anyone opens the clone.
   Existing clones are not touched: each keeps the layout it was last viewed with until the
   operator switches to it.
-- **Pull a template**: `POST /api/images/pull {reference?}` — from the Images panel, any
-  time (not just first-run setup).
-- **Commit a clone → image**: `POST /api/images/commit {host, name}`.
 - **Activate a layout preset** with `POST /api/layout/activate {name}`: pushes
   `ServerMsg::SetMonitors` to the selected clone's daemon, which live-swaps to a fresh Mutter
   session with the new monitors (make-before-break, no GNOME restart, no app loss). Every
@@ -714,10 +686,10 @@ These are baked into the code/scripts now; listed so they aren't re-discovered.
    capture path fails with `no more input formats`.
 3. **The clone socket must be a named volume, not a bind** — every clone mounts the same
    `rmng-sock` volume at `/srv/rmng-sock`; a host bind wouldn't be shareable into siblings.
-4. **Clones need `StopSignal=SIGRTMIN+3`** (baked into every image by `commit` with
-   `set_boot_config`) or every stop is a 20 s hang + SIGKILL.
+4. **Clones need `StopSignal=SIGRTMIN+3`** (baked into the template by `template/Dockerfile`)
+   or every stop is a 20 s hang + SIGKILL.
 5. **A per-clone `rmng-dind-<id>` volume** mounts at `/var/lib/docker` (the overlay-on-
    overlay fix). It is never committed into images and is removed on clone delete.
-6. **Docker Hub pull rate limits** surface verbatim: in the wizard's/Images panel's
-   template-pull log (`POST /api/images/pull`) for `pegasis0/rmng-template:*`, or in a manual
+6. **Docker Hub pull rate limits** surface verbatim: in a preset-image build log
+   (`POST /api/images/prebuild`) for `pegasis0/rmng-template:*`, or in a manual
    `docker pull ubuntu:26.04` while *building* a template (`scripts/publish-template.sh`).

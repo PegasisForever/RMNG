@@ -9,7 +9,7 @@ use futures::{Stream, StreamExt};
 use serde_json::{Value, json};
 use wire::{
     AppConfigRedacted, BoardColumn, ContainerStats, ControlState, ExecRequest, ExecResult,
-    ImageInfo, LedgerRange, LedgerSearch, Operation, RmngClone,
+    LedgerRange, LedgerSearch, Operation, RmngClone,
 };
 
 /// A connected control-server client.
@@ -137,7 +137,10 @@ impl Client {
     /// booted from an image that baked another clone's key ran its whole desktop session
     /// (terminals, editors, agents) under that clone's identity.
     fn with_identity(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let Some(key) = std::env::var("RMNG_PROXY_KEY").ok().filter(|k| !k.is_empty()) else {
+        let Some(key) = std::env::var("RMNG_PROXY_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+        else {
             return req;
         };
         let req = req.header("X-RMNG-Proxy-Key", key);
@@ -194,7 +197,6 @@ impl Client {
     pub async fn stats(&self) -> Result<HashMap<String, ContainerStats>> {
         self.get_json("/api/stats").await
     }
-
 
     /// The `/events` SSE stream, filtered to the default (unnamed) frames = full
     /// [`ControlState`] snapshots: one on connect, then one per change. Named events
@@ -286,8 +288,11 @@ impl Client {
                 obj.insert(key.into(), json!(v));
             }
         }
-        let req =
-            Self::with_identity(self.http.post(format!("{}/api/clone", self.base)).json(&body));
+        let req = Self::with_identity(
+            self.http
+                .post(format!("{}/api/clone", self.base))
+                .json(&body),
+        );
         let v: Value = Self::check(req.send().await?).await?.json().await?;
         Ok(serde_json::from_value(
             v.get("op")
@@ -298,12 +303,21 @@ impl Client {
 
     /// Fork a gen-2 clone (snapshot + clone the source home).
     pub async fn fork(&self, source: &str, new_id: &str, headless: bool) -> Result<Operation> {
-        self.post_json("/api/fork", &json!({ "source": source, "hostname": new_id, "headless": headless })).await
+        self.post_json(
+            "/api/fork",
+            &json!({ "source": source, "hostname": new_id, "headless": headless }),
+        )
+        .await
     }
 
     /// Fork with optional ticket/preset/account overrides (`None` = inherit the source).
     /// Keys are camelCase to match the server's `ForkReq`.
-    pub async fn fork_with(&self, source: &str, new_id: &str, opts: &ForkOpts<'_>) -> Result<Operation> {
+    pub async fn fork_with(
+        &self,
+        source: &str,
+        new_id: &str,
+        opts: &ForkOpts<'_>,
+    ) -> Result<Operation> {
         let mut body = json!({ "source": source, "hostname": new_id });
         let obj = body.as_object_mut().unwrap();
         if opts.headless {
@@ -329,7 +343,8 @@ impl Client {
 
     /// Rebase a gen-2 clone onto a new base tag (dataset + id kept).
     pub async fn rebase(&self, id: &str, tag: &str) -> Result<Operation> {
-        self.post_json(&format!("/api/hosts/{id}/rebase"), &json!({ "tag": tag })).await
+        self.post_json(&format!("/api/hosts/{id}/rebase"), &json!({ "tag": tag }))
+            .await
     }
 
     /// Destroy a managed clone (or unregister a plain clone).
@@ -347,25 +362,6 @@ impl Client {
     pub async fn unarchive(&self, id: &str) -> Result<Operation> {
         self.post_json(&format!("/api/hosts/{id}/unarchive"), &json!({}))
             .await
-    }
-
-    /// The clone-source images.
-    pub async fn images(&self) -> Result<Vec<ImageInfo>> {
-        self.get_json("/api/images").await
-    }
-
-    /// Pull the clone template (`None` = the configured default reference).
-    pub async fn image_pull(&self, reference: Option<&str>) -> Result<Operation> {
-        self.post_json("/api/images/pull", &json!({ "reference": reference }))
-            .await
-    }
-
-    /// Remove a clone-source image (409 when in use).
-    pub async fn image_delete(&self, reference: &str) -> Result<()> {
-        let _: Value = self
-            .post_json("/api/images/delete", &json!({ "reference": reference }))
-            .await?;
-        Ok(())
     }
 
     /// Hot-swap a clone's Claude account. `account` is a selection: an email, `auto`,

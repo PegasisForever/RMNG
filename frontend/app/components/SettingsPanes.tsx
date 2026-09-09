@@ -9,7 +9,6 @@
 import { useState } from "react";
 
 import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
-import { ImagesSection } from "~/components/ImagesSection";
 import { SettingsAccountList } from "~/components/SettingsAccountList";
 import { SettingsAdvancedSection } from "~/components/SettingsAdvancedSection";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
@@ -61,7 +60,9 @@ export function BoardPane({
             counts={boardColumnCounts}
             onAddColumn={(title) => onAddBoardColumn?.(title)}
             onRenameColumn={(id, title) => onRenameBoardColumn?.(id, title)}
-            onSetArchive={(id, archive) => onSetBoardColumnArchive?.(id, archive)}
+            onSetArchive={(id, archive) =>
+              onSetBoardColumnArchive?.(id, archive)
+            }
             onDeleteColumn={(id) => onDeleteBoardColumn?.(id)}
             onReorderColumns={(ids) => onReorderBoardColumns?.(ids)}
           />
@@ -98,8 +99,12 @@ export function AgentsPane({
         model={draft.judge.codexModel}
         email={draft.judge.codexEmail}
         accounts={rows.codex.map((a) => a.email)}
-        onModelChange={(v) => onDraftChange("judge", { ...draft.judge, codexModel: v })}
-        onEmailChange={(v) => onDraftChange("judge", { ...draft.judge, codexEmail: v })}
+        onModelChange={(v) =>
+          onDraftChange("judge", { ...draft.judge, codexModel: v })
+        }
+        onEmailChange={(v) =>
+          onDraftChange("judge", { ...draft.judge, codexEmail: v })
+        }
         onTest={onTestJudge}
         testMessage={judgeTestMessage}
       />
@@ -141,7 +146,11 @@ export function AgentsPane({
 
 /** Presets: Linear identity (key + the ticket-id prefixes that auto-select it) plus the env
  *  vars a clone is created with. */
-export function PresetsPane({ draft, onDraftChange, accounts }: SettingsPaneProps) {
+export function PresetsPane({
+  draft,
+  onDraftChange,
+  accounts,
+}: SettingsPaneProps) {
   return (
     <Section
       title="Presets"
@@ -176,8 +185,12 @@ export function ClaudePane({
         <SettingsProviderFields
           pollSecs={draft.claude.pollSecs}
           pinnedEmail={draft.claude.pinnedEmail}
-          onPollSecsChange={(v) => onDraftChange("claude", { ...draft.claude, pollSecs: v })}
-          onPinnedEmailChange={(v) => onDraftChange("claude", { ...draft.claude, pinnedEmail: v })}
+          onPollSecsChange={(v) =>
+            onDraftChange("claude", { ...draft.claude, pollSecs: v })
+          }
+          onPinnedEmailChange={(v) =>
+            onDraftChange("claude", { ...draft.claude, pinnedEmail: v })
+          }
         />
       </Section>
 
@@ -229,13 +242,19 @@ export function CodexPane({
         <SettingsProviderFields
           pollSecs={draft.codex.pollSecs}
           pinnedEmail={draft.codex.pinnedEmail}
-          onPollSecsChange={(v) => onDraftChange("codex", { ...draft.codex, pollSecs: v })}
-          onPinnedEmailChange={(v) => onDraftChange("codex", { ...draft.codex, pinnedEmail: v })}
+          onPollSecsChange={(v) =>
+            onDraftChange("codex", { ...draft.codex, pollSecs: v })
+          }
+          onPinnedEmailChange={(v) =>
+            onDraftChange("codex", { ...draft.codex, pinnedEmail: v })
+          }
           codexToggles={{
             usagePolling: draft.codex.usagePolling,
             autoReset: draft.codex.autoReset,
-            onUsagePollingChange: (v) => onDraftChange("codex", { ...draft.codex, usagePolling: v }),
-            onAutoResetChange: (v) => onDraftChange("codex", { ...draft.codex, autoReset: v }),
+            onUsagePollingChange: (v) =>
+              onDraftChange("codex", { ...draft.codex, usagePolling: v }),
+            onAutoResetChange: (v) =>
+              onDraftChange("codex", { ...draft.codex, autoReset: v }),
           }}
         />
       </Section>
@@ -271,57 +290,31 @@ export function CodexPane({
   );
 }
 
-/** Clones: what a new clone is cut from. The Docker settings every clone is created with, and
- *  the images they are created from. */
+/** Clones: the Docker settings every new clone is created with. Clone images are gen-2
+ *  preset builds: each preset's Dockerfile builds into a hash tag on demand, so there is no
+ *  image list to manage here. */
 export function ClonesPane({
   draft,
   onDraftChange,
   setupComplete,
   testMessage,
   onTestDocker,
-  images,
-  imagesLoading,
-  pullBusy,
-  now,
-  onPullLatestImage,
-  onPullOtherImage,
-  onDeleteImage,
 }: SettingsPaneProps) {
   return (
     <>
       <Section title="Docker / Clones">
         <SettingsDockerSection
           hostnamePrefix={draft.hostnamePrefix}
-          templateReference={draft.templateReference}
           subnet={draft.subnet}
           subnetLocked={setupComplete}
           cloneCpus={draft.cloneCpus}
           cloneMemoryMb={draft.cloneMemoryMb}
           testMessage={testMessage}
           onHostnamePrefixChange={(v) => onDraftChange("hostnamePrefix", v)}
-          onTemplateReferenceChange={(v) => onDraftChange("templateReference", v)}
           onSubnetChange={(v) => onDraftChange("subnet", v)}
           onCloneCpusChange={(v) => onDraftChange("cloneCpus", v)}
           onCloneMemoryMbChange={(v) => onDraftChange("cloneMemoryMb", v)}
           onTest={onTestDocker}
-        />
-      </Section>
-
-      {/* The pull prompt is prefilled from the Template reference field above. */}
-      <Section
-        title="Images"
-        effect="immediate"
-        hint="Clone-source images (rmng.image=1). Pull the template from a registry (it keeps its own repo:tag) or delete an unused one; a live clone running on an image blocks its delete."
-      >
-        <ImagesSection
-          images={images}
-          loading={imagesLoading}
-          pullBusy={pullBusy}
-          templateRef={draft.templateReference}
-          now={now}
-          onPullLatest={onPullLatestImage}
-          onPullOther={onPullOtherImage}
-          onDelete={onDeleteImage}
         />
       </Section>
     </>
@@ -372,7 +365,9 @@ export function ServerPane({
         <Field label="Chroma mode">
           <select
             value={draft.chroma}
-            onChange={(e) => onDraftChange("chroma", e.target.value as ChromaMode)}
+            onChange={(e) =>
+              onDraftChange("chroma", e.target.value as ChromaMode)
+            }
             className={settingsInput}
           >
             <option value="yuv420">4:2:0 (default)</option>
@@ -392,10 +387,12 @@ export function ServerPane({
           <input
             type="checkbox"
             checked={draft.gpuAcceleratedClones}
-            onChange={(e) => onDraftChange("gpuAcceleratedClones", e.target.checked)}
+            onChange={(e) =>
+              onDraftChange("gpuAcceleratedClones", e.target.checked)
+            }
           />
-          GPU accelerated clones (applies to clones created or unarchived after saving;
-          running clones keep the mode they started in)
+          GPU accelerated clones (applies to clones created or unarchived after
+          saving; running clones keep the mode they started in)
         </label>
       </Section>
 
@@ -414,7 +411,9 @@ export function ServerPane({
           onAuthorizedKeysChange={(keys) =>
             onDraftChange("ssh", { ...draft.ssh, authorizedKeys: keys })
           }
-          onPublicHostChange={(host) => onDraftChange("ssh", { ...draft.ssh, publicHost: host })}
+          onPublicHostChange={(host) =>
+            onDraftChange("ssh", { ...draft.ssh, publicHost: host })
+          }
         />
       </Section>
 

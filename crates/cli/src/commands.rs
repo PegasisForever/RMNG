@@ -12,10 +12,9 @@ use serde_json::{Value, json};
 use wire::{ContainerStats, ControlState, MonitorState, Operation, Provider};
 
 use crate::args::{
-    AccountCmd, BoardCmd, CreateArgs, DesktopCmd, ImageCmd, LedgerCmd, Provider as CliProvider,
-    WaitArgs,
+    AccountCmd, BoardCmd, CreateArgs, DesktopCmd, LedgerCmd, Provider as CliProvider, WaitArgs,
 };
-use crate::output::{human_size, pct, short_id, table};
+use crate::output::{human_size, pct, table};
 use crate::wait::{WaitOutcome, wait_for_op};
 
 fn emit_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -70,12 +69,12 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
     let (st, stats) = tokio::try_join!(client.state(), client.stats())?;
     // Resolved, not stored: a clone nobody filed is drawn in a column all the same, and
     // reporting it as having none would disagree with the dashboard next to it.
-    let board = wire::board::resolve_columns(
-        &wire::board::with_defaults(&st.board_columns),
-        &st.hosts,
-    );
+    let board =
+        wire::board::resolve_columns(&wire::board::with_defaults(&st.board_columns), &st.hosts);
     let column_of = |id: &str| {
-        wire::board::column_of(&board, id).map(|c| c.title.clone()).unwrap_or_default()
+        wire::board::column_of(&board, id)
+            .map(|c| c.title.clone())
+            .unwrap_or_default()
     };
     // `--json` emits the JOINED view the human table shows — each clone object with its live
     // `stats` nested — so an agent parsing JSON gets CPU/RAM too (the raw wire `ControlState`
@@ -156,7 +155,11 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
             let drawn = h.parent.clone().unwrap_or_else(|| h.id.clone());
             vec![
                 id_cell,
-                if *is_child { String::new() } else { column_of(&drawn) },
+                if *is_child {
+                    String::new()
+                } else {
+                    column_of(&drawn)
+                },
                 h.local_ip.clone().unwrap_or_default(),
                 h.source.clone().unwrap_or_default(),
                 h.preset_name.clone().unwrap_or_default(),
@@ -180,8 +183,7 @@ pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
         "{}",
         table(
             &[
-                "ID", "COLUMN", "IP", "IMAGE", "PRESET", "CLAUDE", "CODEX", "CPU", "RAM",
-                "STATUS",
+                "ID", "COLUMN", "IP", "IMAGE", "PRESET", "CLAUDE", "CODEX", "CPU", "RAM", "STATUS",
             ],
             &rows,
         )
@@ -233,7 +235,7 @@ fn clone_opts<'a>(
     }
 }
 
-/// `rmng clone create <hostname> --from <image>` — exact-hostname clone, no ticket.
+/// `rmng clone create <hostname>` — exact-hostname clone, no ticket.
 pub async fn clone_create(
     client: &Client,
     hostname: &str,
@@ -253,7 +255,7 @@ pub async fn clone_create(
     };
     let op = client
         .clone_create(
-            &common.from,
+            "",
             json!({ "hostname": hostname }),
             &clone_opts(common, preset, None, None),
         )
@@ -298,7 +300,10 @@ pub async fn clone_create_from_ticket(
     let (issue, key) = crate::linear::fetch_issue_any(&http, &keys, &r).await?;
     // Best effort: a ticket that refuses to move is not a reason to withhold the clone.
     if let Err(e) = crate::linear::ensure_in_progress(&http, &key, &issue).await {
-        eprintln!("warning: could not move {} to In Progress: {e}", issue.identifier);
+        eprintln!(
+            "warning: could not move {} to In Progress: {e}",
+            issue.identifier
+        );
     }
     let column = match common.column.as_deref() {
         Some(name) => Some(resolve_column(client, name).await?),
@@ -306,7 +311,7 @@ pub async fn clone_create_from_ticket(
     };
     let op = client
         .clone_create(
-            &common.from,
+            "",
             linear_mode(&issue),
             &clone_opts(common, None, agent_instructions, claude_instructions),
         )
@@ -348,7 +353,10 @@ pub async fn clone_create_with_new_ticket(
         crate::linear::create_issue(&http, &preset.linear_key, &team, title.trim(), description)
             .await?;
     if let Err(e) = crate::linear::ensure_in_progress(&http, &preset.linear_key, &issue).await {
-        eprintln!("warning: could not move {} to In Progress: {e}", issue.identifier);
+        eprintln!(
+            "warning: could not move {} to In Progress: {e}",
+            issue.identifier
+        );
     }
     let column = match common.column.as_deref() {
         Some(name) => Some(resolve_column(client, name).await?),
@@ -356,7 +364,7 @@ pub async fn clone_create_with_new_ticket(
     };
     let op = client
         .clone_create(
-            &common.from,
+            "",
             linear_mode(&issue),
             &clone_opts(common, None, agent_instructions, claude_instructions),
         )
@@ -366,7 +374,11 @@ pub async fn clone_create_with_new_ticket(
 }
 
 fn preset_names(cfg: &wire::AppConfigRedacted) -> String {
-    cfg.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+    cfg.presets
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `rmng clone create-plain --title <t>` — no-ticket clone with a title-derived hostname.
@@ -384,7 +396,7 @@ pub async fn clone_create_plain(
     };
     let op = client
         .clone_create(
-            &common.from,
+            "",
             json!({ "plain": { "title": title.trim(), "message": message } }),
             &clone_opts(common, preset, None, None),
         )
@@ -543,66 +555,13 @@ pub async fn account_rm(client: &Client, account: &str, codex: bool, json: bool)
     Ok(0)
 }
 
-pub async fn image(client: &Client, cmd: &ImageCmd, json: bool) -> Result<u8> {
-    match cmd {
-        ImageCmd::Ls => {
-            let images = client.images().await?;
-            if json {
-                emit_json(&images)?;
-                return Ok(0);
-            }
-            let rows: Vec<Vec<String>> = images
-                .iter()
-                .map(|i| {
-                    vec![
-                        i.reference.clone(),
-                        short_id(&i.id),
-                        human_size(i.size_bytes.max(0) as u64),
-                        i.created_at.clone(),
-                        if i.base { "yes".into() } else { "".into() },
-                        i.created_from.clone().unwrap_or_default(),
-                        i.in_use_by.join(","),
-                    ]
-                })
-                .collect();
-            print!(
-                "{}",
-                table(
-                    &[
-                        "REFERENCE",
-                        "ID",
-                        "SIZE",
-                        "CREATED",
-                        "BASE",
-                        "FROM",
-                        "IN-USE-BY"
-                    ],
-                    &rows
-                )
-            );
-            Ok(0)
-        }
-        ImageCmd::Pull { reference, wait } => {
-            let op = client.image_pull(reference.as_deref()).await?;
-            started(client, op, wait, json, "pull", false).await
-        }
-        ImageCmd::Rm { reference } => {
-            client.image_delete(reference).await?;
-            if json {
-                emit_json(&serde_json::json!({ "ok": true }))?;
-            } else {
-                println!("removed {reference}");
-            }
-            Ok(0)
-        }
-    }
-}
-
 pub async fn account(client: &Client, cmd: &AccountCmd, json: bool) -> Result<u8> {
     match cmd {
-        AccountCmd::Swap { clone, account, codex } => {
-            account_swap(client, clone, account, *codex, json).await
-        }
+        AccountCmd::Swap {
+            clone,
+            account,
+            codex,
+        } => account_swap(client, clone, account, *codex, json).await,
         AccountCmd::Rm { account, codex } => account_rm(client, account, *codex, json).await,
         AccountCmd::Ls { provider } => {
             let st = client.state().await?;
@@ -733,9 +692,9 @@ fn parse_when(raw: &str, now: i64) -> Result<i64> {
         "w" => 7 * 24 * 60 * 60_000,
         // No suffix: epoch milliseconds, verbatim.
         _ => {
-            return s
-                .parse::<i64>()
-                .map_err(|_| anyhow!("'{raw}' is neither a duration (90m, 6h, 2d, 3w) nor epoch millis"));
+            return s.parse::<i64>().map_err(|_| {
+                anyhow!("'{raw}' is neither a duration (90m, 6h, 2d, 3w) nor epoch millis")
+            });
         }
     };
     let n: i64 = digits
@@ -763,15 +722,20 @@ pub async fn ledger(client: &Client, cmd: &LedgerCmd, json: bool) -> Result<u8> 
                 since: since.as_deref().map(|s| parse_when(s, now)).transpose()?,
                 until: until.as_deref().map(|s| parse_when(s, now)).transpose()?,
                 // The two flags conflict, so at most one is set.
-                sidechain: sidechain.then_some(true).or_else(|| no_sidechain.then_some(false)),
+                sidechain: sidechain
+                    .then_some(true)
+                    .or_else(|| no_sidechain.then_some(false)),
                 agent: agent.as_deref(),
                 limit: Some(*limit),
             };
             ledger_search(client, pattern, &filter, json).await
         }
-        LedgerCmd::Read { clone, session, offset, len } => {
-            ledger_read(client, clone, session, *offset, *len, json).await
-        }
+        LedgerCmd::Read {
+            clone,
+            session,
+            offset,
+            len,
+        } => ledger_read(client, clone, session, *offset, *len, json).await,
     }
 }
 
@@ -809,7 +773,10 @@ async fn ledger_search(
         .collect();
     print!(
         "{}",
-        table(&["CLONE", "WHEN", "KIND", "SESSION", "OFFSET", "TEXT"], &rows)
+        table(
+            &["CLONE", "WHEN", "KIND", "SESSION", "OFFSET", "TEXT"],
+            &rows
+        )
     );
     if found.truncated {
         eprintln!(
@@ -868,8 +835,7 @@ const ADDRESS_SETTLE_SECS: u64 = 30;
 /// Returns whatever the last look found, so a timeout yields the record without an address
 /// rather than nothing at all.
 async fn settled_clone(client: &Client, id: &str) -> Option<Value> {
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(ADDRESS_SETTLE_SECS);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(ADDRESS_SETTLE_SECS);
     let mut last = None;
     loop {
         if let Ok(st) = client.state().await {
@@ -888,16 +854,17 @@ async fn settled_clone(client: &Client, id: &str) -> Option<Value> {
     }
 }
 
-
 // --- the board -------------------------------------------------------------------------
 
 /// `rmng board <verb>` — the dashboard's columns, and which clone is in which.
 pub async fn board(client: &Client, cmd: &BoardCmd, json: bool) -> Result<u8> {
     match cmd {
         BoardCmd::Ls => board_ls(client, json).await,
-        BoardCmd::Move { clone, column, wait } => {
-            board_move(client, clone, column, wait, json).await
-        }
+        BoardCmd::Move {
+            clone,
+            column,
+            wait,
+        } => board_move(client, clone, column, wait, json).await,
     }
 }
 
@@ -908,10 +875,8 @@ pub async fn board(client: &Client, cmd: &BoardCmd, json: bool) -> Result<u8> {
 /// the reason both agree is that both call `wire::board`.
 async fn board_ls(client: &Client, json: bool) -> Result<u8> {
     let st = client.state().await?;
-    let columns = wire::board::resolve_columns(
-        &wire::board::with_defaults(&st.board_columns),
-        &st.hosts,
-    );
+    let columns =
+        wire::board::resolve_columns(&wire::board::with_defaults(&st.board_columns), &st.hosts);
     if json {
         emit_json(&columns)?;
         return Ok(0);
@@ -922,13 +887,20 @@ async fn board_ls(client: &Client, json: bool) -> Result<u8> {
             vec![
                 c.title.clone(),
                 c.id.clone(),
-                if c.archive { "yes".into() } else { String::new() },
+                if c.archive {
+                    "yes".into()
+                } else {
+                    String::new()
+                },
                 c.clone_ids.len().to_string(),
                 truncate(&c.clone_ids.join(", "), 60),
             ]
         })
         .collect();
-    print!("{}", table(&["COLUMN", "ID", "ARCHIVES", "CLONES", "CONTENTS"], &rows));
+    print!(
+        "{}",
+        table(&["COLUMN", "ID", "ARCHIVES", "CLONES", "CONTENTS"], &rows)
+    );
     Ok(0)
 }
 
@@ -954,7 +926,9 @@ async fn board_move(
     // put an id in a column that nothing ever draws.
     if let Some(parent) = host.parent.as_deref() {
         if st.hosts.iter().any(|h| h.id == parent) {
-            bail!("'{clone}' is a sub clone of '{parent}', drawn under its parent's card; move '{parent}' instead");
+            bail!(
+                "'{clone}' is a sub clone of '{parent}', drawn under its parent's card; move '{parent}' instead"
+            );
         }
     }
 
@@ -977,7 +951,10 @@ async fn board_move(
         settle_quietly(client, op, wait).await?;
     } else if !target.archive && was_archived {
         if !json {
-            eprintln!("restoring {clone}: '{}' is not an archive column", target.title);
+            eprintln!(
+                "restoring {clone}: '{}' is not an archive column",
+                target.title
+            );
         }
         let op = client.unarchive(clone).await?;
         settle_quietly(client, op, wait).await?;
@@ -986,10 +963,8 @@ async fn board_move(
     let moved = wire::board::move_card(&stored, clone, &target.id, 0);
     let st = client.board_put(&moved).await?;
     if json {
-        let columns = wire::board::resolve_columns(
-            &wire::board::with_defaults(&st.board_columns),
-            &st.hosts,
-        );
+        let columns =
+            wire::board::resolve_columns(&wire::board::with_defaults(&st.board_columns), &st.hosts);
         emit_json(&columns)?;
     } else {
         println!("{clone} is now first in {}", target.title);
@@ -1009,12 +984,15 @@ async fn settle_quietly(client: &Client, op: Operation, wait: &WaitArgs) -> Resu
     }
 }
 
-
 /// File a clone the create call just started, if the caller named a column.
 ///
 /// `Operation::target` is the clone id the server settled on, which is the only way the three
 /// derived-hostname verbs learn what their clone is called.
-async fn file_started_clone(client: &Client, op: &Operation, column_id: Option<&str>) -> Result<()> {
+async fn file_started_clone(
+    client: &Client,
+    op: &Operation,
+    column_id: Option<&str>,
+) -> Result<()> {
     match column_id {
         Some(id) => file_at_top(client, &op.target, id).await,
         None => Ok(()),
@@ -1046,7 +1024,9 @@ async fn resolve_column(client: &Client, column: &str) -> Result<String> {
 async fn file_at_top(client: &Client, clone: &str, column_id: &str) -> Result<()> {
     let st = client.state().await?;
     let stored = wire::board::with_defaults(&st.board_columns);
-    client.board_put(&wire::board::move_card(&stored, clone, column_id, 0)).await?;
+    client
+        .board_put(&wire::board::move_card(&stored, clone, column_id, 0))
+        .await?;
     Ok(())
 }
 
@@ -1175,7 +1155,9 @@ fn validate_ssh_host<'a>(st: &'a ControlState, host: &str) -> Result<&'a wire::R
 /// reuse that same identity signal the server already trusts — no server round-trip or
 /// peer-IP needed — to decide clone→clone (direct) vs operator→clone (bastion) SSH.
 fn running_inside_clone() -> bool {
-    std::env::var("RMNG_PROXY_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false)
+    std::env::var("RMNG_PROXY_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// The direct one-liner used clone→clone: no bastion jump — clones share the `rmng` Docker
@@ -1210,7 +1192,10 @@ pub async fn clone_ssh(client: &Client, clone: &str, json: bool) -> Result<u8> {
     // shared Docker bridge. Prefer its internal IP; fall back to the clone id (Docker DNS
     // resolves it) when a just-started clone hasn't been IP-sampled yet.
     let (command, mode) = if running_inside_clone() {
-        (build_direct_ssh_command(&direct_ssh_target(target)), "direct")
+        (
+            build_direct_ssh_command(&direct_ssh_target(target)),
+            "direct",
+        )
     } else {
         let cfg = client.config().await?;
         let public_host = if !cfg.ssh.public_host.trim().is_empty() {
@@ -1222,7 +1207,10 @@ pub async fn clone_ssh(client: &Client, clone: &str, json: bool) -> Result<u8> {
             );
             fallback
         };
-        (build_ssh_command(&public_host, cfg.listen.bastion, clone), "bastion")
+        (
+            build_ssh_command(&public_host, cfg.listen.bastion, clone),
+            "bastion",
+        )
     };
     if json {
         emit_json(&serde_json::json!({ "command": command, "mode": mode }))?;
@@ -1331,9 +1319,7 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
     // (tool, args, kind, monitor-for-screenshots, out path)
     let (tool, args, kind, monitor, out): (&str, Value, Kind, Option<u32>, Option<PathBuf>) =
         match cmd {
-            DesktopCmd::Screenshot {
-                monitor, out, ..
-            } => (
+            DesktopCmd::Screenshot { monitor, out, .. } => (
                 "screenshot",
                 args_obj(vec![("monitor", n(*monitor)), ("resolution", res())]),
                 Kind::Screenshot,
@@ -1582,14 +1568,14 @@ pub async fn exec(
     // ready fd still drains fully, so large piped input is fine (the poll only bounds
     // the wait for the first byte).
     // Detached execs return no output and take no stdin (nothing is attached), so skip the drain.
-    let stdin_b64 = if detach || std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE)
-    {
-        None
-    } else {
-        let mut buf = Vec::new();
-        std::io::stdin().read_to_end(&mut buf)?;
-        (!buf.is_empty()).then(|| B64.encode(&buf))
-    };
+    let stdin_b64 =
+        if detach || std::io::stdin().is_terminal() || !stdin_has_input(STDIN_POLL_GRACE) {
+            None
+        } else {
+            let mut buf = Vec::new();
+            std::io::stdin().read_to_end(&mut buf)?;
+            (!buf.is_empty()).then(|| B64.encode(&buf))
+        };
 
     let req = wire::ExecRequest {
         cmd: cmd.to_vec(),
@@ -1641,7 +1627,10 @@ mod tests {
         assert_eq!(parse_when("90m", NOW).unwrap(), NOW - 90 * 60_000);
         assert_eq!(parse_when("6h", NOW).unwrap(), NOW - 6 * 60 * 60_000);
         assert_eq!(parse_when("2d", NOW).unwrap(), NOW - 2 * 24 * 60 * 60_000);
-        assert_eq!(parse_when("3w", NOW).unwrap(), NOW - 3 * 7 * 24 * 60 * 60_000);
+        assert_eq!(
+            parse_when("3w", NOW).unwrap(),
+            NOW - 3 * 7 * 24 * 60 * 60_000
+        );
         // No suffix is an instant, verbatim, which is what a script already holds.
         assert_eq!(parse_when("1785578400000", NOW).unwrap(), 1_785_578_400_000);
         assert_eq!(parse_when(" 2d ", NOW).unwrap(), NOW - 2 * 24 * 60 * 60_000);
@@ -1708,7 +1697,10 @@ mod tests {
         };
 
         let err = validate_ssh_host(&st, "herms").expect_err("clone suffix must not match");
-        assert_eq!(err.to_string(), "unknown clone 'herms' (see `rmng clone ls`)");
+        assert_eq!(
+            err.to_string(),
+            "unknown clone 'herms' (see `rmng clone ls`)"
+        );
         validate_ssh_host(&st, "pega-herms").expect("exact clone id should match");
     }
 

@@ -5,32 +5,35 @@
 import { expect, test } from "bun:test";
 
 import {
-  canPull,
-  findPullOperation,
   isValidSubnet,
   layoutPresetsPatch,
   nextDisabled,
-  pullReference,
   serverPatch,
   setupDraftFrom,
   subnetOk,
   subnetPatch,
-  templateFallback,
-  templatePatch,
 } from "./setupDraft";
-import type { Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
 function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
-    listen: { web: 9000, video: 9001, daemonMcp: 9004, forward: 9005, bastion: 2222 },
+    listen: {
+      web: 9000,
+      video: 9001,
+      daemonMcp: 9004,
+      forward: 9005,
+      bastion: 2222,
+    },
     agentPort: 4096,
     dataDir: "/data",
     staticDir: "",
     cloneSocket: "/srv/rmng-sock/clones.sock",
     setupComplete: false,
     layoutPresets: [
-      { name: "Default", monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }] },
+      {
+        name: "Default",
+        monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }],
+      },
     ],
     activeLayout: "Default",
     docker: {
@@ -49,7 +52,12 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       homesParent: "tank/rmng/homes",
     },
     claude: { pollSecs: BigInt(600), pinnedEmail: null },
-    codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
+    codex: {
+      pollSecs: BigInt(600),
+      pinnedEmail: null,
+      usagePolling: true,
+      autoReset: false,
+    },
     cloneGroups: [],
     codexGroups: [],
     presets: [],
@@ -72,21 +80,6 @@ type ServerPatch = {
   agentPort: number;
 };
 
-function operation(overrides: Partial<Operation> = {}): Operation {
-  return {
-    id: "op-1",
-    kind: "pull",
-    target: "pegasis0/rmng-template:latest",
-    status: "running",
-    step: "download",
-    pct: 10,
-    message: "",
-    log: [],
-    startedAt: 0,
-    ...overrides,
-  };
-}
-
 test("a rig with no layout preset gets one 1080p monitor to edit", () => {
   expect(setupDraftFrom(config({ layoutPresets: [] })).monitors).toEqual([
     { width: 1920, height: 1080, x: 0, y: 0, primary: true },
@@ -104,8 +97,14 @@ test("the seed follows activeLayout, not the first preset", () => {
   const c = config({
     activeLayout: "Wide",
     layoutPresets: [
-      { name: "Default", monitors: [{ width: 1280, height: 720, x: 0, y: 0, primary: true }] },
-      { name: "Wide", monitors: [{ width: 3840, height: 2160, x: 0, y: 0, primary: true }] },
+      {
+        name: "Default",
+        monitors: [{ width: 1280, height: 720, x: 0, y: 0, primary: true }],
+      },
+      {
+        name: "Wide",
+        monitors: [{ width: 3840, height: 2160, x: 0, y: 0, primary: true }],
+      },
     ],
   });
   expect(setupDraftFrom(c).monitors[0].width).toBe(3840);
@@ -125,11 +124,6 @@ test("step 2 patches only the three docker fields it edits", () => {
   ]);
 });
 
-test("step 2 never sends the template reference — the pull is not a save", () => {
-  const patch = serverPatch(setupDraftFrom(config()), config()) as ServerPatch;
-  expect(JSON.stringify(patch)).not.toContain("rmng-template");
-});
-
 test("step 2 clamps the edited arrangement", () => {
   const draft = {
     ...setupDraftFrom(config()),
@@ -144,23 +138,38 @@ test("step 2 round-trips the presets the wizard never showed, untouched", () => 
   const c = config({
     activeLayout: "Default",
     layoutPresets: [
-      { name: "Default", monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }] },
+      {
+        name: "Default",
+        monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }],
+      },
       // Junk a hand-edited config can hold. A full settings save would clamp and trim it;
       // the wizard has no business rewriting a preset it never drew.
-      { name: "  Legacy  ", monitors: [{ width: 0, height: 0, x: -8, y: 0, primary: false }] },
+      {
+        name: "  Legacy  ",
+        monitors: [{ width: 0, height: 0, x: -8, y: 0, primary: false }],
+      },
     ],
   });
   const presets = layoutPresetsPatch(setupDraftFrom(c), c);
   expect(presets).toHaveLength(2);
   expect(presets[1].name).toBe("  Legacy  ");
-  expect(presets[1].monitors[0]).toEqual({ width: 0, height: 0, x: -8, y: 0, primary: false });
+  expect(presets[1].monitors[0]).toEqual({
+    width: 0,
+    height: 0,
+    x: -8,
+    y: 0,
+    primary: false,
+  });
 });
 
 test("an active layout the config does not name is appended, not swapped in", () => {
   const c = config({
     activeLayout: "Default",
     layoutPresets: [
-      { name: "Other", monitors: [{ width: 1280, height: 720, x: 0, y: 0, primary: true }] },
+      {
+        name: "Other",
+        monitors: [{ width: 1280, height: 720, x: 0, y: 0, primary: true }],
+      },
     ],
   });
   // `activeLayoutName` falls back to the FIRST preset, so this edits "Other" in place.
@@ -171,7 +180,10 @@ test("an active layout the config does not name is appended, not swapped in", ()
 test("a rig with no presets at all gets one named Default", () => {
   const c = config({ layoutPresets: [] });
   expect(layoutPresetsPatch(setupDraftFrom(c), c)).toEqual([
-    { name: "Default", monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }] },
+    {
+      name: "Default",
+      monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+    },
   ]);
 });
 
@@ -191,116 +203,14 @@ test("a blank subnet is not valid — the bridge needs one", () => {
   expect(subnetOk(" 10.99.0.0/24 ")).toBe(true);
 });
 
-test("a blank template field pulls the configured reference", () => {
-  const draft = { ...setupDraftFrom(config()), templateReference: "   " };
-  expect(pullReference(draft, config())).toBe("pegasis0/rmng-template:latest");
-});
-
-test("step 3 saves the reference it pulls, trimmed", () => {
-  const draft = { ...setupDraftFrom(config()), templateReference: "  acme/clone:26.04  " };
-  expect(templatePatch(draft, config())).toEqual({
-    docker: { templateReference: "acme/clone:26.04" },
-  });
-  expect(pullReference(draft, config())).toBe("acme/clone:26.04");
-});
-
-test("a blank template field saves the configured reference back, never a blank", () => {
-  const draft = { ...setupDraftFrom(config()), templateReference: "   " };
-  expect(templatePatch(draft, config())).toEqual({
-    docker: { templateReference: "pegasis0/rmng-template:latest" },
-  });
-});
-
-test("step 3 patches the template reference and nothing else", () => {
-  const draft = { ...setupDraftFrom(config()), templateReference: "acme/clone:26.04" };
-  const patch = templatePatch(draft, config());
-  expect(patch).not.toBeNull();
-  expect(Object.keys(patch!)).toEqual(["docker"]);
-  expect(Object.keys(patch!.docker)).toEqual(["templateReference"]);
-});
-
-test("the placeholder shown and the value a blank field saves are one string", () => {
-  // The promise the placeholder makes is "leave this empty and you keep what it says". Read
-  // the two through the same config and they cannot disagree, whatever that config holds.
-  for (const reference of ["pegasis0/rmng-template:latest", "acme/clone:26.04", ""]) {
-    const c = config({ docker: { ...config().docker, templateReference: reference } });
-    const blank = { ...setupDraftFrom(c), templateReference: "" };
-    expect(pullReference(blank, c)).toBe(templateFallback(c));
-    expect(templatePatch(blank, c)?.docker.templateReference ?? null).toBe(reference || null);
-  }
-});
-
-test("a second visit to step 3 falls back to what the first visit saved", () => {
-  // The wizard's steps write to the config while it is open, so the fallback has to be read
-  // from what the server last confirmed. Reading the config as it looked at mount instead
-  // silently rewrites the operator's own value the next time they clear the field.
-  const atMount = config();
-  const typed = { ...setupDraftFrom(atMount), templateReference: "acme/clone:26.04" };
-  expect(templatePatch(typed, atMount)).toEqual({
-    docker: { templateReference: "acme/clone:26.04" },
-  });
-
-  // What `PUT /api/config` answers with: the post-merge config.
-  const saved = config({ docker: { ...atMount.docker, templateReference: "acme/clone:26.04" } });
-  const cleared = { ...typed, templateReference: "" };
-  expect(templateFallback(saved)).toBe("acme/clone:26.04");
-  expect(templatePatch(cleared, saved)).toEqual({
-    docker: { templateReference: "acme/clone:26.04" },
-  });
-  // The same clear against the stale mount config is the data loss this guards.
-  expect(templatePatch(cleared, atMount)).toEqual({
-    docker: { templateReference: "pegasis0/rmng-template:latest" },
-  });
-});
-
-test("an untouched field saves the seeded reference unchanged", () => {
-  const draft = setupDraftFrom(config());
-  expect(templatePatch(draft, config())).toEqual({
-    docker: { templateReference: "pegasis0/rmng-template:latest" },
-  });
-});
-
-test("a blank field over an unset config has nothing to save", () => {
-  // The server reads an empty scalar as "unchanged", but that is its convention, not this
-  // step's intent. With no reference anywhere there is no PUT to make.
-  const c = config({ docker: { ...config().docker, templateReference: "" } });
-  const draft = { ...setupDraftFrom(c), templateReference: "  " };
-  expect(pullReference(draft, c)).toBe("");
-  expect(templatePatch(draft, c)).toBeNull();
-  // A typed reference on that same rig still saves.
-  expect(templatePatch({ ...draft, templateReference: "acme/clone:26.04" }, c)).toEqual({
-    docker: { templateReference: "acme/clone:26.04" },
-  });
-});
-
-test("the pull op is found by kind and target, and only once a pull was started", () => {
-  const ops = [operation({ kind: "clone", target: "node20:latest" }), operation()];
-  expect(findPullOperation(ops, "pegasis0/rmng-template:latest")?.kind).toBe("pull");
-  expect(findPullOperation(ops, "node20:latest")).toBeUndefined();
-  expect(findPullOperation(ops, null)).toBeUndefined();
-});
-
-test("Download is dead with nothing to pull, mid-pull, and once it is done", () => {
-  const args = {
-    templateReference: "pegasis0/rmng-template:latest",
-    pulling: false,
-    pullRunning: false,
-    pullDone: false,
-  };
-  expect(canPull(args)).toBe(true);
-  expect(canPull({ ...args, templateReference: "  " })).toBe(false);
-  expect(canPull({ ...args, pulling: true })).toBe(false);
-  expect(canPull({ ...args, pullRunning: true })).toBe(false);
-  expect(canPull({ ...args, pullDone: true })).toBe(false);
-});
-
-test("Next is blocked by a failing check, a bad subnet, a save, and a running pull", () => {
-  const args = { step: 0, saving: false, envOk: true, subnetOk: true, pullRunning: false };
+test("Next is blocked by a failing check, a bad subnet, and a save", () => {
+  const args = { step: 0, saving: false, envOk: true, subnetOk: true };
   expect(nextDisabled(args)).toBe(false);
   expect(nextDisabled({ ...args, envOk: false })).toBe(true);
   expect(nextDisabled({ ...args, subnetOk: false })).toBe(true);
   expect(nextDisabled({ ...args, saving: true })).toBe(true);
   // The environment gate applies to step 1 only: a failing check does not lock step 2.
-  expect(nextDisabled({ ...args, step: 1, envOk: false, subnetOk: false })).toBe(false);
-  expect(nextDisabled({ ...args, step: 2, pullRunning: true })).toBe(true);
+  expect(
+    nextDisabled({ ...args, step: 1, envOk: false, subnetOk: false }),
+  ).toBe(false);
 });

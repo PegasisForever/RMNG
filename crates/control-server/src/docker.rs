@@ -31,9 +31,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::errors::Error as BollardError;
-use bollard::exec::{
-    CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults,
-};
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
     ContainerConfig, ContainerCreateBody, ContainerInspectResponse, EndpointSettings, HostConfig,
     Ipam, IpamConfig, Mount, MountBindOptions, MountBindOptionsPropagationEnum, MountPointTypeEnum,
@@ -41,16 +39,14 @@ use bollard::models::{
     RestartPolicyNameEnum, VolumeCreateOptions,
 };
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
-    ListImagesOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder,
-    StopContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder,
+    RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder, StopContainerOptionsBuilder,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
-use wire::{DockerConfig, EnvCheckRow, ExecResult, ImageInfo, SetupEnv, UpdateStatus};
+use wire::{DockerConfig, EnvCheckRow, ExecResult, SetupEnv, UpdateStatus};
 
 // --- Constants ------------------------------------------------------------------------
 
@@ -92,12 +88,6 @@ const EXEC_IDLE_PROBE: std::time::Duration = std::time::Duration::from_secs(1);
 /// fleet. Generous, because provisioning scripts do go quiet for minutes at a time.
 const EXEC_MAX_SILENCE: std::time::Duration = std::time::Duration::from_secs(1800);
 
-/// Label marking an image as a clone source (shown in the image picker).
-pub const LABEL_IMAGE: &str = "rmng.image";
-/// Label marking the wizard-built base image.
-pub const LABEL_BASE: &str = "rmng.base";
-/// Label recording the reference an image was committed from (lineage).
-pub const LABEL_CREATED_FROM: &str = "rmng.created-from";
 /// Label stamped on every RMNG-managed container (clone + build workers).
 pub const LABEL_MANAGED: &str = "rmng.managed";
 /// Label stamped on RMNG shared-infra containers (`rmng-registry`, `rmng-buildkit`).
@@ -195,10 +185,9 @@ impl EnvReport {
         let daemon_detail = match (&self.daemon_ok, &self.daemon_version) {
             (true, Some(v)) => format!("Docker {v}"),
             (true, None) => "reachable".to_string(),
-            (false, _) => self
-                .daemon_detail
-                .clone()
-                .unwrap_or_else(|| "cannot reach the Docker daemon over the configured socket".to_string()),
+            (false, _) => self.daemon_detail.clone().unwrap_or_else(|| {
+                "cannot reach the Docker daemon over the configured socket".to_string()
+            }),
         };
         let self_detail = match &self.self_container {
             Some(id) => format!("container {}", short_id(id)),
@@ -357,12 +346,24 @@ impl SelfSpec {
     /// Project a container inspect into a `SelfSpec`, overriding the image to `new_image_ref`.
     /// Pure (no I/O) so it's unit-testable against a fixture inspect.
     pub fn from_inspect(resp: &ContainerInspectResponse, new_image_ref: &str) -> Result<SelfSpec> {
-        let container_name =
-            resp.name.clone().unwrap_or_default().trim_start_matches('/').to_string();
-        let old_image_id = resp.image.clone().ok_or_else(|| anyhow!("inspect has no image id"))?;
-        let config = resp.config.clone().ok_or_else(|| anyhow!("inspect has no config"))?;
-        let host_config =
-            resp.host_config.clone().ok_or_else(|| anyhow!("inspect has no host_config"))?;
+        let container_name = resp
+            .name
+            .clone()
+            .unwrap_or_default()
+            .trim_start_matches('/')
+            .to_string();
+        let old_image_id = resp
+            .image
+            .clone()
+            .ok_or_else(|| anyhow!("inspect has no image id"))?;
+        let config = resp
+            .config
+            .clone()
+            .ok_or_else(|| anyhow!("inspect has no config"))?;
+        let host_config = resp
+            .host_config
+            .clone()
+            .ok_or_else(|| anyhow!("inspect has no host_config"))?;
         let networks = resp
             .network_settings
             .as_ref()
@@ -436,7 +437,12 @@ impl DockerCtl {
     /// it as the failing `dockerDaemon` env row.
     pub fn connect(cfg: &DockerConfig) -> Self {
         let socket = cfg.socket.trim();
-        let socket = if socket.is_empty() { "/var/run/docker.sock" } else { socket }.to_string();
+        let socket = if socket.is_empty() {
+            "/var/run/docker.sock"
+        } else {
+            socket
+        }
+        .to_string();
         let client = build_client(&socket).map_err(|e| {
             tracing::warn!(target: "docker", "{e:#} — booting anyway; the setup wizard shows the failure");
             format!("{e:#}")
@@ -547,7 +553,9 @@ impl DockerCtl {
                 // shows what it can.
                 report.daemon_detail = Some(format!("{e:#}"));
                 let subnet = self.subnet.read().unwrap().clone();
-                report.control_host = SubnetPlan::parse(&subnet).ok().map(|p| p.gateway().to_string());
+                report.control_host = SubnetPlan::parse(&subnet)
+                    .ok()
+                    .map(|p| p.gateway().to_string());
                 report.dri_ok = std::path::Path::new("/dev/dri/renderD128").exists();
                 report.sock_mount_detail = "Docker daemon unreachable".into();
                 *self.env.write().await = report.clone();
@@ -591,7 +599,9 @@ impl DockerCtl {
         }
 
         // 5. sock-mount discovery from our own container's mounts.
-        let (ok, detail) = self.discover_sock_mount(report.self_container.as_deref()).await;
+        let (ok, detail) = self
+            .discover_sock_mount(report.self_container.as_deref())
+            .await;
         report.sock_mount_ok = ok;
         report.sock_mount_detail = detail;
 
@@ -620,7 +630,13 @@ impl DockerCtl {
             let host = host.trim();
             if host.len() >= 12 && host.bytes().all(|b| b.is_ascii_hexdigit()) {
                 if let Some(d) = &docker {
-                    if let Ok(info) = d.inspect_container(host, None::<bollard::query_parameters::InspectContainerOptions>).await {
+                    if let Ok(info) = d
+                        .inspect_container(
+                            host,
+                            None::<bollard::query_parameters::InspectContainerOptions>,
+                        )
+                        .await
+                    {
                         if let Some(id) = info.id {
                             return Some(id);
                         }
@@ -633,7 +649,13 @@ impl DockerCtl {
             if let Some(id) = extract_container_id_from_mountinfo(&mountinfo) {
                 // Confirm the id is real before trusting it.
                 if let Some(d) = &docker {
-                    if let Ok(info) = d.inspect_container(&id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+                    if let Ok(info) = d
+                        .inspect_container(
+                            &id,
+                            None::<bollard::query_parameters::InspectContainerOptions>,
+                        )
+                        .await
+                    {
                         if let Some(cid) = info.id {
                             return Some(cid);
                         }
@@ -688,7 +710,10 @@ impl DockerCtl {
         // Our own image (the digest id `Image` reports) — guaranteed present on the
         // daemon, and ubuntu-based so `sh`/`test` exist.
         let image = docker
-            .inspect_container(self_id, None::<bollard::query_parameters::InspectContainerOptions>)
+            .inspect_container(
+                self_id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
             .await
             .context("inspecting self for the lxcfs probe image")?
             .image
@@ -747,7 +772,9 @@ impl DockerCtl {
             docker.wait_container(id, None::<bollard::query_parameters::WaitContainerOptions>);
         let frame = tokio::time::timeout(LXCFS_PROBE_TIMEOUT, waits.next())
             .await
-            .map_err(|_| anyhow!("lxcfs probe container did not exit within {LXCFS_PROBE_TIMEOUT:?}"))?;
+            .map_err(|_| {
+                anyhow!("lxcfs probe container did not exit within {LXCFS_PROBE_TIMEOUT:?}")
+            })?;
         match frame {
             Some(Ok(resp)) => Ok(resp.status_code == 0),
             // test = 1 (absent) or 127 (no `test`) — both mean "not available", quietly.
@@ -768,18 +795,33 @@ impl DockerCtl {
             return if present {
                 (true, format!("{SOCK_DIR} present on host (dev mode)"))
             } else {
-                (true, "dev mode — clone socket materialized at runtime".into())
+                (
+                    true,
+                    "dev mode — clone socket materialized at runtime".into(),
+                )
             };
         };
         let docker = match self.daemon() {
             Ok(d) => d,
             Err(e) => return (false, format!("could not inspect self container: {e:#}")),
         };
-        match docker.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+        match docker
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
             Ok(info) => {
                 let found = info.mounts.unwrap_or_default().into_iter().find(|m| {
-                    matches!(m.typ, Some(MountPointTypeEnum::VOLUME) | Some(MountPointTypeEnum::BIND))
-                        && m.destination.as_deref().map(|d| d == SOCK_DIR || d.starts_with(&format!("{SOCK_DIR}/"))).unwrap_or(false)
+                    matches!(
+                        m.typ,
+                        Some(MountPointTypeEnum::VOLUME) | Some(MountPointTypeEnum::BIND)
+                    ) && m
+                        .destination
+                        .as_deref()
+                        .map(|d| d == SOCK_DIR || d.starts_with(&format!("{SOCK_DIR}/")))
+                        .unwrap_or(false)
                 });
                 match found {
                     Some(m) => {
@@ -788,7 +830,9 @@ impl DockerCtl {
                     }
                     None => (
                         false,
-                        format!("no mount at {SOCK_DIR} — add `-v <host-sock-dir>:{SOCK_DIR}` to the control-server container"),
+                        format!(
+                            "no mount at {SOCK_DIR} — add `-v <host-sock-dir>:{SOCK_DIR}` to the control-server container"
+                        ),
                     ),
                 }
             }
@@ -811,7 +855,9 @@ impl DockerCtl {
         match self.daemon()?.connect_network(NETWORK, cfg).await {
             Ok(()) => Ok(()),
             // 403 = already connected; treat as success.
-            Err(BollardError::DockerResponseServerError { status_code: 403, .. }) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 403, ..
+            }) => Ok(()),
             Err(e) => Err(e.into()),
         }
     }
@@ -826,7 +872,14 @@ impl DockerCtl {
         let subnet = self.subnet.read().unwrap().clone();
         let plan = SubnetPlan::parse(&subnet)?;
         // Already present? Verify its subnet matches.
-        match self.daemon()?.inspect_network(NETWORK, None::<bollard::query_parameters::InspectNetworkOptions>).await {
+        match self
+            .daemon()?
+            .inspect_network(
+                NETWORK,
+                None::<bollard::query_parameters::InspectNetworkOptions>,
+            )
+            .await
+        {
             Ok(net) => {
                 let existing = net
                     .ipam
@@ -849,7 +902,9 @@ impl DockerCtl {
                     ),
                 }
             }
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {} // not present → create
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {} // not present → create
             Err(e) => return Err(anyhow!("inspecting the {NETWORK} network: {e}")),
         }
 
@@ -866,10 +921,16 @@ impl DockerCtl {
                 }]),
                 ..Default::default()
             }),
-            labels: Some(HashMap::from([(LABEL_MANAGED.to_string(), "1".to_string())])),
+            labels: Some(HashMap::from([(
+                LABEL_MANAGED.to_string(),
+                "1".to_string(),
+            )])),
             ..Default::default()
         };
-        self.daemon()?.create_network(req).await.with_context(|| format!("creating the {NETWORK} network"))?;
+        self.daemon()?
+            .create_network(req)
+            .await
+            .with_context(|| format!("creating the {NETWORK} network"))?;
         tracing::info!(target: "docker", "created the {NETWORK} bridge with subnet {}", plan.cidr());
         Ok(())
     }
@@ -880,8 +941,10 @@ impl DockerCtl {
     /// create-if-absent, start-if-stopped, recreate-if-image-drifted (cache volumes survive a
     /// recreate). MUST run after `ensure_network` (the containers attach to `NETWORK`).
     pub async fn ensure_build_infra(&self, cfg: &wire::DockerConfig) -> Result<()> {
-        self.ensure_volume(crate::buildinfra::REGISTRY_DATA_VOL).await?;
-        self.ensure_volume(crate::buildinfra::BUILDKIT_CACHE_VOL).await?;
+        self.ensure_volume(crate::buildinfra::REGISTRY_DATA_VOL)
+            .await?;
+        self.ensure_volume(crate::buildinfra::BUILDKIT_CACHE_VOL)
+            .await?;
 
         self.ensure_infra_container(InfraSpec {
             name: crate::buildinfra::REGISTRY_CONTAINER,
@@ -964,7 +1027,9 @@ impl DockerCtl {
         {
             Ok(_) => {}
             // Absent is the steady state on any deployment that never ran the group proxy.
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => return,
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => return,
             Err(e) => {
                 tracing::warn!(target: "docker", "inspecting {}: {e}", Self::RETIRED_GROUP_PROXY);
                 return;
@@ -986,13 +1051,19 @@ impl DockerCtl {
     async fn ensure_infra_container(&self, spec: InfraSpec) -> Result<()> {
         let docker = self.daemon()?;
         match docker
-            .inspect_container(spec.name, None::<bollard::query_parameters::InspectContainerOptions>)
+            .inspect_container(
+                spec.name,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
             .await
         {
             Ok(info) => {
                 let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
-                let cur_image =
-                    info.config.as_ref().and_then(|c| c.image.clone()).unwrap_or_default();
+                let cur_image = info
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.image.clone())
+                    .unwrap_or_default();
                 let cur_fingerprint = info
                     .config
                     .as_ref()
@@ -1015,7 +1086,9 @@ impl DockerCtl {
                     return Ok(());
                 }
             }
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {} // absent
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {} // absent
             Err(e) => return Err(anyhow!("inspecting infra container {}: {e}", spec.name)),
         }
 
@@ -1033,7 +1106,11 @@ impl DockerCtl {
         let body = ContainerCreateBody {
             image: Some(spec.image.clone()),
             cmd: spec.cmd.clone(),
-            env: if spec.env.is_empty() { None } else { Some(spec.env.clone()) },
+            env: if spec.env.is_empty() {
+                None
+            } else {
+                Some(spec.env.clone())
+            },
             labels: Some({
                 let mut m = HashMap::from([(LABEL_INFRA.to_string(), "1".to_string())]);
                 if let Some(fp) = &spec.config_fingerprint {
@@ -1082,9 +1159,16 @@ impl DockerCtl {
     /// `Bytes` aggregate progress ticks throttled to integer-percent changes by
     /// [`PullAggregator`]. `info.error` is surfaced as a hard error verbatim (e.g. Docker
     /// Hub rate limits on `ubuntu:26.04`, gotcha #9).
-    pub async fn pull_image(&self, reference: &str, mut on_event: impl FnMut(PullEvent)) -> Result<()> {
+    pub async fn pull_image(
+        &self,
+        reference: &str,
+        mut on_event: impl FnMut(PullEvent),
+    ) -> Result<()> {
         let (image, tag) = split_reference(reference);
-        let opts = CreateImageOptionsBuilder::new().from_image(&image).tag(&tag).build();
+        let opts = CreateImageOptionsBuilder::new()
+            .from_image(&image)
+            .tag(&tag)
+            .build();
         let docker = self.daemon()?;
         let mut stream = docker.create_image(Some(opts), None, None);
         // Track the last status emitted per layer so we don't spam a line per byte.
@@ -1101,7 +1185,10 @@ impl DockerCtl {
             // Byte-progress ticks happen far more often than status transitions (many
             // ticks share the same "Downloading"/"Extracting" status), so this runs on
             // every frame, independent of the status dedup below.
-            let (current, total) = info.progress_detail.map(|p| (p.current, p.total)).unwrap_or_default();
+            let (current, total) = info
+                .progress_detail
+                .map(|p| (p.current, p.total))
+                .unwrap_or_default();
             if let Some(frac) = aggregator.observe(&id, &status, current, total) {
                 on_event(PullEvent::Bytes { frac });
             }
@@ -1122,20 +1209,11 @@ impl DockerCtl {
     pub async fn image_exists(&self, reference: &str) -> Result<bool> {
         match self.daemon()?.inspect_image(reference).await {
             Ok(_) => Ok(true),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(false),
             Err(e) => Err(anyhow!("inspecting image {reference}: {e}")),
         }
-    }
-
-    /// An image's labels (`ImageInspect.Config.Labels`), or an empty map if it has none.
-    /// The template-pull verify reads this to require `rmng.image=1` on the pulled image.
-    pub async fn image_labels(&self, reference: &str) -> Result<HashMap<String, String>> {
-        let info = self
-            .daemon()?
-            .inspect_image(reference)
-            .await
-            .with_context(|| format!("inspecting image {reference}"))?;
-        Ok(info.config.and_then(|c| c.labels).unwrap_or_default())
     }
 
     /// The running control-server image's identity: inspect our own container to get its
@@ -1144,12 +1222,25 @@ impl DockerCtl {
     pub async fn self_image_info(&self, self_id: &str, repo: &str) -> Result<ServerImageInfo> {
         let docker = self.daemon()?;
         let ctr = docker
-            .inspect_container(self_id, None::<bollard::query_parameters::InspectContainerOptions>)
+            .inspect_container(
+                self_id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
             .await
             .context("inspecting self container for image info")?;
-        let image_id = ctr.image.clone().ok_or_else(|| anyhow!("self container has no image id"))?;
-        let img = docker.inspect_image(&image_id).await.context("inspecting self image")?;
-        let labels = img.config.as_ref().and_then(|c| c.labels.clone()).unwrap_or_default();
+        let image_id = ctr
+            .image
+            .clone()
+            .ok_or_else(|| anyhow!("self container has no image id"))?;
+        let img = docker
+            .inspect_image(&image_id)
+            .await
+            .context("inspecting self image")?;
+        let labels = img
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.clone())
+            .unwrap_or_default();
         // RepoDigest for our repo, e.g. "pegasis0/rmng@sha256:…". Match on the repo prefix.
         let repo_digest = img
             .repo_digests
@@ -1158,8 +1249,14 @@ impl DockerCtl {
             .find(|rd| rd.starts_with(&format!("{repo}@")));
         Ok(ServerImageInfo {
             repo_digest,
-            revision: labels.get("org.opencontainers.image.revision").cloned().filter(|s| !s.is_empty()),
-            created: labels.get("org.opencontainers.image.created").cloned().filter(|s| !s.is_empty()),
+            revision: labels
+                .get("org.opencontainers.image.revision")
+                .cloned()
+                .filter(|s| !s.is_empty()),
+            created: labels
+                .get("org.opencontainers.image.created")
+                .cloned()
+                .filter(|s| !s.is_empty()),
         })
     }
 
@@ -1243,51 +1340,6 @@ impl DockerCtl {
         status
     }
 
-    /// An image's `Config.StopSignal` (e.g. `SIGRTMIN+3`), or `None` when unset. The
-    /// template-pull verify WARNs when a pulled template lacks the clean-stop signal (clones
-    /// off it hang 20 s on stop before SIGKILL — gotcha #5).
-    pub async fn image_stop_signal(&self, reference: &str) -> Result<Option<String>> {
-        let info = self
-            .daemon()?
-            .inspect_image(reference)
-            .await
-            .with_context(|| format!("inspecting image {reference}"))?;
-        Ok(info.config.and_then(|c| c.stop_signal).filter(|s| !s.is_empty()))
-    }
-
-    /// List clone-source images (label `rmng.image=1`), newest first, projected to the
-    /// wire [`ImageInfo`]. `in_use_by` is left empty here — the caller (web.rs) fills it
-    /// from [`Self::list_managed_containers`] (which containers run on which image).
-    pub async fn list_rmng_images(&self) -> Result<Vec<ImageInfo>> {
-        let filters: HashMap<String, Vec<String>> =
-            HashMap::from([("label".to_string(), vec![format!("{LABEL_IMAGE}=1")])]);
-        let opts = ListImagesOptionsBuilder::new().all(false).filters(&filters).build();
-        let summaries = self.daemon()?.list_images(Some(opts)).await.context("listing rmng images")?;
-        let mut out: Vec<ImageInfo> = summaries
-            .into_iter()
-            .flat_map(|s| {
-                // One row per RepoTag: an image tagged `:latest` + alias resolves via
-                // either tag in `resolve_reference`. Empty tag list falls back to the id.
-                let mut tags = s.repo_tags.clone();
-                if tags.is_empty() {
-                    tags.push(s.id.clone());
-                }
-                tags.into_iter().map(move |reference| ImageInfo {
-                    id: s.id.clone(),
-                    reference,
-                    size_bytes: s.size,
-                    created_at: epoch_to_rfc3339(s.created),
-                    base: s.labels.get(LABEL_BASE).map(|v| v == "1").unwrap_or(false),
-                    created_from: s.labels.get(LABEL_CREATED_FROM).cloned(),
-                    in_use_by: Vec::new(),
-                })
-            })
-            .collect();
-        // Newest first (created is epoch seconds).
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        Ok(out)
-    }
-
     /// Build `tag` from an in-memory Dockerfile via the local daemon (`FROM` + profile
     /// lines + `ENV`, rendered by `crate::derived`). Streams step lines into `on_step`;
     /// any daemon error item fails with the collected log attached. `forcerm` + `pull`
@@ -1327,7 +1379,12 @@ impl DockerCtl {
                 log.push(format!("error: {err}"));
                 bail!("building {tag} failed:\n{}", log.join("\n"));
             }
-            if let Some(step) = info.stream.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(step) = info
+                .stream
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 if log.len() < 200 {
                     log.push(step.to_string());
                 }
@@ -1335,7 +1392,10 @@ impl DockerCtl {
             }
         }
         if !self.image_exists(tag).await? {
-            bail!("building {tag} failed (no error line, image missing):\n{}", log.join("\n"));
+            bail!(
+                "building {tag} failed (no error line, image missing):\n{}",
+                log.join("\n")
+            );
         }
         Ok(())
     }
@@ -1344,12 +1404,21 @@ impl DockerCtl {
     /// container) is surfaced verbatim so the operator sees why.
     pub async fn remove_image(&self, reference: &str) -> Result<()> {
         let opts = RemoveImageOptionsBuilder::new().force(false).build();
-        match self.daemon()?.remove_image(reference, Some(opts), None).await {
+        match self
+            .daemon()?
+            .remove_image(reference, Some(opts), None)
+            .await
+        {
             Ok(_) => Ok(()),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {
                 Ok(()) // already gone
             }
-            Err(BollardError::DockerResponseServerError { status_code: 409, message }) => {
+            Err(BollardError::DockerResponseServerError {
+                status_code: 409,
+                message,
+            }) => {
                 bail!("cannot remove image {reference}: {message}")
             }
             Err(e) => Err(anyhow!("removing image {reference}: {e}")),
@@ -1368,7 +1437,11 @@ impl DockerCtl {
             .all(true)
             .filters(&filters)
             .build();
-        let list = self.daemon()?.list_containers(Some(opts)).await.context("listing managed containers")?;
+        let list = self
+            .daemon()?
+            .list_containers(Some(opts))
+            .await
+            .context("listing managed containers")?;
         Ok(list
             .into_iter()
             .map(|c| ManagedContainer {
@@ -1382,7 +1455,10 @@ impl DockerCtl {
                     .map(|n| n.trim_start_matches('/').to_string())
                     .unwrap_or_else(|| c.id.unwrap_or_default()),
                 image: c.image.unwrap_or_default(),
-                running: matches!(c.state, Some(bollard::models::ContainerSummaryStateEnum::RUNNING)),
+                running: matches!(
+                    c.state,
+                    Some(bollard::models::ContainerSummaryStateEnum::RUNNING)
+                ),
             })
             .collect())
     }
@@ -1483,7 +1559,10 @@ impl DockerCtl {
             hostname: Some(spec.hostname.clone()),
             image: Some(spec.image.clone()),
             env: Some(env),
-            labels: Some(HashMap::from([(LABEL_MANAGED.to_string(), "1".to_string())])),
+            labels: Some(HashMap::from([(
+                LABEL_MANAGED.to_string(),
+                "1".to_string(),
+            )])),
             stop_signal: Some("SIGRTMIN+3".to_string()),
             stop_timeout: Some(STOP_TIMEOUT_SECS as i64),
             host_config: Some(host_config),
@@ -1496,7 +1575,9 @@ impl DockerCtl {
             ..Default::default()
         };
 
-        let opts = CreateContainerOptionsBuilder::new().name(&spec.name).build();
+        let opts = CreateContainerOptionsBuilder::new()
+            .name(&spec.name)
+            .build();
         let res = self
             .daemon()?
             .create_container(Some(opts), body)
@@ -1509,7 +1590,10 @@ impl DockerCtl {
     /// to [`SelfSpec::from_inspect`].
     pub async fn inspect_self(&self, self_id: &str) -> Result<ContainerInspectResponse> {
         self.daemon()?
-            .inspect_container(self_id, None::<bollard::query_parameters::InspectContainerOptions>)
+            .inspect_container(
+                self_id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
             .await
             .with_context(|| format!("inspecting self container {self_id}"))
     }
@@ -1536,7 +1620,9 @@ impl DockerCtl {
             }),
             ..Default::default()
         };
-        let opts = CreateContainerOptionsBuilder::new().name(&spec.container_name).build();
+        let opts = CreateContainerOptionsBuilder::new()
+            .name(&spec.container_name)
+            .build();
         let docker = self.daemon()?;
         let id = docker
             .create_container(Some(opts), body)
@@ -1544,7 +1630,10 @@ impl DockerCtl {
             .with_context(|| format!("recreating container {}", spec.container_name))?
             .id;
         if let Err(e) = docker
-            .start_container(&id, None::<bollard::query_parameters::StartContainerOptions>)
+            .start_container(
+                &id,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
             .await
         {
             // Create succeeded but start failed: the created-but-stopped container still holds
@@ -1565,7 +1654,12 @@ impl DockerCtl {
     /// pre-cleaned. The helper outlives the old container's removal. `socket` is
     /// `config.docker.socket` — the docker.sock is bound directly (respects a custom path)
     /// rather than discovered, because Compose stores it under Mounts, not HostConfig.Binds.
-    pub async fn launch_upgrade_helper(&self, new_image: &str, self_id: &str, socket: &str) -> Result<()> {
+    pub async fn launch_upgrade_helper(
+        &self,
+        new_image: &str,
+        self_id: &str,
+        socket: &str,
+    ) -> Result<()> {
         const HELPER_NAME: &str = "rmng-self-upgrade";
         // Reclaim a leftover helper from a crashed earlier run (idempotent, 404-ok).
         let _ = self.remove_container(HELPER_NAME).await;
@@ -1582,7 +1676,11 @@ impl DockerCtl {
                     mounts.push(Mount {
                         target: Some("/data".to_string()),
                         source: m.name.clone().or(m.source.clone()),
-                        typ: Some(if is_vol { MountTypeEnum::VOLUME } else { MountTypeEnum::BIND }),
+                        typ: Some(if is_vol {
+                            MountTypeEnum::VOLUME
+                        } else {
+                            MountTypeEnum::BIND
+                        }),
                         ..Default::default()
                     });
                 }
@@ -1600,7 +1698,11 @@ impl DockerCtl {
         let host_config = HostConfig {
             // docker.sock as a bind (source == target == the configured socket path).
             binds: Some(vec![format!("{socket}:{socket}")]),
-            mounts: if mounts.is_empty() { None } else { Some(mounts) },
+            mounts: if mounts.is_empty() {
+                None
+            } else {
+                Some(mounts)
+            },
             network_mode: Some("none".to_string()),
             auto_remove: Some(false),
             // The control-server itself runs `--privileged` (which bypasses AppArmor). This
@@ -1623,11 +1725,20 @@ impl DockerCtl {
             host_config: Some(host_config),
             ..Default::default()
         };
-        let opts = CreateContainerOptionsBuilder::new().name(HELPER_NAME).build();
+        let opts = CreateContainerOptionsBuilder::new()
+            .name(HELPER_NAME)
+            .build();
         let docker = self.daemon()?;
-        let id = docker.create_container(Some(opts), body).await.context("creating self-upgrade helper")?.id;
+        let id = docker
+            .create_container(Some(opts), body)
+            .await
+            .context("creating self-upgrade helper")?
+            .id;
         docker
-            .start_container(&id, None::<bollard::query_parameters::StartContainerOptions>)
+            .start_container(
+                &id,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
             .await
             .context("starting self-upgrade helper")?;
         Ok(())
@@ -1637,17 +1748,27 @@ impl DockerCtl {
     async fn ensure_volume(&self, name: &str) -> Result<()> {
         let opts = VolumeCreateOptions {
             name: Some(name.to_string()),
-            labels: Some(HashMap::from([(LABEL_MANAGED.to_string(), "1".to_string())])),
+            labels: Some(HashMap::from([(
+                LABEL_MANAGED.to_string(),
+                "1".to_string(),
+            )])),
             ..Default::default()
         };
-        self.daemon()?.create_volume(opts).await.with_context(|| format!("creating volume {name}"))?;
+        self.daemon()?
+            .create_volume(opts)
+            .await
+            .with_context(|| format!("creating volume {name}"))?;
         Ok(())
     }
 
     /// Start a container. bollard treats 304 (already started) as success, so this is a
     /// no-op when it's already running.
     pub async fn start_container(&self, id: &str) -> Result<()> {
-        match self.daemon()?.start_container(id, None::<bollard::query_parameters::StartContainerOptions>).await {
+        match self
+            .daemon()?
+            .start_container(id, None::<bollard::query_parameters::StartContainerOptions>)
+            .await
+        {
             Ok(()) => Ok(()),
             Err(e) => Err(anyhow!("starting container {id}: {e}")),
         }
@@ -1656,10 +1777,14 @@ impl DockerCtl {
     /// Stop a container with the systemd stop signal + the 20 s timeout. bollard maps 304
     /// (already stopped) to success; 404 (already gone) is tolerated here.
     pub async fn stop_container(&self, id: &str) -> Result<()> {
-        let opts = StopContainerOptionsBuilder::new().t(STOP_TIMEOUT_SECS).build();
+        let opts = StopContainerOptionsBuilder::new()
+            .t(STOP_TIMEOUT_SECS)
+            .build();
         match self.daemon()?.stop_container(id, Some(opts)).await {
             Ok(()) => Ok(()),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
             Err(e) => Err(anyhow!("stopping container {id}: {e}")),
         }
     }
@@ -1686,7 +1811,9 @@ impl DockerCtl {
         let opts = RemoveContainerOptionsBuilder::new().force(true).build();
         match self.daemon()?.remove_container(id, Some(opts)).await {
             Ok(()) => Ok(()),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
             Err(e) => Err(anyhow!("removing container {id}: {e}")),
         }
     }
@@ -1697,8 +1824,13 @@ impl DockerCtl {
         let opts = RemoveVolumeOptionsBuilder::new().force(true).build();
         match self.daemon()?.remove_volume(name, Some(opts)).await {
             Ok(()) => Ok(()),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
-            Err(BollardError::DockerResponseServerError { status_code: 409, message }) => {
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 409,
+                message,
+            }) => {
                 bail!("cannot remove volume {name}: {message}")
             }
             Err(e) => Err(anyhow!("removing volume {name}: {e}")),
@@ -1723,7 +1855,10 @@ impl DockerCtl {
     pub async fn inspect_runtime(&self, id: &str) -> Result<ContainerRuntime> {
         match self
             .daemon()?
-            .inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>)
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
             .await
         {
             Ok(info) => Ok(ContainerRuntime {
@@ -1734,9 +1869,12 @@ impl DockerCtl {
                     .and_then(|nets| nets.get(NETWORK).and_then(|e| e.ip_address.clone()))
                     .filter(|ip| !ip.is_empty()),
             }),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => {
-                Ok(ContainerRuntime { pid: None, ip: None })
-            }
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(ContainerRuntime {
+                pid: None,
+                ip: None,
+            }),
             Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
         }
     }
@@ -1759,14 +1897,23 @@ impl DockerCtl {
     /// them that way outlives an upgrade, and it must stay invisible until the reconciler
     /// clears it.
     pub async fn is_running(&self, id: &str) -> Result<bool> {
-        match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+        match self
+            .daemon()?
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
             Ok(info) => {
                 let state = info.state.as_ref();
                 let running = state.and_then(|s| s.running).unwrap_or(false);
                 let paused = state.and_then(|s| s.paused).unwrap_or(false);
                 Ok(running && !paused)
             }
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(false),
             Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
         }
     }
@@ -1775,9 +1922,18 @@ impl DockerCtl {
     /// it, so the only paused containers left are ones an older build archived, and this is
     /// what lets [`DockerCtl::resume_container`] and the reconciler clear them.
     pub async fn is_paused(&self, id: &str) -> Result<bool> {
-        match self.daemon()?.inspect_container(id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+        match self
+            .daemon()?
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
             Ok(info) => Ok(info.state.and_then(|s| s.paused).unwrap_or(false)),
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(false),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(false),
             Err(e) => Err(anyhow!("inspecting container {id}: {e}")),
         }
     }
@@ -1842,13 +1998,22 @@ impl DockerCtl {
     /// resolvable into `/proc` when the control-server shares the host PID namespace
     /// (`pid: "host"`). A dead daemon is a real error (retried).
     pub async fn container_pid_and_memory(&self, name_or_id: &str) -> Result<Option<(i64, i64)>> {
-        match self.daemon()?.inspect_container(name_or_id, None::<bollard::query_parameters::InspectContainerOptions>).await {
+        match self
+            .daemon()?
+            .inspect_container(
+                name_or_id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
             Ok(info) => {
                 let pid = info.state.and_then(|s| s.pid).filter(|&p| p > 0);
                 let mem = info.host_config.and_then(|h| h.memory).filter(|&m| m > 0);
                 Ok(pid.zip(mem))
             }
-            Err(BollardError::DockerResponseServerError { status_code: 404, .. }) => Ok(None),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(None),
             Err(e) => Err(anyhow!("inspecting container {name_or_id}: {e}")),
         }
     }
@@ -1937,8 +2102,7 @@ impl DockerCtl {
         );
         let mut buf = Vec::new();
         while let Some(chunk) = stream.next().await {
-            let bytes =
-                chunk.with_context(|| format!("downloading {path} from {container}"))?;
+            let bytes = chunk.with_context(|| format!("downloading {path} from {container}"))?;
             buf.extend_from_slice(&bytes);
         }
         Ok(buf)
@@ -2018,7 +2182,11 @@ impl DockerCtl {
                 container,
                 CreateExecOptions {
                     cmd: Some(cmd),
-                    env: if env_lines.is_empty() { None } else { Some(env_lines) },
+                    env: if env_lines.is_empty() {
+                        None
+                    } else {
+                        Some(env_lines)
+                    },
                     attach_stdin: Some(true),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
@@ -2028,8 +2196,10 @@ impl DockerCtl {
             .await
             .with_context(|| format!("creating script exec in {container}"))?;
 
-        let StartExecResults::Attached { mut output, mut input } =
-            self.daemon()?.start_exec(&exec.id, None).await?
+        let StartExecResults::Attached {
+            mut output,
+            mut input,
+        } = self.daemon()?.start_exec(&exec.id, None).await?
         else {
             bail!("exec started detached unexpectedly");
         };
@@ -2053,7 +2223,10 @@ impl DockerCtl {
         let mut err_buf = LineSplitter::default();
         let read_fut = async {
             let mut silent_for = std::time::Duration::ZERO;
-            while let Some(chunk) = self.next_exec_chunk(container, &mut output, &mut silent_for).await? {
+            while let Some(chunk) = self
+                .next_exec_chunk(container, &mut output, &mut silent_for)
+                .await?
+            {
                 match chunk {
                     LogOutput::StdOut { message } | LogOutput::Console { message } => {
                         out_buf.push(&message, |line| on_line(STREAM_OUT, line));
@@ -2086,7 +2259,12 @@ impl DockerCtl {
             }
         }
 
-        let code = self.daemon()?.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
+        let code = self
+            .daemon()?
+            .inspect_exec(&exec.id)
+            .await?
+            .exit_code
+            .unwrap_or(-1);
         Ok(code)
     }
 
@@ -2115,7 +2293,11 @@ impl DockerCtl {
                     cmd: Some(cmd.to_vec()),
                     user: Some(user.to_string()),
                     working_dir: workdir.map(str::to_string),
-                    env: if env.is_empty() { None } else { Some(env.to_vec()) },
+                    env: if env.is_empty() {
+                        None
+                    } else {
+                        Some(env.to_vec())
+                    },
                     attach_stdin: Some(stdin.is_some()),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
@@ -2125,8 +2307,10 @@ impl DockerCtl {
             .await
             .with_context(|| format!("creating exec in {container}"))?;
 
-        let StartExecResults::Attached { mut output, mut input } =
-            self.daemon()?.start_exec(&exec.id, None).await?
+        let StartExecResults::Attached {
+            mut output,
+            mut input,
+        } = self.daemon()?.start_exec(&exec.id, None).await?
         else {
             bail!("exec started detached unexpectedly");
         };
@@ -2150,7 +2334,10 @@ impl DockerCtl {
         let mut stderr = String::new();
         let read_fut = async {
             let mut silent_for = std::time::Duration::ZERO;
-            while let Some(chunk) = self.next_exec_chunk(container, &mut output, &mut silent_for).await? {
+            while let Some(chunk) = self
+                .next_exec_chunk(container, &mut output, &mut silent_for)
+                .await?
+            {
                 match chunk {
                     LogOutput::StdOut { message } | LogOutput::Console { message } => {
                         out_buf.push(&message, |line| {
@@ -2188,8 +2375,17 @@ impl DockerCtl {
             }
         }
 
-        let exit_code = self.daemon()?.inspect_exec(&exec.id).await?.exit_code.unwrap_or(-1);
-        Ok(ExecResult { exit_code, stdout, stderr })
+        let exit_code = self
+            .daemon()?
+            .inspect_exec(&exec.id)
+            .await?
+            .exit_code
+            .unwrap_or(-1);
+        Ok(ExecResult {
+            exit_code,
+            stdout,
+            stderr,
+        })
     }
 
     /// Launch a command **detached** (`docker exec` with `detach: true`): the daemon starts it in
@@ -2216,7 +2412,11 @@ impl DockerCtl {
                     cmd: Some(argv),
                     user: Some(user.to_string()),
                     working_dir: workdir.map(str::to_string),
-                    env: if env.is_empty() { None } else { Some(env.to_vec()) },
+                    env: if env.is_empty() {
+                        None
+                    } else {
+                        Some(env.to_vec())
+                    },
                     attach_stdout: Some(false),
                     attach_stderr: Some(false),
                     ..Default::default()
@@ -2227,7 +2427,13 @@ impl DockerCtl {
         // `detach: true` → the daemon backgrounds the process and `start_exec` returns without
         // attached streams. We do not await the command; its exit status is intentionally unknown.
         self.daemon()?
-            .start_exec(&exec.id, Some(StartExecOptions { detach: true, ..Default::default() }))
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
             .await
             .with_context(|| format!("starting detached exec in {container}"))?;
         Ok(())
@@ -2260,7 +2466,11 @@ impl DockerCtl {
                 CreateExecOptions {
                     cmd: Some(cmd.to_vec()),
                     user: Some(user.to_string()),
-                    env: if env.is_empty() { None } else { Some(env.to_vec()) },
+                    env: if env.is_empty() {
+                        None
+                    } else {
+                        Some(env.to_vec())
+                    },
                     attach_stdin: Some(true),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
@@ -2271,23 +2481,45 @@ impl DockerCtl {
             .await
             .with_context(|| format!("creating tty exec in {container}"))?;
         let StartExecResults::Attached { output, input } = daemon
-            .start_exec(&exec.id, Some(StartExecOptions { tty: true, ..Default::default() }))
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    tty: true,
+                    ..Default::default()
+                }),
+            )
             .await?
         else {
             bail!("tty exec started detached unexpectedly");
         };
         // Best-effort initial sizing so the very first render matches the viewer tab.
         daemon
-            .resize_exec(&exec.id, ResizeExecOptions { height: rows, width: cols })
+            .resize_exec(
+                &exec.id,
+                ResizeExecOptions {
+                    height: rows,
+                    width: cols,
+                },
+            )
             .await
             .ok();
-        Ok(TtyExec { id: exec.id, output, input })
+        Ok(TtyExec {
+            id: exec.id,
+            output,
+            input,
+        })
     }
 
     /// Resize a running TTY exec's pseudo-terminal (rows/cols), by the id from [`Self::exec_tty`].
     pub async fn resize_exec(&self, exec_id: &str, cols: u16, rows: u16) -> Result<()> {
         self.daemon()?
-            .resize_exec(exec_id, ResizeExecOptions { height: rows, width: cols })
+            .resize_exec(
+                exec_id,
+                ResizeExecOptions {
+                    height: rows,
+                    width: cols,
+                },
+            )
             .await?;
         Ok(())
     }
@@ -2298,7 +2530,8 @@ impl DockerCtl {
 /// are dropped to detach (which makes `tmux attach` see EOF and detach its client).
 pub struct TtyExec {
     pub id: String,
-    pub output: std::pin::Pin<Box<dyn futures::Stream<Item = Result<LogOutput, BollardError>> + Send>>,
+    pub output:
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<LogOutput, BollardError>> + Send>>,
     pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
 }
 
@@ -2334,9 +2567,15 @@ impl SubnetPlan {
     /// Parse an IPv4 CIDR (the config validator already guarantees `/16`–`/24`, but this
     /// re-checks defensively). Masks host bits off the address to get the network base.
     pub fn parse(cidr: &str) -> Result<Self> {
-        let (ip, prefix) = cidr.split_once('/').ok_or_else(|| anyhow!("subnet {cidr:?} is not CIDR"))?;
-        let addr: Ipv4Addr = ip.parse().with_context(|| format!("subnet {cidr:?} has a bad IPv4 address"))?;
-        let prefix: u8 = prefix.parse().with_context(|| format!("subnet {cidr:?} has a bad prefix"))?;
+        let (ip, prefix) = cidr
+            .split_once('/')
+            .ok_or_else(|| anyhow!("subnet {cidr:?} is not CIDR"))?;
+        let addr: Ipv4Addr = ip
+            .parse()
+            .with_context(|| format!("subnet {cidr:?} has a bad IPv4 address"))?;
+        let prefix: u8 = prefix
+            .parse()
+            .with_context(|| format!("subnet {cidr:?} has a bad prefix"))?;
         if !(1..=32).contains(&prefix) {
             bail!("subnet {cidr:?} prefix out of range");
         }
@@ -2373,7 +2612,10 @@ pub fn split_reference(reference: &str) -> (String, String) {
     match reference[last_slash..].rfind(':') {
         Some(rel) => {
             let abs = last_slash + rel;
-            (reference[..abs].to_string(), reference[abs + 1..].to_string())
+            (
+                reference[..abs].to_string(),
+                reference[abs + 1..].to_string(),
+            )
         }
         None => (reference.to_string(), "latest".to_string()),
     }
@@ -2411,7 +2653,13 @@ impl PullAggregator {
     /// bollard `CreateImageInfo`). Returns the new aggregate fraction only when the integer
     /// percent changed since the last emission; `None` otherwise (including frames with no
     /// layer id, or a status this aggregator doesn't track bytes for).
-    pub fn observe(&mut self, id: &str, status: &str, current: Option<i64>, total: Option<i64>) -> Option<f64> {
+    pub fn observe(
+        &mut self,
+        id: &str,
+        status: &str,
+        current: Option<i64>,
+        total: Option<i64>,
+    ) -> Option<f64> {
         if id.is_empty() {
             return None;
         }
@@ -2421,11 +2669,15 @@ impl PullAggregator {
                 self.extracts.remove(id);
             }
             "Downloading" => {
-                let (Some(c), Some(t)) = (current, total) else { return None };
+                let (Some(c), Some(t)) = (current, total) else {
+                    return None;
+                };
                 self.downloads.insert(id.to_string(), (c, t));
             }
             "Extracting" => {
-                let (Some(c), Some(t)) = (current, total) else { return None };
+                let (Some(c), Some(t)) = (current, total) else {
+                    return None;
+                };
                 self.extracts.insert(id.to_string(), (c, t));
             }
             // "Pulling fs layer", "Waiting", "Verifying Checksum", "Pull complete", etc. —
@@ -2444,16 +2696,29 @@ impl PullAggregator {
         }
     }
 
-    fn weighted_frac(downloads: &HashMap<String, (i64, i64)>, extracts: &HashMap<String, (i64, i64)>) -> f64 {
+    fn weighted_frac(
+        downloads: &HashMap<String, (i64, i64)>,
+        extracts: &HashMap<String, (i64, i64)>,
+    ) -> f64 {
         let (dl_cur, dl_tot) = Self::sum_bytes(downloads);
         let (ex_cur, ex_tot) = Self::sum_bytes(extracts);
-        let dl_frac = if dl_tot > 0 { dl_cur as f64 / dl_tot as f64 } else { 0.0 };
-        let ex_frac = if ex_tot > 0 { ex_cur as f64 / ex_tot as f64 } else { 0.0 };
+        let dl_frac = if dl_tot > 0 {
+            dl_cur as f64 / dl_tot as f64
+        } else {
+            0.0
+        };
+        let ex_frac = if ex_tot > 0 {
+            ex_cur as f64 / ex_tot as f64
+        } else {
+            0.0
+        };
         0.7 * dl_frac + 0.3 * ex_frac
     }
 
     fn sum_bytes(layers: &HashMap<String, (i64, i64)>) -> (i64, i64) {
-        layers.values().fold((0, 0), |(cur, tot), &(c, t)| (cur + c, tot + t))
+        layers
+            .values()
+            .fold((0, 0), |(cur, tot), &(c, t)| (cur + c, tot + t))
     }
 }
 
@@ -2575,7 +2840,7 @@ fn extract_container_id_from_mountinfo(mountinfo: &str) -> Option<String> {
 }
 
 /// Format epoch seconds as an RFC 3339 / ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`),
-/// so `ImageInfo.created_at` is a real ISO string without pulling in a date crate.
+/// so image timestamps are real ISO strings without pulling in a date crate.
 pub(crate) fn epoch_to_rfc3339(secs: i64) -> String {
     // Days-from-civil algorithm (Howard Hinnant), valid across the proleptic Gregorian
     // calendar; we only ever feed it positive, in-range Docker image timestamps.
@@ -2610,7 +2875,9 @@ fn build_tar(entries: &[TarEntry]) -> Result<Vec<u8>> {
         header.set_gid(e.gid);
         header.set_entry_type(tar::EntryType::Regular);
         header.set_cksum();
-        builder.append_data(&mut header, path, e.data.as_slice()).with_context(|| format!("adding {} to tar", e.path))?;
+        builder
+            .append_data(&mut header, path, e.data.as_slice())
+            .with_context(|| format!("adding {} to tar", e.path))?;
     }
     let archive = builder.into_inner().context("finalizing tar")?;
     Ok(archive)
@@ -2630,7 +2897,9 @@ impl LineSplitter {
     pub fn push(&mut self, chunk: &[u8], mut on_line: impl FnMut(&str)) {
         self.buf.extend_from_slice(chunk);
         loop {
-            let Some(nl) = self.buf.iter().position(|&b| b == b'\n') else { break };
+            let Some(nl) = self.buf.iter().position(|&b| b == b'\n') else {
+                break;
+            };
             let mut line: Vec<u8> = self.buf.drain(..=nl).collect();
             line.pop(); // drop '\n'
             if line.last() == Some(&b'\r') {
@@ -2734,7 +3003,11 @@ mod tests {
             ..Default::default()
         };
         let ctl = DockerCtl::connect(&cfg); // must not panic
-        let err = format!("{:#}", ctl.daemon().expect_err("daemon() must fail without a socket"));
+        let err = format!(
+            "{:#}",
+            ctl.daemon()
+                .expect_err("daemon() must fail without a socket")
+        );
         assert!(
             err.contains("/nonexistent/rmng-test-docker.sock"),
             "error should name the socket path: {err}"
@@ -2749,7 +3022,10 @@ mod tests {
         // default and every later boot rejected the mismatch. `set_subnet` must make the
         // derived params (here the dev-mode gateway, same SubnetPlan ensure_network uses)
         // reflect the new subnet immediately.
-        let ctl = DockerCtl::connect(&DockerConfig { subnet: "10.99.0.0/24".into(), ..Default::default() });
+        let ctl = DockerCtl::connect(&DockerConfig {
+            subnet: "10.99.0.0/24".into(),
+            ..Default::default()
+        });
         assert_eq!(ctl.control_host().await.unwrap(), "10.99.0.1");
         ctl.set_subnet("10.98.0.0/24");
         assert_eq!(ctl.control_host().await.unwrap(), "10.98.0.1");
@@ -2845,7 +3121,13 @@ mod tests {
                 gid: 1000,
             },
             // A leading slash is stripped so it extracts relative to the request path.
-            TarEntry { path: "/etc/motd".into(), data: b"root file".to_vec(), mode: 0o600, uid: 0, gid: 0 },
+            TarEntry {
+                path: "/etc/motd".into(),
+                data: b"root file".to_vec(),
+                mode: 0o600,
+                uid: 0,
+                gid: 0,
+            },
         ];
         let archive = build_tar(&entries).unwrap();
         // Read it back and assert the header metadata round-trips verbatim.
@@ -2863,7 +3145,10 @@ mod tests {
             ));
         }
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0], ("home/rmng/.config/foo".into(), 0o644, 1000, 1000, 5));
+        assert_eq!(
+            seen[0],
+            ("home/rmng/.config/foo".into(), 0o644, 1000, 1000, 5)
+        );
         // Leading slash stripped.
         assert_eq!(seen[1].0, "etc/motd");
         assert_eq!((seen[1].1, seen[1].2, seen[1].3), (0o600, 0, 0));
@@ -2872,7 +3157,13 @@ mod tests {
     #[test]
     fn build_tar_uid_gid_applied_verbatim() {
         // The API applies whatever it's given; a nonsense uid/gid still round-trips.
-        let entries = vec![TarEntry { path: "x".into(), data: vec![], mode: 0o755, uid: 4242, gid: 99 }];
+        let entries = vec![TarEntry {
+            path: "x".into(),
+            data: vec![],
+            mode: 0o755,
+            uid: 4242,
+            gid: 99,
+        }];
         let archive = build_tar(&entries).unwrap();
         let mut ar = tar::Archive::new(archive.as_slice());
         let e = ar.entries().unwrap().next().unwrap().unwrap();
@@ -2885,15 +3176,27 @@ mod tests {
 
     #[test]
     fn split_reference_defaults_and_ports() {
-        assert_eq!(split_reference("ubuntu:26.04"), ("ubuntu".into(), "26.04".into()));
-        assert_eq!(split_reference("ubuntu"), ("ubuntu".into(), "latest".into()));
-        assert_eq!(split_reference("rmng/template:base"), ("rmng/template".into(), "base".into()));
+        assert_eq!(
+            split_reference("ubuntu:26.04"),
+            ("ubuntu".into(), "26.04".into())
+        );
+        assert_eq!(
+            split_reference("ubuntu"),
+            ("ubuntu".into(), "latest".into())
+        );
+        assert_eq!(
+            split_reference("rmng/template:base"),
+            ("rmng/template".into(), "base".into())
+        );
         // A registry host with a port is not mistaken for a tag.
         assert_eq!(
             split_reference("registry:5000/img:v1"),
             ("registry:5000/img".into(), "v1".into())
         );
-        assert_eq!(split_reference("registry:5000/img"), ("registry:5000/img".into(), "latest".into()));
+        assert_eq!(
+            split_reference("registry:5000/img"),
+            ("registry:5000/img".into(), "latest".into())
+        );
     }
 
     // --- pull aggregator --------------------------------------------------------------
@@ -2908,14 +3211,20 @@ mod tests {
                 peak = f;
             }
         }
-        assert!((peak - 0.42).abs() < 1e-9, "expected 0.7 * 0.60 = 0.42, got {peak}");
+        assert!(
+            (peak - 0.42).abs() < 1e-9,
+            "expected 0.7 * 0.60 = 0.42, got {peak}"
+        );
 
         // A much bigger layer registers mid-pull: the raw sum-based fraction would drop
         // sharply (0.7 * 60/100_060 ≈ 0.00042), but the reported value must never regress
         // below the prior peak even though the totals grew.
         let dropped = agg.observe("b", "Downloading", Some(0), Some(100_000));
         if let Some(f) = dropped {
-            assert!(f >= peak, "peak regressed when a large new layer joined: {f} < {peak}");
+            assert!(
+                f >= peak,
+                "peak regressed when a large new layer joined: {f} < {peak}"
+            );
         }
     }
 
@@ -2925,7 +3234,9 @@ mod tests {
         // A fully cached layer (no progress_detail — a real "Already exists" frame never
         // carries one) must not appear in either sum's denominator.
         assert!(agg.observe("a", "Already exists", None, None).is_some());
-        let frac = agg.observe("b", "Downloading", Some(50), Some(100)).unwrap();
+        let frac = agg
+            .observe("b", "Downloading", Some(50), Some(100))
+            .unwrap();
         assert!(
             (frac - 0.35).abs() < 1e-9,
             "cached layer must not inflate the denominator: expected 0.7 * 0.50 = 0.35, got {frac}"
@@ -2946,9 +3257,18 @@ mod tests {
         }
         // Download-only progress tops out at 0.7·1.0 = 0.7 (30% is reserved for extract),
         // so at most 71 distinct integer percents (0..=70) can ever be crossed.
-        assert!(emissions <= 71, "expected throttled emissions, got {emissions} (of 501 updates)");
-        assert!(emissions > 1, "expected more than one emission as the percent climbs");
-        assert!((last_frac - 0.7).abs() < 1e-9, "final fraction should reach 0.7, got {last_frac}");
+        assert!(
+            emissions <= 71,
+            "expected throttled emissions, got {emissions} (of 501 updates)"
+        );
+        assert!(
+            emissions > 1,
+            "expected more than one emission as the percent climbs"
+        );
+        assert!(
+            (last_frac - 0.7).abs() < 1e-9,
+            "final fraction should reach 0.7, got {last_frac}"
+        );
     }
 
     #[test]
@@ -2971,7 +3291,10 @@ mod tests {
         // No local digest known → treat as available (can't prove up-to-date).
         assert!(super::is_update_available(None, "sha256:bbb"));
         // Same digest → up to date.
-        assert!(!super::is_update_available(Some("sha256:aaa"), "sha256:aaa"));
+        assert!(!super::is_update_available(
+            Some("sha256:aaa"),
+            "sha256:aaa"
+        ));
         // Different digest → update available.
         assert!(super::is_update_available(Some("sha256:aaa"), "sha256:bbb"));
     }
@@ -2986,11 +3309,21 @@ mod tests {
             ErrorKind::UnexpectedEof,
             ErrorKind::WriteZero,
         ] {
-            assert!(is_benign_stdin_write_error(&Error::new(kind, "closed")), "{kind:?}");
+            assert!(
+                is_benign_stdin_write_error(&Error::new(kind, "closed")),
+                "{kind:?}"
+            );
         }
         // Genuine transport failures are not.
-        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other, ErrorKind::TimedOut] {
-            assert!(!is_benign_stdin_write_error(&Error::new(kind, "boom")), "{kind:?}");
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+            ErrorKind::TimedOut,
+        ] {
+            assert!(
+                !is_benign_stdin_write_error(&Error::new(kind, "boom")),
+                "{kind:?}"
+            );
         }
     }
 
@@ -3004,7 +3337,10 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
         );
         // No container path → None (dev mode).
-        assert_eq!(extract_container_id_from_mountinfo("1 2 0:1 / / rw - overlay overlay rw\n"), None);
+        assert_eq!(
+            extract_container_id_from_mountinfo("1 2 0:1 / / rw - overlay overlay rw\n"),
+            None
+        );
     }
 
     #[test]
@@ -3028,7 +3364,10 @@ mod tests {
 
         // A network / self-attach failure is non-fatal: it doesn't fail the required checks
         // (the wizard-finish caller surfaces `network_detail` as a warning) and adds no row.
-        let net_fail = EnvReport { network_detail: Some("connect self to rmng failed".into()), ..report.clone() };
+        let net_fail = EnvReport {
+            network_detail: Some("connect self to rmng failed".into()),
+            ..report.clone()
+        };
         assert!(net_fail.required_ok());
         assert_eq!(net_fail.to_setup_env().rows.len(), 5);
         let by = |id: &str| env.rows.iter().find(|r| r.id == id).unwrap();
@@ -3042,7 +3381,10 @@ mod tests {
         assert!(by("lxcfs").ok && !by("lxcfs").required);
         assert_eq!(by("lxcfs").detail, "present");
         // Absent lxcfs stays non-required (advisory) and doesn't fail the required set.
-        let no_lxcfs = EnvReport { lxcfs_ok: false, ..report.clone() };
+        let no_lxcfs = EnvReport {
+            lxcfs_ok: false,
+            ..report.clone()
+        };
         assert!(no_lxcfs.required_ok());
         let no_lxcfs_env = no_lxcfs.to_setup_env();
         let lxcfs_row = no_lxcfs_env.rows.iter().find(|r| r.id == "lxcfs").unwrap();
@@ -3050,12 +3392,26 @@ mod tests {
         assert!(lxcfs_row.detail.contains("apt install lxcfs"));
 
         // A missing sock mount fails the required check.
-        let bad = EnvReport { sock_mount_ok: false, ..report.clone() };
+        let bad = EnvReport {
+            sock_mount_ok: false,
+            ..report.clone()
+        };
         assert!(!bad.required_ok());
         // A down daemon fails too.
-        let down = EnvReport { daemon_ok: false, ..report };
+        let down = EnvReport {
+            daemon_ok: false,
+            ..report
+        };
         assert!(!down.required_ok());
-        assert!(!down.to_setup_env().rows.iter().find(|r| r.id == "dockerDaemon").unwrap().ok);
+        assert!(
+            !down
+                .to_setup_env()
+                .rows
+                .iter()
+                .find(|r| r.id == "dockerDaemon")
+                .unwrap()
+                .ok
+        );
 
         // A stored client-build error (the no-socket boot path) becomes the row detail.
         let dead = EnvReport {
@@ -3065,12 +3421,19 @@ mod tests {
         let env = dead.to_setup_env();
         let row = env.rows.iter().find(|r| r.id == "dockerDaemon").unwrap();
         assert!(!row.ok);
-        assert!(row.detail.contains("Socket not found"), "detail: {}", row.detail);
+        assert!(
+            row.detail.contains("Socket not found"),
+            "detail: {}",
+            row.detail
+        );
     }
 
     #[test]
     fn dind_volume_name_shape() {
-        assert_eq!(DockerCtl::dind_volume_name("pega-dev-1"), "rmng-dind-pega-dev-1");
+        assert_eq!(
+            DockerCtl::dind_volume_name("pega-dev-1"),
+            "rmng-dind-pega-dev-1"
+        );
     }
 
     #[test]
@@ -3084,16 +3447,33 @@ mod tests {
         assert_eq!(mounts.len(), 6);
         for m in &mounts {
             assert_eq!(m.typ, Some(MountTypeEnum::BIND));
-            assert_eq!(m.read_only, Some(false), "lxcfs binds are rw (upstream convention)");
+            assert_eq!(
+                m.read_only,
+                Some(false),
+                "lxcfs binds are rw (upstream convention)"
+            );
             let src = m.source.as_deref().unwrap();
             let tgt = m.target.as_deref().unwrap();
-            assert!(src.starts_with("/var/lib/lxcfs/proc/"), "source under lxcfs dir: {src}");
+            assert!(
+                src.starts_with("/var/lib/lxcfs/proc/"),
+                "source under lxcfs dir: {src}"
+            );
             assert!(tgt.starts_with("/proc/"), "target under /proc: {tgt}");
             // Same basename on both sides (meminfo → /proc/meminfo, etc.).
             assert_eq!(src.rsplit('/').next(), tgt.rsplit('/').next());
         }
-        let targets: Vec<&str> = mounts.iter().map(|m| m.target.as_deref().unwrap()).collect();
-        for want in ["/proc/meminfo", "/proc/cpuinfo", "/proc/stat", "/proc/uptime", "/proc/loadavg", "/proc/swaps"] {
+        let targets: Vec<&str> = mounts
+            .iter()
+            .map(|m| m.target.as_deref().unwrap())
+            .collect();
+        for want in [
+            "/proc/meminfo",
+            "/proc/cpuinfo",
+            "/proc/stat",
+            "/proc/uptime",
+            "/proc/loadavg",
+            "/proc/swaps",
+        ] {
             assert!(targets.contains(&want), "missing bind target {want}");
         }
     }

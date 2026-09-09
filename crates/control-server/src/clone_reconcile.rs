@@ -555,22 +555,21 @@ These two flags work on `screenshot`, `move`, `click`, `right-click`, `middle-cl
 
 ## Create clones
 
-Four create verbs. All of them take `--from <image>` (required; `rmng image ls` lists valid
-references) and share the flags in "Common create flags" below.
+Four create verbs. They share the flags in "Common create flags" below; clone images come from the preset Dockerfile (gen-2), so there is no image flag.
 
-- `rmng clone create <hostname> --from <image>` — exact hostname (a DNS label), no ticket.
+- `rmng clone create <hostname>` — exact hostname (a DNS label), no ticket.
   Takes `--preset <name>` / `--no-preset`.
-- `rmng clone create-from-ticket <link-or-id> --from <image>` — clone for an EXISTING Linear ticket. The
+- `rmng clone create-from-ticket <link-or-id>` — clone for an EXISTING Linear ticket. The
   hostname derives from the ticket id (`WE-142` → `<prefix>we-142`) and **the preset is
   auto-selected from the ticket's team prefix** — there is deliberately no `--preset` here.
   Also takes `--agent-instructions` / `--claude-instructions` (appended to the defaults,
   taking precedence).
-- `rmng clone create-with-new-ticket --from <image> --team <key> --title <t>` — CREATE a Linear ticket,
+- `rmng clone create-with-new-ticket --team <key> --title <t>` — CREATE a Linear ticket,
   then clone for it. `--team` is a Linear team key like `we`, and it must be a label on some
   preset: that preset is the one used, and its Linear API key opens the issue. Description via
   `--description <markdown>` or `--description-file <path>` (`-` = stdin, which is the sane
   way to pass a multi-line body). Same instruction flags as `create-from-ticket`.
-- `rmng clone create-plain --from <image> --title <t>` — no-ticket clone with a title-derived
+- `rmng clone create-plain --title <t>` — no-ticket clone with a title-derived
   hostname. `--message`/`--message-file` is auto-sent to the agent as its first message;
   `--preset <name>` is required when any presets are configured.
 
@@ -628,10 +627,9 @@ the odds are good that another clone hit the same wall, and its reasoning is sti
   piping needs no flag:
   `rmng ledger read pega-we-142 793f5eac-… --offset 4096 | jq -r '.kind + ": " + .text'`.
 
-## Images & accounts
+## Preset images & accounts
 
-- `rmng image ls` — list clone-source images. `rmng image pull [ref]`,
-  `rmng image rm <ref>`. Templates are profile Dockerfile lines, built lazily.
+- Clone images build on demand from each preset's Dockerfile into a hash tag; unused tags are purged automatically on delete.
 - `rmng account ls [--provider claude|codex]` — list imported accounts + usage windows.
 - `rmng account rm <email> [--codex]` — delete an imported account, moving any clones off it.
 
@@ -643,7 +641,7 @@ the odds are good that another clone hit the same wall, and its reasoning is sti
 - `rmng clone select <clone>` points the operator's *viewer* at a clone — it does NOT change
   which clone your other commands target. `rmng clone select --none` clears the selection.
 - `--wait` and `--timeout <secs>` are not create-only. Both also work on `rmng clone rm`,
-  `rmng clone archive`, `rmng clone restore`, and `rmng image pull`.
+  `rmng clone archive`, and `rmng clone restore`.
   Use `--wait` on a pull, which can run for many minutes.
 "#;
 
@@ -815,8 +813,10 @@ pub(crate) fn claude_hook_script() -> String {
             )
         })
         .collect();
-    let cursor =
-        format!(".version = 1 | .hooks = {}", serde_json::Value::Object(cursor_hooks));
+    let cursor = format!(
+        ".version = 1 | .hooks = {}",
+        serde_json::Value::Object(cursor_hooks)
+    );
 
     // Both files belong to the user, so both are merged rather than written: Claude Code
     // keeps `model`, `theme` and `enabledPlugins` in one, and Cursor's own hooks would live
@@ -1138,7 +1138,14 @@ fn monitors_csv(monitors: &[wire::MonitorSpec]) -> String {
     monitors
         .iter()
         .map(|m| {
-            format!("{}x{}+{}+{}{}", m.width, m.height, m.x, m.y, if m.primary { "*" } else { "" })
+            format!(
+                "{}x{}+{}+{}{}",
+                m.width,
+                m.height,
+                m.x,
+                m.y,
+                if m.primary { "*" } else { "" }
+            )
         })
         .collect::<Vec<_>>()
         .join(",")
@@ -1286,7 +1293,10 @@ echo "{marker}"
 /// minute, forever.
 const ENV_CHANGED_MARKER: &str = "rmng: /etc/environment updated";
 
-fn preset_for_clone<'a>(cfg: &'a wire::AppConfig, host: &wire::RmngClone) -> Option<&'a wire::Preset> {
+fn preset_for_clone<'a>(
+    cfg: &'a wire::AppConfig,
+    host: &wire::RmngClone,
+) -> Option<&'a wire::Preset> {
     if let Some(name) = host.preset_name.as_deref().filter(|s| !s.trim().is_empty()) {
         if let Some(preset) = cfg.presets.iter().find(|p| p.name == name) {
             return Some(preset);
@@ -2024,12 +2034,6 @@ pub async fn run(app: App) {
 mod tests {
     use super::*;
 
-
-
-
-
-
-
     #[test]
     fn payload_stamp_path_is_under_opt_rmng() {
         assert_eq!(payload_stamp_path(), "opt/rmng/.payload-hash");
@@ -2054,14 +2058,32 @@ mod tests {
             finished_at: None,
         };
         let ops = vec![
-            op(wire::OperationKind::Commit, wire::OperationStatus::Running, "being-committed"),
-            op(wire::OperationKind::Commit, wire::OperationStatus::Done, "committed-already"),
-            op(wire::OperationKind::Clone, wire::OperationStatus::Running, "being-cloned"),
+            op(
+                wire::OperationKind::Commit,
+                wire::OperationStatus::Running,
+                "being-committed",
+            ),
+            op(
+                wire::OperationKind::Commit,
+                wire::OperationStatus::Done,
+                "committed-already",
+            ),
+            op(
+                wire::OperationKind::Clone,
+                wire::OperationStatus::Running,
+                "being-cloned",
+            ),
         ];
         let busy = clones_being_committed(&ops);
         assert!(busy.contains("being-committed"));
-        assert!(!busy.contains("committed-already"), "a finished commit holds nothing frozen");
-        assert!(!busy.contains("being-cloned"), "only a commit freezes a container");
+        assert!(
+            !busy.contains("committed-already"),
+            "a finished commit holds nothing frozen"
+        );
+        assert!(
+            !busy.contains("being-cloned"),
+            "only a commit freezes a container"
+        );
     }
 
     #[test]
@@ -2085,11 +2107,24 @@ mod tests {
     #[test]
     fn ssh_prepare_script_only_creates_dirs() {
         let s = ssh_prepare_script();
-        assert!(s.contains("install -d -o rmng -g rmng -m700 /home/rmng/.ssh"), "{s}");
+        assert!(
+            s.contains("install -d -o rmng -g rmng -m700 /home/rmng/.ssh"),
+            "{s}"
+        );
         assert!(s.contains("mkdir -p /etc/ssh"), "{s}");
         // No destructive verb anywhere, and no reference to a user-owned file.
-        for banned in ["rm -f", "rm ", "pkill", "id_ed25519", "/home/rmng/.ssh/config", "fleet"] {
-            assert!(!s.contains(banned), "prepare script must not mention {banned:?}:\n{s}");
+        for banned in [
+            "rm -f",
+            "rm ",
+            "pkill",
+            "id_ed25519",
+            "/home/rmng/.ssh/config",
+            "fleet",
+        ] {
+            assert!(
+                !s.contains(banned),
+                "prepare script must not mention {banned:?}:\n{s}"
+            );
         }
     }
 
@@ -2099,8 +2134,15 @@ mod tests {
     fn reconciler_never_touches_the_clone_ssh_config() {
         let src = include_str!("clone_reconcile.rs");
         let body = &src[..src.find("mod tests").unwrap_or(src.len())];
-        for banned in ["read_clone_ssh_config", "merge_ssh_config", "fleet_public_key"] {
-            assert!(!body.contains(banned), "{banned} must no longer be used by the reconciler");
+        for banned in [
+            "read_clone_ssh_config",
+            "merge_ssh_config",
+            "fleet_public_key",
+        ] {
+            assert!(
+                !body.contains(banned),
+                "{banned} must no longer be used by the reconciler"
+            );
         }
     }
 
@@ -2219,7 +2261,11 @@ mod tests {
                 .arg(&script)
                 .output()
                 .expect("run codex merge script");
-            assert!(out.status.success(), "script failed: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "script failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             std::fs::read_to_string(&cfg).unwrap()
         };
 
@@ -2247,10 +2293,16 @@ mod tests {
 
         // A headed→headless flip REMOVES `desktop` (no daemon there) and keeps everything else.
         let hl = run(true);
-        assert!(!hl.contains("[mcp_servers.desktop]"), "headless kept a dead endpoint:\n{hl}");
+        assert!(
+            !hl.contains("[mcp_servers.desktop]"),
+            "headless kept a dead endpoint:\n{hl}"
+        );
         assert!(!hl.contains("127.0.0.1:9004"));
         assert!(hl.contains("[mcp_servers.linear]"));
-        assert!(hl.contains("[mcp_servers.my_own]"), "headless dropped the user's own server");
+        assert!(
+            hl.contains("[mcp_servers.my_own]"),
+            "headless dropped the user's own server"
+        );
         assert!(hl.contains("model_reasoning_effort = \"high\""));
 
         // The group-proxy era's dead wiring must be REMOVED, not merely left alone. A merge that
@@ -2279,18 +2331,33 @@ mod tests {
         )
         .unwrap();
         let cleaned = run(false);
-        assert!(!cleaned.contains("model_providers.rmng"), "dead provider table survived:\n{cleaned}");
-        assert!(!cleaned.contains("rmng-control:9000"), "dead base_url survived:\n{cleaned}");
-        assert!(!cleaned.contains("RMNG_PROXY_KEY"), "dead env_key survived:\n{cleaned}");
+        assert!(
+            !cleaned.contains("model_providers.rmng"),
+            "dead provider table survived:\n{cleaned}"
+        );
+        assert!(
+            !cleaned.contains("rmng-control:9000"),
+            "dead base_url survived:\n{cleaned}"
+        );
+        assert!(
+            !cleaned.contains("RMNG_PROXY_KEY"),
+            "dead env_key survived:\n{cleaned}"
+        );
         assert!(
             !cleaned.contains("model_provider = "),
             "the bare model_provider key still overrides auth.json:\n{cleaned}"
         );
         // ...but a plain preference RMNG never owned is NOT ours to delete.
-        assert!(cleaned.contains("model_reasoning_effort = \"high\""), "{cleaned}");
+        assert!(
+            cleaned.contains("model_reasoning_effort = \"high\""),
+            "{cleaned}"
+        );
         // ...and a `model` key INSIDE a user's own table is theirs, not the retired top-level one.
         assert!(cleaned.contains("[profiles.fast]"), "{cleaned}");
-        assert!(cleaned.contains("model = \"gpt-5.5\""), "a user's in-table model was stripped:\n{cleaned}");
+        assert!(
+            cleaned.contains("model = \"gpt-5.5\""),
+            "a user's in-table model was stripped:\n{cleaned}"
+        );
 
         // A clone with no config.toml at all gets a valid one rather than an error.
         std::fs::remove_file(&cfg).unwrap();
@@ -2332,7 +2399,10 @@ mod tests {
         let entries = codex_parity_entries(false, prompt);
         // The SAME global prompt body lands in both agents' native rules files.
         for path in ["home/rmng/.claude/CLAUDE.md", "home/rmng/.codex/AGENTS.md"] {
-            let e = entries.iter().find(|e| e.path == path).unwrap_or_else(|| panic!("missing {path}"));
+            let e = entries
+                .iter()
+                .find(|e| e.path == path)
+                .unwrap_or_else(|| panic!("missing {path}"));
             assert_eq!(e.mode, 0o644);
             assert_eq!((e.uid, e.gid), (1000, 1000));
             assert_eq!(String::from_utf8(e.data.clone()).unwrap(), prompt);
@@ -2347,8 +2417,14 @@ mod tests {
         assert_eq!((rule.uid, rule.gid), (1000, 1000));
         let body = String::from_utf8(rule.data.clone()).unwrap();
         assert!(body.starts_with("---\n"), "front matter first: {body}");
-        assert!(body.contains("\nalwaysApply: true\n"), "unconditional: {body}");
-        assert!(body.ends_with(prompt), "the prompt is the body, verbatim: {body}");
+        assert!(
+            body.contains("\nalwaysApply: true\n"),
+            "unconditional: {body}"
+        );
+        assert!(
+            body.ends_with(prompt),
+            "the prompt is the body, verbatim: {body}"
+        );
         // And the directory it lands in is made ahead of it, or tar creates it root-owned.
         assert!(codex_prepare_script().contains("/home/rmng/.cursor/rules"));
 
@@ -2357,7 +2433,11 @@ mod tests {
             .iter()
             .find(|e| e.path == "home/rmng/.config/rmng/mcp.json")
             .expect("missing mcp.json descriptor");
-        assert!(String::from_utf8(desc.data.clone()).unwrap().contains("\"linear\""));
+        assert!(
+            String::from_utf8(desc.data.clone())
+                .unwrap()
+                .contains("\"linear\"")
+        );
         let agents = entries
             .iter()
             .find(|e| e.path == "home/rmng/.codex/AGENTS.md")
@@ -2370,7 +2450,9 @@ mod tests {
         // entry that would overwrite the file. Shipping it here again would silently reintroduce
         // the clobber.
         assert!(
-            !entries.iter().any(|e| e.path == "home/rmng/.codex/config.toml"),
+            !entries
+                .iter()
+                .any(|e| e.path == "home/rmng/.codex/config.toml"),
             "config.toml must be merged, never overwritten by the parity tar"
         );
         let managed = codex_mcp_toml(false);
@@ -2382,7 +2464,6 @@ mod tests {
         // No provider block: Codex authenticates from ~/.codex/auth.json, not a base_url.
         assert!(!managed.contains("base_url"));
     }
-
 
     #[test]
     fn claude_mcp_script_sets_desktop_headed_and_deletes_it_headless() {
@@ -2436,11 +2517,17 @@ mod tests {
             "home/rmng/.claude/skills/rmng-cli/SKILL.md",
             "home/rmng/.agents/skills/rmng-cli/SKILL.md",
         ] {
-            let e = entries.iter().find(|e| e.path == path).unwrap_or_else(|| panic!("missing {path}"));
+            let e = entries
+                .iter()
+                .find(|e| e.path == path)
+                .unwrap_or_else(|| panic!("missing {path}"));
             assert_eq!(e.mode, 0o644);
             assert_eq!((e.uid, e.gid), (1000, 1000));
             let body = String::from_utf8(e.data.clone()).unwrap();
-            assert!(body.starts_with("---\nname: rmng-cli\n"), "SKILL.md needs skill frontmatter");
+            assert!(
+                body.starts_with("---\nname: rmng-cli\n"),
+                "SKILL.md needs skill frontmatter"
+            );
             let description = body
                 .lines()
                 .find(|line| line.starts_with("description: "))
@@ -2471,7 +2558,9 @@ mod tests {
         assert!(codex.contains("bearer_token_env_var = \"LINEAR_API_KEY\""));
 
         let jq = claude_mcp_jq_program(false);
-        assert!(jq.contains(r#".mcpServers.desktop = {"type":"http","url":"http://127.0.0.1:9004"}"#));
+        assert!(
+            jq.contains(r#".mcpServers.desktop = {"type":"http","url":"http://127.0.0.1:9004"}"#)
+        );
         assert!(jq.contains(r#""Authorization":"Bearer ${LINEAR_API_KEY}""#));
 
         // The node-agent descriptor: desktop carries alwaysLoad, linear carries bearerEnv.
@@ -2492,11 +2581,9 @@ mod tests {
         assert_eq!(desc_hl[0]["name"], "linear");
     }
 
-
     #[test]
     fn codex_parity_stamp_hash_changes_when_config_changes() {
-        let original =
-            codex_parity_stamp_entry_for(&codex_parity_entries(false, "guide"));
+        let original = codex_parity_stamp_entry_for(&codex_parity_entries(false, "guide"));
         // Any content change in the set must move the hash; AGENTS.md stands in for the file
         // that used to be edited here (config.toml, now merged in place rather than shipped).
         let mut changed = codex_parity_entries(false, "guide");
@@ -2613,13 +2700,20 @@ mod tests {
                 &format!("legacy={}/nonexistent-legacy", dir.display()),
             )
             .replace("install -m 0644 -o root -g root", "install -m 0644")
-            .replace("rmdir /home/rmng/.config/environment.d", "rmdir /nonexistent");
+            .replace(
+                "rmdir /home/rmng/.config/environment.d",
+                "rmdir /nonexistent",
+            );
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(&script)
             .output()
             .expect("run env sync script");
-        assert!(out.status.success(), "script failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "script failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).contains(ENV_CHANGED_MARKER)
     }
 
@@ -2629,7 +2723,8 @@ mod tests {
     /// neither desired nor operator-owned stays as-is.
     #[test]
     fn env_sync_converges_desired_keys_but_keeps_operator_lines() {
-        let dir = std::env::temp_dir().join(format!("rmng-envsync-converge-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rmng-envsync-converge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let etc = dir.join("environment");
@@ -2647,20 +2742,44 @@ mod tests {
             &etc,
             "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n",
         );
-        assert!(changed, "converging is a change; the agent-wrapper must restart");
+        assert!(
+            changed,
+            "converging is a change; the agent-wrapper must restart"
+        );
         let body = std::fs::read_to_string(&etc).unwrap();
 
-        assert!(body.contains("RMNG_PROXY_KEY=keepme"), "identity key was dropped:\n{body}");
-        assert!(body.contains("RMNG_CONTROL_URL=http://rmng-control:9000"), "{body}");
+        assert!(
+            body.contains("RMNG_PROXY_KEY=keepme"),
+            "identity key was dropped:\n{body}"
+        );
+        assert!(
+            body.contains("RMNG_CONTROL_URL=http://rmng-control:9000"),
+            "{body}"
+        );
         // Operator-owned content is never touched.
-        assert!(body.contains("# operator's own notes"), "comment lost:\n{body}");
-        assert!(body.contains("MY_OWN_VAR=hello"), "operator var lost:\n{body}");
-        assert!(body.contains("export EDITOR=vim"), "export line lost:\n{body}");
+        assert!(
+            body.contains("# operator's own notes"),
+            "comment lost:\n{body}"
+        );
+        assert!(
+            body.contains("MY_OWN_VAR=hello"),
+            "operator var lost:\n{body}"
+        );
+        assert!(
+            body.contains("export EDITOR=vim"),
+            "export line lost:\n{body}"
+        );
 
         // Idempotent: a second pass with the same desired env is not a change.
-        let changed =
-            run_env_sync(&dir, &etc, "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n");
-        assert!(!changed, "a converged clone must not restart its agent-wrapper every pass");
+        let changed = run_env_sync(
+            &dir,
+            &etc,
+            "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n",
+        );
+        assert!(
+            !changed,
+            "a converged clone must not restart its agent-wrapper every pass"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2680,7 +2799,9 @@ mod tests {
         let (_, printed) = run("RMNG_CONTROL_URL=http://rmng-control:9000\n");
         assert!(printed, "first write must announce the change");
         assert!(
-            std::fs::read_to_string(&etc).unwrap().contains("rmng-control:9000"),
+            std::fs::read_to_string(&etc)
+                .unwrap()
+                .contains("rmng-control:9000"),
             "the new value must land on disk"
         );
 
@@ -2732,8 +2853,13 @@ mod tests {
         assert!(script.contains("chown rmng:rmng /home/rmng/.rmng/monitors"));
         // Before the restart, because the restart is what makes the daemon start the holder.
         let seed = script.find(".rmng/monitors").expect("seeds a layout");
-        let restart = script.find("restart rmng-clone-daemon").expect("restarts the daemon");
-        assert!(seed < restart, "the seed has to land before the daemon starts the holder");
+        let restart = script
+            .find("restart rmng-clone-daemon")
+            .expect("restarts the daemon");
+        assert!(
+            seed < restart,
+            "the seed has to land before the daemon starts the holder"
+        );
     }
 
     /// The seed is written in the same `WxH+X+Y[*]` form the holder's own layout memory uses,
@@ -2741,8 +2867,20 @@ mod tests {
     #[test]
     fn a_layout_is_written_the_way_the_holder_reads_it() {
         let mons = vec![
-            wire::MonitorSpec { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
-            wire::MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: false },
+            wire::MonitorSpec {
+                width: 2560,
+                height: 1440,
+                x: 2560,
+                y: 0,
+                primary: true,
+            },
+            wire::MonitorSpec {
+                width: 2560,
+                height: 1440,
+                x: 0,
+                y: 0,
+                primary: false,
+            },
         ];
         assert_eq!(monitors_csv(&mons), "2560x1440+2560+0*,2560x1440+0+0");
         assert_eq!(monitors_csv(&[]), "");
@@ -2753,22 +2891,36 @@ mod tests {
     #[test]
     fn the_holder_unit_ships_to_headed_clones_only() {
         let unit = |headless| {
-            binary_payload_entries(headless)
-                .map(|es| es.iter().any(|e| e.path.ends_with("rmng-session-holder.service")))
+            binary_payload_entries(headless).map(|es| {
+                es.iter()
+                    .any(|e| e.path.ends_with("rmng-session-holder.service"))
+            })
         };
         // In a checkout with nothing staged the binaries are missing and this errors; the
         // assertion is only meaningful when the payloads are there.
         if let (Ok(headed), Ok(headless)) = (unit(false), unit(true)) {
             assert!(headed, "a headed clone needs the session holder unit");
-            assert!(!headless, "a headless clone must not get the session holder unit");
+            assert!(
+                !headless,
+                "a headless clone must not get the session holder unit"
+            );
         }
         let entry = session_holder_unit_entry();
-        assert_eq!(entry.path, "home/rmng/.config/systemd/user/rmng-session-holder.service");
-        assert_eq!((entry.uid, entry.gid, entry.mode), (CLONE_UID, CLONE_GID, 0o644));
+        assert_eq!(
+            entry.path,
+            "home/rmng/.config/systemd/user/rmng-session-holder.service"
+        );
+        assert_eq!(
+            (entry.uid, entry.gid, entry.mode),
+            (CLONE_UID, CLONE_GID, 0o644)
+        );
         let body = String::from_utf8(entry.data).unwrap();
         assert!(body.contains("ExecStart=/opt/rmng/bin/rmng-clone-daemon --session-holder"));
         // No baked layout: the holder boots on the one it remembers in ~/.rmng/monitors.
-        assert!(!body.contains("RMNG_MONITORS"), "the shipped unit must not bake a layout");
+        assert!(
+            !body.contains("RMNG_MONITORS"),
+            "the shipped unit must not bake a layout"
+        );
     }
 
     #[test]
@@ -2845,7 +2997,10 @@ mod hook_tests {
     fn run_both(settings: &std::path::Path) -> (String, String) {
         let cursor = settings.with_file_name("cursor-hooks.json");
         let script = claude_hook_script()
-            .replace("/home/rmng/.claude/settings.json", settings.to_str().unwrap())
+            .replace(
+                "/home/rmng/.claude/settings.json",
+                settings.to_str().unwrap(),
+            )
             .replace("/home/rmng/.cursor/hooks.json", cursor.to_str().unwrap())
             .replace("chown rmng:rmng", "true")
             // Ownership needs root; the directory still has to be created.
@@ -2904,7 +3059,11 @@ mod hook_tests {
 
         // A second identical pass must not rewrite the file, or the stamp is the only thing
         // stopping an endless churn of settings writes at every clone.
-        assert_eq!(run(&settings), body, "second identical pass rewrote the file");
+        assert_eq!(
+            run(&settings),
+            body,
+            "second identical pass rewrote the file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2913,11 +3072,17 @@ mod hook_tests {
         let dir = tmpdir("absent");
         let settings = dir.join("settings.json");
         let got: serde_json::Value = serde_json::from_str(&run(&settings)).unwrap();
-        assert_eq!(got["hooks"]["Stop"][0]["hooks"][0]["command"], HOOK_IN_CLONE);
+        assert_eq!(
+            got["hooks"]["Stop"][0]["hooks"][0]["command"],
+            HOOK_IN_CLONE
+        );
 
         std::fs::write(&settings, "").unwrap();
         let got: serde_json::Value = serde_json::from_str(&run(&settings)).unwrap();
-        assert_eq!(got["hooks"]["Stop"][0]["hooks"][0]["command"], HOOK_IN_CLONE);
+        assert_eq!(
+            got["hooks"]["Stop"][0]["hooks"][0]["command"],
+            HOOK_IN_CLONE
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2956,7 +3121,10 @@ mod hook_tests {
         assert_eq!(entries[0].mode, 0o755);
 
         entries[0].data.push(b'#');
-        assert_ne!(desired_payload_hash(&entries), desired_payload_hash(&rmng_hook_entries()));
+        assert_ne!(
+            desired_payload_hash(&entries),
+            desired_payload_hash(&rmng_hook_entries())
+        );
     }
 
     #[test]
@@ -2966,7 +3134,12 @@ mod hook_tests {
         std::fs::write(&hook, RMNG_HOOK_PY).unwrap();
         // A hook that exits non-zero interrupts the agent, so every path must exit 0 —
         // including a payload that is not even JSON.
-        for stdin in ["", "not json at all", "[1,2,3]", r#"{"hook_event_name":"Stop"}"#] {
+        for stdin in [
+            "",
+            "not json at all",
+            "[1,2,3]",
+            r#"{"hook_event_name":"Stop"}"#,
+        ] {
             let out = std::process::Command::new("bash")
                 .arg("-c")
                 .arg(format!(
@@ -2987,7 +3160,11 @@ mod hook_tests {
         // The one well-formed payload above is the only line that should have been logged.
         let log = std::fs::read_to_string(dir.join(".rmng/agent-events.jsonl")).unwrap();
         let lines: Vec<&str> = log.lines().collect();
-        assert_eq!(lines.len(), 4, "every invocation logs exactly one line: {log}");
+        assert_eq!(
+            lines.len(),
+            4,
+            "every invocation logs exactly one line: {log}"
+        );
         let last: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
         assert_eq!(last["hook_event_name"], "Stop");
         assert!(last["ts"].as_f64().is_some());
@@ -3024,7 +3201,10 @@ mod hook_tests {
                 "{event} must run the in-clone path"
             );
         }
-        assert_eq!(got["hooks"].as_object().unwrap().len(), CURSOR_HOOK_EVENTS.len());
+        assert_eq!(
+            got["hooks"].as_object().unwrap().len(),
+            CURSOR_HOOK_EVENTS.len()
+        );
         // The reason this file exists at all: Cursor's Claude converter has no name for
         // these, and the first is the only event a failed tool call fires.
         for missing in ["postToolUseFailure", "subagentStart"] {
@@ -3057,7 +3237,11 @@ mod hook_tests {
 
         // A second identical pass must be byte-identical, or the stamp is all that stops an
         // endless churn of writes into a file Cursor watches and reloads on every change.
-        assert_eq!(run_both(&settings).1, body, "second identical pass rewrote the file");
+        assert_eq!(
+            run_both(&settings).1,
+            body,
+            "second identical pass rewrote the file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3093,14 +3277,20 @@ mod hook_tests {
         let body = run_cursor_mcp(&path, false, "lin_api_key_xyz");
         let got: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(got["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
-        assert_eq!(got["mcpServers"]["linear"]["url"], "https://mcp.linear.app/mcp");
+        assert_eq!(
+            got["mcpServers"]["linear"]["url"],
+            "https://mcp.linear.app/mcp"
+        );
         // Cursor expands nothing in this file, so an env reference would be sent verbatim as
         // the token and every Linear call would 401.
         assert_eq!(
             got["mcpServers"]["linear"]["headers"]["Authorization"],
             "Bearer lin_api_key_xyz"
         );
-        assert!(!body.contains("${"), "no unexpanded reference may survive: {body}");
+        assert!(
+            !body.contains("${"),
+            "no unexpanded reference may survive: {body}"
+        );
 
         // A second identical pass must be byte-identical: Cursor watches this file and
         // reconnects every server when it changes.
@@ -3115,7 +3305,10 @@ mod hook_tests {
 
         let headless: serde_json::Value =
             serde_json::from_str(&run_cursor_mcp(&path, true, "lin_api_key_xyz")).unwrap();
-        assert!(headless["mcpServers"]["desktop"].is_null(), "no daemon on a headless clone");
+        assert!(
+            headless["mcpServers"]["desktop"].is_null(),
+            "no daemon on a headless clone"
+        );
         assert!(headless["mcpServers"]["linear"].is_object());
 
         // Flipping to headed on the same file brings desktop back and drops linear, since a
@@ -3123,7 +3316,10 @@ mod hook_tests {
         let keyless: serde_json::Value =
             serde_json::from_str(&run_cursor_mcp(&path, false, "")).unwrap();
         assert!(keyless["mcpServers"]["desktop"].is_object());
-        assert!(keyless["mcpServers"]["linear"].is_null(), "no key means no server");
+        assert!(
+            keyless["mcpServers"]["linear"].is_null(),
+            "no key means no server"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3138,7 +3334,8 @@ mod hook_tests {
         )
         .unwrap();
 
-        let got: serde_json::Value = serde_json::from_str(&run_cursor_mcp(&path, false, "k")).unwrap();
+        let got: serde_json::Value =
+            serde_json::from_str(&run_cursor_mcp(&path, false, "k")).unwrap();
         assert_eq!(got["mcpServers"]["theirs"]["command"], "npx");
         assert_eq!(got["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3149,19 +3346,39 @@ mod hook_tests {
         let a = cursor_mcp_desired(false, "key-one");
         let b = cursor_mcp_desired(false, "key-two");
         assert_ne!(a, b, "a rotated key must re-apply");
-        assert_eq!(a, cursor_mcp_desired(false, "key-one"), "and be stable otherwise");
-        assert_ne!(a, cursor_mcp_desired(true, "key-one"), "as must a headless flip");
+        assert_eq!(
+            a,
+            cursor_mcp_desired(false, "key-one"),
+            "and be stable otherwise"
+        );
+        assert_ne!(
+            a,
+            cursor_mcp_desired(true, "key-one"),
+            "as must a headless flip"
+        );
         for stamp in [a, b] {
-            assert!(!stamp.contains("key-"), "the stamp file must not carry the key: {stamp}");
+            assert!(
+                !stamp.contains("key-"),
+                "the stamp file must not carry the key: {stamp}"
+            );
         }
     }
 
     #[test]
     fn env_value_takes_the_last_duplicate() {
         let vars = vec![
-            wire::EnvVar { key: "LINEAR_API_KEY".into(), value: "first".into() },
-            wire::EnvVar { key: "OTHER".into(), value: "x".into() },
-            wire::EnvVar { key: "LINEAR_API_KEY".into(), value: "second".into() },
+            wire::EnvVar {
+                key: "LINEAR_API_KEY".into(),
+                value: "first".into(),
+            },
+            wire::EnvVar {
+                key: "OTHER".into(),
+                value: "x".into(),
+            },
+            wire::EnvVar {
+                key: "LINEAR_API_KEY".into(),
+                value: "second".into(),
+            },
         ];
         assert_eq!(env_value(&vars, "LINEAR_API_KEY"), "second");
         assert_eq!(env_value(&vars, "ABSENT"), "");

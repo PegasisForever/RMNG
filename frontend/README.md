@@ -34,11 +34,6 @@ planned "monitor" pane is dropped.
   `PUT /api/config` and apply live. Claude accounts are imported from a signed-in clone
   (`ClaudeAccountsPanel`), not entered here. Reads the redacted `GET /api/config`, which
   hands over each preset's Linear key verbatim: the ticket column queries Linear itself.
-- A **"+ Pull template"** affordance (`POST /api/images/pull` — prompts for a registry
-  reference, prefilled with the configured `docker.templateReference`), plus commit-a-clone
-  (`POST /api/images/commit`), with progress shown via the existing `OperationProgress`.
-- **Image picker** in `CloneModal`: pick a clone-source image (from `GET /api/images`) to
-  clone from — the clone streams as an `Operation`.
 - **Claude account controls** (extending `ClaudeAccountsPanel` + the per-host card): show the
   assigned account, **hot-swap** a running clone's token to another account (`POST
   /api/claude/swap`). Usage bars drive the recommendation; "auto" clones rotate across

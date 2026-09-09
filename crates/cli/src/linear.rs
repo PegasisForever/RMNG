@@ -72,7 +72,9 @@ pub fn parse_ticket_ref(input: &str) -> Result<TicketRef, LinearError> {
             continue;
         }
         let team_key = t[start..i].to_uppercase();
-        let number: u64 = t[ds..j].parse().map_err(|_| LinearError("bad ticket number".into()))?;
+        let number: u64 = t[ds..j]
+            .parse()
+            .map_err(|_| LinearError("bad ticket number".into()))?;
         return Ok(TicketRef {
             prefix: team_key.to_ascii_lowercase(),
             team_key: team_key.clone(),
@@ -80,7 +82,9 @@ pub fn parse_ticket_ref(input: &str) -> Result<TicketRef, LinearError> {
             identifier: format!("{team_key}-{number}"),
         });
     }
-    Err(LinearError(format!("could not find a ticket id (like WE-142) in \"{input}\"")))
+    Err(LinearError(format!(
+        "could not find a ticket id (like WE-142) in \"{input}\""
+    )))
 }
 
 async fn gql(
@@ -90,7 +94,9 @@ async fn gql(
     variables: Value,
 ) -> Result<Value, LinearError> {
     if key.is_empty() {
-        return Err(LinearError("no Linear API key configured for that workspace".into()));
+        return Err(LinearError(
+            "no Linear API key configured for that workspace".into(),
+        ));
     }
     let resp = http
         .post(LINEAR_API)
@@ -101,7 +107,10 @@ async fn gql(
         .await
         .map_err(|e| LinearError(format!("Linear API unreachable: {e}")))?;
     let status = resp.status();
-    let body: Value = resp.json().await.map_err(|e| LinearError(format!("Linear API bad JSON: {e}")))?;
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| LinearError(format!("Linear API bad JSON: {e}")))?;
     if let Some(errs) = body.get("errors").and_then(Value::as_array) {
         if !errs.is_empty() {
             let msg = errs
@@ -113,9 +122,14 @@ async fn gql(
         }
     }
     if !status.is_success() {
-        return Err(LinearError(format!("Linear API error (HTTP {})", status.as_u16())));
+        return Err(LinearError(format!(
+            "Linear API error (HTTP {})",
+            status.as_u16()
+        )));
     }
-    body.get("data").cloned().ok_or_else(|| LinearError("Linear API returned no data".into()))
+    body.get("data")
+        .cloned()
+        .ok_or_else(|| LinearError("Linear API returned no data".into()))
 }
 
 fn to_issue_info(prefix: &str, n: &Value) -> IssueInfo {
@@ -156,11 +170,23 @@ pub async fn fetch_issue(
     let query = format!(
         "query($team: String!, $num: Float!) {{ issues(filter: {{ team: {{ key: {{ eq: $team }} }}, number: {{ eq: $num }} }}, first: 1) {{ nodes {{ {ISSUE_FIELDS} }} }} }}"
     );
-    let data = gql(http, key, &query, json!({ "team": r.team_key, "num": r.number })).await?;
-    let node = data.pointer("/issues/nodes/0").cloned().filter(|v| !v.is_null());
+    let data = gql(
+        http,
+        key,
+        &query,
+        json!({ "team": r.team_key, "num": r.number }),
+    )
+    .await?;
+    let node = data
+        .pointer("/issues/nodes/0")
+        .cloned()
+        .filter(|v| !v.is_null());
     match node {
         Some(n) => Ok(to_issue_info(&r.prefix, &n)),
-        None => Err(LinearError(format!("ticket {} not found in Linear", r.identifier))),
+        None => Err(LinearError(format!(
+            "ticket {} not found in Linear",
+            r.identifier
+        ))),
     }
 }
 
@@ -196,7 +222,9 @@ pub fn pick_preset_by_prefix<'a>(
     presets: &'a [wire::PresetRedacted],
     prefix: &str,
 ) -> Option<&'a wire::PresetRedacted> {
-    presets.iter().find(|p| p.labels.iter().any(|pl| pl.eq_ignore_ascii_case(prefix)))
+    presets
+        .iter()
+        .find(|p| p.labels.iter().any(|pl| pl.eq_ignore_ascii_case(prefix)))
 }
 
 /// Create a new issue in team `prefix`, with an explicit API key.
@@ -236,8 +264,14 @@ pub async fn create_issue(
         json!({ "teamId": team_id, "title": title, "description": description, "assigneeId": assignee_id }),
     )
     .await?;
-    let ok = created.pointer("/issueCreate/success").and_then(Value::as_bool).unwrap_or(false);
-    let node = created.pointer("/issueCreate/issue").cloned().filter(|v| !v.is_null());
+    let ok = created
+        .pointer("/issueCreate/success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let node = created
+        .pointer("/issueCreate/issue")
+        .cloned()
+        .filter(|v| !v.is_null());
     match (ok, node) {
         (true, Some(n)) => Ok(to_issue_info(prefix, &n)),
         _ => Err(LinearError(format!("failed to create ticket in {tk}"))),
@@ -270,7 +304,11 @@ pub async fn ensure_in_progress(
     let target = states
         .iter()
         .find(|s| s.get("name").and_then(Value::as_str) == Some("In Progress"))
-        .or_else(|| states.iter().find(|s| s.get("type").and_then(Value::as_str) == Some("started")))
+        .or_else(|| {
+            states
+                .iter()
+                .find(|s| s.get("type").and_then(Value::as_str) == Some("started"))
+        })
         .and_then(|s| s.get("id").and_then(Value::as_str))
         .ok_or_else(|| LinearError(format!("no \"In Progress\" state found for team {tk}")))?
         .to_string();
@@ -282,7 +320,10 @@ pub async fn ensure_in_progress(
     )
     .await?;
     if upd.pointer("/issueUpdate/success").and_then(Value::as_bool) != Some(true) {
-        return Err(LinearError(format!("failed to move {} to In Progress", issue.identifier)));
+        return Err(LinearError(format!(
+            "failed to move {} to In Progress",
+            issue.identifier
+        )));
     }
     Ok(())
 }
@@ -311,11 +352,15 @@ mod tests {
             linear_key: String::new(),
             claude_account: String::new(),
             codex_account: String::new(),
-            vars: Vec::new(),
+            dockerfile: String::new(),
             agent_playbook: String::new(),
             global_prompt: String::new(),
         };
-        let presets = [p("front", &["WE", "UI"]), p("back", &["DEV"]), p("nolabel", &[])];
+        let presets = [
+            p("front", &["WE", "UI"]),
+            p("back", &["DEV"]),
+            p("nolabel", &[]),
+        ];
         // Case-insensitive match against the (lowercase) ticket-id prefix.
         assert_eq!(pick_preset_by_prefix(&presets, "dev").unwrap().name, "back");
         // Multiple labels on a preset → any of them can match.

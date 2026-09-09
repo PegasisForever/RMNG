@@ -1,8 +1,7 @@
 // Settings panel, impure half. Everything the overlay is not allowed to do lives here: the
 // config read that seeds the form, the save that sends it back, the Docker probe, the
 // control-server's version check and its two self-directed actions, the shared account-order
-// store, the five confirms that guard a destructive click, and the one prompt that asks which
-// image to pull.
+// store, and the confirms that guard destructive clicks.
 //
 // The server calls themselves arrive as props rather than being imported, which is how the
 // setup wizard can reuse this panel against a different pair of endpoints. The markup is
@@ -21,7 +20,6 @@ import {
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
-import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
 export interface SettingsPanelContainerProps {
@@ -35,7 +33,9 @@ export interface SettingsPanelContainerProps {
   /** Read the current redacted config (each preset's Linear key comes back verbatim). */
   getConfig: () => Promise<AppConfigRedacted>;
   /** Persist a partial config patch; returns the merged config + a restart-required flag. */
-  putConfig: (patch: unknown) => Promise<ConfigPutResponse & { networkWarning?: string }>;
+  putConfig: (
+    patch: unknown,
+  ) => Promise<ConfigPutResponse & { networkWarning?: string }>;
   /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
   /** `value` and `model` test unsaved fields the operator has just typed. */
   testConfig: (
@@ -54,13 +54,6 @@ export interface SettingsPanelContainerProps {
   operations: Operation[];
   /** Restart the control-server container in place (applies changed startup settings). */
   restartServer: () => Promise<{ ok: boolean }>;
-  // --- clone-source images (moved here from the sidebar) ---
-  images: ImageInfo[];
-  imagesLoading: boolean;
-  /** True while a template-pull op is running (disables the pull action). */
-  pullBusy: boolean;
-  onPullTemplate: (reference: string) => void;
-  onDeleteImage: (reference: string) => void;
   /** Delete an imported Claude account by email (removes its stored token; reassigns clones). */
   onDeleteAccount: (email: string) => void;
   /** Delete an imported Codex account by email. */
@@ -92,11 +85,6 @@ export function SettingsPanelContainer({
   updateServer,
   operations,
   restartServer,
-  images,
-  imagesLoading,
-  pullBusy,
-  onPullTemplate,
-  onDeleteImage,
   onDeleteAccount,
   onDeleteCodexAccount,
   onImportAccount,
@@ -133,10 +121,9 @@ export function SettingsPanelContainer({
   // so the stream drops and the op may not come back — `updateOp` simply goes undefined and
   // the last message stands. Kept until the panel closes; there's nothing to close here.
   const [updateOpId, setUpdateOpId] = useState<string | null>(null);
-  const updateOp = updateOpId ? operations.find((o) => o.id === updateOpId) : undefined;
-  // The image rows' clock. Captured once: an image is days old, and nobody keeps this panel
-  // open long enough for "6d ago" to turn into "7d".
-  const [now] = useState(() => Date.now());
+  const updateOp = updateOpId
+    ? operations.find((o) => o.id === updateOpId)
+    : undefined;
   // Shared cosmetic ordering for the two account lists (drag to reorder). The rail's usage
   // panel reads the same store, so a reorder here reflects there live — persistence and
   // notification both happen in the store. Bucketed per provider because that is the
@@ -154,15 +141,22 @@ export function SettingsPanelContainer({
   // every few seconds on each `stats` SSE frame, and re-running this would re-seed the
   // form from the server and wipe the user's in-progress edits.
   useEffect(() => {
-    getConfig().then(load).catch((e: Error) => setError(e.message));
+    getConfig()
+      .then(load)
+      .catch((e: Error) => setError(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    getUpdateStatus().then(setServerStatus).catch((e) => setServerMsg(`✗ ${(e as Error).message}`));
+    getUpdateStatus()
+      .then(setServerStatus)
+      .catch((e) => setServerMsg(`✗ ${(e as Error).message}`));
   }, [getUpdateStatus]);
 
-  function updateDraft<K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) {
+  function updateDraft<K extends keyof SettingsDraft>(
+    key: K,
+    value: SettingsDraft[K],
+  ) {
     setDraft((d) => (d ? { ...d, [key]: value } : d));
   }
 
@@ -171,14 +165,25 @@ export function SettingsPanelContainer({
     try {
       const s = await getUpdateStatus();
       setServerStatus(s);
-      setServerMsg(s.error ? `⚠ ${s.error}` : s.available ? "update available" : "up to date");
+      setServerMsg(
+        s.error
+          ? `⚠ ${s.error}`
+          : s.available
+            ? "update available"
+            : "up to date",
+      );
     } catch (e) {
       setServerMsg(`✗ ${(e as Error).message}`);
     }
   }
 
   async function doUpdate() {
-    if (!confirm("Update the control-server now?\n\nIt will pull the latest image and restart itself. The UI will briefly disconnect and reconnect; running clones are unaffected.")) return;
+    if (
+      !confirm(
+        "Update the control-server now?\n\nIt will pull the latest image and restart itself. The UI will briefly disconnect and reconnect; running clones are unaffected.",
+      )
+    )
+      return;
     setServerMsg("updating… the server will restart shortly");
     try {
       setUpdateOpId((await updateServer()).id);
@@ -188,48 +193,17 @@ export function SettingsPanelContainer({
   }
 
   async function doRestart() {
-    if (!confirm("Restart the control-server now to apply the changed settings?\n\nThe UI will briefly disconnect and reconnect; running clones are unaffected.")) return;
+    if (
+      !confirm(
+        "Restart the control-server now to apply the changed settings?\n\nThe UI will briefly disconnect and reconnect; running clones are unaffected.",
+      )
+    )
+      return;
     setServerMsg("restarting… reconnecting shortly");
     try {
       await restartServer();
     } catch (e) {
       setServerMsg(`✗ ${(e as Error).message}`);
-    }
-  }
-
-  /** Which reference "+ Pull template" pulls. Prefilled with the configured template, which
-   *  is the one the operator almost always means. */
-  function promptPullImage() {
-    if (pullBusy) return;
-    const rawRef = window.prompt(
-      "Template reference to pull (Docker Hub repo:tag)",
-      draft?.templateReference ?? "",
-    );
-    if (rawRef == null) return;
-    const reference = rawRef.trim();
-    if (!reference) {
-      alert("Enter a template reference.");
-      return;
-    }
-    onPullTemplate(reference);
-  }
-
-  /** One-click refresh: re-pull the configured template reference. Re-pulling the same
-   *  `repo:tag` moves the local tag onto the freshly pulled image — that IS the refresh, and
-   *  it costs several gigabytes, so it is asked about first. */
-  function confirmPullLatest() {
-    if (pullBusy) return;
-    const templateRef = draft?.templateReference ?? "";
-    if (!confirm(`Pull the latest template (${templateRef || "configured reference"})?`)) return;
-    onPullTemplate(templateRef);
-  }
-
-  /** Deleting an image takes it out of the Docker daemon, so it is confirmed first. */
-  function confirmDeleteImage(reference: string) {
-    if (
-      confirm(`Delete image ${reference}?\n\nThis removes the image from the Docker daemon.`)
-    ) {
-      onDeleteImage(reference);
     }
   }
 
@@ -250,7 +224,9 @@ export function SettingsPanelContainer({
     setError(null);
     setSaved(false);
     try {
-      const res = await putConfig(settingsPatch(draft, !!config?.setupComplete));
+      const res = await putConfig(
+        settingsPatch(draft, !!config?.setupComplete),
+      );
       load(res.config); // re-seed from the server's redacted view; clears write-only inputs
       setRestartRequired(res.restartRequired); // shows/clears the restart banner
       setSaved(true);
@@ -277,7 +253,11 @@ export function SettingsPanelContainer({
   async function runJudgeTest() {
     setJudgeTestMsg("testing…");
     try {
-      const r = await testConfig("judge", draft?.judge.codexEmail || "", draft?.judge.codexModel);
+      const r = await testConfig(
+        "judge",
+        draft?.judge.codexEmail || "",
+        draft?.judge.codexModel,
+      );
       setJudgeTestMsg(`${r.ok ? "✓" : "✗"} ${r.message}`);
     } catch (e) {
       setJudgeTestMsg(`✗ ${(e as Error).message}`);
@@ -296,7 +276,9 @@ export function SettingsPanelContainer({
         setAcctOrder((prev) => ({ ...prev, [provider]: ids }))
       }
       onDeleteAccount={(email) => confirmDelete(email, onDeleteAccount)}
-      onDeleteCodexAccount={(email) => confirmDelete(email, onDeleteCodexAccount)}
+      onDeleteCodexAccount={(email) =>
+        confirmDelete(email, onDeleteCodexAccount)
+      }
       onImportAccount={onImportAccount}
       onReplaceAccount={onReplaceAccount}
       setupComplete={!!config?.setupComplete}
@@ -317,13 +299,6 @@ export function SettingsPanelContainer({
       onTestDocker={runTest}
       judgeTestMessage={judgeTestMsg}
       onTestJudge={runJudgeTest}
-      images={images}
-      imagesLoading={imagesLoading}
-      pullBusy={pullBusy}
-      now={now}
-      onPullLatestImage={confirmPullLatest}
-      onPullOtherImage={promptPullImage}
-      onDeleteImage={confirmDeleteImage}
       boardColumns={boardColumns}
       boardColumnCounts={boardColumnCounts}
       onAddBoardColumn={onAddBoardColumn}

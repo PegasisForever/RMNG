@@ -63,15 +63,6 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Shorten `sha256:8e6e9ec2c685…` to the familiar 12-hex-char id.
-pub fn short_id(id: &str) -> String {
-    id.strip_prefix("sha256:")
-        .unwrap_or(id)
-        .chars()
-        .take(12)
-        .collect()
-}
-
 /// A usage window as `pct%` (or `-` when absent).
 pub fn pct(window: &Option<wire::ClaudeUsageWindow>) -> String {
     window
@@ -103,12 +94,5 @@ mod tests {
     fn human_sizes() {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(34855082762), "32.5 GiB");
-    }
-
-
-    #[test]
-    fn short_ids() {
-        assert_eq!(short_id("sha256:8e6e9ec2c685ca1747a6"), "8e6e9ec2c685");
-        assert_eq!(short_id("plain"), "plain");
     }
 }

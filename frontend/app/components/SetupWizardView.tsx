@@ -1,7 +1,6 @@
 // The first-run wizard's markup: a full-page centered card with a step indicator, one step in
-// the body, and a Back/Next footer. It renders from props alone — no config PUT, no pull, no
-// operation stream — so every state it can be in is a story. SetupWizardContainer owns all
-// three of those and hands the results down.
+// the body, and a Back/Next footer. It renders from props alone — no config PUT — so every
+// state it can be in is a story. SetupWizardContainer owns the PUT and hands the result down.
 //
 // NOT a dismissable modal: there is no Escape, no overlay click and no ✕, because the
 // dashboard does not exist behind it. The route renders this INSTEAD of the dashboard while
@@ -9,17 +8,14 @@
 //
 // The form is one editable model (`SetupDraft`) plus a single `onDraftChange`, rather than a
 // value/onChange pair per field. What is NOT in the draft is everything the server decides:
-// whether a save is in flight, whether the environment probe passed, and how far along the
-// template pull is.
+// whether a save is in flight and whether the environment probe passed.
 import { Check } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { SetupEnvironmentStep } from "~/components/SetupEnvironmentStep";
 import { SetupReviewStep } from "~/components/SetupReviewStep";
 import { SetupServerStep } from "~/components/SetupServerStep";
-import { SetupTemplateStep } from "~/components/SetupTemplateStep";
 import { SETUP_STEPS, type SetupDraft } from "~/lib/setupDraft";
-import type { Operation } from "~/lib/types";
 
 export interface SetupWizardViewProps {
   /** Which step is showing, indexing `SETUP_STEPS`. */
@@ -27,35 +23,20 @@ export interface SetupWizardViewProps {
   /** The whole form, as one editable model. */
   draft: SetupDraft;
   /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
-  onDraftChange: <K extends keyof SetupDraft>(key: K, value: SetupDraft[K]) => void;
+  onDraftChange: <K extends keyof SetupDraft>(
+    key: K,
+    value: SetupDraft[K],
+  ) => void;
 
   /** The environment preflight, as a slot: the probe behind it is a fetch, so the container
    *  decides what mounts there. */
   envChecklist: ReactNode;
 
-  /** The configured `docker.templateReference`, which is what a blank template field pulls. */
-  templatePlaceholder: string;
-  /** The reference step 3 saves and pulls, already resolved against the placeholder. The
-   *  review step names it, so a skipped download still shows what clones will be built from. */
-  savedTemplateReference: string;
-  /** The template pull this wizard started, once it shows up in the live op list. */
-  pullOperation: Operation | null;
-  /** The reference the pull was started for. */
-  pullTarget: string | null;
-  /** The POST that starts the pull is in flight. */
-  pulling: boolean;
-  /** The pull operation is running / has finished. */
-  pullRunning: boolean;
-  pullDone: boolean;
-  /** The Download button may fire. */
-  canPull: boolean;
-  onPull: () => void;
-
-  /** The last failed save or pull, in the wizard's own banner. */
+  /** The last failed save, in the wizard's own banner. */
   error: string | null;
   /** A config PUT is in flight. Locks the footer. */
   saving: boolean;
-  /** Next refuses to advance: a failing required check, an invalid subnet, or a running pull. */
+  /** Next refuses to advance: a failing required check or an invalid subnet. */
   nextDisabled: boolean;
   onNext: () => void;
   onBack: () => void;
@@ -68,15 +49,6 @@ export function SetupWizardView({
   draft,
   onDraftChange,
   envChecklist,
-  templatePlaceholder,
-  savedTemplateReference,
-  pullOperation,
-  pullTarget,
-  pulling,
-  pullRunning,
-  pullDone,
-  canPull,
-  onPull,
   error,
   saving,
   nextDisabled,
@@ -93,9 +65,12 @@ export function SetupWizardView({
       <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl">
         {/* Header + step indicator. */}
         <div className="shrink-0 border-b border-slate-100 dark:border-slate-800 px-6 pb-4 pt-5">
-          <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Set up rmng</h1>
+          <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+            Set up rmng
+          </h1>
           <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
-            First-run configuration — a few settings are baked in for good, so choose carefully.
+            First-run configuration — a few settings are baked in for good, so
+            choose carefully.
           </p>
           <div className="mt-4 flex items-center gap-2">
             {SETUP_STEPS.map((label, i) => (
@@ -114,7 +89,9 @@ export function SetupWizardView({
                   </span>
                   <span
                     className={`hidden text-xs font-medium sm:inline ${
-                      i === step ? "text-slate-800 dark:text-slate-100" : "text-slate-400 dark:text-slate-500"
+                      i === step
+                        ? "text-slate-800 dark:text-slate-100"
+                        : "text-slate-400 dark:text-slate-500"
                     }`}
                   >
                     {label}
@@ -155,32 +132,9 @@ export function SetupWizardView({
             />
           ) : null}
 
-          {/* Step 3: Download template. */}
-          {step === 2 ? (
-            <SetupTemplateStep
-              templateReference={draft.templateReference}
-              placeholder={templatePlaceholder}
-              operation={pullOperation}
-              pullTarget={pullTarget}
-              pulling={pulling}
-              pullRunning={pullRunning}
-              pullDone={pullDone}
-              canPull={canPull}
-              onTemplateReferenceChange={(v) => onDraftChange("templateReference", v)}
-              onPull={onPull}
-              onSkip={onNext}
-            />
-          ) : null}
-
-          {/* Step 4: Finish. */}
-          {step === 3 ? (
-            <SetupReviewStep
-              draft={draft}
-              savedTemplateReference={savedTemplateReference}
-              pullTarget={pullTarget}
-              pullDone={pullDone}
-            />
-          ) : null}
+          {/* Step 3: Finish. Clone images build on demand from each preset's Dockerfile,
+              so there is no template to download. */}
+          {step === 2 ? <SetupReviewStep draft={draft} /> : null}
         </div>
 
         {/* Footer: Back / Next / Finish. */}

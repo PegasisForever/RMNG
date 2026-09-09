@@ -27,7 +27,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 ## Endpoint summary
 
 | Method | Path | Purpose | Success |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | GET | `/events` | Global state SSE plus named `stats`, `lxcStats`, `forwards`, and `version` events | 200 SSE `ControlState` |
 | GET | `/api/state` | Single-shot persisted `ControlState` snapshot | 200 `ControlState` |
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
@@ -43,10 +43,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/hosts/:id/copy?dst=` | Extract a streamed tar archive inside a clone | 200 `CopyResult` |
 | GET | `/api/self` | The calling clone's own record, by the address it called from | 200 `Clone` / 404 |
 | POST | `/api/layout/activate` | Make a layout preset active and live-apply it to the selected clone | 200 `{ok,applied,errors}` |
-| GET | `/api/images` | List clone-source images (`rmng.image=1`) | 200 `ImageInfo[]` |
-| POST | `/api/images/pull` | Pull the clone template from a registry (keeps its own `repo:tag`) | 200 `Operation` |
-| POST | `/api/images/commit` | Commit a running clone to a new image | 200 `Operation` |
-| POST | `/api/images/delete` | Remove a clone-source image | 200 `{ok}` |
+| POST | `/api/images/prebuild` | Warm a preset image without creating (build posted Dockerfile on miss) | 200 `{ok,op}` |
 | GET/PUT | `/api/notes/:id` | Fetch or save a clone's rich-text notes | 200 `[block]` / 204 |
 | POST | `/api/upload` | Upload an image (multipart) | 200 `{url}` |
 | GET | `/uploads/:file` | Serve an uploaded image | 200 binary |
@@ -80,6 +77,7 @@ are a plain string or `{error}`.
 ## State & SSE
 
 ### `GET /events`
+
 Subscribe to all control-state changes. Emits a full `ControlState` JSON snapshot
 immediately, then a fresh snapshot on every `store.mutate()`; a `ping` comment every 20 s
 keeps the connection alive. This is what the dashboard subscribes to.
@@ -102,6 +100,7 @@ is enough; there is nothing to poll. This is what keeps a long-open tab from tal
 server its bundle was not built against.
 
 ### `GET /api/state`
+
 The current `ControlState` as a single-shot JSON snapshot — the same document as the first
 default `/events` frame, without opening an SSE stream. For one-off readers (the `rmng` CLI's
 `ps`/`ops`/`account ls`, scripts).
@@ -109,7 +108,7 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 `ControlState` ([control.rs](../crates/wire/src/control.rs)):
 
 | Field | Type | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `selected` | `string?` | clone id shown in the viewer |
 | `monitors` | `MonitorSpec[]` | legacy field, kept for JSON back-compat; no longer populated (always `[]`) — use `activeLayout` + the config's `layoutPresets` |
 | `activeLayout` | `string` | name of the active layout preset, mirrored from config so the board rail's switcher updates over SSE |
@@ -142,6 +141,7 @@ legacy `"bootstrap"` op still loads, aliased onto `pull`), `target`, `source`, `
 `pct`, a rolling `log`, and timestamps.
 
 ### `stats` event and `GET /api/stats`
+
 The same `/events` connection multiplexes a second, named SSE event: `stats`, a live
 `{ <hostId>: ContainerStats }` map for running **managed** clones only (a stopped or
 unmanaged clone contributes no entry). `GET /api/stats` returns the exact latest snapshot for
@@ -159,6 +159,7 @@ not serialization, so an idle fleet doesn't wake subscribers). Deliberately kept
 persists the file, so folding stats in would rewrite it on every poll.
 
 ### `lxcStats` event
+
 The same connection also sends a named `lxcStats` event for the complete CT 105 LXC that hosts
 RMNG, independent of the clone-only `stats` map. Its `LxcStats` payload has `cpuPct`, `memUsed`,
 `memLimit`, and `diskUsed`. CPU is measured from the CT-root cgroup’s `cpu.stat` over the monitor
@@ -171,6 +172,7 @@ second CPU sample establishes a rate; `diskUsed` is `null` when the rootfs stat 
 Like `stats`, this event is SSE-only and never writes `state.json`.
 
 ### `forwards` event
+
 The same `/events` connection multiplexes a fourth, named SSE event: `forwards`, the volatile
 port-forward **runtime** map — the live status of each clone's forward rules as the viewer
 opens/closes its local listeners. A new subscriber gets the current snapshot immediately, then
@@ -179,6 +181,7 @@ like `stats` — it never enters `ControlState`/`state.json`. The *desired* rule
 persisted on `Clone.forwards` and edited via `PUT /api/hosts/:id/forwards`.
 
 <a id="clonetokens"></a>
+
 ### `boardColumns` — the board's columns
 
 Each column is `{ id, title, cloneIds }`, and the array order is the board's left-to-right
@@ -198,6 +201,7 @@ An empty list is legal and means the operator deleted every column. The frontend
 one default column, so a fresh install still shows its clones.
 
 ### `cloneTokens` — per-clone token accounting
+
 `{ inputTokens, outputTokens, fableActive }` per clone id, accumulated by
 [agentlog.rs](../crates/control-server/src/agentlog.rs) from the agent CLIs' own session
 transcripts: `~/.claude/projects/<cwd-slug>/<uuid>.jsonl`,
@@ -245,7 +249,9 @@ scan so it decays on its own. Claude-only — Codex records its model in `turn_c
 in the usage event, and Fable is a Claude family regardless.
 
 <a id="monitorstate"></a>
+
 ### `Clone.monitorState` — where `working` vs `idle` comes from
+
 Docker liveness supplies `offline`. The other two answer one question about the clone's agent:
 **will it get any further without a person?** A clone that finished its task reads `idle`, and so
 does one that asked a question, one whose only running command never returns, and one wedged
@@ -262,7 +268,7 @@ registry at `~/.claude/sessions/<pid>.json`, and the server reads it through the
 [homes.rs](../crates/control-server/src/homes.rs) already maintains:
 
 | what the registry says about a session | verdict |
-|---|---|
+| --- | --- |
 | no live session in the clone at all | `idle` for the clone — nothing could wake it |
 | this session `waiting` | this session is stuck — a dialog is up |
 | this session `idle` | this session is stuck — sitting at its prompt |
@@ -293,7 +299,7 @@ registry, but it writes everything the probe would have: one JSONL "rollout" per
 the four folds above, measured against Codex CLI 0.144.4:
 
 | Claude Code hook | Codex rollout record |
-|---|---|
+| --- | --- |
 | `UserPromptSubmit` | `event_msg` / `user_message` |
 | `PreToolUse` | `response_item` / `custom_tool_call`, `function_call`, `local_shell_call` |
 | `PostToolUse` | the matching `…_call_output`, paired on `call_id` |
@@ -377,7 +383,7 @@ Measured against a replay oracle over two runs on a live 32-clone fleet (2955 sc
 real stalls), against the 5-minute token-idle rule this replaced:
 
 | | accuracy | missed a stuck clone | false alarm | median lag | worst lag |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | token idle | 90.9% | 250 | 20 | 331s | 1487s |
 | this | 96.7% | 44 | 54 | 31s | 92s |
 
@@ -385,7 +391,7 @@ Deciding per session was measured against pooling a clone's sessions into one vi
 samples rebuilt from those same runs, with truth taken per session and a clone's truth the OR:
 
 | | accuracy | missed a stuck clone | false alarm |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | pooled into one view per clone | 97.8% | 12 | 38 |
 | one view per session | 98.2% | 14 | 27 |
 
@@ -504,7 +510,7 @@ A line is written only when the decision is news, meaning the session's state ch
 went away, or the model was called for it. A fleet holding still writes nothing.
 
 | field | what it says |
-|---|---|
+| --- | --- |
 | `ts`, `clone`, `session` | this SERVER's clock, and who the line is about |
 | `state`, `was` | `working`, `idle`, or `gone`, and what it replaced (`new` on a first sighting) |
 | `decidedBy`, `why` | `files`, `model`, `cache`, `floor`, `no-judge`, or `ask-failed`, and the reason |
@@ -528,6 +534,7 @@ which is why the comparison above is stated as a gap against an age rather than 
 ## Clone selection & the board
 
 ### `POST /api/activate` — body `{ "id": string | null }`
+
 Set `selected` (or clear with `null`). Returns the updated `ControlState`. The media plane
 re-targets port 1 to the newly selected clone.
 
@@ -538,6 +545,7 @@ on the active preset does not move a window. Deleting or archiving the selected 
 the selection on its own, and pushes the layout to the clone it lands on the same way.
 
 ### `PUT /api/board` — body `{ "columns": BoardColumn[] }`
+
 Replace `boardColumns` wholesale. Returns the updated `ControlState`.
 
 A column is `{ id, title, cloneIds }`. Two things are deliberately not stored. The archived
@@ -547,6 +555,7 @@ column claims is drawn in the first one, which is how a newly created clone reac
 board. Ids of deleted clones are ignored on render and dropped by the next write.
 
 ### `PUT /api/clones/muted` — body `{ "cloneIds": string[] }`
+
 Replace the muted-clone set wholesale, the same bargain as the two above. Answers the new
 `ControlState`, whose `mutedClones` is the set sorted and deduplicated.
 
@@ -560,6 +569,7 @@ A muted clone's sub clones are silent too. That rule is applied where the notifi
 children with no second write. Ids for clones that no longer exist are kept, not pruned.
 
 ### `PUT /api/tickets/order` (body `{ "ticketIds": string[] }`)
+
 Replace `ticketOrder` wholesale. Returns the updated `ControlState`.
 
 This is the operator's own arrangement of the ticket column, top to bottom, and it is the
@@ -573,14 +583,16 @@ because new work should land where somebody looks rather than at the bottom of a
 ## Clone lifecycle
 
 ### `POST /api/clone`
+
 Start a clone container from a clone-source image. Runs async — returns an `Operation` id
 immediately; progress flows over `/events`. After the clone is up the server kicks off the
 agent's first message ([chat::kickoff_agent](../crates/control-server/src/chat.rs)).
 
 Body (one of three modes + optional account/instructions):
+
 ```jsonc
 {
-  "image": "pegasis0/rmng-template:latest", // required: clone-source image reference (from GET /api/images)
+  "image": "", // retired gen-1 field: accepted for compatibility, ignored (gen-2 derives the image from the preset)
   // -- pick ONE mode --
   "linear": { "workspace": "dev", "ticket": "DEV-123", "ticketUrl": "https://…",
               "branch": "…", "title": "…", "label": "…" },  // a ticket the CLIENT resolved, OR
@@ -612,6 +624,7 @@ Body (one of three modes + optional account/instructions):
                                     //   Mutually exclusive with `parent` (400).
 }
 ```
+
 **Linear mode makes no Linear call here.** The client (the web dialog or the `rmng` CLI)
 holds the preset keys, so it looks the issue up or opens it, moves it to In Progress, and
 posts what came back. Every field is stored verbatim. Only `ticket` is required; an omitted
@@ -669,7 +682,7 @@ clone reaches `hosts` only at the end of its create job, so the wait started exa
 operator opened the clone.
 
 | What | Was late by | Symptom |
-|---|---|---|
+| --- | --- | --- |
 | `/home/rmng/shared`, the shared folder | up to 15 s | the folder is missing, then appears |
 | `data/hosts/<id>`, the home symlink | up to 15 s | no SMB browse, no file API, no token counts, no activity signal |
 | The bastion's `PermitOpen` entry | up to 10 s | `ssh -J` to the clone is refused |
@@ -698,6 +711,7 @@ Nothing here is fatal. A step that fails is logged, left unstamped, and picked u
 which is what the loops were for.
 
 ### `POST /api/layout/activate` — body `{ "name": string }`
+
 Make the named layout preset the active one and live-apply it to the clone on screen. No
 session restart, no app loss. Validates `name` against `config.layoutPresets` (`400` if
 unknown), persists it as `config.activeLayout`, mirrors `activeLayout` +
@@ -718,16 +732,19 @@ has no connected daemon (headless, archived, still booting). `errors` captures a
 socket-send failure only (there is no ack).
 
 ### `POST /api/delete` — body `{ "id": string }`
+
 Destroy a managed clone (stops it with `SIGRTMIN+3`, removes the container and its
 `rmng-dind-<id>` inner-Docker volume) or unregister an unmanaged clone. Returns the `Operation`;
 progress over `/events`.
 
 ### `POST /api/hosts/:id/archive`
+
 Gracefully stop a managed clone while retaining its container, volumes, notes, and chat history.
 Returns an `archive` `Operation`. Unknown, unmanaged, already-archived, or concurrently-operated
 clones return `400`.
 
 ### `POST /api/hosts/:id/unarchive`
+
 Restart a retained archived clone. Returns an `unarchive` `Operation`; the clone's account
 selections are retained, and the reconcile pass re-pushes its tokens once it is up.
 
@@ -741,47 +758,11 @@ set the create job settles (see
 
 ## Images (clone-source templates) & setup
 
-Clone sources are images labeled `rmng.image=1`, identified by their own `repo:tag` (e.g.
-`pegasis0/rmng-template:latest`) — there is no local retag and no golden-CT / CoW model. `POST`
+Clone images are gen-2 preset builds (see above). `POST`
 bodies (references contain `/` and `:`, so nothing uses path params).
 
-### `GET /api/images` → `ImageInfo[]`
-List clone-source images, newest first. Each `ImageInfo` carries `id` (`sha256:…`),
-`reference` (the image's own `repo:tag`, e.g. `pegasis0/rmng-template:latest`), `size_bytes`,
-`created_at`, `base` (true for the published clone template, `rmng.base=1`), `created_from`
-(lineage, `rmng.created-from`), and `in_use_by` (clone ids of live clones whose `source` is this
-image). `502` if the daemon is unreachable.
-
-### `POST /api/images/pull` — body `{ "reference"?: string }`
-Pull the clone template from a registry. The pulled image keeps its own `repo:tag` as the
-clone-source reference — no local retag. `reference` is a registry `repo:tag` to pull from —
-absent/blank defaults to `config.docker.templateReference` (default
-`pegasis0/rmng-template:latest`); see
-[DEPLOY.md#publishing-the-template](DEPLOY.md#publishing-the-template) for how that image is
-built and published. Rejects a blank reference, a `repo@sha256:…` digest reference (pull a
-`repo:tag` instead), and a duplicate pull already in flight for the same reference. Verifies
-the pulled image carries the `rmng.image=1` label (else it isn't an RMNG template) and warns —
-without refusing — if its `StopSignal` isn't `SIGRTMIN+3`. Re-pulling the same `repo:tag`
-naturally moves the local tag onto the fresh image (standard `docker pull`) — that is the
-refresh. Returns the driving `Operation` (kind `pull`, which the setup wizard's "Download
-template" step watches for, showing aggregate byte progress). Replaces the retired in-product
-`/api/images/bootstrap` build — no base OS is built in-product any more, only pulled pre-built.
-
-### `POST /api/images/commit` — body `{ "host": string, "name": string }`
-Commit a running managed clone (`host`) to a new clone-source image `<name>:latest` — the
-DNS-label `name` is the full repo (kind `commit`). `docker commit` **excludes volume mounts**,
-so the clone's inner-Docker state (`/var/lib/docker`) never enters the image — clones always
-start with an empty inner Docker. On-disk credentials in the clone's home **are** baked in
-(logged as a warning). Rejects a name that already exists.
-
-### `POST /api/images/delete` — body `{ "reference": string }` → `{ok}`
-Remove a clone-source image. `409` if any clone still runs on it (`in_use_by` non-empty) or a
-running operation (clone/commit/pull) references it as its source or target; the daemon's own
-"in use by a container" `409` is surfaced too. If the same image carries more than one tag,
-deleting one `reference` only untags it while the others stay attached to the same layers — the
-image re-lists under a remaining reference; delete again to actually free them.
-
 ### `GET /api/setup/env` → `SetupEnv`
+
 The setup wizard's environment preflight: `{ rows: EnvCheckRow[] }`, each row `{ id, label,
 ok, detail, required }`. Rows, in order: **Docker daemon** reachable (`dockerDaemon`,
 required), **control-server container** detected (`selfContainer`, info — absence = dev mode),
@@ -795,16 +776,20 @@ advisory — without it clones see host-wide `/proc` values). Cached from the Do
 ## Notes & uploads
 
 ### `GET /api/notes/:id` → `[block]` &nbsp;·&nbsp; `POST /api/notes/:id` (204)
+
 Per-clone rich-text notes (BlockNote block array), stored at `data/notes/{id}.json`. `:id`
 must be a DNS label. GET returns `[]` if none.
 
 ### `POST /api/upload` (multipart `file`) → `{ "url": "/uploads/<hex>.<ext>" }`
+
 Image upload (png/jpeg/gif/webp/svg/avif/bmp, ≤15 MB) → `data/uploads/`.
 
 ### `GET /uploads/:file`
+
 Serve an uploaded image by its generated `<16-hex>.<ext>` name, with the right Content-Type.
 
 ### `POST /api/linear/upload-relay` (multipart `url`, `headers`, `file`) → `{ "ok": true, "status": 200 }`
+
 Replay one PUT at the Google-signed URL Linear's `fileUpload` mutation handed the browser. The
 page cannot send it itself: the bucket answers the preflight with `vary: Origin` and no
 `access-control-allow-origin`. This route holds no key and never calls Linear's GraphQL.
@@ -818,6 +803,7 @@ the signature covers them, minus `host`, `content-length`, `transfer-encoding`, 
 The hop gives up at 45 seconds, inside the signed URL's 60-second `X-Goog-Expires` window.
 
 ### `GET /api/linear/asset?url=<assetUrl>` → the image bytes
+
 Read one Linear-hosted image and serve it same-origin. An `assetUrl` answers an unauthenticated
 GET with 401, and `uploads.linear.app` leaves `authorization` out of its CORS allow-list, so
 neither an `<img>` nor a `fetch` in the page can read one. This route fetches it with a
@@ -918,7 +904,7 @@ Reusing a name would file two unrelated histories in one bucket.
 ### `GET /api/ledger/search` → `{ hits, scannedBytes, truncated }`
 
 | Param | Meaning |
-|---|---|
+| --- | --- |
 | `q` | Required. A case-insensitive substring, matched against the whole ledger line, so it reaches the text, the tool name and the kind alike |
 | `clone` | One clone id. Absent searches every clone the ledger knows, live or retired |
 | `since` / `until` | Epoch milliseconds, both inclusive. A record whose timestamp will not parse passes both bounds |
@@ -948,6 +934,7 @@ returns an empty `text` rather than an error. An unknown clone or session is a 4
 ## Configuration
 
 ### `GET /api/config` → `AppConfigRedacted`
+
 The full config, preset Linear keys included as `linearKey: string`. The browser lists Linear
 issues itself, so this is where it gets a key; the server answers only on a Tailscale-only
 network, which is what makes that acceptable.
@@ -961,6 +948,7 @@ member emails only — no credentials, so they pass through unredacted). See
 [PROTOCOL.md](PROTOCOL.md#config-schema) for the schema.
 
 ### `PUT /api/config` (partial merge) → `{ config, restartRequired, networkWarning? }`
+
 Deep-merge a partial config over the stored one, persist to disk at `0600`, apply live.
 Returns the redacted config plus `restartRequired: boolean` — set when a restart-required
 field changed (the four listen ports, `cloneSocket`, `docker.socket`, `staticDir`, `chroma`)
@@ -981,17 +969,19 @@ same one-clone push `POST /api/layout/activate` does. Every other clone takes th
 when the operator switches to it.
 
 ### `POST /api/config/test` (body `{ "what", "value"?, "model"? }`) → `{ ok, message }`
+
 Synchronously test a setting. `value` and `model` carry what the operator has typed but not saved,
 so the verdict is about the field they are looking at rather than about the stored one.
 
 | `what` | tests | `value` / `model` |
-|---|---|---|
+| --- | --- | --- |
 | `docker` | re-runs the Docker self-setup probe and collapses the environment report (daemon reachable, sock mount, render node) into one verdict. The row-by-row breakdown is `GET /api/setup/env` | neither |
 | `judge` | puts one real stuck-detection question to GPT, which exercises the account lookup, the token refresh, the endpoint and the model name together | `value` = the account email (blank = the first imported), `model` = the GPT model |
 
 ---
 
 <a id="accounts-claude--codex"></a>
+
 ## Accounts (Claude + Codex)
 
 Clone model traffic never touches the control-server: each agent dials its provider directly and
@@ -1011,7 +1001,7 @@ A clone's binding is six optional fields on its `Clone` row, three per provider 
 independent (one clone can run both, one, or neither):
 
 | Field | Holds |
-|---|---|
+| --- | --- |
 | `claudeSelection` / `codexSelection` | the operator's intent **verbatim**: an email, `auto`, `none`, or `group:<pool>` |
 | `claudeAccountEmail` / `codexAccountEmail` | the account currently resolved from that selection — whose token is installed right now |
 | `claudeGroup` / `codexGroup` | the pool the clone is being balanced within, when the selection is `group:<pool>` |
@@ -1047,7 +1037,7 @@ Symmetric across the two providers — `{claude,codex}` below is a literal path 
 sets differ only in which store and credential file they touch.
 
 | Endpoint | Body | Returns | Does |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `POST /api/login/begin` | `{provider}` | `{url}` | Mint a PKCE verifier and return the provider's authorize URL. Nothing is stored against an account yet, and the sign-in expires after 15 minutes if its callback never comes back |
 | `POST /api/login/complete` | `{provider, pasted, group}` | `{ok, email}` | Redeem the pasted callback, store the account, and add it to `group` (empty for none). Kicks an immediate usage poll |
 | `POST /api/{claude,codex}/refresh` | — | `{ok, rateLimited, rotated}` | Force one usage poll now, then a rotation pass. `rateLimited` is true if any account hit a 429 |
@@ -1078,7 +1068,7 @@ The control-server proxies chat to each clone's agent-wrapper (`http://{host}:{a
 default `:4096`), persisting history at `data/chats/{id}.json`.
 
 | Endpoint | Body | Returns | Does |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `GET /api/chat/:id` | — | `ChatSnapshot` | `{busy, activity, messages[]}` snapshot |
 | `POST /api/chat/:id` | `{text}` | `202` / `409` if busy | Persist the user message, set busy, spawn the turn (opens the wrapper's `/events`, POSTs `/prompt`, relays activity, records the reply). Watchdog: 30 min hard / 3 min idle |
 | `GET /api/chat/:id/events` | — | SSE `ChatSnapshot` | Snapshot + a fresh one on each message/activity/busy change; 20 s ping |
@@ -1091,6 +1081,7 @@ default `:4096`), persisting history at `data/chats/{id}.json`.
 ## SPA fallback
 
 ### `GET /*`
+
 Serves the installed React build from disk; unknown paths fall back to `index.html` for
 client-side routing. The bundle is resolved at startup: `/usr/local/share/rmng/static` in the
 image, else the repo dev build (`frontend/build/client`). A non-empty `staticDir` config field

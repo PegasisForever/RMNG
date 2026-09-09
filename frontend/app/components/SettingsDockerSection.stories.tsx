@@ -14,7 +14,6 @@ function base() {
   const draft = makeSettingsDraft();
   return {
     hostnamePrefix: draft.hostnamePrefix,
-    templateReference: draft.templateReference,
     subnet: draft.subnet,
     cloneCpus: draft.cloneCpus,
     cloneMemoryMb: draft.cloneMemoryMb,
@@ -30,7 +29,6 @@ const meta = {
     subnetLocked: true,
     testMessage: null,
     onHostnamePrefixChange: fn(),
-    onTemplateReferenceChange: fn(),
     onSubnetChange: fn(),
     onCloneCpusChange: fn(),
     onCloneMemoryMbChange: fn(),

@@ -1,7 +1,7 @@
 # `rmng` CLI reference — fleet management over the web port
 
 The `rmng` binary ([crates/cli](../crates/cli/README.md), package `rmng-cli`) is the fleet
-management surface: clones, images, imported accounts and their pools, and operations, all over
+management surface: clones, imported accounts and their pools, and operations, all over
 the control-server's **port-2 web API** (via [control-client](../crates/control-client/README.md)).
 It also carries the **operator/fleet desktop control** (`rmng desktop`, folded in from the
 retired global MCP) and a docker-exec-style **`rmng clone exec`** — both reach clones through the
@@ -50,27 +50,25 @@ $RMNG_CONTROL_URL` hint.
   are JSON too** — `{"error": {"message", "hint"}}` on stderr, with the same exit codes.
 
 | Command (with `--json`) | Emits |
-|---|---|
+| --- | --- |
 | `clone ls` | `{ selected, clones: [Clone + {stats, accounts, column}], operations }` (CLI shape — includes the metrics the table shows) |
 | `board ls` | `BoardColumn[]`, resolved the way the dashboard draws them |
 | `board move` | the resolved `BoardColumn[]` after the move |
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
 | `clone create`, `clone create-from-ticket`, `clone create-with-new-ticket`, `clone create-plain` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
-| `clone rm`, `clone archive`, `clone restore`, `image pull`, `image commit` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
+| `clone rm`, `clone archive`, `clone restore` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
 | `clone cp` | `{ bytes, dst }` |
 | `clone self` | the caller's `Clone` record, or exit 1 outside a clone |
 | `op wait` | the terminal `Operation` |
 | `op ls` | `Operation[]` |
-| `image ls` | `ImageInfo[]` |
 | `account ls` | `ClaudeUsage[]` |
-| `image rm` | `{ok: true}` |
 | `desktop` (screenshot/action) | `{ screenshot: <path>, text? }`; query verbs → the tool's JSON |
 
 ## Exit codes
 
 | Code | Meaning |
-|---|---|
+| --- | --- |
 | `0` | ok (including a "vanished" wait — see below) |
 | `1` | API / transport error (also: `rm` confirmation declined) |
 | `2` | usage error (clap) |
@@ -79,11 +77,12 @@ $RMNG_CONTROL_URL` hint.
 
 ## Commands
 
-The surface is **noun → verb**. Nouns: `clone`, `image`, `account`, `op`, `ledger`, `board`,
+The surface is **noun → verb**. Nouns: `clone`, `account`, `op`, `ledger`, `board`,
 `desktop`.
 The target is always a positional **clone id** (the first column of `rmng clone ls`).
 
 ### `rmng clone ls`
+
 Clones table: `ID` (a `*` suffix marks the selected clone), `COLUMN` (the board column the
 clone is drawn in; blank on a sub clone, which is drawn under its parent's card), `IP` (the current Docker bridge
 address when available), `IMAGE` (source reference), `PRESET`, `CLAUDE` and `CODEX` (the account
@@ -119,7 +118,7 @@ clone-creating verb is prefixed `create-` so the action is unmistakable — the 
 (`ticket WE-142`) read like it acted *on* the ticket. Each prints the started op id (follow
 with `rmng op wait <op-id>`), or blocks with `--wait`.
 
-**Common flags** (all four): `--from <IMAGE>` (required), `--claude-account <A>`,
+**Common flags** (all four): `--claude-account <A>`,
 `--codex-account <A>`, `--headless`, `--parent <C>` | `--top-level`, `--column <NAME>`,
 `--wait` `[--timeout <N>]`.
 
@@ -140,23 +139,26 @@ child gets its own pick instead of being pinned to its parent's. `--parent <clon
 specific top-level clone; `--top-level` forces a top-level clone, skipping inheritance.
 
 #### `rmng clone create <HOSTNAME> [--preset <P>|--no-preset]`
+
 Exact hostname (a DNS label; `400` if taken), no ticket, no derived display name.
 
 ```sh
-rmng clone create w-cp --from pegasis0/rmng-template:latest --wait
+rmng clone create w-cp --wait
 ```
 
 #### `rmng clone create-from-ticket <LINK-OR-ID> [--agent-instructions <T>] [--claude-instructions <T>]`
+
 Clone for an **existing** Linear ticket. The hostname derives from the ticket id
 (`WE-142` → `<prefix>we-142`) and **the preset is auto-selected from the ticket's team prefix**
 — there is deliberately no `--preset`, matching the dialog. The two instruction flags append to
 the built-in defaults and take precedence where they conflict.
 
 ```sh
-rmng clone create-from-ticket WE-142 --from pegasis0/rmng-template:latest --wait
+rmng clone create-from-ticket WE-142 --wait
 ```
 
 #### `rmng clone create-with-new-ticket --team <KEY> --title <T> [--description <MD>|--description-file <PATH>] [--agent-instructions <T>] [--claude-instructions <T>]`
+
 **Create** a Linear ticket, then clone for it. `--team` is a Linear team key (`we`) and must be
 a label on some preset — that preset is used, and its Linear API key opens the issue. Hence no
 `--preset` here either: the team key *is* the preset choice.
@@ -167,7 +169,7 @@ stays as written, and only renders for a reader on this server's network. The we
 where pasted images get re-hosted in Linear.
 
 ```sh
-rmng clone create-with-new-ticket --from pegasis0/rmng-template:latest \
+rmng clone create-with-new-ticket \
   --team we --title 'Fix the flaky login test' --description-file - --wait <<'MD'
 The test fails ~1 in 5 runs on CI.
 
@@ -176,28 +178,34 @@ MD
 ```
 
 #### `rmng clone create-plain --title <T> [--message <M>|--message-file <PATH>] [--preset <P>]`
+
 No-ticket clone with a title-derived hostname. `--message` is auto-sent to the agent as its
 first message (omitted ⇒ nothing is sent). `--preset` is required when any presets are
 configured.
 
 ### `rmng clone rm <CLONE> [-y|--yes] [--wait] [--timeout <N>]`
+
 Destroy a clone (container + volumes; cascades to its sub clones). Asks `[y/N]` on stderr unless
 `-y`; declining exits 1. **Refuses to run non-interactively without `-y`** (stdin not a terminal).
 
 ### `rmng clone archive <CLONE>` / `rmng clone restore <CLONE>` `[--wait] [--timeout <N>]`
+
 Stop a managed clone while retaining its container/volumes/notes/chat, then restart it later.
 Reversible, no confirmation. The server refuses unknown / unmanaged / already-in-state clones.
 
 ### `rmng clone ssh <CLONE>`
+
 Print the ready-to-paste `ssh` command for a usable managed clone (working/idle/not-yet-sampled).
 From inside a clone it prints a direct command; otherwise a bastion jump. Unmanaged/archived/
 offline clones are refused. `--json` → `{ command, mode }`.
 
 ### `rmng clone exec <CLONE> [-u <user>] [-w <dir>] [-e KEY=VAL]… -- <cmd…>`
+
 Run one non-interactive command inside a clone (docker-exec style); forwards piped stdin and
 passes through the command's exit code. `--json` emits one object with the captured streams.
 
 ### `rmng board ls`
+
 The dashboard's columns, left to right: `COLUMN ID ARCHIVES CLONES CONTENTS`. The view is
 **resolved**, not the raw stored list, so a clone nobody has filed appears in the column the
 board draws it in rather than nowhere. A board nobody has arranged yet reports the two columns
@@ -206,6 +214,7 @@ the dashboard draws by default, `Clones` and `Archived`.
 `--json` emits `BoardColumn[]` in the same resolved form.
 
 ### `rmng board move <CLONE> <COLUMN> [--wait]`
+
 Move a clone to the **top** of a column. `COLUMN` is what a person reads off the board, so
 `"In Progress"` works; the stored id (`in-progress`) works too, and both ignore case and
 surrounding space. An unknown name lists the columns that do exist and changes nothing.
@@ -219,6 +228,7 @@ A sub clone is refused. The board draws it under its parent's card and never fil
 filing one would write an id no column ever draws. Move the parent instead.
 
 ### `rmng clone cp <SRC> <CLONE>:<DST-DIR> [--exclude <name>]…`
+
 Copy a directory into a clone at an absolute path. `SRC` takes two forms, and which one you
 use decides where the bytes travel.
 
@@ -263,6 +273,7 @@ strike every `node_modules/*/dist`, and the copy would look complete while impor
 `--json` → `{ bytes, dst }`. `--exclude` is anchored at the top of SRC either way.
 
 ### `rmng clone sync <CLONE>:<SRC-DIR> <CLONE>:<DST-DIR> [--exclude <name>]…`
+
 `cp` with deletion: the destination ends up matching the source, so a file it holds and the
 source does not is removed. Everything else is `cp`'s clone-to-clone form, including the
 anchored excludes and the ownership handling.
@@ -278,23 +289,24 @@ local directory. And the destination cannot be `/home/rmng` itself, where a sync
     rmng clone sync pega-we-142:/home/rmng/proj agt-1a2b:/home/rmng/proj --exclude target
 
 ### `rmng clone self`
+
 Print the calling clone's own id, or the whole record with `--json`. Identity is the
 per-clone router key in this process's environment, the same proof the server trusts for
 sub-clone nesting, so it needs no hostname convention. Outside a clone it prints nothing and
 exits 1.
 
 ### `rmng clone select <CLONE>` / `rmng clone select --none`
+
 Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears it. **Operator-only
 — it does not change which clone your other commands target.** Unknown id errors (exit 1).
 
-### `rmng image ls|pull|commit|rm`
-- `image ls` — clone-source images: `REFERENCE ID SIZE CREATED BASE FROM IN-USE-BY`.
-- `image pull [reference] [--wait]` — pull the clone template; no reference = the configured
-  `docker.templateReference`.
-- `image commit <CLONE> --as <NAME> [--wait]` — commit a running clone to `<name>:latest`.
-- `image rm <reference>` — remove a clone-source image (`409` while clones use it).
+### `rmng image …` (removed)
+
+Gen-1 image commands (`image ls|pull|rm`) are gone: gen-2 clones build their image from the
+preset Dockerfile on demand, and unused tags are purged automatically on delete.
 
 ### `rmng account ls [--provider claude|codex]`
+
 Read-only listing of imported accounts and usage windows: `EMAIL PROVIDER ASSIGNABLE 5H
 5H-RESETS 7D FABLE ERROR`. Both providers by default; `--provider` filters to one.
 
@@ -305,6 +317,7 @@ scoped to the server's account store, so an account re-imported after a delete m
 previous id. Key off `email` + `provider` if you need a stable identity across imports.
 
 ### `rmng account swap <CLONE> <ACCOUNT> [--codex]`
+
 Hot-swap a clone's account for one provider (`POST /api/{claude,codex}/swap`). `<ACCOUNT>` is a
 selection verbatim: an email (pin it), `auto` (the server picks and may re-pick), `none` (install
 no token — the clone boots provably tokenless), or `group:<pool>` (bind it to a named pool and
@@ -312,19 +325,23 @@ let the rotator balance it). The token is written into the clone's credential fi
 nothing restarts, because the agents re-read those files per request.
 
 ### `rmng account rm <ACCOUNT> [--codex]`
+
 Delete an imported account by email. Refused (`400`) while any clone is explicitly **pinned** to
 it — that pin is an operator decision, not a rotation, so it is never silently undone. Clones on
 `auto` or a pool are moved to another account first; the reply's `moved` lists them.
 
 ### `rmng op ls`
-The current `operations[]`: in-flight + recently-finished clone/delete/archive/restore/pull/
-commit/update jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are pruned quickly.
+
+The current `operations[]`: in-flight + recently-finished clone/fork/rebase/delete/archive/
+restore/prebuild/update jobs (`ID KIND TARGET STATUS STEP PCT MESSAGE`). Finished ops are pruned quickly.
 
 ### `rmng op wait <op-id> [--timeout <N>]`
+
 Block until an operation reaches a terminal state (default timeout 600 s). Same semantics as
 `--wait` on the starting command.
 
 ### `rmng ledger search <PATTERN> [--clone <id>] [--since <when>] [--until <when>] [--sidechain | --no-sidechain] [--agent <id>] [--limit <N>]`
+
 Search the distilled transcripts of every clone the ledger knows, retired clones included. The
 control-server tails each running clone's Claude Code and Cursor transcripts and keeps a greppable copy
 under `data/ledger/<clone>/<session>.ndjson`, so this answers "how did we do this last time"
@@ -355,6 +372,7 @@ rmng ledger search "Here is my review" --sidechain --json | jq -r '.hits[].line 
 ```
 
 ### `rmng ledger read <CLONE> <SESSION> [--offset <N>] [--len <N>]`
+
 Print a byte range of one session's ledger, for the conversation around a hit. Pass a hit's own
 offset to re-read that line, or less to read what led up to it. The range is snapped outward to
 line boundaries, so stdout is always whole NDJSON lines and never a fragment of one.
@@ -367,6 +385,7 @@ rmng ledger read pega-we-142 793f5eac-bbe3-4d3c-b923-29980dcf570d --offset 4096 
 ```
 
 ### `rmng desktop <clone> <verb>`
+
 Drive any clone's desktop from an operator machine. The clone id is the first positional;
 each verb maps 1:1 to a daemon-MCP tool, forwarded by the control-server to that clone's
 daemon MCP (`http://{clone}:9004`). This is the operator-facing replacement for the retired
@@ -375,7 +394,7 @@ global MCP — see [MCP.md](MCP.md).
 Verbs marked **⤢** also take `[--resolution WxH | --native]` (see "Coordinate space" below).
 
 | Verb | Args | Daemon tool | Does |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `screenshot` ⤢ | `[--monitor N] [--out PATH]` | `screenshot` | JPEG of the monitor's latest frame |
 | `monitors` | — | `list_monitors` | `[{id,width,height,native_width,native_height}]` |
 | `windows` | — | `list_windows` | open windows (`id,title,wm_class,monitor,frame,…`) |
@@ -430,6 +449,7 @@ rmng desktop w-cp-claude windows             # prints JSON, no screenshot
 ```
 
 ### `rmng clone exec <clone> [-u|--user USER] [-w|--workdir DIR] [-e|--env KEY=VAL ...] [-d|--detach] -- <cmd> [args...]`
+
 Run a **single non-interactive** command inside a clone, docker-exec style (no TTY). The
 control-server runs it via the Docker exec primitive; `rmng clone ssh` covers interactive sessions.
 
@@ -478,7 +498,7 @@ printed to stderr whenever the step or whole-percent changes.
 
 ## Seed a new clone
 
-`rmng clone create worker --from template:latest --headless --seed /home/rmng/project --wait`
+`rmng clone create worker --headless --wait`
 
 Repeat `--seed` to copy more directories from the calling clone into the same paths.
 The server finishes the copies before the create operation reports success.

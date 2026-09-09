@@ -49,7 +49,9 @@ function useLiveState(initial: ControlState) {
   const [state, setState] = useState(initial);
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
   const [lxcStats, setLxcStats] = useState<LxcStats | null>(null);
-  const [forwards, setForwards] = useState<Record<string, ForwardRuntime[]>>({});
+  const [forwards, setForwards] = useState<Record<string, ForwardRuntime[]>>(
+    {},
+  );
   useEffect(() => {
     let es: EventSource | null = null;
     let lastActivity = Date.now();
@@ -111,7 +113,9 @@ function useLiveState(initial: ControlState) {
         lastActivity = Date.now();
         let next: string | null = null;
         try {
-          next = (JSON.parse((e as MessageEvent).data) as { buildId?: string }).buildId ?? null;
+          next =
+            (JSON.parse((e as MessageEvent).data) as { buildId?: string })
+              .buildId ?? null;
         } catch {
           return; // malformed frame — leave the page alone
         }
@@ -136,7 +140,10 @@ function useLiveState(initial: ControlState) {
     const watchdog = window.setInterval(() => {
       if (disposed) return;
       const stale = Date.now() - lastActivity > SSE_STALE_MS;
-      if (es?.readyState === EventSource.CLOSED || (es?.readyState === EventSource.OPEN && stale)) {
+      if (
+        es?.readyState === EventSource.CLOSED ||
+        (es?.readyState === EventSource.OPEN && stale)
+      ) {
         connect();
       }
     }, 5_000);
@@ -145,7 +152,10 @@ function useLiveState(initial: ControlState) {
     const onOnline = () => connect();
     // Tab re-focus after a sleep/background stretch that outran the staleness window.
     const onVisible = () => {
-      if (document.visibilityState === "visible" && Date.now() - lastActivity > SSE_STALE_MS) {
+      if (
+        document.visibilityState === "visible" &&
+        Date.now() - lastActivity > SSE_STALE_MS
+      ) {
         connect();
       }
     };
@@ -195,13 +205,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     );
   }
   if (!cfg.setupComplete) {
-    return (
-      <SetupWizardContainer
-        operations={state.operations}
-        initialConfig={cfg}
-        onDone={refetchConfig}
-      />
-    );
+    return <SetupWizardContainer initialConfig={cfg} onDone={refetchConfig} />;
   }
   if (mobile) {
     // The phone tree sizes to the viewport here, so its pages can size to their container

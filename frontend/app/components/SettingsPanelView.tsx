@@ -40,7 +40,10 @@ export interface SettingsPanelViewProps {
    *  is what draws the loading state and hides the footer. */
   draft: SettingsDraft | null;
   /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
-  onDraftChange: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void;
+  onDraftChange: <K extends keyof SettingsDraft>(
+    key: K,
+    value: SettingsDraft[K],
+  ) => void;
 
   /** Which category the rail is on. Controlled, so every pane is reachable as a story. A
    *  category the rail is not offering (Board, on a page with no board) falls back to the
@@ -57,7 +60,10 @@ export interface SettingsPanelViewProps {
    *  account lists and their group checkboxes. */
   accountOrder: AcctOrder;
   /** The new order for one provider's rows, after a drag. */
-  onReorderAccounts: (provider: "claude" | "codex", orderedIds: string[]) => void;
+  onReorderAccounts: (
+    provider: "claude" | "codex",
+    orderedIds: string[],
+  ) => void;
   /** Delete an imported Claude account by email (removes its stored token; reassigns clones). */
   onDeleteAccount: (email: string) => void;
   /** Delete an imported Codex account by email. */
@@ -100,20 +106,6 @@ export interface SettingsPanelViewProps {
   judgeTestMessage: string | null;
   onTestJudge: () => void;
 
-  /** Clone-source images (moved here from the sidebar). */
-  images: ImageInfo[];
-  imagesLoading: boolean;
-  /** True while a template-pull op is running (disables the pull action). */
-  pullBusy: boolean;
-  /** Wall-clock milliseconds, for each image row's age. */
-  now: number;
-  /** Re-pull the configured template reference. The container confirms first. */
-  onPullLatestImage: () => void;
-  /** Pull some other reference. The container asks which one. */
-  onPullOtherImage: () => void;
-  /** Delete an image. The container confirms first. */
-  onDeleteImage: (reference: string) => void;
-
   /** The dashboard board's columns, left to right. Omit to drop the Board category entirely,
    *  which is what a page without a board does. */
   boardColumns?: BoardColumn[];
@@ -128,7 +120,10 @@ export interface SettingsPanelViewProps {
 
 /** The pane each category draws. Keyed rather than switched, so adding a category is a line
  *  here and a line in `SETTINGS_CATEGORIES`. */
-const PANES: Record<SettingsCategory, React.ComponentType<SettingsPaneProps>> = {
+const PANES: Record<
+  SettingsCategory,
+  React.ComponentType<SettingsPaneProps>
+> = {
   board: BoardPane,
   agents: AgentsPane,
   presets: PresetsPane,
@@ -162,7 +157,9 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
   useModalEscape(onClose);
 
   // Board columns are optional, so the rail offers that category only when there are some.
-  const categories = SETTINGS_CATEGORIES.filter((c) => c.id !== "board" || !!boardColumns);
+  const categories = SETTINGS_CATEGORIES.filter(
+    (c) => c.id !== "board" || !!boardColumns,
+  );
   const active = categories.find((c) => c.id === category) ?? categories[0];
   const Pane = PANES[active.id];
 
@@ -174,7 +171,9 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
         {/* Header and banners sit outside the pane, so the rail starts under them and a save
             error stays on screen whichever category it came from. */}
         <div className="flex items-center justify-between px-5 pt-4 pb-2">
-          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">Settings</h2>
+          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+            Settings
+          </h2>
           <button
             type="button"
             onClick={onClose}
@@ -193,7 +192,9 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
 
         {restartRequired ? (
           <div className="mx-5 mb-2 flex items-center gap-3 rounded border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-400">
-            <span>Changed port/socket/video settings need a restart to apply.</span>
+            <span>
+              Changed port/socket/video settings need a restart to apply.
+            </span>
             <button
               type="button"
               onClick={onRestartServer}
@@ -204,11 +205,7 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
           </div>
         ) : null}
 
-        {!draft ? (
-          <p className="flex-1 py-8 text-center text-sm text-slate-400 dark:text-slate-500">
-            Loading…
-          </p>
-        ) : (
+        {draft ? (
           // Rail beside pane on a desktop-width panel, rail above pane on a phone, where a
           // 11rem column would leave the fields too narrow to type in.
           <div className="flex min-h-0 flex-1 flex-col border-t border-slate-100 dark:border-slate-800 sm:flex-row">
@@ -229,6 +226,10 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
               />
             </div>
           </div>
+        ) : (
+          <p className="flex-1 py-8 text-center text-sm text-slate-400 dark:text-slate-500">
+            Loading…
+          </p>
         )}
 
         {/* Footer — a flex sibling of the pane, so it's always pinned flush to the panel's

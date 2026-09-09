@@ -75,10 +75,7 @@ pub fn router(app: App) -> Router {
         .route("/api/server/version", get(server_version))
         .route("/api/server/update", post(server_update))
         .route("/api/server/restart", post(server_restart))
-        .route("/api/images", get(images_list))
-        .route("/api/images/pull", post(images_pull))
         .route("/api/images/prebuild", post(images_prebuild))
-        .route("/api/images/delete", post(images_delete))
         .route("/api/chat/:id", get(chat_get).post(chat_send))
         .route("/api/chat/:id/events", get(chat_events))
         .route("/api/chat/:id/abort", post(chat_abort))
@@ -236,9 +233,7 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     // connect enough — there is no need to repeat it.
     let build_id = json!({ "buildId": app.build_id() }).to_string();
     let version_stream =
-        futures::stream::once(
-            async move { Ok(Event::default().event("version").data(build_id)) },
-        );
+        futures::stream::once(async move { Ok(Event::default().event("version").data(build_id)) });
 
     // Observable heartbeat: a named `ping` event every 15s. Unlike the low-level keep-alive
     // *comment* below (which `EventSource` swallows silently), the client can see this — so
@@ -301,9 +296,16 @@ async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<
     // produced it is a navigation, not a command.
     let req = match req.id.as_deref() {
         Some(id)
-            if app.store.get().hosts.iter().any(|h| h.id == id && h.archived) =>
+            if app
+                .store
+                .get()
+                .hosts
+                .iter()
+                .any(|h| h.id == id && h.archived) =>
         {
-            ActivateReq { id: app.store.get().selected }
+            ActivateReq {
+                id: app.store.get().selected,
+            }
         }
         _ => req,
     };
@@ -599,7 +601,10 @@ fn parse_env_lines(s: &str) -> Vec<String> {
 /// yield a BYTE, so this decodes into bytes and reads UTF-8 back out of them: `\303\251` is one
 /// `é`, never two characters of mojibake.
 fn unquote_shell_value(v: &str) -> String {
-    let Some(inner) = v.strip_prefix("$'").and_then(|rest| rest.strip_suffix('\'')) else {
+    let Some(inner) = v
+        .strip_prefix("$'")
+        .and_then(|rest| rest.strip_suffix('\''))
+    else {
         return v.to_string();
     };
     let src = inner.as_bytes();
@@ -642,7 +647,10 @@ fn unquote_shell_value(v: &str) -> String {
             b'0'..=b'7' => {
                 // Up to three octal digits, counting the one already taken.
                 let end = (i + 2).min(src.len());
-                let more = src[i..end].iter().take_while(|b| (b'0'..=b'7').contains(b)).count();
+                let more = src[i..end]
+                    .iter()
+                    .take_while(|b| (b'0'..=b'7').contains(b))
+                    .count();
                 let oct = std::str::from_utf8(&src[i - 1..i + more]).unwrap_or_default();
                 out.push(u8::from_str_radix(oct, 8).unwrap_or(b'?'));
                 i += more;
@@ -661,7 +669,11 @@ fn merge_env(base: &mut Vec<String>, overrides: &[String]) {
         .iter()
         .filter_map(|e| e.split_once('=').map(|(k, _)| k))
         .collect();
-    base.retain(|e| e.split_once('=').map(|(k, _)| !keys.contains(k)).unwrap_or(true));
+    base.retain(|e| {
+        e.split_once('=')
+            .map(|(k, _)| !keys.contains(k))
+            .unwrap_or(true)
+    });
     base.extend(overrides.iter().cloned());
 }
 
@@ -690,7 +702,8 @@ pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String
         "show-environment".to_string(),
     ];
     let runtime = format!("XDG_RUNTIME_DIR=/run/user/{DESKTOP_UID}");
-    let env = match app
+
+    match app
         .docker
         .exec_capture(clone_id, &cmd, DESKTOP_UID, None, &[runtime], None)
         .await
@@ -709,8 +722,7 @@ pub(crate) async fn desktop_session_env(app: &App, clone_id: &str) -> Vec<String
             tracing::debug!(clone = clone_id, "show-environment exec failed: {e}");
             Vec::new()
         }
-    };
-    env
+    }
 }
 
 /// `POST /api/hosts/:id/exec` — run a single non-interactive command inside the clone via
@@ -824,13 +836,24 @@ fn caller_clone(app: &App, headers: &HeaderMap, peer: Option<std::net::IpAddr>) 
     if let Some(id) = peer.and_then(|ip| clone_at_ip(app, ip)) {
         return Some(id);
     }
-    let header = |name| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+    let header = |name| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
     let by_key = app
         .clone_keys
         .clone_for_token(header("x-rmng-proxy-key").filter(|k| !k.is_empty())?);
     let by_host = header("x-rmng-clone")
         .filter(|h| !h.is_empty())
-        .filter(|h| app.store.get().hosts.iter().any(|c| c.id == *h && c.managed))
+        .filter(|h| {
+            app.store
+                .get()
+                .hosts
+                .iter()
+                .any(|c| c.id == *h && c.managed)
+        })
         .map(str::to_string);
     match (by_host, by_key) {
         (Some(host), Some(key)) if host != key => {
@@ -896,8 +919,11 @@ fn resolve_parent(
         return Ok(None);
     }
     let st = app.store.get();
-    let top_level_managed =
-        |id: &str| st.hosts.iter().any(|h| h.id == id && h.managed && h.parent.is_none());
+    let top_level_managed = |id: &str| {
+        st.hosts
+            .iter()
+            .any(|h| h.id == id && h.managed && h.parent.is_none())
+    };
     if let Some(pid) = explicit {
         return match st.hosts.iter().find(|h| h.id == pid) {
             None => Err(bad(format!("parent clone '{pid}' not found"))),
@@ -1072,7 +1098,13 @@ impl ResolvedIssue {
     /// Only `ticket` is required. `workspace` falls back to the team part of the identifier,
     /// which is where the server's own lookup gets it from too.
     fn from_body(v: &serde_json::Value) -> Result<Self, String> {
-        let field = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("").trim().to_string();
+        let field = |k: &str| {
+            v.get(k)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
         let identifier = field("ticket");
         if identifier.is_empty() {
             return Err("linear.ticket is required (a Linear identifier like \"WE-142\")".into());
@@ -1149,9 +1181,9 @@ async fn clone(
     let bad = |m: String| (StatusCode::BAD_REQUEST, m);
     let str_field = |k: &str| body.get(k).and_then(|v| v.as_str()).map(str::to_string);
 
-    let image = str_field("image")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| bad("body must include { image }".into()))?;
+    // Retired gen-1 field, accepted for compatibility and ignored: gen-2 derives the
+    // image from the effective preset's Dockerfile (see `jobs::start_clone`).
+    let image = str_field("image").unwrap_or_default();
     // Account selections, verbatim as the operator wrote them: an email, `auto`, `none`, or
     // `group:<pool>`.
     //
@@ -1179,15 +1211,30 @@ async fn clone(
         let known: Vec<&str> = pools.iter().map(|p| p.name.as_str()).collect();
         Err(bad(format!(
             "unknown {flag} pool '{name}' (configured: {})",
-            if known.is_empty() { "none".to_string() } else { known.join(", ") }
+            if known.is_empty() {
+                "none".to_string()
+            } else {
+                known.join(", ")
+            }
         )))
     };
-    check_pool(claude_account.as_ref(), &cfg_pools.clone_groups, "claudeAccount")?;
-    check_pool(codex_account.as_ref(), &cfg_pools.codex_groups, "codexAccount")?;
+    check_pool(
+        claude_account.as_ref(),
+        &cfg_pools.clone_groups,
+        "claudeAccount",
+    )?;
+    check_pool(
+        codex_account.as_ref(),
+        &cfg_pools.codex_groups,
+        "codexAccount",
+    )?;
     let agent_instructions = str_field("agentInstructions");
     let claude_instructions = str_field("claudeInstructions");
     // Cross-cutting like `group`/`preset`: a headless clone (no desktop) in any create mode.
-    let headless = body.get("headless").and_then(|v| v.as_bool()).unwrap_or(false);
+    let headless = body
+        .get("headless")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let cfg = app.config();
     let prefix = cfg.docker.hostname_prefix.clone();
 
@@ -1298,16 +1345,12 @@ async fn clone(
                 display_name: Some(display),
                 ..Default::default()
             }),
-            claude_account: account_or_preset_default(
-                claude_account.as_ref(),
-                explicit,
-                |p| &p.claude_account,
-            ),
-            codex_account: account_or_preset_default(
-                codex_account.as_ref(),
-                explicit,
-                |p| &p.codex_account,
-            ),
+            claude_account: account_or_preset_default(claude_account.as_ref(), explicit, |p| {
+                &p.claude_account
+            }),
+            codex_account: account_or_preset_default(codex_account.as_ref(), explicit, |p| {
+                &p.codex_account
+            }),
             first_message: Some(message).filter(|m| !m.is_empty()),
             agent_instructions,
             claude_instructions,
@@ -1389,12 +1432,16 @@ fn ticket_clone_spec(
         }),
         // Ticket mode's preset may have been label-auto-selected, so its account defaults are
         // only knowable once the issue is resolved.
-        claude_account: account_or_preset_default(common.claude_account.as_ref(), Some(preset), |p| {
-            &p.claude_account
-        }),
-        codex_account: account_or_preset_default(common.codex_account.as_ref(), Some(preset), |p| {
-            &p.codex_account
-        }),
+        claude_account: account_or_preset_default(
+            common.claude_account.as_ref(),
+            Some(preset),
+            |p| &p.claude_account,
+        ),
+        codex_account: account_or_preset_default(
+            common.codex_account.as_ref(),
+            Some(preset),
+            |p| &p.codex_account,
+        ),
         first_message: None,
         agent_instructions: common.agent_instructions,
         claude_instructions: common.claude_instructions,
@@ -1433,7 +1480,10 @@ pub(crate) fn compose_playbook(cfg: &wire::AppConfig, preset: Option<&wire::Pres
 /// plus the preset's optional `globalPrompt` append (after a blank line). This is the shared
 /// operating-memory body written to EVERY agent's native rules file (CLAUDE.md / AGENTS.md).
 /// Same shape as [`compose_playbook`] (which yields the node-agent-only b+d append).
-pub(crate) fn compose_global_prompt(cfg: &wire::AppConfig, preset: Option<&wire::Preset>) -> String {
+pub(crate) fn compose_global_prompt(
+    cfg: &wire::AppConfig,
+    preset: Option<&wire::Preset>,
+) -> String {
     let base = cfg.global_prompt.trim();
     match preset
         .map(|p| p.global_prompt.trim())
@@ -1444,68 +1494,7 @@ pub(crate) fn compose_global_prompt(cfg: &wire::AppConfig, preset: Option<&wire:
     }
 }
 
-// --- images (clone-source templates) ---------------------------------------
-
-/// `GET /api/images` — the clone-source images (`rmng.image=1`), each with the names of
-/// the managed containers created from it (`in_use_by`; container name == clone id for
-/// clones). Both halves come from the daemon — Docker, not `state.json`, knows which
-/// containers reference which image. A daemon error surfaces as 502.
-async fn images_list(
-    State(app): State<App>,
-) -> Result<Json<Vec<wire::ImageInfo>>, (StatusCode, String)> {
-    let mut images = app
-        .docker
-        .list_rmng_images()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-    let containers = app
-        .docker
-        .list_managed_containers()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-    fill_in_use_by(&mut images, &containers);
-    Ok(Json(images))
-}
-
-/// Fill each image's `in_use_by` with the names of managed containers whose creation
-/// image equals the image reference. Pure over (images, containers) so it's
-/// unit-testable independent of the daemon.
-fn fill_in_use_by(images: &mut [wire::ImageInfo], containers: &[crate::docker::ManagedContainer]) {
-    for img in images.iter_mut() {
-        img.in_use_by = containers
-            .iter()
-            .filter(|c| c.image == img.reference)
-            .map(|c| c.name.clone())
-            .collect();
-    }
-}
-
-#[derive(Deserialize)]
-struct PullReq {
-    /// Registry reference to pull the template from. Absent/blank ⇒
-    /// `config.docker.templateReference` (the wizard's default). The pulled image keeps this
-    /// `repo:tag` as its clone-source reference — no local retag.
-    #[serde(default)]
-    reference: Option<String>,
-}
-
-/// `POST /api/images/pull` — pull the clone template from a registry (`reference`, default
-/// `config.docker.templateReference`). The pulled image keeps its own `repo:tag` as the
-/// clone-source reference (no retag). Returns the driving Operation (kind `pull`, which the
-/// wizard watches for). Replaces the retired in-product `/api/images/bootstrap` build.
-async fn images_pull(
-    State(app): State<App>,
-    Json(req): Json<PullReq>,
-) -> Result<Json<Operation>, (StatusCode, String)> {
-    let reference = req
-        .reference
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| app.config().docker.template_reference);
-    jobs::start_pull(&app, &reference)
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
-}
+// --- derived images (gen-2 preset builds) -----------------------------------
 
 /// `POST /api/images/prebuild` — warm a preset image without creating: build the posted
 /// Dockerfile text on miss. The preset card's rebuild button posts the editor's current
@@ -1524,63 +1513,6 @@ struct PrebuildReq {
     /// Full Dockerfile text to build (the preset editor's current text).
     #[serde(default)]
     dockerfile: String,
-}
-
-#[derive(Deserialize)]
-struct ImageDeleteReq {
-    /// Image reference or id to remove.
-    reference: String,
-}
-
-/// `POST /api/images/delete` — remove a clone-source image. 409 (Conflict) when the image is
-/// still referenced: a managed container was created from it (per the daemon — the same
-/// dependency that would make the daemon's own no-force removal fail, surfaced with the
-/// container names), OR a running op (clone/commit) uses it.
-async fn images_delete(
-    State(app): State<App>,
-    Json(req): Json<ImageDeleteReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let reference = req.reference.trim();
-    if reference.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "reference is required".into()));
-    }
-    let containers = app
-        .docker
-        .list_managed_containers()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-    let users: Vec<String> = containers
-        .iter()
-        .filter(|c| c.image == reference)
-        .map(|c| c.name.clone())
-        .collect();
-    if !users.is_empty() {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "image is in use by {} clone(s): {}",
-                users.len(),
-                users.join(", ")
-            ),
-        ));
-    }
-    // A running clone-from-this-image or commit-to-this-reference also blocks removal.
-    let busy = app.store.get().operations.iter().any(|o| {
-        o.status == wire::OperationStatus::Running
-            && (o.source.as_deref() == Some(reference) || o.target == reference)
-    });
-    if busy {
-        return Err((
-            StatusCode::CONFLICT,
-            "image is in use by a running operation".into(),
-        ));
-    }
-    app.docker
-        .remove_image(reference)
-        .await
-        // The daemon's no-force removal 409s when a container still holds it; surface as 409.
-        .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
-    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -1652,13 +1584,26 @@ async fn fork(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let cfg = app.config();
     let prefix = cfg.docker.hostname_prefix.as_str();
-    let hostname = match req.hostname.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()) {
+    let hostname = match req
+        .hostname
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+    {
         Some(h) => h,
         None => {
-            let base = match req.linear.as_ref().and_then(|l| l.ticket.clone()).filter(|t| !t.is_empty()) {
+            let base = match req
+                .linear
+                .as_ref()
+                .and_then(|l| l.ticket.clone())
+                .filter(|t| !t.is_empty())
+            {
                 Some(ticket) => naming::ticket_hostname_base(prefix, &ticket),
                 None => {
-                    let title = req.linear.as_ref().and_then(|l| l.display_name.clone()).unwrap_or_default();
+                    let title = req
+                        .linear
+                        .as_ref()
+                        .and_then(|l| l.display_name.clone())
+                        .unwrap_or_default();
                     naming::plain_hostname_base(prefix, &title)
                 }
             };
@@ -1868,7 +1813,8 @@ const UPLOAD_RELAY_TIMEOUT_SECS: u64 = 45;
 ///
 /// `content-length` is reqwest's to set from the body it is given, and `host` is reqwest's to
 /// set from the URL it is dialing. The other two are hop-by-hop by definition.
-const UPLOAD_RELAY_DROPPED: [&str; 4] = ["host", "content-length", "transfer-encoding", "connection"];
+const UPLOAD_RELAY_DROPPED: [&str; 4] =
+    ["host", "content-length", "transfer-encoding", "connection"];
 
 /// The headers to replay, out of the `[{ "key": ..., "value": ... }]` the browser sent.
 ///
@@ -1959,16 +1905,18 @@ async fn linear_upload_relay(
     let mut headers_raw = String::new();
     let mut body: Option<Vec<u8>> = None;
 
-    while let Some(field) = mp
-        .next_field()
-        .await
-        .map_err(|e| bad(e.to_string()))?
-    {
+    while let Some(field) = mp.next_field().await.map_err(|e| bad(e.to_string()))? {
         match field.name().unwrap_or("").to_string().as_str() {
             "url" => url = field.text().await.map_err(|e| bad(e.to_string()))?,
             "headers" => headers_raw = field.text().await.map_err(|e| bad(e.to_string()))?,
             "file" => {
-                body = Some(field.bytes().await.map_err(|e| bad(e.to_string()))?.to_vec());
+                body = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| bad(e.to_string()))?
+                        .to_vec(),
+                );
             }
             _ => {}
         }
@@ -2121,7 +2069,12 @@ async fn fetch_asset(
     for key in keys {
         // No per-attempt deadline: the caller holds one for the whole request, keys and body
         // together, so that adding a preset cannot add 20 seconds to how long one hop runs.
-        let resp = match http.get(url).header(header::AUTHORIZATION, key).send().await {
+        let resp = match http
+            .get(url)
+            .header(header::AUTHORIZATION, key)
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 last = format!("the asset host was unreachable: {e}");
@@ -2133,7 +2086,10 @@ async fn fetch_asset(
             // 401 and 403 are "not this key", which is the whole reason for the loop. Every
             // other status is remembered the same way, so what gets reported is the last
             // answer seen rather than a guess about which key should have worked.
-            last = format!("Linear answered HTTP {} for that asset", resp.status().as_u16());
+            last = format!(
+                "Linear answered HTTP {} for that asset",
+                resp.status().as_u16()
+            );
             continue;
         }
         return Ok(resp);
@@ -2177,7 +2133,10 @@ async fn asset_response(
         .to_string();
     // A length past the cap is refused before a byte is read, so the common oversized case
     // costs one round trip and the caller gets a status rather than a cut-off image.
-    if resp.content_length().is_some_and(|n| n > LINEAR_ASSET_MAX_BYTES as u64) {
+    if resp
+        .content_length()
+        .is_some_and(|n| n > LINEAR_ASSET_MAX_BYTES as u64)
+    {
         return Err((StatusCode::BAD_GATEWAY, asset_too_large()));
     }
     Ok((
@@ -2248,11 +2207,17 @@ async fn ledger_search(
     let data_dir = app.config().data_dir;
     let query = crate::ledger::SearchQuery {
         pattern,
-        clone: q.clone.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
+        clone: q
+            .clone
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty()),
         since_ms: q.since,
         until_ms: q.until,
         sidechain: q.sidechain,
-        agent: q.agent.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()),
+        agent: q
+            .agent
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty()),
         limit: q.limit.unwrap_or_else(crate::ledger::default_limit),
     };
     // Blocking: one search can read every ledger file on disk.
@@ -2447,7 +2412,11 @@ async fn config_test(State(app): State<App>, Json(req): Json<TestReq>) -> Json<s
         }
         "judge" => {
             let stored = app.config().judge;
-            let model = if req.model.is_empty() { stored.codex_model } else { req.model };
+            let model = if req.model.is_empty() {
+                stored.codex_model
+            } else {
+                req.model
+            };
             crate::stuck::probe_codex(&app, &req.value, &model).await
         }
         other => (false, format!("unknown test '{other}'")),
@@ -2529,8 +2498,6 @@ async fn server_restart(
 }
 
 // --- clone → group binding -------------------------------------------------
-
-
 
 // --- per-clone chat ---------------------------------------------------------
 
@@ -2646,7 +2613,6 @@ async fn chat_schedule_cancel(
     Ok(StatusCode::NO_CONTENT)
 }
 
-
 // --- Claude + Codex accounts ------------------------------------------------
 
 /// An error body the frontend's `postJson` reads as `{ error }` (vs. a bare string).
@@ -2655,7 +2621,6 @@ fn err_json(code: StatusCode, msg: impl ToString) -> (StatusCode, Json<serde_jso
 }
 
 type JsonResult = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
-
 
 /// `POST /api/claude/import/check` — confirm a clone is signed in to Claude Code via
 /// claude.ai and report the account identity (so the UI can show it before the
@@ -2672,7 +2637,10 @@ struct LoginBeginReq {
 /// the `state` that will come back in the callback, until the paste or the timeout.
 async fn login_begin(State(app): State<App>, Json(req): Json<LoginBeginReq>) -> JsonResult {
     let provider = crate::oauth::Provider::parse(&req.provider).ok_or_else(|| {
-        err_json(StatusCode::BAD_REQUEST, format!("unknown provider '{}'", req.provider))
+        err_json(
+            StatusCode::BAD_REQUEST,
+            format!("unknown provider '{}'", req.provider),
+        )
     })?;
     let url = crate::oauth::begin(&app, provider)
         .map_err(|e| err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
@@ -2705,12 +2673,19 @@ struct LoginCompleteReq {
 /// code is one of those, so it is not a 502.
 async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq>) -> JsonResult {
     let provider = crate::oauth::Provider::parse(&req.provider).ok_or_else(|| {
-        err_json(StatusCode::BAD_REQUEST, format!("unknown provider '{}'", req.provider))
+        err_json(
+            StatusCode::BAD_REQUEST,
+            format!("unknown provider '{}'", req.provider),
+        )
     })?;
     let replaces = req.replaces.trim().to_string();
     // A replacement joins its predecessor's pools, so the modal's pool pick is not asked for
     // and must not be applied on top of them.
-    let group = if replaces.is_empty() { req.group.as_str() } else { "" };
+    let group = if replaces.is_empty() {
+        req.group.as_str()
+    } else {
+        ""
+    };
     let email = crate::oauth::complete(&app, provider, &req.pasted, group)
         .await
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
@@ -2752,9 +2727,6 @@ async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq
         "moved": moved,
     })))
 }
-
-
-
 
 /// `POST /api/claude/refresh` — force one usage poll now.
 async fn claude_refresh(State(app): State<App>) -> Json<serde_json::Value> {
@@ -2812,16 +2784,19 @@ async fn claude_swap(
             format!("'{}' is not a managed clone", host.id),
         ));
     }
-    let assignment =
-        crate::claude::resolve_assignment(&app, Some(&req.account), host.claude_account_email.as_deref())
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "no Claude account can take this clone: none is imported, or every one \
+    let assignment = crate::claude::resolve_assignment(
+        &app,
+        Some(&req.account),
+        host.claude_account_email.as_deref(),
+    )
+    .ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "no Claude account can take this clone: none is imported, or every one \
                      that could has a token that expired and cannot be refreshed"
-                        .into(),
-                )
-            })?;
+                .into(),
+        )
+    })?;
     let selection = crate::claude::normalize_selection(Some(&req.account));
     let (group, email) = match assignment {
         crate::claude::Assignment::None => {
@@ -2888,9 +2863,6 @@ async fn claude_rotate(State(app): State<App>) -> Json<serde_json::Value> {
 
 // --- Codex accounts --------------------------------------------------------
 
-
-
-
 /// `POST /api/codex/refresh` — force one usage poll now.
 async fn codex_refresh(State(app): State<App>) -> Json<serde_json::Value> {
     Json(
@@ -2932,15 +2904,19 @@ async fn codex_swap(
             format!("'{}' is not a managed clone", host.id),
         ));
     }
-    let assignment = crate::codex::resolve_assignment(&app, Some(&req.account), host.codex_account_email.as_deref())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "no Codex account can take this clone: none is imported, or every one that \
+    let assignment = crate::codex::resolve_assignment(
+        &app,
+        Some(&req.account),
+        host.codex_account_email.as_deref(),
+    )
+    .ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "no Codex account can take this clone: none is imported, or every one that \
                  could has a token that expired and cannot be refreshed"
-                    .into(),
-            )
-        })?;
+                .into(),
+        )
+    })?;
     let selection = crate::codex::normalize_selection(Some(&req.account));
     let (group, email) = match assignment {
         crate::codex::Assignment::None => {
@@ -3000,102 +2976,7 @@ async fn codex_rotate(State(app): State<App>) -> Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::docker::ManagedContainer;
     use axum::http::HeaderName;
-    use wire::ImageInfo;
-
-    fn image(reference: &str) -> ImageInfo {
-        ImageInfo {
-            id: format!("sha256:{reference}"),
-            reference: reference.into(),
-            size_bytes: 0,
-            created_at: String::new(),
-            base: false,
-            created_from: None,
-            in_use_by: Vec::new(),
-        }
-    }
-    fn container_on(name: &str, image: &str) -> ManagedContainer {
-        ManagedContainer {
-            name: name.into(),
-            image: image.into(),
-            running: true,
-        }
-    }
-
-    fn column(id: &str, clone_ids: &[&str]) -> wire::BoardColumn {
-        wire::BoardColumn {
-            id: id.into(),
-            title: id.into(),
-            clone_ids: clone_ids.iter().map(|s| (*s).to_string()).collect(),
-            archive: false,
-        }
-    }
-
-    #[tokio::test]
-    async fn board_columns_are_replaced_wholesale_and_persist() {
-        let app = App::test_app();
-
-        board_put(State(app.clone()), Json(BoardPutReq { columns: vec![column("todo", &["a"])] }))
-            .await;
-        // A second write is a replacement, not a merge: the operator deleting a column has to
-        // be able to make the board smaller.
-        let after =
-            board_put(State(app.clone()), Json(BoardPutReq { columns: vec![column("doing", &[])] }))
-                .await;
-
-        assert_eq!(after.0.board_columns, vec![column("doing", &[])]);
-        assert_eq!(app.store.get().board_columns, vec![column("doing", &[])]);
-    }
-
-    #[tokio::test]
-    async fn an_empty_column_list_clears_the_board() {
-        let app = App::test_app();
-        board_put(State(app.clone()), Json(BoardPutReq { columns: vec![column("todo", &[])] }))
-            .await;
-
-        board_put(State(app.clone()), Json(BoardPutReq { columns: Vec::new() })).await;
-
-        // Deleting the last column is legal; the frontend falls back to a default column so
-        // no clone is ever left without one.
-        assert!(app.store.get().board_columns.is_empty());
-    }
-
-    #[test]
-    fn in_use_by_maps_containers_by_creation_image() {
-        let mut images = vec![image("rmng/template:a"), image("rmng/template:b")];
-        let containers = vec![
-            container_on("h1", "rmng/template:a"),
-            container_on("h2", "rmng/template:a"),
-            container_on("h3", "rmng/template:b"),
-            container_on("h5", "rmng/template:z"), // image not in the list → ignored
-        ];
-        fill_in_use_by(&mut images, &containers);
-        assert_eq!(images[0].in_use_by, vec!["h1", "h2"]);
-        assert_eq!(images[1].in_use_by, vec!["h3"]);
-    }
-
-    #[test]
-    fn in_use_by_empty_when_no_containers_reference_it() {
-        let mut images = vec![image("rmng/template:a")];
-        let containers = vec![container_on("h1", "rmng/template:other")];
-        fill_in_use_by(&mut images, &containers);
-        assert!(images[0].in_use_by.is_empty());
-    }
-
-
-
-
-
-
-
-    // --- POST /api/images/pull (the endpoint that replaced /api/images/bootstrap) ---
-    //
-    // Handlers are called directly: `State`/`Json` are public tuple structs, so no HTTP
-    // harness is needed. Docker is absent in tests, so a `start_pull` that passes the guards
-    // spawns a background pull that fails later — but the test never yields (current-thread
-    // runtime), so the returned op is observed before that task runs.
-
     use std::sync::Arc;
 
     fn test_app() -> App {
@@ -3114,140 +2995,62 @@ mod tests {
         App::new(store, cfg)
     }
 
-    #[tokio::test]
-    async fn the_ledger_routes_find_a_line_and_read_back_around_it() {
-        let app = test_app();
-        // Stand in for what the tailer writes: two events of one retired clone's session.
-        let dir = crate::ledger::ledger_root(&app.config().data_dir).join("pega-we-142");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("sess-1.ndjson"),
-            "{\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:00:00.000Z\",\"kind\":\"user\",\"text\":\"swap the encoder to VA-API\"}\n\
-             {\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:05:00.000Z\",\"kind\":\"assistant\",\"text\":\"done, the encoder is VA-API now\"}\n\
-             {\"clone\":\"pega-we-142\",\"session\":\"sess-1\",\"ts\":\"2026-08-01T10:04:00.000Z\",\"kind\":\"assistant\",\"agentId\":\"a7\",\"sidechain\":true,\"text\":\"the VA-API path builds\"}\n",
-        )
-        .unwrap();
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
-        let base = format!("http://{addr}");
-        let http = reqwest::Client::new();
-
-        // A search with no pattern is a 400 rather than a full dump.
-        let bad = http.get(format!("{base}/api/ledger/search")).send().await.unwrap();
-        assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
-
-        let found: serde_json::Value = http
-            .get(format!("{base}/api/ledger/search?q=VA-API&clone=pega-we-142"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let hits = found["hits"].as_array().unwrap();
-        assert_eq!(hits.len(), 3);
-        // Newest first, and the clone is named even though it no longer exists in state.
-        assert_eq!(hits[0]["kind"], "assistant");
-        assert_eq!(hits[0]["clone"], "pega-we-142");
-
-        // `sidechain` and `agent` split the conversation from the subagents it spawned.
-        for (query, want) in [("sidechain=true", 1), ("sidechain=false", 2), ("agent=a7", 1)] {
-            let got: serde_json::Value = http
-                .get(format!("{base}/api/ledger/search?q=VA-API&{query}"))
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            assert_eq!(got["hits"].as_array().unwrap().len(), want, "{query}");
+    fn column(id: &str, clone_ids: &[&str]) -> wire::BoardColumn {
+        wire::BoardColumn {
+            id: id.into(),
+            title: id.into(),
+            clone_ids: clone_ids.iter().map(|s| (*s).to_string()).collect(),
+            archive: false,
         }
-
-        // The hit's own offset reads back as exactly that line.
-        let hit = &hits[2];
-        let range: serde_json::Value = http
-            .get(format!(
-                "{base}/api/ledger/read?clone=pega-we-142&session=sess-1&offset={}&len={}",
-                hit["offset"], hit["len"]
-            ))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let text = range["text"].as_str().unwrap();
-        assert_eq!(text.lines().count(), 1);
-        assert!(text.contains("swap the encoder"));
-
-        // Reading from 0 picks up every line, and `size` says how much there is.
-        let whole: serde_json::Value = http
-            .get(format!("{base}/api/ledger/read?clone=pega-we-142&session=sess-1"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(whole["text"].as_str().unwrap().lines().count(), 3);
-        assert_eq!(whole["size"], whole["len"]);
-
-        // A time bound cuts the earlier half.
-        let late: serde_json::Value = http
-            // 2026-08-01T10:02:00Z, between the two records.
-            .get(format!("{base}/api/ledger/search?q=encoder&since=1785578520000"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(late["hits"].as_array().unwrap().len(), 1);
-        assert_eq!(late["hits"][0]["kind"], "assistant");
     }
 
     #[tokio::test]
-    async fn images_pull_registers_pull_op_and_defaults_reference() {
-        let app = test_app();
-        // `reference: None` → defaults to config.docker.template_reference; the op targets that
-        // reference (no local name/retag).
-        let op = images_pull(State(app.clone()), Json(PullReq { reference: None }))
-            .await
-            .unwrap()
-            .0;
-        assert_eq!(op.kind, wire::OperationKind::Pull);
-        assert_eq!(op.target, app.config().docker.template_reference);
-        assert_eq!(op.status, wire::OperationStatus::Running);
-        // The op is registered in state (the wizard watches it over /events).
-        assert!(app.store.get().operations.iter().any(|o| o.id == op.id));
+    async fn board_columns_are_replaced_wholesale_and_persist() {
+        let app = App::test_app();
+
+        board_put(
+            State(app.clone()),
+            Json(BoardPutReq {
+                columns: vec![column("todo", &["a"])],
+            }),
+        )
+        .await;
+        // A second write is a replacement, not a merge: the operator deleting a column has to
+        // be able to make the board smaller.
+        let after = board_put(
+            State(app.clone()),
+            Json(BoardPutReq {
+                columns: vec![column("doing", &[])],
+            }),
+        )
+        .await;
+
+        assert_eq!(after.0.board_columns, vec![column("doing", &[])]);
+        assert_eq!(app.store.get().board_columns, vec![column("doing", &[])]);
     }
 
     #[tokio::test]
-    async fn images_pull_rejects_duplicate_in_flight() {
-        let app = test_app();
-        // A blank reference defaults to config.docker.template_reference; the first pull
-        // registers a Running op targeting that reference.
-        let _first = images_pull(
+    async fn an_empty_column_list_clears_the_board() {
+        let app = App::test_app();
+        board_put(
             State(app.clone()),
-            Json(PullReq {
-                reference: Some("   ".into()),
+            Json(BoardPutReq {
+                columns: vec![column("todo", &[])],
             }),
         )
-        .await
-        .unwrap();
-        // A second pull for the same reference is rejected while the first is in flight.
-        let err = images_pull(
+        .await;
+
+        board_put(
             State(app.clone()),
-            Json(PullReq {
-                reference: Some("pegasis0/rmng-template:latest".into()),
+            Json(BoardPutReq {
+                columns: Vec::new(),
             }),
         )
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("already being pulled"), "msg: {}", err.1);
+        .await;
+
+        // Deleting the last column is legal; the frontend falls back to a default column so
+        // no clone is ever left without one.
+        assert!(app.store.get().board_columns.is_empty());
     }
 
     // --- POST /api/activate (selection, and the layout that follows it) ---
@@ -3272,7 +3075,13 @@ mod tests {
             s.selected = Some("w1".into());
         });
 
-        let _ = activate(State(app.clone()), Json(ActivateReq { id: Some("w2".into()) })).await;
+        let _ = activate(
+            State(app.clone()),
+            Json(ActivateReq {
+                id: Some("w2".into()),
+            }),
+        )
+        .await;
 
         let got = crate::mediaplane::recv_now(&client).expect("the clone got a layout push");
         match serde_json::from_slice::<wire::socket::ServerMsg>(&got).unwrap() {
@@ -3283,8 +3092,17 @@ mod tests {
         }
 
         // Re-selecting the same clone is not a switch. Nothing changed, so nothing is pushed.
-        let _ = activate(State(app.clone()), Json(ActivateReq { id: Some("w2".into()) })).await;
-        assert!(crate::mediaplane::recv_now(&client).is_none(), "a no-op select pushed a layout");
+        let _ = activate(
+            State(app.clone()),
+            Json(ActivateReq {
+                id: Some("w2".into()),
+            }),
+        )
+        .await;
+        assert!(
+            crate::mediaplane::recv_now(&client).is_none(),
+            "a no-op select pushed a layout"
+        );
     }
 
     // --- GET /api/state (single-shot snapshot for the rmng CLI) ---
@@ -3306,7 +3124,6 @@ mod tests {
         assert_eq!(st.selected.as_deref(), Some("w1"));
     }
 
-
     // --- POST /api/clone `hostname` mode (raw clone, fleet CLI) ---
 
     #[tokio::test]
@@ -3317,7 +3134,10 @@ mod tests {
             "hostname": "w-mod-claude",
             "claudeAccount": "auto",
         });
-        let resp = clone(State(app.clone()), None, HeaderMap::new(), Json(body)).await.unwrap().0;
+        let resp = clone(State(app.clone()), None, HeaderMap::new(), Json(body))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(resp["ok"], true);
         let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
         assert_eq!(op.kind, wire::OperationKind::Clone);
@@ -3330,7 +3150,9 @@ mod tests {
     async fn clone_hostname_mode_rejects_bad_label() {
         let app = test_app();
         let body = json!({ "image": "tmpl:latest", "hostname": "Not A Label!" });
-        let err = clone(State(app.clone()), None, HeaderMap::new(), Json(body)).await.unwrap_err();
+        let err = clone(State(app.clone()), None, HeaderMap::new(), Json(body))
+            .await
+            .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("DNS label"), "msg: {}", err.1);
     }
@@ -3339,7 +3161,9 @@ mod tests {
     async fn clone_hostname_mode_rejects_unknown_preset() {
         let app = test_app();
         let body = json!({ "image": "tmpl:latest", "hostname": "w1", "preset": "nope" });
-        let err = clone(State(app.clone()), None, HeaderMap::new(), Json(body)).await.unwrap_err();
+        let err = clone(State(app.clone()), None, HeaderMap::new(), Json(body))
+            .await
+            .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
     }
@@ -3417,7 +3241,11 @@ mod tests {
         assert_eq!(spec.claude_account.as_deref(), Some("auto"));
         // Preset vars are gone (all static env lives in the preset Dockerfile); the only
         // runtime preset inject is the Linear key.
-        assert!(spec.env.iter().any(|v| v.key == "LINEAR_API_KEY" && v.value == "lin_w"));
+        assert!(
+            spec.env
+                .iter()
+                .any(|v| v.key == "LINEAR_API_KEY" && v.value == "lin_w")
+        );
         assert_eq!(spec.env.len(), 1);
     }
 
@@ -3430,7 +3258,9 @@ mod tests {
         // A blank label is no label rather than an empty one.
         assert_eq!(issue.label, None);
         assert_eq!(
-            ResolvedIssue::from_body(&json!({ "ticket": "WE-1", "label": "  " })).unwrap().label,
+            ResolvedIssue::from_body(&json!({ "ticket": "WE-1", "label": "  " }))
+                .unwrap()
+                .label,
             None
         );
     }
@@ -3450,7 +3280,10 @@ mod tests {
         let app = ticket_app();
         let body = json!({ "image": "tmpl:latest", "linear": issue_body(), "preset": "work" });
 
-        let resp = clone(State(app.clone()), None, HeaderMap::new(), Json(body)).await.unwrap().0;
+        let resp = clone(State(app.clone()), None, HeaderMap::new(), Json(body))
+            .await
+            .unwrap()
+            .0;
 
         assert_eq!(resp["ok"], true);
         let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
@@ -3484,7 +3317,11 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("no preset matches ticket XX-9"), "msg: {}", err.1);
+        assert!(
+            err.1.contains("no preset matches ticket XX-9"),
+            "msg: {}",
+            err.1
+        );
         assert!(err.1.contains("work"), "msg: {}", err.1);
     }
 
@@ -3501,7 +3338,11 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("{ linear }, { plain } or { hostname }"), "msg: {}", err.1);
+        assert!(
+            err.1.contains("{ linear }, { plain } or { hostname }"),
+            "msg: {}",
+            err.1
+        );
     }
 
     /// Every create mode honours `parent`, not just the fleet-CLI hostname mode.
@@ -3568,8 +3409,14 @@ mod tests {
         let empty = HeaderMap::new();
 
         // `topLevel` forces a top-level clone; no hints also → top-level.
-        assert_eq!(resolve_parent(&app, &json!({ "topLevel": true }), &empty, None).unwrap(), None);
-        assert_eq!(resolve_parent(&app, &json!({}), &empty, None).unwrap(), None);
+        assert_eq!(
+            resolve_parent(&app, &json!({ "topLevel": true }), &empty, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_parent(&app, &json!({}), &empty, None).unwrap(),
+            None
+        );
         // A valid explicit top-level parent is accepted.
         assert_eq!(
             resolve_parent(&app, &json!({ "parent": "p" }), &empty, None).unwrap(),
@@ -3580,7 +3427,15 @@ mod tests {
             assert!(resolve_parent(&app, &json!({ "parent": pid }), &empty, None).is_err());
         }
         // `parent` + `topLevel` together is an error.
-        assert!(resolve_parent(&app, &json!({ "parent": "p", "topLevel": true }), &empty, None).is_err());
+        assert!(
+            resolve_parent(
+                &app,
+                &json!({ "parent": "p", "topLevel": true }),
+                &empty,
+                None
+            )
+            .is_err()
+        );
     }
 
     /// Deleting a pool must not strand the clones bound to it.
@@ -3591,7 +3446,10 @@ mod tests {
     #[test]
     fn deleting_a_pool_repoints_its_clones_at_auto() {
         let app = test_app();
-        let pool = |n: &str| wire::CloneGroup { name: n.into(), accounts: vec![] };
+        let pool = |n: &str| wire::CloneGroup {
+            name: n.into(),
+            accounts: vec![],
+        };
         let old = wire::AppConfig {
             clone_groups: vec![pool("keep"), pool("doomed")],
             codex_groups: vec![pool("gpt")],
@@ -3634,7 +3492,14 @@ mod tests {
         };
         heal_dangling_pool_bindings(&app, &old, &merged);
 
-        let by_id = |id: &str| app.store.get().hosts.into_iter().find(|h| h.id == id).unwrap();
+        let by_id = |id: &str| {
+            app.store
+                .get()
+                .hosts
+                .into_iter()
+                .find(|h| h.id == id)
+                .unwrap()
+        };
         // The stranded clone keeps working, on `auto`, and no longer names a pool that is gone.
         let bound = by_id("bound");
         assert_eq!(bound.claude_selection.as_deref(), Some("auto"));
@@ -3664,13 +3529,18 @@ mod tests {
     async fn clone_rejects_an_unknown_account_pool() {
         let app = test_app();
         *app.cfg.write().unwrap() = wire::AppConfig {
-            clone_groups: vec![wire::CloneGroup { name: "pooled".into(), accounts: vec![] }],
-            codex_groups: vec![wire::CloneGroup { name: "gpt".into(), accounts: vec![] }],
+            clone_groups: vec![wire::CloneGroup {
+                name: "pooled".into(),
+                accounts: vec![],
+            }],
+            codex_groups: vec![wire::CloneGroup {
+                name: "gpt".into(),
+                accounts: vec![],
+            }],
             ..app.config()
         };
-        let create = |body: serde_json::Value| {
-            clone(State(app.clone()), None, HeaderMap::new(), Json(body))
-        };
+        let create =
+            |body: serde_json::Value| clone(State(app.clone()), None, HeaderMap::new(), Json(body));
 
         // A configured pool is accepted (reaches the op, i.e. past validation).
         let ok = create(json!({
@@ -3686,7 +3556,11 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("pooed") && err.1.contains("pooled"), "unhelpful: {}", err.1);
+        assert!(
+            err.1.contains("pooed") && err.1.contains("pooled"),
+            "unhelpful: {}",
+            err.1
+        );
 
         // The two providers have independent pool lists — a Claude pool is not a Codex pool.
         let err = create(json!({
@@ -3722,7 +3596,8 @@ mod tests {
         let p = Some(&presets[0]);
 
         // No request, no parent → the preset decides, per provider.
-        let (c, x, _) = effective_accounts_preset(None, false, None, false, None, true, p, &presets);
+        let (c, x, _) =
+            effective_accounts_preset(None, false, None, false, None, true, p, &presets);
         assert_eq!(c.as_deref(), Some("group:pooled"));
         assert_eq!(x.as_deref(), Some("gpt@team.com"));
 
@@ -3739,7 +3614,10 @@ mod tests {
             &presets,
         );
         assert_eq!(c.as_deref(), Some("me@x.com"));
-        assert_eq!(x, None, "an explicit clear must not be back-filled by the preset");
+        assert_eq!(
+            x, None,
+            "an explicit clear must not be back-filled by the preset"
+        );
 
         // A parent's selection outranks it too (sub clones follow their parent, not the preset).
         let parent = wire::RmngClone {
@@ -3749,7 +3627,11 @@ mod tests {
         };
         let (c, x, _) =
             effective_accounts_preset(Some(&parent), false, None, false, None, true, p, &presets);
-        assert_eq!(c.as_deref(), Some("auto"), "the parent wins over the preset");
+        assert_eq!(
+            c.as_deref(),
+            Some("auto"),
+            "the parent wins over the preset"
+        );
         // ...but only for the provider the parent actually had. Codex still falls to the preset.
         assert_eq!(x.as_deref(), Some("gpt@team.com"));
     }
@@ -3759,7 +3641,10 @@ mod tests {
     /// preset to an empty string instead of letting the account layer pick.
     #[test]
     fn a_blank_preset_default_is_no_opinion() {
-        let presets = vec![wire::Preset { name: "bare".into(), ..Default::default() }];
+        let presets = vec![wire::Preset {
+            name: "bare".into(),
+            ..Default::default()
+        }];
         let (c, x, _) = effective_accounts_preset(
             None,
             false,
@@ -3804,16 +3689,31 @@ mod tests {
             Some("group:pooled")
         );
         // Blank preset default, and no preset at all, both fall through.
-        let bare = wire::Preset { name: "bare".into(), ..Default::default() };
-        assert_eq!(account_or_preset_default(None, Some(&bare), |p| &p.claude_account), None);
-        assert_eq!(account_or_preset_default(None, None, |p| &p.claude_account), None);
+        let bare = wire::Preset {
+            name: "bare".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            account_or_preset_default(None, Some(&bare), |p| &p.claude_account),
+            None
+        );
+        assert_eq!(
+            account_or_preset_default(None, None, |p| &p.claude_account),
+            None
+        );
     }
 
     #[test]
     fn sub_clone_inherits_accounts_and_preset_unless_overridden() {
         let presets = vec![
-            wire::Preset { name: "parent-preset".into(), ..Default::default() },
-            wire::Preset { name: "override-preset".into(), ..Default::default() },
+            wire::Preset {
+                name: "parent-preset".into(),
+                ..Default::default()
+            },
+            wire::Preset {
+                name: "override-preset".into(),
+                ..Default::default()
+            },
         ];
         // The parent is on `auto` and has LANDED on a concrete account. What a sub clone
         // inherits is the *selection*, not the resolved email — otherwise a child asking for
@@ -3830,9 +3730,21 @@ mod tests {
         let name = |p: Option<&wire::Preset>| p.map(|p| p.name.clone());
 
         // Nothing specified → inherit all three from the parent.
-        let (c, x, pr) =
-            effective_accounts_preset(Some(&parent), false, None, false, None, false, None, &presets);
-        assert_eq!(c, Some("auto".into()), "the selection is inherited, not the resolved email");
+        let (c, x, pr) = effective_accounts_preset(
+            Some(&parent),
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &presets,
+        );
+        assert_eq!(
+            c,
+            Some("auto".into()),
+            "the selection is inherited, not the resolved email"
+        );
         assert_eq!(x, Some("group:gpt".into()));
         assert_eq!(name(pr), Some("parent-preset".into()));
 
@@ -3848,7 +3760,11 @@ mod tests {
             &presets,
         );
         assert_eq!(c, Some("me@x.com".into()));
-        assert_eq!(x, Some("group:gpt".into()), "an unspecified provider still inherits");
+        assert_eq!(
+            x,
+            Some("group:gpt".into()),
+            "an unspecified provider still inherits"
+        );
         assert_eq!(name(pr), Some("override-preset".into()));
 
         // Explicit `none` (specified, but resolving to None) opts out of inheritance.
@@ -3866,14 +3782,22 @@ mod tests {
         assert!(pr.is_none());
 
         // Parent names a preset that no longer exists → gracefully no preset.
-        let orphan = wire::RmngClone { preset_name: Some("gone".into()), ..parent.clone() };
-        let (_c, _x, pr) =
-            effective_accounts_preset(Some(&orphan), false, None, false, None, false, None, &presets);
+        let orphan = wire::RmngClone {
+            preset_name: Some("gone".into()),
+            ..parent.clone()
+        };
+        let (_c, _x, pr) = effective_accounts_preset(
+            Some(&orphan),
+            false,
+            None,
+            false,
+            None,
+            false,
+            None,
+            &presets,
+        );
         assert!(pr.is_none());
     }
-
-
-
 
     #[tokio::test]
     async fn resolve_parent_auto_detects_caller_router_key() {
@@ -3882,7 +3806,10 @@ mod tests {
         push_clone(&app, "c", true, Some("p"));
         let header = |key: &str| {
             let mut h = HeaderMap::new();
-            h.insert(HeaderName::from_static("x-rmng-proxy-key"), key.parse().unwrap());
+            h.insert(
+                HeaderName::from_static("x-rmng-proxy-key"),
+                key.parse().unwrap(),
+            );
             h
         };
 
@@ -3894,9 +3821,15 @@ mod tests {
         );
         // A sub-clone caller can't nest deeper (one level) → top-level.
         let key_c = app.clone_keys.mint("c");
-        assert_eq!(resolve_parent(&app, &json!({}), &header(&key_c), None).unwrap(), None);
+        assert_eq!(
+            resolve_parent(&app, &json!({}), &header(&key_c), None).unwrap(),
+            None
+        );
         // An unrecognized key → top-level.
-        assert_eq!(resolve_parent(&app, &json!({}), &header("bogus"), None).unwrap(), None);
+        assert_eq!(
+            resolve_parent(&app, &json!({}), &header("bogus"), None).unwrap(),
+            None
+        );
         // An explicit `topLevel` overrides the caller key.
         assert_eq!(
             resolve_parent(&app, &json!({ "topLevel": true }), &header(&key_p), None).unwrap(),
@@ -4013,7 +3946,10 @@ mod tests {
         headers.insert("x-rmng-clone", "pega-template".parse().unwrap());
         let peer = Some(std::net::IpAddr::from([10, 99, 0, 6]));
 
-        assert_eq!(caller_clone(&app, &headers, peer).as_deref(), Some("pega-we-649"));
+        assert_eq!(
+            caller_clone(&app, &headers, peer).as_deref(),
+            Some("pega-we-649")
+        );
         let me = clone_self(State(app.clone()), connect_info(peer), headers.clone())
             .await
             .unwrap();
@@ -4031,7 +3967,10 @@ mod tests {
     async fn a_v4_mapped_peer_resolves_to_the_same_clone() {
         let app = two_clones();
         let mapped = Some("::ffff:10.99.0.6".parse::<std::net::IpAddr>().unwrap());
-        assert_eq!(caller_clone(&app, &HeaderMap::new(), mapped).as_deref(), Some("pega-we-649"));
+        assert_eq!(
+            caller_clone(&app, &HeaderMap::new(), mapped).as_deref(),
+            Some("pega-we-649")
+        );
     }
 
     /// An address that names no clone, which is every request from the operator's LAN, falls
@@ -4042,8 +3981,14 @@ mod tests {
         let lan = Some(std::net::IpAddr::from([10, 0, 0, 15]));
         let mut headers = HeaderMap::new();
         assert_eq!(caller_clone(&app, &headers, lan), None);
-        headers.insert("x-rmng-proxy-key", app.clone_keys.mint("pega-we-649").parse().unwrap());
-        assert_eq!(caller_clone(&app, &headers, lan).as_deref(), Some("pega-we-649"));
+        headers.insert(
+            "x-rmng-proxy-key",
+            app.clone_keys.mint("pega-we-649").parse().unwrap(),
+        );
+        assert_eq!(
+            caller_clone(&app, &headers, lan).as_deref(),
+            Some("pega-we-649")
+        );
     }
 
     /// Two rows on one address means the IP map is mid-refresh, so it answers nothing at all.
@@ -4062,7 +4007,9 @@ mod tests {
     #[tokio::test]
     async fn clone_self_from_an_unplaceable_caller_is_404_not_a_guess() {
         let app = two_clones();
-        let err = clone_self(State(app.clone()), None, HeaderMap::new()).await.unwrap_err();
+        let err = clone_self(State(app.clone()), None, HeaderMap::new())
+            .await
+            .unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
         assert!(err.1.contains("not running inside"), "msg: {}", err.1);
     }
@@ -4085,9 +4032,15 @@ mod tests {
         let key = app.clone_keys.mint("pega-we-649");
         let mut headers = HeaderMap::new();
         headers.insert("x-rmng-proxy-key", key.parse().unwrap());
-        assert_eq!(caller_clone(&app, &headers, None).as_deref(), Some("pega-we-649"));
+        assert_eq!(
+            caller_clone(&app, &headers, None).as_deref(),
+            Some("pega-we-649")
+        );
         headers.insert("x-rmng-clone", "someones-laptop".parse().unwrap());
-        assert_eq!(caller_clone(&app, &headers, None).as_deref(), Some("pega-we-649"));
+        assert_eq!(
+            caller_clone(&app, &headers, None).as_deref(),
+            Some("pega-we-649")
+        );
     }
 
     #[tokio::test]
@@ -4175,7 +4128,10 @@ mod tests {
         assert_eq!(v["stdinB64"], "aGk=");
         assert!(v.get("stdin_b64").is_none(), "must use camelCase key");
         // `detach` is omitted when false (skip_serializing_if) and present when set.
-        assert!(v.get("detach").is_none(), "detach:false must be omitted from the wire");
+        assert!(
+            v.get("detach").is_none(),
+            "detach:false must be omitted from the wire"
+        );
         let detached = serde_json::to_value(wire::ExecRequest {
             cmd: vec!["x".into()],
             detach: true,
@@ -4276,7 +4232,10 @@ PLAIN=plainvalue
             "XDG_RUNTIME_DIR=/run/user/1000".to_string(),
         ];
         // Caller overrides PATH and adds a brand-new key; the untouched session vars remain.
-        merge_env(&mut base, &["PATH=/caller/bin".to_string(), "FOO=1".to_string()]);
+        merge_env(
+            &mut base,
+            &["PATH=/caller/bin".to_string(), "FOO=1".to_string()],
+        );
         assert_eq!(
             base,
             vec![
@@ -4492,7 +4451,9 @@ PLAIN=plainvalue
                     .iter()
                     .map(|(k, v)| format!("{k}: {}", v.to_str().unwrap_or("")))
                     .collect();
-                let body = axum::body::to_bytes(req.into_body(), 1 << 20).await.unwrap();
+                let body = axum::body::to_bytes(req.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
                 Json(json!({ "headers": seen, "len": body.len() }))
             }),
         );
@@ -4502,15 +4463,18 @@ PLAIN=plainvalue
             relay_headers(r#"[{"key":"content-type","value":"image/png"},{"key":"x-goog-content-length-range","value":"0,8"}]"#)
                 .unwrap();
         let bytes = b"\x89PNG\r\n\x1a\n".to_vec();
-        let seen: serde_json::Value =
-            relay_request(&reqwest::Client::new(), &format!("http://{addr}/put"), &headers)
-                .body(bytes.clone())
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
+        let seen: serde_json::Value = relay_request(
+            &reqwest::Client::new(),
+            &format!("http://{addr}/put"),
+            &headers,
+        )
+        .body(bytes.clone())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
         let lines = seen["headers"].as_array().unwrap();
         let has = |want: &str| lines.iter().any(|l| l.as_str() == Some(want));
@@ -4557,9 +4521,17 @@ PLAIN=plainvalue
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("");
                     if key != "second" {
-                        return (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "application/json")], b"{\"error\":\"unauthorized\"}".to_vec());
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            b"{\"error\":\"unauthorized\"}".to_vec(),
+                        );
                     }
-                    (StatusCode::OK, [(header::CONTENT_TYPE, "image/png")], served)
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "image/png")],
+                        served,
+                    )
                 }
             }),
         );
@@ -4577,8 +4549,9 @@ PLAIN=plainvalue
         assert_eq!(tries.load(Ordering::SeqCst), 2);
 
         // No key has access: the answer reports what Linear said about the last one tried.
-        let (status, text) =
-            fetch_asset(&app.http, &url, &["first".into(), "third".into()]).await.unwrap_err();
+        let (status, text) = fetch_asset(&app.http, &url, &["first".into(), "third".into()])
+            .await
+            .unwrap_err();
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(text.contains("401"), "{text}");
 
@@ -4612,8 +4585,16 @@ PLAIN=plainvalue
         *app.cfg.write().unwrap() = wire::AppConfig {
             presets: vec![
                 // A key with no access leads, so the asset route has to fall past it.
-                wire::Preset { name: "dud".into(), linear_key: "lin_api_not_a_key".into(), ..Default::default() },
-                wire::Preset { name: "real".into(), linear_key: key.clone(), ..Default::default() },
+                wire::Preset {
+                    name: "dud".into(),
+                    linear_key: "lin_api_not_a_key".into(),
+                    ..Default::default()
+                },
+                wire::Preset {
+                    name: "real".into(),
+                    linear_key: key.clone(),
+                    ..Default::default()
+                },
             ],
             ..app.config()
         };
@@ -4639,7 +4620,9 @@ PLAIN=plainvalue
             .json()
             .await
             .unwrap();
-        let file = signed.pointer("/data/fileUpload/uploadFile").expect("fileUpload refused");
+        let file = signed
+            .pointer("/data/fileUpload/uploadFile")
+            .expect("fileUpload refused");
         let upload_url = file["uploadUrl"].as_str().unwrap().to_string();
         let asset_url = file["assetUrl"].as_str().unwrap().to_string();
         // `content-type` leads, as `putHeaders` builds it: it is signed but not listed.
@@ -4649,7 +4632,10 @@ PLAIN=plainvalue
 
         let headers_raw = serde_json::to_string(&headers).unwrap();
         let (ct, body) = multipart(
-            &[("url", upload_url.as_str()), ("headers", headers_raw.as_str())],
+            &[
+                ("url", upload_url.as_str()),
+                ("headers", headers_raw.as_str()),
+            ],
             Some(("rmng-proxy-probe.png", &png)),
         );
         let put = http
@@ -4671,7 +4657,10 @@ PLAIN=plainvalue
             .await
             .unwrap();
         assert_eq!(got.status(), reqwest::StatusCode::OK);
-        let seen_ct = got.headers()[header::CONTENT_TYPE].to_str().unwrap().to_string();
+        let seen_ct = got.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .to_string();
         for (name, value) in got.headers() {
             println!("asset header {name}: {}", value.to_str().unwrap_or("?"));
         }
@@ -4683,9 +4672,18 @@ PLAIN=plainvalue
 
     #[test]
     fn the_asset_proxy_takes_every_distinct_configured_key_in_config_order() {
-        let preset = |key: &str| wire::Preset { linear_key: key.into(), ..Default::default() };
+        let preset = |key: &str| wire::Preset {
+            linear_key: key.into(),
+            ..Default::default()
+        };
         let cfg = wire::AppConfig {
-            presets: vec![preset(""), preset("K2"), preset("K1"), preset("K2"), preset("  ")],
+            presets: vec![
+                preset(""),
+                preset("K2"),
+                preset("K1"),
+                preset("K2"),
+                preset("  "),
+            ],
             ..Default::default()
         };
         assert_eq!(linear_keys(&cfg), vec!["K2".to_string(), "K1".to_string()]);
@@ -4721,7 +4719,9 @@ PLAIN=plainvalue
         .unwrap();
         assert_eq!(ok.status(), StatusCode::OK);
         assert_eq!(ok.headers()[header::CONTENT_TYPE], "image/png");
-        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert_eq!(bytes.to_vec(), png);
     }
 
@@ -4747,10 +4747,9 @@ PLAIN=plainvalue
         let keys = vec!["one".to_string(), "two".to_string(), "three".to_string()];
         let budget = Duration::from_millis(400);
         let started = std::time::Instant::now();
-        let (status, text) =
-            asset_response(&app.http, &format!("http://{addr}/x"), &keys, budget)
-                .await
-                .unwrap_err();
+        let (status, text) = asset_response(&app.http, &format!("http://{addr}/x"), &keys, budget)
+            .await
+            .unwrap_err();
         let took = started.elapsed();
 
         println!("three keys, one {budget:?} budget, stalled target: {took:?} -> {status} {text}");
@@ -4758,7 +4757,10 @@ PLAIN=plainvalue
         assert!(text.contains("within 400ms"), "{text}");
         // Three keys times the budget would be 1.2s. Generous headroom, and still nowhere
         // near what a per-attempt bound would take.
-        assert!(took < budget * 2, "one budget for three keys, took {took:?}");
+        assert!(
+            took < budget * 2,
+            "one budget for three keys, took {took:?}"
+        );
     }
 
     /// The bytes are forwarded as they arrive, never collected first.
@@ -4779,13 +4781,18 @@ PLAIN=plainvalue
             get(move || {
                 let gate = gate.clone();
                 async move {
-                    let stream = futures::stream::once(async move { Ok::<_, std::io::Error>(vec![b'a'; 64 * 1024]) })
-                        .chain(futures::stream::once(async move {
-                            let rx = gate.lock().await.take().unwrap();
-                            let _ = rx.await;
-                            Ok::<_, std::io::Error>(vec![b'b'; 16])
-                        }));
-                    ([(header::CONTENT_TYPE, "image/png")], axum::body::Body::from_stream(stream))
+                    let stream = futures::stream::once(async move {
+                        Ok::<_, std::io::Error>(vec![b'a'; 64 * 1024])
+                    })
+                    .chain(futures::stream::once(async move {
+                        let rx = gate.lock().await.take().unwrap();
+                        let _ = rx.await;
+                        Ok::<_, std::io::Error>(vec![b'b'; 16])
+                    }));
+                    (
+                        [(header::CONTENT_TYPE, "image/png")],
+                        axum::body::Body::from_stream(stream),
+                    )
                 }
             }),
         );
@@ -4800,8 +4807,13 @@ PLAIN=plainvalue
             get(move || {
                 let (client, upstream) = (client.clone(), upstream.clone());
                 async move {
-                    asset_response(&client, &upstream, &["k".to_string()], Duration::from_secs(20))
-                        .await
+                    asset_response(
+                        &client,
+                        &upstream,
+                        &["k".to_string()],
+                        Duration::from_secs(20),
+                    )
+                    .await
                 }
             }),
         );
@@ -4863,7 +4875,10 @@ PLAIN=plainvalue
                 let stream = futures::stream::iter(
                     (0..33).map(|_| Ok::<_, std::io::Error>(vec![0u8; 1024 * 1024])),
                 );
-                ([(header::CONTENT_TYPE, "image/png")], axum::body::Body::from_stream(stream))
+                (
+                    [(header::CONTENT_TYPE, "image/png")],
+                    axum::body::Body::from_stream(stream),
+                )
             }),
         );
         tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
@@ -4872,10 +4887,14 @@ PLAIN=plainvalue
         let keys = vec!["k".to_string()];
         let budget = Duration::from_secs(30);
 
-        let (status, text) =
-            asset_response(&app.http, &format!("http://{raw_addr}/declared"), &keys, budget)
-                .await
-                .unwrap_err();
+        let (status, text) = asset_response(
+            &app.http,
+            &format!("http://{raw_addr}/declared"),
+            &keys,
+            budget,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(text.contains("32MB"), "{text}");
 
@@ -4890,9 +4909,6 @@ PLAIN=plainvalue
 
     // What stays here is the control-server half of the boundary: the internal token-delta
     // intake's auth.
-
-
-
 
     /// Spin up `/events` and read the opening bytes. All three multiplexed streams send a
     /// snapshot on connect: the default (unnamed) `ControlState` frame plus the named
@@ -4953,8 +4969,15 @@ PLAIN=plainvalue
         let app = App::test_app();
         let boot = app.build_id();
 
-        assert!(boot.starts_with("boot-"), "dev runs get a per-boot id, got {boot}");
-        assert_eq!(app.build_id(), boot, "must not change while the process lives");
+        assert!(
+            boot.starts_with("boot-"),
+            "dev runs get a per-boot id, got {boot}"
+        );
+        assert_eq!(
+            app.build_id(),
+            boot,
+            "must not change while the process lives"
+        );
 
         // An image built without `GIT_SHA` labels an empty revision; keep the boot id rather
         // than publish an empty identity every client would compare equal.
@@ -5140,5 +5163,4 @@ mod playbook_tests {
     }
 
     // --- the /cc tombstone ---------------------------------------------------------------
-
 }

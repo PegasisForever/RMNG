@@ -57,12 +57,9 @@ import {
   deleteClaudeAccount,
   deleteCodexAccount,
   deleteClone,
-  deleteImage,
   duplicateClone,
   getConfig,
   getUpdateStatus,
-  listImages,
-  pullTemplate,
   putBoardColumns,
   putConfig,
   putForwards,
@@ -90,8 +87,17 @@ import {
 import { useAccountOrder } from "~/lib/accountOrder";
 import { copyText } from "~/lib/clipboard";
 import { browserLocale } from "~/lib/format";
-import { readSelection, sameSelection, withSelection, type Selection } from "~/lib/selection";
-import { rememberSideWidth, SIDE_DEFAULT, storedSideWidth } from "~/lib/sidePanelWidth";
+import {
+  readSelection,
+  sameSelection,
+  withSelection,
+  type Selection,
+} from "~/lib/selection";
+import {
+  rememberSideWidth,
+  SIDE_DEFAULT,
+  storedSideWidth,
+} from "~/lib/sidePanelWidth";
 import { type ClaudeUsage, type ControlState, type Clone } from "~/lib/types";
 import { toggleMuted } from "~/lib/mute";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
@@ -101,11 +107,12 @@ import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { LxcStats } from "~/lib/wire/LxcStats";
-import type { ImageInfo } from "~/lib/wire/ImageInfo";
 
 // BlockNote + the chat panel are browser-only; load them lazily and render only
 // after mount so they never participate in SSR.
-const NotesEditorContainer = lazy(() => import("~/components/NotesEditorContainer"));
+const NotesEditorContainer = lazy(
+  () => import("~/components/NotesEditorContainer"),
+);
 const ChatContainer = lazy(() => import("~/components/ChatContainer"));
 // The ticket description is markdown, and rendering it means BlockNote, which is as
 // browser-only as the notes editor that already uses it.
@@ -160,7 +167,10 @@ export function DashboardContainer({
    *  Back onto it would open nothing. */
   const select = (next: Selection, replace = false) => {
     if (sameSelection(next, selection)) return;
-    setParams(withSelection(params, next), { replace, preventScrollReset: true });
+    setParams(withSelection(params, next), {
+      replace,
+      preventScrollReset: true,
+    });
   };
 
   const [error, setError] = useState<string | null>(null);
@@ -176,7 +186,9 @@ export function DashboardContainer({
   const [changing, setChanging] = useState(false);
   // The clone a rebase dialog is open for (null = modal closed). The dialog owns the
   // op lifecycle and closes itself on settle, like the template dialog.
-  const [rebaseCloneTarget, setRebaseCloneTarget] = useState<Clone | null>(null);
+  const [rebaseCloneTarget, setRebaseCloneTarget] = useState<Clone | null>(
+    null,
+  );
   // The group an "add account" OAuth login is in flight for (null = modal closed).
   const [importOpen, setImportOpen] = useState(false);
   // The dead account the sign-in modal is standing in for, or null for a plain import.
@@ -186,23 +198,6 @@ export function DashboardContainer({
   const [forwarding, setForwarding] = useState(false);
   const [forwardError, setForwardError] = useState<string | null>(null);
 
-  // Clone-source images (from /api/images) — fetched on mount and refetched
-  // whenever a pull/commit/delete op leaves `running` (the image set changed).
-  const [images, setImages] = useState<ImageInfo[]>([]);
-  const [imagesLoading, setImagesLoading] = useState(true);
-  const refreshImages = () => {
-    setImagesLoading(true);
-    listImages()
-      .then(setImages)
-      .catch(() => {
-        /* keep the last-known list on a transient error */
-      })
-      .finally(() => setImagesLoading(false));
-  };
-  useEffect(() => {
-    refreshImages();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
   // Which half of the side panel gets the height.
   const [sideFocus, setSideFocus] = useState<SideFocus>("notes");
   // The width the operator last left the side panel at. Read after mount rather than in the
@@ -234,10 +229,12 @@ export function DashboardContainer({
   // Derived, so a clone that is restored or deleted while its panels are open drops the focus
   // on its own: an id that no longer names an archived clone answers null here, and the panels
   // fall back to whatever the viewer is on, with no cleanup to run.
-  const urlClone = selection.clone ? clonesById.get(selection.clone) ?? null : null;
+  const urlClone = selection.clone
+    ? (clonesById.get(selection.clone) ?? null)
+    : null;
   const openArchived = urlClone?.archived ? urlClone : null;
   const focusedId = openArchived ? openArchived.id : state.selected;
-  const selectedClone = focusedId ? clonesById.get(focusedId) ?? null : null;
+  const selectedClone = focusedId ? (clonesById.get(focusedId) ?? null) : null;
 
   // Which live clone the viewer streams is the server's state, not this page's, so an address
   // that names one has to ask for it the way the click that first opened it did. That covers
@@ -280,22 +277,6 @@ export function DashboardContainer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.selected, selection.clone, selection.ticket]);
 
-  // Refetch images when an image-mutating op (pull/commit/delete) leaves the
-  // running set — that's when the image list changed. Keyed on the set of running
-  // op ids so it fires on each transition, not on every SSE frame.
-  const imgOpsRunning = state.operations
-    .filter(
-      (o) =>
-        o.status === "running" &&
-        (o.kind === "pull" || o.kind === "commit" || o.kind === "delete"),
-    )
-    .map((o) => o.id)
-    .join(",");
-  useEffect(() => {
-    refreshImages();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imgOpsRunning]);
-
   const run = (p: Promise<unknown>) =>
     p.then(() => setError(null)).catch((e: Error) => setError(e.message));
 
@@ -331,9 +312,10 @@ export function DashboardContainer({
   // A clone being provisioned into a specific column. The board can only file a clone that
   // exists, and the clone does not exist until its op finishes, so the request is parked
   // here and applied when the clone shows up in `hosts`.
-  const [pendingColumn, setPendingColumn] = useState<{ columnId: string; target: string } | null>(
-    null,
-  );
+  const [pendingColumn, setPendingColumn] = useState<{
+    columnId: string;
+    target: string;
+  } | null>(null);
   const [newCloneColumn, setNewCloneColumn] = useState<string | null>(null);
   /** The clone the open create-dialog is making, selected when the dialog closes. */
   const [newClone, setNewClone] = useState<string | null>(null);
@@ -348,7 +330,9 @@ export function DashboardContainer({
   // because every SSE frame brings a fresh array and resetting on each one would undo a drag
   // that is still in flight.
   const serverTicketOrder = JSON.stringify(state.ticketOrder ?? []);
-  const [ticketOrder, setTicketOrder] = useState<string[]>(() => state.ticketOrder ?? []);
+  const [ticketOrder, setTicketOrder] = useState<string[]>(
+    () => state.ticketOrder ?? [],
+  );
   useEffect(() => {
     setTicketOrder(JSON.parse(serverTicketOrder) as string[]);
   }, [serverTicketOrder]);
@@ -367,7 +351,9 @@ export function DashboardContainer({
   // later. The server sorts what it stores, and `toggleMuted` sorts too, so the frame that
   // comes back is the identical array.
   const serverMuted = JSON.stringify(state.mutedClones ?? []);
-  const [mutedClones, setMutedClones] = useState<string[]>(() => state.mutedClones ?? []);
+  const [mutedClones, setMutedClones] = useState<string[]>(
+    () => state.mutedClones ?? [],
+  );
   useEffect(() => {
     setMutedClones(JSON.parse(serverMuted) as string[]);
   }, [serverMuted]);
@@ -416,7 +402,10 @@ export function DashboardContainer({
   // 60 seconds, so the list would otherwise sit there showing an edit Linear does not have
   // for up to a minute, with an error next to it. The rollback is on the mutation and not on
   // the refetch, because a refetch that fails after a write that landed is still a good edit.
-  const editTicket = (ticket: LinearTicket, patch: { title?: string; description?: string }) => {
+  const editTicket = (
+    ticket: LinearTicket,
+    patch: { title?: string; description?: string },
+  ) => {
     upsertTicket({ ...ticket, ...patch });
     run(
       issueUpdate(keysForTeam(presets, ticket.team ?? ""), ticket, patch)
@@ -456,7 +445,12 @@ export function DashboardContainer({
   // just showed the operator two states of one kind and let them pick the second.
   const setTicketState = (ticket: LinearTicket, state: TicketWorkflowState) => {
     if (!queued(state.type)) advancePast(ticket);
-    upsertTicket({ ...ticket, state: state.type, stateId: state.id, stateName: state.name });
+    upsertTicket({
+      ...ticket,
+      state: state.type,
+      stateId: state.id,
+      stateName: state.name,
+    });
     run(
       issueSetStateId(keysForTeam(presets, ticket.team ?? ""), ticket, state.id)
         .catch((e: Error) => {
@@ -474,13 +468,22 @@ export function DashboardContainer({
   //
   // The list is rebuilt rather than patched in place, which is what keeps the panel's own "+"
   // menu right: it offers what the ticket does not carry, and it reads that off this list.
-  const setTicketLabel = (ticket: LinearTicket, label: TicketLabel, on: boolean) => {
+  const setTicketLabel = (
+    ticket: LinearTicket,
+    label: TicketLabel,
+    on: boolean,
+  ) => {
     const labels = on
       ? [...ticket.labels, label]
       : ticket.labels.filter((l) => l.id !== label.id);
     upsertTicket({ ...ticket, labels });
     run(
-      issueSetLabel(keysForTeam(presets, ticket.team ?? ""), ticket, label.id, on)
+      issueSetLabel(
+        keysForTeam(presets, ticket.team ?? ""),
+        ticket,
+        label.id,
+        on,
+      )
         .catch((e: Error) => {
           upsertTicket(ticket);
           throw e;
@@ -516,7 +519,9 @@ export function DashboardContainer({
     : null;
   // Derived: a ticket that leaves the list (cloned, closed, moved in Linear) closes its
   // panel on its own, with no cleanup to run.
-  const openTicket = selection.ticket ? findTicket(selection.ticket, visibleTickets) : null;
+  const openTicket = selection.ticket
+    ? findTicket(selection.ticket, visibleTickets)
+    : null;
 
   /** Move the panel off a ticket that is about to leave the column, onto the one below it.
    *
@@ -565,9 +570,17 @@ export function DashboardContainer({
   };
 
   const onDeleteAccount = (email: string) =>
-    run(deleteClaudeAccount(email).then(() => void refreshClaudeUsage().catch(() => {})));
+    run(
+      deleteClaudeAccount(email).then(
+        () => void refreshClaudeUsage().catch(() => {}),
+      ),
+    );
   const onDeleteCodexAccount = (email: string) =>
-    run(deleteCodexAccount(email).then(() => void refreshCodexUsage().catch(() => {})));
+    run(
+      deleteCodexAccount(email).then(
+        () => void refreshCodexUsage().catch(() => {}),
+      ),
+    );
 
   // Archiving rides a drag into the Archived column, and that column's contents come from
   // the server's `archived` flag rather than from the column list. So when the call fails
@@ -616,11 +629,15 @@ export function DashboardContainer({
         onCopyBranchName={copyText}
         description={
           <ClientOnly>
-            <Suspense fallback={<p className="px-1 text-xs text-slate-400">Loading…</p>}>
+            <Suspense
+              fallback={<p className="px-1 text-xs text-slate-400">Loading…</p>}
+            >
               <TicketDescription
                 key={selectedTicket.id}
                 markdown={selectedTicket.description ?? ""}
-                onSave={(markdown) => editTicket(selectedTicket, { description: markdown })}
+                onSave={(markdown) =>
+                  editTicket(selectedTicket, { description: markdown })
+                }
               />
             </Suspense>
           </ClientOnly>
@@ -654,10 +671,15 @@ export function DashboardContainer({
       <ClientOnly>
         <Suspense
           fallback={
-            <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading editor…</div>
+            <div className="p-6 text-sm text-slate-400 dark:text-slate-500">
+              Loading editor…
+            </div>
           }
         >
-          <NotesEditorContainer key={selectedClone.id} cloneId={selectedClone.id} />
+          <NotesEditorContainer
+            key={selectedClone.id}
+            cloneId={selectedClone.id}
+          />
         </Suspense>
       </ClientOnly>
     );
@@ -672,8 +694,8 @@ export function DashboardContainer({
     return (
       <>
         <p className="px-4 pb-2 text-xs text-slate-400 dark:text-slate-500">
-          {selectedClone.linearTicket} did not load{ticketsError ? `: ${ticketsError}` : ""}.
-          Showing notes.
+          {selectedClone.linearTicket} did not load
+          {ticketsError ? `: ${ticketsError}` : ""}. Showing notes.
         </p>
         {notes}
       </>
@@ -691,11 +713,17 @@ export function DashboardContainer({
               onCopyBranchName={copyText}
               description={
                 <ClientOnly>
-                  <Suspense fallback={<p className="px-1 text-xs text-slate-400">Loading…</p>}>
+                  <Suspense
+                    fallback={
+                      <p className="px-1 text-xs text-slate-400">Loading…</p>
+                    }
+                  >
                     <TicketDescription
                       key={openTicket.id}
                       markdown={openTicket.description ?? ""}
-                      onSave={(markdown) => editTicket(openTicket, { description: markdown })}
+                      onSave={(markdown) =>
+                        editTicket(openTicket, { description: markdown })
+                      }
                     />
                   </Suspense>
                 </ClientOnly>
@@ -709,7 +737,9 @@ export function DashboardContainer({
               labelOptions={openTicketMeta.labels}
               labelsLoading={openTicketMeta.loading}
               onAddLabel={(label) => setTicketLabel(openTicket, label, true)}
-              onRemoveLabel={(label) => setTicketLabel(openTicket, label, false)}
+              onRemoveLabel={(label) =>
+                setTicketLabel(openTicket, label, false)
+              }
               onCreateClone={() => {
                 setTicketPrefill(openTicket.url);
                 setCloneOpen(true);
@@ -787,9 +817,13 @@ export function DashboardContainer({
           onSelectClone: selectClone,
           onDeleteClone: (clone) => {
             // Deleting a parent cascades to its sub clones (server-side), so say so up front.
-            const subCount = state.hosts.filter((h) => h.parent === clone.id).length;
+            const subCount = state.hosts.filter(
+              (h) => h.parent === clone.id,
+            ).length;
             const subs =
-              subCount > 0 ? ` and its ${subCount} sub clone${subCount === 1 ? "" : "s"}` : "";
+              subCount > 0
+                ? ` and its ${subCount} sub clone${subCount === 1 ? "" : "s"}`
+                : "";
             const msg = clone.managed
               ? `Delete ${clone.id}${subs}? This destroys its container${subCount > 0 ? "s" : ""}.`
               : `Remove ${clone.id}? This unregisters the clone.`;
@@ -806,7 +840,8 @@ export function DashboardContainer({
           onCopySshCommand: copyText,
           onOpenInLinear: openInLinear,
           mutedClones,
-          onToggleMuteClone: (clone) => applyMuted(toggleMuted(mutedClones, clone.id)),
+          onToggleMuteClone: (clone) =>
+            applyMuted(toggleMuted(mutedClones, clone.id)),
           tickets: {
             tickets: visibleTickets,
             // Nothing asked yet is not an empty queue. Without this the column claims every
@@ -814,10 +849,12 @@ export function DashboardContainer({
             loading: ticketsLoading,
             error: ticketsError,
             selectedId: openTicket?.id ?? null,
-            onSelectTicket: (ticket) => select({ ...selection, ticket: ticket.id }),
+            onSelectTicket: (ticket) =>
+              select({ ...selection, ticket: ticket.id }),
             onNewTicket: () => setNewTicketOpen(true),
             workspaces,
-            onOpenWorkspace: (workspace) => openInLinear(workspaceHomeUrl(workspace)),
+            onOpenWorkspace: (workspace) =>
+              openInLinear(workspaceHomeUrl(workspace)),
             onOpenInLinear: openInLinear,
             onCopyBranchName: copyText,
             onCopyTicketLink: copyText,
@@ -837,7 +874,9 @@ export function DashboardContainer({
           onMoveCard: (cloneId, toColumnId, toIndex) =>
             applyColumns(moveCard(columns, cloneId, toColumnId, toIndex)),
           onRenameColumn: (columnId, title) =>
-            applyColumns(columns.map((c) => (c.id === columnId ? { ...c, title } : c))),
+            applyColumns(
+              columns.map((c) => (c.id === columnId ? { ...c, title } : c)),
+            ),
         }}
         notes={notesCard()}
         cloneTicket={cloneTicketCard()}
@@ -846,7 +885,9 @@ export function DashboardContainer({
             <ClientOnly>
               <Suspense
                 fallback={
-                  <div className="p-4 text-sm text-slate-400 dark:text-slate-500">Loading chat…</div>
+                  <div className="p-4 text-sm text-slate-400 dark:text-slate-500">
+                    Loading chat…
+                  </div>
                 }
               >
                 <ChatContainer
@@ -902,7 +943,10 @@ export function DashboardContainer({
           onFork={(source, headless, payload) =>
             forkClone(source, headless, payload).then((op) => {
               if (newCloneColumn) {
-                setPendingColumn({ columnId: newCloneColumn, target: op.target });
+                setPendingColumn({
+                  columnId: newCloneColumn,
+                  target: op.target,
+                });
               }
               // The op's target is the new clone's id; `onClose` selects it once the
               // dialog settles, so making a clone leaves the operator looking at it.
@@ -934,7 +978,10 @@ export function DashboardContainer({
           onClone={(payload) =>
             duplicateClone(payload).then((op) => {
               if (newCloneColumn) {
-                setPendingColumn({ columnId: newCloneColumn, target: op.target });
+                setPendingColumn({
+                  columnId: newCloneColumn,
+                  target: op.target,
+                });
               }
               setNewClone(op.target);
               return op;
@@ -954,13 +1001,6 @@ export function DashboardContainer({
           updateServer={updateServer}
           operations={state.operations}
           restartServer={restartServer}
-          images={images}
-          imagesLoading={imagesLoading}
-          pullBusy={state.operations.some(
-            (o) => o.kind === "pull" && o.status === "running",
-          )}
-          onPullTemplate={(reference) => run(pullTemplate(reference))}
-          onDeleteImage={(reference) => run(deleteImage(reference))}
           onImportAccount={() => openImport(null)}
           onReplaceAccount={(account) => openImport(account)}
           onDeleteAccount={onDeleteAccount}
@@ -970,16 +1010,27 @@ export function DashboardContainer({
           onAddBoardColumn={(title) =>
             applyColumns([
               ...columns,
-              { id: newColumnId(title, columns), title, cloneIds: [], archive: false },
+              {
+                id: newColumnId(title, columns),
+                title,
+                cloneIds: [],
+                archive: false,
+              },
             ])
           }
           onRenameBoardColumn={(columnId, title) =>
-            applyColumns(columns.map((c) => (c.id === columnId ? { ...c, title } : c)))
+            applyColumns(
+              columns.map((c) => (c.id === columnId ? { ...c, title } : c)),
+            )
           }
           onSetBoardColumnArchive={(columnId, archive) =>
-            applyColumns(columns.map((c) => (c.id === columnId ? { ...c, archive } : c)))
+            applyColumns(
+              columns.map((c) => (c.id === columnId ? { ...c, archive } : c)),
+            )
           }
-          onDeleteBoardColumn={(columnId) => applyColumns(removeColumn(columns, columnId))}
+          onDeleteBoardColumn={(columnId) =>
+            applyColumns(removeColumn(columns, columnId))
+          }
           onReorderBoardColumns={(ids) =>
             applyColumns(
               ids.flatMap((id) => {
@@ -991,14 +1042,16 @@ export function DashboardContainer({
         />
       ) : null}
 
-
       {importOpen ? (
         <ImportAccountModalContainer
           claudeGroups={cloneGroups.map((g) => g.name)}
           codexGroups={codexGroups.map((g) => g.name)}
           replacing={
             replacing
-              ? { provider: replacing.provider === "codex" ? "codex" : "claude", email: replacing.email }
+              ? {
+                  provider: replacing.provider === "codex" ? "codex" : "claude",
+                  email: replacing.email,
+                }
               : null
           }
           onClose={() => setImportOpen(false)}
@@ -1043,13 +1096,17 @@ export function DashboardContainer({
           onClose={() => setRebaseCloneTarget(null)}
           // The dialog owns the whole lifecycle: it keeps itself open, renders the op's
           // progress, and closes when the op settles.
-          onRebase={(preset, rebuild) => rebaseClone(rebaseCloneTarget.id, preset, rebuild)}
+          onRebase={(preset, rebuild) =>
+            rebaseClone(rebaseCloneTarget.id, preset, rebuild)
+          }
         />
       ) : null}
 
       {forwardClone ? (
         <PortForwardModal
-          clone={state.hosts.find((h) => h.id === forwardClone.id) ?? forwardClone}
+          clone={
+            state.hosts.find((h) => h.id === forwardClone.id) ?? forwardClone
+          }
           runtime={forwards[forwardClone.id] ?? []}
           busy={forwarding}
           error={forwardError}

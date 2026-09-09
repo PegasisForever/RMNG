@@ -1,28 +1,29 @@
-// The Docker / Clones section's body: the Docker probe, the naming and template settings,
+// The Docker / Clones section's body: the Docker probe, the clone naming setting,
 // the one-time clone subnet, and the per-clone resource limits.
 //
 // Each field carries its own effect badge because this section's header has none: the
 // settings under it do not all take effect at the same moment, and the subnet does not take
 // effect at all once first-run setup has finished.
-import { EffectBadge, FieldHeading, settingsInput } from "~/components/SettingsFields";
+import {
+  EffectBadge,
+  FieldHeading,
+  settingsInput,
+} from "~/components/SettingsFields";
 
 export function SettingsDockerSection({
   hostnamePrefix,
-  templateReference,
   subnet,
   subnetLocked,
   cloneCpus,
   cloneMemoryMb,
   testMessage,
   onHostnamePrefixChange,
-  onTemplateReferenceChange,
   onSubnetChange,
   onCloneCpusChange,
   onCloneMemoryMbChange,
   onTest,
 }: {
   hostnamePrefix: string;
-  templateReference: string;
   subnet: string;
   /** First-run setup has finished, so the subnet is baked into the rmng bridge and every
    *  clone IP and can no longer be changed. */
@@ -32,7 +33,6 @@ export function SettingsDockerSection({
   /** The result of the last Docker probe, in the panel's own words. */
   testMessage: string | null;
   onHostnamePrefixChange: (value: string) => void;
-  onTemplateReferenceChange: (value: string) => void;
   onSubnetChange: (value: string) => void;
   onCloneCpusChange: (value: number) => void;
   onCloneMemoryMbChange: (value: number) => void;
@@ -48,7 +48,11 @@ export function SettingsDockerSection({
         >
           Test Docker
         </button>
-        {testMessage ? <p className="text-xs text-slate-500 dark:text-slate-400">{testMessage}</p> : null}
+        {testMessage ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {testMessage}
+          </p>
+        ) : null}
       </div>
       <div>
         <FieldHeading label="Clone hostname prefix" effect="immediate" />
@@ -59,24 +63,10 @@ export function SettingsDockerSection({
           className={`mt-0.5 ${settingsInput}`}
         />
         <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
-          Prepended to derived clone hostnames — e.g. <code>{hostnamePrefix || "pega-"}</code>dev-123 /{" "}
-          <code>{hostnamePrefix || "pega-"}</code>my-task. Lowercased + sanitized to a DNS label; blank keeps
-          the current value.
-        </p>
-      </div>
-      <div>
-        <FieldHeading label="Template reference" effect="immediate" />
-        <input
-          value={templateReference}
-          onChange={(e) => onTemplateReferenceChange(e.target.value)}
-          placeholder="pegasis0/rmng-template:latest"
-          spellCheck={false}
-          className={`mt-0.5 ${settingsInput}`}
-        />
-        <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
-          Registry <code>repo:tag</code> the wizard/Images panel pulls the clone template
-          from. The pulled image keeps this reference and clones are created from it.
-          Read fresh on each pull.
+          Prepended to derived clone hostnames — e.g.{" "}
+          <code>{hostnamePrefix || "pega-"}</code>dev-123 /{" "}
+          <code>{hostnamePrefix || "pega-"}</code>my-task. Lowercased +
+          sanitized to a DNS label; blank keeps the current value.
         </p>
       </div>
       {/* Subnet is baked into the rmng bridge + every clone's static IP at first-run
@@ -100,7 +90,9 @@ export function SettingsDockerSection({
       <div className="grid grid-cols-2 gap-3">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">CPU limit per clone (cores)</span>
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              CPU limit per clone (cores)
+            </span>
             <EffectBadge effect="immediate" />
           </div>
           <input
@@ -113,7 +105,9 @@ export function SettingsDockerSection({
         </div>
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Memory limit per clone (MB)</span>
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Memory limit per clone (MB)
+            </span>
             <EffectBadge effect="immediate" />
           </div>
           <input
@@ -126,8 +120,8 @@ export function SettingsDockerSection({
         </div>
       </div>
       <p className="text-xs text-slate-400 dark:text-slate-500">
-        Limits apply to newly created clones (existing clones keep the limits they were
-        created with).
+        Limits apply to newly created clones (existing clones keep the limits
+        they were created with).
       </p>
     </div>
   );

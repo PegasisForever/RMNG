@@ -3,23 +3,24 @@ import { useState } from "react";
 import { useArgs } from "storybook/preview-api";
 import { fn } from "storybook/test";
 
-import { SettingsPanelView, type SettingsPanelViewProps } from "./SettingsPanelView";
+import {
+  SettingsPanelView,
+  type SettingsPanelViewProps,
+} from "./SettingsPanelView";
 import { newColumnId, removeColumn } from "~/lib/board";
 import { accountsNow, makeClaudeAccounts } from "./__fixtures__/accounts";
 import { makeSettingsDraft, makeUpdateStatus } from "./__fixtures__/appConfig";
 import { makeBoardColumns } from "./__fixtures__/board";
-import { imagesNow, makeImages } from "./__fixtures__/images";
 import { makeOperation } from "./__fixtures__/operations";
 import { makeStoryLink } from "./__fixtures__/storyLinks";
 
-/** Everything a story edits, rebuilt per story: the form the sections write back into, the
- *  account rows the two lists reorder, and the image list. One set behind every story is how
- *  an edit in one shows up in the next. */
+/** Everything a story edits, rebuilt per story: the form the sections write back into and
+ *  the account rows the two lists reorder. One set behind every story is how an edit in one
+ *  shows up in the next. */
 function base() {
   return {
     draft: makeSettingsDraft(),
     accounts: makeClaudeAccounts(accountsNow),
-    images: makeImages(),
     boardColumns: makeBoardColumns(),
     boardColumnCounts: { todo: 3, doing: 3, blocked: 1, archived: 0 },
   };
@@ -53,11 +54,15 @@ function useBoardColumns(args: SettingsPanelViewProps) {
       args.onAddBoardColumn?.(title);
     },
     onRenameBoardColumn: (columnId: string, title: string) => {
-      setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, title } : c)));
+      setColumns((prev) =>
+        prev.map((c) => (c.id === columnId ? { ...c, title } : c)),
+      );
       args.onRenameBoardColumn?.(columnId, title);
     },
     onSetBoardColumnArchive: (columnId: string, archive: boolean) => {
-      setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, archive } : c)));
+      setColumns((prev) =>
+        prev.map((c) => (c.id === columnId ? { ...c, archive } : c)),
+      );
       args.onSetBoardColumnArchive?.(columnId, archive);
     },
     onDeleteBoardColumn: (columnId: string) => {
@@ -94,8 +99,14 @@ const meta = {
     onDeleteCodexAccount: fn(),
     // Importing an account opens a modal ON TOP of this panel, which is navigation: the
     // story jumps to that modal's own story rather than stacking it here.
-    onImportAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn"),
-    onReplaceAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "Replacing"),
+    onImportAccount: makeStoryLink(
+      "Settings/Components/ImportAccountModalView",
+      "SignedIn",
+    ),
+    onReplaceAccount: makeStoryLink(
+      "Settings/Components/ImportAccountModalView",
+      "Replacing",
+    ),
     setupComplete: true,
     error: null,
     restartRequired: false,
@@ -114,12 +125,6 @@ const meta = {
     onTestDocker: fn(),
     judgeTestMessage: null,
     onTestJudge: fn(),
-    imagesLoading: false,
-    pullBusy: false,
-    now: imagesNow,
-    onPullLatestImage: fn(),
-    onPullOtherImage: fn(),
-    onDeleteImage: fn(),
     onAddBoardColumn: fn(),
     onRenameBoardColumn: fn(),
     onSetBoardColumnArchive: fn(),
@@ -166,7 +171,7 @@ export const Claude: Story = { args: { ...base(), category: "claude" } };
 /** Codex: the same three sections for the other provider. */
 export const Codex: Story = { args: { ...base(), category: "codex" } };
 
-/** Clones: what a new clone is cut from, and the images it is cut out of. */
+/** Clones: the Docker settings every new clone is created with. */
 export const Clones: Story = { args: { ...base(), category: "clones" } };
 
 /** Server: the control-server's own version and the settings it reads at startup. */

@@ -11,7 +11,7 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 ## Ports & sockets
 
 | Name | Default | Override | Listener | Connected by | Transport |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | video | `9001` | `listen.video` | control-server mediaplane | native viewer | framed H.264/JSON over TCP |
 | web | `9000` | `listen.web` | control-server web | browser / `rmng` CLI / control-client | HTTP + SSE |
 | forward | `9005` | `listen.forward` | control-server mediaplane | native viewer | framed TCP over TCP (one conn per forwarded local socket, spliced to the clone) |
@@ -32,7 +32,7 @@ path uses this compact framing carrying `socket.rs` types).
 **Server → viewer:**
 
 | Tag | Name | Frame |
-|---|---|---|
+| --- | --- | --- |
 | `0` | video | `[0][u32be monitor_id][u32be len][AnnexB access-unit]` |
 | `1` | clipboard | `[1][u32be len][JSON ClipboardMsg]` |
 | `2` | cursor | `[2][u32be len][JSON CursorMeta]` |
@@ -48,7 +48,7 @@ path uses this compact framing carrying `socket.rs` types).
 `InputMsg` ([socket.rs](../crates/wire/src/socket.rs), serde tag `kind`, snake_case):
 
 | Variant | Fields | Use |
-|---|---|---|
+| --- | --- | --- |
 | `pointer_move` | `monitor_id`, `x`, `y` (f64) | absolute pointer in monitor-pixel space (**native**, see below) |
 | `pointer_relative` | `dx`, `dy` (f64) | unaccelerated delta — pointer-lock / games |
 | `button` | `button` (evdev: `0x110`–`0x112` left/right/middle, `0x113`/`0x114` back/forward), `pressed` | mouse button |
@@ -90,7 +90,7 @@ a daemon older than it reads as "the holder was already running" and is left alo
 `DaemonMsg` (daemon → server), serde tag `t`:
 
 | Variant | Payload | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `hello` | `{clone_id, fresh_session}` | register the clone; `fresh_session` asks for the active layout |
 | `frame` | `FrameMsg` | one captured monitor frame; dmabuf fds attached via SCM_RIGHTS |
 | `cursor` | `CursorMeta` | cursor position (+shape on change, +`warp` if MCP-driven) |
@@ -113,6 +113,7 @@ daemon first registers. Every other clone keeps the layout it was last viewed wi
 modifier), `width`, `height`, `planes: [{offset, stride}]`, `seq` (echoed in `ack`).
 
 ### CursorMeta
+
 ```rust
 struct CursorMeta {
     monitor_id: u32, x: i32, y: i32,
@@ -121,11 +122,13 @@ struct CursorMeta {
 }
 struct CursorShape { width, height, hotspot_x, hotspot_y, rgba: Vec<u8> /* base64 in JSON */ }
 ```
+
 Captured out-of-band as `SPA_META_Cursor` (cursor-mode METADATA, via the raw-PipeWire path
 since GStreamer `pipewiresrc` can't surface it) and drawn client-side. `warp:true` triggers
 the viewer's 0.5 s local-motion suppression.
 
 ### Clipboard (rich + lazy)
+
 `ClipboardOffer {serial, mime_types[]}` advertises types (no bytes). `ClipboardRequest
 {serial, mime_type}` asks for one. `ClipboardData {serial, mime_type, bytes /* b64 */}`
 transfers. `ClipboardMsg` (serde tag `k`: `offer`/`request`/`data`) is the port-1 viewer-side
@@ -192,7 +195,7 @@ socket, verified against a node another process created.
 is. No file descriptors cross.
 
 | Direction | Message | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | daemon → holder | `hello{proto}` | First message. Answered by `hello_ok`. |
 | daemon → holder | `input` | One `InputMsg` to inject. Fire-and-forget, ordered. |
 | daemon → holder | `set_layout{monitors}` | Apply a layout, make-before-break. No-op if unchanged. |
@@ -235,7 +238,7 @@ the config. `PUT /api/config` returns
 [config.rs](../crates/wire/src/config.rs).
 
 | Field | Type | Default | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `listen` | `ListenConfig` | see below | the web, video, daemon MCP, forward, and bastion ports |
 | `agent_port` | u16 | `4096` | agent-wrapper port on each clone |
 | `data_dir` | string | `"data"` | state, notes, uploads, chats, and private clone-token totals root; `state.json` and the `claude-accounts.json` secret store live here. **One-time** (set in the setup wizard) |
@@ -264,12 +267,12 @@ the config. `PUT /api/config` returns
   validated `/16`–`/24` at merge; **one-time**, baked into the network at first-run setup), `hostname_prefix` (`"pega-"`, editable in Settings → prepended to derived
   clone hostnames; carried from the retired `proxmox.hostname_prefix` on migration),
   `clone_cpus` (`16` — whole cores → `nano_cpus`) and `clone_memory_mb` (`32768` — MiB, +8 GiB
-  swap), both editable per-clone limits, and `template_reference`
-  (`"pegasis0/rmng-template:latest"` — the registry `repo:tag` the wizard/API pulls the clone
-  template from at `POST /api/images/pull`; editable, no secret).
+  swap), both editable per-clone limits. (`template_reference` is a retired gen-1 field: still
+  stored for compatibility, but nothing reads it — gen-2 builds clone images from each
+  preset's Dockerfile on demand.)
 - **First-run setup wizard**: a fresh deploy ships `config.json` with `"setupComplete":
   false`, so the web UI shows the wizard (environment checklist → server settings + monitors
-  → download the clone template → finish) instead of the dashboard; finishing latches
+  → finish) instead of the dashboard; finishing latches
   `setupComplete: true` (a one-way latch) and materializes the lazy `rmng` network, after
   which the one-time fields (`data_dir`, `clone_socket`, `docker.subnet`) are locked. There is
   **no grandfather rule**: an old `config.json` re-runs the wizard (new machine, no network /
@@ -334,11 +337,9 @@ the config. `PUT /api/config` returns
 
 Template params are mostly not config: the base OS is fixed in the template build
 (`ubuntu:26.04` in `template/Dockerfile` — the patched gnome-shell is compiled against 26.04's
-GNOME only) and isn't chosen at pull time. The wizard/API pull takes an optional registry
-reference (`POST /api/images/pull {reference?}`; the pulled image keeps its own `repo:tag` as
-the clone-source reference, no retag; `reference` defaults to `docker.template_reference`).
-Per-clone CPU / memory limits come from
-`docker.clone_cpus` / `docker.clone_memory_mb`, applied at clone create — not per image.
+GNOME only). Clone images build on demand from each preset's Dockerfile into a hash tag
+(`POST /api/images/prebuild` warms one without creating). Per-clone CPU / memory limits come
+from `docker.clone_cpus` / `docker.clone_memory_mb`, applied at clone create — not per image.
 
 ---
 
@@ -416,6 +417,7 @@ protocol), `viewer` (port-1 logical types), `mcp` (MCP arg DTOs). control + conf
 derive `ts_rs::TS` and export to `frontend/app/lib/wire/`.
 
 **`media`** ([lib.rs](../crates/media/src/lib.rs)) — the GPU + socket plane:
+
 - `init() -> Result<()>` — init GStreamer once.
 - `Encoder::new(on_au: FnMut(Vec<u8>, bool))` / `.push(fd, fourcc, modifier, w, h)` /
   `.force_idr()` — one VA-API H.264 encoder per monitor (`vapostproc ! vah264enc ! h264parse`,

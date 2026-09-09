@@ -6,13 +6,12 @@ and the **fleet-automation plane**. It exposes three service ports (9000 web, 90
 and the `clone-daemon`/`agent-wrapper`/`rmng-cli` binaries are plain on-disk payloads under
 `/usr/local/share/rmng/` (read at runtime, injected into clones at create time) — nothing is
 compiled into the binary. Clones themselves are created from a separately-published **template**
-image (`pegasis0/rmng-template`, built by `template/Dockerfile`), pulled by `POST
-/api/images/pull` — not built in-product, so the patched gnome-shell `.deb` isn't a
-control-server payload at all. Full references: [API](../../docs/API.md) ·
+image (`pegasis0/rmng-template`, built by `template/Dockerfile`) — not built in-product,
+so the patched gnome-shell `.deb` isn't a control-server payload at all. Full references: [API](../../docs/API.md) ·
 [MCP](../../docs/MCP.md) · [PROTOCOL](../../docs/PROTOCOL.md) · [DEPLOY](../../docs/DEPLOY.md).
 
 | Port | Default | Transport | Serves |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **1 — video** | 9001 | framed H.264/JSON over TCP | the native [viewer](../viewer/README.md): selected clone's monitors out; input/clipboard/cursor |
 | **2 — web API** | 9000 | `axum` HTTP + SSE + embedded frontend | the [frontend](../../frontend/README.md): `/events`, all `/api/*`, the SPA |
 | **4 — forward** | 9005 | framed TCP over TCP | the viewer's port-forward data plane: one TCP connection per accepted local socket, spliced to the clone |
@@ -26,6 +25,7 @@ control-server safe while clones are mid-turn.
 ## Modules
 
 `app` (shared state holder) · `state` (in-memory `ControlState` + atomic `state.json` persist
+
 + file-watch + SSE bus) · `config` (load/merge/redact `config.json` at 0600) · `web` (port 2
 routes + SSE + SPA + the desktop/exec proxy endpoints for `rmng desktop`/`rmng exec`) ·
 `clonekey` (per-clone identity bearers, `RMNG_PROXY_KEY`) · `mediaplane` (port 1: clone-socket
@@ -80,6 +80,7 @@ in-clone agent calls it directly on localhost and the `rmng desktop` CLI proxies
 web API. Every tool + args: [MCP.md](../../docs/MCP.md).
 
 <a id="accounts-claude--codex"></a>
+
 ## Accounts (`claude` / `codex`)
 
 **Single-token model, server-owned.** An account is just its OAuth pair (access + single-use
@@ -104,15 +105,13 @@ the clone's prompt cache. The two modules are near-symmetric; what they share
 ## Orchestration (`docker`, `provision`, `jobs`)
 
 `docker` holds the bollard client + dumb primitives (create/start/stop/commit/exec/tar/network);
-`provision` stitches them into clone-create, template-pull, commit-from-clone, and delete
+`provision` stitches them into clone-create, fork, rebase, and delete
 flows, streaming progress through a `FnMut(&str, &str)` callback (the old `P step msg` /
 `RESULT` bash protocol is gone); `jobs` wraps each in an `Operation` streamed over `/events`.
-Clone sources are **images** (`rmng.image=1`, identified by their own `repo:tag` such as
-`pegasis0/rmng-template:latest`) — no golden-CT / CoW model: the template is built + published
-ahead of time (`template/Dockerfile`, not by this crate — see
-[DEPLOY.md#publishing-the-template](../../docs/DEPLOY.md#publishing-the-template)),
-`pull_template` pulls it (no local retag — it keeps its own `repo:tag`), clones are `docker run`
-off an image, and any clone commits to a new image. In-container guest scripts
+Clone images are **gen-2 preset builds** — no golden-CT / CoW model: each preset's Dockerfile
+builds into a hash tag on demand (see
+[DEPLOY.md#publishing-the-template](../../docs/DEPLOY.md#publishing-the-template)).
+In-container guest scripts
 (`claude-import.sh`, `codex-import.sh` — one per provider, same `status`/`read`/`apply`/`clear`
 verbs) run over `docker exec bash -s`. See [DEPLOY.md](../../docs/DEPLOY.md) and
 [SCRIPTS.md](../../docs/SCRIPTS.md).

@@ -1,7 +1,6 @@
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
-import type { ImageInfo } from "~/lib/wire/ImageInfo";
 // The hand-maintained `Operation`, not the generated `wire/Operation`: ts-rs maps the
 // Rust `u64` timestamps to `bigint`, but `JSON.parse` yields plain numbers, so the
 // hand-maintained shape is the one these responses actually have at runtime.
@@ -26,35 +25,38 @@ import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
  *  The fallback names the status code when the response carries no status text, which is
  *  every response over HTTP/2. */
 async function request(url: string, init?: RequestInit): Promise<unknown> {
-  const res = await fetch(url, init);
-  const body = await res.text().catch(() => "");
-  if (!res.ok) throw new Error(serverErrorText(body, res.statusText || `HTTP ${res.status}`));
-  try {
-    return JSON.parse(body) as unknown;
-  } catch {
-    // A 204, or a success body that is not JSON. No caller reads one.
-    return {};
-  }
+ const res = await fetch(url, init);
+ const body = await res.text().catch(() => "");
+ if (!res.ok)
+  throw new Error(
+   serverErrorText(body, res.statusText || `HTTP ${res.status}`),
+  );
+ try {
+  return JSON.parse(body) as unknown;
+ } catch {
+  // A 204, or a success body that is not JSON. No caller reads one.
+  return {};
+ }
 }
 
 function jsonInit(method: string, body: unknown): RequestInit {
-  return {
-    method,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  };
+ return {
+  method,
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
+ };
 }
 
 function postJson(url: string, body: unknown): Promise<unknown> {
-  return request(url, jsonInit("POST", body));
+ return request(url, jsonInit("POST", body));
 }
 
 function getJson(url: string): Promise<unknown> {
-  return request(url);
+ return request(url);
 }
 
 function delJson(url: string): Promise<unknown> {
-  return request(url, { method: "DELETE" });
+ return request(url, { method: "DELETE" });
 }
 
 /** A Linear issue the client has already resolved, as the clone route takes it.
@@ -66,17 +68,17 @@ function delJson(url: string): Promise<unknown> {
  *  `ticket` is the only one it cannot do without. The hostname derives from it, and that step
  *  stays server-side because it needs the live clone list to guarantee uniqueness. */
 export interface CloneLinearMeta {
-  /** Lowercase team key, e.g. `we`. Picks the preset when `preset` is omitted. */
-  workspace: string;
-  /** Linear identifier, e.g. `WE-142`. */
-  ticket: string;
-  ticketUrl: string;
-  /** Linear's own `branchName`. */
-  branch: string;
-  /** The issue title, which becomes the clone's display name. */
-  title: string;
-  /** The issue's first Linear label. Omitted when it has none. */
-  label?: string;
+ /** Lowercase team key, e.g. `we`. Picks the preset when `preset` is omitted. */
+ workspace: string;
+ /** Linear identifier, e.g. `WE-142`. */
+ ticket: string;
+ ticketUrl: string;
+ /** Linear's own `branchName`. */
+ branch: string;
+ /** The issue title, which becomes the clone's display name. */
+ title: string;
+ /** The issue's first Linear label. Omitted when it has none. */
+ label?: string;
 }
 
 /** Clone payload: a Linear issue the client already resolved, or a plain no-ticket clone
@@ -88,93 +90,111 @@ export interface CloneLinearMeta {
  *  ticket-id prefix in the ticket mode; plain sends a resolved name.
  *  `parent` nests the new clone as a sub clone under that clone id. */
 export type ClonePayload = (
-  | ({ linear: CloneLinearMeta } & {
-      agentInstructions?: string;
-      claudeInstructions?: string;
-    })
-  | { plain: { title: string; message: string } }
-) & { group?: string; preset?: string; headless?: boolean; parent?: string; claudeAccount?: string; codexAccount?: string };
+ | ({ linear: CloneLinearMeta } & {
+    agentInstructions?: string;
+    claudeInstructions?: string;
+   })
+ | { plain: { title: string; message: string } }
+) & {
+ group?: string;
+ preset?: string;
+ headless?: boolean;
+ parent?: string;
+ claudeAccount?: string;
+ codexAccount?: string;
+};
 
 export const activate = (id: string | null) =>
-  postJson("/api/activate", { id });
+ postJson("/api/activate", { id });
 /** Start a template clone (title + preset in `payload`). The server builds the
  *  effective preset's Dockerfile into the clone image — no caller-supplied base.
  *  Returns the driving Operation so the caller can follow it; progress streams
  *  over /events. */
 export const duplicateClone = (payload: ClonePayload) =>
-  postJson("/api/clone", { image: "", ...payload }).then(
-    (r) => (r as { op: Operation }).op,
-  );
+ postJson("/api/clone", { image: "", ...payload }).then(
+  (r) => (r as { op: Operation }).op,
+ );
 export const deleteClone = (id: string) => postJson("/api/delete", { id });
 /** Warm a preset image without creating: build the posted Dockerfile text on miss.
  *  The preset card's rebuild button posts the editor's current text (which may be
  *  unsaved). Returns the driving Operation; progress streams over /events. */
 export const prebuildDockerfile = (dockerfile: string) =>
-  postJson("/api/images/prebuild", { dockerfile }).then(
-    (r) => (r as { op: Operation }).op,
-  );
+ postJson("/api/images/prebuild", { dockerfile }).then(
+  (r) => (r as { op: Operation }).op,
+ );
 /** Fork a gen-2 clone from a live source clone. The server snapshots + clones the
  *  source home, derives the new clone id from the ticket identifier or title (like
  *  create does), and creates from the source's recorded base tag. Returns
  *  the driving Operation so the caller can follow it; progress streams over /events. */
 export interface ForkPayload {
-  preset?: string;
-  linear?: {
-    workspace?: string;
-    ticket?: string;
-    ticketUrl?: string;
-    branch?: string;
-    displayName?: string;
-    label?: string;
-  };
-  claudeAccount?: string;
-  codexAccount?: string;
-  firstMessage?: string;
-  agentInstructions?: string;
-  claudeInstructions?: string;
+ preset?: string;
+ linear?: {
+  workspace?: string;
+  ticket?: string;
+  ticketUrl?: string;
+  branch?: string;
+  displayName?: string;
+  label?: string;
+ };
+ claudeAccount?: string;
+ codexAccount?: string;
+ firstMessage?: string;
+ agentInstructions?: string;
+ claudeInstructions?: string;
 }
 
 export const forkClone = (
-  source: string,
-  headless?: boolean,
-  payload?: ForkPayload,
+ source: string,
+ headless?: boolean,
+ payload?: ForkPayload,
 ) =>
-  postJson("/api/fork", {
-    source,
-    ...(headless ? { headless } : {}),
-    ...(payload?.preset ? { preset: payload.preset } : {}),
-    ...(payload?.linear ? { linear: payload.linear } : {}),
-    ...(payload?.claudeAccount ? { claudeAccount: payload.claudeAccount } : {}),
-    ...(payload?.codexAccount ? { codexAccount: payload.codexAccount } : {}),
-    ...(payload?.firstMessage ? { firstMessage: payload.firstMessage } : {}),
-    ...(payload?.agentInstructions ? { agentInstructions: payload.agentInstructions } : {}),
-    ...(payload?.claudeInstructions ? { claudeInstructions: payload.claudeInstructions } : {}),
-  }).then((r) => (r as { op: Operation }).op);
+ postJson("/api/fork", {
+  source,
+  ...(headless ? { headless } : {}),
+  ...(payload?.preset ? { preset: payload.preset } : {}),
+  ...(payload?.linear ? { linear: payload.linear } : {}),
+  ...(payload?.claudeAccount ? { claudeAccount: payload.claudeAccount } : {}),
+  ...(payload?.codexAccount ? { codexAccount: payload.codexAccount } : {}),
+  ...(payload?.firstMessage ? { firstMessage: payload.firstMessage } : {}),
+  ...(payload?.agentInstructions
+   ? { agentInstructions: payload.agentInstructions }
+   : {}),
+  ...(payload?.claudeInstructions
+   ? { claudeInstructions: payload.claudeInstructions }
+   : {}),
+ }).then((r) => (r as { op: Operation }).op);
 /** Rebase a gen-2 clone onto a preset's image (`preset`), keeping dataset + id and the
  *  clone's own preset bindings. `rebuild` forces a fresh image build even when the tag
  *  exists. Returns the driving Operation; progress streams over /events. */
 export const rebaseClone = (id: string, preset: string, rebuild: boolean) =>
-  postJson(`/api/hosts/${id}/rebase`, { preset, rebuild }).then(
-    (r) => (r as { op: Operation }).op,
-  );
+ postJson(`/api/hosts/${id}/rebase`, { preset, rebuild }).then(
+  (r) => (r as { op: Operation }).op,
+ );
 /** Gracefully stop a managed clone while retaining its container and per-clone data. */
 export const archiveClone = (id: string) =>
-  postJson(`/api/hosts/${encodeURIComponent(id)}/archive`, {});
+ postJson(`/api/hosts/${encodeURIComponent(id)}/archive`, {});
 /** Restart a retained archived clone. */
 export const unarchiveClone = (id: string) =>
-  postJson(`/api/hosts/${encodeURIComponent(id)}/unarchive`, {});
+ postJson(`/api/hosts/${encodeURIComponent(id)}/unarchive`, {});
 /** Replace a clone's port-forward rules. New rules omit `id` (server derives it as
  *  `f<localPort>`). 400 on a local-port conflict (validated server-side); the UI
  *  refreshes from the next `/events` frame. */
 export const putForwards = (
-  cloneId: string,
-  forwards: Array<{ id?: string; remotePort: number; localPort: number; enabled: boolean; label?: string }>,
-) => putJson(`/api/hosts/${encodeURIComponent(cloneId)}/forwards`, { forwards });
+ cloneId: string,
+ forwards: Array<{
+  id?: string;
+  remotePort: number;
+  localPort: number;
+  enabled: boolean;
+  label?: string;
+ }>,
+) =>
+ putJson(`/api/hosts/${encodeURIComponent(cloneId)}/forwards`, { forwards });
 
 /** Replace the board's columns wholesale. The client owns the layout rules and sends the
  *  settled list; the server just stores it and broadcasts the new state. */
 export const putBoardColumns = (columns: BoardColumn[]) =>
-  putJson("/api/board", { columns });
+ putJson("/api/board", { columns });
 
 /** Replace the operator's ticket order wholesale, top to bottom. Same bargain as
  *  `putBoardColumns`: the client owns the arrangement and sends the settled list of ticket
@@ -183,14 +203,14 @@ export const putBoardColumns = (columns: BoardColumn[]) =>
  *  Ids for tickets that no longer exist are fine to send. Nothing prunes them and nothing
  *  reads them. */
 export const putTicketOrder = (ticketIds: string[]) =>
-  putJson("/api/tickets/order", { ticketIds });
+ putJson("/api/tickets/order", { ticketIds });
 
 /** Replace the muted-clone set. Same wholesale bargain as the two above.
  *
  *  Muting silences this clone's desktop notification and its sub clones'. The server raises no
  *  notifications itself; it holds the set so every tab and the phone agree on it. */
 export const putMutedClones = (cloneIds: string[]) =>
-  putJson("/api/clones/muted", { cloneIds });
+ putJson("/api/clones/muted", { cloneIds });
 
 // --- uploads ---------------------------------------------------------------
 
@@ -202,45 +222,34 @@ export const putMutedClones = (cloneIds: string[]) =>
  *  The URL it returns is LAN-only (`/uploads/<name>`), which is why an editor whose body is
  *  bound for Linear uses `~/lib/linear/upload` instead: that one puts the bytes in Linear. */
 export async function uploadFile(file: File): Promise<string> {
-  const fd = new FormData();
-  fd.append("file", file);
-  // No content-type header: the browser sets the multipart boundary itself.
-  const data = (await request("/api/upload", { method: "POST", body: fd })) as { url?: string };
-  if (!data.url) throw new Error("upload failed");
-  return data.url;
+ const fd = new FormData();
+ fd.append("file", file);
+ // No content-type header: the browser sets the multipart boundary itself.
+ const data = (await request("/api/upload", { method: "POST", body: fd })) as {
+  url?: string;
+ };
+ if (!data.url) throw new Error("upload failed");
+ return data.url;
 }
 
-// --- images (clone-source templates) ---------------------------------------
-
-/** The clone-source images (`rmng.image=1`); each carries the ids of the live
- *  clones running on it (`inUseBy`). Powers the sidebar Images section + the
- *  clone dialog's image picker. */
-export const listImages = () => getJson("/api/images") as Promise<ImageInfo[]>;
-/** Pull the clone template from a registry (`reference`, e.g. `pegasis0/rmng-template:latest`).
- *  The pulled image keeps its own `repo:tag` as the clone-source reference (no local retag).
- *  Omitted/blank `reference` falls back server-side to `docker.templateReference`. Returns the
- *  driving Operation (kind `pull`); progress streams over /events. */
-export const pullTemplate = (reference?: string) =>
-  postJson("/api/images/pull", { reference });
-/** Remove a clone-source image by reference. 409 (with a "…in use by…" message)
- *  when a live clone or a running op still references it. */
-export const deleteImage = (reference: string) =>
-  postJson("/api/images/delete", { reference });
 /** The environment preflight rows for the setup wizard's first step. */
 export const getSetupEnv = () => getJson("/api/setup/env") as Promise<SetupEnv>;
 /** The control-server's own version + whether Hub has a newer image (no pull). */
-export const getUpdateStatus = () => getJson("/api/server/version") as Promise<UpdateStatus>;
+export const getUpdateStatus = () =>
+ getJson("/api/server/version") as Promise<UpdateStatus>;
 /** Pull the latest control-server image and swap the running container onto it. Returns the
  *  driving Operation (kind `update`); the server restarts mid-op. */
-export const updateServer = () => postJson("/api/server/update", {}) as Promise<Operation>;
+export const updateServer = () =>
+ postJson("/api/server/update", {}) as Promise<Operation>;
 /** Restart the control-server in place to apply changed startup settings. The UI briefly
  *  disconnects and reconnects. */
-export const restartServer = () => postJson("/api/server/restart", {}) as Promise<{ ok: boolean }>;
+export const restartServer = () =>
+ postJson("/api/server/restart", {}) as Promise<{ ok: boolean }>;
 
 /** Start an account sign-in here rather than in a clone: returns the provider URL to open.
  *  Nothing is stored yet, and the sign-in expires if the callback is never pasted back. */
 export const beginLogin = (provider: "claude" | "codex") =>
-  postJson("/api/login/begin", { provider }) as Promise<{ url: string }>;
+ postJson("/api/login/begin", { provider }) as Promise<{ url: string }>;
 /** Finish that sign-in with whatever the browser landed on. Both redirect URIs point at a
  *  port on the operator's own machine, so the page fails to load and its address bar is the
  *  only place the authorization code exists. */
@@ -249,17 +258,22 @@ export const beginLogin = (provider: "claude" | "codex") =>
  *  Empty for a plain import. Signing in as the same account is not a replacement, and the
  *  server treats it as the token refresh it already is. */
 export const completeLogin = (
-  provider: "claude" | "codex",
-  pasted: string,
-  group: string,
-  replaces = "",
+ provider: "claude" | "codex",
+ pasted: string,
+ group: string,
+ replaces = "",
 ) =>
-  postJson("/api/login/complete", { provider, pasted, group, replaces }) as Promise<{
-    ok: boolean;
-    email: string;
-    replaced: string | null;
-    moved: string[];
-  }>;
+ postJson("/api/login/complete", {
+  provider,
+  pasted,
+  group,
+  replaces,
+ }) as Promise<{
+  ok: boolean;
+  email: string;
+  replaced: string | null;
+  moved: string[];
+ }>;
 
 /** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */
 export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
@@ -267,63 +281,73 @@ export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
 /** Change a clone's Claude account/group. `account` is "auto", "none", an email, or
  *  "group:<name>". `account` in the reply is null when set to "none". */
 export const swapClaudeAccount = (clone: string, account: string) =>
-  postJson("/api/claude/swap", { host: clone, account }) as Promise<{
-    ok: boolean;
-    account: string | null;
-    group: string | null;
-    selection: string;
-  }>;
+ postJson("/api/claude/swap", { host: clone, account }) as Promise<{
+  ok: boolean;
+  account: string | null;
+  group: string | null;
+  selection: string;
+ }>;
 
 /** Delete an imported Claude account by email. Rejects (400) if a clone is pinned to it;
  *  auto/group clones are moved off first. `moved` lists the host ids that were reassigned. */
 export const deleteClaudeAccount = (account: string) =>
-  postJson("/api/claude/delete", { account }) as Promise<{ ok: boolean; moved: string[] }>;
+ postJson("/api/claude/delete", { account }) as Promise<{
+  ok: boolean;
+  moved: string[];
+ }>;
 
 export const refreshCodexUsage = () => postJson("/api/codex/refresh", {});
 
-
 export const swapCodexAccount = (clone: string, account: string) =>
-  postJson("/api/codex/swap", { host: clone, account }) as Promise<{
-    ok: boolean;
-    account: string | null;
-    group: string | null;
-    selection: string;
-  }>;
+ postJson("/api/codex/swap", { host: clone, account }) as Promise<{
+  ok: boolean;
+  account: string | null;
+  group: string | null;
+  selection: string;
+ }>;
 
 /** Delete an imported Codex account by email (the Codex twin of `deleteClaudeAccount`). */
 export const deleteCodexAccount = (account: string) =>
-  postJson("/api/codex/delete", { account }) as Promise<{ ok: boolean; moved: string[] }>;
+ postJson("/api/codex/delete", { account }) as Promise<{
+  ok: boolean;
+  moved: string[];
+ }>;
 
 // --- Settings / config (redacted read · partial write · validate) ----------
 function putJson(url: string, body: unknown): Promise<unknown> {
-  return request(url, jsonInit("PUT", body));
+ return request(url, jsonInit("PUT", body));
 }
 
 /** Current config. Each preset's Linear key comes back verbatim, which is where the ticket
  *  column gets the key it queries Linear with. */
-export const getConfig = () => getJson("/api/config") as Promise<AppConfigRedacted>;
+export const getConfig = () =>
+ getJson("/api/config") as Promise<AppConfigRedacted>;
 /** Merge a partial config update (empty-string secrets are left unchanged), persist,
  *  apply live. Returns the new redacted config plus whether a restart is required to
  *  apply restart-scoped settings (ports, cloneSocket, staticDir, chroma). When the
  *  patch flips `setupComplete` (wizard finish), the server also ensures the `rmng`
  *  network; a non-fatal failure rides along as `networkWarning`. */
 export const putConfig = (patch: unknown) =>
-  putJson("/api/config", patch) as Promise<
-    ConfigPutResponse & { networkWarning?: string }
-  >;
+ putJson("/api/config", patch) as Promise<
+  ConfigPutResponse & { networkWarning?: string }
+ >;
 /** Validate a setting (e.g. `"docker"`, which re-runs the Docker self-setup probe). `value` and
  *  `model` carry what the operator has typed but not saved, so a test reports on the fields
  *  they are looking at. */
 export const testConfig = (what: string, value?: string, model?: string) =>
-  postJson("/api/config/test", { what, value: value ?? "", model: model ?? "" }) as Promise<{
-    ok: boolean;
-    message: string;
-  }>;
+ postJson("/api/config/test", {
+  what,
+  value: value ?? "",
+  model: model ?? "",
+ }) as Promise<{
+  ok: boolean;
+  message: string;
+ }>;
 /** Make `name` the active layout preset and live-apply it to the clone on screen. The rest of
  * the fleet keeps its current monitors until the operator switches to it. */
 export const activateLayout = (name: string) =>
-  postJson("/api/layout/activate", { name }) as Promise<{
-    ok: boolean;
-    applied: string[];
-    errors: string[];
-  }>;
+ postJson("/api/layout/activate", { name }) as Promise<{
+  ok: boolean;
+  applied: string[];
+  errors: string[];
+ }>;

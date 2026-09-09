@@ -65,14 +65,18 @@ export interface SettingsDraft {
   layoutPresets: LayoutPresetDraft[];
   presets: PresetDraft[];
   hostnamePrefix: string;
-  templateReference: string;
   /** One-time: baked into the rmng bridge and every clone IP at first-run setup. */
   subnet: string;
   cloneCpus: number;
   cloneMemoryMb: number;
   claude: { pollSecs: number; pinnedEmail: string };
   claudeGroups: GroupDraft[];
-  codex: { pollSecs: number; pinnedEmail: string; usagePolling: boolean; autoReset: boolean };
+  codex: {
+    pollSecs: number;
+    pinnedEmail: string;
+    usagePolling: boolean;
+    autoReset: boolean;
+  };
   codexGroups: GroupDraft[];
   listen: ListenConfig;
   agentPort: number;
@@ -95,7 +99,10 @@ export interface SettingsDraft {
 /** The layout preset a rig with none configured is given to edit. Offering an empty list
  *  would leave the operator with nothing to type into. */
 export function newLayoutPreset(name = ""): LayoutPresetDraft {
-  return { name, monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }] };
+  return {
+    name,
+    monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+  };
 }
 
 /** A blank preset row. Both account defaults start empty: a new preset takes no opinion on
@@ -141,7 +148,10 @@ export function monitorPatch(m: MonitorDraft): MonitorDraft {
 export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
   return {
     layoutPresets: c.layoutPresets.length
-      ? c.layoutPresets.map((p) => ({ name: p.name, monitors: p.monitors.map((m) => ({ ...m })) }))
+      ? c.layoutPresets.map((p) => ({
+          name: p.name,
+          monitors: p.monitors.map((m) => ({ ...m })),
+        }))
       : [newLayoutPreset("Default")],
     presets: c.presets.map((p) => ({
       name: p.name,
@@ -154,7 +164,6 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       dockerfile: p.dockerfile ?? "FROM pegasis0/rmng-template:latest",
     })),
     hostnamePrefix: c.docker.hostnamePrefix,
-    templateReference: c.docker.templateReference,
     subnet: c.docker.subnet,
     cloneCpus: c.docker.cloneCpus,
     cloneMemoryMb: c.docker.cloneMemoryMb,
@@ -163,13 +172,19 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       pollSecs: Number(c.claude.pollSecs),
       pinnedEmail: c.claude.pinnedEmail ?? "",
     },
-    claudeGroups: c.cloneGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })),
+    claudeGroups: c.cloneGroups.map((g) => ({
+      name: g.name,
+      accounts: [...g.accounts],
+    })),
     codex: {
       ...c.codex,
       pollSecs: Number(c.codex.pollSecs),
       pinnedEmail: c.codex.pinnedEmail ?? "",
     },
-    codexGroups: c.codexGroups.map((g) => ({ name: g.name, accounts: [...g.accounts] })),
+    codexGroups: c.codexGroups.map((g) => ({
+      name: g.name,
+      accounts: [...g.accounts],
+    })),
     listen: { ...c.listen },
     agentPort: c.agentPort,
     dataDir: c.dataDir,
@@ -207,7 +222,10 @@ function savedGroups(groups: GroupDraft[]): GroupDraft[] {
  * it is read-only and the server rejects a change anyway. Before setup it is sent; after, it
  * is omitted entirely rather than sent unchanged.
  */
-export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unknown {
+export function settingsPatch(
+  draft: SettingsDraft,
+  setupComplete: boolean,
+): unknown {
   return {
     layoutPresets: draft.layoutPresets
       .filter((p) => p.name.trim())
@@ -217,7 +235,6 @@ export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unk
       })),
     docker: {
       hostnamePrefix: draft.hostnamePrefix,
-      templateReference: draft.templateReference,
       cloneCpus: draft.cloneCpus,
       cloneMemoryMb: draft.cloneMemoryMb,
       ...(setupComplete ? {} : { subnet: draft.subnet }),
@@ -243,7 +260,10 @@ export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unk
       .filter((p) => p.name.trim())
       .map((p) => ({
         name: p.name.trim(),
-        labels: p.labels.split(",").map((s) => s.trim()).filter(Boolean),
+        labels: p.labels
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
         linearKey: p.linearKey,
         // Unlike linearKey a blank here is MEANINGFUL ("no default — let the clone decide"),
         // so it is sent as-is rather than treated as "keep stored".
@@ -251,7 +271,10 @@ export function settingsPatch(draft: SettingsDraft, setupComplete: boolean): unk
         codexAccount: p.codexAccount,
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
-        dockerfile: p.dockerfile.trim() === "" ? "FROM pegasis0/rmng-template:latest" : p.dockerfile,
+        dockerfile:
+          p.dockerfile.trim() === ""
+            ? "FROM pegasis0/rmng-template:latest"
+            : p.dockerfile,
       })),
   };
 }
