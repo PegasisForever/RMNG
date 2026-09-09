@@ -341,38 +341,6 @@ fn clone_pct(step: &str) -> Option<f64> {
 /// still-booting). The remaining `monitors` 85 / `accounts` 95 / `done` 100 steps are driven
 /// by the caller (`run_clone`), so this fn returning does NOT mean the clone is connectable
 /// yet. Returns the image reference on success (`RmngClone.source`). The container *name* is the
-/// Apply one per-clone configuration step at create time, best-effort.
-///
-/// Every step here is also a step the per-clone reconciler owns, and each one runs here purely
-/// so a fresh clone has it from its first second rather than up to one reconcile pass later.
-/// A failure is therefore never fatal: it is logged, the stamp is withheld, and the reconciler
-/// finds the step outstanding on its first pass. Withholding the stamp IS the retry, so a step
-/// whose script exited non-zero must not be stamped. `stamp` is `None` for a step the
-/// reconciler re-runs unconditionally (those scripts are content-idempotent).
-async fn seed_step(
-    docker: &crate::docker::DockerCtl,
-    container: &str,
-    hostname: &str,
-    label: &str,
-    script: &str,
-    stamp: Option<TarEntry>,
-) {
-    let code = docker
-        .exec_script(container, script, &[], &[], |_stream, line| {
-            tracing::debug!(target: "provision", "{label}: {line}");
-        })
-        .await
-        .unwrap_or(1);
-    if code != 0 {
-        tracing::warn!("clone {hostname}: {label} exited {code} (reconciler will retry)");
-        return;
-    }
-    let Some(stamp) = stamp else { return };
-    if let Err(e) = docker.upload_tar(container, vec![stamp]).await {
-        tracing::warn!("clone {hostname}: writing the {label} stamp failed: {e:#} (non-fatal)");
-    }
-}
-
 /// The inject → start → wait-ready tail, factored out so the caller
 /// can run it under a cleanup trap.
 async fn clone_container_after_create(
@@ -418,7 +386,7 @@ async fn clone_container_after_create(
         bins.push(crate::clone_reconcile::session_holder_unit_entry());
     }
     bins.push(crate::clone_reconcile::payload_stamp_entry_for(&bins));
-    docker.upload_tar(container, bins).await?;
+    // (Single upload below, after identity + content join this vec.)
     // Headless clone: mask the desktop units BEFORE first boot, while the container is
     // still stopped. A mask (symlink → /dev/null over the baked unit file) keeps the
     // session from ever starting: the wants-symlinks resolve to masked units and systemd
@@ -504,24 +472,15 @@ async fn clone_container_after_create(
         "inject",
         "injecting machine-id + preset env + PATH rc (pre-boot)",
     );
-    docker.upload_tar(container, identity).await?;
+    bins.extend(identity);
 
-    // systemd PID 1 comes up, and the user manager with it, now reading the env written above.
-    on_progress(
-        "inject",
-        "starting container to inject the rest of the preset",
-    );
-    docker.start_container(container).await?;
-
-    // (Headless desktop handling already happened pre-boot via unit masks — nothing
-    // could have started, so there is nothing to reap here.)
-
-    // Codex reads global guidance + MCP config from ~/.codex, whose parent dirs the
-    // template pre-creates with the right owner (phase 30) — no prepare step, and no CLI
-    // install step either: the template bakes `codex` as its sole source.
-
-    // Build the second upload_tar: the files that had to wait for the container to be up. The
-    // identity + env went in pre-boot, above.
+    // Everything below is whole files rendered server-side, so it all joins the same
+    // pre-boot tar instead of waiting for the container: the agent playbook, Codex
+    // parity + stamp, SSH material + stamp, and the initial contents of the four
+    // merge-owned files (the template bakes none of them, so on a fresh clone
+    // merge-on-empty equals this exact content — see the `*_initial` renderers, each
+    // tested against the same source as its loop merge). The loop still merges for
+    // lived-in clones, operator edits, and fork-carryover; the create path never merges.
     let mut entries: Vec<TarEntry> = Vec::new();
     // The Settings-editable agent playbook (global + preset append), read by the agent-wrapper
     // at startup (AGENT_INSTRUCTIONS_PATH). Empty ⇒ skip; the wrapper then uses its baked-in
@@ -542,9 +501,8 @@ async fn clone_container_after_create(
     entries.append(&mut codex_entries);
     // SSH: the clone's stable host key + the current authorized_keys, so `ssh -J … rmng@<id>`
     // works the moment the clone is up. The template pre-created ~rmng/.ssh (700) and ships
-    // no host keys, so these land with the right owner/perms. Best-effort: a keygen failure
-    // must not fail the whole clone — log and continue (SSH just won't work until the next
-    // reconcile push).
+    // no host keys, so these land with the right owner/perms. Stamp withheld on failure and
+    // the loop's ensure_ssh_ready retries — the designed retry, not a mask.
     // `authorized_keys` is the only `~/.ssh` file provisioned; a config baked into the source
     // image stays exactly as the image left it (the server no longer reads or writes it).
     match crate::ssh::clone_ssh_tar_entries(&cfg.data_dir, hostname, &cfg.ssh.authorized_keys) {
@@ -555,103 +513,67 @@ async fn clone_container_after_create(
         Err(e) => tracing::warn!("clone {hostname}: ssh material skipped: {e}"),
     }
 
-    on_progress(
-        "inject",
-        "injecting the agent playbook + Codex parity + SSH material",
-    );
-    docker.upload_tar(container, entries).await?;
-
-    // Interactive Claude Code reads MCP servers from ~/.claude.json (state-bearing → jq merge, not
-    // a tar entry). Give it the same desktop+linear set as Codex and the agent-wrapper; the
-    // desktop server is removed on headless clones. Stamp it so the reconciler skips re-running
-    // this within its first 30s pass. Best-effort — the reconciler retries on failure.
-    on_progress("inject", "configuring ~/.claude.json MCP servers");
-    seed_step(
-        docker,
-        container,
-        hostname,
-        "~/.claude.json MCP servers",
-        &crate::clone_reconcile::claude_mcp_script(headless),
-        Some(crate::clone_reconcile::claude_mcp_stamp_entry_for(headless)),
-    )
-    .await;
-
-    // Cursor reads neither of those files, so it gets the same managed servers through
-    // `~/.cursor/mcp.json`. Its Linear bearer is resolved from the clone's env here, because
-    // Cursor does not expand an environment reference in that file.
-    on_progress("inject", "configuring ~/.cursor/mcp.json MCP servers");
+    // Initial contents of the merge-owned files (modes match what each loop merge sets,
+    // so a matching stamp means the loop never rewrites them). See the `*_initial`
+    // renderers for the merge-on-empty equivalence.
     let linear_key = crate::clone_reconcile::env_value(env, "LINEAR_API_KEY");
-    seed_step(
-        docker,
-        container,
-        hostname,
-        "~/.cursor/mcp.json MCP servers",
-        &crate::clone_reconcile::cursor_mcp_script(headless, &linear_key),
-        Some(crate::clone_reconcile::cursor_mcp_stamp_entry_for(
-            headless,
-            &linear_key,
-        )),
-    )
-    .await;
-
-    // Codex keeps its MCP servers in `~/.codex/config.toml`, which the parity tar above does not
-    // touch (that file is the operator's, so the servers go in by merge). Seeded here for the
-    // same reason as the two above: without it a clone's Codex runs with no managed servers
-    // until the reconciler's first pass.
-    on_progress("inject", "merging ~/.codex/config.toml MCP servers");
-    seed_step(
-        docker,
-        container,
-        hostname,
-        "~/.codex/config.toml MCP servers",
-        &crate::clone_reconcile::codex_mcp_merge_script(headless),
-        Some(crate::clone_reconcile::codex_mcp_stamp_entry_for(headless)),
-    )
-    .await;
-
-    // The activity probe, so the new clone reports working-vs-stuck from its first turn
-    // rather than from the reconciler's first pass 30s later. Stamped the same way, and
-    // best-effort for the same reason: the reconciler is the backstop.
-    on_progress("inject", "installing the activity probe");
-    // Same seed pattern as the MCP steps above with one inline difference: tar and register
-    // are two calls, so a failure names which one. Either way the stamp is withheld and the
-    // loop's ensure_claude_hook retries — tolerance here is the designed retry, not a mask.
-    let tar_ok = docker
-        .upload_tar(container, crate::clone_reconcile::rmng_hook_entries())
-        .await
-        .inspect_err(|e| {
-            tracing::warn!("clone {hostname}: activity probe tar failed: {e:#} (reconciler will retry)");
-        })
-        .is_ok();
-    let reg_ok = docker
-        .exec_script(
-            container,
-            &crate::clone_reconcile::claude_hook_script(),
-            &[],
-            &[],
-            |_stream, line| {
-                tracing::debug!(target: "provision", "claude-hook: {line}");
-            },
-        )
-        .await
-        .inspect_err(|e| {
-            tracing::warn!("clone {hostname}: activity probe register exec failed: {e:#} (reconciler will retry)");
-        })
-        .unwrap_or(1)
-        == 0;
-    if tar_ok && reg_ok {
-        if let Err(e) = docker
-            .upload_tar(
-                container,
-                vec![crate::clone_reconcile::claude_hook_stamp_entry()],
-            )
-            .await
-        {
-            tracing::warn!("clone {hostname}: writing claude hook stamp failed: {e:#} (non-fatal)");
-        }
-    } else {
-        tracing::warn!("clone {hostname}: activity probe install incomplete (reconciler will retry)");
+    for (path, data, mode) in [
+        (
+            format!("home/{CLONE_USER}/.claude.json"),
+            crate::clone_reconcile::claude_mcp_initial(headless).into_bytes(),
+            0o600,
+        ),
+        (
+            format!("home/{CLONE_USER}/.cursor/mcp.json"),
+            crate::clone_reconcile::cursor_mcp_initial(headless, &linear_key).into_bytes(),
+            0o600,
+        ),
+        (
+            format!("home/{CLONE_USER}/.codex/config.toml"),
+            crate::clone_reconcile::codex_mcp_toml(headless).into_bytes(),
+            0o600,
+        ),
+        (
+            format!("home/{CLONE_USER}/.claude/settings.json"),
+            crate::clone_reconcile::claude_settings_initial().into_bytes(),
+            0o644,
+        ),
+        (
+            format!("home/{CLONE_USER}/.cursor/hooks.json"),
+            crate::clone_reconcile::cursor_hooks_initial().into_bytes(),
+            0o644,
+        ),
+    ] {
+        entries.push(TarEntry {
+            path,
+            data,
+            mode,
+            uid: CLONE_UID,
+            gid: CLONE_GID,
+        });
     }
+    entries.push(crate::clone_reconcile::claude_mcp_stamp_entry_for(
+        headless,
+    ));
+    entries.push(
+        crate::clone_reconcile::cursor_mcp_stamp_entry_for(headless, &linear_key),
+    );
+    entries.push(crate::clone_reconcile::codex_mcp_stamp_entry_for(headless));
+    // The activity probe file rides the tar; its registration is rendered above as initial
+    // content. Stamp withheld only if this whole upload fails (then the loop retries).
+    entries.extend(crate::clone_reconcile::rmng_hook_entries());
+    entries.push(crate::clone_reconcile::claude_hook_stamp_entry());
+
+    // The single pre-boot tar: binaries + identity + content + stamps in one daemon
+    // roundtrip, before systemd ever runs. Post-start injects are down to the bashrc
+    // append (tar cannot append), the headless tmux session, and wait-ready.
+    on_progress("inject", "injecting clone payload: binaries + identity + config (pre-boot)");
+    bins.extend(entries);
+    docker.upload_tar(container, bins).await?;
+
+    // systemd PID 1 comes up, and the user manager with it, now reading the env written above.
+    on_progress("inject", "starting container");
+    docker.start_container(container).await?;
 
     // The bashrc block can't go in the tar (it's an APPEND, not a whole file — /etc/bash.bashrc
     // already exists in the image). Delete any prior rmng-preset-path block then re-append,

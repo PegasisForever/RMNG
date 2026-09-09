@@ -75,7 +75,8 @@ fn active_mcp(headless: bool) -> Vec<ManagedMcp> {
 }
 
 /// Codex `[mcp_servers.*]` tables (config.toml). linear auths via `bearer_token_env_var`.
-fn codex_mcp_toml(headless: bool) -> String {
+/// `pub(crate)`: the create path renders the fresh-clone initial file from this directly.
+pub(crate) fn codex_mcp_toml(headless: bool) -> String {
     let mut s = String::new();
     for m in active_mcp(headless) {
         s.push_str(&format!("[mcp_servers.{}]\nurl = \"{}\"\n", m.name, m.url));
@@ -111,7 +112,29 @@ fn claude_mcp_jq_program(headless: bool) -> String {
     steps.join(" | ")
 }
 
-/// The neutral MCP descriptor the node-agent reads (`~/.config/rmng/mcp.json`): a JSON array of
+/// Initial `~/.claude.json` for a fresh clone: what [`claude_mcp_script`]'s jq merge
+/// produces on an empty base. The template bakes no such file, so the create path renders
+/// this directly into the pre-boot tar instead of exec-merging after start. Same managed
+/// set, same shapes, same headless rule — one source ([`managed_mcp`]) drives both.
+pub(crate) fn claude_mcp_initial(headless: bool) -> String {
+    let mut servers = serde_json::Map::new();
+    for m in active_mcp(headless) {
+        let mut obj = serde_json::json!({ "type": "http", "url": m.url });
+        if let Some(env) = m.bearer_env {
+            obj["headers"] =
+                serde_json::json!({ "Authorization": format!("Bearer ${{{env}}}") });
+        }
+        servers.insert(m.name.to_string(), obj);
+    }
+    serde_json::json!({ "mcpServers": servers }).to_string()
+}
+
+/// Initial `~/.cursor/mcp.json`: what [`cursor_mcp_script`]'s jq merge produces on an
+/// empty base (`.mcpServers = (({} // {}) + want)`). Same builder, same drop rules.
+pub(crate) fn cursor_mcp_initial(headless: bool, linear_key: &str) -> String {
+    let (want, _drop) = cursor_mcp_sets(headless, linear_key);
+    serde_json::json!({ "mcpServers": want }).to_string()
+}
 /// `{name,url,bearerEnv?,alwaysLoad?}`. The agent-wrapper maps this to the Claude Agent SDK's
 /// `mcpServers` (resolving `bearerEnv` from `process.env`, skipping a server whose bearer env is
 /// empty). Headless-filtered here so the wrapper needs no headless logic of its own.
@@ -787,40 +810,61 @@ pub(crate) fn rmng_hook_entries() -> Vec<TarEntry> {
 /// Assigning the whole `.hooks` object rather than merging into it is deliberate: it is how a
 /// renamed or dropped event stops firing, instead of lingering forever the way a
 /// merge-only-what-we-emit would leave it.
-pub(crate) fn claude_hook_script() -> String {
-    let hooks: serde_json::Map<String, serde_json::Value> = HOOK_EVENTS
-        .iter()
-        .map(|event| {
-            (
-                (*event).to_string(),
-                serde_json::json!([{
-                    // Claude Code reads a missing matcher as "every tool". Cursor reads this
-                    // same file and its converter calls `.split()` on the matcher without
-                    // checking for one, so a missing matcher throws and Cursor silently
-                    // registers NONE of these hooks. Spelling out the default costs nothing
-                    // and is the whole difference between the probe working in Cursor and
-                    // not existing there.
-                    "matcher": "*",
-                    "hooks": [{ "type": "command", "command": HOOK_IN_CLONE, "timeout": 10 }]
-                }]),
-            )
-        })
-        .collect();
-    let claude = format!(".hooks = {}", serde_json::Value::Object(hooks));
+/// The `.hooks` object both agents get, built once and shared by the merge script and the
+/// pre-boot initial files below. Single source for the event lists AND the entry shape.
+fn claude_hooks_object() -> serde_json::Value {
+    serde_json::Value::Object(
+        HOOK_EVENTS
+            .iter()
+            .map(|event| {
+                (
+                    (*event).to_string(),
+                    serde_json::json!([{
+                        // Claude Code reads a missing matcher as "every tool". Cursor reads this
+                        // same file and its converter calls `.split()` on the matcher without
+                        // checking for one, so a missing matcher throws and Cursor silently
+                        // registers NONE of these hooks. Spelling out the default costs nothing
+                        // and is the whole difference between the probe working in Cursor and
+                        // not existing there.
+                        "matcher": "*",
+                        "hooks": [{ "type": "command", "command": HOOK_IN_CLONE, "timeout": 10 }]
+                    }]),
+                )
+            })
+            .collect(),
+    )
+}
 
-    let cursor_hooks: serde_json::Map<String, serde_json::Value> = CURSOR_HOOK_EVENTS
-        .iter()
-        .map(|event| {
-            (
-                (*event).to_string(),
-                serde_json::json!([{ "command": HOOK_IN_CLONE, "timeout": 10 }]),
-            )
-        })
-        .collect();
-    let cursor = format!(
-        ".version = 1 | .hooks = {}",
-        serde_json::Value::Object(cursor_hooks)
-    );
+fn cursor_hooks_object() -> serde_json::Value {
+    serde_json::Value::Object(
+        CURSOR_HOOK_EVENTS
+            .iter()
+            .map(|event| {
+                (
+                    (*event).to_string(),
+                    serde_json::json!([{ "command": HOOK_IN_CLONE, "timeout": 10 }]),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Initial `~/.claude/settings.json`: what the hook merge assigns on an empty base
+/// (`.hooks = {...}`, whole-object assignment — renames/drops stop firing instead of
+/// lingering). Other keys (model, theme) only exist on lived-in clones, where the loop
+/// merge — not this — applies.
+pub(crate) fn claude_settings_initial() -> String {
+    serde_json::json!({ "hooks": claude_hooks_object() }).to_string()
+}
+
+/// Initial `~/.cursor/hooks.json`: `.version = 1 | .hooks = {...}` on an empty base.
+pub(crate) fn cursor_hooks_initial() -> String {
+    serde_json::json!({ "version": 1, "hooks": cursor_hooks_object() }).to_string()
+}
+
+pub(crate) fn claude_hook_script() -> String {
+    let claude = format!(".hooks = {}", claude_hooks_object());
+    let cursor = format!(".version = 1 | .hooks = {}", cursor_hooks_object());
 
     // Both files belong to the user, so both are merged rather than written: Claude Code
     // keeps `model`, `theme` and `enabledPlugins` in one, and Cursor's own hooks would live
@@ -2482,6 +2526,49 @@ mod tests {
         // Phase 30 creates both skill directories.
         assert!(TEMPLATE_PHASE_30.contains("/.claude/skills/rmng-cli"));
         assert!(TEMPLATE_PHASE_30.contains("/.agents/skills/rmng-cli"));
+    }
+
+    /// The pre-boot initial files must equal what each loop merge produces on an empty
+    /// base — the create path renders these instead of exec-merging, and the template
+    /// bakes none of the targets, so on a fresh clone the base is always empty.
+    #[test]
+    fn preboot_initials_match_the_merges_on_empty_base() {
+        // ~/.claude.json: merge sets linear + desktop on `{}` (deletes desktop headless).
+        let v: serde_json::Value = serde_json::from_str(&claude_mcp_initial(false)).unwrap();
+        assert_eq!(v["mcpServers"]["linear"]["url"], "https://mcp.linear.app/mcp");
+        assert_eq!(
+            v["mcpServers"]["linear"]["headers"]["Authorization"],
+            "Bearer ${LINEAR_API_KEY}"
+        );
+        assert_eq!(
+            v["mcpServers"]["desktop"]["url"],
+            "http://127.0.0.1:9004"
+        );
+        let v: serde_json::Value = serde_json::from_str(&claude_mcp_initial(true)).unwrap();
+        assert!(v["mcpServers"].get("desktop").is_none());
+        assert!(v["mcpServers"].get("linear").is_some());
+        // ~/.cursor/mcp.json: merge computes `.mcpServers = (({} // {}) + want)`.
+        let (want, _) = cursor_mcp_sets(false, "lin_key");
+        let v: serde_json::Value =
+            serde_json::from_str(&cursor_mcp_initial(false, "lin_key")).unwrap();
+        assert_eq!(v["mcpServers"], want);
+        // ~/.codex/config.toml: merge appends the managed tables to nothing.
+        let toml = codex_mcp_toml(false);
+        assert!(toml.contains("[mcp_servers.desktop]") && toml.contains("[mcp_servers.linear]"));
+        assert!(!codex_mcp_toml(true).contains("desktop"));
+        // Hook registrations: whole-`.hooks` assignment on `{}` (+ version for Cursor).
+        let v: serde_json::Value = serde_json::from_str(&claude_settings_initial()).unwrap();
+        assert_eq!(v["hooks"].as_object().unwrap().len(), HOOK_EVENTS.len());
+        for event in HOOK_EVENTS {
+            let cmd = v["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap();
+            assert_eq!(cmd, HOOK_IN_CLONE, "{event} points at the probe");
+        }
+        let v: serde_json::Value = serde_json::from_str(&cursor_hooks_initial()).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(
+            v["hooks"].as_object().unwrap().len(),
+            CURSOR_HOOK_EVENTS.len()
+        );
     }
 
     #[test]

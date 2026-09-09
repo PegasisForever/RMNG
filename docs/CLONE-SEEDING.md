@@ -4,11 +4,12 @@ Where every byte of a clone comes from. Sources: `template/` (image),
 `crates/control-server/src/provision.rs` (inject), `crates/control-server/src/clone_reconcile.rs`
 (loop), `crates/control-server/src/derived.rs` (preset images).
 
-Design rule: the post-boot inject (list 3) is the reconciler loop (list 4) run once, early.
-Steps the loop backstops are best-effort at create time and stamped; a missing stamp
-means the loop re-runs that step on its next pass. Withholding the stamp IS the retry.
-Steps with NO loop backstop (payload presence, headless unit delete, bashrc append,
-resolvable control host) fail the op instead — booting a half-clone helps nobody.
+Design rule: list 3 used to be the loop run once, early. It no longer is: everything
+file-shaped lands pre-boot in ONE tar (list 2), and the loop (list 4) owns lived-in
+convergence. Steps the loop backstops (SSH material) are best-effort at create with
+the stamp withheld; the loop re-runs whatever is unstamped. Steps with NO loop
+backstop (payload presence, unit masks, bashrc append, resolvable control host)
+fail the op instead — booting a half-clone helps nobody.
 
 ## 1. Baked into the image
 
@@ -56,8 +57,9 @@ all per-clone content.
 
 ## 2. Injected before boot (container created, still stopped)
 
-`clone_container_after_create` in `provision.rs`, via `upload_tar` (works on stopped
-containers) — plus the create-spec bind mounts, which are also fixed before start:
+`clone_container_after_create` in `provision.rs`: ONE `upload_tar` (works on stopped
+containers) plus one symlink upload (headless masks), then the create-spec bind
+mounts — all fixed before start:
 
 Files (a missing payload fails the op — no daemonless boot; the loop hard-errors on
 the same absence, so tolerating it here would only delay the failure by one pass):
@@ -76,6 +78,12 @@ the same absence, so tolerating it here would only delay the failure by one pass
   pkill, no boot race; fails the op on upload error), and, only when the preset
   sets PATH,
   `etc/fish/conf.d/rmng-preset-path.fish` + `etc/profile.d/rmng-preset-path.sh`.
+- Content: playbook (`~/.config/rmng/agent-instructions.md`, skipped when empty),
+  Codex parity files + stamp, SSH host key + `authorized_keys` + stamp, probe file
+  (`~/.rmng/hook.py`) + stamp, and the initial contents of the four merge-owned
+  files (`~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex/config.toml`,
+  `~/.claude/settings.json`, `~/.cursor/hooks.json`) + their four stamps — all
+  rendered server-side, all stamped so the loop's first pass is a no-op.
 
 Mounts (create-spec binds, present from first boot — always mounted, no empty skips):
 
@@ -87,31 +95,21 @@ Mounts (create-spec binds, present from first boot — always mounted, no empty 
   rejects it as a bind source).
 - Clone media socket dir.
 
-## 3. Injected after boot (provision: stamped steps + fail-loud steps)
+## 3. Injected after boot (bashrc append, tmux, wait-ready)
 
-Container started (`docker.start_container`), then in order. Steps the loop backstops
-are best-effort (`seed_step` logs-and-continues, stamp withheld); steps with no
-backstop fail the op:
+Container started (`docker.start_container`). Everything file-shaped already landed
+in the single pre-boot tar (list 2) — including the initial contents of the four
+merge-owned files, rendered by the `*_initial` functions (merge-on-empty equals that
+content; the template bakes none of them, so the base is always empty on create).
+The `jq`/`awk` merges stay for lived-in clones, operator edits, and fork-carryover —
+the create path never merges. What remains post-boot needs a live container:
 
 1. Headless: nothing — the desktop units were masked pre-boot (list 2) and could
    never have started.
-2. Codex CLI: none — the template bakes `codex` as its sole source (was: post-boot
-   install-if-missing here plus a loop ensure; three copies of one truth).
-3. Second tar: `~/.config/rmng/agent-instructions.md` (global + preset playbook,
-   skipped when empty), the Codex parity files + stamp, the clone's stable SSH
-   host key + current `authorized_keys` + stamp.
-4. `~/.claude.json` MCP servers (jq merge — state-bearing, never a tar entry) +
-   stamp. Desktop server removed on headless.
-5. `~/.cursor/mcp.json` MCP servers + stamp (`LINEAR_API_KEY` resolved to its
-   value here — Cursor does not expand env references).
-6. `~/.codex/config.toml` MCP servers (merge — the operator's file) + stamp.
-7. Activity probe: hook files tar + registration script + stamp. Tar vs register
-   failures are logged separately; either way the stamp is withheld and the loop
-   retries.
-8. Preset-PATH append to `/etc/bash.bashrc` (append, not a file — tar cannot do
+2. Preset-PATH append to `/etc/bash.bashrc` (append, not a file — tar cannot do
    it; idempotent delete-then-append; only when the preset sets PATH). FAILS THE
    OP on error — no loop step re-appends it.
-9. Headless: start the default `main` tmux session, report ready (convenience only —
+3. Headless: start the default `main` tmux session, report ready (convenience only —
    `termplane` recreates a missing session on select). Headed: poll the mediaplane
    for the clone-daemon's `Hello` until `WAIT_READY_TIMEOUT`. Alive-but-unregistered
    reports ready with an explicit warning (check it in the UI); an exited container
