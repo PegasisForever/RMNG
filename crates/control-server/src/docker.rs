@@ -295,9 +295,9 @@ pub struct CreateSpec {
     /// The shared clone media socket *directory* on the host to bind at `/srv/rmng-sock`.
     /// The daemon path is `<this>/clones.sock`; empty skips the mount (dev/test).
     pub sock_source: String,
-    /// Gen-2 home dataset dir on the CT (e.g. `/srv/rmng-homes/<id>`), bound at
-    /// `/home/rmng`. `None` keeps the legacy overlay home (gen-1 behavior).
-    pub dataset_dir: Option<String>,
+    /// Merged home-overlay view on the CT (e.g. `/srv/rmng-homes/.merged/<id>`),
+    /// bound at `/home/rmng`. `None` keeps the legacy overlay home (gen-1 behavior).
+    pub home_dir: Option<String>,
     /// Gen-2 homes parent dir on the CT (e.g. `/srv/rmng-homes`), bound at
     /// `/home/rmng/clones` so every clone sees every home. Only used with
     /// `dataset_dir`; empty skips the mount.
@@ -1219,6 +1219,43 @@ impl DockerCtl {
         }
     }
 
+    /// Content id of a local image (`sha256:…`), stable across tag moves. Skeleton
+    /// exports are keyed by this, so a retagged base rebuilds them.
+    pub async fn image_id(&self, reference: &str) -> Result<String> {
+        let info = self
+            .daemon()?
+            .inspect_image(reference)
+            .await
+            .with_context(|| format!("inspecting image {reference}"))?;
+        info.id
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("image {reference} has no id"))
+    }
+
+    /// A never-started container of `image` to read image files from (the daemon reads
+    /// the filesystem, not the process). The caller removes it; removal is safe even
+    /// when the create half-failed — [`DockerCtl::remove_container`] tolerates 404.
+    pub async fn create_reader(&self, image: &str, name: &str) -> Result<String> {
+        let body = ContainerCreateBody {
+            image: Some(image.to_string()),
+            entrypoint: Some(vec!["true".to_string()]),
+            cmd: Some(Vec::new()),
+            host_config: Some(HostConfig {
+                network_mode: Some("none".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let opts = CreateContainerOptionsBuilder::new().name(name).build();
+        let id = self
+            .daemon()?
+            .create_container(Some(opts), body)
+            .await
+            .with_context(|| format!("creating reader container for {image}"))?
+            .id;
+        Ok(id)
+    }
+
     /// The running control-server image's identity: inspect our own container to get its
     /// image id, then inspect that image for the RepoDigest matching `repo` + the OCI
     /// version labels. `repo` is the reference-without-tag of `docker.serverImage`.
@@ -1509,9 +1546,8 @@ impl DockerCtl {
         // clones created after the probe saw lxcfs get them; existing containers are
         // untouched.
         mounts.extend(lxcfs_proc_mounts(self.env.read().await.lxcfs_ok));
-        // Gen-2 home: the clone's own dataset at /home/rmng, plus the homes parent
-        // at /home/rmng/clones for the cross-clone view. Absent = gen-1 overlay home.
-        if let Some(dir) = spec.dataset_dir.as_deref().filter(|s| !s.trim().is_empty()) {
+        // Clone home: the merged overlay view at /home/rmng.
+        if let Some(dir) = spec.home_dir.as_deref().filter(|s| !s.trim().is_empty()) {
             mounts.push(Mount {
                 target: Some("/home/rmng".to_string()),
                 source: Some(dir.to_string()),
@@ -1992,43 +2028,6 @@ impl DockerCtl {
             self.unpause_container(id).await.ok();
         }
         self.stop_container(id).await
-    }
-
-    /// The container's host PID (`State.Pid`), or `None` when it isn't running (the daemon
-    /// reports pid 0 for stopped containers) or doesn't exist (404). The clone-home
-    /// reconciler ([`crate::homes`]) turns this into a `/proc/<pid>/root/home/rmng` symlink
-    /// under `data/hosts/`; that only resolves when the control-server shares the host PID
-    /// namespace (`pid: "host"` in compose.yaml). A dead daemon is a real error (retried).
-    pub async fn container_pid(&self, name_or_id: &str) -> Result<Option<i64>> {
-        Ok(self.inspect_runtime(name_or_id).await?.pid)
-    }
-
-    /// `(host PID, HostConfig.Memory bytes)` for a running container, from a single inspect.
-    /// `None` when the container is stopped/gone (pid 0 / 404) or its memory limit is unset
-    /// (0 / absent — unlimited, so there's no basis to size `/dev/shm` from). The `/dev/shm`
-    /// reconciler ([`crate::shm`]) uses the PID to enter the clone's mount namespace and
-    /// `Memory / 2` as the LXC-parity remount target. Like [`container_pid`], the PID is only
-    /// resolvable into `/proc` when the control-server shares the host PID namespace
-    /// (`pid: "host"`). A dead daemon is a real error (retried).
-    pub async fn container_pid_and_memory(&self, name_or_id: &str) -> Result<Option<(i64, i64)>> {
-        match self
-            .daemon()?
-            .inspect_container(
-                name_or_id,
-                None::<bollard::query_parameters::InspectContainerOptions>,
-            )
-            .await
-        {
-            Ok(info) => {
-                let pid = info.state.and_then(|s| s.pid).filter(|&p| p > 0);
-                let mem = info.host_config.and_then(|h| h.memory).filter(|&m| m > 0);
-                Ok(pid.zip(mem))
-            }
-            Err(BollardError::DockerResponseServerError {
-                status_code: 404, ..
-            }) => Ok(None),
-            Err(e) => Err(anyhow!("inspecting container {name_or_id}: {e}")),
-        }
     }
 
     /// The last `n` combined stdout+stderr log lines of a container, newest at the end,

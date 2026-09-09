@@ -269,7 +269,13 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
 /// JSON as the first default `/events` frame). For one-off readers — the `rmng` CLI,
 /// scripts — that shouldn't have to open an SSE stream to see the fleet.
 async fn state_get(State(app): State<App>) -> Json<ControlState> {
-    Json(app.store.get())
+    // Overlay the live daemon sessions: `store` persists rows, but connectedness
+    // changes outside mutations (a Hello arrives anytime), so it is resolved here.
+    let mut state = app.store.get();
+    for h in &mut state.hosts {
+        h.daemon_connected = app.media.is_connected(&h.id);
+    }
+    Json(state)
 }
 
 /// `GET /api/stats` — the current per-clone resource-usage snapshot, matching the first named

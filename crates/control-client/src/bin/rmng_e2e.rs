@@ -69,6 +69,33 @@ impl Runner {
         Ok(self.client.state().await?.hosts.iter().any(|h| h.id == id))
     }
 
+    /// Poll `/api/state` until the clone-daemon holds its media session (headed
+    /// clones only). Separate from op completion: the op succeeds when the
+    /// container is up, which says nothing about the agent stack inside.
+    async fn wait_connected(&self, id: &str, what: &str) -> Result<()> {
+        println!("e2e: waiting for {id} daemon ...");
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > self.budget {
+                bail!("{what}: clone '{id}' daemon never registered");
+            }
+            let connected = self
+                .client
+                .state()
+                .await?
+                .hosts
+                .iter()
+                .find(|h| h.id == id)
+                .map(|h| h.daemon_connected)
+                .unwrap_or(false);
+            if connected {
+                println!("e2e: {id} daemon registered");
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
     async fn cleanup(&self) {
         for id in &self.made {
             if !self.hosts_contain(id).await.unwrap_or(true) {
@@ -161,6 +188,10 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
         bail!("created clone '{id}' is not managed");
     }
     println!("e2e: created '{id}'");
+    // The op succeeding only means the container is up: wait for the clone-daemon's
+    // Hello, which is what makes the clone actually usable (and what an earlier
+    // version of this test never checked — brain-dead clones passed green).
+    r.wait_connected(&id, "create").await?;
 
     // 2. Fork it with a first message.
     println!("e2e: fork '{id}' ...");
@@ -182,6 +213,7 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
         bail!("forked clone '{fork}' missing from state");
     }
     println!("e2e: forked '{fork}'");
+    r.wait_connected(&fork, "fork").await?;
 
     // 3. Archive the fork.
     println!("e2e: archive '{fork}' ...");

@@ -136,4 +136,11 @@ dataset: string | null,
  * fork and rebase resolve the same base, and delete can purge the tag when no
  * remaining clone references it.
  */
-baseTag: string | null, };
+baseTag: string | null, 
+/**
+ * Whether the clone-daemon currently holds its media-socket session. Volatile:
+ * overlaid at `/api/state` serve time from the live connection table, never
+ * a persisted fact (a `state.json` copy may hold a stale value). Headless and
+ * archived clones read false — no daemon runs there to connect.
+ */
+daemonConnected: boolean, };

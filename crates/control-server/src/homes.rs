@@ -29,10 +29,10 @@ pub(crate) fn hosts_root(data_dir: &str) -> PathBuf {
     Path::new(data_dir).join("hosts")
 }
 
-/// The clone's home on the CT: its ZFS dataset dir. Plain directory, present whether the
-/// clone runs or not — this is what makes stopped-clone browsing work.
+/// The clone's home on the CT: its overlay merged view. Plain directory once mounted,
+/// present whether the clone runs or not — this is what makes stopped-clone browsing work.
 fn clone_home(id: &str) -> PathBuf {
-    PathBuf::from(crate::zfs::dataset_dir(id))
+    crate::home_overlay::merged_dir(crate::zfs::HOMES_DIR, id)
 }
 
 /// Names present under `hosts/` that no longer belong to a maintained clone and should be
@@ -188,9 +188,12 @@ mod tests {
     }
 
     #[test]
-    fn clone_home_targets_the_dataset_dir() {
-        // Gen-2: the browse link points at the CT-side dataset dir, running or not.
-        assert_eq!(clone_home("c1"), PathBuf::from("/srv/rmng-homes/c1"));
+    fn clone_home_targets_the_merged_view() {
+        // Gen-2: the browse link points at the overlay merged view, running or not.
+        assert_eq!(
+            clone_home("c1"),
+            PathBuf::from("/srv/rmng-homes/.merged/c1")
+        );
     }
 
     #[test]

@@ -285,6 +285,12 @@ pub struct RmngClone {
     /// remaining clone references it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_tag: Option<String>,
+    /// Whether the clone-daemon currently holds its media-socket session. Volatile:
+    /// overlaid at `/api/state` serve time from the live connection table, never
+    /// a persisted fact (a `state.json` copy may hold a stale value). Headless and
+    /// archived clones read false — no daemon runs there to connect.
+    #[serde(default)]
+    pub daemon_connected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

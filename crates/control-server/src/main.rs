@@ -21,6 +21,7 @@ mod docker;
 mod files;
 mod forward;
 mod homes;
+mod home_overlay;
 mod jobs;
 mod ledger;
 mod mediaplane;
@@ -257,6 +258,10 @@ async fn main() -> Result<()> {
             // UI. The fleet stops for the window and (non-archived) restarts after.
             // No gen-1 rows ⇒ no-op. Runs under the whole-LXC backup.
             tokio::spawn(jobs::migrate_all_on_boot(app_for_bg.clone()));
+            // Home overlays do not survive a CT reboot (mounts, unlike containers):
+            // re-establish every managed clone's merged view before anything serves it.
+            // Best-effort per clone; migration mounts its own as it goes.
+            tokio::spawn(home_overlay::remount_all(app_for_bg.clone()));
             // Background loops: the per-clone agent-state monitor poller, the one-shot
             // clone-home sync (links data/hosts/<id> → the clone's dataset dir, archived
             // included, so every home is browsable in one place; runs once here, the
