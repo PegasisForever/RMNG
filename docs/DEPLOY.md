@@ -395,28 +395,26 @@ front of the whole fleet.
 | --- | --- |
 | Over SMB | `smb://<docker-host>/shared`, same `rmng`/`rmng` credential as `clones` |
 | Inside every clone | `/home/rmng/shared` |
-| On the control-server | `data/shared` (`/data/data/shared` in the container) |
-| On the Docker host | `/var/lib/docker/volumes/rmng-data/_data/data/shared` |
+| On the control-server and the Docker host | `<homes>/.shared` (e.g. `/srv/rmng-homes/.shared`) — the one pool path both see, because the homes bind is shared |
 
 Read-write from every side. The pool's root is owned by the clone user (uid **1000**), so a
 clone writes to it as itself and the `shared` SMB share acts as the same user.
 
 It reaches clones that already exist. Docker cannot add a mount to a live container, and
-recreating one would destroy the clone's writable layer, so the server mounts the pool into each
-running clone in place: `open_tree` detaches a copy of the directory, `setns` enters the clone's
-mount namespace by host PID, and `move_mount` attaches the copy at `/home/rmng/shared`. A 15
-second reconciler does this for every running managed clone, including new ones and ones that
-just restarted, so nothing needs a rebuild or a restart to pick it up.
+recreating one would destroy the clone's writable layer, so the pool is a create-time bind
+(see `CreateSpec::shared_dir`): every freshly created container carries it from first boot,
+and the gen-2 migration recreates the rest. Clones that predate the pool keep no mount —
+there is no live re-apply loop.
 
-Three consequences worth knowing:
+Four consequences worth knowing:
 
-1. It needs `--pid host`, like the clone-home links above. Without it the server warns once per
-   clone and mounts nothing.
+1. The pool path must be daemon-visible: it lives under the homes parent for exactly this
+   reason. Anything inside the server's `data/` volume is container-private and Docker
+   rejects it as a bind source.
 2. It appears under the `clones` share too, at `smb://<host>/clones/<id>/shared`, because it
    genuinely sits inside each clone's home. A recursive copy of `clones` will read it once per
    clone.
-3. A clone's own `/home/rmng/shared` is empty for up to 15 seconds after that clone starts,
-   until the reconciler re-applies the mount.
+3. A clone's own `/home/rmng/shared` is the pool from first boot — no reconciler delay.
 4. Anything a clone already kept at `~/shared` is hidden while the pool is mounted over it. The
    files are untouched and come back if the mount goes away, but they are not in the pool.
 

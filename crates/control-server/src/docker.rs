@@ -302,8 +302,9 @@ pub struct CreateSpec {
     /// `/home/rmng/clones` so every clone sees every home. Only used with
     /// `dataset_dir`; empty skips the mount.
     pub homes_dir: String,
-    /// Shared pool dir on the CT (absolute host path, e.g. `/data/shared`), bound at
-    /// `/home/rmng/shared`. Empty skips the mount (dev/test).
+    /// Shared pool dir on the CT (absolute host path, e.g.
+    /// `/srv/rmng-homes/.shared`), bound at `/home/rmng/shared`. Empty skips the
+    /// mount (dev/test).
     pub shared_dir: String,
 }
 
