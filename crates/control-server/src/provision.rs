@@ -577,11 +577,11 @@ async fn clone_container_after_create(
     let preset_conf = clone_etc_environment_conf(env);
     let path_rc = preset_path_rc(&preset_conf);
     let mut identity: Vec<TarEntry> = vec![
-        // Fresh random machine-id: a committed image bakes one in, and systemd-in-docker
-        // does NOT persist a generated id into an empty writable /etc/machine-id (it runs
-        // with a transient one; seen live in the E2E — hostnamectl broken, id unstable
-        // across restarts). Writing a unique id per clone gives stable, collision-free
-        // D-Bus/journald identity; commit truncates it again, so images never carry it.
+        // Fresh random machine-id per clone. The template blanks it (a baked id would give
+        // the whole fleet one identity), and systemd-in-docker does NOT persist a generated
+        // id into an empty writable /etc/machine-id (it runs with a transient one; seen live
+        // in the E2E — hostnamectl broken, id unstable across restarts). Writing a unique id
+        // per clone gives stable, collision-free D-Bus/journald identity.
         TarEntry {
             path: "etc/machine-id".into(),
             data: fresh_machine_id()?,
@@ -961,7 +961,9 @@ pub async fn delete_clone(
 
     // Gen-2 tail: the row still exists (jobs.rs removes it after this returns), so the
     // dataset + base tag are readable here. Everything below is best-effort cleanup —
-    // the container removal above is what matters.
+    // the container removal above is what matters. Drop the home link with the row;
+    // the dataset itself lives or dies by the ZFS destroy below.
+    crate::homes::remove_link(app, host_id).await;
     if let Some(row) = gen2_row(app, host_id) {
         if row.dataset.is_some() {
             on_progress("remove", "destroying the home dataset");

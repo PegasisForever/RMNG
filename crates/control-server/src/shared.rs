@@ -66,7 +66,10 @@ mod tests {
     #[test]
     fn shared_root_joins_shared() {
         assert_eq!(shared_root("data"), Path::new("data/shared"));
-        assert_eq!(shared_root("/srv/rmng/data"), Path::new("/srv/rmng/data/shared"));
+        assert_eq!(
+            shared_root("/srv/rmng/data"),
+            Path::new("/srv/rmng/data/shared")
+        );
     }
 
     #[test]

@@ -257,15 +257,15 @@ async fn main() -> Result<()> {
             // UI. The fleet stops for the window and (non-archived) restarts after.
             // No gen-1 rows ⇒ no-op. Runs under the whole-LXC backup.
             tokio::spawn(jobs::migrate_all_on_boot(app_for_bg.clone()));
-            // Background loops: the per-clone agent-state monitor poller, the clone-home reconciler
-            // (the Docker-port successor to the Proxmox-era sshfs mount loop — it symlinks
-            // data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so every clone's home is browsable
-            // in one place; needs the container's `pid: "host"`), the smbd supervisor that serves that
+            // Background loops: the per-clone agent-state monitor poller, the one-shot
+            // clone-home sync (links data/hosts/<id> → the clone's dataset dir, archived
+            // included, so every home is browsable in one place; runs once here, the
+            // create job links eagerly and the delete job unlinks), the smbd supervisor that serves that
             // same directory as the `clones` SMB share (port 445), so the homes are browsable over
             // `smb://<host>/clones` too.
             tokio::spawn(monitor::run(app_for_bg.clone()));
             tokio::spawn(clone_reconcile::run(app_for_bg.clone()));
-            tokio::spawn(homes::run(app_for_bg.clone()));
+            tokio::spawn(homes::sync_all(app_for_bg.clone()));
             // Reads each clone's agent session logs through the symlinks `homes` maintains —
             // hence spawned after it. Supplies per-clone token totals and the activity signal
             // for agents RMNG did not launch (a human running `claude` over SSH).
