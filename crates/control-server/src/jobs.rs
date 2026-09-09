@@ -1796,10 +1796,9 @@ async fn run_unarchive(app: App, op_id: String, host_id: String) {
     });
     drop(progress);
     // A restart rebuilds the container's mount table and gives it a new pid, so the
-    // out-of-container resources are gone even though the clone itself is intact. Re-apply
-    // them here for the same reason the create path does: an unarchived clone is presented
-    // as ready. (The shared pool needs no re-apply: it is a create-time bind now.)
-    crate::shm::ensure_now(&app, &host_id).await;
+    // home link is gone even though the clone itself is intact. Re-apply it here for
+    // the same reason the create path does: an unarchived clone is presented as ready.
+    // (The shared pool and /dev/shm need no re-apply: both are create-time config now.)
     crate::homes::ensure_now(&app, &host_id).await;
     crate::ssh::allow_clone_now(&app, &host_id).await;
     push_current_tokens(&app, &host_id).await;

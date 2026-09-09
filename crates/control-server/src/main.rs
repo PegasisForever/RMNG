@@ -28,7 +28,6 @@ mod monitor;
 mod naming;
 mod provision;
 mod shared;
-mod shm;
 mod smb;
 mod ssh;
 mod state;
@@ -263,9 +262,7 @@ async fn main() -> Result<()> {
             // data/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng so every clone's home is browsable
             // in one place; needs the container's `pid: "host"`), the smbd supervisor that serves that
             // same directory as the `clones` SMB share (port 445), so the homes are browsable over
-            // `smb://<host>/clones` too, and the /dev/shm reconciler that keeps each running clone's
-            // shared memory at LXC parity (~50% of RAM) so Chromium/Electron apps don't exhaust
-            // Docker's 64 MB default (also needs `pid: "host"`).
+            // `smb://<host>/clones` too.
             tokio::spawn(monitor::run(app_for_bg.clone()));
             tokio::spawn(clone_reconcile::run(app_for_bg.clone()));
             tokio::spawn(homes::run(app_for_bg.clone()));
@@ -278,7 +275,6 @@ async fn main() -> Result<()> {
             // outlives the clone. Its directory listing is also the registry of names already
             // used, which is what stops a new clone inheriting a retired one's history.
             tokio::spawn(ledger::run(app_for_bg.clone()));
-            tokio::spawn(shm::run(app_for_bg.clone()));
             // The shared pool: one dir at data/shared, bound into every clone at
             // /home/rmng/shared from first boot (see CreateSpec::shared_dir) and served
             // as the `shared` SMB share. Ensured here once; the bind needs no upkeep.
