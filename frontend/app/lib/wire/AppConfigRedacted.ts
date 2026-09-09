@@ -24,9 +24,4 @@ export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataD
 /**
  * Which GPT the stuck detector asks, and which Codex account pays for it.
  */
-judge: JudgeConfig, 
-/**
- * Whether a new clone's desktop renders on the GPU. Applies to clones created or
- * unarchived after it changes; see [`AppConfig::gpu_accelerated_clones`].
- */
-gpuAcceleratedClones: boolean, };
+judge: JudgeConfig, };

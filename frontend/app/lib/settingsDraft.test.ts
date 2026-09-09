@@ -69,7 +69,6 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       },
     ],
     chroma: "yuv420",
-    gpuAcceleratedClones: true,
     ssh: {
       authorizedKeys: ["ssh-ed25519 AAAA me@laptop"],
       publicHost: "rmng.example.com",

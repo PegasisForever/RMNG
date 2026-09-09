@@ -14,9 +14,17 @@ import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 import { makeCloneGroups, makeCodexGroups } from "./accounts";
 import { makeClonePresets } from "./presets";
 
-export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
+export function makeAppConfig(
+  overrides: Partial<AppConfigRedacted> = {},
+): AppConfigRedacted {
   return {
-    listen: { web: 9000, video: 9001, daemonMcp: 9004, forward: 9005, bastion: 2222 },
+    listen: {
+      web: 9000,
+      video: 9001,
+      daemonMcp: 9004,
+      forward: 9005,
+      bastion: 2222,
+    },
     agentPort: 4096,
     dataDir: "/data",
     staticDir: "",
@@ -51,7 +59,12 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
       pollSecs: BigInt(600),
       pinnedEmail: "alex@example.com",
     },
-    codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
+    codex: {
+      pollSecs: BigInt(600),
+      pinnedEmail: null,
+      usagePolling: true,
+      autoReset: false,
+    },
     // Built per call, down to the member list, so two configs from this builder never share
     // an array with each other or with the accounts fixture module.
     cloneGroups: makeCloneGroups(),
@@ -60,13 +73,15 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
     // from, so the Settings panel lists exactly the presets the ticket dialog offers.
     presets: makeClonePresets(),
     chroma: "yuv420",
-    gpuAcceleratedClones: true,
     ssh: {
-      authorizedKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop"],
+      authorizedKeys: [
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop",
+      ],
       publicHost: "rmng.example.com",
     },
     agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
-    globalPrompt: "# Working in this clone\n\n(sample shared operating memory)\n",
+    globalPrompt:
+      "# Working in this clone\n\n(sample shared operating memory)\n",
     judge: { codexModel: "gpt-5.6-luna", codexEmail: null },
     ...overrides,
   };
@@ -78,7 +93,9 @@ export function makeAppConfig(overrides: Partial<AppConfigRedacted> = {}): AppCo
  *
  *  Freshly built, arrays and all: the sections replace what they are given, but every story
  *  that edits one would otherwise be editing the next story's form too. */
-export function makeSettingsDraft(overrides: Partial<SettingsDraft> = {}): SettingsDraft {
+export function makeSettingsDraft(
+  overrides: Partial<SettingsDraft> = {},
+): SettingsDraft {
   return { ...settingsDraftFrom(makeAppConfig()), ...overrides };
 }
 
@@ -87,14 +104,22 @@ export function makeSettingsDraft(overrides: Partial<SettingsDraft> = {}): Setti
  *
  *  Freshly built, monitors and ports included: the Server step replaces what it is given, but
  *  every story that drags a monitor would otherwise be dragging the next story's too. */
-export function makeSetupDraft(overrides: Partial<SetupDraft> = {}): SetupDraft {
-  return { ...setupDraftFrom(makeAppConfig({ setupComplete: false })), ...overrides };
+export function makeSetupDraft(
+  overrides: Partial<SetupDraft> = {},
+): SetupDraft {
+  return {
+    ...setupDraftFrom(makeAppConfig({ setupComplete: false })),
+    ...overrides,
+  };
 }
 
 /** The control-server's own version, as `GET /api/server/version` answers it. Up to date by
  *  default; override `available` for the state that lights the Update button. */
-export function makeUpdateStatus(overrides: Partial<UpdateStatus> = {}): UpdateStatus {
-  const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+export function makeUpdateStatus(
+  overrides: Partial<UpdateStatus> = {},
+): UpdateStatus {
+  const digest =
+    "sha256:1111111111111111111111111111111111111111111111111111111111111111";
   return {
     currentRevision: "a1b2c3d",
     currentCreated: "2026-07-01T12:00:00Z",

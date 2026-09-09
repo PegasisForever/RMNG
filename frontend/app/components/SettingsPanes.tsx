@@ -376,26 +376,6 @@ export function ServerPane({
         </Field>
       </Section>
 
-      {/* Where a clone's own desktop draws. The stream itself is unaffected: encoding stays
-          on the server's GPU and the viewer still decodes in hardware either way. */}
-      <Section
-        title="Clone rendering"
-        effect="immediate"
-        hint="GPU-rendered clones are faster but each holds video memory for as long as it lives (0.4-2.4 GiB measured). A CPU-rendered clone holds none and costs about half a core while somebody is watching it, nothing while idle. Encoding and decoding stay on the GPU in both modes."
-      >
-        <label className="col-span-2 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-          <input
-            type="checkbox"
-            checked={draft.gpuAcceleratedClones}
-            onChange={(e) =>
-              onDraftChange("gpuAcceleratedClones", e.target.checked)
-            }
-          />
-          GPU accelerated clones (applies to clones created or unarchived after
-          saving; running clones keep the mode they started in)
-        </label>
-      </Section>
-
       {/* Public keys installed on the bastion + every clone, so "Copy SSH command" (per-clone)
           and `rmng ssh <clone>` work with no laptop-side config. Keys apply live; the bastion
           port itself is fixed at startup and shown for reference. */}
