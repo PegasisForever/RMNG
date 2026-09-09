@@ -95,25 +95,20 @@ Mounts (create-spec binds, present from first boot — always mounted, no empty 
   rejects it as a bind source).
 - Clone media socket dir.
 
-## 3. Injected after boot (bashrc append, tmux, wait-ready)
+## 3. Injected after boot (tmux, wait-ready)
 
 Container started (`docker.start_container`). Everything file-shaped already landed
-in the single pre-boot tar (list 2) — including the initial contents of the four
-merge-owned files, rendered by the `*_initial` functions (merge-on-empty equals that
-content; the template bakes none of them, so the base is always empty on create).
-The `jq`/`awk` merges stay for lived-in clones, operator edits, and fork-carryover —
-the create path never merges. What remains post-boot needs a live container:
+in the single pre-boot tar (list 2) — including the preset-PATH bashrc drop-in
+(`/etc/bash.bashrc.d/rmng-preset-path.sh`, sourced from the baked bashrc). What
+remains post-boot needs a live container:
 
 1. Headless: nothing — the desktop units were masked pre-boot (list 2) and could
    never have started.
-2. Preset-PATH append to `/etc/bash.bashrc` (append, not a file — tar cannot do
-   it; idempotent delete-then-append; only when the preset sets PATH). FAILS THE
-   OP on error — no loop step re-appends it.
-3. Headless: start the default `main` tmux session, report ready (convenience only —
-   `termplane` recreates a missing session on select). Headed: poll the mediaplane
-   for the clone-daemon's `Hello` until `WAIT_READY_TIMEOUT`. Alive-but-unregistered
-   reports ready with an explicit warning (check it in the UI); an exited container
-   fails with its log tail.
+2. Headless: start the default `main` tmux session, report ready (convenience only —
+   `termplane` recreates a missing session on select).
+3. Headed: poll the mediaplane for the clone-daemon's `Hello` until
+   `WAIT_READY_TIMEOUT`. Alive-but-unregistered reports ready with an explicit
+   warning (check it in the UI); an exited container fails with its log tail.
 
 ## 4. Reconciler loop (`clone_reconcile::run`, every 30 s)
 

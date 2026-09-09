@@ -106,6 +106,16 @@ done
 # <<< rmng-local-bin <<<
 SH
 
+# Drop-in dir for server-managed bashrc snippets (preset PATH). Sourced last from the
+# baked /etc/bash.bashrc, so a snippet behaves like an append without ever editing this
+# file: the control-server ships whole files pre-boot (overwrite-idempotent). Guarded so
+# a rebuild re-running this script stays idempotent.
+grep -q 'bash\.bashrc\.d' /etc/bash.bashrc 2>/dev/null || cat >> /etc/bash.bashrc <<'SH'
+# >>> rmng-dropins >>>: server-managed snippets, see /etc/bash.bashrc.d/
+for f in /etc/bash.bashrc.d/*.sh; do [ -r "$f" ] && . "$f"; done
+# <<< rmng-dropins <<<
+SH
+
 # Passwordless GNOME keyring. The headless session has no login password to unlock a keyring,
 # so the first Secret Service client (Chrome, VS Code, etc.) pops a "Choose password for new
 # keyring" dialog. Pre-create an empty-password login keyring — the unencrypted, never-locked

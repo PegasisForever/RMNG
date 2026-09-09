@@ -259,10 +259,10 @@ pub(crate) fn clone_etc_environment_conf(vars: &[EnvVar]) -> String {
 /// even if the preset set `PATH` outright, and drop any `$PATH` token; dirs are reversed so
 /// the listed order wins (each is prepended in turn).
 ///
-/// Returns the `(fish_conf, profile_sh, bashrc_block)` tuple, or `None` when the preset has
-/// no `PATH` var (or it has no usable dirs). The bashrc block is marker-delimited so a
-/// re-provision can delete+re-append it; the fish + profile files are whole-file replacements
-/// (idempotent by overwrite). All three are dropped as root-owned `/etc` files by the caller.
+/// Returns the `(fish_conf, profile_sh, bashrc_dropin)` tuple, or `None` when the preset
+/// has no `PATH` var (or it has no usable dirs). All three are whole files (idempotent by
+/// overwrite): fish + profile land in their drop-in dirs, and the bashrc one lands in
+/// `/etc/bash.bashrc.d/`, which the template sources from the baked `/etc/bash.bashrc`.
 fn preset_path_rc(env_text: &str) -> Option<PresetPathRc> {
     // Last PATH=… line wins (mirrors the shell taking the final assignment).
     let path_val = env_text
@@ -290,12 +290,11 @@ fn preset_path_rc(env_text: &str) -> Option<PresetPathRc> {
         "# rmng env preset: prepend the preset PATH dirs for login sh/bash.\n\
          for d in {dirs}; do\n  case \":$PATH:\" in\n    *\":$d:\"*) : ;;\n    *) PATH=\"$d:$PATH\" ;;\n  esac\ndone\n"
     );
-    // Marker-delimited so the append-to-/etc/bash.bashrc step can delete a prior block first.
+    // Whole file for the `/etc/bash.bashrc.d/` drop-in the template sources: overwrite
+    // replaces any prior preset, no markers needed.
     let bashrc = format!(
-        "# >>> rmng-preset-path >>>\n\
-         # rmng env preset: prepend preset PATH dirs for non-login interactive bash.\n\
-         for d in {dirs}; do\n  case \":$PATH:\" in\n    *\":$d:\"*) : ;;\n    *) PATH=\"$d:$PATH\" ;;\n  esac\ndone\n\
-         # <<< rmng-preset-path <<<\n"
+        "# rmng env preset: prepend preset PATH dirs for non-login interactive bash.\n\
+         for d in {dirs}; do\n  case \":$PATH:\" in\n    *\":$d:\"*) : ;;\n    *) PATH=\"$d:$PATH\" ;;\n  esac\ndone\n"
     );
     Some(PresetPathRc {
         fish,
@@ -467,6 +466,13 @@ async fn clone_container_after_create(
             uid: 0,
             gid: 0,
         });
+        identity.push(TarEntry {
+            path: "etc/bash.bashrc.d/rmng-preset-path.sh".into(),
+            data: rc.bashrc.clone().into_bytes(),
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+        });
     }
     on_progress(
         "inject",
@@ -565,8 +571,8 @@ async fn clone_container_after_create(
     entries.push(crate::clone_reconcile::claude_hook_stamp_entry());
 
     // The single pre-boot tar: binaries + identity + content + stamps in one daemon
-    // roundtrip, before systemd ever runs. Post-start injects are down to the bashrc
-    // append (tar cannot append), the headless tmux session, and wait-ready.
+    // Post-start injects are down to the headless tmux session and wait-ready: every file
+    // (including the bashrc drop-in) already landed in the single pre-boot tar.
     on_progress("inject", "injecting clone payload: binaries + identity + config (pre-boot)");
     bins.extend(entries);
     docker.upload_tar(container, bins).await?;
@@ -574,29 +580,6 @@ async fn clone_container_after_create(
     // systemd PID 1 comes up, and the user manager with it, now reading the env written above.
     on_progress("inject", "starting container");
     docker.start_container(container).await?;
-
-    // The bashrc block can't go in the tar (it's an APPEND, not a whole file — /etc/bash.bashrc
-    // already exists in the image). Delete any prior rmng-preset-path block then re-append,
-    // so a re-provision stays idempotent. Only when the preset sets PATH.
-    on_progress("start", &format!("clone {hostname} starting"));
-    if let Some(rc) = &path_rc {
-        let script = format!(
-            "set -e\n\
-             sed -i '/# >>> rmng-preset-path >>>/,/# <<< rmng-preset-path <<</d' /etc/bash.bashrc 2>/dev/null || true\n\
-             cat >> /etc/bash.bashrc <<'RMNG_PRESET_PATH_EOF'\n{}RMNG_PRESET_PATH_EOF\n",
-            rc.bashrc
-        );
-        let code = docker
-            .exec_script(container, &script, &[], &[], |_stream, line| {
-                tracing::debug!(target: "provision", "bashrc-append: {line}");
-            })
-            .await?;
-        if code != 0 {
-            // No loop step re-appends this block: fail the op rather than ship a clone
-            // whose non-login bash silently misses the preset PATH.
-            anyhow::bail!("clone {hostname}: bashrc preset-PATH append exited {code}");
-        }
-    }
 
     // Headless clone: there is no clone-daemon, so a media `Hello` never arrives — don't wait
     // for one. Start the default `main` tmux session (idempotent; the viewer shows it as the
@@ -1651,9 +1634,9 @@ mod tests {
         assert!(rc.fish.contains("set -gx PATH \"$d\" $PATH"));
         // sh/bash use the case-guard prepend.
         assert!(rc.profile.contains("*) PATH=\"$d:$PATH\" ;;"));
-        // bashrc block is marker-delimited (so re-provision can delete+re-append).
-        assert!(rc.bashrc.starts_with("# >>> rmng-preset-path >>>\n"));
-        assert!(rc.bashrc.trim_end().ends_with("# <<< rmng-preset-path <<<"));
+        // bashrc drop-in is a whole file (overwrite-idempotent, no markers).
+        assert!(rc.bashrc.contains("for d in"));
+        assert!(!rc.bashrc.contains(">>>"));
     }
 
     #[test]
