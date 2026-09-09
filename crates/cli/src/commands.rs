@@ -1518,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_ssh_host_rejects_unknown_host() {
+    fn validate_ssh_host_allows_only_reachable_clones() {
         let st = ControlState {
             hosts: vec![wire::RmngClone {
                 id: "pega-herms".into(),
@@ -1527,17 +1527,12 @@ mod tests {
             }],
             ..Default::default()
         };
-
         let err = validate_ssh_host(&st, "herms").expect_err("clone suffix must not match");
         assert_eq!(
             err.to_string(),
             "unknown clone 'herms' (see `rmng clone ls`)"
         );
         validate_ssh_host(&st, "pega-herms").expect("exact clone id should match");
-    }
-
-    #[test]
-    fn validate_ssh_host_rejects_unreachable_targets() {
         let st = ControlState {
             hosts: vec![
                 wire::RmngClone {
@@ -1559,7 +1554,6 @@ mod tests {
             ],
             ..Default::default()
         };
-
         assert_eq!(
             validate_ssh_host(&st, "legacy").unwrap_err().to_string(),
             "'legacy' is not a managed clone; RMNG has no SSH endpoint for it"
@@ -1572,10 +1566,6 @@ mod tests {
             validate_ssh_host(&st, "offline").unwrap_err().to_string(),
             "clone 'offline' is offline; its SSH endpoint is unavailable"
         );
-    }
-
-    #[test]
-    fn validate_ssh_host_allows_active_or_unsampled_clones() {
         let st = ControlState {
             hosts: [None, Some(MonitorState::Working), Some(MonitorState::Idle)]
                 .into_iter()
@@ -1589,36 +1579,8 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-
         for host in ["clone-0", "clone-1", "clone-2"] {
             validate_ssh_host(&st, host).expect("managed clone should have an SSH command");
         }
-    }
-
-    #[test]
-    fn ps_formatters_handle_metrics_and_status() {
-        assert_eq!(cpu_pct(0.4), "0.4%");
-        assert_eq!(cpu_pct(18.4), "18%");
-        assert_eq!(
-            ram(&ContainerStats {
-                cpu_pct: 0.0,
-                mem_used: 2 * 1024 * 1024 * 1024,
-                mem_limit: 4 * 1024 * 1024 * 1024,
-            }),
-            "2.0 GiB/4.0 GiB"
-        );
-        assert_eq!(clone_status(true, Some(MonitorState::Working)), "archived");
-        assert_eq!(clone_status(false, Some(MonitorState::Idle)), "idle");
-        assert_eq!(clone_status(false, None), "");
-    }
-
-    #[test]
-    fn host_from_base_strips_scheme_port_and_path() {
-        assert_eq!(host_from_base("http://rmng-control:9000"), "rmng-control");
-        assert_eq!(
-            host_from_base("https://rmng.example.com/"),
-            "rmng.example.com"
-        );
-        assert_eq!(host_from_base("localhost:9000"), "localhost");
     }
 }

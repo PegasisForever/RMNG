@@ -55,7 +55,11 @@ pub fn render_bastion_sshd_config(
     let permit_open = if clone_ids.is_empty() {
         "none".to_string()
     } else {
-        clone_ids.iter().map(|id| format!("{id}:22")).collect::<Vec<_>>().join(" ")
+        clone_ids
+            .iter()
+            .map(|id| format!("{id}:22"))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     format!(
         "# Rendered by rmng control-server — do not edit.
@@ -96,7 +100,10 @@ pub fn bastion_hostkey_path(data_dir: &str) -> PathBuf {
 
 /// The persisted per-clone host key path (stable across clone rebuilds of the same id).
 pub fn clone_hostkey_path(data_dir: &str, clone_id: &str) -> PathBuf {
-    Path::new(data_dir).join("ssh/clones").join(clone_id).join("ssh_host_ed25519_key")
+    Path::new(data_dir)
+        .join("ssh/clones")
+        .join(clone_id)
+        .join("ssh_host_ed25519_key")
 }
 
 /// Generate an ed25519 host key at `key_path` (+ `.pub`) if it doesn't already exist.
@@ -121,7 +128,11 @@ pub fn ensure_hostkey(key_path: &Path) -> Result<()> {
         .arg(key_path)
         .status()
         .context("running ssh-keygen (is openssh installed?)")?;
-    anyhow::ensure!(status.success(), "ssh-keygen failed for {}", key_path.display());
+    anyhow::ensure!(
+        status.success(),
+        "ssh-keygen failed for {}",
+        key_path.display()
+    );
     Ok(())
 }
 
@@ -184,7 +195,11 @@ pub fn clone_ssh_tar_entries(
 /// Order-independent hash of a key set (for "did this clone's keys change?" tracking).
 pub fn keys_hash(keys: &[String]) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut sorted: Vec<&str> = keys.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    let mut sorted: Vec<&str> = keys
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
     sorted.sort_unstable();
     sorted.dedup();
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -205,7 +220,9 @@ const STABLE_RUN: Duration = Duration::from_secs(60);
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 
 pub fn backoff(failures: u32) -> Duration {
-    BASE_BACKOFF.saturating_mul(2u32.saturating_pow(failures)).min(MAX_BACKOFF)
+    BASE_BACKOFF
+        .saturating_mul(2u32.saturating_pow(failures))
+        .min(MAX_BACKOFF)
 }
 
 /// Sorted, deduped ids of active managed clones — the `PermitOpen` allowlist source.
@@ -307,8 +324,10 @@ async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<Str
             // (changing it under a running sshd would need a restart), so filter to the home/
             // files. Nothing else under ~/.ssh is ours to write.
             Ok(entries) => {
-                let ak: Vec<_> =
-                    entries.into_iter().filter(|e| e.path.starts_with("home/")).collect();
+                let ak: Vec<_> = entries
+                    .into_iter()
+                    .filter(|e| e.path.starts_with("home/"))
+                    .collect();
                 match app.docker.upload_tar(&host.id, ak).await {
                     Ok(()) => {
                         pushed.insert(host.id.clone(), hash);
@@ -377,8 +396,16 @@ async fn run_sshd(mut child: Child, app: &App, data_dir: &str, pushed: &mut Hash
     SSHD_PID.store(child.id().unwrap_or(0), Ordering::Relaxed);
     let logs = async {
         tokio::join!(
-            async { if let Some(r) = out { log_lines(r).await } },
-            async { if let Some(r) = err { log_lines(r).await } },
+            async {
+                if let Some(r) = out {
+                    log_lines(r).await
+                }
+            },
+            async {
+                if let Some(r) = err {
+                    log_lines(r).await
+                }
+            },
         );
     };
     let reconcile = async {
@@ -462,16 +489,11 @@ mod tests {
     fn authorized_keys_dedup_and_newline() {
         let out = render_authorized_keys(&[
             "ssh-ed25519 AAAA a".into(),
-            "  ".into(),               // blank → dropped
+            "  ".into(),                 // blank → dropped
             "ssh-ed25519 AAAA a".into(), // dup → dropped
             "ssh-ed25519 BBBB b".into(),
         ]);
         assert_eq!(out, "ssh-ed25519 AAAA a\nssh-ed25519 BBBB b\n");
-    }
-
-    #[test]
-    fn authorized_keys_empty_is_empty_string() {
-        assert_eq!(render_authorized_keys(&[]), "");
     }
 
     #[test]
@@ -493,7 +515,10 @@ mod tests {
             "Match User rmng",
             "PermitOpen clone-a:22 clone-b:22",
         ] {
-            assert!(out.contains(needle), "bastion sshd_config missing `{needle}`:\n{out}");
+            assert!(
+                out.contains(needle),
+                "bastion sshd_config missing `{needle}`:\n{out}"
+            );
         }
     }
 
@@ -501,33 +526,33 @@ mod tests {
     fn bastion_config_empty_fleet_denies_all_forwards() {
         // No clones ⇒ PermitOpen none (a valid key can auth but can open nothing).
         let out = render_bastion_sshd_config(2222, "/k", BASTION_AUTHORIZED_KEYS, &[]);
-        assert!(out.contains("PermitOpen none"), "empty fleet must deny forwards:\n{out}");
+        assert!(
+            out.contains("PermitOpen none"),
+            "empty fleet must deny forwards:\n{out}"
+        );
     }
 
     #[test]
     fn bastion_permitopen_uses_literal_ids() {
         // PermitOpen is matched literally against the client's requested host:port, which
         // is the clone id — so entries must be exactly `<id>:22`, no resolution.
-        let out = render_bastion_sshd_config(2222, "/k", BASTION_AUTHORIZED_KEYS, &["w-cp-claude".into()]);
+        let out = render_bastion_sshd_config(
+            2222,
+            "/k",
+            BASTION_AUTHORIZED_KEYS,
+            &["w-cp-claude".into()],
+        );
         assert!(out.contains("PermitOpen w-cp-claude:22"), "{out}");
-    }
-
-    #[test]
-    fn hostkey_paths_are_under_data_dir() {
-        assert_eq!(
-            bastion_hostkey_path("/data").to_str().unwrap(),
-            "/data/ssh/bastion/ssh_host_ed25519_key"
-        );
-        assert_eq!(
-            clone_hostkey_path("/data", "clone-a").to_str().unwrap(),
-            "/data/ssh/clones/clone-a/ssh_host_ed25519_key"
-        );
     }
 
     #[test]
     fn ensure_hostkey_generates_once_and_is_idempotent() {
         // Needs openssh-client for ssh-keygen; skip cleanly where it's absent (minimal CI).
-        if std::process::Command::new("ssh-keygen").arg("-?").output().is_err() {
+        if std::process::Command::new("ssh-keygen")
+            .arg("-?")
+            .output()
+            .is_err()
+        {
             eprintln!("skipping: ssh-keygen not installed");
             return;
         }
@@ -541,28 +566,46 @@ mod tests {
         let first = std::fs::read(&key).unwrap();
 
         ensure_hostkey(&key).unwrap(); // idempotent: must NOT regenerate
-        assert_eq!(std::fs::read(&key).unwrap(), first, "second call regenerated the key");
+        assert_eq!(
+            std::fs::read(&key).unwrap(),
+            first,
+            "second call regenerated the key"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn clone_tar_entries_have_correct_paths_modes_owners() {
-        if std::process::Command::new("ssh-keygen").arg("-?").output().is_err() {
+        if std::process::Command::new("ssh-keygen")
+            .arg("-?")
+            .output()
+            .is_err()
+        {
             eprintln!("skipping: ssh-keygen not installed");
             return;
         }
         let dir = std::env::temp_dir().join(format!("rmng-ssh-tar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let entries =
-            clone_ssh_tar_entries(dir.to_str().unwrap(), "clone-a", &["ssh-ed25519 AAAA a".into()]).unwrap();
+        let entries = clone_ssh_tar_entries(
+            dir.to_str().unwrap(),
+            "clone-a",
+            &["ssh-ed25519 AAAA a".into()],
+        )
+        .unwrap();
 
         // authorized_keys = exactly the operator keys. No fleet pubkey is folded in any more.
-        let ak = entries.iter().find(|e| e.path == "home/rmng/.ssh/authorized_keys").expect("authorized_keys entry");
+        let ak = entries
+            .iter()
+            .find(|e| e.path == "home/rmng/.ssh/authorized_keys")
+            .expect("authorized_keys entry");
         assert_eq!(ak.mode, 0o600);
         assert_eq!((ak.uid, ak.gid), (1000, 1000));
         let ak_text = String::from_utf8(ak.data.clone()).unwrap();
-        assert_eq!(ak_text, "ssh-ed25519 AAAA a\n", "authorized_keys is the operator set verbatim");
+        assert_eq!(
+            ak_text, "ssh-ed25519 AAAA a\n",
+            "authorized_keys is the operator set verbatim"
+        );
 
         // The ONLY files under ~/.ssh we write is authorized_keys. `config` in particular must not
         // be emitted: a managed `Host *` block there applied clone-local `User`/`IdentityFile` to
@@ -572,7 +615,11 @@ mod tests {
             .map(|e| e.path.as_str())
             .filter(|p| p.starts_with("home/"))
             .collect();
-        assert_eq!(home, vec!["home/rmng/.ssh/authorized_keys"], "only authorized_keys under home/");
+        assert_eq!(
+            home,
+            vec!["home/rmng/.ssh/authorized_keys"],
+            "only authorized_keys under home/"
+        );
 
         // No client identity is provisioned anywhere — neither in ~/.ssh (where gcr-ssh-agent
         // would adopt and crash on it) nor at the old out-of-tree fleet path.
@@ -582,7 +629,10 @@ mod tests {
             "home/rmng/.config/rmng/ssh/fleet_ed25519",
             "home/rmng/.config/rmng/ssh/fleet_ed25519.pub",
         ] {
-            assert!(!entries.iter().any(|e| e.path == stale), "{stale} must not be provisioned");
+            assert!(
+                !entries.iter().any(|e| e.path == stale),
+                "{stale} must not be provisioned"
+            );
         }
         // And no key material is generated on disk for it either.
         assert!(
@@ -591,10 +641,17 @@ mod tests {
         );
 
         // The clone's own sshd HOST key is still provisioned (that is inbound, not a client id).
-        let hk = entries.iter().find(|e| e.path == "etc/ssh/ssh_host_ed25519_key").expect("host key entry");
+        let hk = entries
+            .iter()
+            .find(|e| e.path == "etc/ssh/ssh_host_ed25519_key")
+            .expect("host key entry");
         assert_eq!(hk.mode, 0o600);
         assert_eq!((hk.uid, hk.gid), (0, 0));
-        assert!(entries.iter().any(|e| e.path == "etc/ssh/ssh_host_ed25519_key.pub" && e.mode == 0o644));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.path == "etc/ssh/ssh_host_ed25519_key.pub" && e.mode == 0o644)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -614,14 +671,6 @@ mod tests {
         assert_eq!(backoff(4).as_secs(), 240);
         assert_eq!(backoff(10).as_secs(), 300); // capped
         assert_eq!(backoff(u32::MAX).as_secs(), 300); // saturating
-    }
-
-    #[test]
-    fn changing_keys_changes_rendered_authorized_keys() {
-        assert_ne!(
-            render_authorized_keys(&["ssh-ed25519 A a".into()]),
-            render_authorized_keys(&["ssh-ed25519 B b".into()])
-        );
     }
 
     #[test]

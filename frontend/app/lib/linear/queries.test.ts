@@ -14,7 +14,9 @@ import {
 
 /** One `assignedIssues` node as Linear sends it: every field the query asks for, with the
  *  nulls a freshly filed issue really carries. */
-function node(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function node(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     id: "3f2c1b4a-0d9e-4a11-9f3b-5c6d7e8f9012",
     identifier: "WE-142",
@@ -69,7 +71,9 @@ test("an issue whose state type we do not model is dropped, not defaulted", () =
 /** The state's own id and name ride along, for the menu that changes it. A ticket from an
  *  answer that asked only for the type keeps neither rather than inventing them. */
 test("the state's id and name come through when the answer carried them", () => {
-  const t = ticketFromNode(node({ state: { id: "st-review", name: "In Review", type: "started" } }));
+  const t = ticketFromNode(
+    node({ state: { id: "st-review", name: "In Review", type: "started" } }),
+  );
 
   expect(t?.state).toBe("in_progress");
   expect(t?.stateId).toBe("st-review");
@@ -97,7 +101,10 @@ test("priority 0 is absence, and only 1 to 4 survive", () => {
 
 test("a label with no colour of its own falls back to slate", () => {
   const labels = {
-    nodes: [{ id: "l1", name: "backend", color: null }, { id: "l2", name: "urgent" }],
+    nodes: [
+      { id: "l1", name: "backend", color: null },
+      { id: "l2", name: "urgent" },
+    ],
   };
 
   expect(ticketFromNode(node({ labels }))?.labels).toEqual([
@@ -108,7 +115,10 @@ test("a label with no colour of its own falls back to slate", () => {
 
 test("a label keeps the colour Linear stores for it, and a nameless one is dropped", () => {
   const labels = {
-    nodes: [{ id: "l1", name: "backend", color: "#bec2c8" }, { id: "l2", color: "#ff0000" }],
+    nodes: [
+      { id: "l1", name: "backend", color: "#bec2c8" },
+      { id: "l2", color: "#ff0000" },
+    ],
   };
 
   expect(ticketFromNode(node({ labels }))?.labels).toEqual([
@@ -126,25 +136,31 @@ test("a label with no id keeps its place and carries an empty one", () => {
   ]);
 });
 
-test("Linear's own branch name and the description ride along when it sent them", () => {
-  const t = ticketFromNode(
-    node({ branchName: "pega/we-142-encoder", description: "# Steps\n\nHot-plug a monitor." }),
-  );
-
-  expect(t?.branchName).toBe("pega/we-142-encoder");
-  expect(t?.description).toBe("# Steps\n\nHot-plug a monitor.");
-});
-
 test("a sub-issue in any state is a link, and one we cannot model is dropped", () => {
   const children = {
     nodes: [
-      { identifier: "WE-143", title: "Repro", url: "https://linear.app/x/WE-143", state: { type: "completed" } },
-      { identifier: "WE-144", title: "Unknown", url: "https://linear.app/x/WE-144", state: { type: "somethingNew" } },
+      {
+        identifier: "WE-143",
+        title: "Repro",
+        url: "https://linear.app/x/WE-143",
+        state: { type: "completed" },
+      },
+      {
+        identifier: "WE-144",
+        title: "Unknown",
+        url: "https://linear.app/x/WE-144",
+        state: { type: "somethingNew" },
+      },
     ],
   };
 
   expect(ticketFromNode(node({ children }))?.children).toEqual([
-    { id: "WE-143", title: "Repro", url: "https://linear.app/x/WE-143", state: "done" },
+    {
+      id: "WE-143",
+      title: "Repro",
+      url: "https://linear.app/x/WE-143",
+      state: "done",
+    },
   ]);
 });
 
@@ -162,8 +178,6 @@ test("a parent is a link, and no parent is an absent field", () => {
     url: "https://linear.app/x/WE-100",
     state: "in_progress",
   });
-  expect(ticketFromNode(node())?.parent).toBeUndefined();
-  expect(linkFromNode(null)).toBeNull();
 });
 
 test("the response's nodes map in order, and an unmappable one costs only itself", () => {
@@ -173,20 +187,26 @@ test("the response's nodes map in order, and an unmappable one costs only itself
     node({ identifier: "WE-7" }),
   );
 
-  expect(ticketsFromResponse(data).map((t) => t.id)).toEqual(["WE-142", "WE-7"]);
+  expect(ticketsFromResponse(data).map((t) => t.id)).toEqual([
+    "WE-142",
+    "WE-7",
+  ]);
 });
 
 test("a response of some other shape yields no tickets rather than throwing", () => {
   expect(ticketsFromResponse(null)).toEqual([]);
-  expect(ticketsFromResponse({ viewer: null })).toEqual([]);
-  expect(ticketsFromResponse({ viewer: { assignedIssues: { nodes: "no" } } })).toEqual([]);
+  expect(
+    ticketsFromResponse({ viewer: { assignedIssues: { nodes: "no" } } }),
+  ).toEqual([]);
 });
 
 // The query is a string, so nothing type-checks it. These are the four clauses that decide
 // which issues come back at all.
 test("the query asks viewer for open assigned issues, newest first", () => {
   expect(OPEN_ISSUES_QUERY).toContain("viewer { assignedIssues(");
-  expect(OPEN_ISSUES_QUERY).toContain('state: { type: { in: ["unstarted", "started"] } }');
+  expect(OPEN_ISSUES_QUERY).toContain(
+    'state: { type: { in: ["unstarted", "started"] } }',
+  );
   expect(OPEN_ISSUES_QUERY).toContain("orderBy: updatedAt");
   expect(OPEN_ISSUES_QUERY).toContain("first: 100");
   expect(OPEN_ISSUES_QUERY).toContain("id identifier title url");

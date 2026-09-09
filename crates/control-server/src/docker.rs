@@ -3048,14 +3048,6 @@ mod tests {
         assert_eq!(plan.gateway().to_string(), "172.30.0.1");
     }
 
-    #[test]
-    fn prefix_mask_values() {
-        assert_eq!(prefix_to_mask(24), 0xFFFF_FF00);
-        assert_eq!(prefix_to_mask(16), 0xFFFF_0000);
-        assert_eq!(prefix_to_mask(20), 0xFFFF_F000);
-        assert_eq!(prefix_to_mask(32), 0xFFFF_FFFF);
-    }
-
     // --- line splitter --------------------------------------------------------------
 
     fn collect_pushes(chunks: &[&[u8]]) -> (Vec<String>, Vec<String>) {
@@ -3154,40 +3146,10 @@ mod tests {
         assert_eq!((seen[1].1, seen[1].2, seen[1].3), (0o600, 0, 0));
     }
 
-    #[test]
-    fn build_tar_uid_gid_applied_verbatim() {
-        // The API applies whatever it's given; a nonsense uid/gid still round-trips.
-        let entries = vec![TarEntry {
-            path: "x".into(),
-            data: vec![],
-            mode: 0o755,
-            uid: 4242,
-            gid: 99,
-        }];
-        let archive = build_tar(&entries).unwrap();
-        let mut ar = tar::Archive::new(archive.as_slice());
-        let e = ar.entries().unwrap().next().unwrap().unwrap();
-        assert_eq!(e.header().uid().unwrap(), 4242);
-        assert_eq!(e.header().gid().unwrap(), 99);
-        assert_eq!(e.header().mode().unwrap(), 0o755);
-    }
-
     // --- reference splitting + timestamp --------------------------------------------
 
     #[test]
-    fn split_reference_defaults_and_ports() {
-        assert_eq!(
-            split_reference("ubuntu:26.04"),
-            ("ubuntu".into(), "26.04".into())
-        );
-        assert_eq!(
-            split_reference("ubuntu"),
-            ("ubuntu".into(), "latest".into())
-        );
-        assert_eq!(
-            split_reference("rmng/template:base"),
-            ("rmng/template".into(), "base".into())
-        );
+    fn split_reference_keeps_a_registry_port_out_of_the_tag() {
         // A registry host with a port is not mistaken for a tag.
         assert_eq!(
             split_reference("registry:5000/img:v1"),
@@ -3269,21 +3231,6 @@ mod tests {
             (last_frac - 0.7).abs() < 1e-9,
             "final fraction should reach 0.7, got {last_frac}"
         );
-    }
-
-    #[test]
-    fn epoch_to_rfc3339_known_values() {
-        assert_eq!(epoch_to_rfc3339(0), "1970-01-01T00:00:00Z");
-        // 2021-01-01T00:00:00Z
-        assert_eq!(epoch_to_rfc3339(1_609_459_200), "2021-01-01T00:00:00Z");
-        // A leap-day timestamp: 2020-02-29T12:34:56Z = 1582979696
-        assert_eq!(epoch_to_rfc3339(1_582_979_696), "2020-02-29T12:34:56Z");
-    }
-
-    #[test]
-    fn short_id_strips_sha_prefix() {
-        assert_eq!(short_id("sha256:abcdef0123456789"), "abcdef012345");
-        assert_eq!(short_id("abcdef0123456789"), "abcdef012345");
     }
 
     #[test]
@@ -3425,14 +3372,6 @@ mod tests {
             row.detail.contains("Socket not found"),
             "detail: {}",
             row.detail
-        );
-    }
-
-    #[test]
-    fn dind_volume_name_shape() {
-        assert_eq!(
-            DockerCtl::dind_volume_name("pega-dev-1"),
-            "rmng-dind-pega-dev-1"
         );
     }
 

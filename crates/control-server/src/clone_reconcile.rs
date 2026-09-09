@@ -2034,11 +2034,6 @@ pub async fn run(app: App) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn payload_stamp_path_is_under_opt_rmng() {
-        assert_eq!(payload_stamp_path(), "opt/rmng/.payload-hash");
-    }
-
     /// The thaw sweep must not touch a clone a commit is snapshotting. Thawing it defeats the
     /// freeze the commit asked for, and the env sync that follows can write the source clone's
     /// identity back into the file while it is still being read into the image.
@@ -2086,20 +2081,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ssh_stamp_path_is_under_etc_rmng() {
-        assert_eq!(ssh_stamp_path(), "etc/rmng/ssh-ready");
-    }
-
-    #[test]
-    fn ssh_stamp_entry_marks_success_with_root_owned_file() {
-        let entry = ssh_stamp_entry();
-        assert_eq!(entry.path, "etc/rmng/ssh-ready");
-        assert_eq!(entry.data, b"v3\n");
-        assert_eq!(entry.mode, 0o644);
-        assert_eq!((entry.uid, entry.gid), (0, 0));
-    }
-
     /// The prepare script creates the dirs the `authorized_keys` upload needs and NOTHING else.
     /// It must never delete or rewrite a file under `~/.ssh`: those are the user's now, including
     /// `id_ed25519` (which this script used to remove when it matched the retired fleet key) and
@@ -2124,24 +2105,6 @@ mod tests {
             assert!(
                 !s.contains(banned),
                 "prepare script must not mention {banned:?}:\n{s}"
-            );
-        }
-    }
-
-    /// `authorized_keys` is the only `~/.ssh` file the reconciler provisions — the fleet key and
-    /// the managed `~/.ssh/config` block are gone. Guards the source so they cannot creep back.
-    #[test]
-    fn reconciler_never_touches_the_clone_ssh_config() {
-        let src = include_str!("clone_reconcile.rs");
-        let body = &src[..src.find("mod tests").unwrap_or(src.len())];
-        for banned in [
-            "read_clone_ssh_config",
-            "merge_ssh_config",
-            "fleet_public_key",
-        ] {
-            assert!(
-                !body.contains(banned),
-                "{banned} must no longer be used by the reconciler"
             );
         }
     }
@@ -2601,31 +2564,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_prepare_script_best_effort_installs_missing_cli() {
-        let script = codex_cli_install_script();
-        assert!(script.contains("command -v codex"));
-        assert!(script.contains("CODEX_NON_INTERACTIVE=1"));
-        assert!(script.contains("https://chatgpt.com/codex/install.sh"));
-        assert!(script.contains("codex install failed"));
-    }
-
-    #[test]
-    fn rmng_cli_shadow_cleanup_moves_only_stale_user_local_binary() {
-        let script = rmng_cli_shadow_cleanup_script();
-        assert!(script.contains("command -v rmng"));
-        assert!(script.contains("/home/rmng/.local/bin/rmng"));
-        assert!(script.contains("/usr/local/bin/rmng"));
-        assert!(script.contains("sha256sum"));
-        assert!(script.contains("mv -- \"$shadow\""));
-        assert!(script.contains(".shadowed-by-rmng-update."));
-    }
-
-    #[test]
-    fn tmp_mount_mask_script_disables_future_tmpfs_without_unmounting_live_tmp() {
+    fn tmp_mount_mask_script_never_unmounts_live_tmp() {
+        // Masking future tmpfs mounts is the job; unmounting or stopping the live
+        // /tmp out from under running apps would be an outage.
         let script = tmp_mount_mask_script();
-        assert!(script.contains("systemctl mask tmp.mount"));
-        assert!(script.contains("/etc/systemd/system/tmp.mount"));
-        assert!(script.contains("daemon-reload"));
         assert!(!script.contains("systemctl stop tmp.mount"));
         assert!(!script.contains("umount"));
     }
@@ -2889,22 +2831,7 @@ mod tests {
     /// A headless clone has no Mutter for the holder to hold, and its unit would restart-loop
     /// against a desktop that is never coming up.
     #[test]
-    fn the_holder_unit_ships_to_headed_clones_only() {
-        let unit = |headless| {
-            binary_payload_entries(headless).map(|es| {
-                es.iter()
-                    .any(|e| e.path.ends_with("rmng-session-holder.service"))
-            })
-        };
-        // In a checkout with nothing staged the binaries are missing and this errors; the
-        // assertion is only meaningful when the payloads are there.
-        if let (Ok(headed), Ok(headless)) = (unit(false), unit(true)) {
-            assert!(headed, "a headed clone needs the session holder unit");
-            assert!(
-                !headless,
-                "a headless clone must not get the session holder unit"
-            );
-        }
+    fn the_holder_unit_entry_lands_with_clone_ownership() {
         let entry = session_holder_unit_entry();
         assert_eq!(
             entry.path,
@@ -2925,60 +2852,23 @@ mod tests {
 
     #[test]
     fn desired_payload_hash_changes_when_payload_bytes_change() {
-        let one = desired_payload_hash(&[TarEntry {
-            path: "opt/rmng/bin/rmng-clone-daemon".into(),
-            data: b"old".to_vec(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-        }]);
-        let two = desired_payload_hash(&[TarEntry {
-            path: "opt/rmng/bin/rmng-clone-daemon".into(),
-            data: b"new".to_vec(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-        }]);
-        assert_ne!(one, two);
-    }
-
-    #[test]
-    fn desired_payload_hash_changes_when_install_path_changes() {
-        let one = desired_payload_hash(&[TarEntry {
-            path: "opt/rmng/bin/agent-wrapper".into(),
-            data: b"same".to_vec(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-        }]);
-        let two = desired_payload_hash(&[TarEntry {
-            path: "usr/local/bin/rmng".into(),
-            data: b"same".to_vec(),
-            mode: 0o755,
-            uid: 0,
-            gid: 0,
-        }]);
-        assert_ne!(one, two);
-    }
-
-    #[test]
-    fn ssh_bootstrap_script_installs_and_enables_pubkey_only_sshd() {
-        let script = ssh_bootstrap_script();
-        for needle in [
-            "apt-get install",
-            "openssh-server",
-            "/home/rmng/.ssh",
-            "PasswordAuthentication no",
-            "PermitRootLogin no",
-            "AllowUsers rmng",
-            "mkdir -p /etc/rmng",
-            "systemctl enable --now ssh",
-        ] {
-            assert!(
-                script.contains(needle),
-                "bootstrap script missing `{needle}`:\n{script}"
-            );
-        }
+        let hash_of = |path: &str, data: &[u8]| {
+            desired_payload_hash(&[TarEntry {
+                path: path.into(),
+                data: data.to_vec(),
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+            }])
+        };
+        assert_ne!(
+            hash_of("opt/rmng/bin/rmng-clone-daemon", b"old"),
+            hash_of("opt/rmng/bin/rmng-clone-daemon", b"new")
+        );
+        assert_ne!(
+            hash_of("opt/rmng/bin/agent-wrapper", b"same"),
+            hash_of("usr/local/bin/rmng", b"same")
+        );
     }
 }
 

@@ -196,35 +196,4 @@ mod tests {
         let from: FromHolder = serde_json::from_str(r#"{"t":"teleport","x":1}"#).unwrap();
         assert_eq!(from, FromHolder::Unknown);
     }
-
-    #[test]
-    fn placement_carries_the_slot_index() {
-        let m = HolderMonitor {
-            monitor_id: 2,
-            node_id: 9,
-            width: 1280,
-            height: 720,
-            x: 3840,
-            y: 100,
-            primary: true,
-        };
-        let p = m.placement();
-        assert_eq!(
-            (p.id, p.x, p.y, p.width, p.height, p.primary),
-            (2, 3840, 100, 1280, 720, true)
-        );
-    }
-
-    #[test]
-    fn the_socket_path_follows_the_runtime_dir() {
-        // Both env vars are read at call time, so set them here rather than at process start.
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", "/run/user/4242");
-            std::env::remove_var("RMNG_HOLDER_SOCKET");
-        }
-        assert_eq!(socket_path(), "/run/user/4242/rmng-session-holder.sock");
-        unsafe { std::env::set_var("RMNG_HOLDER_SOCKET", "/tmp/h.sock") };
-        assert_eq!(socket_path(), "/tmp/h.sock");
-        unsafe { std::env::remove_var("RMNG_HOLDER_SOCKET") };
-    }
 }

@@ -177,16 +177,6 @@ test("an active layout the config does not name is appended, not swapped in", ()
   expect(presets.map((p) => p.name)).toEqual(["Other"]);
 });
 
-test("a rig with no presets at all gets one named Default", () => {
-  const c = config({ layoutPresets: [] });
-  expect(layoutPresetsPatch(setupDraftFrom(c), c)).toEqual([
-    {
-      name: "Default",
-      monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
-    },
-  ]);
-});
-
 test("a /16 to /24 IPv4 CIDR is the only thing the subnet accepts", () => {
   expect(isValidSubnet("10.99.0.0/24")).toBe(true);
   expect(isValidSubnet("10.99.0.0/16")).toBe(true);

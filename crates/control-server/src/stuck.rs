@@ -173,7 +173,10 @@ impl LastSeen {
 
     /// Record an answer this tick actually reached, clearing any blind streak.
     pub fn settled(&self, id: &str, state: wire::MonitorState) {
-        self.seen.write().unwrap().insert(id.to_string(), (state, 0));
+        self.seen
+            .write()
+            .unwrap()
+            .insert(id.to_string(), (state, 0));
     }
 
     /// What to report for a clone whose home could not be read, and count the tick.
@@ -200,7 +203,10 @@ impl LastSeen {
 
     /// Drop clones that left the fleet, mirroring [`crate::monitor::ActivityBus::retain`].
     pub fn retain(&self, clones: &HashSet<String>) {
-        self.seen.write().unwrap().retain(|id, _| clones.contains(id));
+        self.seen
+            .write()
+            .unwrap()
+            .retain(|id, _| clones.contains(id));
     }
 }
 
@@ -367,7 +373,10 @@ fn session_why(session: &Session) -> String {
     match session.status.as_deref() {
         Some("waiting") => format!(
             "waiting on {}",
-            session.waiting_for.clone().unwrap_or_else(|| "unknown".into())
+            session
+                .waiting_for
+                .clone()
+                .unwrap_or_else(|| "unknown".into())
         ),
         _ => "idle at its prompt".to_string(),
     }
@@ -542,11 +551,18 @@ pub fn read_hook_events(root: &Path) -> Vec<HookEvent> {
 fn cursor_process(root: &Path) -> Option<(i64, f64)> {
     let lock = root.join("home/rmng/.config/Cursor/code.lock");
     let meta = std::fs::metadata(&lock).ok()?;
-    let started =
-        meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
+    let started = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
     let pid: i64 = std::fs::read_to_string(&lock).ok()?.trim().parse().ok()?;
     let raw = std::fs::read(root.join("proc").join(pid.to_string()).join("cmdline")).ok()?;
-    let mut args = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(String::from_utf8_lossy);
+    let mut args = raw
+        .split(|b| *b == 0)
+        .filter(|a| !a.is_empty())
+        .map(String::from_utf8_lossy);
     if !args.next()?.ends_with("/cursor") {
         return None;
     }
@@ -625,7 +641,12 @@ pub fn read_cursor_sessions(root: &Path, events: &[HookEvent], now: f64) -> Vec<
             pid,
             session_id: sid.to_string(),
             status: Some(
-                if stops.contains_key(sid) { "idle" } else { "busy" }.to_string(),
+                if stops.contains_key(sid) {
+                    "idle"
+                } else {
+                    "busy"
+                }
+                .to_string(),
             ),
             alive: true,
             ..Default::default()
@@ -673,23 +694,38 @@ pub fn codex_session_id(stem: &str) -> Option<&str> {
 /// `avahi-daemon [w-s4-codex-rev.local]` that any substring match reads as a live agent.
 fn codex_rollouts(root: &Path) -> Vec<(i64, PathBuf)> {
     let proc = root.join("proc");
-    let Ok(entries) = std::fs::read_dir(&proc) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&proc) else {
+        return Vec::new();
+    };
     let mut out: Vec<(i64, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<i64>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i64>().ok())
+        else {
             continue;
         };
-        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else { continue };
+        let Ok(raw) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
         let argv0 = raw.split(|b| *b == 0).next().unwrap_or_default();
         let argv0 = String::from_utf8_lossy(argv0);
-        if Path::new(argv0.as_ref()).file_name().is_none_or(|n| n != "codex") {
+        if Path::new(argv0.as_ref())
+            .file_name()
+            .is_none_or(|n| n != "codex")
+        {
             continue;
         }
         // A process that exits mid-walk takes its whole fd directory with it, which is an
         // ordinary close rather than an error.
-        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
         for fd in fds.flatten() {
-            let Ok(target) = std::fs::read_link(fd.path()) else { continue };
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
             let named = target
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -723,8 +759,12 @@ struct CodexLine {
 /// Codex calls a tool three ways depending on how the model addressed it, and the pairing is
 /// `call_id` in every case. Anything here that is not the whole set degrades the same way a
 /// missing `PostToolUse` does: the call reads as in flight forever.
-const CODEX_TOOL_CALLS: [&str; 4] =
-    ["custom_tool_call", "function_call", "local_shell_call", "web_search_call"];
+const CODEX_TOOL_CALLS: [&str; 4] = [
+    "custom_tool_call",
+    "function_call",
+    "local_shell_call",
+    "web_search_call",
+];
 
 /// Whether this payload type closes a tool call.
 fn codex_tool_output(kind: &str) -> bool {
@@ -751,23 +791,34 @@ fn codex_tool_output(kind: &str) -> bool {
 /// The stamps are the clone's own, taken from each line rather than from the file, so they
 /// difference against each other exactly as hook stamps do.
 fn codex_events(path: &Path, session: &str) -> Vec<HookEvent> {
-    let Ok(body) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
     let mut out: Vec<HookEvent> = Vec::new();
     for line in body.lines() {
-        let Ok(raw) = serde_json::from_str::<CodexLine>(line) else { continue };
+        let Ok(raw) = serde_json::from_str::<CodexLine>(line) else {
+            continue;
+        };
         let Some(payload) = raw.payload else { continue };
-        let Some(kind) = payload.get("type").and_then(Value::as_str) else { continue };
+        let Some(kind) = payload.get("type").and_then(Value::as_str) else {
+            continue;
+        };
         let ts = raw
             .timestamp
             .as_deref()
             .and_then(crate::claude::parse_rfc3339_utc_secs)
             .map_or(0.0, |secs| secs as f64);
         let str_at = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_string);
-        let base = HookEvent { session_id: Some(session.to_string()), ts, ..Default::default() };
+        let base = HookEvent {
+            session_id: Some(session.to_string()),
+            ts,
+            ..Default::default()
+        };
         let named = match (raw.kind.as_deref(), kind) {
-            (Some("event_msg"), "user_message") => {
-                HookEvent { hook_event_name: "UserPromptSubmit".into(), ..base }
-            }
+            (Some("event_msg"), "user_message") => HookEvent {
+                hook_event_name: "UserPromptSubmit".into(),
+                ..base
+            },
             (Some("event_msg"), "task_complete") => HookEvent {
                 hook_event_name: "Stop".into(),
                 last_assistant_message: str_at("last_agent_message"),
@@ -808,7 +859,11 @@ pub fn read_codex_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>) {
     let mut sessions = Vec::new();
     let mut events = Vec::new();
     for (pid, path) in codex_rollouts(root) {
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()).and_then(codex_session_id) else {
+        let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(codex_session_id)
+        else {
             continue;
         };
         let mine = codex_events(&path, id);
@@ -817,11 +872,13 @@ pub fn read_codex_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>) {
         // order, so its order is the fact; a stamp comparison would additionally be betting
         // on the clock never stepping back. A rollout with no prompt in it at all is a
         // session sitting at its first prompt, which is idle.
-        let open = mine.iter().fold(false, |open, e| match e.hook_event_name.as_str() {
-            "UserPromptSubmit" => true,
-            "Stop" => false,
-            _ => open,
-        });
+        let open = mine
+            .iter()
+            .fold(false, |open, e| match e.hook_event_name.as_str() {
+                "UserPromptSubmit" => true,
+                "Stop" => false,
+                _ => open,
+            });
         sessions.push(Session {
             pid,
             session_id: id.to_string(),
@@ -948,24 +1005,44 @@ pub fn read_pi_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>, HashMap<S
     let mut stack = vec![root.join(PI_SESSIONS)];
     let mut budget = 20_000;
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
-            if budget == 0 { break; }
+            if budget == 0 {
+                break;
+            }
             budget -= 1;
             let path = e.path();
             if e.file_type().is_ok_and(|t| t.is_dir()) {
                 stack.push(path);
                 continue;
             }
-            if path.extension().is_none_or(|x| x != "jsonl") { continue; }
-            if path.file_stem().and_then(|s| s.to_str()).and_then(pi_session_id).is_none() {
+            if path.extension().is_none_or(|x| x != "jsonl") {
+                continue;
+            }
+            if path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(pi_session_id)
+                .is_none()
+            {
                 continue;
             }
             // Skip huge transcripts: a multi-MB session costs a full parse every 4s tick.
             // The live turn is almost always in a small file; subagent bulk lives under
             // `subagent-artifacts/`, which this walk never enters by name shape anyway.
             let mtime = e.metadata().and_then(|m| m.modified()).ok();
-            files.push((mtime.map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)).unwrap_or(0.0), path));
+            files.push((
+                mtime
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or(0.0)
+                    })
+                    .unwrap_or(0.0),
+                path,
+            ));
         }
     }
     files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -978,21 +1055,39 @@ pub fn read_pi_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>, HashMap<S
     let mut cwds: HashMap<String, String> = HashMap::new();
     let mut seen: HashSet<String> = HashSet::new();
     for (_, path) in &files {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        let Some(id) = pi_session_id(stem).map(str::to_string) else { continue };
-        if !seen.insert(id.clone()) { continue; }
-        let Ok(body) = std::fs::read_to_string(path) else { continue };
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let Some(id) = pi_session_id(stem).map(str::to_string) else {
+            continue;
+        };
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(path) else {
+            continue;
+        };
         let mut cwd = String::new();
         let mut has_user = false;
         let mut open: HashSet<String> = HashSet::new();
         let mut last_kind = String::new();
         for line in body.lines() {
-            if line.trim().is_empty() { continue; }
-            let Ok(raw) = serde_json::from_str::<PiLine>(line) else { continue };
-            let ts = pi_ts(raw.timestamp.as_deref(), raw.message.as_ref().and_then(|m| m.timestamp));
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(raw) = serde_json::from_str::<PiLine>(line) else {
+                continue;
+            };
+            let ts = pi_ts(
+                raw.timestamp.as_deref(),
+                raw.message.as_ref().and_then(|m| m.timestamp),
+            );
             match raw.kind.as_deref() {
                 Some("session") => {
-                    if let Some(c) = raw.cwd.filter(|c| !c.is_empty()) { cwd = c; }
+                    if let Some(c) = raw.cwd.filter(|c| !c.is_empty()) {
+                        cwd = c;
+                    }
                 }
                 Some("message") => {
                     let Some(msg) = raw.message else { continue };
@@ -1011,17 +1106,30 @@ pub fn read_pi_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>, HashMap<S
                             last_kind = "assistant".to_string();
                             if let Some(content) = msg.content {
                                 let calls: Vec<PiToolCall> = match content {
-                                    Value::Array(blocks) => blocks.iter().filter_map(|b| {
-                                        (b.get("type")?.as_str() == Some("toolCall")).then(|| PiToolCall {
-                                            id: b.get("id").and_then(Value::as_str).map(str::to_string),
-                                            name: b.get("name").and_then(Value::as_str).map(str::to_string),
-                                            arguments: b.get("arguments").cloned(),
+                                    Value::Array(blocks) => blocks
+                                        .iter()
+                                        .filter_map(|b| {
+                                            (b.get("type")?.as_str() == Some("toolCall")).then(
+                                                || PiToolCall {
+                                                    id: b
+                                                        .get("id")
+                                                        .and_then(Value::as_str)
+                                                        .map(str::to_string),
+                                                    name: b
+                                                        .get("name")
+                                                        .and_then(Value::as_str)
+                                                        .map(str::to_string),
+                                                    arguments: b.get("arguments").cloned(),
+                                                },
+                                            )
                                         })
-                                    }).collect(),
+                                        .collect(),
                                     _ => Vec::new(),
                                 };
                                 for c in calls {
-                                    if let Some(cid) = c.id.clone() { open.insert(cid.clone()); }
+                                    if let Some(cid) = c.id.clone() {
+                                        open.insert(cid.clone());
+                                    }
                                     events.push(HookEvent {
                                         hook_event_name: "PreToolUse".into(),
                                         session_id: Some(id.clone()),
@@ -1036,7 +1144,9 @@ pub fn read_pi_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>, HashMap<S
                         }
                         Some("toolResult") => {
                             last_kind = "toolResult".to_string();
-                            if let Some(cid) = msg.tool_call_id.clone() { open.remove(&cid); }
+                            if let Some(cid) = msg.tool_call_id.clone() {
+                                open.remove(&cid);
+                            }
                             events.push(HookEvent {
                                 hook_event_name: "PostToolUse".into(),
                                 session_id: Some(id.clone()),
@@ -1052,18 +1162,36 @@ pub fn read_pi_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>, HashMap<S
                 _ => {}
             }
         }
-        if !has_user { continue; }
-        if !cwd.is_empty() { cwds.insert(id.clone(), cwd.clone()); }
+        if !has_user {
+            continue;
+        }
+        if !cwd.is_empty() {
+            cwds.insert(id.clone(), cwd.clone());
+        }
         // Generating means the newest turn has a prompt but no reply yet. Pi appends a
         // session line only when a message completes, so a trailing user message with a
         // fresh file is an agent mid-generation, not an idle one.
-        let file_quiet = std::fs::metadata(path).and_then(|m| m.modified()).ok().map(|t| {
-            std::time::SystemTime::now().duration_since(t).map(|d| d.as_secs_f64()).unwrap_or(f64::MAX)
-        }).unwrap_or(f64::MAX);
+        let file_quiet = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|t| {
+                std::time::SystemTime::now()
+                    .duration_since(t)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(f64::MAX)
+            })
+            .unwrap_or(f64::MAX);
         let generating = last_kind == "user" && file_quiet <= MOVING_WINDOW_S;
         sessions.push(Session {
             session_id: id,
-            status: Some(if !open.is_empty() || generating { "busy" } else { "idle" }.to_string()),
+            status: Some(
+                if !open.is_empty() || generating {
+                    "busy"
+                } else {
+                    "idle"
+                }
+                .to_string(),
+            ),
             pi_cwd: Some(cwd).filter(|c| !c.is_empty()),
             alive: true,
             ..Default::default()
@@ -1112,9 +1240,13 @@ fn read_pi_tasks(root: &Path) -> Vec<PiTask> {
     let mut stack = vec![root.join("home/rmng")];
     let mut budget = 20_000;
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
-            if budget == 0 || out.len() >= MAX_PI_TASK_FILES { return out; }
+            if budget == 0 || out.len() >= MAX_PI_TASK_FILES {
+                return out;
+            }
             budget -= 1;
             let path = e.path();
             let Ok(kind) = e.file_type() else { continue };
@@ -1137,16 +1269,30 @@ fn read_pi_tasks(root: &Path) -> Vec<PiTask> {
                 }
                 continue;
             }
-            if path.extension().is_none_or(|x| x != "json") { continue; }
-            if !path.components().any(|c| c.as_os_str() == ".pi") { continue; }
-            if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.')) {
+            if path.extension().is_none_or(|x| x != "json") {
                 continue;
             }
-            let Ok(body) = std::fs::read_to_string(&path) else { continue };
-            let Ok(raw) = serde_json::from_str::<RawTask>(&body) else { continue };
+            if !path.components().any(|c| c.as_os_str() == ".pi") {
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'))
+            {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(raw) = serde_json::from_str::<RawTask>(&body) else {
+                continue;
+            };
             // A task file without a status is not a task record (delegate seeds and
             // bookkeeping share these directories).
-            let Some(status) = raw.status.filter(|s| !s.is_empty()) else { continue };
+            let Some(status) = raw.status.filter(|s| !s.is_empty()) else {
+                continue;
+            };
             out.push(PiTask {
                 id: raw.id.unwrap_or_default(),
                 name: raw.name.or(raw.description).unwrap_or_default(),
@@ -1168,19 +1314,31 @@ fn read_pi_tasks(root: &Path) -> Vec<PiTask> {
 /// `outputPath` is stored display-relative (`<project>/.pi/tasks/...`) or project-relative
 /// (`.pi/tasks/...`), so both shapes are tried under the container root.
 fn pi_task_output(root: &Path, task: &PiTask, now: f64) -> Option<(u64, f64)> {
-    if task.output_path.is_empty() { return None; }
+    if task.output_path.is_empty() {
+        return None;
+    }
     let mut candidates = Vec::new();
     if !task.cwd.is_empty() {
         let under = task.cwd.strip_prefix('/').unwrap_or(&task.cwd);
         candidates.push(root.join(under).join(&task.output_path));
-        candidates.push(root.join(under).join(task.output_path.trim_start_matches("../")));
+        candidates.push(
+            root.join(under)
+                .join(task.output_path.trim_start_matches("../")),
+        );
     }
     candidates.push(root.join(task.output_path.trim_start_matches('/')));
     for path in candidates {
-        let Ok(meta) = std::fs::metadata(&path) else { continue };
-        if !meta.is_file() { continue; }
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
         let Ok(mtime) = meta.modified() else { continue };
-        let age = now - mtime.duration_since(std::time::UNIX_EPOCH).map_or(now, |d| d.as_secs_f64());
+        let age = now
+            - mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(now, |d| d.as_secs_f64());
         return Some((meta.len(), age));
     }
     None
@@ -1195,7 +1353,9 @@ fn pi_task_output(root: &Path, task: &PiTask, now: f64) -> Option<(u64, f64)> {
 /// is the worse failure.
 fn pi_live_wake<'a>(tasks: &'a [PiTask], cwd: Option<&str>) -> Option<&'a PiTask> {
     tasks.iter().find(|t| {
-        if !t.wakes_agent() { return false; }
+        if !t.wakes_agent() {
+            return false;
+        }
         match (cwd.filter(|c| !c.is_empty()), t.cwd.as_str()) {
             (Some(want), got) if !got.is_empty() => got == want,
             _ => true,
@@ -1222,7 +1382,9 @@ pub fn unowned_last_seen(events: &[HookEvent], started: f64) -> Option<f64> {
         .iter()
         .filter(|e| e.ts >= started && e.session_id.as_deref() == Some(CURSOR_UNOWNED))
         .map(|e| e.ts)
-        .fold(None, |best: Option<f64>, ts| Some(best.map_or(ts, |b| b.max(ts))))
+        .fold(None, |best: Option<f64>, ts| {
+            Some(best.map_or(ts, |b| b.max(ts)))
+        })
 }
 
 /// The subagents a `Stop` reports as still running, or `None` when it reported nothing at all.
@@ -1337,7 +1499,10 @@ fn latest_live_stop(events: &[HookEvent]) -> HashMap<&str, &HookEvent> {
 /// `now`, and a negative age is not a fact about anything.
 fn prompt_ages(events: &[HookEvent], now: f64) -> HashMap<&str, f64> {
     let mut out = HashMap::new();
-    for e in events.iter().filter(|e| e.hook_event_name == "UserPromptSubmit") {
+    for e in events
+        .iter()
+        .filter(|e| e.hook_event_name == "UserPromptSubmit")
+    {
         if let Some(sid) = e.session_id.as_deref() {
             out.insert(sid, (now - e.ts).max(0.0));
         }
@@ -1424,8 +1589,14 @@ fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
             }
             let Ok(meta) = entry.metadata() else { continue };
             let Ok(mtime) = meta.modified() else { continue };
-            let age = now - mtime.duration_since(std::time::UNIX_EPOCH).map_or(now, |d| d.as_secs_f64());
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let age = now
+                - mtime
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(now, |d| d.as_secs_f64());
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
             // A subagent transcript is named `agent-<id>.jsonl` under a `subagents/` dir, and
             // a Codex rollout carries its start time before its id.
             let id = codex_session_id(stem)
@@ -1436,7 +1607,13 @@ fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
             match out.get(&id) {
                 Some(prev) if prev.quiet <= age => {}
                 _ => {
-                    out.insert(id, Transcript { quiet: age, path: Some(path) });
+                    out.insert(
+                        id,
+                        Transcript {
+                            quiet: age,
+                            path: Some(path),
+                        },
+                    );
                 }
             }
         }
@@ -1469,8 +1646,12 @@ fn ends_interrupted(path: &Path) -> bool {
     /// Comfortably past an interrupt record, which is about 500 bytes.
     const WINDOW: u64 = 16 * 1024;
 
-    let Ok(mut file) = std::fs::File::open(path) else { return false };
-    let Ok(len) = file.metadata().map(|m| m.len()) else { return false };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return false;
+    };
     let from = len.saturating_sub(WINDOW);
     if file.seek(SeekFrom::Start(from)).is_err() {
         return false;
@@ -1481,11 +1662,18 @@ fn ends_interrupted(path: &Path) -> bool {
     }
     let text = String::from_utf8_lossy(&buf);
     // The window can open mid-line, and that leading fragment is dropped by taking the last.
-    let Some(last) = text.lines().rfind(|l| !l.trim().is_empty()) else { return false };
-    let Ok(raw) = serde_json::from_str::<Value>(last) else { return false };
+    let Some(last) = text.lines().rfind(|l| !l.trim().is_empty()) else {
+        return false;
+    };
+    let Ok(raw) = serde_json::from_str::<Value>(last) else {
+        return false;
+    };
     // A user-role record, so an assistant merely quoting the marker is not mistaken for one.
     // Cursor names this key `role` where Claude Code names it `type`.
-    let role = raw.get("type").or_else(|| raw.get("role")).and_then(Value::as_str);
+    let role = raw
+        .get("type")
+        .or_else(|| raw.get("role"))
+        .and_then(Value::as_str);
     if role != Some("user") {
         return false;
     }
@@ -1515,7 +1703,11 @@ fn drop_interrupted<'a>(
     let mut seen: HashMap<&str, bool> = HashMap::new();
     let mut kept: Vec<&'a HookEvent> = Vec::new();
     for t in tools {
-        let owner = t.agent_id.as_deref().or(t.session_id.as_deref()).unwrap_or_default();
+        let owner = t
+            .agent_id
+            .as_deref()
+            .or(t.session_id.as_deref())
+            .unwrap_or_default();
         let interrupted = match seen.get(owner) {
             Some(known) => *known,
             None => {
@@ -1542,7 +1734,11 @@ fn background_outputs(root: &Path, now: f64) -> HashMap<String, (u64, f64)> {
         return out;
     };
     for claude_dir in tmp.flatten() {
-        if !claude_dir.file_name().to_string_lossy().starts_with("claude-") {
+        if !claude_dir
+            .file_name()
+            .to_string_lossy()
+            .starts_with("claude-")
+        {
             continue;
         }
         // /tmp/claude-*/<slug>/<session>/tasks/*.output
@@ -1565,8 +1761,13 @@ fn background_outputs(root: &Path, now: f64) -> HashMap<String, (u64, f64)> {
                     let Ok(meta) = task.metadata() else { continue };
                     let Ok(mtime) = meta.modified() else { continue };
                     let age = now
-                        - mtime.duration_since(std::time::UNIX_EPOCH).map_or(now, |d| d.as_secs_f64());
-                    let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                        - mtime
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(now, |d| d.as_secs_f64());
+                    let id = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default();
                     out.insert(id.to_string(), (meta.len(), age));
                 }
             }
@@ -1607,7 +1808,10 @@ impl<'a> CloneFacts<'a> {
         if let Some(at) = unowned_last_seen(events, f64::NEG_INFINITY) {
             silence.insert(
                 CURSOR_UNOWNED.to_string(),
-                Transcript { quiet: (now - at).max(0.0), path: None },
+                Transcript {
+                    quiet: (now - at).max(0.0),
+                    path: None,
+                },
             );
         }
         // The hook fold first, then the one ending it cannot see. An interrupt fires nothing,
@@ -1647,8 +1851,11 @@ impl<'a> CloneFacts<'a> {
 /// A subagent's work counts as its parent's, because the parent is what it reports back to.
 pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Value {
     let sid = session.session_id.as_str();
-    let tools: Vec<&&HookEvent> =
-        facts.tools.iter().filter(|t| t.session_id.as_deref() == Some(sid)).collect();
+    let tools: Vec<&&HookEvent> = facts
+        .tools
+        .iter()
+        .filter(|t| t.session_id.as_deref() == Some(sid))
+        .collect();
     // Sitting inside a tool call is blocked in it, not generating. Both states publish `busy`,
     // so the registry cannot tell them apart and this is what does. A subagent's call does not
     // block its parent: the parent is inside its own `Task` call, which is counted here.
@@ -1959,7 +2166,9 @@ Reply with only a JSON object:
 {"will_progress": true, "reason": "one short sentence"}"#;
 
 /// Edges of the elapsed-time buckets the cache key rounds to, in seconds.
-const BUCKETS: [f64; 9] = [30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0, 4800.0, 9600.0];
+const BUCKETS: [f64; 9] = [
+    30.0, 60.0, 120.0, 300.0, 600.0, 1200.0, 2400.0, 4800.0, 9600.0,
+];
 
 /// Remembers what the model said, so a clone sitting in one state is asked once rather than
 /// once per tick.
@@ -2071,7 +2280,10 @@ impl JudgeHealth {
 }
 
 fn bucket(seconds: f64) -> usize {
-    BUCKETS.iter().position(|edge| seconds < *edge).unwrap_or(BUCKETS.len())
+    BUCKETS
+        .iter()
+        .position(|edge| seconds < *edge)
+        .unwrap_or(BUCKETS.len())
 }
 
 /// The view with every duration replaced by its bucket, rendered canonically. Two views with
@@ -2197,7 +2409,12 @@ impl Judge {
         http: &reqwest::Client,
         backend: &Backend,
         view: &Value,
-    ) -> Result<(wire::MonitorState, String, bool, Option<crate::stucklog::CallUsage>)> {
+    ) -> Result<(
+        wire::MonitorState,
+        String,
+        bool,
+        Option<crate::stucklog::CallUsage>,
+    )> {
         let key = cache_key(view);
         if let Some((progress, reason)) = self.answers.read().unwrap().get(&key).cloned() {
             return Ok((apply_verdict(Some(progress)), reason, false, None));
@@ -2205,7 +2422,10 @@ impl Judge {
         let (answer, usage) = ask(http, backend, view).await?;
         let progress = answer.will_progress == Some(true);
         let reason = answer.reason.unwrap_or_default();
-        self.answers.write().unwrap().insert(key, (progress, reason.clone()));
+        self.answers
+            .write()
+            .unwrap()
+            .insert(key, (progress, reason.clone()));
         Ok((apply_verdict(Some(progress)), reason, true, usage))
     }
 
@@ -2264,7 +2484,14 @@ async fn ask(
     backend: &Backend,
     view: &Value,
 ) -> Result<(Answer, Option<crate::stucklog::CallUsage>)> {
-    ask_codex(http, &backend.token, &backend.account_id, &backend.model, view).await
+    ask_codex(
+        http,
+        &backend.token,
+        &backend.account_id,
+        &backend.model,
+        view,
+    )
+    .await
 }
 
 /// Ask GPT over the Codex CLI's own endpoint, on an imported account's ChatGPT plan.
@@ -2344,7 +2571,10 @@ fn error_line(status: u16, body: &str) -> String {
     // The raw path has always been bounded by `snippet`, and parsing a body is no reason to
     // stop bounding it: this string reaches a per-tick warning and the decision log.
     let what = snippet(&what);
-    let plan = parsed.error.plan_type.map_or(String::new(), |p| format!(" on the {p} plan"));
+    let plan = parsed
+        .error
+        .plan_type
+        .map_or(String::new(), |p| format!(" on the {p} plan"));
     let resets = parsed.error.resets_at.map_or(String::new(), |at| {
         format!(", resets {}", crate::docker::epoch_to_rfc3339(at))
     });
@@ -2380,7 +2610,9 @@ impl std::error::Error for QuotaExhausted {}
 fn quota_exhausted(body: &str) -> Option<QuotaExhausted> {
     let parsed = serde_json::from_str::<ApiError>(body).ok()?;
     match parsed.error.kind.as_deref() {
-        Some("usage_limit_reached") => Some(QuotaExhausted { resets_at: parsed.error.resets_at }),
+        Some("usage_limit_reached") => Some(QuotaExhausted {
+            resets_at: parsed.error.resets_at,
+        }),
         _ => None,
     }
 }
@@ -2481,7 +2713,10 @@ fn codex_answer_text(body: &str) -> Result<(String, Option<crate::stucklog::Call
             _ => {}
         }
     }
-    let text = [message, done, delta].into_iter().find(|t| !t.is_empty()).unwrap_or_default();
+    let text = [message, done, delta]
+        .into_iter()
+        .find(|t| !t.is_empty())
+        .unwrap_or_default();
     Ok((text, usage))
 }
 
@@ -2489,10 +2724,15 @@ fn codex_answer_text(body: &str) -> Result<(String, Option<crate::stucklog::Call
 /// a reply that yields nothing usable must read as "no" rather than as an error.
 fn parse_answer(content: &str) -> Answer {
     let (Some(start), Some(end)) = (content.find('{'), content.rfind('}')) else {
-        return Answer { will_progress: None, reason: None };
+        return Answer {
+            will_progress: None,
+            reason: None,
+        };
     };
-    serde_json::from_str(&content[start..=end])
-        .unwrap_or(Answer { will_progress: None, reason: None })
+    serde_json::from_str(&content[start..=end]).unwrap_or(Answer {
+        will_progress: None,
+        reason: None,
+    })
 }
 
 fn snippet(s: &str) -> String {
@@ -2512,7 +2752,9 @@ fn inside_a_fresh_call(view: &Value) -> Option<f64> {
         .filter(|t| !HUMAN_WAITS.contains(&t["tool"].as_str().unwrap_or_default()))
         .filter_map(|t| t["running_for_seconds"].as_f64())
         .filter(|age| *age < HANG_GRACE_S)
-        .fold(None, |best: Option<f64>, age| Some(best.map_or(age, |b| b.min(age))))
+        .fold(None, |best: Option<f64>, age| {
+            Some(best.map_or(age, |b| b.min(age)))
+        })
 }
 
 /// The model's answer, with the one rule it is not allowed to break applied over the top.
@@ -2573,7 +2815,10 @@ fn degraded_state(view: &Value) -> (wire::MonitorState, String) {
     // measured token-idle baseline over-reported on.
     let publishes_status = view["session"]["status"].is_string();
     if publishes_status && view["session"]["generating"].as_bool() == Some(true) {
-        return (wire::MonitorState::Working, "the agent is writing tokens".to_string());
+        return (
+            wire::MonitorState::Working,
+            "the agent is writing tokens".to_string(),
+        );
     }
     match overruled(wire::MonitorState::Idle, view) {
         Some((state, why)) => (state, why),
@@ -2604,7 +2849,15 @@ pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bo
     });
     // This call is billed like any other, but it belongs to no session and so has no decision
     // line to ride. Its cost is reported to the operator who pressed the button instead.
-    match ask_codex(&app.http, &acct.access_token, &acct.account_id, model, &view).await {
+    match ask_codex(
+        &app.http,
+        &acct.access_token,
+        &acct.account_id,
+        model,
+        &view,
+    )
+    .await
+    {
         Err(e) => (false, format!("{model} on {email}: {e:#}")),
         Ok((a, usage)) => match a.will_progress {
             // The fixture describes a release build still running, so a judge that is working
@@ -2617,7 +2870,10 @@ pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bo
             }
             _ => (
                 false,
-                format!("{model} on {email} gave an unusable answer: {}", a.reason.unwrap_or_default()),
+                format!(
+                    "{model} on {email} gave an unusable answer: {}",
+                    a.reason.unwrap_or_default()
+                ),
             ),
         },
     }
@@ -2818,7 +3074,11 @@ pub async fn resolve_fleet(
                                             target: "stuck",
                                             "clone {id} {sid}: overruling idle — {floor}"
                                         );
-                                        (state, "floor", format!("{floor} (the model said: {reason})"))
+                                        (
+                                            state,
+                                            "floor",
+                                            format!("{floor} (the model said: {reason})"),
+                                        )
                                     }
                                     None => (state, by, reason),
                                 };
@@ -2896,8 +3156,10 @@ pub async fn resolve_fleet(
             (id, settled_as)
         }
     });
-    let out: HashMap<String, wire::MonitorState> =
-        futures::future::join_all(decided).await.into_iter().collect();
+    let out: HashMap<String, wire::MonitorState> = futures::future::join_all(decided)
+        .await
+        .into_iter()
+        .collect();
 
     // The cache is keyed by view content, not by clone, so it cannot be pruned per clone.
     // Clearing it wholesale once it outgrows the fleet costs one round of re-asking.
@@ -3024,9 +3286,10 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
         true => read_pi_tasks(&root),
         false => Vec::new(),
     };
-    let pi_wake_pending = live
-        .iter()
-        .any(|s| pi_ids.contains(&s.session_id) && pi_live_wake(&pi_tasks_early, s.pi_cwd.as_deref()).is_some());
+    let pi_wake_pending = live.iter().any(|s| {
+        pi_ids.contains(&s.session_id)
+            && pi_live_wake(&pi_tasks_early, s.pi_cwd.as_deref()).is_some()
+    });
     if clone_state(&live, true) != Verdict::Ask && !pi_wake_pending {
         return Some(live.iter().map(settled).collect());
     }
@@ -3060,17 +3323,18 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
                     };
                 }
                 match session_state(s) {
-                Verdict::Ask => SessionCase {
-                    session: s.session_id.clone(),
-                    verdict: Verdict::Ask,
-                    view: build_session_view(s, &facts, now),
-                    why: String::new(),
-                    status: s.status.clone(),
-                    waiting_for: s.waiting_for.clone(),
-                    prompt_age: ages.get(s.session_id.as_str()).copied(),
-                },
-                _ => settled(s),
-            }})
+                    Verdict::Ask => SessionCase {
+                        session: s.session_id.clone(),
+                        verdict: Verdict::Ask,
+                        view: build_session_view(s, &facts, now),
+                        why: String::new(),
+                        status: s.status.clone(),
+                        waiting_for: s.waiting_for.clone(),
+                        prompt_age: ages.get(s.session_id.as_str()).copied(),
+                    },
+                    _ => settled(s),
+                }
+            })
             .collect(),
     )
 }
@@ -3095,7 +3359,10 @@ mod tests {
 
     #[test]
     fn a_stopped_container_is_offline_whatever_its_sessions_say() {
-        assert_eq!(clone_state(&[session(Some("busy"), true)], false), Verdict::Offline);
+        assert_eq!(
+            clone_state(&[session(Some("busy"), true)], false),
+            Verdict::Offline
+        );
         assert_eq!(clone_state(&[], false), Verdict::Offline);
     }
 
@@ -3104,7 +3371,10 @@ mod tests {
         // No session at all, and a session whose process is gone, are the same thing: there
         // is nothing left that could wake this clone.
         assert_eq!(clone_state(&[], true), Verdict::Stuck);
-        assert_eq!(clone_state(&[session(Some("busy"), false)], true), Verdict::Stuck);
+        assert_eq!(
+            clone_state(&[session(Some("busy"), false)], true),
+            Verdict::Stuck
+        );
     }
 
     #[test]
@@ -3124,19 +3394,26 @@ mod tests {
         let idle = || session(Some("idle"), true);
         let waiting = || session(Some("waiting"), true);
         assert_eq!(clone_state(&[idle(), waiting()], true), Verdict::Stuck);
-        assert_eq!(clone_state(&[idle(), waiting(), session(None, true)], true), Verdict::Ask);
+        assert_eq!(
+            clone_state(&[idle(), waiting(), session(None, true)], true),
+            Verdict::Ask
+        );
     }
 
     #[test]
     fn every_session_idle_is_decided_without_the_model() {
         // The commonest state in a fleet, and it costs nothing.
-        assert_eq!(clone_state(&[session(Some("idle"), true)], true), Verdict::Stuck);
+        assert_eq!(
+            clone_state(&[session(Some("idle"), true)], true),
+            Verdict::Stuck
+        );
         let two = [session(Some("idle"), true), session(Some("idle"), true)];
         assert_eq!(clone_state(&two, true), Verdict::Stuck);
     }
 
     fn pi_root(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("rmng-pi-stuck-{}-{}", std::process::id(), tag));
+        let root =
+            std::env::temp_dir().join(format!("rmng-pi-stuck-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -3151,7 +3428,11 @@ mod tests {
     }
 
     fn write_pi_task(root: &Path, project: &str, run: &str, id: &str, body: &str) {
-        let dir = root.join("home/rmng").join(project).join(".pi/tasks").join(run);
+        let dir = root
+            .join("home/rmng")
+            .join(project)
+            .join(".pi/tasks")
+            .join(run);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{id}.json")), body).unwrap();
     }
@@ -3179,10 +3460,28 @@ mod tests {
         };
         assert!(base.wakes_agent());
         // A wake without its notification never fires: the wake rides the notification.
-        assert!(!PiTask { notify: false, ..base.clone() }.wakes_agent());
-        assert!(!PiTask { trigger: false, ..base.clone() }.wakes_agent());
+        assert!(
+            !PiTask {
+                notify: false,
+                ..base.clone()
+            }
+            .wakes_agent()
+        );
+        assert!(
+            !PiTask {
+                trigger: false,
+                ..base.clone()
+            }
+            .wakes_agent()
+        );
         for done in ["completed", "failed", "killed"] {
-            assert!(!PiTask { status: done.into(), ..base.clone() }.wakes_agent());
+            assert!(
+                !PiTask {
+                    status: done.into(),
+                    ..base.clone()
+                }
+                .wakes_agent()
+            );
         }
     }
 
@@ -3211,7 +3510,12 @@ mod tests {
              {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\"}}],\"timestamp\":1000000}}}}\n\
              {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"toolCall\",\"id\":\"c1\",\"name\":\"bash\",\"arguments\":{{\"command\":\"cargo build\"}}}}],\"timestamp\":1001000}}}}\n"
         );
-        write_pi_session(&root, "--home-rmng-api--", &format!("2026-09-08T04-08-03-092Z_{PI_ID}.jsonl"), &open);
+        write_pi_session(
+            &root,
+            "--home-rmng-api--",
+            &format!("2026-09-08T04-08-03-092Z_{PI_ID}.jsonl"),
+            &open,
+        );
         let (sessions, events, cwds) = read_pi_sessions(&root);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status.as_deref(), Some("busy"));
@@ -3220,8 +3524,15 @@ mod tests {
         // One open call folds exactly like a Claude PreToolUse without its Post.
         assert_eq!(in_flight_tools(&events).len(), 1);
 
-        let closed = format!("{open}{{\"type\":\"message\",\"message\":{{\"role\":\"toolResult\",\"toolCallId\":\"c1\",\"toolName\":\"bash\",\"timestamp\":1002000}}}}\n");
-        write_pi_session(&root, "--home-rmng-api--", &format!("2026-09-08T04-08-03-092Z_{PI_ID}.jsonl"), &closed);
+        let closed = format!(
+            "{open}{{\"type\":\"message\",\"message\":{{\"role\":\"toolResult\",\"toolCallId\":\"c1\",\"toolName\":\"bash\",\"timestamp\":1002000}}}}\n"
+        );
+        write_pi_session(
+            &root,
+            "--home-rmng-api--",
+            &format!("2026-09-08T04-08-03-092Z_{PI_ID}.jsonl"),
+            &closed,
+        );
         let (sessions, events, _) = read_pi_sessions(&root);
         assert_eq!(sessions[0].status.as_deref(), Some("idle"));
         assert!(in_flight_tools(&events).is_empty());
@@ -3279,7 +3590,8 @@ mod tests {
              {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"waiting on the build\"}}],\"timestamp\":1001000}}}}\n"
         );
         std::fs::write(
-            fake.join(".pi/agent/sessions/--home-rmng-api--").join(format!("t_{PI_ID}.jsonl")),
+            fake.join(".pi/agent/sessions/--home-rmng-api--")
+                .join(format!("t_{PI_ID}.jsonl")),
             session_body,
         )
         .unwrap();
@@ -3302,7 +3614,10 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert_eq!(tasks.len(), 1);
-        assert!(tasks[0].pointer("/wakes_agent").is_none(), "no flag in the view");
+        assert!(
+            tasks[0].pointer("/wakes_agent").is_none(),
+            "no flag in the view"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3318,7 +3633,8 @@ mod tests {
              {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"server is up\"}}],\"timestamp\":1001000}}}}\n"
         );
         std::fs::write(
-            fake.join(".pi/agent/sessions/--home-rmng-api--").join(format!("t_{PI_ID}.jsonl")),
+            fake.join(".pi/agent/sessions/--home-rmng-api--")
+                .join(format!("t_{PI_ID}.jsonl")),
             session_body,
         )
         .unwrap();
@@ -3368,10 +3684,20 @@ mod tests {
             ..Default::default()
         }];
         let view = view_of(&root, &s, &events, 1100.0);
-        let tasks = view.pointer("/background_tasks").and_then(Value::as_array).cloned().unwrap_or_default();
+        let tasks = view
+            .pointer("/background_tasks")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(tasks.len(), 1);
-        assert!(tasks[0].pointer("/wakes_agent").is_none(), "no flag in the view");
-        assert_eq!(tasks[0].pointer("/what").and_then(Value::as_str), Some("cargo build --release"));
+        assert!(
+            tasks[0].pointer("/wakes_agent").is_none(),
+            "no flag in the view"
+        );
+        assert_eq!(
+            tasks[0].pointer("/what").and_then(Value::as_str),
+            Some("cargo build --release")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3402,7 +3728,11 @@ mod tests {
 
     #[test]
     fn an_unreadable_record_is_a_torn_read_not_an_absent_session() {
-        let torn = Session { alive: true, status: Some("__unreadable__".into()), ..Default::default() };
+        let torn = Session {
+            alive: true,
+            status: Some("__unreadable__".into()),
+            ..Default::default()
+        };
         assert_eq!(clone_state(&[torn], true), Verdict::Ask);
     }
 
@@ -3421,7 +3751,10 @@ mod tests {
         assert_eq!(session_why(&s), "waiting on permission prompt");
         s.waiting_for = None;
         assert_eq!(session_why(&s), "waiting on unknown");
-        assert_eq!(session_why(&session(Some("idle"), true)), "idle at its prompt");
+        assert_eq!(
+            session_why(&session(Some("idle"), true)),
+            "idle at its prompt"
+        );
     }
 
     // -- the hook fold ------------------------------------------------------------------
@@ -3436,7 +3769,10 @@ mod tests {
     }
 
     fn prompt(sid: &str, ts: f64) -> HookEvent {
-        HookEvent { ts, ..event("UserPromptSubmit", sid, None) }
+        HookEvent {
+            ts,
+            ..event("UserPromptSubmit", sid, None)
+        }
     }
 
     #[test]
@@ -3447,7 +3783,10 @@ mod tests {
             prompt("s1", 100.0),
             prompt("s2", 150.0),
             prompt("s1", 200.0),
-            HookEvent { ts: 210.0, ..event("Stop", "s1", None) },
+            HookEvent {
+                ts: 210.0,
+                ..event("Stop", "s1", None)
+            },
         ];
         let ages = prompt_ages(&events, 500.0);
         assert_eq!(ages.get("s1").copied(), Some(300.0));
@@ -3459,7 +3798,12 @@ mod tests {
     fn a_prompt_that_lands_during_the_read_ages_zero_rather_than_negative() {
         // Same clamp `build_session_view` applies to tool ages, for the same reason: a hook
         // fired while the log was being read sits ahead of `now`.
-        assert_eq!(prompt_ages(&[prompt("s1", 501.0)], 500.0).get("s1").copied(), Some(0.0));
+        assert_eq!(
+            prompt_ages(&[prompt("s1", 501.0)], 500.0)
+                .get("s1")
+                .copied(),
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -3514,9 +3858,23 @@ mod tests {
         // boundary ever came, and 24 minutes later the judge still read two subagents as
         // running and answered `working` on every four-second tick.
         let root = fake_clone("interrupt");
-        write_transcript(&root, "s", &[&interrupt_line("[Request interrupted by user for tool use]")]);
-        write_transcript(&root, "agent-a1", &[&interrupt_line("[Request interrupted by user]")]);
-        write_transcript(&root, "agent-a2", &[r#"{"type":"assistant","message":{"content":[]}}"#]);
+        write_transcript(
+            &root,
+            "s",
+            &[&interrupt_line(
+                "[Request interrupted by user for tool use]",
+            )],
+        );
+        write_transcript(
+            &root,
+            "agent-a1",
+            &[&interrupt_line("[Request interrupted by user]")],
+        );
+        write_transcript(
+            &root,
+            "agent-a2",
+            &[r#"{"type":"assistant","message":{"content":[]}}"#],
+        );
 
         let mut main = event("PreToolUse", "s", None);
         main.tool_use_id = Some("t1".into());
@@ -3525,11 +3883,19 @@ mod tests {
         let mut alive = event("PreToolUse", "s", Some("a2"));
         alive.tool_use_id = Some("t3".into());
         let events = [main, stopped, alive];
-        assert_eq!(in_flight_tools(&events).len(), 3, "the hook fold alone sees all three");
+        assert_eq!(
+            in_flight_tools(&events).len(),
+            3,
+            "the hook fold alone sees all three"
+        );
 
         let facts = CloneFacts::read(&root, &events, 2000.0);
         let owners: Vec<Option<&str>> = facts.tools.iter().map(|t| t.agent_id.as_deref()).collect();
-        assert_eq!(owners, vec![Some("a2")], "only the agent that was not interrupted is left");
+        assert_eq!(
+            owners,
+            vec![Some("a2")],
+            "only the agent that was not interrupted is left"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3542,7 +3908,9 @@ mod tests {
         write_transcript(
             &root,
             "s",
-            &[r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[Request interrupted by user] is what I saw"}]}}"#],
+            &[
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[Request interrupted by user] is what I saw"}]}}"#,
+            ],
         );
         let mut pre = event("PreToolUse", "s", None);
         pre.tool_use_id = Some("t1".into());
@@ -3550,7 +3918,11 @@ mod tests {
         assert_eq!(CloneFacts::read(&root, &events, 2000.0).tools.len(), 1);
 
         // A transcript that stops mid-turn is not an interrupt either.
-        write_transcript(&root, "s", &[r#"{"type":"user","message":{"content":"do the thing"}}"#]);
+        write_transcript(
+            &root,
+            "s",
+            &[r#"{"type":"user","message":{"content":"do the thing"}}"#],
+        );
         assert_eq!(CloneFacts::read(&root, &events, 2000.0).tools.len(), 1);
 
         // Nor is a session with no transcript at all, which is a Cursor conversation the
@@ -3591,7 +3963,11 @@ mod tests {
         write_transcript(
             &root,
             "s",
-            &[&filler, &filler, &interrupt_line("[Request interrupted by user]")],
+            &[
+                &filler,
+                &filler,
+                &interrupt_line("[Request interrupted by user]"),
+            ],
         );
         let path = root.join("home/rmng/.claude/projects/p/s.jsonl");
         assert!(std::fs::metadata(&path).unwrap().len() > 400_000);
@@ -3617,7 +3993,10 @@ mod tests {
         for closer in ["SubagentStop", "StopFailure"] {
             let mut end = event(closer, "s", Some("a1"));
             end.ts = 200.0;
-            assert!(in_flight_tools(&[sub.clone(), stop.clone(), end]).is_empty(), "{closer}");
+            assert!(
+                in_flight_tools(&[sub.clone(), stop.clone(), end]).is_empty(),
+                "{closer}"
+            );
         }
     }
 
@@ -3769,7 +4148,10 @@ mod tests {
             event("UserPromptSubmit", "s", None),
             event("Stop", "s", None),
         ];
-        assert!(current_api_errors(&events).is_empty(), "a later Stop means it recovered");
+        assert!(
+            current_api_errors(&events).is_empty(),
+            "a later Stop means it recovered"
+        );
 
         let still_broken = [event("Stop", "s", None), event("StopFailure", "s", None)];
         assert_eq!(current_api_errors(&still_broken).len(), 1);
@@ -3825,7 +4207,10 @@ mod tests {
 
     #[test]
     fn the_answer_survives_fencing_and_prose() {
-        assert_eq!(parse_answer(r#"{"will_progress": true, "reason": "x"}"#).will_progress, Some(true));
+        assert_eq!(
+            parse_answer(r#"{"will_progress": true, "reason": "x"}"#).will_progress,
+            Some(true)
+        );
         let fenced = "```json\n{\"will_progress\": false, \"reason\": \"hung\"}\n```";
         assert_eq!(parse_answer(fenced).will_progress, Some(false));
         let chatty = "Sure! {\"will_progress\": true, \"reason\": \"building\"} hope that helps";
@@ -3834,7 +4219,12 @@ mod tests {
 
     #[test]
     fn an_unusable_reply_reads_as_no_rather_than_as_yes() {
-        for reply in ["", "I cannot determine that.", "{oops", "{\"will_progress\": \"yes\"}"] {
+        for reply in [
+            "",
+            "I cannot determine that.",
+            "{oops",
+            "{\"will_progress\": \"yes\"}",
+        ] {
             assert_eq!(
                 apply_verdict(parse_answer(reply).will_progress),
                 wire::MonitorState::Idle,
@@ -3863,7 +4253,11 @@ mod tests {
         fields.extend(std::iter::repeat_n("0".to_string(), 18));
         fields.push(starttime.to_string());
         // A comm containing a space and a paren is why the parser splits on the LAST ')'.
-        std::fs::write(dir.join("stat"), format!("{pid} (claude (main)) {}\n", fields.join(" "))).unwrap();
+        std::fs::write(
+            dir.join("stat"),
+            format!("{pid} (claude (main)) {}\n", fields.join(" ")),
+        )
+        .unwrap();
     }
 
     fn write_session(root: &Path, pid: i64, proc_start: &str, status: Option<&str>) {
@@ -3875,7 +4269,8 @@ mod tests {
             "status": status,
         });
         std::fs::write(
-            root.join("home/rmng/.claude/sessions").join(format!("{pid}.json")),
+            root.join("home/rmng/.claude/sessions")
+                .join(format!("{pid}.json")),
             serde_json::to_vec(&body).unwrap(),
         )
         .unwrap();
@@ -3893,7 +4288,10 @@ mod tests {
 
         // Same pid, different start time: a DIFFERENT process reused the number.
         write_proc(&root, 9960, "99999999");
-        assert!(!read_sessions(&root)[0].alive, "a reused pid must not read as alive");
+        assert!(
+            !read_sessions(&root)[0].alive,
+            "a reused pid must not read as alive"
+        );
 
         // No such process at all.
         std::fs::remove_dir_all(root.join("proc")).unwrap();
@@ -3922,7 +4320,11 @@ mod tests {
     #[test]
     fn a_torn_record_reads_as_maybe_running_rather_than_as_gone() {
         let root = fake_clone("torn");
-        std::fs::write(root.join("home/rmng/.claude/sessions/1.json"), b"{\"pid\": 1, \"proc").unwrap();
+        std::fs::write(
+            root.join("home/rmng/.claude/sessions/1.json"),
+            b"{\"pid\": 1, \"proc",
+        )
+        .unwrap();
         let live = read_sessions(&root);
         assert_eq!(live.len(), 1);
         assert!(live[0].alive);
@@ -3935,7 +4337,11 @@ mod tests {
         let seen = LastSeen::new();
         seen.settled("c1", wire::MonitorState::Working);
         for tick in 1..=BLIND_TICKS {
-            assert_eq!(seen.blind("c1", false), wire::MonitorState::Working, "tick {tick}");
+            assert_eq!(
+                seen.blind("c1", false),
+                wire::MonitorState::Working,
+                "tick {tick}"
+            );
         }
         // Holding a stale `working` is the one thing this must never do for long.
         assert_eq!(seen.blind("c1", false), wire::MonitorState::Idle);
@@ -3957,7 +4363,10 @@ mod tests {
 
     #[test]
     fn a_clone_nobody_has_settled_has_nothing_to_hold() {
-        assert_eq!(LastSeen::new().blind("never-seen", false), wire::MonitorState::Idle);
+        assert_eq!(
+            LastSeen::new().blind("never-seen", false),
+            wire::MonitorState::Idle
+        );
     }
 
     #[test]
@@ -3990,11 +4399,8 @@ mod tests {
         assert_eq!(clone_root(data.to_str().unwrap(), "here"), Some(live));
 
         // Same shape, but the pid has exited and taken its whole `/proc` entry with it.
-        std::os::unix::fs::symlink(
-            data.join("proc/9999/root/home/rmng"),
-            hosts.join("gone"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(data.join("proc/9999/root/home/rmng"), hosts.join("gone"))
+            .unwrap();
         assert_eq!(clone_root(data.to_str().unwrap(), "gone"), None);
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -4021,7 +4427,11 @@ mod tests {
         )
         .unwrap();
         let events = read_hook_events(&root);
-        assert_eq!(events.len(), 1, "the half-written line is skipped, not fatal");
+        assert_eq!(
+            events.len(),
+            1,
+            "the half-written line is skipped, not fatal"
+        );
         assert_eq!(events[0].hook_event_name, "UserPromptSubmit");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4041,7 +4451,10 @@ mod tests {
         // `busy` covers both writing tokens and sitting in a tool call. Reading it as
         // generating is what let a hung clone read as alive for as long as it hung.
         assert_eq!(view["session"]["generating"], json!(false));
-        assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(509.0));
+        assert_eq!(
+            view["in_flight_tool_calls"][0]["running_for_seconds"],
+            json!(509.0)
+        );
         assert_eq!(view["in_flight_tool_calls"][0]["by"], json!("main agent"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4056,7 +4469,10 @@ mod tests {
         pre.ts = 500.0;
         // The hook fired while the log was being read, so its stamp is ahead of `now`.
         let view = view_of(&root, &mine, &[pre], 499.0);
-        assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(0.0));
+        assert_eq!(
+            view["in_flight_tool_calls"][0]["running_for_seconds"],
+            json!(0.0)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4098,7 +4514,10 @@ mod tests {
         // one of them right. A floor that covered these would bury exactly the case the whole
         // module exists to catch.
         for tool in HUMAN_WAITS {
-            assert!(overruled(wire::MonitorState::Idle, &inside(tool, 4.0)).is_none(), "{tool}");
+            assert!(
+                overruled(wire::MonitorState::Idle, &inside(tool, 4.0)).is_none(),
+                "{tool}"
+            );
         }
     }
 
@@ -4112,7 +4531,13 @@ mod tests {
             {"tool": "Bash", "by": "subagent", "running_for_seconds": 4.0}]});
         assert!(overruled(wire::MonitorState::Idle, &theirs).is_none());
         // Nothing in flight at all is the ordinary idle case and must stay idle.
-        assert!(overruled(wire::MonitorState::Idle, &json!({"in_flight_tool_calls": []})).is_none());
+        assert!(
+            overruled(
+                wire::MonitorState::Idle,
+                &json!({"in_flight_tool_calls": []})
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -4147,7 +4572,15 @@ mod tests {
         let root = fake_clone("turnover");
         let mut mine = session(Some("shell"), true);
         mine.session_id = "s".into();
-        let view = view_of(&root, &mine, &[stop_with_task("until ! pgrep -f x; do sleep 20; done", 100.0)], 8680.0);
+        let view = view_of(
+            &root,
+            &mine,
+            &[stop_with_task(
+                "until ! pgrep -f x; do sleep 20; done",
+                100.0,
+            )],
+            8680.0,
+        );
         assert_eq!(view["session"]["turn_over_for_seconds"], json!(8580.0));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4172,7 +4605,10 @@ mod tests {
         let stop = stop_with_task("until ! pgrep -f x; do sleep 20; done", 100.0);
         let a = view_of(&root, &mine, std::slice::from_ref(&stop), 5000.0);
         let b = view_of(&root, &mine, &[stop], 5004.0);
-        assert_ne!(a, b, "the raw views differ by the four seconds between ticks");
+        assert_ne!(
+            a, b,
+            "the raw views differ by the four seconds between ticks"
+        );
         assert_eq!(cache_key(&a), cache_key(&b), "one bucket, so one question");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4200,8 +4636,11 @@ mod tests {
     fn write_log(root: &Path, lines: &[Value]) {
         let dir = root.join("home/rmng/.rmng");
         std::fs::create_dir_all(&dir).unwrap();
-        let body: String =
-            lines.iter().map(|l| format!("{l}\n")).collect::<Vec<_>>().concat();
+        let body: String = lines
+            .iter()
+            .map(|l| format!("{l}\n"))
+            .collect::<Vec<_>>()
+            .concat();
         std::fs::write(dir.join("agent-events.jsonl"), body).unwrap();
     }
 
@@ -4231,7 +4670,15 @@ mod tests {
         );
         let events = read_hook_events(&root);
         let names: Vec<&str> = events.iter().map(|e| e.hook_event_name.as_str()).collect();
-        assert_eq!(names, ["UserPromptSubmit", "PreToolUse", "PostToolUseFailure", "Stop"]);
+        assert_eq!(
+            names,
+            [
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUseFailure",
+                "Stop"
+            ]
+        );
         assert!(events.iter().all(|e| e.from_cursor));
         assert_eq!(events[3].status.as_deref(), Some("aborted"));
         // The point of the translation: the existing folds work on Cursor unchanged.
@@ -4282,7 +4729,11 @@ mod tests {
             ],
         );
         let events = read_hook_events(&root);
-        assert_eq!(events[0].session_id.as_deref(), Some(CURSOR_UNOWNED), "named at the door");
+        assert_eq!(
+            events[0].session_id.as_deref(),
+            Some(CURSOR_UNOWNED),
+            "named at the door"
+        );
 
         let sessions = read_cursor_sessions(&root, &events, t + 5.0);
         assert_eq!(sessions.len(), 1);
@@ -4307,14 +4758,19 @@ mod tests {
         let t = soon();
         write_log(
             &root,
-            &[json!({"hook_event_name": "preToolUse", "session_id": "", "tool_use_id": "t1",
-                     "ts": t})],
+            &[
+                json!({"hook_event_name": "preToolUse", "session_id": "", "tool_use_id": "t1",
+                     "ts": t}),
+            ],
         );
         let events = read_hook_events(&root);
         // Either side of the window, not exactly on it: `t` is a real epoch stamp, where the
         // f64 spacing is about 2.4e-7, so `(t + 60.0) - t` is not reliably 60.0 and a test
         // written on the boundary flickers.
-        assert_eq!(read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S - 1.0).len(), 1);
+        assert_eq!(
+            read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S - 1.0).len(),
+            1
+        );
         assert!(read_cursor_sessions(&root, &events, t + MOVING_WINDOW_S + 1.0).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4329,8 +4785,10 @@ mod tests {
         let t = soon();
         write_log(
             &root,
-            &[json!({"hook_event_name": "PreToolUse", "session_id": "", "tool_use_id": "t1",
-                     "ts": t})],
+            &[
+                json!({"hook_event_name": "PreToolUse", "session_id": "", "tool_use_id": "t1",
+                     "ts": t}),
+            ],
         );
         let events = read_hook_events(&root);
         assert_eq!(events[0].session_id.as_deref(), Some(""));
@@ -4420,9 +4878,8 @@ mod tests {
     /// one is.
     fn fake_codex(tag: &str, pid: i64, id: &str, lines: &[&str]) -> PathBuf {
         let root = fake_clone(tag);
-        let inside = format!(
-            "/home/rmng/.codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-{id}.jsonl"
-        );
+        let inside =
+            format!("/home/rmng/.codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-{id}.jsonl");
         let path = root.join(inside.trim_start_matches('/'));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut body = String::new();
@@ -4472,20 +4929,38 @@ mod tests {
     fn a_codex_turn_reads_busy_until_the_record_that_closes_it() {
         let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
         let open = fake_codex("codex-open", 1, id, &[CODEX_PROMPT]);
-        assert_eq!(read_codex_sessions(&open).0[0].status.as_deref(), Some("busy"));
+        assert_eq!(
+            read_codex_sessions(&open).0[0].status.as_deref(),
+            Some("busy")
+        );
 
         let closed = fake_codex("codex-closed", 1, id, &[CODEX_PROMPT, CODEX_DONE]);
-        assert_eq!(read_codex_sessions(&closed).0[0].status.as_deref(), Some("idle"));
+        assert_eq!(
+            read_codex_sessions(&closed).0[0].status.as_deref(),
+            Some("idle")
+        );
 
         // A prompt after that close opens a new turn. The order in the file decides it, so
         // this holds even though the reopening prompt carries the earlier stamp of the two.
-        let again = fake_codex("codex-again", 1, id, &[CODEX_PROMPT, CODEX_DONE, CODEX_PROMPT]);
+        let again = fake_codex(
+            "codex-again",
+            1,
+            id,
+            &[CODEX_PROMPT, CODEX_DONE, CODEX_PROMPT],
+        );
         let (sessions, _) = read_codex_sessions(&again);
-        assert_eq!(sessions[0].status.as_deref(), Some("busy"), "a later prompt reopens it");
+        assert_eq!(
+            sessions[0].status.as_deref(),
+            Some("busy"),
+            "a later prompt reopens it"
+        );
 
         // A session sitting at its very first prompt has nothing outstanding.
         let fresh = fake_codex("codex-fresh", 1, id, &[]);
-        assert_eq!(read_codex_sessions(&fresh).0[0].status.as_deref(), Some("idle"));
+        assert_eq!(
+            read_codex_sessions(&fresh).0[0].status.as_deref(),
+            Some("idle")
+        );
         for r in [open, closed, again, fresh] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -4503,11 +4978,20 @@ mod tests {
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].tool_name.as_deref(), Some("exec"));
         assert_eq!(live[0].tool_use_id.as_deref(), Some("call_7q2"));
-        assert!(live[0].tool_input.as_deref().is_some_and(|i| i.contains("PROBE-MARKER-ALPHA")));
+        assert!(
+            live[0]
+                .tool_input
+                .as_deref()
+                .is_some_and(|i| i.contains("PROBE-MARKER-ALPHA"))
+        );
 
         // Approving it writes the output, and the pairing is `call_id` on both.
-        let answered =
-            fake_codex("codex-answered", 1, id, &[CODEX_PROMPT, CODEX_CALL, CODEX_OUTPUT]);
+        let answered = fake_codex(
+            "codex-answered",
+            1,
+            id,
+            &[CODEX_PROMPT, CODEX_CALL, CODEX_OUTPUT],
+        );
         assert!(in_flight_tools(&read_codex_sessions(&answered).1).is_empty());
         for r in [waiting, answered] {
             let _ = std::fs::remove_dir_all(r);
@@ -4517,7 +5001,12 @@ mod tests {
     #[test]
     fn a_finished_codex_turn_hands_the_judge_what_the_agent_last_said() {
         let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
-        let root = fake_codex("codex-view", 7, id, &[CODEX_PROMPT, CODEX_CALL, CODEX_OUTPUT, CODEX_DONE]);
+        let root = fake_codex(
+            "codex-view",
+            7,
+            id,
+            &[CODEX_PROMPT, CODEX_CALL, CODEX_OUTPUT, CODEX_DONE],
+        );
         let (sessions, events) = read_codex_sessions(&root);
         let now = 1786172541.0 + 30.0;
         let view = view_of(&root, &sessions[0], &events, now);
@@ -4539,8 +5028,11 @@ mod tests {
         let root = fake_clone("codex-lookalike");
         let fds = root.join("proc/9/fd");
         std::fs::create_dir_all(&fds).unwrap();
-        std::fs::write(root.join("proc/9/cmdline"), b"avahi-daemon\0[w-s4-codex-rev.local]\0")
-            .unwrap();
+        std::fs::write(
+            root.join("proc/9/cmdline"),
+            b"avahi-daemon\0[w-s4-codex-rev.local]\0",
+        )
+        .unwrap();
         std::os::unix::fs::symlink(
             "/home/rmng/.codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-019fe02b-cb2c-7ec0-8a48-77d87c7f057f.jsonl",
             fds.join("42"),
@@ -4563,7 +5055,10 @@ mod tests {
         );
         // Too short to hold one, and long enough but not shaped like one.
         assert_eq!(codex_session_id("agent-a18ea2842ca67cf6e"), None);
-        assert_eq!(codex_session_id("rollout-2026-08-08T02-59-54-not-a-uuid-at-all-xx"), None);
+        assert_eq!(
+            codex_session_id("rollout-2026-08-08T02-59-54-not-a-uuid-at-all-xx"),
+            None
+        );
     }
 
     #[test]
@@ -4621,7 +5116,10 @@ mod tests {
         // tells them apart, and the model needs the command itself to judge the second.
         assert_eq!(view["session"]["generating"], json!(false));
         assert_eq!(view["in_flight_tool_calls"][0]["tool"], json!("Shell"));
-        assert_eq!(view["in_flight_tool_calls"][0]["running_for_seconds"], json!(399.0));
+        assert_eq!(
+            view["in_flight_tool_calls"][0]["running_for_seconds"],
+            json!(399.0)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4715,7 +5213,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
         let (text, _) = codex_answer_text(CODEX_STREAM).expect("a stream that completed");
         let answer = parse_answer(&text);
         assert_eq!(answer.will_progress, Some(true));
-        assert_eq!(answer.reason.as_deref(), Some("the release build is still running"));
+        assert_eq!(
+            answer.reason.as_deref(),
+            Some("the release build is still running")
+        );
     }
 
     /// The deltas are the last resort, for a backend that stops sending either finished form.
@@ -4726,7 +5227,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             .filter(|l| !l.contains("output_text.done") && !l.contains(r#""type":"message""#))
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(codex_answer_text(&deltas).unwrap().0, r#"{"will_progress":true}"#);
+        assert_eq!(
+            codex_answer_text(&deltas).unwrap().0,
+            r#"{"will_progress":true}"#
+        );
     }
 
     /// The exact statement of what one call cost, which nothing else in the system has: the
@@ -4757,15 +5261,20 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
         assert_eq!(usage, None);
 
         // Present but not an object: same reading, and no panic on the indexing below it.
-        let junk = CODEX_STREAM
-            .replace(r#""usage":{"input_tokens":67,"output_tokens":66}"#, r#""usage":null"#);
+        let junk = CODEX_STREAM.replace(
+            r#""usage":{"input_tokens":67,"output_tokens":66}"#,
+            r#""usage":null"#,
+        );
         assert_eq!(codex_answer_text(&junk).unwrap().1, None);
 
         // An object with neither total readable told us nothing. That is "unknown", not a call
         // that cost zero — a fake zero would read downstream as a free call.
-        for shape in [r#""usage":{}"#, r#""usage":{"prompt_tokens":67,"completion_tokens":66}"#] {
-            let renamed = CODEX_STREAM
-                .replace(r#""usage":{"input_tokens":67,"output_tokens":66}"#, shape);
+        for shape in [
+            r#""usage":{}"#,
+            r#""usage":{"prompt_tokens":67,"completion_tokens":66}"#,
+        ] {
+            let renamed =
+                CODEX_STREAM.replace(r#""usage":{"input_tokens":67,"output_tokens":66}"#, shape);
             assert_eq!(codex_answer_text(&renamed).unwrap().1, None, "{shape}");
         }
     }
@@ -4800,14 +5309,18 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
     /// type threw away everything the backend actually said about a failure.
     #[test]
     fn an_error_keeps_both_its_type_and_its_message() {
-        let both = r#"{"error":{"type":"invalid_request_error","message":"Stream must be set to true"}}"#;
+        let both =
+            r#"{"error":{"type":"invalid_request_error","message":"Stream must be set to true"}}"#;
         assert_eq!(
             error_line(400, both),
             "codex 400: invalid_request_error: Stream must be set to true"
         );
         // An empty or blank type is not a name, and must not shadow the prose.
         let blank = r#"{"error":{"type":"   ","message":"Stream must be set to true"}}"#;
-        assert_eq!(error_line(400, blank), "codex 400: Stream must be set to true");
+        assert_eq!(
+            error_line(400, blank),
+            "codex 400: Stream must be set to true"
+        );
     }
 
     /// The raw path has always been bounded. Parsing a body is no reason to stop bounding it:
@@ -4834,7 +5347,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             "codex 400: Stream must be set to true"
         );
         // A 200-character cap still applies to a body that tells us nothing.
-        assert_eq!(error_line(503, &"x".repeat(500)).len(), "codex 503: ".len() + 200);
+        assert_eq!(
+            error_line(503, &"x".repeat(500)).len(),
+            "codex 503: ".len() + 200
+        );
     }
 
     /// A stream that died part way through has to be an error. Read as an empty answer it
@@ -4874,7 +5390,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
     /// call, so it holds when there is nobody to ask.
     #[test]
     fn a_fresh_tool_call_reads_working_without_the_judge() {
-        assert_eq!(degraded_state(&view_in_call("Bash", 4.0)).0, wire::MonitorState::Working);
+        assert_eq!(
+            degraded_state(&view_in_call("Bash", 4.0)).0,
+            wire::MonitorState::Working
+        );
     }
 
     /// Everything the two rules cannot prove. Most of a working agent's wall clock is here —
@@ -4899,7 +5418,12 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
     /// clone that is working; it can never invent one that stopped.
     #[test]
     fn degraded_mode_never_produces_idle() {
-        for view in [view_generating(true), view_in_call("Bash", 4.0), json!({}), json!({"session": {}})] {
+        for view in [
+            view_generating(true),
+            view_in_call("Bash", 4.0),
+            json!({}),
+            json!({"session": {}}),
+        ] {
             assert_ne!(degraded_state(&view).0, wire::MonitorState::Idle, "{view}");
         }
     }
@@ -4933,9 +5457,17 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
         let seen = LastSeen::new();
         seen.settled("c", wire::MonitorState::Unknown);
         for _ in 0..(BLIND_TICKS + 4) {
-            assert_eq!(seen.blind("c", true), wire::MonitorState::Unknown, "still degraded");
+            assert_eq!(
+                seen.blind("c", true),
+                wire::MonitorState::Unknown,
+                "still degraded"
+            );
         }
-        assert_eq!(seen.blind("c", false), wire::MonitorState::Idle, "the judge came back");
+        assert_eq!(
+            seen.blind("c", false),
+            wire::MonitorState::Idle,
+            "the judge came back"
+        );
 
         // A held `working` decays on its own clock, outage or not.
         let seen = LastSeen::new();
@@ -4961,7 +5493,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
     fn a_spent_allowance_degrades_at_once_and_anything_else_waits() {
         let mut h = JudgeHealth::default();
         h.failed(Some(Some(1787196558)));
-        assert!(h.degraded(), "a spent allowance does not wait for a threshold");
+        assert!(
+            h.degraded(),
+            "a spent allowance does not wait for a threshold"
+        );
         assert_eq!(h.quota_resets_at, Some(1787196558));
 
         // A blip must not darken a fleet.
@@ -4993,11 +5528,17 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
     fn a_degraded_judge_is_probed_once_a_minute_and_a_healthy_one_never() {
         let mut h = JudgeHealth::default();
         let t0 = Instant::now();
-        assert!(!h.may_probe(t0), "a healthy judge is asked per session, not probed");
+        assert!(
+            !h.may_probe(t0),
+            "a healthy judge is asked per session, not probed"
+        );
 
         h.failed(Some(None));
         assert!(h.may_probe(t0), "the first tick of an outage probes");
-        assert!(!h.may_probe(t0 + Duration::from_secs(59)), "and then holds off");
+        assert!(
+            !h.may_probe(t0 + Duration::from_secs(59)),
+            "and then holds off"
+        );
         assert!(h.may_probe(t0 + PROBE_EVERY), "until the interval is up");
     }
 
@@ -5019,8 +5560,12 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
         let path = std::env::var("RMNG_CODEX_AUTH").expect("RMNG_CODEX_AUTH");
         let raw = std::fs::read_to_string(path).expect("a readable codex auth.json");
         let auth: Value = serde_json::from_str(&raw).unwrap();
-        let token = auth["tokens"]["access_token"].as_str().expect("an access token");
-        let account = auth["tokens"]["account_id"].as_str().expect("an account id");
+        let token = auth["tokens"]["access_token"]
+            .as_str()
+            .expect("an access token");
+        let account = auth["tokens"]["account_id"]
+            .as_str()
+            .expect("an account id");
         let http = reqwest::Client::new();
 
         // A release build that is still running: something machine-driven will finish it.
@@ -5028,13 +5573,17 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             "sessions": [{"status": "shell", "quiet_for_seconds": 40}],
             "background_tasks": [{"command": "cargo build --release", "running_for_seconds": 90}],
         });
-        let (answer, usage) =
-            ask_codex(&http, token, account, "gpt-5.6-luna", &building).await.unwrap();
+        let (answer, usage) = ask_codex(&http, token, account, "gpt-5.6-luna", &building)
+            .await
+            .unwrap();
         assert_eq!(answer.will_progress, Some(true), "{answer:?}");
         // The live endpoint's own account of what that cost. Printed rather than asserted:
         // the exact counts move with the prompt, and this test exists to exercise the wire.
         println!("building: {answer:?} cost {usage:?}");
-        assert!(usage.is_some(), "the live endpoint reports usage on response.completed");
+        assert!(
+            usage.is_some(),
+            "the live endpoint reports usage on response.completed"
+        );
 
         // Finished, with a dev server it left running. Nothing there will ever wake anybody.
         let served = json!({
@@ -5042,11 +5591,10 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
             "background_tasks": [{"command": "npm run dev", "running_for_seconds": 900}],
             "agent_last_said": "The dev server is up on port 3000. Let me know what to build next.",
         });
-        let (answer, usage) =
-            ask_codex(&http, token, account, "gpt-5.6-luna", &served).await.unwrap();
+        let (answer, usage) = ask_codex(&http, token, account, "gpt-5.6-luna", &served)
+            .await
+            .unwrap();
         assert_eq!(answer.will_progress, Some(false), "{answer:?}");
         println!("served: {answer:?} cost {usage:?}");
     }
-
 }
-

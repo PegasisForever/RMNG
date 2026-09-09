@@ -52,7 +52,9 @@ use crate::app::App;
 
 /// The record shape, the two answers, and nothing else: `wire` owns them, so the on-disk
 /// NDJSON line and what the `rmng` CLI parses out of the API are one definition.
-pub use wire::{LedgerHit as Hit, LedgerRange as Range, LedgerRecord, LedgerSearch as SearchResult};
+pub use wire::{
+    LedgerHit as Hit, LedgerRange as Range, LedgerRecord, LedgerSearch as SearchResult,
+};
 
 /// How often the fleet is tailed.
 ///
@@ -165,7 +167,9 @@ fn clone_dir(data_dir: &str, clone: &str) -> Option<PathBuf> {
 /// and by [`crate::jobs::start_clone`], so a retired clone's name is never handed to a new clone
 /// whose history would then be filed under it.
 pub fn reserved_names(data_dir: &str) -> HashSet<String> {
-    let Ok(rd) = std::fs::read_dir(ledger_root(data_dir)) else { return HashSet::new() };
+    let Ok(rd) = std::fs::read_dir(ledger_root(data_dir)) else {
+        return HashSet::new();
+    };
     rd.flatten()
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -182,7 +186,9 @@ fn ledger_name(src: &Path) -> Option<String> {
     let stem = src.file_stem()?.to_str()?;
     let plain = !stem.is_empty()
         && stem.len() <= 128
-        && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        && stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     plain.then(|| format!("{stem}.ndjson"))
 }
 
@@ -340,17 +346,26 @@ fn clip(s: &str, max: usize) -> String {
 /// [`MAX_TOOL_RESULT_TAIL_CHARS`]). A string short enough that the two ends would meet is kept
 /// whole, which is never more than the budget the two caps already allow.
 fn clip_ends(s: &str, head: usize, tail: usize) -> String {
-    let Some((cut, _)) = s.char_indices().nth(head) else { return s.to_string() };
+    let Some((cut, _)) = s.char_indices().nth(head) else {
+        return s.to_string();
+    };
     if tail == 0 {
         return format!("{} [clipped, +{} bytes]", &s[..cut], s.len() - cut);
     }
     // Walking back from the end rather than counting the whole string, which is megabytes on the
     // results this fires for.
-    let Some((from, _)) = s.char_indices().nth_back(tail - 1) else { return s.to_string() };
+    let Some((from, _)) = s.char_indices().nth_back(tail - 1) else {
+        return s.to_string();
+    };
     if from <= cut {
         return s.to_string();
     }
-    format!("{} [clipped, +{} bytes] {}", &s[..cut], from - cut, &s[from..])
+    format!(
+        "{} [clipped, +{} bytes] {}",
+        &s[..cut],
+        from - cut,
+        &s[from..]
+    )
 }
 
 /// What an image block leaves behind: its type, never its bytes.
@@ -375,9 +390,10 @@ fn image_marker(block: &Block) -> String {
 
 /// The text of a `tool_result`'s content, which is a string or a list of blocks.
 fn tool_result_text(content: Option<&serde_json::Value>) -> String {
-    let clip_result =
-        |s: &str| clip_ends(s, MAX_TOOL_RESULT_CHARS, MAX_TOOL_RESULT_TAIL_CHARS);
-    let Some(value) = content else { return String::new() };
+    let clip_result = |s: &str| clip_ends(s, MAX_TOOL_RESULT_CHARS, MAX_TOOL_RESULT_TAIL_CHARS);
+    let Some(value) = content else {
+        return String::new();
+    };
     if let Some(s) = value.as_str() {
         return clip_result(s);
     }
@@ -424,7 +440,9 @@ fn distill(
             }
         }
     }
-    let Ok(raw) = serde_json::from_str::<RawLine>(line) else { return Vec::new() };
+    let Ok(raw) = serde_json::from_str::<RawLine>(line) else {
+        return Vec::new();
+    };
     if let Some(ts) = raw.timestamp.as_deref().filter(|t| !t.is_empty()) {
         st.last_ts = ts.to_string();
     }
@@ -488,7 +506,9 @@ fn distill(
             vec![emit("compact", text)]
         }
         Some(role @ ("user" | "assistant")) => {
-            let Some(content) = raw.message.and_then(|m| m.content) else { return Vec::new() };
+            let Some(content) = raw.message.and_then(|m| m.content) else {
+                return Vec::new();
+            };
             distill_message(role, content, &emit)
         }
         _ => Vec::new(),
@@ -499,8 +519,12 @@ fn distill(
 ///
 /// Codex names a call after how the model addressed it. Reading only one of these would keep
 /// the call and drop the answer, or the reverse.
-const CODEX_TOOL_CALLS: [&str; 4] =
-    ["custom_tool_call", "function_call", "local_shell_call", "web_search_call"];
+const CODEX_TOOL_CALLS: [&str; 4] = [
+    "custom_tool_call",
+    "function_call",
+    "local_shell_call",
+    "web_search_call",
+];
 
 /// The records one Codex rollout line contributes.
 ///
@@ -526,9 +550,15 @@ fn distill_codex(
     payload: serde_json::Value,
     emit: &impl Fn(&str, String) -> LedgerRecord,
 ) -> Vec<LedgerRecord> {
-    let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else { return Vec::new() };
+    let Some(kind) = payload.get("type").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
     let text_at = |key: &str| {
-        payload.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+        payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
     };
     match (envelope, kind) {
         ("event_msg", role @ ("user_message" | "agent_message")) => {
@@ -578,13 +608,18 @@ fn is_pi_line(v: &serde_json::Value) -> bool {
 /// millisecond stamp converted. `None` when the line carries neither, leaving the caller to
 /// inherit or stamp the pass time.
 fn pi_ledger_ts(v: &serde_json::Value) -> Option<String> {
-    if let Some(iso) = v.get("timestamp").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
+    if let Some(iso) = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+    {
         return Some(iso.to_string());
     }
-    let ms = v
-        .get("ts")
-        .and_then(|t| t.as_i64())
-        .or_else(|| v.get("message").and_then(|m| m.get("timestamp")).and_then(|t| t.as_i64()))?;
+    let ms = v.get("ts").and_then(|t| t.as_i64()).or_else(|| {
+        v.get("message")
+            .and_then(|m| m.get("timestamp"))
+            .and_then(|t| t.as_i64())
+    })?;
     (ms > 0).then(|| crate::docker::epoch_to_rfc3339(ms / 1000))
 }
 
@@ -640,7 +675,10 @@ fn distill_pi(
         ..base.clone()
     };
     let str_at = |v: &serde_json::Value, key: &str| {
-        v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string()
+        v.get(key)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
     };
 
     // Child transcript shape first: its `recordType` names the record directly.
@@ -692,7 +730,9 @@ fn distill_pi(
         _ if v.get("recordType").is_some() => Vec::new(),
         // Main session shape: `{"type":"message","message":{"role":…}}`.
         None => {
-            let Some(msg) = v.get("message") else { return Vec::new() };
+            let Some(msg) = v.get("message") else {
+                return Vec::new();
+            };
             match msg.get("role").and_then(|r| r.as_str()) {
                 Some("user") => {
                     let said = pi_text(msg.get("content").unwrap_or(&Value::Null));
@@ -715,16 +755,26 @@ fn distill_pi(
                     for b in blocks {
                         match b.get("type").and_then(|t| t.as_str()) {
                             Some("text") => {
-                                if let Some(t) = b.get("text").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
+                                if let Some(t) = b
+                                    .get("text")
+                                    .and_then(|t| t.as_str())
+                                    .filter(|t| !t.is_empty())
+                                {
                                     said.push(t.to_string());
                                 }
                             }
                             Some("toolCall") => {
                                 if !said.is_empty() {
-                                    out.push(emit("assistant", clip(&said.join("\n"), MAX_TEXT_CHARS)));
+                                    out.push(emit(
+                                        "assistant",
+                                        clip(&said.join("\n"), MAX_TEXT_CHARS),
+                                    ));
                                     said.clear();
                                 }
-                                let input = b.get("arguments").map(|a| a.to_string()).unwrap_or_default();
+                                let input = b
+                                    .get("arguments")
+                                    .map(|a| a.to_string())
+                                    .unwrap_or_default();
                                 let mut rec = emit("toolUse", clip(&input, MAX_TOOL_INPUT_CHARS));
                                 rec.tool = str_at(b, "name");
                                 rec.tool_id = str_at(b, "id");
@@ -739,10 +789,7 @@ fn distill_pi(
                     out
                 }
                 Some("toolResult") => {
-                    let mut rec = emit(
-                        "toolResult",
-                        tool_result_text(msg.get("content")),
-                    );
+                    let mut rec = emit("toolResult", tool_result_text(msg.get("content")));
                     rec.tool_id = str_at(msg, "toolCallId");
                     rec.tool = str_at(msg, "toolName");
                     vec![rec]
@@ -769,7 +816,9 @@ fn distill_message(
         }
         return vec![emit(role, clip(s, MAX_TEXT_CHARS))];
     }
-    let Ok(blocks) = serde_json::from_value::<Vec<Block>>(content) else { return Vec::new() };
+    let Ok(blocks) = serde_json::from_value::<Vec<Block>>(content) else {
+        return Vec::new();
+    };
 
     let mut out: Vec<LedgerRecord> = Vec::new();
     let mut said: Vec<String> = Vec::new();
@@ -849,7 +898,9 @@ fn entry_name(entry: &std::fs::DirEntry) -> Option<String> {
 /// Both agents write a delegated task here, next to the transcript of the session that spawned it.
 /// A directory with none, or one that is not a session directory at all, reads as empty.
 fn subagent_files(dir: &Path, prefix: &str, name: &str, out: &mut Vec<Transcript>, cap: usize) {
-    let Ok(files) = std::fs::read_dir(dir.join("subagents")) else { return };
+    let Ok(files) = std::fs::read_dir(dir.join("subagents")) else {
+        return;
+    };
     for f in files.flatten() {
         if out.len() >= cap {
             return;
@@ -883,13 +934,19 @@ fn subagent_files(dir: &Path, prefix: &str, name: &str, out: &mut Vec<Transcript
 fn session_files(home: &Path, cap: usize) -> Vec<Transcript> {
     let root = home.join(".claude/projects");
     let mut out: Vec<Transcript> = Vec::new();
-    let Ok(slugs) = std::fs::read_dir(&root) else { return out };
+    let Ok(slugs) = std::fs::read_dir(&root) else {
+        return out;
+    };
     'walk: for slug in slugs.flatten() {
         if !slug.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        let Some(slug_name) = entry_name(&slug) else { continue };
-        let Ok(entries) = std::fs::read_dir(slug.path()) else { continue };
+        let Some(slug_name) = entry_name(&slug) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(slug.path()) else {
+            continue;
+        };
         for e in entries.flatten() {
             if out.len() >= cap {
                 break 'walk;
@@ -897,7 +954,9 @@ fn session_files(home: &Path, cap: usize) -> Vec<Transcript> {
             let path = e.path();
             let Ok(kind) = e.file_type() else { continue };
             let Some(file) = entry_name(&e) else { continue };
-            let Some(name) = ledger_name(&path) else { continue };
+            let Some(name) = ledger_name(&path) else {
+                continue;
+            };
             if kind.is_file() {
                 if path.extension().is_some_and(|x| x == "jsonl") {
                     out.push(Transcript {
@@ -936,12 +995,16 @@ fn session_files(home: &Path, cap: usize) -> Vec<Transcript> {
 fn cursor_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
     let root = home.join(".cursor/projects");
     let mut out: Vec<Transcript> = Vec::new();
-    let Ok(workspaces) = std::fs::read_dir(&root) else { return out };
+    let Ok(workspaces) = std::fs::read_dir(&root) else {
+        return out;
+    };
     'walk: for ws in workspaces.flatten() {
         if !ws.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        let Ok(convs) = std::fs::read_dir(ws.path().join("agent-transcripts")) else { continue };
+        let Ok(convs) = std::fs::read_dir(ws.path().join("agent-transcripts")) else {
+            continue;
+        };
         for conv in convs.flatten() {
             if out.len() >= cap {
                 break 'walk;
@@ -949,10 +1012,14 @@ fn cursor_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
             if !conv.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let Some(id) = entry_name(&conv) else { continue };
+            let Some(id) = entry_name(&conv) else {
+                continue;
+            };
             let dir = conv.path();
             let path = dir.join(format!("{id}.jsonl"));
-            let Some(name) = ledger_name(&path) else { continue };
+            let Some(name) = ledger_name(&path) else {
+                continue;
+            };
             if path.is_file() {
                 out.push(Transcript {
                     key: format!("{id}/{id}.jsonl"),
@@ -988,7 +1055,9 @@ fn codex_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
     // Three dated levels, so a bounded walk rather than a recursive one.
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             if out.len() >= cap {
                 out.sort_unstable_by(|a, b| a.path.cmp(&b.path));
@@ -1004,8 +1073,12 @@ fn codex_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
             if !kind.is_file() || !file.starts_with("rollout-") || !file.ends_with(".jsonl") {
                 continue;
             }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-            let Some(id) = crate::stuck::codex_session_id(stem) else { continue };
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(id) = crate::stuck::codex_session_id(stem) else {
+                continue;
+            };
             out.push(Transcript {
                 // The dated directories are part of the key: two days can hold a file of the
                 // same name only if Codex reuses a session id, and the key must not merge them.
@@ -1041,7 +1114,9 @@ fn pi_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
     let mut stack = vec![root];
     let mut budget = 20_000;
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             if budget == 0 || out.len() >= cap {
                 out.sort_unstable_by(|a, b| (a.sidechain, &a.path).cmp(&(b.sidechain, &b.path)));
@@ -1065,7 +1140,9 @@ fn pi_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
                 Some(rel) => rel.to_string(),
                 None => continue,
             };
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
             // A child transcript: `<runId>_<agent>_transcript`.
             if let Some(minus_kind) = stem.strip_suffix("_transcript") {
                 if let Some((run, agent)) = minus_kind.rsplit_once('_') {
@@ -1083,7 +1160,9 @@ fn pi_session_files(home: &Path, cap: usize) -> Vec<Transcript> {
             }
             // A main session: `<timestamp>_<id>`.
             let tail = stem.rsplit('_').next().unwrap_or(stem);
-            let Some(id) = crate::stuck::codex_session_id(tail) else { continue };
+            let Some(id) = crate::stuck::codex_session_id(tail) else {
+                continue;
+            };
             out.push(Transcript {
                 key,
                 name: format!("{id}.ndjson"),
@@ -1108,7 +1187,9 @@ fn tail_file(clone: &str, t: &Transcript, dir: &Path, offsets: &mut Offsets) -> 
     let src = t.path.as_path();
     let name = t.name.clone();
     let key = t.key.clone();
-    let Ok(meta) = std::fs::metadata(src) else { return 0 };
+    let Ok(meta) = std::fs::metadata(src) else {
+        return 0;
+    };
     // Regular files only. A clone can point one of these paths at a FIFO, and opening a FIFO with
     // no writer blocks forever inside the serial pass.
     if !meta.is_file() {
@@ -1120,7 +1201,11 @@ fn tail_file(clone: &str, t: &Transcript, dir: &Path, offsets: &mut Offsets) -> 
     let mut st = match offsets.get(&key) {
         Some(prev) if prev.inode == inode && prev.offset <= len => prev.clone(),
         // Replaced or truncated: nothing about the old cursor describes this file.
-        _ => FileState { inode, offset: 0, ..Default::default() },
+        _ => FileState {
+            inode,
+            offset: 0,
+            ..Default::default()
+        },
     };
     st.inode = inode;
     if st.offset >= len {
@@ -1128,7 +1213,9 @@ fn tail_file(clone: &str, t: &Transcript, dir: &Path, offsets: &mut Offsets) -> 
         return 0;
     }
 
-    let Ok(mut file) = std::fs::File::open(src) else { return 0 };
+    let Ok(mut file) = std::fs::File::open(src) else {
+        return 0;
+    };
     if file.seek(SeekFrom::Start(st.offset)).is_err() {
         return 0;
     }
@@ -1165,7 +1252,9 @@ fn tail_file(clone: &str, t: &Transcript, dir: &Path, offsets: &mut Offsets) -> 
     );
     let mut body = String::new();
     for line in buf[..consumed].split(|b| *b == b'\n') {
-        let Ok(text) = std::str::from_utf8(line) else { continue };
+        let Ok(text) = std::str::from_utf8(line) else {
+            continue;
+        };
         if text.trim().is_empty() {
             continue;
         }
@@ -1198,7 +1287,10 @@ fn tail_file(clone: &str, t: &Transcript, dir: &Path, offsets: &mut Offsets) -> 
 }
 
 fn append(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     f.write_all(bytes)
 }
 
@@ -1222,7 +1314,12 @@ fn tail_clone(clone: &str, home: &Path, dir: &Path) {
     let codex = codex_session_files(home, left);
     left = left.saturating_sub(codex.len());
     let pi = pi_session_files(home, left);
-    for src in claude.iter().chain(cursor.iter()).chain(codex.iter()).chain(pi.iter()) {
+    for src in claude
+        .iter()
+        .chain(cursor.iter())
+        .chain(codex.iter())
+        .chain(pi.iter())
+    {
         if budget == 0 {
             break; // Backlog drains over the next few passes.
         }
@@ -1250,11 +1347,16 @@ fn tail_clone(clone: &str, home: &Path, dir: &Path) {
 /// It never fails the caller and it is bounded by [`CLONE_TAIL_TIMEOUT`].
 pub async fn tail_once(app: &App, clone: &str) {
     let cfg = app.config();
-    let Some(dir) = clone_dir(&cfg.data_dir, clone) else { return };
+    let Some(dir) = clone_dir(&cfg.data_dir, clone) else {
+        return;
+    };
     let home = crate::homes::hosts_root(&cfg.data_dir).join(clone);
     let id = clone.to_string();
     let work = tokio::task::spawn_blocking(move || tail_clone(&id, &home, &dir));
-    if tokio::time::timeout(CLONE_TAIL_TIMEOUT, work).await.is_err() {
+    if tokio::time::timeout(CLONE_TAIL_TIMEOUT, work)
+        .await
+        .is_err()
+    {
         tracing::warn!(target: "ledger", "final tail of {clone} timed out");
     }
 }
@@ -1272,7 +1374,9 @@ async fn tail_fleet(app: &App) {
         .map(|h| h.id)
         .collect();
     for id in hosts {
-        let Some(dir) = clone_dir(&cfg.data_dir, &id) else { continue };
+        let Some(dir) = clone_dir(&cfg.data_dir, &id) else {
+            continue;
+        };
         let home = root.join(&id);
         let name = id.clone();
         let work = tokio::task::spawn_blocking(move || tail_clone(&name, &home, &dir));
@@ -1286,7 +1390,10 @@ async fn tail_fleet(app: &App) {
 
 /// The background tailer, spawned once at startup after [`crate::homes`].
 pub async fn run(app: App) {
-    tracing::info!("transcript ledger tailer started (every {}s)", TAIL_INTERVAL.as_secs());
+    tracing::info!(
+        "transcript ledger tailer started (every {}s)",
+        TAIL_INTERVAL.as_secs()
+    );
     loop {
         tail_fleet(&app).await;
         tokio::time::sleep(TAIL_INTERVAL).await;
@@ -1332,8 +1439,12 @@ fn search_files(data_dir: &str, clone: Option<&str>) -> Vec<(String, PathBuf)> {
     clones.sort_unstable();
     let mut dated: Vec<(std::time::SystemTime, String, PathBuf)> = Vec::new();
     for id in clones {
-        let Some(dir) = clone_dir(data_dir, &id) else { continue };
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Some(dir) = clone_dir(data_dir, &id) else {
+            continue;
+        };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "ndjson") {
@@ -1358,13 +1469,17 @@ pub fn search(data_dir: &str, q: &SearchQuery) -> SearchResult {
     let mut truncated = false;
 
     'files: for (clone, path) in search_files(data_dir, q.clone.as_deref()) {
-        let Ok(file) = std::fs::File::open(&path) else { continue };
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
         let mut reader = BufReader::new(file);
         let mut offset: u64 = 0;
         let mut raw: Vec<u8> = Vec::new();
         loop {
             raw.clear();
-            let Ok(read) = reader.read_until(b'\n', &mut raw) else { continue 'files };
+            let Ok(read) = reader.read_until(b'\n', &mut raw) else {
+                continue 'files;
+            };
             if read == 0 {
                 break;
             }
@@ -1379,11 +1494,15 @@ pub fn search(data_dir: &str, q: &SearchQuery) -> SearchResult {
             if read > MAX_LINE_BYTES {
                 continue;
             }
-            let Ok(text) = std::str::from_utf8(&raw) else { continue };
+            let Ok(text) = std::str::from_utf8(&raw) else {
+                continue;
+            };
             if !text.to_lowercase().contains(&needle) {
                 continue;
             }
-            let Ok(rec) = serde_json::from_str::<LedgerRecord>(text.trim_end()) else { continue };
+            let Ok(rec) = serde_json::from_str::<LedgerRecord>(text.trim_end()) else {
+                continue;
+            };
             if q.sidechain.is_some_and(|want| rec.sidechain != want) {
                 continue;
             }
@@ -1419,7 +1538,11 @@ pub fn search(data_dir: &str, q: &SearchQuery) -> SearchResult {
 
     // Newest first across the whole result, not merely across the files it came from.
     hits.sort_by(|a, b| b.ts.cmp(&a.ts));
-    SearchResult { hits, scanned_bytes: scanned, truncated }
+    SearchResult {
+        hits,
+        scanned_bytes: scanned,
+        truncated,
+    }
 }
 
 /// Read `len` bytes of `<clone>/<session>.ndjson` from `offset`, snapped outward to whole lines.
@@ -1430,7 +1553,9 @@ pub fn read_range(
     offset: u64,
     len: u64,
 ) -> Result<Range, String> {
-    let Some(dir) = clone_dir(data_dir, clone) else { return Err(format!("invalid clone '{clone}'")) };
+    let Some(dir) = clone_dir(data_dir, clone) else {
+        return Err(format!("invalid clone '{clone}'"));
+    };
     let Some(name) = ledger_name(Path::new(session)) else {
         return Err(format!("invalid session '{session}'"));
     };
@@ -1454,12 +1579,18 @@ pub fn read_range(
     let head = offset.saturating_sub(MAX_LINE_BYTES as u64);
     let tail = (offset + want + MAX_LINE_BYTES as u64).min(size);
     let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-    file.seek(SeekFrom::Start(head)).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(head))
+        .map_err(|e| e.to_string())?;
     let mut buf: Vec<u8> = Vec::new();
-    file.take(tail - head).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    file.take(tail - head)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
 
     let rel_start = (offset - head) as usize;
-    let start = match buf[..rel_start.min(buf.len())].iter().rposition(|b| *b == b'\n') {
+    let start = match buf[..rel_start.min(buf.len())]
+        .iter()
+        .rposition(|b| *b == b'\n')
+    {
         Some(nl) => nl + 1,
         None if head == 0 => 0,
         // The window opened mid-line and found no break: give up on the leading fragment.
@@ -1522,7 +1653,13 @@ mod tests {
     fn a_pi_session_distills_words_calls_and_results() {
         let mut st = FileState::default();
         let user = r#"{"type":"message","timestamp":"2026-09-08T05:00:10.000Z","message":{"role":"user","content":[{"type":"text","text":"build it"}],"timestamp":1788840010000}}"#;
-        let recs = distill("c", "01a07f33-9913-7397-ba86-9003a65261d2", user, &mut st, READ_AT);
+        let recs = distill(
+            "c",
+            "01a07f33-9913-7397-ba86-9003a65261d2",
+            user,
+            &mut st,
+            READ_AT,
+        );
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].kind, "user");
         assert_eq!(recs[0].text, "build it");
@@ -1571,8 +1708,16 @@ mod tests {
         let slug = home.join(".pi/agent/sessions/--home-rmng-api--");
         std::fs::create_dir_all(slug.join("subagent-artifacts")).unwrap();
         let id = "01a07f33-9913-7397-ba86-9003a65261d2";
-        std::fs::write(slug.join(format!("2026-09-08T05-00-00-000Z_{id}.jsonl")), "{}\n").unwrap();
-        std::fs::write(slug.join("subagent-artifacts/r1_worker_transcript.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            slug.join(format!("2026-09-08T05-00-00-000Z_{id}.jsonl")),
+            "{}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            slug.join("subagent-artifacts/r1_worker_transcript.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
         std::fs::write(slug.join("subagent-artifacts/r1_worker_meta.json"), "{}\n").unwrap();
 
         let found = pi_session_files(&home, 4096);
@@ -1605,7 +1750,10 @@ mod tests {
         assert_eq!(recs[0].ts, "2026-08-04T09:00:00Z");
         let untimed = r#"{"type":"ai-title","aiTitle":"a title"}"#;
         let recs = distill("c", "s1", untimed, &mut st, READ_AT);
-        assert_eq!(recs[0].ts, "2026-08-04T09:00:00Z", "carried, not the read time");
+        assert_eq!(
+            recs[0].ts, "2026-08-04T09:00:00Z",
+            "carried, not the read time"
+        );
     }
 
     #[test]
@@ -1624,12 +1772,21 @@ mod tests {
 
         let found = cursor_session_files(&home, 4096);
         let paths: Vec<&Path> = found.iter().map(|t| t.path.as_path()).collect();
-        assert_eq!(paths, vec![conv.join("e52bd0c6.jsonl"), conv.join("subagents/853bf50b.jsonl")]);
+        assert_eq!(
+            paths,
+            vec![
+                conv.join("e52bd0c6.jsonl"),
+                conv.join("subagents/853bf50b.jsonl")
+            ]
+        );
         // The conversation first, and the subagent filed under the conversation it belongs to.
         assert!(!found[0].sidechain && found[1].sidechain);
         assert!(found.iter().all(|t| t.name == "e52bd0c6.ndjson"));
         assert_eq!(found[1].agent, "853bf50b");
-        assert!(cursor_session_files(&home, 0).is_empty(), "the cap is respected");
+        assert!(
+            cursor_session_files(&home, 0).is_empty(),
+            "the cap is respected"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1658,7 +1815,11 @@ mod tests {
 
         let found = codex_session_files(&home, MAX_SESSION_FILES);
         assert_eq!(found.len(), 1, "{found:#?}");
-        assert_eq!(found[0].name, format!("{id}.ndjson"), "the ledger file is the session");
+        assert_eq!(
+            found[0].name,
+            format!("{id}.ndjson"),
+            "the ledger file is the session"
+        );
         // The dated directories are in the key, so one id reused on two days stays two files.
         assert_eq!(
             found[0].key,
@@ -1681,7 +1842,10 @@ mod tests {
         let recs = distill("c", "019fe02b", asked, &mut st, READ_AT);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].kind, "user");
-        assert_eq!(recs[0].session, "019fe02b", "the file names the session, no line does");
+        assert_eq!(
+            recs[0].session, "019fe02b",
+            "the file names the session, no line does"
+        );
         assert_eq!(recs[0].ts, "2026-08-08T07:00:15.962Z");
         assert!(recs[0].text.starts_with("Run the shell command"));
 
@@ -1736,7 +1900,10 @@ mod tests {
             r#"{"timestamp":"2026-08-08T07:00:20.635Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":18621}}}}"#,
             r#"{"timestamp":"2026-08-08T07:00:15.828Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019fe02c"}}"#,
         ] {
-            assert!(distill("c", "s", line, &mut st, READ_AT).is_empty(), "kept {line}");
+            assert!(
+                distill("c", "s", line, &mut st, READ_AT).is_empty(),
+                "kept {line}"
+            );
         }
     }
 
@@ -1806,7 +1973,10 @@ mod tests {
         // The conversation first: it is what a bounded pass must not leave waiting.
         assert_eq!(found[0].key, "-home-rmng-RMNG/aaaa-bbbb.jsonl");
         assert!(!found[0].sidechain);
-        assert_eq!(found[1].key, "-home-rmng-RMNG/aaaa-bbbb/subagents/agent-a18ea2842ca67cf6e.jsonl");
+        assert_eq!(
+            found[1].key,
+            "-home-rmng-RMNG/aaaa-bbbb/subagents/agent-a18ea2842ca67cf6e.jsonl"
+        );
         assert!(found[1].sidechain);
         assert_eq!(found[1].agent, "a18ea2842ca67cf6e");
         // Both land in the session's own ledger file.
@@ -1823,7 +1993,9 @@ mod tests {
             &home,
             "p",
             "sess",
-            &[r#"{"type":"user","sessionId":"sess","timestamp":"2026-08-07T10:00:00.000Z","message":{"content":"review the diff"}}"#],
+            &[
+                r#"{"type":"user","sessionId":"sess","timestamp":"2026-08-07T10:00:00.000Z","message":{"content":"review the diff"}}"#,
+            ],
         );
         let subs = home.join(".claude/projects/p/sess/subagents");
         std::fs::create_dir_all(&subs).unwrap();
@@ -1842,23 +2014,43 @@ mod tests {
 
         tail_clone("c1", &home, &dir);
         let body = std::fs::read_to_string(dir.join("sess.ndjson")).unwrap();
-        let recs: Vec<LedgerRecord> =
-            body.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let recs: Vec<LedgerRecord> = body
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         assert_eq!(recs.len(), 3, "{body}");
         assert!(recs.iter().all(|r| r.session == "sess"));
         assert!(!recs[0].sidechain, "the operator's own turn");
 
-        let review = recs.iter().find(|r| r.text.contains("encoder path")).unwrap();
+        let review = recs
+            .iter()
+            .find(|r| r.text.contains("encoder path"))
+            .unwrap();
         assert!(review.sidechain);
         assert_eq!(review.agent_id, "a1d14cec3da0aa973");
 
-        let second = recs.iter().find(|r| r.text.contains("second opinion")).unwrap();
-        assert!(second.sidechain, "the file's location decides, not the line");
-        assert_eq!(second.agent_id, "unflagged", "the id falls back to the file name");
+        let second = recs
+            .iter()
+            .find(|r| r.text.contains("second opinion"))
+            .unwrap();
+        assert!(
+            second.sidechain,
+            "the file's location decides, not the line"
+        );
+        assert_eq!(
+            second.agent_id, "unflagged",
+            "the id falls back to the file name"
+        );
 
         // A second pass repeats nothing, which is the cursor keying by full path working.
         tail_clone("c1", &home, &dir);
-        assert_eq!(std::fs::read_to_string(dir.join("sess.ndjson")).unwrap().lines().count(), 3);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("sess.ndjson"))
+                .unwrap()
+                .lines()
+                .count(),
+            3
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1986,9 +2178,16 @@ mod tests {
             r#"{{"type":"user","sessionId":"s1","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":[{{"type":"tool_result","tool_use_id":"t","content":"{noise}test result: FAILED. 411 passed; 1 failed"}}]}}}}"#
         );
         let recs = distill("c", "s1", &line, &mut st, READ_AT);
-        assert!(recs[0].text.starts_with("compiling crate"), "the head is untouched");
+        assert!(
+            recs[0].text.starts_with("compiling crate"),
+            "the head is untouched"
+        );
         assert!(recs[0].text.contains("clipped"));
-        assert!(recs[0].text.ends_with("411 passed; 1 failed"), "{}", recs[0].text);
+        assert!(
+            recs[0].text.ends_with("411 passed; 1 failed"),
+            "{}",
+            recs[0].text
+        );
     }
 
     #[test]
@@ -2010,8 +2209,10 @@ mod tests {
 
     #[test]
     fn only_a_changed_title_is_recorded_and_it_inherits_the_last_timestamp() {
-        let mut st =
-            FileState { last_ts: "2026-08-01T10:00:00.000Z".into(), ..Default::default() };
+        let mut st = FileState {
+            last_ts: "2026-08-01T10:00:00.000Z".into(),
+            ..Default::default()
+        };
         let line = r#"{"type":"ai-title","sessionId":"s1","aiTitle":"Wire up the ledger"}"#;
         let first = distill("c", "s1", line, &mut st, READ_AT);
         assert_eq!(first.len(), 1);
@@ -2030,7 +2231,10 @@ mod tests {
         let recs = distill("c", "s1", line, &mut st, READ_AT);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].kind, "compact");
-        assert_eq!(recs[0].text, "conversation compacted (manual): 791517 tokens before, 11833 after");
+        assert_eq!(
+            recs[0].text,
+            "conversation compacted (manual): 791517 tokens before, 11833 after"
+        );
         let noise = r#"{"type":"system","subtype":"turn_duration","sessionId":"s1","timestamp":"2026-08-01T11:14:05.352Z","durationMs":12}"#;
         assert!(distill("c", "s1", noise, &mut st, READ_AT).is_empty());
     }
@@ -2045,7 +2249,10 @@ mod tests {
             r#"{"type":"file-history-snapshot","messageId":"m"}"#,
             "not json at all",
         ] {
-            assert!(distill("c", "s1", line, &mut st, READ_AT).is_empty(), "kept {line}");
+            assert!(
+                distill("c", "s1", line, &mut st, READ_AT).is_empty(),
+                "kept {line}"
+            );
         }
     }
 
@@ -2084,7 +2291,9 @@ mod tests {
             &home,
             "-home-rmng-RMNG",
             "aaaa-bbbb",
-            &[r#"{"type":"user","sessionId":"aaaa-bbbb","timestamp":"2026-08-01T10:00:00.000Z","message":{"content":"first"}}"#],
+            &[
+                r#"{"type":"user","sessionId":"aaaa-bbbb","timestamp":"2026-08-01T10:00:00.000Z","message":{"content":"first"}}"#,
+            ],
         );
         tail_clone("c1", &home, &dir);
         let out = dir.join("aaaa-bbbb.ndjson");
@@ -2210,14 +2419,25 @@ mod tests {
                 "p",
                 &format!("sess-{clone}"),
                 &[
-                    &format!(r#"{{"type":"user","sessionId":"sess-{clone}","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":"fix the encoder"}}}}"#),
-                    &format!(r#"{{"type":"assistant","sessionId":"sess-{clone}","timestamp":"2026-08-02T10:00:00.000Z","message":{{"content":[{{"type":"text","text":"the encoder is fixed"}}]}}}}"#),
+                    &format!(
+                        r#"{{"type":"user","sessionId":"sess-{clone}","timestamp":"2026-08-01T10:00:00.000Z","message":{{"content":"fix the encoder"}}}}"#
+                    ),
+                    &format!(
+                        r#"{{"type":"assistant","sessionId":"sess-{clone}","timestamp":"2026-08-02T10:00:00.000Z","message":{{"content":[{{"type":"text","text":"the encoder is fixed"}}]}}}}"#
+                    ),
                 ],
             );
             tail_clone(clone, &home, &clone_dir(&data, clone).unwrap());
         }
 
-        let all = search(&data, &SearchQuery { pattern: "encoder".into(), limit: 50, ..Default::default() });
+        let all = search(
+            &data,
+            &SearchQuery {
+                pattern: "encoder".into(),
+                limit: 50,
+                ..Default::default()
+            },
+        );
         assert_eq!(all.hits.len(), 4);
         assert!(!all.truncated);
         // Newest first.
@@ -2225,14 +2445,28 @@ mod tests {
 
         let one = search(
             &data,
-            &SearchQuery { pattern: "encoder".into(), clone: Some("c1".into()), limit: 50, ..Default::default() },
+            &SearchQuery {
+                pattern: "encoder".into(),
+                clone: Some("c1".into()),
+                limit: 50,
+                ..Default::default()
+            },
         );
         assert_eq!(one.hits.len(), 2);
         assert!(one.hits.iter().all(|h| h.clone == "c1"));
 
         // Case-insensitive, and the pattern reaches the kind as well as the text.
         assert_eq!(
-            search(&data, &SearchQuery { pattern: "FIX THE".into(), limit: 50, ..Default::default() }).hits.len(),
+            search(
+                &data,
+                &SearchQuery {
+                    pattern: "FIX THE".into(),
+                    limit: 50,
+                    ..Default::default()
+                }
+            )
+            .hits
+            .len(),
             2
         );
 
@@ -2262,7 +2496,12 @@ mod tests {
         assert!(mid.text.starts_with('{'), "{}", mid.text);
 
         // Reading past the end is empty, not an error; a bad id is an error.
-        assert_eq!(read_range(&data, "c1", "sess-c1", 1_000_000, 10).unwrap().len, 0);
+        assert_eq!(
+            read_range(&data, "c1", "sess-c1", 1_000_000, 10)
+                .unwrap()
+                .len,
+            0
+        );
         assert!(read_range(&data, "../etc", "sess-c1", 0, 10).is_err());
         assert!(read_range(&data, "c1", "../../secrets", 0, 10).is_err());
         let _ = std::fs::remove_dir_all(&root);
@@ -2277,7 +2516,9 @@ mod tests {
             &home,
             "p",
             "sess",
-            &[r#"{"type":"user","sessionId":"sess","timestamp":"2026-08-07T10:00:00.000Z","message":{"content":"review the encoder"}}"#],
+            &[
+                r#"{"type":"user","sessionId":"sess","timestamp":"2026-08-07T10:00:00.000Z","message":{"content":"review the encoder"}}"#,
+            ],
         );
         let subs = home.join(".claude/projects/p/sess/subagents");
         std::fs::create_dir_all(&subs).unwrap();
@@ -2293,21 +2534,44 @@ mod tests {
         tail_clone("c1", &home, &clone_dir(&data, "c1").unwrap());
 
         let find = |q: SearchQuery| search(&data, &q).hits;
-        let base = SearchQuery { pattern: "encoder".into(), limit: 50, ..Default::default() };
+        let base = SearchQuery {
+            pattern: "encoder".into(),
+            limit: 50,
+            ..Default::default()
+        };
         assert_eq!(find(base.clone()).len(), 3, "unfiltered, both halves");
 
         // The mirror of the old problem: a delegating session's own words, without the fan-out.
-        let main_only = find(SearchQuery { sidechain: Some(false), ..base.clone() });
+        let main_only = find(SearchQuery {
+            sidechain: Some(false),
+            ..base.clone()
+        });
         assert_eq!(main_only.len(), 1);
         assert!(main_only[0].line.contains("review the encoder"));
 
-        assert_eq!(find(SearchQuery { sidechain: Some(true), ..base.clone() }).len(), 2);
+        assert_eq!(
+            find(SearchQuery {
+                sidechain: Some(true),
+                ..base.clone()
+            })
+            .len(),
+            2
+        );
 
         // One subagent's run, read back on its own.
-        let one = find(SearchQuery { agent: Some("a2".into()), ..base.clone() });
+        let one = find(SearchQuery {
+            agent: Some("a2".into()),
+            ..base.clone()
+        });
         assert_eq!(one.len(), 1);
         assert!(one[0].line.contains("leaks"));
-        assert!(find(SearchQuery { agent: Some("a9".into()), ..base }).is_empty());
+        assert!(
+            find(SearchQuery {
+                agent: Some("a9".into()),
+                ..base
+            })
+            .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2323,11 +2587,16 @@ mod tests {
         write_transcript(&home, "p", "s", &refs);
         tail_clone("c1", &home, &clone_dir(&data, "c1").unwrap());
 
-        let capped = search(&data, &SearchQuery { pattern: "needle".into(), limit: 3, ..Default::default() });
+        let capped = search(
+            &data,
+            &SearchQuery {
+                pattern: "needle".into(),
+                limit: 3,
+                ..Default::default()
+            },
+        );
         assert_eq!(capped.hits.len(), 3);
         assert!(capped.truncated);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
-
-

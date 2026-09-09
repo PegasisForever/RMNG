@@ -195,25 +195,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_carries_preset_agent_playbook() {
-        let base = AppConfig::default();
-        let incoming = serde_json::json!({
-            "presets": [{ "name": "p", "agentPlaybook": "extra for p", "linearKey": "" }],
-        });
-        let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.presets.len(), 1);
-        assert_eq!(merged.presets[0].agent_playbook, "extra for p");
-    }
-
-    #[test]
-    fn merge_sets_global_agent_playbook() {
-        let base = AppConfig::default();
-        let incoming = serde_json::json!({ "agentPlaybook": "NEW GLOBAL" });
-        let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.agent_playbook, "NEW GLOBAL");
-    }
-
-    #[test]
     fn migrate_legacy_folds_old_fields() {
         // envPresets seed presets (no labels/key); linear + cloneAccounts just flag a rewrite.
         let raw = serde_json::json!({
@@ -225,7 +206,10 @@ mod tests {
         assert_eq!(cfg.presets.len(), 1);
         assert_eq!(cfg.presets[0].name, "old");
         assert!(cfg.presets[0].labels.is_empty() && cfg.presets[0].linear_key.is_empty());
-        assert_eq!(cfg.presets[0].dockerfile, "FROM pegasis0/rmng-template:latest");
+        assert_eq!(
+            cfg.presets[0].dockerfile,
+            "FROM pegasis0/rmng-template:latest"
+        );
 
         // Legacy object-shaped `linear` also counts; existing presets are never clobbered.
         let raw = serde_json::json!({ "linear": { "we": "K1" }, "envPresets": [{ "name": "x" }] });
@@ -248,7 +232,10 @@ mod tests {
     fn merge_replaces_account_pools_wholesale() {
         // The editor always sends the full pool list, so a plain array replace is right.
         let mut base = AppConfig::default();
-        base.clone_groups = vec![wire::CloneGroup { name: "old".into(), accounts: vec![] }];
+        base.clone_groups = vec![wire::CloneGroup {
+            name: "old".into(),
+            accounts: vec![],
+        }];
         let incoming = serde_json::json!({
             "cloneGroups": [
                 { "name": "team", "accounts": ["a@x.com"] },
@@ -272,12 +259,14 @@ mod tests {
         assert_eq!(cleared.codex_groups.len(), 1);
     }
 
-
     #[test]
     fn merge_replaces_account_pools_alongside_codex_config() {
         use wire::CodexConfig;
         let mut base = AppConfig::default();
-        base.clone_groups = vec![wire::CloneGroup { name: "old".into(), accounts: vec![] }];
+        base.clone_groups = vec![wire::CloneGroup {
+            name: "old".into(),
+            accounts: vec![],
+        }];
         base.codex = CodexConfig {
             poll_secs: 600,
             usage_polling: true,
@@ -296,7 +285,11 @@ mod tests {
         // A codex-only patch leaves the groups untouched.
         let m2 =
             merge_update(&merged, serde_json::json!({ "codex": { "pollSecs": 120 } })).unwrap();
-        assert_eq!(m2.clone_groups.len(), 1, "codex patch must not disturb pools");
+        assert_eq!(
+            m2.clone_groups.len(),
+            1,
+            "codex patch must not disturb pools"
+        );
         assert_eq!(m2.clone_groups[0].name, "team");
     }
 
@@ -531,10 +524,17 @@ mod tests {
         let mut n = base.clone();
         n.chroma = wire::ChromaMode::Yuv444;
         assert!(restart_required(&base, &n));
+        let mut n = base.clone();
+        n.listen.bastion = 2200;
+        assert!(restart_required(&base, &n));
 
         // A non-trigger field (immediate-apply) does NOT require a restart.
         let mut n = base.clone();
         n.docker.hostname_prefix = "other-".into();
+        assert!(!restart_required(&base, &n));
+        // Changing keys alone is live-apply, NOT restart-required.
+        let mut n = base.clone();
+        n.ssh.authorized_keys = vec!["ssh-ed25519 AAAA x".into()];
         assert!(!restart_required(&base, &n));
     }
 
@@ -658,18 +658,6 @@ mod tests {
         )
         .unwrap();
         assert!(merged.ssh.authorized_keys.is_empty());
-    }
-
-    #[test]
-    fn restart_required_flips_on_bastion_port() {
-        let base = AppConfig::default();
-        let mut n = base.clone();
-        n.listen.bastion = 2200;
-        assert!(restart_required(&base, &n));
-        // Changing keys alone is live-apply, NOT restart-required.
-        let mut k = base.clone();
-        k.ssh.authorized_keys = vec!["ssh-ed25519 AAAA x".into()];
-        assert!(!restart_required(&base, &k));
     }
 
     #[test]

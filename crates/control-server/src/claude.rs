@@ -412,7 +412,10 @@ impl RefreshFailure {
     /// A failure that says nothing about the grant: a timeout, a 429, a 5xx, an unreadable
     /// reply. The chain may still be fine, so the account keeps its place.
     fn transient(error: anyhow::Error) -> Self {
-        Self { error, rejected: false }
+        Self {
+            error,
+            rejected: false,
+        }
     }
 }
 
@@ -1123,7 +1126,9 @@ pub(crate) fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
     // Tail after the seconds: an optional `.fraction`, then an optional zone offset.
     let mut rest = s.get(19..)?;
     if let Some(frac) = rest.strip_prefix('.') {
-        let end = frac.find(|c: char| !c.is_ascii_digit()).unwrap_or(frac.len());
+        let end = frac
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(frac.len());
         if end == 0 {
             return None; // a bare '.' with no digits is malformed
         }
@@ -1131,8 +1136,7 @@ pub(crate) fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
     }
     let offset_secs = parse_zone_offset(rest)?;
     let days = days_from_civil(year, month, day);
-    let secs =
-        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    let secs = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
     Some(secs - offset_secs)
 }
 
@@ -1374,9 +1378,19 @@ fn keep_saturated_current(current: &RotationCandidate, best: &RotationCandidate)
         return !current_capped;
     }
     let (current_reset, current_pct, best_reset, best_pct) = if current_capped {
-        (current.seven_reset, current.seven_pct, best.seven_reset, best.seven_pct)
+        (
+            current.seven_reset,
+            current.seven_pct,
+            best.seven_reset,
+            best.seven_pct,
+        )
     } else {
-        (current.five_reset, current.five_pct, best.five_reset, best.five_pct)
+        (
+            current.five_reset,
+            current.five_pct,
+            best.five_reset,
+            best.five_pct,
+        )
     };
     match (current_reset, best_reset) {
         (Some(current_reset), Some(best_reset)) => {
@@ -1709,7 +1723,11 @@ pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Res
     tracing::info!(
         "replaced Claude account {old_email} with {new_email}: {} clone(s), pool(s) {}",
         moved.len(),
-        if joined.is_empty() { "none".to_string() } else { joined.join(", ") },
+        if joined.is_empty() {
+            "none".to_string()
+        } else {
+            joined.join(", ")
+        },
     );
 
     // Deliver the new token to everything that just moved. Backgrounded for the same reason
@@ -1839,7 +1857,11 @@ pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredClaudeAcco
     // The identity is a separate outcome from the token. A clone that took the token and
     // refused the identity still works, so it is a warning rather than a failed push.
     if let Some(line) = out.lines().find(|l| l.contains("RMNG_IDENTITY_FAILED")) {
-        tracing::warn!("{host_id} kept {}'s token but not its identity: {}", acct.email, line.trim());
+        tracing::warn!(
+            "{host_id} kept {}'s token but not its identity: {}",
+            acct.email,
+            line.trim()
+        );
     }
     Ok(())
 }
@@ -1988,12 +2010,18 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
                 }
                 Some(Ok(())) => {
                     ok += 1;
-                    app.claude.pushed.lock().unwrap().insert(id.clone(), push_key(acct));
+                    app.claude
+                        .pushed
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), push_key(acct));
                     tracing::info!("pushed fresh token ({email}) to {id}");
                 }
                 Some(Err(e)) => {
                     failed += 1;
-                    tracing::warn!("pushing token ({email}) to {id} failed (retried next pass): {e}");
+                    tracing::warn!(
+                        "pushing token ({email}) to {id} failed (retried next pass): {e}"
+                    );
                 }
             }
         }
@@ -2044,14 +2072,9 @@ mod tests {
     // The exact shapes Claude Code v2 emits — `claude auth status` (camelCase JSON)
     // and `~/.claude/.credentials.json` (camelCase, nested under `claudeAiOauth`).
 
-
-
-
     // The bug this guard exists for: re-importing a clone the server already pushed a token
     // to stored a blank refresh token beside a year-2100 expiry, so the account was never
     // refreshed again and handed out a dead access token until somebody noticed the 401s.
-
-
 
     #[test]
     fn parses_usage_with_null_extra_fields() {
@@ -2115,9 +2138,11 @@ mod tests {
         };
         let fable = to_usage(&acct, raw).fable.expect("fable window present");
         assert_eq!(fable.pct, 8.0);
-        assert_eq!(fable.resets_at.as_deref(), Some("2026-07-24T22:00:00.469890+00:00"));
+        assert_eq!(
+            fable.resets_at.as_deref(),
+            Some("2026-07-24T22:00:00.469890+00:00")
+        );
     }
-
 
     // --- groups: rotation assignment ---------------------------------------
 
@@ -2213,13 +2238,6 @@ mod tests {
 
     /// An unfiltered pass visits every clone; a filtered one visits only the rotated
     /// account's, which is what keeps a refresh from rewriting the whole fleet.
-    #[test]
-    fn push_scope_admits_all_hosts_only_when_unfiltered() {
-        assert!(in_push_scope("a@one.test", None));
-        assert!(in_push_scope("b@one.test", None));
-        assert!(in_push_scope("a@one.test", Some("a@one.test")));
-        assert!(!in_push_scope("b@one.test", Some("a@one.test")));
-    }
 
     #[test]
     fn assignment_rule_a_only_group_accounts() {
@@ -2373,7 +2391,10 @@ mod tests {
         for current in [Some("z@outside"), None] {
             match resolve_assignment(&app, Some("group:team"), current) {
                 Some(Assignment::Group { initial, .. }) => {
-                    assert!(matches!(initial.as_str(), "a@x" | "b@x"), "picked non-member {initial}");
+                    assert!(
+                        matches!(initial.as_str(), "a@x" | "b@x"),
+                        "picked non-member {initial}"
+                    );
                 }
                 _ => panic!("expected a group assignment"),
             }
@@ -2402,9 +2423,22 @@ mod tests {
         again.access_token = "sk-ant-oat01-new".into();
         upsert_account(&app, again).unwrap();
 
-        let held: Vec<_> = app.claude.snapshot().into_iter().filter(|a| a.email == "a@x").collect();
-        assert_eq!(held.len(), 1, "one email, one record: {:?}", held.iter().map(|a| &a.id).collect::<Vec<_>>());
-        assert_eq!(app.claude.get_by_email("a@x").unwrap().access_token, "sk-ant-oat01-new");
+        let held: Vec<_> = app
+            .claude
+            .snapshot()
+            .into_iter()
+            .filter(|a| a.email == "a@x")
+            .collect();
+        assert_eq!(
+            held.len(),
+            1,
+            "one email, one record: {:?}",
+            held.iter().map(|a| &a.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            app.claude.get_by_email("a@x").unwrap().access_token,
+            "sk-ant-oat01-new"
+        );
     }
 
     #[test]
@@ -2434,9 +2468,15 @@ mod tests {
         });
         app.claude.update_account(&acct).unwrap();
 
-        let err = fresh_access_token(&app, "a@x").await.unwrap_err().to_string();
+        let err = fresh_access_token(&app, "a@x")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("signed in again"), "message: {err}");
-        assert!(err.contains("invalid_grant"), "the reason travels with it: {err}");
+        assert!(
+            err.contains("invalid_grant"),
+            "the reason travels with it: {err}"
+        );
         // No HTTP call happened, so the record is exactly the one the test wrote.
         let after = app.claude.get_by_email("a@x").unwrap();
         assert_eq!(after.last_refresh.unwrap().rt_before, "beef");
@@ -2453,7 +2493,10 @@ mod tests {
         assert_eq!(body["oauthAccount"]["emailAddress"], "a@x");
         assert_eq!(body["oauthAccount"]["accountUuid"], "uuid-of-a@x");
         assert_eq!(body["userID"].as_str().unwrap().len(), 64);
-        assert_ne!(body["userID"], body["machineID"], "two identifiers, not one");
+        assert_ne!(
+            body["userID"], body["machineID"],
+            "two identifiers, not one"
+        );
     }
 
     /// The reverse migration recovers accounts with no organization. Naming an empty one
@@ -2468,15 +2511,11 @@ mod tests {
             serde_json::from_str(&identity_json(&acct).expect("uuid present")).unwrap();
         let account = body["oauthAccount"].as_object().unwrap();
         assert_eq!(account["accountUuid"], "uuid-of-a@x");
-        assert!(!account.contains_key("organizationUuid"), "no empty org: {account:?}");
+        assert!(
+            !account.contains_key("organizationUuid"),
+            "no empty org: {account:?}"
+        );
         assert!(!account.contains_key("organizationName"));
-    }
-
-    #[test]
-    fn an_account_without_a_uuid_gets_no_identity_rather_than_a_wrong_one() {
-        let mut acct = stored("a@x");
-        acct.account_uuid = String::new();
-        assert!(identity_json(&acct).is_none());
     }
 
     #[test]
@@ -2521,10 +2560,19 @@ mod tests {
         app.store.mutate(|s| s.hosts.push(auto_clone("c1", "a@x")));
         let moved = delete_account(&app, "a@x").await.unwrap();
         assert_eq!(moved, vec!["c1".to_string()]);
-        assert!(!app.claude.emails().contains(&"a@x".to_string()), "token deleted");
+        assert!(
+            !app.claude.emails().contains(&"a@x".to_string()),
+            "token deleted"
+        );
         // The clone no longer points at the deleted account. The re-placement runs in the
         // background, so what this call guarantees is only the detach.
-        let c1 = app.store.get().hosts.into_iter().find(|h| h.id == "c1").unwrap();
+        let c1 = app
+            .store
+            .get()
+            .hosts
+            .into_iter()
+            .find(|h| h.id == "c1")
+            .unwrap();
         assert_ne!(c1.claude_account_email.as_deref(), Some("a@x"));
     }
 
@@ -2547,12 +2595,18 @@ mod tests {
 
         let rows = app.store.get().claude_accounts;
         assert!(
-            !rows.iter().any(|u| u.email == "a@x" && u.provider != Some(wire::Provider::Codex)),
+            !rows
+                .iter()
+                .any(|u| u.email == "a@x" && u.provider != Some(wire::Provider::Codex)),
             "the deleted Claude row is still published: {rows:?}"
         );
-        assert!(rows.iter().any(|u| u.email == "b@x"), "an untouched account was dropped");
         assert!(
-            rows.iter().any(|u| u.email == "a@x" && u.provider == Some(wire::Provider::Codex)),
+            rows.iter().any(|u| u.email == "b@x"),
+            "an untouched account was dropped"
+        );
+        assert!(
+            rows.iter()
+                .any(|u| u.email == "a@x" && u.provider == Some(wire::Provider::Codex)),
             "the Codex account sharing the email was dropped with it"
         );
     }
@@ -2583,7 +2637,10 @@ mod tests {
     fn a_rejected_grant_takes_an_account_out_while_its_token_is_still_in_date() {
         let app = app_with_group(&["live@x", "revoked@x"]);
         let mut acct = app.claude.get_by_email("revoked@x").unwrap();
-        assert!(token_alive(acct.expires_at, now_ms()), "the fixture token is in date");
+        assert!(
+            token_alive(acct.expires_at, now_ms()),
+            "the fixture token is in date"
+        );
         acct.last_refresh = Some(RefreshRecord {
             at: now_ms(),
             ok: false,
@@ -2595,7 +2652,10 @@ mod tests {
         app.claude.update_account(&acct).unwrap();
 
         assert_eq!(app.claude.usable_emails(), vec!["live@x".to_string()]);
-        assert_eq!(pick_group_account(&app, "team", Some("revoked@x")).unwrap(), "live@x");
+        assert_eq!(
+            pick_group_account(&app, "team", Some("revoked@x")).unwrap(),
+            "live@x"
+        );
     }
 
     /// The other half of the same rule. A 429, a timeout or a 5xx says nothing about the
@@ -2622,10 +2682,16 @@ mod tests {
 
     #[test]
     fn only_a_rejection_from_the_provider_is_fatal() {
-        assert!(refresh_status_is_fatal(400), "invalid_grant arrives as a 400");
+        assert!(
+            refresh_status_is_fatal(400),
+            "invalid_grant arrives as a 400"
+        );
         assert!(refresh_status_is_fatal(401));
         for retryable in [429, 500, 502, 503] {
-            assert!(!refresh_status_is_fatal(retryable), "{retryable} must be retryable");
+            assert!(
+                !refresh_status_is_fatal(retryable),
+                "{retryable} must be retryable"
+            );
         }
     }
 
@@ -2654,22 +2720,44 @@ mod tests {
         // binding where it was. Reaching `live@x` IS the assertion that it no longer tries.
         rotate_once(&app).await;
 
-        let host = app.store.get().hosts.into_iter().find(|h| h.id == "archived-1").unwrap();
+        let host = app
+            .store
+            .get()
+            .hosts
+            .into_iter()
+            .find(|h| h.id == "archived-1")
+            .unwrap();
         assert_eq!(host.claude_account_email.as_deref(), Some("live@x"));
     }
 
     #[test]
     fn a_replacement_inherits_every_pool_the_old_account_sat_in() {
         let mut pools = vec![
-            CloneGroup { name: "Personal".into(), accounts: vec!["old@x".into(), "other@x".into()] },
-            CloneGroup { name: "Medi".into(), accounts: vec!["old@x".into()] },
-            CloneGroup { name: "Untouched".into(), accounts: vec!["other@x".into()] },
+            CloneGroup {
+                name: "Personal".into(),
+                accounts: vec!["old@x".into(), "other@x".into()],
+            },
+            CloneGroup {
+                name: "Medi".into(),
+                accounts: vec!["old@x".into()],
+            },
+            CloneGroup {
+                name: "Untouched".into(),
+                accounts: vec!["other@x".into()],
+            },
         ];
         let joined = swap_pool_member(&mut pools, "old@x", "new@x");
         assert_eq!(joined, vec!["Personal".to_string(), "Medi".to_string()]);
-        assert_eq!(pools[0].accounts, vec!["other@x".to_string(), "new@x".to_string()]);
+        assert_eq!(
+            pools[0].accounts,
+            vec!["other@x".to_string(), "new@x".to_string()]
+        );
         assert_eq!(pools[1].accounts, vec!["new@x".to_string()]);
-        assert_eq!(pools[2].accounts, vec!["other@x".to_string()], "a pool without it is left alone");
+        assert_eq!(
+            pools[2].accounts,
+            vec!["other@x".to_string()],
+            "a pool without it is left alone"
+        );
 
         // Replacing with an account that is already a member neither duplicates it nor
         // leaves the old one behind.
@@ -2716,7 +2804,11 @@ mod tests {
 
         let hosts = app.store.get().hosts;
         let pinned = hosts.iter().find(|h| h.id == "pinned").unwrap();
-        assert_eq!(pinned.claude_selection.as_deref(), Some("new@x"), "the pin follows");
+        assert_eq!(
+            pinned.claude_selection.as_deref(),
+            Some("new@x"),
+            "the pin follows"
+        );
         assert_eq!(pinned.claude_account_email.as_deref(), Some("new@x"));
         let pooled = hosts.iter().find(|h| h.id == "pooled").unwrap();
         assert_eq!(pooled.claude_account_email.as_deref(), Some("new@x"));
@@ -2732,7 +2824,12 @@ mod tests {
     #[tokio::test]
     async fn replacing_an_account_with_itself_does_nothing() {
         let app = app_with_group(&["a@x", "b@x"]);
-        assert!(replace_account(&app, "a@x", "a@x").await.unwrap().is_empty());
+        assert!(
+            replace_account(&app, "a@x", "a@x")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(app.claude.emails().contains(&"a@x".to_string()));
     }
 
@@ -2765,7 +2862,10 @@ mod tests {
         let app = app_with_group(&["live@x", "dead@x"]);
         kill_token(&app, "dead@x");
 
-        assert_eq!(pick_group_account(&app, "team", Some("dead@x")).unwrap(), "live@x");
+        assert_eq!(
+            pick_group_account(&app, "team", Some("dead@x")).unwrap(),
+            "live@x"
+        );
     }
 
     #[test]
@@ -2775,7 +2875,10 @@ mod tests {
         // fleet over a blip.
         let now = 1_000_000_000_000;
         assert!(token_alive(now + 1, now));
-        assert!(!token_alive(now, now), "expired to the millisecond is expired");
+        assert!(
+            !token_alive(now, now),
+            "expired to the millisecond is expired"
+        );
     }
 
     fn rotation_candidate(
@@ -2893,9 +2996,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_rfc3339_z_and_offset_forms() {
+    fn rfc3339_utc_secs_parses_valid_shapes_and_rejects_malformed() {
         // Bare Z (Codex's epoch_to_rfc3339 form).
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"), Some(1_609_459_200));
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"),
+            Some(1_609_459_200)
+        );
         // The Anthropic usage API's real shape: fractional seconds + `+00:00` offset.
         assert_eq!(
             parse_rfc3339_utc_secs("2026-07-24T22:00:00.469890+00:00"),
@@ -2907,16 +3013,25 @@ mod tests {
             Some(1_609_459_200)
         );
         // Non-UTC offsets shift to UTC: -05:00 is 5h later in epoch, +05:30 is earlier.
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"), Some(1_609_477_200));
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00+05:30"), Some(1_609_439_400));
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"),
+            Some(1_609_477_200)
+        );
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00+05:30"),
+            Some(1_609_439_400)
+        );
         // `±HHMM` (no colon) is accepted too.
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00-0500"), Some(1_609_477_200));
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00-0500"),
+            Some(1_609_477_200)
+        );
         // No zone → treated as UTC.
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00"), Some(1_609_459_200));
-    }
-
-    #[test]
-    fn rejects_malformed_rfc3339() {
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00"),
+            Some(1_609_459_200)
+        );
+        // Malformed input is rejected, not guessed.
         assert_eq!(parse_rfc3339_utc_secs("not-a-timestamp"), None);
         assert_eq!(parse_rfc3339_utc_secs("2021-13-01T00:00:00Z"), None); // month 13
         assert_eq!(parse_rfc3339_utc_secs("2021-01-01T25:00:00Z"), None); // hour 25

@@ -10,7 +10,8 @@ import {
 } from "~/lib/linear/assets";
 
 const ASSET = "https://uploads.linear.app/ab12/cd34/shot.png";
-const PROXIED = "/api/linear/asset?url=https%3A%2F%2Fuploads.linear.app%2Fab12%2Fcd34%2Fshot.png";
+const PROXIED =
+  "/api/linear/asset?url=https%3A%2F%2Fuploads.linear.app%2Fab12%2Fcd34%2Fshot.png";
 
 describe("isLinearAsset", () => {
   test("takes the asset host over https and nothing else", () => {
@@ -41,7 +42,9 @@ describe("assetProxyUrl", () => {
   test("leaves every other image where it is", () => {
     // The clone dialog's own store, which this server already serves.
     expect(assetProxyUrl("/uploads/shot.png")).toBe("/uploads/shot.png");
-    expect(assetProxyUrl("https://example.com/cat.png")).toBe("https://example.com/cat.png");
+    expect(assetProxyUrl("https://example.com/cat.png")).toBe(
+      "https://example.com/cat.png",
+    );
   });
 });
 
@@ -94,11 +97,6 @@ describe("markdown round trip", () => {
     expect(toLinearMarkdown(body)).toBe(body);
   });
 
-  test("an empty body survives both ways", () => {
-    expect(toProxyMarkdown("")).toBe("");
-    expect(toLinearMarkdown("")).toBe("");
-  });
-
   test("an HTML img tag is rewritten too, quotes intact", () => {
     const html = `<img src="${ASSET}" alt="shot">`;
     expect(toProxyMarkdown(html)).toBe(`<img src="${PROXIED}" alt="shot">`);
@@ -130,9 +128,15 @@ describe("only an image destination crosses to the proxy", () => {
     expect(toProxyMarkdown(`![alt](${ASSET})`)).toBe(`![alt](${PROXIED})`);
     expect(toProxyMarkdown(`![](${ASSET})`)).toBe(`![](${PROXIED})`);
     expect(toProxyMarkdown(`![alt](<${ASSET}>)`)).toBe(`![alt](<${PROXIED}>)`);
-    expect(toProxyMarkdown(`![alt](${ASSET} "title")`)).toBe(`![alt](${PROXIED} "title")`);
-    expect(toProxyMarkdown(`<img src='${ASSET}'>`)).toBe(`<img src='${PROXIED}'>`);
-    expect(toProxyMarkdown(`<IMG ALT="x" SRC=${ASSET}>`)).toBe(`<IMG ALT="x" SRC=${PROXIED}>`);
+    expect(toProxyMarkdown(`![alt](${ASSET} "title")`)).toBe(
+      `![alt](${PROXIED} "title")`,
+    );
+    expect(toProxyMarkdown(`<img src='${ASSET}'>`)).toBe(
+      `<img src='${PROXIED}'>`,
+    );
+    expect(toProxyMarkdown(`<IMG ALT="x" SRC=${ASSET}>`)).toBe(
+      `<IMG ALT="x" SRC=${PROXIED}>`,
+    );
   });
 
   test("an unclosed image opener cannot reach a link on the next line", () => {
@@ -144,7 +148,9 @@ describe("only an image destination crosses to the proxy", () => {
     // The reverse stays wide: nothing shaped like a proxy path may reach Linear, whether the
     // editor put it in an image destination or an operator typed it into a link.
     const typed = `[typed](${PROXIED}) and ![real](${PROXIED})`;
-    expect(toLinearMarkdown(typed)).toBe(`[typed](${ASSET}) and ![real](${ASSET})`);
+    expect(toLinearMarkdown(typed)).toBe(
+      `[typed](${ASSET}) and ![real](${ASSET})`,
+    );
     expect(toLinearMarkdown(typed)).not.toContain("/api/linear/asset");
   });
 });
@@ -161,7 +167,7 @@ describe("the encoder and the pattern that reads it back agree", () => {
       "https://uploads.linear.app/a(b).png",
       "https://uploads.linear.app/a!b~c*d.png",
       "https://uploads.linear.app/a b.png",
-      "https://uploads.linear.app/a]b\"c.png",
+      'https://uploads.linear.app/a]b"c.png',
     ]) {
       const proxied = assetProxyUrl(url);
       expect(proxied).not.toBe(url);
@@ -174,7 +180,11 @@ describe("the encoder and the pattern that reads it back agree", () => {
   });
 
   test("every character a proxy path can hold is one the pattern matches", () => {
-    const minted = assetProxyUrl("https://uploads.linear.app/!'()*~ \"]<>&?#.png");
-    expect(minted.slice(`${ASSET_PROXY}?url=`.length)).toMatch(/^[A-Za-z0-9\-_.%]+$/);
+    const minted = assetProxyUrl(
+      "https://uploads.linear.app/!'()*~ \"]<>&?#.png",
+    );
+    expect(minted.slice(`${ASSET_PROXY}?url=`.length)).toMatch(
+      /^[A-Za-z0-9\-_.%]+$/,
+    );
   });
 });

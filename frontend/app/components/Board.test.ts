@@ -17,19 +17,9 @@ test("a hover that changes nothing returns the very same array", () => {
   const before = lanes();
 
   expect(arrange(before, "a", "a")).toBe(before);
-});
-
-test("a hover over an unknown target returns the very same array", () => {
-  const before = lanes();
-
   expect(arrange(before, "a", "nope")).toBe(before);
   expect(arrange(before, "nope", "b")).toBe(before);
-});
-
-test("a hover over the card's own column returns the very same array", () => {
   // The column id is not a card id, so there is no index to move to.
-  const before = lanes();
-
   expect(arrange(before, "a", "todo")).toBe(before);
 });
 

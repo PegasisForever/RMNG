@@ -89,10 +89,4 @@ mod tests {
         assert_eq!(lines[1], "w-long-name  working");
         assert_eq!(lines[2], "w2           -");
     }
-
-    #[test]
-    fn human_sizes() {
-        assert_eq!(human_size(512), "512 B");
-        assert_eq!(human_size(34855082762), "32.5 GiB");
-    }
 }

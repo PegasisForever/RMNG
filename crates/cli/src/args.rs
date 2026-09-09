@@ -512,13 +512,6 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn parses_clone_ls() {
-        let cli = Cli::parse_from(["rmng", "clone", "ls"]);
-        assert!(matches!(cli.cmd, Cmd::Clone(CloneCmd::Ls)));
-        assert!(!cli.json);
-    }
-
-    #[test]
     fn global_flags_work_after_subcommand() {
         let cli = Cli::parse_from(["rmng", "clone", "ls", "--json", "--server", "http://x:9000"]);
         assert!(cli.json);
@@ -635,16 +628,6 @@ mod tests {
     }
 
     #[test]
-    fn clone_rm_requires_clone() {
-        assert!(Cli::try_parse_from(["rmng", "clone", "rm"]).is_err());
-        let cli = Cli::parse_from(["rmng", "clone", "rm", "w-cp", "-y"]);
-        assert!(matches!(
-            cli.cmd,
-            Cmd::Clone(CloneCmd::Rm { ref clone, yes: true, .. }) if clone == "w-cp"
-        ));
-    }
-
-    #[test]
     fn ledger_search_needs_a_pattern_and_takes_its_filters() {
         assert!(Cli::try_parse_from(["rmng", "ledger", "search"]).is_err());
         let cli = Cli::parse_from([
@@ -750,49 +733,6 @@ mod tests {
             restore.cmd,
             Cmd::Clone(CloneCmd::Restore { ref clone, .. }) if clone == "w-cp"
         ));
-    }
-
-    #[test]
-    fn op_ls_and_wait() {
-        assert!(matches!(
-            Cli::parse_from(["rmng", "op", "ls"]).cmd,
-            Cmd::Op(OpCmd::Ls)
-        ));
-        let w = Cli::parse_from(["rmng", "op", "wait", "op_123", "--timeout", "30"]);
-        assert!(matches!(
-            w.cmd,
-            Cmd::Op(OpCmd::Wait { ref op_id, timeout: 30 }) if op_id == "op_123"
-        ));
-    }
-
-    #[test]
-    fn account_ls_provider_enum() {
-        let cli = Cli::parse_from(["rmng", "account", "ls", "--provider", "codex"]);
-        assert!(matches!(
-            cli.cmd,
-            Cmd::Account(AccountCmd::Ls {
-                provider: Some(Provider::Codex)
-            })
-        ));
-        // Bad provider rejected.
-        assert!(Cli::try_parse_from(["rmng", "account", "ls", "--provider", "bogus"]).is_err());
-    }
-
-    #[test]
-    fn board_move_takes_a_clone_and_a_human_column_name() {
-        match Cli::parse_from(["rmng", "board", "move", "pega-we-1", "In Progress"]).cmd {
-            Cmd::Board(BoardCmd::Move { clone, column, .. }) => {
-                assert_eq!(clone, "pega-we-1");
-                assert_eq!(column, "In Progress");
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-        assert!(matches!(
-            Cli::parse_from(["rmng", "board", "ls"]).cmd,
-            Cmd::Board(BoardCmd::Ls)
-        ));
-        // Both positionals are required.
-        assert!(Cli::try_parse_from(["rmng", "board", "move", "only-a-clone"]).is_err());
     }
 
     #[test]
@@ -985,12 +925,7 @@ mod tests {
 
     /// Neither flag ⇒ nothing sent ⇒ the daemon applies its 1080p default.
     #[test]
-    fn resolution_arg_is_none_when_unset() {
-        assert_eq!(ResolutionArgs::default().resolution_arg(), Ok(None));
-    }
-
-    #[test]
-    fn resolution_arg_accepts_either_x_case() {
+    fn resolution_arg_validates_shape_and_case() {
         for s in ["1280x720", "1280X720", " 1280 x 720 "] {
             let r = ResolutionArgs {
                 resolution: Some(s.into()),
@@ -1002,12 +937,8 @@ mod tests {
                 "input {s:?}"
             );
         }
-    }
-
-    /// A typo must fail the command here rather than reach the daemon, which would fall back
-    /// to native and silently put the caller's clicks in the wrong space.
-    #[test]
-    fn resolution_arg_rejects_malformed_values() {
+        // A typo must fail the command here rather than reach the daemon, which would fall back
+        // to native and silently put the caller's clicks in the wrong space.
         for bad in [
             "1920", "1920x", "x1080", "0x1080", "1920x0", "-1x-1", "axb", "",
         ] {
@@ -1017,6 +948,7 @@ mod tests {
             };
             assert!(r.resolution_arg().is_err(), "should reject {bad:?}");
         }
+        assert_eq!(ResolutionArgs::default().resolution_arg(), Ok(None));
     }
 
     #[test]

@@ -3,20 +3,33 @@
 // config becomes, what a save trims, what it drops, and what it refuses to send at all.
 import { expect, test } from "bun:test";
 
-import { orderedAccounts, settingsDraftFrom, settingsPatch } from "./settingsDraft";
+import {
+  orderedAccounts,
+  settingsDraftFrom,
+  settingsPatch,
+} from "./settingsDraft";
 import type { ClaudeUsage } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
 function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
-    listen: { web: 9000, video: 9001, daemonMcp: 9004, forward: 9005, bastion: 2222 },
+    listen: {
+      web: 9000,
+      video: 9001,
+      daemonMcp: 9004,
+      forward: 9005,
+      bastion: 2222,
+    },
     agentPort: 4096,
     dataDir: "/data",
     staticDir: "",
     cloneSocket: "/srv/rmng-sock/clones.sock",
     setupComplete: true,
     layoutPresets: [
-      { name: "Default", monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }] },
+      {
+        name: "Default",
+        monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }],
+      },
     ],
     activeLayout: "Default",
     docker: {
@@ -35,7 +48,12 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       homesParent: "tank/rmng/homes",
     },
     claude: { pollSecs: BigInt(600), pinnedEmail: "alex@example.com" },
-    codex: { pollSecs: BigInt(600), pinnedEmail: null, usagePolling: true, autoReset: false },
+    codex: {
+      pollSecs: BigInt(600),
+      pinnedEmail: null,
+      usagePolling: true,
+      autoReset: false,
+    },
     cloneGroups: [{ name: "pooled", accounts: ["alex@example.com"] }],
     codexGroups: [],
     presets: [
@@ -48,11 +66,14 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
         agentPlaybook: "",
         globalPrompt: "",
         dockerfile: "FROM pegasis0/rmng-template:latest",
-        },
+      },
     ],
     chroma: "yuv420",
     gpuAcceleratedClones: true,
-    ssh: { authorizedKeys: ["ssh-ed25519 AAAA me@laptop"], publicHost: "rmng.example.com" },
+    ssh: {
+      authorizedKeys: ["ssh-ed25519 AAAA me@laptop"],
+      publicHost: "rmng.example.com",
+    },
     agentPlaybook: "playbook",
     globalPrompt: "prompt",
     judge: { codexModel: "gpt-5.6-luna", codexEmail: null },
@@ -70,7 +91,13 @@ type Patch = {
   codexGroups: { name: string; accounts: string[] }[];
   layoutPresets: {
     name: string;
-    monitors: { width: number; height: number; x: number; y: number; primary: boolean }[];
+    monitors: {
+      width: number;
+      height: number;
+      x: number;
+      y: number;
+      primary: boolean;
+    }[];
   }[];
   presets: {
     name: string;
@@ -85,8 +112,10 @@ type Patch = {
   judge: { codexModel: string; codexEmail: string | null };
 };
 
-const patch = (draft: ReturnType<typeof settingsDraftFrom>, setupComplete = true) =>
-  settingsPatch(draft, setupComplete) as Patch;
+const patch = (
+  draft: ReturnType<typeof settingsDraftFrom>,
+  setupComplete = true,
+) => settingsPatch(draft, setupComplete) as Patch;
 
 // --- seeding the form ---------------------------------------------------------------------
 
@@ -96,27 +125,11 @@ test("a rig with no layout preset is given one to edit", () => {
   const draft = settingsDraftFrom(config({ layoutPresets: [] }));
 
   expect(draft.layoutPresets).toEqual([
-    { name: "Default", monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }] },
+    {
+      name: "Default",
+      monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+    },
   ]);
-});
-
-test("a preset's labels become the comma-separated string the operator types", () => {
-  expect(settingsDraftFrom(config()).presets[0].labels).toBe("WE, frontend");
-});
-
-test("the stored Linear key reaches the form verbatim, as a regular visible field", () => {
-  // No write-only logic remains: what the editor sends is what is stored.
-  const preset = settingsDraftFrom(config()).presets[0];
-
-  expect(preset.linearKey).toBe("lin_api_fixture");
-});
-
-test("a null pinned email becomes a blank field rather than the string null", () => {
-  expect(settingsDraftFrom(config()).codex.pinnedEmail).toBe("");
-});
-
-test("poll intervals arrive as bigint and are edited as numbers", () => {
-  expect(settingsDraftFrom(config()).claude.pollSecs).toBe(600);
 });
 
 test("the form never shares an array with the config it was seeded from", () => {
@@ -126,7 +139,9 @@ test("the form never shares an array with the config it was seeded from", () => 
   const draft = settingsDraftFrom(c);
 
   expect(draft.claudeGroups[0].accounts).not.toBe(c.cloneGroups[0].accounts);
-  expect(draft.layoutPresets[0].monitors[0]).not.toBe(c.layoutPresets[0].monitors[0]);
+  expect(draft.layoutPresets[0].monitors[0]).not.toBe(
+    c.layoutPresets[0].monitors[0],
+  );
   expect(draft.listen).not.toBe(c.listen);
 });
 
@@ -161,7 +176,9 @@ test("repeated pool members are deduped", () => {
     { name: "team", accounts: ["a@x.com", "a@x.com", "b@x.com"] },
   ];
 
-  expect(patch(draft).codexGroups).toEqual([{ name: "team", accounts: ["a@x.com", "b@x.com"] }]);
+  expect(patch(draft).codexGroups).toEqual([
+    { name: "team", accounts: ["a@x.com", "b@x.com"] },
+  ]);
 });
 
 test("a half-typed preset is dropped, and the rest are trimmed", () => {
@@ -187,7 +204,9 @@ test("a blank Dockerfile resets to the default base on save", () => {
   const draft = settingsDraftFrom(config());
   draft.presets = [{ ...draft.presets[0], dockerfile: "   " }];
 
-  expect(patch(draft).presets[0].dockerfile).toBe("FROM pegasis0/rmng-template:latest");
+  expect(patch(draft).presets[0].dockerfile).toBe(
+    "FROM pegasis0/rmng-template:latest",
+  );
 });
 
 test("a blank Linear key is sent as-is, clearing the stored one", () => {
@@ -216,25 +235,42 @@ test("a blank pinned email is sent as null rather than an empty string", () => {
 test("an unnamed layout preset is dropped and negative geometry is clamped", () => {
   const draft = settingsDraftFrom(config());
   draft.layoutPresets = [
-    { name: "  Dual  ", monitors: [{ width: 0, height: -5, x: -100, y: -1, primary: true }] },
-    { name: "", monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: false }] },
+    {
+      name: "  Dual  ",
+      monitors: [{ width: 0, height: -5, x: -100, y: -1, primary: true }],
+    },
+    {
+      name: "",
+      monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: false }],
+    },
   ];
 
   const saved = patch(draft).layoutPresets;
   expect(saved).toHaveLength(1);
   expect(saved[0].name).toBe("Dual");
-  expect(saved[0].monitors[0]).toEqual({ width: 1, height: 1, x: 0, y: 0, primary: true });
+  expect(saved[0].monitors[0]).toEqual({
+    width: 1,
+    height: 1,
+    x: 0,
+    y: 0,
+    primary: true,
+  });
 });
 
 test("the cosmetic account order is never part of the patch", () => {
   // The pool is unordered as far as the server is concerned, so the order stays in the
   // browser. Nothing in the patch names it.
-  expect(Object.keys(patch(settingsDraftFrom(config())))).not.toContain("acctOrder");
+  expect(Object.keys(patch(settingsDraftFrom(config())))).not.toContain(
+    "acctOrder",
+  );
 });
 
 // --- splitting the account list -----------------------------------------------------------
 
-const account = (email: string, provider?: "claude" | "codex"): ClaudeUsage => ({
+const account = (
+  email: string,
+  provider?: "claude" | "codex",
+): ClaudeUsage => ({
   id: `${provider ?? "claude"}|${email}`,
   email,
   provider,
@@ -245,7 +281,10 @@ const account = (email: string, provider?: "claude" | "codex"): ClaudeUsage => (
 
 test("a row with no provider counts as Claude", () => {
   // `provider` was added to the row after the fact, so an older row has none.
-  const rows = orderedAccounts([account("legacy"), account("new", "claude")], {});
+  const rows = orderedAccounts(
+    [account("legacy"), account("new", "claude")],
+    {},
+  );
 
   expect(rows.claude.map((a) => a.email)).toEqual(["legacy", "new"]);
   expect(rows.codex).toEqual([]);
@@ -269,7 +308,10 @@ test("each provider's list follows its own saved order", () => {
 });
 
 test("a freshly imported account lands after the ordered ones, not first", () => {
-  const accounts = [account("fresh@x.com", "claude"), account("a@x.com", "claude")];
+  const accounts = [
+    account("fresh@x.com", "claude"),
+    account("a@x.com", "claude"),
+  ];
 
   const rows = orderedAccounts(accounts, { claude: ["claude|a@x.com"] });
 

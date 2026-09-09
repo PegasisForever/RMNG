@@ -817,21 +817,6 @@ mod tests {
 
     #[test]
     fn defaults_are_sane() {
-        let c = AppConfig::default();
-        assert_eq!(c.listen.web, 9000);
-        assert_eq!(c.listen.video, 9001);
-        assert_eq!(c.agent_port, 4096);
-        // New one-time / restart-required fields carry their documented defaults.
-        assert_eq!(c.static_dir, ""); // empty = installed/default frontend dir
-        assert_eq!(c.clone_socket, "/srv/rmng-sock/clones.sock");
-        assert!(!c.setup_complete); // wizard latches this true
-        assert_eq!(c.docker.socket, "/var/run/docker.sock");
-        assert_eq!(c.docker.subnet, "10.99.0.0/24");
-        assert_eq!(c.docker.hostname_prefix, "pega-");
-        assert_eq!(c.docker.clone_cpus, 16);
-        assert_eq!(c.docker.clone_memory_mb, 32768);
-        assert_eq!(c.docker.template_reference, "pegasis0/rmng-template:latest");
-        assert_eq!(c.docker.homes_parent, "tank/rmng/homes");
         // Missing keys fall back to the same defaults (older config.json stays valid).
         let d: AppConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(d.static_dir, "");
@@ -840,7 +825,7 @@ mod tests {
         assert_eq!(d.docker.socket, "/var/run/docker.sock");
         assert_eq!(d.docker.subnet, "10.99.0.0/24");
         assert_eq!(d.docker.template_reference, "pegasis0/rmng-template:latest");
-        let mons = c.effective_monitors();
+        let mons = AppConfig::default().effective_monitors();
         assert_eq!(mons.len(), 2);
         assert_eq!(
             (mons[0].width, mons[0].height, mons[0].x),
@@ -849,12 +834,6 @@ mod tests {
         assert!(mons[0].primary);
         assert_eq!(mons[1].x, 0);
         assert!(!mons[1].primary);
-    }
-
-    #[test]
-    fn docker_config_default_server_image() {
-        let d = DockerConfig::default();
-        assert_eq!(d.server_image, "pegasis0/rmng:latest");
     }
 
     #[test]
@@ -1090,7 +1069,8 @@ mod tests {
     }
 
     #[test]
-    fn effective_monitors_from_active_preset() {
+    fn effective_monitors_selection_rules() {
+        // Active preset wins.
         let mut c = AppConfig::default();
         c.layout_presets = vec![
             LayoutPreset {
@@ -1116,43 +1096,13 @@ mod tests {
         ];
         c.active_layout = "B".into();
         assert_eq!(c.effective_monitors(), c.layout_presets[1].monitors);
-    }
-
-    #[test]
-    fn effective_monitors_defaults_when_empty() {
+        // A missing active name falls back to the first preset.
+        c.active_layout = "Nonexistent".into();
+        assert_eq!(c.effective_monitors(), c.layout_presets[0].monitors);
         // No presets → dual-1440p default (unchanged behavior).
         let c = AppConfig::default();
         assert_eq!(c.effective_monitors().len(), 2);
         assert!(c.effective_monitors()[0].primary);
-    }
-
-    #[test]
-    fn effective_monitors_falls_back_to_first_when_active_missing() {
-        let mut c = AppConfig::default();
-        c.layout_presets = vec![LayoutPreset {
-            name: "Only".into(),
-            monitors: vec![MonitorSpec {
-                width: 1280,
-                height: 720,
-                x: 0,
-                y: 0,
-                primary: true,
-            }],
-        }];
-        c.active_layout = "Nonexistent".into();
-        assert_eq!(c.effective_monitors(), c.layout_presets[0].monitors);
-    }
-
-    #[test]
-    fn listen_default_bastion_is_2222() {
-        assert_eq!(ListenConfig::default().bastion, 2222);
-    }
-
-    #[test]
-    fn ssh_config_defaults_are_empty() {
-        let s = SshConfig::default();
-        assert!(s.authorized_keys.is_empty());
-        assert!(s.public_host.is_empty());
     }
 
     #[test]

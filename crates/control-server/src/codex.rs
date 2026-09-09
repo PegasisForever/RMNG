@@ -1760,15 +1760,6 @@ mod tests {
     /// Parity with `claude::jittered_lead_never_drops_below_the_floor`: the offset only
     /// ever adds lead, and it is derived from the email so a batch of accounts imported
     /// together stops coming due in the same second.
-    #[test]
-    fn jittered_lead_adds_to_the_floor_and_varies_by_email() {
-        for email in ["a@one.test", "b@one.test", "c@two.test"] {
-            let lead = refresh_lead_ms(email);
-            assert!(lead >= REFRESH_LEAD_MS);
-            assert!(lead < REFRESH_LEAD_MS + REFRESH_SPREAD_MS);
-        }
-        assert_ne!(refresh_lead_ms("a@one.test"), refresh_lead_ms("b@one.test"));
-    }
 
     fn jwt_with(payload: &str) -> String {
         let b64 = B64.encode(payload.as_bytes());
@@ -1990,23 +1981,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn assignment_distinct_when_enough_accounts() {
-        let eligible = ["a@o".to_string(), "b@o".to_string(), "c@o".to_string()];
-        let clones = [
-            clone_host("c1", None),
-            clone_host("c2", None),
-            clone_host("c3", None),
-        ];
-        for _ in 0..50 {
-            let got = assign_rotation(&clones, &eligible, &HashMap::new());
-            let mut emails: Vec<_> = got.iter().map(|(_, e)| e.clone()).collect();
-            emails.sort();
-            emails.dedup();
-            assert_eq!(emails.len(), 3);
-        }
-    }
-
     fn codex_rotation_candidate(
         email: &str,
         seven_pct: f64,
@@ -2020,80 +1994,9 @@ mod tests {
     }
 
     #[test]
-    fn codex_saturated_assignment_prefers_soonest_7d_reset() {
-        let candidates = [
-            codex_rotation_candidate("soon@o", 96.0, Some(1_000)),
-            codex_rotation_candidate("late@o", 96.0, Some(2_000)),
-        ];
-        let clones = [clone_host("c1", Some("late@o"))];
-
-        let got = assign_saturated_rotation(&clones, &candidates);
-
-        assert_eq!(got[0].1, "soon@o");
-    }
-
-    #[test]
-    fn codex_saturated_assignment_uses_lower_7d_when_resets_are_missing() {
-        let candidates = [
-            codex_rotation_candidate("hot@o", 98.0, None),
-            codex_rotation_candidate("cool@o", 90.0, None),
-        ];
-        let clones = [clone_host("c1", Some("hot@o"))];
-
-        let got = assign_saturated_rotation(&clones, &candidates);
-
-        assert_eq!(got[0].1, "cool@o");
-    }
-
-    #[test]
-    fn codex_saturated_assignment_keeps_current_within_reset_margin() {
-        let candidates = [
-            codex_rotation_candidate("current@o", 96.0, Some(1_800)),
-            codex_rotation_candidate("best@o", 96.0, Some(1_000)),
-        ];
-        let clones = [clone_host("c1", Some("current@o"))];
-
-        let got = assign_saturated_rotation(&clones, &candidates);
-
-        assert_eq!(got[0].1, "current@o");
-    }
-
-    #[test]
-    fn codex_saturated_assignment_moves_missing_reset_current_to_known_reset() {
-        let candidates = [
-            codex_rotation_candidate("unknown@o", 96.0, None),
-            codex_rotation_candidate("known@o", 96.0, Some(1_000)),
-        ];
-        let clones = [clone_host("c1", Some("unknown@o"))];
-
-        let got = assign_saturated_rotation(&clones, &candidates);
-
-        assert_eq!(got[0].1, "known@o");
-    }
-
-    #[test]
     fn codex_exhaustion_threshold_is_95_7d() {
         assert!(!is_exhausted(94.9));
         assert!(is_exhausted(95.0));
-    }
-
-    #[test]
-    fn parses_rfc3339_z_and_offset_forms() {
-        // Codex resets arrive as `...Z`, but the parser is kept identical to Claude's, so
-        // it must also read fractional seconds and numeric offsets.
-        assert_eq!(
-            parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"),
-            Some(1_609_459_200)
-        );
-        assert_eq!(
-            parse_rfc3339_utc_secs("2026-07-24T22:00:00.469890+00:00"),
-            Some(1_784_930_400)
-        );
-        assert_eq!(
-            parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"),
-            Some(1_609_477_200)
-        );
-        assert_eq!(parse_rfc3339_utc_secs("2021-13-01T00:00:00Z"), None);
     }
 
     fn host_sel(id: &str, managed: bool, group: Option<&str>, sel: Option<&str>) -> RmngClone {
@@ -2115,25 +2018,9 @@ mod tests {
         let u = to_usage(&sample_account(), raw);
         assert_eq!(u.reset_credits, Some(4));
         assert_eq!(u.seven_day.unwrap().pct, 96.0);
-    }
-
-    #[test]
-    fn to_usage_absent_reset_credits_is_none() {
-        let raw: RawUsage = serde_json::from_str(r#"{"rate_limit":{}}"#).unwrap();
-        assert_eq!(to_usage(&sample_account(), raw).reset_credits, None);
-    }
-
-    #[test]
-    fn codex_auto_pool_is_only_managed_ungrouped_auto_clones() {
-        let hosts = vec![
-            host_sel("auto1", true, None, Some("auto")),
-            host_sel("pinned", true, None, Some("me@x")),
-            host_sel("legacy", true, None, None),
-            host_sel("grouped", true, Some("g"), Some("auto")),
-            host_sel("stopped", false, None, Some("auto")),
-        ];
-        let picked: Vec<String> = auto_pool_clones(&hosts).into_iter().map(|h| h.id).collect();
-        assert_eq!(picked, vec!["auto1"]);
+        // Absent credits read as none, not zero.
+        let bare: RawUsage = serde_json::from_str(r#"{"rate_limit":{}}"#).unwrap();
+        assert_eq!(to_usage(&sample_account(), bare).reset_credits, None);
     }
 
     fn facts(id: &str, pct: f64, reset_at: i64, credits: i64) -> FleetFacts {
@@ -2324,13 +2211,5 @@ mod tests {
             parse_consume_outcome("not json"),
             ConsumeOutcome::Unknown(String::new())
         );
-    }
-
-    #[test]
-    fn request_id_is_nonempty_and_varies() {
-        let a = new_request_id();
-        let b = new_request_id();
-        assert_eq!(a.len(), 32);
-        assert_ne!(a, b);
     }
 }

@@ -539,34 +539,40 @@ mod sse_tests {
     }
 
     #[test]
-    fn parses_default_event() {
-        let evs = parse_all(&["data: {\"hosts\":[]}\n\n"]);
-        assert_eq!(
-            evs,
-            vec![SseEvent {
-                event: None,
-                data: "{\"hosts\":[]}".into()
-            }]
-        );
-    }
-
-    #[test]
-    fn parses_named_event_and_keeps_name() {
-        let evs = parse_all(&["event: stats\ndata: {}\n\n"]);
-        assert_eq!(
-            evs,
-            vec![SseEvent {
-                event: Some("stats".into()),
-                data: "{}".into()
-            }]
-        );
-    }
-
-    #[test]
-    fn skips_keepalive_comments() {
-        let evs = parse_all(&[": ping\n\n", "data: 1\n\n"]);
-        assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0].data, "1");
+    fn single_frame_shapes() {
+        // Unnamed event, named event, keepalive comments, CRLF line endings.
+        for (chunks, expect) in [
+            (
+                vec!["data: {\"hosts\":[]}\n\n"],
+                vec![SseEvent {
+                    event: None,
+                    data: "{\"hosts\":[]}".into(),
+                }],
+            ),
+            (
+                vec!["event: stats\ndata: {}\n\n"],
+                vec![SseEvent {
+                    event: Some("stats".into()),
+                    data: "{}".into(),
+                }],
+            ),
+            (
+                vec![": ping\n\n", "data: 1\n\n"],
+                vec![SseEvent {
+                    event: None,
+                    data: "1".into(),
+                }],
+            ),
+            (
+                vec!["data: x\r\n\r\n"],
+                vec![SseEvent {
+                    event: None,
+                    data: "x".into(),
+                }],
+            ),
+        ] {
+            assert_eq!(parse_all(&chunks), expect);
+        }
     }
 
     #[test]
@@ -586,12 +592,6 @@ mod sse_tests {
         let evs = parse_all(&["event: stats\ndata: a\n\ndata: b\n\n"]);
         assert_eq!(evs[0].event.as_deref(), Some("stats"));
         assert_eq!(evs[1].event, None);
-    }
-
-    #[test]
-    fn handles_crlf_lines() {
-        let evs = parse_all(&["data: x\r\n\r\n"]);
-        assert_eq!(evs[0].data, "x");
     }
 
     #[test]

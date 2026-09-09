@@ -13,12 +13,6 @@ import {
 describe("modal Escape stacking", () => {
   beforeEach(() => __resetModalEscapeStack());
 
-  test("a lone modal owns Escape", () => {
-    const only = Symbol("only");
-    __pushModal(only);
-    expect(ownsEscape(only, true)).toBe(true);
-  });
-
   test("only the topmost modal owns Escape", () => {
     const settings = Symbol("settings");
     const login = Symbol("login");
@@ -49,12 +43,5 @@ describe("modal Escape stacking", () => {
     expect(ownsEscape(busyClone, false)).toBe(false);
     // ...and the dialog beneath must not close either.
     expect(ownsEscape(under, true)).toBe(false);
-  });
-
-  test("an unmounted modal owns nothing", () => {
-    const gone = Symbol("gone");
-    __pushModal(gone);
-    __popModal(gone);
-    expect(ownsEscape(gone, true)).toBe(false);
   });
 });

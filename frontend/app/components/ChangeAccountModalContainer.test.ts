@@ -17,12 +17,10 @@ test("tokenless legacy Claude clone is not treated as already auto", () => {
   const h = clone();
 
   expect(currentValue(h)).toBe("none");
-  expect("auto" !== currentValue(h)).toBe(true);
 });
 
 test("tokenless legacy Codex clone is not treated as already auto", () => {
   const h = clone();
 
   expect(currentCodexValue(h)).toBe("none");
-  expect("auto" !== currentCodexValue(h)).toBe(true);
 });

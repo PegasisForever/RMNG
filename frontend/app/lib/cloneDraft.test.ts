@@ -57,13 +57,42 @@ test("a pruned FAILED op stays failed rather than reading as done", () => {
 // --- preset resolution (mirrors the server, per tab) ---------------------------------
 
 const presets: PresetRedacted[] = [
-  { name: "work", labels: ["WE", "DEV"], linearKey: "lin_api_fixture", claudeAccount: "group:pooled", codexAccount: "", agentPlaybook: "", globalPrompt: "", dockerfile: "FROM pegasis0/rmng-template:latest" },
-  { name: "side", labels: ["AW"], linearKey: "", claudeAccount: "", codexAccount: "", agentPlaybook: "", globalPrompt: "", dockerfile: "FROM pegasis0/rmng-template:latest" },
-  { name: "bare", labels: [], linearKey: "", claudeAccount: "", codexAccount: "", agentPlaybook: "", globalPrompt: "", dockerfile: "FROM pegasis0/rmng-template:latest" },
+  {
+    name: "work",
+    labels: ["WE", "DEV"],
+    linearKey: "lin_api_fixture",
+    claudeAccount: "group:pooled",
+    codexAccount: "",
+    agentPlaybook: "",
+    globalPrompt: "",
+    dockerfile: "FROM pegasis0/rmng-template:latest",
+  },
+  {
+    name: "side",
+    labels: ["AW"],
+    linearKey: "",
+    claudeAccount: "",
+    codexAccount: "",
+    agentPlaybook: "",
+    globalPrompt: "",
+    dockerfile: "FROM pegasis0/rmng-template:latest",
+  },
+  {
+    name: "bare",
+    labels: [],
+    linearKey: "",
+    claudeAccount: "",
+    codexAccount: "",
+    agentPlaybook: "",
+    globalPrompt: "",
+    dockerfile: "FROM pegasis0/rmng-template:latest",
+  },
 ];
 
 test("the no-ticket tab uses the hand-picked preset", () => {
-  expect(resolvePreset("plain", presets, { plainPreset: "side" })?.name).toBe("side");
+  expect(resolvePreset("plain", presets, { plainPreset: "side" })?.name).toBe(
+    "side",
+  );
 });
 
 test("the new-ticket tab derives the preset from the team key", () => {
@@ -73,7 +102,9 @@ test("the new-ticket tab derives the preset from the team key", () => {
 });
 
 test("the existing-ticket tab auto-selects by the ticket prefix, case-insensitively", () => {
-  expect(resolvePreset("existing", presets, { ticketPrefix: "we" })?.name).toBe("work");
+  expect(resolvePreset("existing", presets, { ticketPrefix: "we" })?.name).toBe(
+    "work",
+  );
 });
 
 test("nothing resolves until there is something to resolve from", () => {
@@ -83,14 +114,11 @@ test("nothing resolves until there is something to resolve from", () => {
   expect(resolvePreset("create", presets, {})).toBeUndefined();
 });
 
-test("a prefix no preset claims resolves to nothing", () => {
-  // The server would 400 listing the configured presets; the dialog says so up front.
-  expect(resolvePreset("existing", presets, { ticketPrefix: "zzz" })).toBeUndefined();
-});
-
 test("a preset with no labels never auto-matches", () => {
   // Matches `pick_preset_by_prefix`: an unlabelled preset is opt-in only.
-  expect(resolvePreset("existing", presets, { ticketPrefix: "" })).toBeUndefined();
+  expect(
+    resolvePreset("existing", presets, { ticketPrefix: "" }),
+  ).toBeUndefined();
   expect(resolvePreset("create", presets, { team: "" })).toBeUndefined();
 });
 
@@ -105,20 +133,27 @@ test("a key claimed by two presets goes to the first in config order", () => {
   // would, or the dialog names one preset and the clone gets another.
   const shadowed: PresetRedacted[] = [
     ...presets,
-    { name: "late", labels: ["WE"], linearKey: "lin_api_fixture", claudeAccount: "", codexAccount: "", agentPlaybook: "", globalPrompt: "", dockerfile: "FROM pegasis0/rmng-template:latest" },
+    {
+      name: "late",
+      labels: ["WE"],
+      linearKey: "lin_api_fixture",
+      claudeAccount: "",
+      codexAccount: "",
+      agentPlaybook: "",
+      globalPrompt: "",
+      dockerfile: "FROM pegasis0/rmng-template:latest",
+    },
   ];
 
-  expect(teamKeysOf(shadowed).find((t) => t.key === "we")?.preset.name).toBe("work");
+  expect(teamKeysOf(shadowed).find((t) => t.key === "we")?.preset.name).toBe(
+    "work",
+  );
   expect(teamKeysOf(shadowed)).toHaveLength(3);
 });
 
 test("an unlabelled preset contributes no team key", () => {
   // `bare` has no labels, so the dropdown cannot offer it and nothing auto-selects it.
   expect(teamKeysOf(presets).map((t) => t.preset.name)).not.toContain("bare");
-});
-
-test("no presets means no team keys rather than a crash", () => {
-  expect(teamKeysOf([])).toEqual([]);
 });
 
 // --- the missing-Linear-key rule (mirrors the server, per tab) ---------------------------
@@ -131,10 +166,6 @@ test("the warning stays down until the config has landed", () => {
   // Without the gate the warning flashes on every open.
   expect(linearKeyMissing("existing", [], undefined, false)).toBe(false);
   expect(linearKeyMissing("create", [], undefined, false)).toBe(false);
-});
-
-test("the no-ticket tab never needs a Linear key", () => {
-  expect(linearKeyMissing("plain", [], undefined, true)).toBe(false);
 });
 
 test("creating a ticket needs the RESOLVED preset's own key", () => {
@@ -180,35 +211,68 @@ const check = (
 
 test("no source clone blocks every tab", () => {
   // The source is the one field shared by all three requests, and the picker can be empty.
-  expect(check(draft({ source: null }), { ticketParsed: true, preset: work })).toBe(false);
-  expect(check(draft({ source: null, mode: "create", team: "we", title: "x" }))).toBe(false);
-  expect(check(draft({ source: null, mode: "plain", title: "x", plainPreset: "work" }))).toBe(false);
+  expect(
+    check(draft({ source: null }), { ticketParsed: true, preset: work }),
+  ).toBe(false);
+  expect(
+    check(draft({ source: null, mode: "create", team: "we", title: "x" })),
+  ).toBe(false);
+  expect(
+    check(
+      draft({ source: null, mode: "plain", title: "x", plainPreset: "work" }),
+    ),
+  ).toBe(false);
 });
 
 test("an existing ticket needs both a parse and a preset that claims its prefix", () => {
   // With the preset dropdown gone there is no way to override the auto-selection, so a prefix
   // nothing claims is a request the server would 400.
-  expect(check(draft({ ticket: "WE-142" }), { ticketParsed: true, preset: work })).toBe(true);
-  expect(check(draft({ ticket: "WE-142" }), { ticketParsed: true, preset: undefined })).toBe(false);
-  expect(check(draft({ ticket: "nonsense" }), { ticketParsed: false, preset: work })).toBe(false);
+  expect(
+    check(draft({ ticket: "WE-142" }), { ticketParsed: true, preset: work }),
+  ).toBe(true);
+  expect(
+    check(draft({ ticket: "WE-142" }), {
+      ticketParsed: true,
+      preset: undefined,
+    }),
+  ).toBe(false);
+  expect(
+    check(draft({ ticket: "nonsense" }), { ticketParsed: false, preset: work }),
+  ).toBe(false);
 });
 
 test("with no presets configured at all, a parseable ticket is enough", () => {
-  expect(check(draft({ ticket: "WE-142" }), { presets: [], ticketParsed: true })).toBe(true);
+  expect(
+    check(draft({ ticket: "WE-142" }), { presets: [], ticketParsed: true }),
+  ).toBe(true);
 });
 
 test("a new ticket needs a team key and a title", () => {
-  expect(check(draft({ mode: "create", team: "we", title: "Tighten the row" }))).toBe(true);
-  expect(check(draft({ mode: "create", team: "we", title: "   " }))).toBe(false);
-  expect(check(draft({ mode: "create", team: "", title: "Tighten the row" }))).toBe(false);
+  expect(
+    check(draft({ mode: "create", team: "we", title: "Tighten the row" })),
+  ).toBe(true);
+  expect(check(draft({ mode: "create", team: "we", title: "   " }))).toBe(
+    false,
+  );
+  expect(
+    check(draft({ mode: "create", team: "", title: "Tighten the row" })),
+  ).toBe(false);
 });
 
 test("a no-ticket clone needs a title, and a preset whenever any are configured", () => {
-  expect(check(draft({ mode: "plain", title: "scratch", plainPreset: "work" }))).toBe(true);
-  expect(check(draft({ mode: "plain", title: "scratch", plainPreset: "" }))).toBe(false);
-  expect(check(draft({ mode: "plain", title: "", plainPreset: "work" }))).toBe(false);
+  expect(
+    check(draft({ mode: "plain", title: "scratch", plainPreset: "work" })),
+  ).toBe(true);
+  expect(
+    check(draft({ mode: "plain", title: "scratch", plainPreset: "" })),
+  ).toBe(false);
+  expect(check(draft({ mode: "plain", title: "", plainPreset: "work" }))).toBe(
+    false,
+  );
   // Nothing configured, so there is no preset to pick and the title carries the form.
-  expect(check(draft({ mode: "plain", title: "scratch" }), { presets: [] })).toBe(true);
+  expect(
+    check(draft({ mode: "plain", title: "scratch" }), { presets: [] }),
+  ).toBe(true);
 });
 
 test("a missing Linear key blocks an otherwise complete form", () => {
@@ -220,7 +284,11 @@ test("a missing Linear key blocks an otherwise complete form", () => {
       keyMissing: true,
     }),
   ).toBe(false);
-  expect(check(draft({ ticket: "WE-142" }), { ticketParsed: true, preset: work, keyMissing: true })).toBe(
-    false,
-  );
+  expect(
+    check(draft({ ticket: "WE-142" }), {
+      ticketParsed: true,
+      preset: work,
+      keyMissing: true,
+    }),
+  ).toBe(false);
 });

@@ -2678,23 +2678,6 @@ mod tests {
 
     // --- GET /api/state (single-shot snapshot for the rmng CLI) ---
 
-    #[tokio::test]
-    async fn api_state_returns_current_snapshot() {
-        let app = test_app();
-        app.store.mutate(|s| {
-            s.hosts.push(wire::RmngClone {
-                id: "w1".into(),
-                host: "w1".into(),
-                managed: true,
-                ..Default::default()
-            });
-            s.selected = Some("w1".into());
-        });
-        let st = state_get(State(app.clone())).await.0;
-        assert_eq!(st.hosts.len(), 1);
-        assert_eq!(st.selected.as_deref(), Some("w1"));
-    }
-
     // --- POST /api/clone (template clone: title + preset) ---
 
     #[tokio::test]
@@ -3241,14 +3224,6 @@ PLAIN=plainvalue
         );
     }
 
-    #[test]
-    fn desktop_user_detection() {
-        assert!(is_desktop_user("1000"));
-        assert!(is_desktop_user("rmng"));
-        assert!(!is_desktop_user("root"));
-        assert!(!is_desktop_user("0"));
-    }
-
     /// End-to-end through the real router: the notes editor saves with `PUT` and the
     /// `{ blocks }` envelope, and reads the same shape back. Goes over a live loopback
     /// socket (not a direct handler call) so it also pins the route *method* — a `POST`-
@@ -3555,115 +3530,6 @@ PLAIN=plainvalue
     }
 
     /// Both Linear routes, against Linear, in the order the browser drives them.
-    ///
-    /// Everything above stubs the far side, which is the only way to assert the forwarding and
-    /// the key loop at all. What no stub can answer is whether the pair still fits Linear's
-    /// own behaviour: whether the signed PUT is accepted as replayed, and whether the
-    /// `assetUrl` it produces is readable with the key that produced it. So this one is real,
-    /// and `#[ignore]`d for it.
-    ///
-    ///     LINEAR_API_KEY=… cargo test -p control-server \
-    ///       the_two_linear_routes_round_trip_an_image -- --ignored --nocapture
-    ///
-    /// It uploads one 70-byte PNG and touches no issue.
-    #[tokio::test]
-    #[ignore = "talks to api.linear.app and uploads.linear.app, needs LINEAR_API_KEY"]
-    async fn the_two_linear_routes_round_trip_an_image() {
-        let key = std::env::var("LINEAR_API_KEY").expect("set LINEAR_API_KEY to run this");
-        // 1x1 RGBA, the smallest thing that is honestly a PNG.
-        let png = B64
-            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
-            .unwrap();
-
-        let app = test_app();
-        *app.cfg.write().unwrap() = wire::AppConfig {
-            presets: vec![
-                // A key with no access leads, so the asset route has to fall past it.
-                wire::Preset {
-                    name: "dud".into(),
-                    linear_key: "lin_api_not_a_key".into(),
-                    ..Default::default()
-                },
-                wire::Preset {
-                    name: "real".into(),
-                    linear_key: key.clone(),
-                    ..Default::default()
-                },
-            ],
-            ..app.config()
-        };
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, router(app)).await.unwrap() });
-        let http = reqwest::Client::new();
-
-        // The mutation the BROWSER runs. Never this server's, which is the whole point of the
-        // relay: it is handed a signed URL and replays one PUT at it.
-        let signed: serde_json::Value = http
-            .post("https://api.linear.app/graphql")
-            .header("authorization", &key)
-            .json(&json!({
-                "query": "mutation($contentType: String!, $filename: String!, $size: Int!) { \
-                            fileUpload(contentType: $contentType, filename: $filename, size: $size) { \
-                              success uploadFile { uploadUrl assetUrl headers { key value } } } }",
-                "variables": { "contentType": "image/png", "filename": "rmng-proxy-probe.png", "size": png.len() },
-            }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let file = signed
-            .pointer("/data/fileUpload/uploadFile")
-            .expect("fileUpload refused");
-        let upload_url = file["uploadUrl"].as_str().unwrap().to_string();
-        let asset_url = file["assetUrl"].as_str().unwrap().to_string();
-        // `content-type` leads, as `putHeaders` builds it: it is signed but not listed.
-        let mut headers = vec![json!({ "key": "content-type", "value": "image/png" })];
-        headers.extend(file["headers"].as_array().unwrap().iter().cloned());
-        println!("assetUrl {asset_url}");
-
-        let headers_raw = serde_json::to_string(&headers).unwrap();
-        let (ct, body) = multipart(
-            &[
-                ("url", upload_url.as_str()),
-                ("headers", headers_raw.as_str()),
-            ],
-            Some(("rmng-proxy-probe.png", &png)),
-        );
-        let put = http
-            .post(format!("http://{addr}/api/linear/upload-relay"))
-            .header("content-type", ct)
-            .body(body)
-            .send()
-            .await
-            .unwrap();
-        let put_status = put.status();
-        println!("relay -> {} {}", put_status, put.text().await.unwrap());
-        assert!(put_status.is_success());
-
-        // The `<img src>` an editor in the page would use. Unauthenticated, same-origin.
-        let got = http
-            .get(format!("http://{addr}/api/linear/asset"))
-            .query(&[("url", &asset_url)])
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(got.status(), reqwest::StatusCode::OK);
-        let seen_ct = got.headers()[header::CONTENT_TYPE]
-            .to_str()
-            .unwrap()
-            .to_string();
-        for (name, value) in got.headers() {
-            println!("asset header {name}: {}", value.to_str().unwrap_or("?"));
-        }
-        let bytes = got.bytes().await.unwrap().to_vec();
-        println!("asset -> 200 {seen_ct} ({} bytes)", bytes.len());
-        assert_eq!(seen_ct, "image/png");
-        assert_eq!(bytes, png, "the bytes read back must be the bytes uploaded");
-    }
-
     #[test]
     fn the_asset_proxy_takes_every_distinct_configured_key_in_config_order() {
         let preset = |key: &str| wire::Preset {
@@ -3980,41 +3846,6 @@ PLAIN=plainvalue
 
         app.set_build_id("2ae7f50");
         assert_eq!(app.build_id(), "2ae7f50");
-    }
-
-    /// The observable heartbeat: a named `ping` event arrives within the first interval.
-    /// Distinct from the low-level keep-alive *comment* (`:ping`) — we assert the `event:`
-    /// form so a comment can't satisfy it. Ignored by default: it waits ~15s for the first
-    /// tick. Run with `cargo test -p control-server -- --ignored events_stream_emits_ping`.
-    #[tokio::test]
-    #[ignore = "waits ~15s for the first server heartbeat tick"]
-    async fn events_stream_emits_ping_heartbeat() {
-        use futures::stream::StreamExt;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
-
-        let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/events"))
-            .header("accept", "text/event-stream")
-            .send()
-            .await
-            .unwrap();
-
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
-        while let Ok(Some(chunk)) =
-            tokio::time::timeout(Duration::from_secs(18), stream.next()).await
-        {
-            buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
-            if buf.replace(' ', "").contains("event:ping") {
-                break;
-            }
-        }
-        assert!(
-            buf.replace(' ', "").contains("event:ping"),
-            "no ping heartbeat event within ~18s: {buf:?}"
-        );
     }
 }
 

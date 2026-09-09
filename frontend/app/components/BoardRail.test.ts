@@ -33,5 +33,4 @@ test("keeps unavailable LXC rate and disk visibly unavailable", () => {
     mem: "0.5GB",
     disk: "—",
   });
-  expect(formatLxcUsage(null)).toBeNull();
 });

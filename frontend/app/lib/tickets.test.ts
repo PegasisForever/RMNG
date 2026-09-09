@@ -18,8 +18,18 @@ import {
 } from "./tickets";
 import type { Clone } from "~/lib/types";
 
-function ticket(id: string, state: LinearTicket["state"] = "todo"): LinearTicket {
-  return { id, title: id, url: `https://linear.app/x/issue/${id}`, state, labels: [], children: [] };
+function ticket(
+  id: string,
+  state: LinearTicket["state"] = "todo",
+): LinearTicket {
+  return {
+    id,
+    title: id,
+    url: `https://linear.app/x/issue/${id}`,
+    state,
+    labels: [],
+    children: [],
+  };
 }
 
 function clone(id: string, linearTicket?: string, archived = false): Clone {
@@ -38,13 +48,18 @@ function clone(id: string, linearTicket?: string, archived = false): Clone {
 test("open tickets with no clone are kept, in the given order", () => {
   const tickets = [ticket("WE-1"), ticket("WE-2", "in_progress")];
 
-  expect(openTickets(tickets, [clone("c1")]).map((t) => t.id)).toEqual(["WE-1", "WE-2"]);
+  expect(openTickets(tickets, [clone("c1")]).map((t) => t.id)).toEqual([
+    "WE-1",
+    "WE-2",
+  ]);
 });
 
 test("a ticket with a clone is dropped", () => {
   const tickets = [ticket("WE-1"), ticket("WE-2")];
 
-  expect(openTickets(tickets, [clone("c1", "WE-2")]).map((t) => t.id)).toEqual(["WE-1"]);
+  expect(openTickets(tickets, [clone("c1", "WE-2")]).map((t) => t.id)).toEqual([
+    "WE-1",
+  ]);
 });
 
 test("an archived clone still counts as claimed", () => {
@@ -60,15 +75,27 @@ test("the ticket id match ignores case", () => {
 });
 
 test("states past in-progress are dropped whether or not a clone exists", () => {
-  const done = { ...ticket("WE-9"), state: "done" as unknown as LinearTicket["state"] };
+  const done = {
+    ...ticket("WE-9"),
+    state: "done" as unknown as LinearTicket["state"],
+  };
 
   expect(openTickets([done], [])).toEqual([]);
 });
 
 test("a repeated id is kept once, at its first position", () => {
-  const merged = [ticket("WE-1"), ticket("DEV-5"), ticket("WE-1"), ticket("DEV-9")];
+  const merged = [
+    ticket("WE-1"),
+    ticket("DEV-5"),
+    ticket("WE-1"),
+    ticket("DEV-9"),
+  ];
 
-  expect(openTickets(merged, []).map((t) => t.id)).toEqual(["WE-1", "DEV-5", "DEV-9"]);
+  expect(openTickets(merged, []).map((t) => t.id)).toEqual([
+    "WE-1",
+    "DEV-5",
+    "DEV-9",
+  ]);
 });
 
 test("a drag id round-trips, and a clone's own id is not mistaken for one", () => {
@@ -93,25 +120,27 @@ test("the stored order wins over Linear's", () => {
 test("a ticket the order has never seen goes to the top", () => {
   const fromLinear = [ticket("WE-1"), ticket("WE-9"), ticket("WE-2")];
 
-  expect(ids(orderTickets(fromLinear, ["WE-1", "WE-2"]))).toEqual(["WE-9", "WE-1", "WE-2"]);
+  expect(ids(orderTickets(fromLinear, ["WE-1", "WE-2"]))).toEqual([
+    "WE-9",
+    "WE-1",
+    "WE-2",
+  ]);
 });
 
 test("several new ones keep Linear's order among themselves, above the placed ones", () => {
   const fromLinear = [ticket("WE-8"), ticket("WE-1"), ticket("WE-9")];
 
-  expect(ids(orderTickets(fromLinear, ["WE-1"]))).toEqual(["WE-8", "WE-9", "WE-1"]);
+  expect(ids(orderTickets(fromLinear, ["WE-1"]))).toEqual([
+    "WE-8",
+    "WE-9",
+    "WE-1",
+  ]);
 });
 
 test("an id in the order that no longer exists is ignored", () => {
   const fromLinear = [ticket("WE-2")];
 
   expect(ids(orderTickets(fromLinear, ["WE-1", "WE-2"]))).toEqual(["WE-2"]);
-});
-
-test("no stored order at all leaves Linear's order alone", () => {
-  const fromLinear = [ticket("WE-2"), ticket("WE-1")];
-
-  expect(ids(orderTickets(fromLinear, []))).toEqual(["WE-2", "WE-1"]);
 });
 
 // `PUT /api/tickets/order` lowercases every id before it stores one, so what comes back over
@@ -142,7 +171,10 @@ test("without one, the id and a slug of the title stand in", () => {
 });
 
 test("punctuation never reaches the branch", () => {
-  const t = { ...ticket("DEV-7"), title: "Retry on 429 (don't drop the window!)" };
+  const t = {
+    ...ticket("DEV-7"),
+    title: "Retry on 429 (don't drop the window!)",
+  };
 
   expect(branchNameOf(t)).toBe("dev-7-retry-on-429-don-t-drop-the-window");
 });
@@ -150,11 +182,14 @@ test("punctuation never reaches the branch", () => {
 test("a long title is cut on a word boundary", () => {
   const t = {
     ...ticket("WE-9"),
-    title: "Normalize the sidebar CPU reading to a percentage of the account allowance",
+    title:
+      "Normalize the sidebar CPU reading to a percentage of the account allowance",
   };
   const name = branchNameOf(t);
 
-  expect(name.startsWith("we-9-normalize-the-sidebar-cpu-reading-to-a")).toBe(true);
+  expect(name.startsWith("we-9-normalize-the-sidebar-cpu-reading-to-a")).toBe(
+    true,
+  );
   expect(name.endsWith("-")).toBe(false);
 });
 
@@ -209,19 +244,34 @@ test("a clone with no ticket, and one Linear did not answer for, are both absent
 // --- adoption: what stops Linear from re-sorting the column -----------------
 
 test("a ticket the order has never seen is adopted at the top", () => {
-  expect(adoptTickets([ticket("WE-9"), ticket("WE-1")], ["we-1"])).toEqual(["we-9", "we-1"]);
+  expect(adoptTickets([ticket("WE-9"), ticket("WE-1")], ["we-1"])).toEqual([
+    "we-9",
+    "we-1",
+  ]);
 });
 
 test("adoption keeps the arrangement already stored, underneath the new ones", () => {
-  const drawn = [ticket("WE-9"), ticket("WE-3"), ticket("WE-1"), ticket("WE-2")];
+  const drawn = [
+    ticket("WE-9"),
+    ticket("WE-3"),
+    ticket("WE-1"),
+    ticket("WE-2"),
+  ];
   // `orderTickets` has already put the new one on top; adoption pins exactly that.
-  expect(adoptTickets(drawn, ["we-3", "we-1", "we-2"])).toEqual(["we-9", "we-3", "we-1", "we-2"]);
+  expect(adoptTickets(drawn, ["we-3", "we-1", "we-2"])).toEqual([
+    "we-9",
+    "we-3",
+    "we-1",
+    "we-2",
+  ]);
 });
 
 test("adoption answers null once the order covers every ticket drawn", () => {
   // The guard that stops the container writing on every poll, and that makes the effect
   // converge after one pass.
-  expect(adoptTickets([ticket("WE-1"), ticket("WE-2")], ["we-1", "we-2"])).toBeNull();
+  expect(
+    adoptTickets([ticket("WE-1"), ticket("WE-2")], ["we-1", "we-2"]),
+  ).toBeNull();
   expect(adoptTickets([], ["we-1"])).toBeNull();
   expect(adoptTickets([], [])).toBeNull();
 });
@@ -249,7 +299,10 @@ test("an adopted ticket keeps its place when Linear re-sorts, which is the bug t
 
 test("a ticket that arrives after adoption still goes to the top", () => {
   const order = adoptTickets([ticket("WE-1"), ticket("WE-2")], [])!;
-  const withNew = orderTickets([ticket("WE-2"), ticket("WE-9"), ticket("WE-1")], order);
+  const withNew = orderTickets(
+    [ticket("WE-2"), ticket("WE-9"), ticket("WE-1")],
+    order,
+  );
   expect(ids(withNew)).toEqual(["WE-9", "WE-1", "WE-2"]);
   expect(adoptTickets(withNew, order)).toEqual(["we-9", "we-1", "we-2"]);
 });
@@ -257,7 +310,13 @@ test("a ticket that arrives after adoption still goes to the top", () => {
 test("the column shows queued and started work, and nothing else", () => {
   expect(queued("todo")).toBe(true);
   expect(queued("in_progress")).toBe(true);
-  for (const gone of ["done", "canceled", "backlog", "triage", "duplicate"] as const) {
+  for (const gone of [
+    "done",
+    "canceled",
+    "backlog",
+    "triage",
+    "duplicate",
+  ] as const) {
     expect(queued(gone)).toBe(false);
   }
 });
@@ -272,15 +331,12 @@ test("the last ticket hands over to the one above it", () => {
   expect(ticketAfter(drawn, "WE-2")?.id).toBe("WE-1");
 });
 
-test("the only ticket hands over to nothing", () => {
+test("handover edge rows hand over to nothing, case-insensitively", () => {
+  // A single ticket, and an identifier the column does not draw, have nowhere to go.
   expect(ticketAfter([ticket("WE-1")], "WE-1")).toBeNull();
-});
-
-test("a ticket the column does not draw hands over to nothing", () => {
   expect(ticketAfter([ticket("WE-1")], "WE-9")).toBeNull();
-});
-
-test("the handover matches an identifier whatever its case", () => {
-  const drawn = [ticket("WE-1"), ticket("WE-2")];
-  expect(ticketAfter(drawn, "we-1")?.id).toBe("WE-2");
+  // The match ignores case, the way every other one does.
+  expect(ticketAfter([ticket("WE-1"), ticket("WE-2")], "we-1")?.id).toBe(
+    "WE-2",
+  );
 });

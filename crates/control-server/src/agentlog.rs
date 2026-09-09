@@ -394,9 +394,17 @@ fn is_fable(model: &str) -> bool {
 /// of a response already counted. They are freshly written bytes with their own timestamps, so
 /// they are evidence the agent is working even when they add no tokens.
 fn fold_claude_line(line: &str, ledger: &mut Ledger, delta: &mut Delta) {
-    let Ok(rec) = serde_json::from_str::<ClaudeLine>(line) else { return };
-    let ClaudeLine { timestamp, request_id, message } = rec;
-    let Some(ClaudeMessage { id, model, usage }) = message else { return };
+    let Ok(rec) = serde_json::from_str::<ClaudeLine>(line) else {
+        return;
+    };
+    let ClaudeLine {
+        timestamp,
+        request_id,
+        message,
+    } = rec;
+    let Some(ClaudeMessage { id, model, usage }) = message else {
+        return;
+    };
     let Some(usage) = usage else { return };
     let model = model.unwrap_or_default();
     if model.is_empty() || model.starts_with('<') {
@@ -405,8 +413,7 @@ fn fold_claude_line(line: &str, ledger: &mut Ledger, delta: &mut Delta) {
     // Saturating throughout: release builds have `overflow-checks` off, so a crafted
     // `u64::MAX` would wrap a plain `+` to an attacker-chosen total rather than erroring.
     // (In a debug build the same input would panic — killing the scanner, which is worse.)
-    let input =
-        token(usage.input_tokens).saturating_add(token(usage.cache_creation_input_tokens));
+    let input = token(usage.input_tokens).saturating_add(token(usage.cache_creation_input_tokens));
     let output = token(usage.output_tokens);
     // Credit the response, not the line. A line the CLI left unidentified cannot be tied to one,
     // so it is counted on its own — over-counting an anonymous line is better than dropping a
@@ -432,7 +439,10 @@ fn fold_claude_line(line: &str, ledger: &mut Ledger, delta: &mut Delta) {
 /// and of 178 in its subagent transcripts, none did. Keying on it left subagent traffic with no
 /// duplicate suppression at all.
 fn response_key(message_id: Option<String>, request_id: Option<String>) -> Option<String> {
-    message_id.into_iter().chain(request_id).find(|k| !k.is_empty())
+    message_id
+        .into_iter()
+        .chain(request_id)
+        .find(|k| !k.is_empty())
 }
 
 /// Fold one Codex rollout line into `delta`.
@@ -440,12 +450,16 @@ fn response_key(message_id: Option<String>, request_id: Option<String>) -> Optio
 /// No request-id dedup: each `token_count` event is appended exactly once, and the byte cursor
 /// already guarantees a given event is read at most once.
 fn fold_codex_line(line: &str, delta: &mut Delta) {
-    let Ok(rec) = serde_json::from_str::<CodexLine>(line) else { return };
+    let Ok(rec) = serde_json::from_str::<CodexLine>(line) else {
+        return;
+    };
     let Some(payload) = rec.payload else { return };
     if payload.kind.as_deref() != Some("token_count") {
         return;
     }
-    let Some(usage) = payload.info.and_then(|i| i.last_token_usage) else { return };
+    let Some(usage) = payload.info.and_then(|i| i.last_token_usage) else {
+        return;
+    };
     // Cached input is the analogue of Claude's cache reads — excluded for the same reason.
     // `saturating_sub` because the two fields come from different accounting paths and a
     // future format change must not underflow into a nonsense total.
@@ -498,7 +512,10 @@ fn scan_file(
         _ => 0,
     };
     if start >= len {
-        return Some(Cursor { inode, offset: start.min(len) });
+        return Some(Cursor {
+            inode,
+            offset: start.min(len),
+        });
     }
     if !count {
         // Seeding pass: adopt the current end without reading. See `CloneScan::seeded`.
@@ -530,22 +547,33 @@ fn scan_file(
                 want,
                 path.display()
             );
-            return Some(Cursor { inode, offset: start + want });
+            return Some(Cursor {
+                inode,
+                offset: start + want,
+            });
         }
-        return Some(Cursor { inode, offset: start });
+        return Some(Cursor {
+            inode,
+            offset: start,
+        });
     };
     let consumed = last_nl + 1;
     for line in buf[..consumed].split(|b| *b == b'\n') {
         if line.is_empty() {
             continue;
         }
-        let Ok(text) = std::str::from_utf8(line) else { continue };
+        let Ok(text) = std::str::from_utf8(line) else {
+            continue;
+        };
         match flavor {
             Flavor::Claude => fold_claude_line(text, ledger, delta),
             Flavor::Codex => fold_codex_line(text, delta),
         }
     }
-    Some(Cursor { inode, offset: start + consumed as u64 })
+    Some(Cursor {
+        inode,
+        offset: start + consumed as u64,
+    })
 }
 
 /// Every `*.jsonl` under `root`, recursing to `depth` more levels, up to `budget` files.
@@ -567,7 +595,9 @@ fn collect_jsonl(root: &Path, depth: usize, budget: &mut usize, out: &mut Vec<Pa
     if *budget == 0 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(root) else { return };
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
     for entry in rd.flatten() {
         if *budget == 0 {
             return;
@@ -605,10 +635,21 @@ struct LogSet {
 /// counted for nothing — a clone doing ordinary work could starve its own second provider.
 fn log_files_capped(home: &Path, scan_cap: usize, enum_cap: usize) -> LogSet {
     let roots = [
-        (home.join(".claude/projects"), CLAUDE_WALK_DEPTH, Flavor::Claude),
-        (home.join(".codex/sessions"), CODEX_WALK_DEPTH, Flavor::Codex),
+        (
+            home.join(".claude/projects"),
+            CLAUDE_WALK_DEPTH,
+            Flavor::Claude,
+        ),
+        (
+            home.join(".codex/sessions"),
+            CODEX_WALK_DEPTH,
+            Flavor::Codex,
+        ),
     ];
-    let mut set = LogSet { scan: Vec::new(), seen: HashSet::new() };
+    let mut set = LogSet {
+        scan: Vec::new(),
+        seen: HashSet::new(),
+    };
     for (root, depth, flavor) in roots {
         let mut budget = enum_cap;
         let mut found = Vec::new();
@@ -659,7 +700,12 @@ fn keep_newest(paths: &mut Vec<PathBuf>, keep: usize) {
 
 /// Scan one clone's logs, returning what changed since the last pass.
 fn scan_clone(home: &Path, scan: &mut CloneScan) -> Delta {
-    scan_clone_capped(home, scan, MAX_SCAN_FILES_PER_PROVIDER, MAX_ENUM_FILES_PER_PROVIDER)
+    scan_clone_capped(
+        home,
+        scan,
+        MAX_SCAN_FILES_PER_PROVIDER,
+        MAX_ENUM_FILES_PER_PROVIDER,
+    )
 }
 
 /// [`scan_clone`] with the caps supplied, so the tests can reach the over-cap path.
@@ -675,7 +721,11 @@ fn scan_clone_capped(home: &Path, scan: &mut CloneScan, scan_cap: usize, enum_ca
     } else {
         // Flavor is irrelevant here: a seeding pass stats a file and adopts its end, parsing
         // nothing.
-        files.seen.iter().map(|p| (p.clone(), Flavor::Claude)).collect()
+        files
+            .seen
+            .iter()
+            .map(|p| (p.clone(), Flavor::Claude))
+            .collect()
     };
     for (path, flavor) in pass {
         let prev = scan.cursors.get(&path).copied();
@@ -701,8 +751,11 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
     let all = app.store.get().hosts;
     // Only a RUNNING clone has logs to read — an archived one's container is stopped, so
     // `homes` has removed its symlink.
-    let hosts: Vec<RmngClone> =
-        all.iter().filter(|h| h.managed && !h.archived).cloned().collect();
+    let hosts: Vec<RmngClone> = all
+        .iter()
+        .filter(|h| h.managed && !h.archived)
+        .cloned()
+        .collect();
     // …but a total is retained for every clone that still EXISTS, archived included: the work
     // already happened, and archiving is explicitly a retain operation. Only an actually
     // deleted clone loses its figure. Scoping this to the running set instead would silently
@@ -775,7 +828,10 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
                 continue;
             }
             Err(_) => {
-                let fresh = CloneScan { timeouts: prev_timeouts + 1, ..Default::default() };
+                let fresh = CloneScan {
+                    timeouts: prev_timeouts + 1,
+                    ..Default::default()
+                };
                 if fresh.timeouts >= MAX_SCAN_TIMEOUTS {
                     tracing::error!(
                         target: "agentlog",
@@ -804,8 +860,9 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
         if let Some(ts) = delta.last_activity_ms.filter(|ts| *ts <= believable_until) {
             app.activity.mark(&host.id, ts);
         }
-        let fable_active =
-            scan.last_fable_ms.is_some_and(|at| now.saturating_sub(at) < FABLE_ACTIVE_MS);
+        let fable_active = scan
+            .last_fable_ms
+            .is_some_and(|at| now.saturating_sub(at) < FABLE_ACTIVE_MS);
         let prev = existing.get(&host.id).copied().unwrap_or_default();
         let next = CloneTokens {
             input_tokens: prev.input_tokens.saturating_add(delta.input_tokens),
@@ -826,8 +883,11 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
     // meanwhile, and its persisted total is unaffected either way).
     scans.retain(|id, _| scanning_ids.contains(id));
 
-    let stale: Vec<String> =
-        existing.keys().filter(|id| !known_ids.contains(*id)).cloned().collect();
+    let stale: Vec<String> = existing
+        .keys()
+        .filter(|id| !known_ids.contains(*id))
+        .cloned()
+        .collect();
     if updates.is_empty() && stale.is_empty() {
         return;
     }
@@ -892,14 +952,27 @@ mod tests {
         dir
     }
 
-    fn claude_line(req: &str, model: &str, input: u64, cache_create: u64, cache_read: u64, output: u64) -> String {
+    fn claude_line(
+        req: &str,
+        model: &str,
+        input: u64,
+        cache_create: u64,
+        cache_read: u64,
+        output: u64,
+    ) -> String {
         format!(
             r#"{{"type":"assistant","timestamp":"2026-07-29T13:10:25.021Z","requestId":"{req}","message":{{"model":"{model}","usage":{{"input_tokens":{input},"cache_creation_input_tokens":{cache_create},"cache_read_input_tokens":{cache_read},"output_tokens":{output}}}}}}}"#
         )
     }
 
     /// A line in the shape both CLIs actually write today: a `message.id`, no `requestId`.
-    fn claude_msg_line(msg_id: &str, model: &str, input: u64, cache_create: u64, output: u64) -> String {
+    fn claude_msg_line(
+        msg_id: &str,
+        model: &str,
+        input: u64,
+        cache_create: u64,
+        output: u64,
+    ) -> String {
         format!(
             r#"{{"isSidechain":true,"type":"assistant","timestamp":"2026-07-29T13:10:25.021Z","message":{{"id":"{msg_id}","model":"{model}","usage":{{"input_tokens":{input},"cache_creation_input_tokens":{cache_create},"cache_read_input_tokens":0,"output_tokens":{output}}}}}}}"#
         )
@@ -919,7 +992,10 @@ mod tests {
         // Real shape from a clone: 1 real input token against 210,735 cache reads. Counting
         // reads would make the figure meaningless.
         let (d, _) = fold_claude(&[claude_line("r1", "claude-opus-5", 1, 961, 210_735, 887)]);
-        assert_eq!(d.input_tokens, 962, "input = input + cache_creation, never cache_read");
+        assert_eq!(
+            d.input_tokens, 962,
+            "input = input + cache_creation, never cache_read"
+        );
         assert_eq!(d.output_tokens, 887);
     }
 
@@ -928,7 +1004,10 @@ mod tests {
         // Observed on CT 120: one response written twice, same requestId, different line uuid.
         let line = claude_line("req_dup", "claude-opus-4-8", 2, 5491, 15_002, 985);
         let (d, _) = fold_claude(&[line.clone(), line]);
-        assert_eq!(d.input_tokens, 5493, "the second record is the same response");
+        assert_eq!(
+            d.input_tokens, 5493,
+            "the second record is the same response"
+        );
         assert_eq!(d.output_tokens, 985);
     }
 
@@ -953,18 +1032,39 @@ mod tests {
     fn lines_without_usage_are_ignored() {
         let mut ledger = Ledger::default();
         let mut delta = Delta::default();
-        fold_claude_line(r#"{"type":"user","message":{"role":"user"}}"#, &mut ledger, &mut delta);
+        fold_claude_line(
+            r#"{"type":"user","message":{"role":"user"}}"#,
+            &mut ledger,
+            &mut delta,
+        );
         fold_claude_line("not json at all", &mut ledger, &mut delta);
         assert!(delta.is_empty());
+        // Same rule on the Codex side: non-token events must not book anything.
+        let mut d = Delta::default();
+        fold_codex_line(
+            r#"{"timestamp":"2026-07-29T13:12:02.327Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+            &mut d,
+        );
+        fold_codex_line(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#,
+            &mut d,
+        );
+        assert!(d.is_empty());
     }
 
     #[test]
     fn fable_model_is_detected_by_substring() {
         assert!(is_fable("claude-fable-5"));
-        assert!(is_fable("claude-fable-5-20260714"), "dated variants must match");
+        assert!(
+            is_fable("claude-fable-5-20260714"),
+            "dated variants must match"
+        );
         assert!(!is_fable("claude-opus-5"));
         let (d, _) = fold_claude(&[claude_line("r1", "claude-fable-5", 1, 0, 0, 1)]);
-        assert!(d.last_fable_ms.is_some(), "a fable response stamps the badge clock");
+        assert!(
+            d.last_fable_ms.is_some(),
+            "a fable response stamps the badge clock"
+        );
         let (d, _) = fold_claude(&[claude_line("r2", "claude-opus-5", 1, 0, 0, 1)]);
         assert!(d.last_fable_ms.is_none(), "a non-fable response must not");
     }
@@ -973,16 +1073,29 @@ mod tests {
     fn ledger_is_bounded_and_evicts_oldest_first() {
         let mut l = Ledger::default();
         for i in 0..LEDGER_CAPACITY + 10 {
-            assert_eq!(l.credit(&format!("m{i}"), 1, 1), Booked { input: 1, output: 1 });
+            assert_eq!(
+                l.credit(&format!("m{i}"), 1, 1),
+                Booked {
+                    input: 1,
+                    output: 1
+                }
+            );
         }
         assert_eq!(l.booked.len(), LEDGER_CAPACITY, "the map must stay bounded");
         assert_eq!(
             l.credit("m0", 1, 1),
-            Booked { input: 1, output: 1 },
+            Booked {
+                input: 1,
+                output: 1
+            },
             "the oldest are evicted, so m0 is credited afresh"
         );
         let newest = format!("m{}", LEDGER_CAPACITY + 9);
-        assert_eq!(l.credit(&newest, 1, 1), Booked::default(), "the newest is still held");
+        assert_eq!(
+            l.credit(&newest, 1, 1),
+            Booked::default(),
+            "the newest is still held"
+        );
     }
 
     #[test]
@@ -991,10 +1104,17 @@ mod tests {
         // (thinking, text, tool_use, tool_use), sharing message.id and repeating the usage
         // object. Input and cache-creation are identical on all four; output climbs to its real
         // figure on the last. Summing the lines gave 4x the input and 349 output instead of 334.
-        let line = |output: u64| claude_msg_line("msg_011CdJ", "claude-opus-4-8", 2128, 32_045, output);
+        let line =
+            |output: u64| claude_msg_line("msg_011CdJ", "claude-opus-4-8", 2128, 32_045, output);
         let (d, _) = fold_claude(&[line(5), line(5), line(5), line(334)]);
-        assert_eq!(d.input_tokens, 34_173, "2128 input + 32045 cache creation, counted once");
-        assert_eq!(d.output_tokens, 334, "the response's final output figure, not the sum");
+        assert_eq!(
+            d.input_tokens, 34_173,
+            "2128 input + 32045 cache creation, counted once"
+        );
+        assert_eq!(
+            d.output_tokens, 334,
+            "the response's final output figure, not the sum"
+        );
     }
 
     #[test]
@@ -1028,14 +1148,21 @@ mod tests {
         );
         assert_eq!(first.input_tokens, 900);
         assert_eq!(second.input_tokens, 0, "the input was already booked");
-        assert_eq!(first.output_tokens + second.output_tokens, 700, "output follows the maximum");
+        assert_eq!(
+            first.output_tokens + second.output_tokens,
+            700,
+            "output follows the maximum"
+        );
     }
 
     #[test]
     fn a_repeat_line_adds_no_tokens_but_still_stamps_activity() {
         let line = claude_msg_line("msg_act", "claude-opus-5", 10, 0, 3);
         let (d, _) = fold_claude(&[line.clone(), line]);
-        assert!(d.last_activity_ms.is_some(), "a freshly written line means the agent is working");
+        assert!(
+            d.last_activity_ms.is_some(),
+            "a freshly written line means the agent is working"
+        );
         assert_eq!(d.input_tokens, 10);
     }
 
@@ -1053,17 +1180,6 @@ mod tests {
         fold_codex_line(&ev(50, 20, 7, 3, 150), &mut d);
         assert_eq!(d.input_tokens, 130, "100 + (50 - 20 cached)");
         assert_eq!(d.output_tokens, 15, "5 + 7 + 3 reasoning");
-    }
-
-    #[test]
-    fn codex_non_token_events_are_ignored() {
-        let mut d = Delta::default();
-        fold_codex_line(
-            r#"{"timestamp":"2026-07-29T13:12:02.327Z","type":"event_msg","payload":{"type":"task_started"}}"#,
-            &mut d,
-        );
-        fold_codex_line(r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}"#, &mut d);
-        assert!(d.is_empty());
     }
 
     #[test]
@@ -1099,7 +1215,12 @@ mod tests {
         let path = dir.join("s.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
         // A complete line plus a fragment, as seen mid-append by the writer.
-        write!(f, "{}\n{{\"type\":\"assis", claude_line("r1", "claude-opus-5", 10, 0, 0, 1)).unwrap();
+        write!(
+            f,
+            "{}\n{{\"type\":\"assis",
+            claude_line("r1", "claude-opus-5", 10, 0, 0, 1)
+        )
+        .unwrap();
         f.flush().unwrap();
 
         let mut ledger = Ledger::default();
@@ -1119,8 +1240,11 @@ mod tests {
     fn truncation_and_replacement_restart_the_cursor() {
         let dir = tmpdir("trunc");
         let path = dir.join("s.jsonl");
-        std::fs::write(&path, format!("{}\n", claude_line("r1", "claude-opus-5", 100, 0, 0, 1)))
-            .unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n", claude_line("r1", "claude-opus-5", 100, 0, 0, 1)),
+        )
+        .unwrap();
         let mut ledger = Ledger::default();
         let mut d = Delta::default();
         let c = scan_file(&path, None, Flavor::Claude, &mut ledger, &mut d, true).unwrap();
@@ -1128,11 +1252,17 @@ mod tests {
 
         // Replace with a SHORTER file: the old offset would sit past the end, or worse,
         // mid-line. It must restart from 0.
-        std::fs::write(&path, format!("{}\n", claude_line("r9", "claude-opus-5", 3, 0, 0, 1)))
-            .unwrap();
+        std::fs::write(
+            &path,
+            format!("{}\n", claude_line("r9", "claude-opus-5", 3, 0, 0, 1)),
+        )
+        .unwrap();
         let mut d2 = Delta::default();
         scan_file(&path, Some(c), Flavor::Claude, &mut ledger, &mut d2, true).unwrap();
-        assert_eq!(d2.input_tokens, 3, "a shrunken file is re-read from the start");
+        assert_eq!(
+            d2.input_tokens, 3,
+            "a shrunken file is re-read from the start"
+        );
     }
 
     #[test]
@@ -1144,7 +1274,10 @@ mod tests {
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::write(
             proj.join("old.jsonl"),
-            format!("{}\n", claude_line("r_old", "claude-opus-5", 999_999, 0, 0, 42)),
+            format!(
+                "{}\n",
+                claude_line("r_old", "claude-opus-5", 999_999, 0, 0, 42)
+            ),
         )
         .unwrap();
 
@@ -1171,7 +1304,10 @@ mod tests {
         let sess = dir.join(".codex/sessions/2026/07/29");
         std::fs::create_dir_all(&proj).unwrap();
         std::fs::create_dir_all(&sess).unwrap();
-        let mut scan = CloneScan { seeded: true, ..Default::default() };
+        let mut scan = CloneScan {
+            seeded: true,
+            ..Default::default()
+        };
 
         std::fs::write(
             proj.join("a.jsonl"),
@@ -1224,14 +1360,26 @@ mod tests {
         std::fs::write(day.join("rollout-x.jsonl"), "").unwrap();
 
         let names = scanned_names(&log_files_capped(&dir, 64, 64));
-        assert!(names.contains(&"ok.jsonl".to_string()), "main session transcript");
-        assert!(names.contains(&"agent-abc.jsonl".to_string()), "subagent transcripts must count");
+        assert!(
+            names.contains(&"ok.jsonl".to_string()),
+            "main session transcript"
+        );
+        assert!(
+            names.contains(&"agent-abc.jsonl".to_string()),
+            "subagent transcripts must count"
+        );
         assert!(
             names.contains(&"agent-acbff6cb7.jsonl".to_string()),
             "workflow agent transcripts must count"
         );
-        assert!(names.contains(&"rollout-x.jsonl".to_string()), "codex rollout");
-        assert!(!names.contains(&"too-deep.jsonl".to_string()), "the walk must stay bounded");
+        assert!(
+            names.contains(&"rollout-x.jsonl".to_string()),
+            "codex rollout"
+        );
+        assert!(
+            !names.contains(&"too-deep.jsonl".to_string()),
+            "the walk must stay bounded"
+        );
     }
 
     fn scanned_names(set: &LogSet) -> Vec<String> {
@@ -1252,12 +1400,20 @@ mod tests {
                 let name = p.display().to_string();
                 std::fs::write(
                     &p,
-                    format!("{}\n", claude_msg_line(&format!("msg_hist_{name}"), "claude-opus-5", 500, 0, 9)),
+                    format!(
+                        "{}\n",
+                        claude_msg_line(&format!("msg_hist_{name}"), "claude-opus-5", 500, 0, 9)
+                    ),
                 )
                 .unwrap();
                 let at =
                     std::fs::FileTimes::new().set_modified(base + Duration::from_secs(i as u64));
-                std::fs::File::options().write(true).open(&p).unwrap().set_times(at).unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(&p)
+                    .unwrap()
+                    .set_times(at)
+                    .unwrap();
                 p
             })
             .collect()
@@ -1277,7 +1433,10 @@ mod tests {
         let names = scanned_names(&set);
         for newest in &paths[7..] {
             let name = newest.file_name().unwrap().to_string_lossy().into_owned();
-            assert!(names.contains(&name), "{name} is among the newest and must be read");
+            assert!(
+                names.contains(&name),
+                "{name} is among the newest and must be read"
+            );
         }
     }
 
@@ -1293,16 +1452,34 @@ mod tests {
         // Seeding pass, then a counting pass that reads only the two newest of the three.
         scan_clone_capped(&dir, &mut scan, 2, 100);
         scan_clone_capped(&dir, &mut scan, 2, 100);
-        assert_eq!(scan.cursors.len(), 3, "cursors follow existence, not this pass's selection");
-        assert!(scan.cursors.contains_key(&paths[0]), "the file left out still has its place");
+        assert_eq!(
+            scan.cursors.len(),
+            3,
+            "cursors follow existence, not this pass's selection"
+        );
+        assert!(
+            scan.cursors.contains_key(&paths[0]),
+            "the file left out still has its place"
+        );
 
         // The oldest is written to again, which makes it the newest and brings it back into the
         // cut. Only the new line counts; its 500 tokens of history stay counted-never.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&paths[0]).unwrap();
-        writeln!(f, "{}", claude_msg_line("msg_resumed", "claude-opus-5", 12, 0, 4)).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&paths[0])
+            .unwrap();
+        writeln!(
+            f,
+            "{}",
+            claude_msg_line("msg_resumed", "claude-opus-5", 12, 0, 4)
+        )
+        .unwrap();
         drop(f);
         let d = scan_clone_capped(&dir, &mut scan, 2, 100);
-        assert_eq!(d.input_tokens, 12, "resumed where the cursor left off, not at byte 0");
+        assert_eq!(
+            d.input_tokens, 12,
+            "resumed where the cursor left off, not at byte 0"
+        );
 
         // The one that really disappears is the one that loses its cursor.
         std::fs::remove_file(&paths[0]).unwrap();
@@ -1319,7 +1496,13 @@ mod tests {
         let set = log_files_capped(&dir, 4, 100);
         let codex = set.scan.iter().filter(|(_, f)| *f == Flavor::Codex).count();
         assert_eq!(codex, 2, "codex has its own budget");
-        assert_eq!(set.scan.iter().filter(|(_, f)| *f == Flavor::Claude).count(), 4);
+        assert_eq!(
+            set.scan
+                .iter()
+                .filter(|(_, f)| *f == Flavor::Claude)
+                .count(),
+            4
+        );
     }
 
     #[test]
@@ -1331,7 +1514,11 @@ mod tests {
         let mut scan = CloneScan::default();
         let d = scan_clone(&dir, &mut scan);
         assert!(d.is_empty());
-        assert_eq!(scan.cursors.len(), 6, "every file the walk saw is seeded, capped or not");
+        assert_eq!(
+            scan.cursors.len(),
+            6,
+            "every file the walk saw is seeded, capped or not"
+        );
     }
 
     /// Build an app whose state holds the given clones and token totals.
@@ -1355,7 +1542,11 @@ mod tests {
                 .map(|(id, n)| {
                     (
                         (*id).to_string(),
-                        CloneTokens { input_tokens: *n, output_tokens: *n, fable_active: false },
+                        CloneTokens {
+                            input_tokens: *n,
+                            output_tokens: *n,
+                            fable_active: false,
+                        },
                     )
                 })
                 .collect();
@@ -1368,14 +1559,28 @@ mod tests {
         // `kept` is archived — its container is stopped, so there are no logs to read, but the
         // work already happened and the row is still in the sidebar. `gone` is not in the
         // fleet at all: deleted, so its home and its figure go together.
-        let app = app_with(&[("live", false), ("kept", true)], &[("live", 5), ("kept", 7), ("gone", 9)]);
+        let app = app_with(
+            &[("live", false), ("kept", true)],
+            &[("live", 5), ("kept", 7), ("gone", 9)],
+        );
         let mut scans = HashMap::new();
         scan_once(&app, &mut scans).await;
 
         let after = app.store.get().clone_tokens;
-        assert_eq!(after.get("kept").map(|t| t.input_tokens), Some(7), "archiving retains");
-        assert_eq!(after.get("live").map(|t| t.input_tokens), Some(5), "running is untouched");
-        assert!(!after.contains_key("gone"), "a deleted clone's total is dropped");
+        assert_eq!(
+            after.get("kept").map(|t| t.input_tokens),
+            Some(7),
+            "archiving retains"
+        );
+        assert_eq!(
+            after.get("live").map(|t| t.input_tokens),
+            Some(5),
+            "running is untouched"
+        );
+        assert!(
+            !after.contains_key("gone"),
+            "a deleted clone's total is dropped"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1385,7 +1590,14 @@ mod tests {
         let app = app_with(&[("boot", false)], &[("boot", 42)]);
         let mut scans = HashMap::new();
         scan_once(&app, &mut scans).await;
-        assert_eq!(app.store.get().clone_tokens.get("boot").map(|t| t.input_tokens), Some(42));
+        assert_eq!(
+            app.store
+                .get()
+                .clone_tokens
+                .get("boot")
+                .map(|t| t.input_tokens),
+            Some(42)
+        );
     }
 
     // --- hardening against a hostile / buggy clone ------------------------------------------
@@ -1398,18 +1610,37 @@ mod tests {
         // Release builds run with `overflow-checks` off, so an unguarded `+` on u64::MAX would
         // silently wrap the persisted all-time figure to an attacker-chosen value.
         let (d, _) = fold_claude(&[claude_line("r1", "claude-opus-5", u64::MAX, 0, 0, u64::MAX)]);
-        assert_eq!(d.input_tokens, 0, "an absurd count contributes nothing rather than wrapping");
+        assert_eq!(
+            d.input_tokens, 0,
+            "an absurd count contributes nothing rather than wrapping"
+        );
         assert_eq!(d.output_tokens, 0);
         // Activity IS still stamped: a turn with an unbelievable token count is still a turn,
         // and the timestamp is validated separately (see the future-timestamp test).
         assert!(d.last_activity_ms.is_some());
 
         // The boundary itself is accepted; one past it is not.
-        let (ok, _) = fold_claude(&[claude_line("r2", "claude-opus-5", MAX_PLAUSIBLE_TOKENS, 0, 0, 1)]);
+        let (ok, _) = fold_claude(&[claude_line(
+            "r2",
+            "claude-opus-5",
+            MAX_PLAUSIBLE_TOKENS,
+            0,
+            0,
+            1,
+        )]);
         assert_eq!(ok.input_tokens, MAX_PLAUSIBLE_TOKENS);
-        let (over, _) =
-            fold_claude(&[claude_line("r3", "claude-opus-5", MAX_PLAUSIBLE_TOKENS + 1, 0, 0, 1)]);
-        assert_eq!(over.input_tokens, 0, "one past the cap is dropped, not wrapped");
+        let (over, _) = fold_claude(&[claude_line(
+            "r3",
+            "claude-opus-5",
+            MAX_PLAUSIBLE_TOKENS + 1,
+            0,
+            0,
+            1,
+        )]);
+        assert_eq!(
+            over.input_tokens, 0,
+            "one past the cap is dropped, not wrapped"
+        );
     }
 
     #[test]
@@ -1445,13 +1676,19 @@ mod tests {
         let mut ledger = Ledger::default();
         let mut d = Delta::default();
         let c1 = scan_file(&path, None, Flavor::Claude, &mut ledger, &mut d, true).unwrap();
-        assert_eq!(c1.offset, MAX_READ_PER_FILE, "the capped region is skipped past");
+        assert_eq!(
+            c1.offset, MAX_READ_PER_FILE,
+            "the capped region is skipped past"
+        );
         assert_eq!(d.input_tokens, 0, "nothing countable was in it");
 
         // Next pass clears the remaining junk and reaches the real line behind it.
         let c2 = scan_file(&path, Some(c1), Flavor::Claude, &mut ledger, &mut d, true).unwrap();
         assert!(c2.offset > c1.offset, "the scan keeps making progress");
-        assert_eq!(d.input_tokens, 33, "and counts the record that followed the junk");
+        assert_eq!(
+            d.input_tokens, 33,
+            "and counts the record that followed the junk"
+        );
     }
 
     #[test]
@@ -1533,7 +1770,14 @@ mod tests {
             "a far-future timestamp must be rejected, not believed (stamped {stamped}, now {now})"
         );
         // The tokens on that record still count — only the CLOCK is untrusted.
-        assert_eq!(app.store.get().clone_tokens.get("evil").map(|t| t.input_tokens), Some(5));
+        assert_eq!(
+            app.store
+                .get()
+                .clone_tokens
+                .get("evil")
+                .map(|t| t.input_tokens),
+            Some(5)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1543,15 +1787,25 @@ mod tests {
         let app = App::test_app();
         app.store.mutate(|s| {
             s.hosts = vec![];
-            s.clone_tokens =
-                [("ghost".to_string(), CloneTokens { input_tokens: 9, output_tokens: 9, fable_active: false })]
-                    .into_iter()
-                    .collect();
+            s.clone_tokens = [(
+                "ghost".to_string(),
+                CloneTokens {
+                    input_tokens: 9,
+                    output_tokens: 9,
+                    fable_active: false,
+                },
+            )]
+            .into_iter()
+            .collect();
         });
         let mut scans = HashMap::new();
         scan_once(&app, &mut scans).await;
         assert_eq!(
-            app.store.get().clone_tokens.get("ghost").map(|t| t.input_tokens),
+            app.store
+                .get()
+                .clone_tokens
+                .get("ghost")
+                .map(|t| t.input_tokens),
             Some(9),
             "an empty fleet is not a reason to wipe every total"
         );

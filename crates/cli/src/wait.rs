@@ -127,7 +127,8 @@ mod tests {
     }
 
     #[test]
-    fn running_then_done() {
+    fn wait_machine_outcomes() {
+        // Running then done resolves with the operation.
         let mut m = WaitMachine::new("op_1");
         assert!(
             m.observe(&frame(vec![op(
@@ -147,10 +148,7 @@ mod tests {
             Some(WaitOutcome::Done(o)) => assert_eq!(o.id, "op_1"),
             other => panic!("expected Done, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn error_is_failed() {
+        // An error resolves as failed, not done.
         let mut m = WaitMachine::new("op_1");
         match m.observe(&frame(vec![op(
             "op_1",
@@ -161,10 +159,7 @@ mod tests {
             Some(WaitOutcome::Failed(o)) => assert_eq!(o.id, "op_1"),
             other => panic!("expected Failed, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn vanish_after_running_reports_seen() {
+        // Vanishing after being seen counts as done (ops prune after landing).
         let mut m = WaitMachine::new("op_1");
         m.observe(&frame(vec![op(
             "op_1",
@@ -176,10 +171,7 @@ mod tests {
             Some(WaitOutcome::Vanished { ever_seen: true }) => {}
             other => panic!("expected Vanished(seen), got {other:?}"),
         }
-    }
-
-    #[test]
-    fn missing_from_first_frame_reports_never_seen() {
+        // Vanishing before ever being seen reports never-seen.
         let mut m = WaitMachine::new("op_1");
         match m.observe(&frame(vec![op(
             "other",

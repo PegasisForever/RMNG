@@ -9,7 +9,7 @@ use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
-use wire::{ContainerStats, RmngClone, LxcStats, MonitorState};
+use wire::{ContainerStats, LxcStats, MonitorState, RmngClone};
 
 use crate::app::App;
 
@@ -32,7 +32,10 @@ pub struct StatsBus {
 impl StatsBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(16);
-        Self { tx, latest: StdRwLock::new((HashMap::new(), "{}".to_string())) }
+        Self {
+            tx,
+            latest: StdRwLock::new((HashMap::new(), "{}".to_string())),
+        }
     }
 
     /// The latest published map (JSON) plus a live receiver for a new `/events` subscriber.
@@ -75,7 +78,10 @@ pub struct LxcStatsBus {
 impl LxcStatsBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(16);
-        Self { tx, latest: StdRwLock::new((None, "null".to_string())) }
+        Self {
+            tx,
+            latest: StdRwLock::new((None, "null".to_string())),
+        }
     }
 
     /// The latest CT sample (JSON) plus a live receiver for a new `/events` subscriber.
@@ -138,7 +144,6 @@ impl ViewTracker {
     }
 }
 
-
 /// Volatile per-clone "agent was last busy" timestamps (wall-clock ms) — the signal behind
 /// `working` vs `idle`.
 ///
@@ -183,7 +188,10 @@ impl ActivityBus {
     /// Drop entries for clones no longer in the active managed fleet, so the map cannot grow
     /// unbounded across the life of a long-running server.
     pub fn retain(&self, ids: &HashSet<String>) {
-        self.last_active.write().unwrap().retain(|id, _| ids.contains(id));
+        self.last_active
+            .write()
+            .unwrap()
+            .retain(|id, _| ids.contains(id));
     }
 }
 
@@ -208,9 +216,15 @@ struct CpuSample {
 /// `None` until two samples establish a rate, and again whenever the counter moves backwards —
 /// a container restart resets it to zero, and a stale delta would read as a spike.
 fn cpu_pct(previous: &mut Option<CpuSample>, usage_usec: u64, now: Instant) -> Option<f64> {
-    let previous = previous.replace(CpuSample { usage_usec, sampled_at: now })?;
+    let previous = previous.replace(CpuSample {
+        usage_usec,
+        sampled_at: now,
+    })?;
     let usage_delta = usage_usec.checked_sub(previous.usage_usec)? as f64;
-    let elapsed_usec = now.checked_duration_since(previous.sampled_at)?.as_secs_f64() * 1_000_000.0;
+    let elapsed_usec = now
+        .checked_duration_since(previous.sampled_at)?
+        .as_secs_f64()
+        * 1_000_000.0;
     (elapsed_usec > 0.0).then_some((usage_delta / elapsed_usec) * 100.0 / CT105_CPU_CAPACITY)
 }
 
@@ -268,7 +282,9 @@ async fn sample_lxc(previous_cpu: &mut Option<CpuSample>) -> Option<LxcStats> {
 /// `previous_cpu` carries this clone's prior CPU counter across ticks, so the first sample after a
 /// clone appears yields no CPU reading (the CT-wide gauge behaves the same way).
 async fn sample_clone(
-    app: &App, host: &RmngClone, previous_cpu: &mut Option<CpuSample>,
+    app: &App,
+    host: &RmngClone,
+    previous_cpu: &mut Option<CpuSample>,
 ) -> (Option<ContainerStats>, Option<Option<String>>) {
     if !host.managed {
         return (None, None);
@@ -316,7 +332,11 @@ async fn sample_clone(
     };
 
     (
-        Some(ContainerStats { cpu_pct, mem_used: memory.used, mem_limit: memory.limit }),
+        Some(ContainerStats {
+            cpu_pct,
+            mem_used: memory.used,
+            mem_limit: memory.limit,
+        }),
         ip,
     )
 }
@@ -400,8 +420,10 @@ fn debounce(
     pending: &mut HashMap<String, (MonitorState, Instant)>,
     now: Instant,
 ) {
-    let shown: HashMap<&str, Option<MonitorState>> =
-        clones.iter().map(|c| (c.id.as_str(), c.monitor_state)).collect();
+    let shown: HashMap<&str, Option<MonitorState>> = clones
+        .iter()
+        .map(|c| (c.id.as_str(), c.monitor_state))
+        .collect();
     for (id, proposed) in next.iter_mut() {
         // Only a working clone going idle waits. A clone we do not show, one with no state yet,
         // one that is not currently working, anything touching `offline`, and a tick that
@@ -412,8 +434,10 @@ fn debounce(
         // and raises the badge. `unknown → offline` stays unheld: a container that died
         // mid-outage is news the moment we can see it again.
         let stored = shown.get(id.as_str()).copied().flatten();
-        let held = matches!(stored, Some(MonitorState::Working) | Some(MonitorState::Unknown))
-            && *proposed == MonitorState::Idle;
+        let held = matches!(
+            stored,
+            Some(MonitorState::Working) | Some(MonitorState::Unknown)
+        ) && *proposed == MonitorState::Idle;
         if !held {
             pending.remove(id);
             continue;
@@ -532,7 +556,8 @@ fn should_flag_unread(
 }
 
 async fn poll_once(
-    app: &App, previous_lxc_cpu: &mut Option<CpuSample>,
+    app: &App,
+    previous_lxc_cpu: &mut Option<CpuSample>,
     previous_clone_cpu: &mut HashMap<String, CpuSample>,
     pending_state: &mut HashMap<String, (MonitorState, Instant)>,
     blinded: &mut HashMap<String, MonitorState>,
@@ -559,19 +584,22 @@ async fn poll_once(
         async move {
             // An unavailable Docker daemon leaves the lifecycle unchanged; it is not proof that
             // the container stopped. Only a successful liveness response may write `offline`.
-            let running = match tokio::time::timeout(FETCH_TIMEOUT, app.docker.is_running(&host.id)).await {
-                Ok(Ok(running)) => Some(running),
-                Ok(Err(error)) => {
-                    tracing::warn!(host = %host.id, "Docker liveness check failed: {error}");
-                    None
-                }
-                Err(_) => {
-                    tracing::warn!(host = %host.id, "Docker liveness check timed out");
-                    None
-                }
-            };
+            let running =
+                match tokio::time::timeout(FETCH_TIMEOUT, app.docker.is_running(&host.id)).await {
+                    Ok(Ok(running)) => Some(running),
+                    Ok(Err(error)) => {
+                        tracing::warn!(host = %host.id, "Docker liveness check failed: {error}");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(host = %host.id, "Docker liveness check timed out");
+                        None
+                    }
+                };
             let (stats, ip) = if running == Some(true) {
-                match tokio::time::timeout(FETCH_TIMEOUT, sample_clone(app, host, &mut cpu_sample)).await {
+                match tokio::time::timeout(FETCH_TIMEOUT, sample_clone(app, host, &mut cpu_sample))
+                    .await
+                {
                     Ok(sample) => sample,
                     Err(_) => {
                         tracing::debug!(host = %host.id, "clone resource sample timed out");
@@ -617,7 +645,11 @@ async fn poll_once(
     // once for the whole fleet, concurrently, rather than inline per clone.
     let states = crate::stuck::resolve_fleet(
         app,
-        settled.iter().filter(|(_, up, _, _)| *up).map(|(id, ..)| id.clone()).collect(),
+        settled
+            .iter()
+            .filter(|(_, up, _, _)| *up)
+            .map(|(id, ..)| id.clone())
+            .collect(),
     )
     .await;
 
@@ -667,7 +699,10 @@ async fn poll_once(
         .map(|host| {
             (
                 host.id.clone(),
-                (app.views.last_viewed(&host.id), app.activity.last_active_at(&host.id)),
+                (
+                    app.views.last_viewed(&host.id),
+                    app.activity.last_active_at(&host.id),
+                ),
             )
         })
         .collect();
@@ -713,9 +748,7 @@ async fn poll_once(
                 // test below would never fire and a clone that really did stop during an
                 // outage would be swallowed silently. Remembered here, spent on the way out.
                 let before = replay_baseline(blinded, &host.id, host.monitor_state, monitor_state);
-                if before == Some(MonitorState::Working)
-                    && monitor_state != MonitorState::Working
-                {
+                if before == Some(MonitorState::Working) && monitor_state != MonitorState::Working {
                     let (last_viewed, last_token) =
                         unread_ctx.get(&host.id).copied().unwrap_or((None, None));
                     let is_selected = selected.as_deref() == Some(host.id.as_str());
@@ -740,7 +773,10 @@ async fn poll_once(
 
 /// Background loop; spawned once at startup.
 pub async fn run(app: App) {
-    tracing::info!("monitor poller started (every {}s)", POLL_INTERVAL.as_secs());
+    tracing::info!(
+        "monitor poller started (every {}s)",
+        POLL_INTERVAL.as_secs()
+    );
     let mut previous_lxc_cpu = None;
     let mut previous_clone_cpu = HashMap::new();
     let mut pending_state = HashMap::new();
@@ -765,7 +801,11 @@ mod tests {
     use super::*;
 
     fn stat(cpu: f64) -> ContainerStats {
-        ContainerStats { cpu_pct: cpu, mem_used: 1 << 30, mem_limit: 8u64 << 30 }
+        ContainerStats {
+            cpu_pct: cpu,
+            mem_used: 1 << 30,
+            mem_limit: 8u64 << 30,
+        }
     }
 
     fn lxc_stat(cpu: Option<f64>) -> LxcStats {
@@ -788,38 +828,98 @@ mod tests {
         let mut blinded = HashMap::new();
 
         // working → unknown: silent, and the baseline is taken.
-        assert_eq!(replay_baseline(&mut blinded, "c", Some(MonitorState::Working),
-                                   MonitorState::Unknown), Some(MonitorState::Working));
-        assert!(!should_flag_unread(MonitorState::Unknown, false, None, None));
+        assert_eq!(
+            replay_baseline(
+                &mut blinded,
+                "c",
+                Some(MonitorState::Working),
+                MonitorState::Unknown
+            ),
+            Some(MonitorState::Working)
+        );
+        assert!(!should_flag_unread(
+            MonitorState::Unknown,
+            false,
+            None,
+            None
+        ));
 
         // ...however long the outage lasts.
         for _ in 0..5 {
-            assert_eq!(replay_baseline(&mut blinded, "c", Some(MonitorState::Unknown),
-                                       MonitorState::Unknown), Some(MonitorState::Working),
-                       "the baseline must not erode");
+            assert_eq!(
+                replay_baseline(
+                    &mut blinded,
+                    "c",
+                    Some(MonitorState::Unknown),
+                    MonitorState::Unknown
+                ),
+                Some(MonitorState::Working),
+                "the baseline must not erode"
+            );
         }
 
         // unknown → idle on recovery: the stop replays, exactly once.
-        assert_eq!(replay_baseline(&mut blinded, "c", Some(MonitorState::Unknown),
-                                   MonitorState::Idle), Some(MonitorState::Working));
+        assert_eq!(
+            replay_baseline(
+                &mut blinded,
+                "c",
+                Some(MonitorState::Unknown),
+                MonitorState::Idle
+            ),
+            Some(MonitorState::Working)
+        );
         assert!(should_flag_unread(MonitorState::Idle, false, None, None));
-        assert!(blinded.is_empty(), "and the entry is spent, so it cannot fire twice");
+        assert!(
+            blinded.is_empty(),
+            "and the entry is spent, so it cannot fire twice"
+        );
 
         // idle → unknown → idle replays nothing: recovery is not a burst of noise.
-        assert_eq!(replay_baseline(&mut blinded, "c", Some(MonitorState::Idle),
-                                   MonitorState::Unknown), Some(MonitorState::Idle));
-        assert_eq!(replay_baseline(&mut blinded, "c", Some(MonitorState::Unknown),
-                                   MonitorState::Idle), Some(MonitorState::Idle));
+        assert_eq!(
+            replay_baseline(
+                &mut blinded,
+                "c",
+                Some(MonitorState::Idle),
+                MonitorState::Unknown
+            ),
+            Some(MonitorState::Idle)
+        );
+        assert_eq!(
+            replay_baseline(
+                &mut blinded,
+                "c",
+                Some(MonitorState::Unknown),
+                MonitorState::Idle
+            ),
+            Some(MonitorState::Idle)
+        );
 
         // A clone whose FIRST ever reading is unknown has no baseline to invent.
-        assert_eq!(replay_baseline(&mut blinded, "n", None, MonitorState::Unknown), None);
+        assert_eq!(
+            replay_baseline(&mut blinded, "n", None, MonitorState::Unknown),
+            None
+        );
         assert!(blinded.is_empty());
 
         // A container that dies mid-outage is not swallowed either.
-        assert_eq!(replay_baseline(&mut blinded, "c", Some(MonitorState::Working),
-                                   MonitorState::Unknown), Some(MonitorState::Working));
-        assert_eq!(replay_baseline(&mut blinded, "c", Some(MonitorState::Unknown),
-                                   MonitorState::Offline), Some(MonitorState::Working));
+        assert_eq!(
+            replay_baseline(
+                &mut blinded,
+                "c",
+                Some(MonitorState::Working),
+                MonitorState::Unknown
+            ),
+            Some(MonitorState::Working)
+        );
+        assert_eq!(
+            replay_baseline(
+                &mut blinded,
+                "c",
+                Some(MonitorState::Unknown),
+                MonitorState::Offline
+            ),
+            Some(MonitorState::Working)
+        );
     }
 
     /// The pair can desync, which is the whole hazard of a derived field: `Unknown` is stored
@@ -838,7 +938,10 @@ mod tests {
         };
 
         // The reload case: the state matches, the flag does not. Must still count as news.
-        assert!(flag_is_stale(MonitorState::Idle, &host(true)), "the flag is stale");
+        assert!(
+            flag_is_stale(MonitorState::Idle, &host(true)),
+            "the flag is stale"
+        );
         // Steady state on a healthy rig: nothing to do.
         assert!(!flag_is_stale(MonitorState::Idle, &host(false)));
         // Entering an outage from a clean flag, and sitting in one with it already set.
@@ -850,11 +953,26 @@ mod tests {
     fn a_slide_into_unknown_raises_nothing() {
         // The one case where we do NOT know the agent stopped. Raising a badge here tells an
         // operator their fleet died at the exact moment we lost the ability to say.
-        assert!(!should_flag_unread(MonitorState::Unknown, false, None, None));
-        assert!(!should_flag_unread(MonitorState::Unknown, false, Some(1), Some(2)));
+        assert!(!should_flag_unread(
+            MonitorState::Unknown,
+            false,
+            None,
+            None
+        ));
+        assert!(!should_flag_unread(
+            MonitorState::Unknown,
+            false,
+            Some(1),
+            Some(2)
+        ));
         // Everything else is unchanged.
         assert!(should_flag_unread(MonitorState::Idle, false, None, None));
-        assert!(should_flag_unread(MonitorState::Offline, false, Some(9), Some(1)));
+        assert!(should_flag_unread(
+            MonitorState::Offline,
+            false,
+            Some(9),
+            Some(1)
+        ));
     }
 
     /// Leaving `unknown` is the tick that spends the replay baseline and raises the badge, and
@@ -868,13 +986,21 @@ mod tests {
         let t0 = Instant::now();
         let mut next = HashMap::from([("c".to_string(), MonitorState::Idle)]);
         debounce(&mut next, &clones, &mut pending, t0);
-        assert_eq!(next["c"], MonitorState::Unknown, "held at what is actually up");
+        assert_eq!(
+            next["c"],
+            MonitorState::Unknown,
+            "held at what is actually up"
+        );
 
         // And it must LET GO. A hold that never expires is the most damaging thing this arm
         // could do: the clone would sit on "no reading" forever after the judge came back.
         let mut next = HashMap::from([("c".to_string(), MonitorState::Idle)]);
         debounce(&mut next, &clones, &mut pending, t0 + DEBOUNCE);
-        assert_eq!(next["c"], MonitorState::Idle, "the hold expires like any other");
+        assert_eq!(
+            next["c"],
+            MonitorState::Idle,
+            "the hold expires like any other"
+        );
 
         // A container that died mid-outage is news immediately.
         let mut pending = HashMap::new();
@@ -905,7 +1031,10 @@ mod tests {
         let pct = cpu_pct(&mut previous, 32_001_000, start + Duration::from_secs(4)).unwrap();
         assert!((pct - 50.0).abs() < f64::EPSILON);
 
-        assert_eq!(cpu_pct(&mut previous, 10, start + Duration::from_secs(8)), None);
+        assert_eq!(
+            cpu_pct(&mut previous, 10, start + Duration::from_secs(8)),
+            None
+        );
     }
 
     #[test]
@@ -916,7 +1045,11 @@ mod tests {
         // CT-wide gauge uses, so the rows and the total are directly comparable.
         let start = Instant::now();
         let mut previous = None;
-        assert_eq!(cpu_pct(&mut previous, 0, start), None, "one sample cannot make a rate");
+        assert_eq!(
+            cpu_pct(&mut previous, 0, start),
+            None,
+            "one sample cannot make a rate"
+        );
 
         // 8 cores busy for 4s == 32s of CPU time.
         let pct = cpu_pct(&mut previous, 32_000_000, start + Duration::from_secs(4)).unwrap();
@@ -972,12 +1105,30 @@ mod tests {
         let t0 = Instant::now();
         let mut pending = HashMap::new();
         // Proposed idle against a shown working: keep showing working while the clock runs.
-        for at in [t0, t0 + Duration::from_secs(30), t0 + DEBOUNCE - Duration::from_millis(1)] {
-            assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending, at),
-                       MonitorState::Working);
+        for at in [
+            t0,
+            t0 + Duration::from_secs(30),
+            t0 + DEBOUNCE - Duration::from_millis(1),
+        ] {
+            assert_eq!(
+                settle(
+                    MonitorState::Idle,
+                    Some(MonitorState::Working),
+                    &mut pending,
+                    at
+                ),
+                MonitorState::Working
+            );
         }
-        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending, t0 + DEBOUNCE),
-                   MonitorState::Idle);
+        assert_eq!(
+            settle(
+                MonitorState::Idle,
+                Some(MonitorState::Working),
+                &mut pending,
+                t0 + DEBOUNCE
+            ),
+            MonitorState::Idle
+        );
         assert!(pending.is_empty(), "once through, it stops being tracked");
     }
 
@@ -986,19 +1137,54 @@ mod tests {
         // The whole point. 36% of changes reversed inside 30 seconds on the live fleet.
         let t0 = Instant::now();
         let mut pending = HashMap::new();
-        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending, t0),
-                   MonitorState::Working);
+        assert_eq!(
+            settle(
+                MonitorState::Idle,
+                Some(MonitorState::Working),
+                &mut pending,
+                t0
+            ),
+            MonitorState::Working
+        );
         // It comes back before the minute is up, so the pending change is dropped...
-        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Working), &mut pending,
-                          t0 + Duration::from_secs(20)), MonitorState::Working);
+        assert_eq!(
+            settle(
+                MonitorState::Working,
+                Some(MonitorState::Working),
+                &mut pending,
+                t0 + Duration::from_secs(20)
+            ),
+            MonitorState::Working
+        );
         assert!(pending.is_empty());
         // ...and a later idle starts its own fresh minute rather than inheriting the old clock.
-        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending,
-                          t0 + Duration::from_secs(30)), MonitorState::Working);
-        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending,
-                          t0 + Duration::from_secs(89)), MonitorState::Working);
-        assert_eq!(settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending,
-                          t0 + Duration::from_secs(90)), MonitorState::Idle);
+        assert_eq!(
+            settle(
+                MonitorState::Idle,
+                Some(MonitorState::Working),
+                &mut pending,
+                t0 + Duration::from_secs(30)
+            ),
+            MonitorState::Working
+        );
+        assert_eq!(
+            settle(
+                MonitorState::Idle,
+                Some(MonitorState::Working),
+                &mut pending,
+                t0 + Duration::from_secs(89)
+            ),
+            MonitorState::Working
+        );
+        assert_eq!(
+            settle(
+                MonitorState::Idle,
+                Some(MonitorState::Working),
+                &mut pending,
+                t0 + Duration::from_secs(90)
+            ),
+            MonitorState::Idle
+        );
     }
 
     #[test]
@@ -1006,8 +1192,15 @@ mod tests {
         // One direction only. Waiting here would make every turn shorter than a minute
         // invisible, and starting work is news an operator wants immediately.
         let mut pending = HashMap::new();
-        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Idle), &mut pending, Instant::now()),
-                   MonitorState::Working);
+        assert_eq!(
+            settle(
+                MonitorState::Working,
+                Some(MonitorState::Idle),
+                &mut pending,
+                Instant::now()
+            ),
+            MonitorState::Working
+        );
         assert!(pending.is_empty());
     }
 
@@ -1017,10 +1210,24 @@ mod tests {
         // wait a minute to see it.
         let t0 = Instant::now();
         let mut pending = HashMap::new();
-        assert_eq!(settle(MonitorState::Offline, Some(MonitorState::Working), &mut pending, t0),
-                   MonitorState::Offline);
-        assert_eq!(settle(MonitorState::Working, Some(MonitorState::Offline), &mut pending, t0),
-                   MonitorState::Working);
+        assert_eq!(
+            settle(
+                MonitorState::Offline,
+                Some(MonitorState::Working),
+                &mut pending,
+                t0
+            ),
+            MonitorState::Offline
+        );
+        assert_eq!(
+            settle(
+                MonitorState::Working,
+                Some(MonitorState::Offline),
+                &mut pending,
+                t0
+            ),
+            MonitorState::Working
+        );
         assert!(pending.is_empty());
     }
 
@@ -1028,8 +1235,10 @@ mod tests {
     fn a_clones_first_reading_is_shown_at_once() {
         // Nothing to be a change from, so nothing to hold.
         let mut pending = HashMap::new();
-        assert_eq!(settle(MonitorState::Working, None, &mut pending, Instant::now()),
-                   MonitorState::Working);
+        assert_eq!(
+            settle(MonitorState::Working, None, &mut pending, Instant::now()),
+            MonitorState::Working
+        );
         assert!(pending.is_empty());
     }
 
@@ -1037,7 +1246,12 @@ mod tests {
     fn a_clone_that_left_the_fleet_stops_being_tracked() {
         let t0 = Instant::now();
         let mut pending = HashMap::new();
-        settle(MonitorState::Idle, Some(MonitorState::Working), &mut pending, t0);
+        settle(
+            MonitorState::Idle,
+            Some(MonitorState::Working),
+            &mut pending,
+            t0,
+        );
         assert_eq!(pending.len(), 1);
         let mut empty = HashMap::new();
         debounce(&mut empty, &[], &mut pending, t0);
@@ -1057,8 +1271,16 @@ mod tests {
             ("free".to_string(), MonitorState::Working),
         ]);
         debounce(&mut next, &clones, &mut pending, t0);
-        assert_eq!(next["held"], MonitorState::Working, "its change is still young");
-        assert_eq!(next["free"], MonitorState::Working, "it proposed no change at all");
+        assert_eq!(
+            next["held"],
+            MonitorState::Working,
+            "its change is still young"
+        );
+        assert_eq!(
+            next["free"],
+            MonitorState::Working,
+            "it proposed no change at all"
+        );
         assert_eq!(pending.keys().collect::<Vec<_>>(), vec!["held"]);
     }
 
@@ -1082,8 +1304,10 @@ mod tests {
 
     #[test]
     fn a_parent_goes_idle_once_every_sub_clone_is_idle() {
-        let clones =
-            [clone_row("parent", None, None), clone_row("sub-a", Some("parent"), None)];
+        let clones = [
+            clone_row("parent", None, None),
+            clone_row("sub-a", Some("parent"), None),
+        ];
         let mut next = HashMap::from([
             ("parent".to_string(), MonitorState::Idle),
             ("sub-a".to_string(), MonitorState::Idle),
@@ -1095,8 +1319,10 @@ mod tests {
     #[test]
     fn an_offline_parent_is_not_lifted_by_a_working_sub_clone() {
         // Offline is about the container, and the row must not claim a stopped clone is working.
-        let clones =
-            [clone_row("parent", None, None), clone_row("sub-a", Some("parent"), None)];
+        let clones = [
+            clone_row("parent", None, None),
+            clone_row("sub-a", Some("parent"), None),
+        ];
         let mut next = HashMap::from([
             ("parent".to_string(), MonitorState::Offline),
             ("sub-a".to_string(), MonitorState::Working),
@@ -1120,7 +1346,10 @@ mod tests {
 
     #[test]
     fn a_top_level_clones_state_is_untouched() {
-        let clones = [clone_row("solo", None, None), clone_row("other", None, None)];
+        let clones = [
+            clone_row("solo", None, None),
+            clone_row("other", None, None),
+        ];
         let mut next = HashMap::from([
             ("solo".to_string(), MonitorState::Idle),
             ("other".to_string(), MonitorState::Working),
@@ -1132,26 +1361,66 @@ mod tests {
     #[test]
     fn selected_clone_never_flags_unread() {
         // Whatever the timestamps, a clone the operator is currently looking at is not flagged.
-        assert!(!should_flag_unread(MonitorState::Idle, true, None, Some(10)));
-        assert!(!should_flag_unread(MonitorState::Offline, true, Some(1), Some(10)));
+        assert!(!should_flag_unread(
+            MonitorState::Idle,
+            true,
+            None,
+            Some(10)
+        ));
+        assert!(!should_flag_unread(
+            MonitorState::Offline,
+            true,
+            Some(1),
+            Some(10)
+        ));
     }
 
     #[test]
     fn idle_is_suppressed_only_when_viewed_since_last_activity() {
         // Viewed at/after last token activity → operator has seen the output → gray dot, no nag.
-        assert!(!should_flag_unread(MonitorState::Idle, false, Some(10), Some(10)));
-        assert!(!should_flag_unread(MonitorState::Idle, false, Some(11), Some(10)));
+        assert!(!should_flag_unread(
+            MonitorState::Idle,
+            false,
+            Some(10),
+            Some(10)
+        ));
+        assert!(!should_flag_unread(
+            MonitorState::Idle,
+            false,
+            Some(11),
+            Some(10)
+        ));
         // Last looked before the clone's final activity → they haven't seen it → flag.
-        assert!(should_flag_unread(MonitorState::Idle, false, Some(9), Some(10)));
+        assert!(should_flag_unread(
+            MonitorState::Idle,
+            false,
+            Some(9),
+            Some(10)
+        ));
         // Never viewed, or no recorded activity to compare against → flag (current behavior).
-        assert!(should_flag_unread(MonitorState::Idle, false, None, Some(10)));
-        assert!(should_flag_unread(MonitorState::Idle, false, Some(10), None));
+        assert!(should_flag_unread(
+            MonitorState::Idle,
+            false,
+            None,
+            Some(10)
+        ));
+        assert!(should_flag_unread(
+            MonitorState::Idle,
+            false,
+            Some(10),
+            None
+        ));
     }
 
     #[test]
     fn offline_transition_is_always_flagged_even_if_recently_viewed() {
         // A container that died is surfaced regardless of when it was last viewed.
-        assert!(should_flag_unread(MonitorState::Offline, false, Some(99), Some(10)));
+        assert!(should_flag_unread(
+            MonitorState::Offline,
+            false,
+            Some(99),
+            Some(10)
+        ));
     }
 
     #[test]
@@ -1203,14 +1472,10 @@ mod tests {
 
     #[test]
     fn pick_stat_drops_an_offline_clone() {
-        assert_eq!(pick_stat(None, MonitorState::Offline, Some(&stat(33.0))), None);
-    }
-
-    #[test]
-    fn stats_bus_new_subscriber_gets_empty_snapshot() {
-        let bus = StatsBus::new();
-        let (snap, _rx) = bus.subscribe();
-        assert_eq!(snap, "{}");
+        assert_eq!(
+            pick_stat(None, MonitorState::Offline, Some(&stat(33.0))),
+            None
+        );
     }
 
     #[test]
@@ -1233,8 +1498,10 @@ mod tests {
         let (_snap, mut rx) = bus.subscribe();
         let a: HashMap<String, ContainerStats> =
             (0..8).map(|i| (format!("h{i}"), stat(i as f64))).collect();
-        let b: HashMap<String, ContainerStats> =
-            (0..8).rev().map(|i| (format!("h{i}"), stat(i as f64))).collect();
+        let b: HashMap<String, ContainerStats> = (0..8)
+            .rev()
+            .map(|i| (format!("h{i}"), stat(i as f64)))
+            .collect();
         assert_eq!(a, b);
         bus.publish(&a);
         assert!(rx.try_recv().is_ok());

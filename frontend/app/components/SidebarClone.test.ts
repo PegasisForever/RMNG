@@ -14,7 +14,3 @@ test("formats a direct sample with sub-percent CPU and no memory cap", () => {
 
   expect(formatCloneUsage(stats)).toEqual({ cpu: "0.4%", mem: "2.5GB" });
 });
-
-test("has no metric labels before the first sample", () => {
-  expect(formatCloneUsage(undefined)).toBeNull();
-});

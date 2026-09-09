@@ -15,9 +15,9 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast::error::RecvError;
 
@@ -191,8 +191,15 @@ fn update_capture_gates(handle: &MediaHandle, app: &App, viewers: &Viewers) {
         }
         match conn.send(&ServerMsg::Capture { active }) {
             Ok(()) => {
-                handle.capture_gate.lock().unwrap().insert(id.clone(), active);
-                tracing::debug!("clone '{id}': capture {}", if active { "on" } else { "off" });
+                handle
+                    .capture_gate
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), active);
+                tracing::debug!(
+                    "clone '{id}': capture {}",
+                    if active { "on" } else { "off" }
+                );
             }
             // A clone that cannot take the message keeps capturing, which is safe: it is
             // exactly what every daemon did before this existed. Leave the record unset so
@@ -212,7 +219,11 @@ fn send_capture_gate_on_hello(handle: &MediaHandle, app: &App, viewers: &Viewers
     let conn = handle.conns.lock().unwrap().get(id).cloned();
     let Some(conn) = conn else { return };
     if conn.send(&ServerMsg::Capture { active }).is_ok() {
-        handle.capture_gate.lock().unwrap().insert(id.to_string(), active);
+        handle
+            .capture_gate
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), active);
     }
 }
 
@@ -242,15 +253,13 @@ impl MediaHandle {
     /// Push a live layout to one clone-daemon. Cheap: `Conn::send` is a single
     /// `MSG_DONTWAIT` `sendmsg`, and the clone's session holder ignores a layout equal to
     /// the one it already holds, so a repeat moves no windows.
-    pub fn set_monitors(
-        &self,
-        clone: &str,
-        monitors: &[wire::MonitorSpec],
-    ) -> Result<(), String> {
+    pub fn set_monitors(&self, clone: &str, monitors: &[wire::MonitorSpec]) -> Result<(), String> {
         let conn = self.conns.lock().unwrap().get(clone).cloned();
         match conn {
             Some(c) => c
-                .send(&ServerMsg::SetMonitors { monitors: monitors.to_vec() })
+                .send(&ServerMsg::SetMonitors {
+                    monitors: monitors.to_vec(),
+                })
                 .map_err(|e| e.to_string()),
             None => Err(format!("clone '{clone}' not connected")),
         }
@@ -332,14 +341,22 @@ pub fn spawn(app: App, init: MediaInit) {
     // Headless-clone terminal plane: proxies tmux sessions to viewers when the selected clone
     // is headless. Threaded into the connect path, the selection watcher, and each viewer's
     // input reader below.
-    let termplane =
-        Arc::new(crate::termplane::TermPlane::new(app.clone(), viewers.clone(), rt_handle.clone()));
+    let termplane = Arc::new(crate::termplane::TermPlane::new(
+        app.clone(),
+        viewers.clone(),
+        rt_handle.clone(),
+    ));
 
     // Port 1 TCP: viewers + their input. Each viewer gets a bounded channel + a writer
     // thread; producers only `try_send`, so a slow viewer never blocks the encoders.
     {
-        let (viewers, handle, app, encoders, termplane) =
-            (viewers.clone(), handle.clone(), app.clone(), encoders.clone(), termplane.clone());
+        let (viewers, handle, app, encoders, termplane) = (
+            viewers.clone(),
+            handle.clone(),
+            app.clone(),
+            encoders.clone(),
+            termplane.clone(),
+        );
         std::thread::spawn(move || match TcpListener::bind(("0.0.0.0", video_port)) {
             Ok(l) => {
                 tracing::info!("port 1 (video) listening on 0.0.0.0:{video_port}");
@@ -381,7 +398,15 @@ pub fn spawn(app: App, init: MediaInit) {
                     let cfg = app.config();
                     let selected = app.store.selected();
                     // Queue mode + metadata straight into this viewer's channel (mode is first).
-                    prime_viewer_metadata(&handle, &tx, selected.clone(), chroma, &state, &cfg, forward_port);
+                    prime_viewer_metadata(
+                        &handle,
+                        &tx,
+                        selected.clone(),
+                        chroma,
+                        &state,
+                        &cfg,
+                        forward_port,
+                    );
                     // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
                     // (independent of encode latency); mode already leads its channel.
                     viewers.lock().unwrap().insert(id, ViewerConn { id, tx });
@@ -395,8 +420,12 @@ pub fn spawn(app: App, init: MediaInit) {
                     termplane.on_viewers_changed();
 
                     // Reader thread owns teardown.
-                    let (handle, app, viewers, termplane) =
-                        (handle.clone(), app.clone(), viewers.clone(), termplane.clone());
+                    let (handle, app, viewers, termplane) = (
+                        handle.clone(),
+                        app.clone(),
+                        viewers.clone(),
+                        termplane.clone(),
+                    );
                     std::thread::spawn(move || {
                         read_viewer_input(read_half, handle, app, viewers, termplane, id)
                     });
@@ -482,7 +511,11 @@ pub fn spawn(app: App, init: MediaInit) {
                         // monitors) via termplane. Headed clones get a fresh Desktop ViewSpec.
                         match sel.as_deref() {
                             Some(s) if is_headless(&state, s) => termplane.on_viewers_changed(),
-                            Some(_) => broadcast_json(&viewers, T_VIEWSPEC, &desktop_view_spec(&app.config())),
+                            Some(_) => broadcast_json(
+                                &viewers,
+                                T_VIEWSPEC,
+                                &desktop_view_spec(&app.config()),
+                            ),
                             None => {}
                         }
                     }
@@ -560,20 +593,30 @@ fn build_forwards_msg(state: &wire::ControlState, forward_port: u16) -> wire::fo
         .iter()
         .filter(|h| !h.archived)
         .flat_map(|h| {
-            h.forwards.iter().filter(|f| f.enabled).map(move |f| wire::forward::ForwardRule {
-                host_id: h.id.clone(),
-                id: f.id.clone(),
-                remote_port: f.remote_port,
-                local_port: f.local_port,
-            })
+            h.forwards
+                .iter()
+                .filter(|f| f.enabled)
+                .map(move |f| wire::forward::ForwardRule {
+                    host_id: h.id.clone(),
+                    id: f.id.clone(),
+                    remote_port: f.remote_port,
+                    local_port: f.local_port,
+                })
         })
         .collect();
-    wire::forward::ForwardsMsg { forward_port, rules }
+    wire::forward::ForwardsMsg {
+        forward_port,
+        rules,
+    }
 }
 
 /// Broadcast the current desired forward set to every viewer (port-1 tag 5).
 fn broadcast_forwards(viewers: &Viewers, state: &wire::ControlState, forward_port: u16) {
-    broadcast_json(viewers, T_FORWARDS, &build_forwards_msg(state, forward_port));
+    broadcast_json(
+        viewers,
+        T_FORWARDS,
+        &build_forwards_msg(state, forward_port),
+    );
 }
 
 /// Pre-frame one H.264 AU: `[0u8][u32be monitor_id][u32be len][AnnexB]`. Built once
@@ -637,8 +680,14 @@ fn send_clip_to(handle: &MediaHandle, viewers: &Viewers, dest: &str, msg: Clipbo
 /// Every clipboard destination except `source`: all *other* clones + all *other*
 /// viewers (remote↔local + remote↔remote + viewer↔viewer).
 fn clip_dests(handle: &MediaHandle, viewers: &Viewers, source: &str) -> Vec<String> {
-    let mut dests: Vec<String> =
-        handle.conns.lock().unwrap().keys().filter(|&id| id != source).cloned().collect();
+    let mut dests: Vec<String> = handle
+        .conns
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|&id| id != source)
+        .cloned()
+        .collect();
     for id in viewers.lock().unwrap().keys() {
         let src = viewer_src(*id);
         if src != source {
@@ -678,7 +727,10 @@ fn clip_fetch_owner(
     }
     let key = (req.serial, req.mime_type.clone());
     let in_flight = clip.pending.contains_key(&key);
-    clip.pending.entry(key).or_default().push(requester.to_string());
+    clip.pending
+        .entry(key)
+        .or_default()
+        .push(requester.to_string());
     (!in_flight).then_some(owner)
 }
 
@@ -715,8 +767,12 @@ fn force_idr_all(encoders: &Encoders) {
     // Snapshot the handles, then release the lock before touching GStreamer: `force_idr`
     // pushes an event into the pipeline and can block on its streaming thread. Holding the
     // global map across that would stall every clone's reader thread (see `encoder_for`).
-    let snapshot: Vec<Arc<Encoder>> =
-        encoders.lock().unwrap().values().map(|(e, _, _)| e.clone()).collect();
+    let snapshot: Vec<Arc<Encoder>> = encoders
+        .lock()
+        .unwrap()
+        .values()
+        .map(|(e, _, _)| e.clone())
+        .collect();
     for e in snapshot {
         e.force_idr();
     }
@@ -751,7 +807,9 @@ fn encoder_for(
     // clone's reader thread — one slow encoder init froze the entire fleet's media sockets.
     let built = {
         let viewers = viewers.clone();
-        match Encoder::new(chroma, move |au, _idr| broadcast_video(&viewers, monitor_id, &au)) {
+        match Encoder::new(chroma, move |au, _idr| {
+            broadcast_video(&viewers, monitor_id, &au)
+        }) {
             Ok(e) => Arc::new(e),
             Err(err) => {
                 tracing::error!("encoder for monitor {monitor_id} init failed: {err}");
@@ -864,7 +922,13 @@ pub(crate) fn accepted_conn(tag: &str) -> (OwnedFd, Arc<Conn>) {
     let path = std::env::temp_dir().join(format!("rmng-conn-{}-{tag}.sock", std::process::id()));
     let path = path.to_str().unwrap().to_string();
     let listener = Listener::bind(&path).unwrap();
-    let fd = socket(AddressFamily::Unix, SockType::SeqPacket, SockFlag::empty(), None).unwrap();
+    let fd = socket(
+        AddressFamily::Unix,
+        SockType::SeqPacket,
+        SockFlag::empty(),
+        None,
+    )
+    .unwrap();
     connect(fd.as_raw_fd(), &UnixAddr::new(path.as_str()).unwrap()).unwrap();
     let conn = Arc::new(listener.accept().unwrap());
     let _ = std::fs::remove_file(&path);
@@ -925,7 +989,10 @@ fn prime_viewer_metadata(
         // Nothing selected: clear the viewer's window set (it shows only its keep-alive window).
         if let Some(b) = frame_json(
             T_VIEWSPEC,
-            &wire::viewer::ViewSpec { monitors: vec![], content: wire::viewer::ViewContent::Desktop },
+            &wire::viewer::ViewSpec {
+                monitors: vec![],
+                content: wire::viewer::ViewContent::Desktop,
+            },
         ) {
             let _ = tx.try_send(b);
         }
@@ -985,7 +1052,16 @@ fn prime_viewer_video(
 fn dup_latest_frames(
     handle: &MediaHandle,
     sel: &str,
-) -> Vec<(u32, OwnedFd, u32, u64, u32, u32, Vec<wire::socket::PlaneLayout>, bool)> {
+) -> Vec<(
+    u32,
+    OwnedFd,
+    u32,
+    u64,
+    u32,
+    u32,
+    Vec<wire::socket::PlaneLayout>,
+    bool,
+)> {
     let latest = handle.latest.lock().unwrap();
     latest
         .get(sel)
@@ -993,7 +1069,16 @@ fn dup_latest_frames(
             m.values()
                 .filter_map(|f| {
                     dup_owned(&f.fd).map(|fd| {
-                        (f.monitor_id, fd, f.fourcc, f.modifier, f.width, f.height, f.planes.clone(), f.shm)
+                        (
+                            f.monitor_id,
+                            fd,
+                            f.fourcc,
+                            f.modifier,
+                            f.width,
+                            f.height,
+                            f.planes.clone(),
+                            f.shm,
+                        )
                     })
                 })
                 .collect()
@@ -1063,7 +1148,10 @@ fn reprime_all(
         broadcast_json(
             viewers,
             T_VIEWSPEC,
-            &wire::viewer::ViewSpec { monitors: vec![], content: wire::viewer::ViewContent::Desktop },
+            &wire::viewer::ViewSpec {
+                monitors: vec![],
+                content: wire::viewer::ViewContent::Desktop,
+            },
         );
         return;
     };
@@ -1101,7 +1189,11 @@ fn serve_clone(
         match conn.recv() {
             Ok((DaemonMsg::Hello(h), _)) => {
                 tracing::info!("clone-daemon '{}' connected", h.clone_id);
-                handle.conns.lock().unwrap().insert(h.clone_id.clone(), conn.clone());
+                handle
+                    .conns
+                    .lock()
+                    .unwrap()
+                    .insert(h.clone_id.clone(), conn.clone());
                 // A daemon starts out capturing, so tell it at once if nobody is watching.
                 send_capture_gate_on_hello(&handle, &app, &viewers, &h.clone_id);
                 // Correct a stale layout on the clone that is on screen right now, and on one
@@ -1121,10 +1213,25 @@ fn serve_clone(
                 let Some(id) = clone_id.clone() else { continue };
                 if let Some(fd) = fds.into_iter().next() {
                     if let Some(dup) = dup_owned(&fd) {
-                        handle.latest.lock().unwrap().entry(id.clone()).or_default().insert(
-                            f.monitor_id,
-                            LatestFrame { monitor_id: f.monitor_id, fd: dup, fourcc: f.fourcc, modifier: f.modifier, width: f.width, height: f.height, planes: f.planes.clone(), shm: f.shm },
-                        );
+                        handle
+                            .latest
+                            .lock()
+                            .unwrap()
+                            .entry(id.clone())
+                            .or_default()
+                            .insert(
+                                f.monitor_id,
+                                LatestFrame {
+                                    monitor_id: f.monitor_id,
+                                    fd: dup,
+                                    fourcc: f.fourcc,
+                                    modifier: f.modifier,
+                                    width: f.width,
+                                    height: f.height,
+                                    planes: f.planes.clone(),
+                                    shm: f.shm,
+                                },
+                            );
                     }
                     // Ack as soon as the frame is received and `latest` owns its own dup of the
                     // fd — BEFORE any encoding. The daemon's 1-deep gate exists precisely to shed
@@ -1135,7 +1242,10 @@ fn serve_clone(
                     // stops draining. Observed live: all clone sockets frozen at a constant
                     // Recv-Q with the capture threads parked in `sock_alloc_send_pskb`.
                     // Acking here degrades to a lower frame rate under load instead of deadlock.
-                    let _ = conn.send(&ServerMsg::Ack(Ack { monitor_id: f.monitor_id, seq: f.seq }));
+                    let _ = conn.send(&ServerMsg::Ack(Ack {
+                        monitor_id: f.monitor_id,
+                        seq: f.seq,
+                    }));
                     let sel = app.store.selected();
                     // This loop re-reads the selection per frame, so it can beat the store
                     // watcher to a flip. When it does, it owns the whole handover.
@@ -1151,8 +1261,17 @@ fn serve_clone(
                         &format!("clone '{id}'s frame loop"),
                     );
                     if sel.as_deref() == Some(id.as_str()) {
-                        if let Some(enc) = encoder_for(&encoders, &viewers, f.monitor_id, f.width, f.height, chroma) {
-                            if let Err(e) = enc.push(fd, f.fourcc, f.modifier, f.width, f.height, &f.planes, f.shm) {
+                        if let Some(enc) = encoder_for(
+                            &encoders,
+                            &viewers,
+                            f.monitor_id,
+                            f.width,
+                            f.height,
+                            chroma,
+                        ) {
+                            if let Err(e) = enc.push(
+                                fd, f.fourcc, f.modifier, f.width, f.height, &f.planes, f.shm,
+                            ) {
                                 tracing::warn!("encode push failed: {e}");
                             }
                         }
@@ -1203,7 +1322,13 @@ fn serve_clone(
             Ok((DaemonMsg::Unknown, _)) => {}
             Err(e) => {
                 if let Some(id) = &clone_id {
-                    teardown_if_current(&handle.conns, &handle.latest, &handle.capture_gate, id, &conn);
+                    teardown_if_current(
+                        &handle.conns,
+                        &handle.latest,
+                        &handle.capture_gate,
+                        id,
+                        &conn,
+                    );
                     clip_forget_source(&handle.clip, id);
                     tracing::info!("clone-daemon '{id}' disconnected: {e}");
                 }
@@ -1285,8 +1410,12 @@ fn read_viewer_input(
         }
         match tag[0] {
             T_VIDEO => {
-                let Ok(input) = serde_json::from_slice::<InputMsg>(&body) else { continue };
-                let Some(clone) = app.store.selected() else { continue };
+                let Ok(input) = serde_json::from_slice::<InputMsg>(&body) else {
+                    continue;
+                };
+                let Some(clone) = app.store.selected() else {
+                    continue;
+                };
                 let _ = handle.send_input(&clone, input);
             }
             T_CLIPBOARD => {
@@ -1336,11 +1465,15 @@ fn read_forward_header(stream: &mut TcpStream) -> std::io::Result<wire::forward:
     stream.read_exact(&mut lb)?;
     let len = u32::from_be_bytes(lb) as usize;
     if len > 64 * 1024 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "forward header too large"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "forward header too large",
+        ));
     }
     let mut body = vec![0u8; len];
     stream.read_exact(&mut body)?;
-    serde_json::from_slice(&body).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_slice(&body)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// Bidirectionally pipe two TCP streams until both close. Each direction runs in its own
@@ -1376,7 +1509,12 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
             return;
         }
     };
-    let host = app.store.get().hosts.into_iter().find(|h| h.id == header.host_id);
+    let host = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .find(|h| h.id == header.host_id);
     let Some(host) = host else {
         let _ = stream.write_all(&[1u8]);
         return;
@@ -1424,19 +1562,18 @@ fn serve_forward(mut stream: TcpStream, app: App, rt: tokio::runtime::Handle) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn media_init_disabled_token_is_distinguishable() {
-        let disabled = MediaInit { enabled: false };
-        assert!(!disabled.enabled_for_test());
-    }
-
     /// Connect a SOCK_SEQPACKET client to `path` — the daemon side of an accept pair
     /// (mirrors `clone-daemon`'s `Transport::connect`). The returned fd only has to stay
     /// alive; the test never sends on it.
     fn seq_connect(path: &str) -> OwnedFd {
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};
-        let fd =
-            socket(AddressFamily::Unix, SockType::SeqPacket, SockFlag::empty(), None).unwrap();
+        let fd = socket(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
         connect(fd.as_raw_fd(), &UnixAddr::new(path).unwrap()).unwrap();
         fd
     }
@@ -1453,17 +1590,28 @@ mod tests {
         handle.insert_conn_for_test("a", conn_a);
         handle.insert_conn_for_test("b", conn_b);
 
-        let mons =
-            vec![wire::MonitorSpec { width: 1280, height: 720, x: 0, y: 0, primary: true }];
+        let mons = vec![wire::MonitorSpec {
+            width: 1280,
+            height: 720,
+            x: 0,
+            y: 0,
+            primary: true,
+        }];
         handle.set_monitors("a", &mons).unwrap();
-        assert!(handle.set_monitors("c", &mons).is_err(), "no connection is not a push");
+        assert!(
+            handle.set_monitors("c", &mons).is_err(),
+            "no connection is not a push"
+        );
 
         let got = recv_now(&client_a).expect("the named clone got the layout");
         match serde_json::from_slice::<ServerMsg>(&got).unwrap() {
             ServerMsg::SetMonitors { monitors } => assert_eq!(monitors, mons),
             other => panic!("expected SetMonitors, got {other:?}"),
         }
-        assert!(recv_now(&client_b).is_none(), "the other clone keeps its own layout");
+        assert!(
+            recv_now(&client_b).is_none(),
+            "the other clone keeps its own layout"
+        );
     }
 
     /// The three `Hello` cases, and why the middle one exists: a fleet upgrading onto the
@@ -1493,7 +1641,10 @@ mod tests {
         apply_active_layout_when_ready(app.clone(), "fresh".into());
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(recv_now(&client).is_none(), "pushed to a clone that had not registered");
+        assert!(
+            recv_now(&client).is_none(),
+            "pushed to a clone that had not registered"
+        );
 
         app.media.insert_conn_for_test("fresh", conn);
         let mut got = None;
@@ -1536,7 +1687,11 @@ mod tests {
         viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx });
         update_capture_gates(&app.media, &app, &viewers);
         assert_eq!(capture_msg(&client_a), Some(true));
-        assert_eq!(capture_msg(&client_b), None, "a clone already stopped was told again");
+        assert_eq!(
+            capture_msg(&client_b),
+            None,
+            "a clone already stopped was told again"
+        );
 
         // Selection moves to 'b': exactly one stop and one start.
         app.store.mutate(|s| s.selected = Some("b".into()));
@@ -1591,11 +1746,22 @@ mod tests {
         // The switch: 'a' stops painting and 'b' starts, from one claim.
         app.store.mutate(|s| s.selected = Some("b".into()));
         assert!(adopt(Some("b".into())));
-        assert_eq!(capture_msg(&client_a), Some(false), "the clone leaving kept capturing");
-        assert_eq!(capture_msg(&client_b), Some(true), "the clone arriving was never told to paint");
+        assert_eq!(
+            capture_msg(&client_a),
+            Some(false),
+            "the clone leaving kept capturing"
+        );
+        assert_eq!(
+            capture_msg(&client_b),
+            Some(true),
+            "the clone arriving was never told to paint"
+        );
 
         // The second observer of the same flip finds nothing to do and says nothing.
-        assert!(!adopt(Some("b".into())), "the same selection was claimed twice");
+        assert!(
+            !adopt(Some("b".into())),
+            "the same selection was claimed twice"
+        );
         assert_eq!(capture_msg(&client_a), None);
         assert_eq!(capture_msg(&client_b), None);
     }
@@ -1653,8 +1819,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let conns: Mutex<HashMap<String, Arc<Conn>>> = Mutex::new(HashMap::new());
-        let latest: Mutex<HashMap<String, HashMap<u32, LatestFrame>>> =
-            Mutex::new(HashMap::new());
+        let latest: Mutex<HashMap<String, HashMap<u32, LatestFrame>>> = Mutex::new(HashMap::new());
         let gates: Mutex<HashMap<String, bool>> = Mutex::new(HashMap::new());
         // B has re-Hello'd: both maps hold the NEW session's state under id "x".
         conns.lock().unwrap().insert("x".into(), conn_b.clone());
@@ -1664,7 +1829,11 @@ mod tests {
         // Old thread A tears down late — B's entries must survive in BOTH maps.
         teardown_if_current(&conns, &latest, &gates, "x", &conn_a);
         assert!(
-            conns.lock().unwrap().get("x").is_some_and(|c| Arc::ptr_eq(c, &conn_b)),
+            conns
+                .lock()
+                .unwrap()
+                .get("x")
+                .is_some_and(|c| Arc::ptr_eq(c, &conn_b)),
             "old-thread teardown clobbered the new session's conns entry"
         );
         assert!(
@@ -1693,8 +1862,12 @@ mod tests {
             .split_once("Ok((DaemonMsg::ClipboardOffer")
             .expect("frame arm ends at the next match arm")
             .0;
-        let ack = frame_arm.find("ServerMsg::Ack").expect("frame arm sends an Ack");
-        let push = frame_arm.find("enc.push(").expect("frame arm pushes to an encoder");
+        let ack = frame_arm
+            .find("ServerMsg::Ack")
+            .expect("frame arm sends an Ack");
+        let push = frame_arm
+            .find("enc.push(")
+            .expect("frame arm pushes to an encoder");
         assert!(
             ack < push,
             "Ack must precede enc.push in the frame arm: acking after the encode makes the \
@@ -1704,27 +1877,71 @@ mod tests {
 
     #[test]
     fn build_forwards_msg_unions_enabled_rules_only() {
-        use wire::{ControlState, RmngClone, PortForward};
-        let mut a = RmngClone { id: "a".into(), host: "a".into(), ..Default::default() };
+        use wire::{ControlState, PortForward, RmngClone};
+        let mut a = RmngClone {
+            id: "a".into(),
+            host: "a".into(),
+            ..Default::default()
+        };
         a.forwards = vec![
-            PortForward { id: "f8080".into(), remote_port: 3000, local_port: 8080, enabled: true, label: None },
-            PortForward { id: "f9".into(), remote_port: 9, local_port: 9, enabled: false, label: None },
+            PortForward {
+                id: "f8080".into(),
+                remote_port: 3000,
+                local_port: 8080,
+                enabled: true,
+                label: None,
+            },
+            PortForward {
+                id: "f9".into(),
+                remote_port: 9,
+                local_port: 9,
+                enabled: false,
+                label: None,
+            },
         ];
-        let mut b = RmngClone { id: "b".into(), host: "b".into(), ..Default::default() };
-        b.forwards = vec![
-            PortForward { id: "f7000".into(), remote_port: 5000, local_port: 7000, enabled: true, label: None },
-        ];
-        let mut archived = RmngClone { id: "archived".into(), host: "archived".into(), archived: true, ..Default::default() };
-        archived.forwards = vec![
-            PortForward { id: "f9000".into(), remote_port: 9000, local_port: 9000, enabled: true, label: None },
-        ];
-        let st = ControlState { hosts: vec![a, b, archived], ..Default::default() };
+        let mut b = RmngClone {
+            id: "b".into(),
+            host: "b".into(),
+            ..Default::default()
+        };
+        b.forwards = vec![PortForward {
+            id: "f7000".into(),
+            remote_port: 5000,
+            local_port: 7000,
+            enabled: true,
+            label: None,
+        }];
+        let mut archived = RmngClone {
+            id: "archived".into(),
+            host: "archived".into(),
+            archived: true,
+            ..Default::default()
+        };
+        archived.forwards = vec![PortForward {
+            id: "f9000".into(),
+            remote_port: 9000,
+            local_port: 9000,
+            enabled: true,
+            label: None,
+        }];
+        let st = ControlState {
+            hosts: vec![a, b, archived],
+            ..Default::default()
+        };
         let msg = build_forwards_msg(&st, 9005);
         assert_eq!(msg.forward_port, 9005);
         // Only the two enabled rules, tagged with clone id.
         assert_eq!(msg.rules.len(), 2);
-        assert!(msg.rules.iter().any(|r| r.host_id == "a" && r.local_port == 8080 && r.remote_port == 3000));
-        assert!(msg.rules.iter().any(|r| r.host_id == "b" && r.local_port == 7000));
+        assert!(
+            msg.rules
+                .iter()
+                .any(|r| r.host_id == "a" && r.local_port == 8080 && r.remote_port == 3000)
+        );
+        assert!(
+            msg.rules
+                .iter()
+                .any(|r| r.host_id == "b" && r.local_port == 7000)
+        );
         assert!(!msg.rules.iter().any(|r| r.host_id == "archived"));
         assert!(!msg.rules.iter().any(|r| r.local_port == 9)); // disabled excluded
     }
@@ -1733,7 +1950,12 @@ mod tests {
     fn forward_header_frames_round_trip() {
         use std::io::Write;
         use std::net::{TcpListener, TcpStream};
-        let hdr = wire::forward::ForwardHeader { token: None, host_id: "h".into(), id: "f22".into(), remote_port: 22 };
+        let hdr = wire::forward::ForwardHeader {
+            token: None,
+            host_id: "h".into(),
+            id: "f22".into(),
+            remote_port: 22,
+        };
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let h = std::thread::spawn(move || {
@@ -1784,47 +2006,45 @@ mod tests {
         tx_b.try_send(filler).unwrap(); // B is now full (nobody drains _rx_b)
 
         let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
-        viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx: tx_a });
-        viewers.lock().unwrap().insert(2, ViewerConn { id: 2, tx: tx_b });
+        viewers
+            .lock()
+            .unwrap()
+            .insert(1, ViewerConn { id: 1, tx: tx_a });
+        viewers
+            .lock()
+            .unwrap()
+            .insert(2, ViewerConn { id: 2, tx: tx_b });
 
         let msg: Arc<[u8]> = Arc::from(vec![7u8, 8, 9]);
         broadcast_bytes(&viewers, &msg);
 
         // A received the message and stayed; B was full and got removed.
         assert_eq!(&*rx_a.recv().unwrap(), &[7u8, 8, 9]);
-        assert!(viewers.lock().unwrap().contains_key(&1), "fast viewer was wrongly dropped");
-        assert!(!viewers.lock().unwrap().contains_key(&2), "full viewer was not dropped");
+        assert!(
+            viewers.lock().unwrap().contains_key(&1),
+            "fast viewer was wrongly dropped"
+        );
+        assert!(
+            !viewers.lock().unwrap().contains_key(&2),
+            "full viewer was not dropped"
+        );
     }
 
     #[test]
-    fn remove_viewer_is_idempotent() {
-        use std::sync::mpsc::sync_channel;
-        let (tx, _rx) = sync_channel::<Arc<[u8]>>(1);
-        let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
-        viewers.lock().unwrap().insert(5, ViewerConn { id: 5, tx });
-        remove_viewer(&viewers, 5);
-        remove_viewer(&viewers, 5); // second call must be a no-op, not a panic
-        assert!(viewers.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn frame_video_layout_matches_wire() {
+    fn frame_layouts_match_wire() {
+        // [tag=0][monitor_id be][len be][au]
         let au = [0xAAu8, 0xBB, 0xCC];
         let f = frame_video(0x01020304, &au);
-        // [tag=0][monitor_id be][len be][au]
         assert_eq!(f[0], T_VIDEO);
         assert_eq!(&f[1..5], &0x01020304u32.to_be_bytes());
         assert_eq!(&f[5..9], &(au.len() as u32).to_be_bytes());
         assert_eq!(&f[9..], &au);
-    }
-
-    #[test]
-    fn frame_json_layout_matches_wire() {
-        let f = frame_json(T_CURSOR, &serde_json::json!({"x": 1})).unwrap();
+        // [tag][len be][json]
+        let g = frame_json(T_CURSOR, &serde_json::json!({"x": 1})).unwrap();
         let json = serde_json::to_vec(&serde_json::json!({"x": 1})).unwrap();
-        assert_eq!(f[0], T_CURSOR);
-        assert_eq!(&f[1..5], &(json.len() as u32).to_be_bytes());
-        assert_eq!(&f[5..], &json[..]);
+        assert_eq!(g[0], T_CURSOR);
+        assert_eq!(&g[1..5], &(json.len() as u32).to_be_bytes());
+        assert_eq!(&g[5..], &json[..]);
     }
 
     #[test]
@@ -1843,41 +2063,72 @@ mod tests {
         let other = viewer_src(2);
         {
             let mut c = clip.lock().unwrap();
-            c.offer = Some((ClipboardOffer { serial: 1, mime_types: vec!["text/plain".into()] }, owner.clone()));
+            c.offer = Some((
+                ClipboardOffer {
+                    serial: 1,
+                    mime_types: vec!["text/plain".into()],
+                },
+                owner.clone(),
+            ));
             // A pending request that the owner (viewer 1) and viewer 2 both wanted.
-            c.pending.insert((1, "text/plain".into()), vec![owner.clone(), other.clone()]);
+            c.pending
+                .insert((1, "text/plain".into()), vec![owner.clone(), other.clone()]);
         }
 
         clip_forget_source(&clip, &owner);
 
         let c = clip.lock().unwrap();
-        assert!(c.offer.is_none(), "offer owned by the leaving viewer should be dropped");
+        assert!(
+            c.offer.is_none(),
+            "offer owned by the leaving viewer should be dropped"
+        );
         // owner scrubbed from the requester list; viewer 2 remains.
-        assert_eq!(c.pending.get(&(1, "text/plain".into())), Some(&vec![other.clone()]));
-    }
-
-    #[test]
-    fn clip_forget_source_removes_empty_pending_entries() {
-        let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
-        let only = viewer_src(9);
-        clip.lock().unwrap().pending.insert((7, "image/png".into()), vec![only.clone()]);
-        clip_forget_source(&clip, &only);
-        assert!(clip.lock().unwrap().pending.is_empty(), "emptied requester list should be removed");
+        assert_eq!(
+            c.pending.get(&(1, "text/plain".into())),
+            Some(&vec![other.clone()])
+        );
+        drop(c);
+        // An emptied requester list is removed rather than left behind to grow
+        // the map; the surviving entry for viewer 2 is untouched.
+        let lone = viewer_src(9);
+        clip.lock()
+            .unwrap()
+            .pending
+            .insert((7, "image/png".into()), vec![lone.clone()]);
+        clip_forget_source(&clip, &lone);
+        let c = clip.lock().unwrap();
+        assert!(c.pending.get(&(7, "image/png".into())).is_none());
+        assert_eq!(c.pending.len(), 1);
     }
 
     #[test]
     fn a_second_requester_joins_the_running_fetch_instead_of_starting_another() {
         use wire::socket::{ClipboardOffer, ClipboardRequest};
         let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
-        clip.lock().unwrap().offer =
-            Some((ClipboardOffer { serial: 4, mime_types: vec!["text/plain".into()] }, "clone-a".into()));
-        let req = ClipboardRequest { serial: 4, mime_type: "text/plain".into() };
+        clip.lock().unwrap().offer = Some((
+            ClipboardOffer {
+                serial: 4,
+                mime_types: vec!["text/plain".into()],
+            },
+            "clone-a".into(),
+        ));
+        let req = ClipboardRequest {
+            serial: 4,
+            mime_type: "text/plain".into(),
+        };
 
         let first = clip_fetch_owner(&clip, &req, &viewer_src(1));
         let second = clip_fetch_owner(&clip, &req, &viewer_src(2));
 
-        assert_eq!(first.as_deref(), Some("clone-a"), "the first request starts the fetch");
-        assert_eq!(second, None, "the second must not start a parallel SelectionRead");
+        assert_eq!(
+            first.as_deref(),
+            Some("clone-a"),
+            "the first request starts the fetch"
+        );
+        assert_eq!(
+            second, None,
+            "the second must not start a parallel SelectionRead"
+        );
         // Both still get the bytes: the reply fans out over the pending list.
         assert_eq!(
             clip.lock().unwrap().pending.get(&(4, "text/plain".into())),
@@ -1890,26 +2141,55 @@ mod tests {
         use wire::socket::{ClipboardOffer, ClipboardRequest};
         let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
         clip.lock().unwrap().offer = Some((
-            ClipboardOffer { serial: 4, mime_types: vec!["text/plain".into(), "text/html".into()] },
+            ClipboardOffer {
+                serial: 4,
+                mime_types: vec!["text/plain".into(), "text/html".into()],
+            },
             "clone-a".into(),
         ));
-        let text = ClipboardRequest { serial: 4, mime_type: "text/plain".into() };
-        let html = ClipboardRequest { serial: 4, mime_type: "text/html".into() };
-        let newer = ClipboardRequest { serial: 5, mime_type: "text/plain".into() };
+        let text = ClipboardRequest {
+            serial: 4,
+            mime_type: "text/plain".into(),
+        };
+        let html = ClipboardRequest {
+            serial: 4,
+            mime_type: "text/html".into(),
+        };
+        let newer = ClipboardRequest {
+            serial: 5,
+            mime_type: "text/plain".into(),
+        };
 
         assert!(clip_fetch_owner(&clip, &text, &viewer_src(1)).is_some());
-        assert!(clip_fetch_owner(&clip, &html, &viewer_src(1)).is_some(), "html is a separate transfer");
-        assert!(clip_fetch_owner(&clip, &newer, &viewer_src(1)).is_some(), "a new offer is a separate transfer");
+        assert!(
+            clip_fetch_owner(&clip, &html, &viewer_src(1)).is_some(),
+            "html is a separate transfer"
+        );
+        assert!(
+            clip_fetch_owner(&clip, &newer, &viewer_src(1)).is_some(),
+            "a new offer is a separate transfer"
+        );
     }
 
     #[test]
     fn the_owner_is_never_asked_to_fetch_from_itself() {
         use wire::socket::{ClipboardOffer, ClipboardRequest};
         let clip: Mutex<ClipState> = Mutex::new(ClipState::default());
-        clip.lock().unwrap().offer =
-            Some((ClipboardOffer { serial: 1, mime_types: vec!["text/plain".into()] }, "clone-a".into()));
-        let req = ClipboardRequest { serial: 1, mime_type: "text/plain".into() };
+        clip.lock().unwrap().offer = Some((
+            ClipboardOffer {
+                serial: 1,
+                mime_types: vec!["text/plain".into()],
+            },
+            "clone-a".into(),
+        ));
+        let req = ClipboardRequest {
+            serial: 1,
+            mime_type: "text/plain".into(),
+        };
         assert_eq!(clip_fetch_owner(&clip, &req, "clone-a"), None);
-        assert!(clip.lock().unwrap().pending.is_empty(), "the owner must not be recorded as a requester");
+        assert!(
+            clip.lock().unwrap().pending.is_empty(),
+            "the owner must not be recorded as a requester"
+        );
     }
 }

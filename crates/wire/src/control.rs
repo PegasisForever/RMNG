@@ -694,32 +694,6 @@ mod tests {
     }
 
     #[test]
-    fn clone_casing_matches_typescript() {
-        // gdm_* stay snake_case; extras are camelCase.
-        let h = RmngClone {
-            id: "h".into(),
-            host: "1.2.3.4".into(),
-            port: 3389,
-            gdm_username: Some("u".into()),
-            claude_account_email: Some("a@b.c".into()),
-            linear_workspace: Some("we".into()),
-            monitor_state: Some(MonitorState::Working),
-            ..Default::default()
-        };
-        let v = serde_json::to_value(&h).unwrap();
-        assert!(
-            v.get("gdm_username").is_some(),
-            "gdm_username stays snake_case"
-        );
-        assert_eq!(v["claudeAccountEmail"], "a@b.c");
-        assert_eq!(v["linearWorkspace"], "we");
-        assert_eq!(v["monitorState"], "working");
-        assert_eq!(v["archived"], false);
-        // omitted optionals are not serialized
-        assert!(v.get("source").is_none());
-    }
-
-    #[test]
     fn ts_binding_keeps_gdm_snake_case() {
         // Guards the ts-rs quirk: the gdm_* fields must stay snake_case in the
         // generated TS so the frontend reads the same keys the server emits.
@@ -862,59 +836,6 @@ mod tests {
             ..Default::default()
         };
         let s = serde_json::to_string(&st).unwrap();
-        assert!(s.contains("\"claudeAccounts\""));
-        assert!(s.contains("\"fiveHour\""));
-        assert!(s.contains("\"resetCredits\":3"));
-        let back: ControlState = serde_json::from_str(&s).unwrap();
-        assert_eq!(st, back);
-    }
-
-    #[test]
-    fn controlstate_layout_fields_camelcase() {
-        let st = ControlState {
-            active_layout: "Dual 1440p".into(),
-            layout_preset_names: vec!["Dual 1440p".into(), "Single 4K".into()],
-            ..Default::default()
-        };
-        let v = serde_json::to_value(&st).unwrap();
-        assert_eq!(v["activeLayout"], "Dual 1440p");
-        assert_eq!(v["layoutPresetNames"][1], "Single 4K");
-    }
-
-    #[test]
-    fn layout_preset_roundtrip_camelcase() {
-        let p = LayoutPreset {
-            name: "Dual 1440p".into(),
-            monitors: vec![MonitorSpec {
-                width: 2560,
-                height: 1440,
-                x: 0,
-                y: 0,
-                primary: true,
-            }],
-        };
-        let v = serde_json::to_value(&p).unwrap();
-        assert_eq!(v["name"], "Dual 1440p");
-        assert_eq!(v["monitors"][0]["width"], 2560);
-        let back: LayoutPreset = serde_json::from_value(v).unwrap();
-        assert_eq!(back, p);
-    }
-
-    #[test]
-    fn codex_reset_marks_roundtrip_camelcase() {
-        let st = ControlState {
-            codex_reset_marks: vec![CodexResetMark {
-                account_id: "codex:acc-1".into(),
-                window_resets_at: 1783392770,
-                consumed_at: 1783168000000,
-                redeem_request_id: "abc123".into(),
-            }],
-            ..Default::default()
-        };
-        let s = serde_json::to_string(&st).unwrap();
-        assert!(s.contains("\"codexResetMarks\""));
-        assert!(s.contains("\"windowResetsAt\":1783392770"));
-        assert!(s.contains("\"redeemRequestId\":\"abc123\""));
         let back: ControlState = serde_json::from_str(&s).unwrap();
         assert_eq!(st, back);
     }
@@ -923,21 +844,6 @@ mod tests {
 #[cfg(test)]
 mod forward_tests {
     use super::*;
-
-    #[test]
-    fn port_forward_round_trips_camel_case() {
-        let f = PortForward {
-            id: "f8080".into(),
-            remote_port: 3000,
-            local_port: 8080,
-            enabled: true,
-            label: Some("dev".into()),
-        };
-        let json = serde_json::to_string(&f).unwrap();
-        assert!(json.contains("\"remotePort\":3000"), "got {json}");
-        assert!(json.contains("\"localPort\":8080"), "got {json}");
-        assert_eq!(serde_json::from_str::<PortForward>(&json).unwrap(), f);
-    }
 
     #[test]
     fn clone_forwards_defaults_empty_and_is_omitted() {

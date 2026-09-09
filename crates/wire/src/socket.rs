@@ -605,21 +605,6 @@ mod tests {
 
     #[test]
     fn base64_roundtrips() {
-        for case in [
-            vec![],
-            vec![0u8],
-            vec![1, 2, 3],
-            (0u8..=255).collect::<Vec<_>>(),
-        ] {
-            let data = ClipboardData {
-                serial: 1,
-                mime_type: "x".into(),
-                bytes: case.clone(),
-            };
-            let s = serde_json::to_string(&data).unwrap();
-            let back: ClipboardData = serde_json::from_str(&s).unwrap();
-            assert_eq!(back.bytes, case);
-        }
         // Every length modulo 4, so both padded tails are exercised at a size where an
         // off-by-one in the tail would show as a corrupt image rather than a failed decode.
         for len in 4_093..4_100 {

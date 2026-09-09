@@ -176,15 +176,12 @@ fn parse_auth_file(file_name: &str, body: &str, group: &str) -> Option<Recovered
         }
     });
     // Prefer the JSON email; fall back to the `<kind>-<email>.json` file-name stem.
-    let email = raw
-        .email
-        .filter(|e| !e.is_empty())
-        .or_else(|| {
-            file_name
-                .strip_suffix(".json")
-                .and_then(|s| s.split_once('-').map(|(_, e)| e.to_string()))
-                .filter(|e| !e.is_empty())
-        })?;
+    let email = raw.email.filter(|e| !e.is_empty()).or_else(|| {
+        file_name
+            .strip_suffix(".json")
+            .and_then(|s| s.split_once('-').map(|(_, e)| e.to_string()))
+            .filter(|e| !e.is_empty())
+    })?;
     Some(Recovered {
         kind,
         email,
@@ -299,8 +296,7 @@ fn write_store(path: &Path, body: &impl Serialize) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    let mut bytes = serde_json::to_vec_pretty(body)
-        .map_err(std::io::Error::other)?;
+    let mut bytes = serde_json::to_vec_pretty(body).map_err(std::io::Error::other)?;
     bytes.push(b'\n');
     std::fs::write(&tmp, &bytes)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
@@ -352,7 +348,11 @@ pub fn read_raw_clone_pools(cfg: &wire::AppConfig) -> PoolSnapshot {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    raw.hosts.into_iter().filter(|h| !h.id.is_empty()).map(|h| (h.id, h.group)).collect()
+    raw.hosts
+        .into_iter()
+        .filter(|h| !h.id.is_empty())
+        .map(|h| (h.id, h.group))
+        .collect()
 }
 
 fn heal_clone_bindings(
@@ -361,7 +361,6 @@ fn heal_clone_bindings(
     claude_pools: &[wire::CloneGroup],
     codex_pools: &[wire::CloneGroup],
 ) {
-
     let mut bound = 0usize;
     let mut autos = 0usize;
     app.store.mutate(|s| {
@@ -682,15 +681,32 @@ mod tests {
     #[test]
     fn kind_falls_back_to_the_file_name_prefix() {
         let body = r#"{"access_token":"AT","refresh_token":"RT","email":"a@b.com"}"#;
-        assert_eq!(parse_auth_file("codex-a@b.com.json", body, "g").unwrap().kind, "codex");
         assert_eq!(
-            parse_auth_file("antigravity-a@b.com.json", body, "g").unwrap().kind,
+            parse_auth_file("codex-a@b.com.json", body, "g")
+                .unwrap()
+                .kind,
+            "codex"
+        );
+        assert_eq!(
+            parse_auth_file("antigravity-a@b.com.json", body, "g")
+                .unwrap()
+                .kind,
             "antigravity"
         );
-        assert_eq!(parse_auth_file("claude-a@b.com.json", body, "g").unwrap().kind, "claude");
+        assert_eq!(
+            parse_auth_file("claude-a@b.com.json", body, "g")
+                .unwrap()
+                .kind,
+            "claude"
+        );
         // Email falls back to the file-name stem when the JSON omits it.
         let no_email = r#"{"access_token":"AT","refresh_token":"RT"}"#;
-        assert_eq!(parse_auth_file("claude-x@y.com.json", no_email, "g").unwrap().email, "x@y.com");
+        assert_eq!(
+            parse_auth_file("claude-x@y.com.json", no_email, "g")
+                .unwrap()
+                .email,
+            "x@y.com"
+        );
     }
 
     /// A credential RMNG cannot take ownership of must be skipped, not half-migrated: without
@@ -714,7 +730,10 @@ mod tests {
         assert_eq!(expiry_ms(None), None);
         assert_eq!(expiry_ms(Some("")), None);
         assert_eq!(expiry_ms(Some("not-a-date")), None);
-        assert_eq!(expiry_ms(Some("2021-01-01T00:00:00Z")), Some(1_609_459_200_000));
+        assert_eq!(
+            expiry_ms(Some("2021-01-01T00:00:00Z")),
+            Some(1_609_459_200_000)
+        );
         let parsed = parse_auth_file(
             "claude-a@b.com.json",
             r#"{"access_token":"AT","refresh_token":"RT","email":"a@b.com"}"#,
@@ -758,8 +777,15 @@ mod tests {
             aged("Medi", 1_785_432_000_000),
             aged("Personal", 1_785_432_000_000),
         ]);
-        assert_eq!(out.len(), 1, "a single-use token must land in exactly one store");
-        assert_eq!(out[0].expires_at, 1_785_432_000_000, "the stalest copy must not win");
+        assert_eq!(
+            out.len(),
+            1,
+            "a single-use token must land in exactly one store"
+        );
+        assert_eq!(
+            out[0].expires_at, 1_785_432_000_000,
+            "the stalest copy must not win"
+        );
         // An exact tie falls back to group order, so the result is still deterministic.
         assert_eq!(out[0].group, "Personal");
     }
@@ -810,7 +836,11 @@ mod tests {
         let before = read_raw_clone_pools(&cfg);
         assert_eq!(before.get("a").map(String::as_str), Some("Personal"));
         assert_eq!(before.get("b").map(String::as_str), Some("Medi"));
-        assert_eq!(before.get("c").map(String::as_str), Some(""), "no group is empty, not absent");
+        assert_eq!(
+            before.get("c").map(String::as_str),
+            Some(""),
+            "no group is empty, not absent"
+        );
 
         // Now simulate what the early state-store write does: the same file, minus `group`.
         std::fs::write(
@@ -822,7 +852,11 @@ mod tests {
         )
         .unwrap();
         let after = read_raw_clone_pools(&cfg);
-        assert_eq!(after.get("a").map(String::as_str), Some(""), "the binding is gone from disk");
+        assert_eq!(
+            after.get("a").map(String::as_str),
+            Some(""),
+            "the binding is gone from disk"
+        );
         // Which is exactly why the snapshot must be taken first — it still holds the truth.
         assert_eq!(before.get("a").map(String::as_str), Some("Personal"));
 
@@ -887,9 +921,14 @@ mod tests {
         store.reload_from_disk();
         // After it, the recovered account is live and the stale one is gone, so a refresh can no
         // longer persist the old set back over the new file.
-        let fresh = store.get_by_email("fresh@x.com").expect("recovered account not adopted");
+        let fresh = store
+            .get_by_email("fresh@x.com")
+            .expect("recovered account not adopted");
         assert_eq!(fresh.access_token, "NEW");
-        assert!(store.get_by_email("stale@x.com").is_none(), "stale account survived the reload");
+        assert!(
+            store.get_by_email("stale@x.com").is_none(),
+            "stale account survived the reload"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -922,7 +961,10 @@ mod tests {
             ("group:Medi".into(), String::new())
         );
         // A pool that did not survive the migration at all binds neither.
-        assert_eq!(apply("Gone", &["Personal"], &["Personal"]), (String::new(), String::new()));
+        assert_eq!(
+            apply("Gone", &["Personal"], &["Personal"]),
+            (String::new(), String::new())
+        );
     }
 
     #[test]
@@ -952,8 +994,16 @@ mod tests {
         let root = std::env::temp_dir().join(format!("rmng-unmig-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for (group, file, body) in [
-            ("beta", "claude-b@x.com.json", r#"{"access_token":"A","refresh_token":"R","email":"b@x.com","type":"claude"}"#),
-            ("alpha", "claude-a@x.com.json", r#"{"access_token":"A","refresh_token":"R","email":"a@x.com","type":"claude"}"#),
+            (
+                "beta",
+                "claude-b@x.com.json",
+                r#"{"access_token":"A","refresh_token":"R","email":"b@x.com","type":"claude"}"#,
+            ),
+            (
+                "alpha",
+                "claude-a@x.com.json",
+                r#"{"access_token":"A","refresh_token":"R","email":"a@x.com","type":"claude"}"#,
+            ),
             ("alpha", "notes.txt", "ignore me"),
             ("alpha", "broken.json", "{ not json"),
         ] {

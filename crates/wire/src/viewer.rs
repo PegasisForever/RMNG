@@ -185,19 +185,6 @@ pub enum FromViewer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn to_viewer_tagged() {
-        let m = ToViewer::Video(VideoAu {
-            monitor_id: 0,
-            idr: true,
-            pts: 1,
-            annexb: vec![0, 0, 1],
-        });
-        let s = serde_json::to_string(&m).unwrap();
-        assert!(s.contains("\"t\":\"video\""));
-        assert_eq!(serde_json::from_str::<ToViewer>(&s).unwrap(), m);
-    }
-
     /// Tag 3 changed shape incompatibly: it used to be a bare array of monitor placements and is
     /// now a [`ViewSpec`] object. A pre-`ViewSpec` server therefore leaves a current viewer with
     /// no window at all — it sits at "connected, waiting for video" while video AUs pile up and

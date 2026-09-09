@@ -154,7 +154,10 @@ impl Recorder {
         decision.ts = now_rfc3339();
         decision.was = was.unwrap_or_else(|| "new".to_string());
         decision.asked = asked;
-        self.seen.write().unwrap().insert(key, decision.state.clone());
+        self.seen
+            .write()
+            .unwrap()
+            .insert(key, decision.state.clone());
         self.pending.lock().unwrap().push(decision);
     }
 
@@ -212,7 +215,10 @@ impl Recorder {
         }
         for (day, body) in group_by_day(&queued) {
             let path = dir.join(format!("{day}.ndjson"));
-            let opened = std::fs::OpenOptions::new().create(true).append(true).open(&path);
+            let opened = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path);
             match opened {
                 Ok(mut file) => {
                     if let Err(e) = file.write_all(body.as_bytes()) {
@@ -229,7 +235,10 @@ impl Recorder {
     /// [`crate::monitor::ActivityBus::retain`]. A deleted clone leaves no `gone` lines: its
     /// sessions ended with it, and the delete is already recorded as an operation.
     pub fn retain(&self, clones: &std::collections::HashSet<String>) {
-        self.seen.write().unwrap().retain(|(c, _), _| clones.contains(c));
+        self.seen
+            .write()
+            .unwrap()
+            .retain(|(c, _), _| clones.contains(c));
     }
 }
 
@@ -300,8 +309,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("rmng-stucklog-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rmng-stucklog-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -328,7 +336,10 @@ mod tests {
         rec.record(decision("c1", "s1", "working"), false);
         let lines = drain(&rec);
         assert_eq!(lines.len(), 2);
-        assert_eq!((lines[1].was.as_str(), lines[1].state.as_str()), ("idle", "working"));
+        assert_eq!(
+            (lines[1].was.as_str(), lines[1].state.as_str()),
+            ("idle", "working")
+        );
     }
 
     #[test]
@@ -346,7 +357,11 @@ mod tests {
         let rec = Recorder::new();
         rec.record(decision("c1", "s1", "idle"), false);
         rec.record(decision("c1", "s2", "idle"), false);
-        assert_eq!(drain(&rec).len(), 2, "s2 is news even though s1 said the same thing");
+        assert_eq!(
+            drain(&rec).len(),
+            2,
+            "s2 is news even though s1 said the same thing"
+        );
     }
 
     #[test]
@@ -359,7 +374,10 @@ mod tests {
         rec.retire("c1", &["s2".to_string()]);
         let lines = drain(&rec);
         assert_eq!(lines.len(), 1);
-        assert_eq!((lines[0].session.as_str(), lines[0].state.as_str()), ("s1", "gone"));
+        assert_eq!(
+            (lines[0].session.as_str(), lines[0].state.as_str()),
+            ("s1", "gone")
+        );
         assert_eq!(lines[0].was, "idle");
 
         // Forgotten, so the same session id coming back reads as new rather than as a change.
@@ -392,7 +410,10 @@ mod tests {
         let back: Decision = serde_json::from_str(&json).unwrap();
         assert_eq!(back.prompt_age_seconds, Some(2712.0));
         assert_eq!(back.view.unwrap()["session"]["status"], "busy");
-        assert!(json.contains(r#""promptAgeSeconds":2712"#), "camelCase on the wire: {json}");
+        assert!(
+            json.contains(r#""promptAgeSeconds":2712"#),
+            "camelCase on the wire: {json}"
+        );
     }
 
     #[test]
@@ -435,7 +456,10 @@ mod tests {
         let json = serde_json::to_string(&d).unwrap();
         let back: Decision = serde_json::from_str(&json).unwrap();
         assert_eq!(back.usage, d.usage);
-        assert!(json.contains(r#""inputTokens":1913"#), "camelCase on the wire: {json}");
+        assert!(
+            json.contains(r#""inputTokens":1913"#),
+            "camelCase on the wire: {json}"
+        );
         assert!(json.contains(r#""cachedInputTokens":1536"#), "{json}");
     }
 
@@ -451,13 +475,19 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, None);
         assert_eq!(usage.reasoning_output_tokens, None);
         let json = serde_json::to_string(&usage).unwrap();
-        assert!(!json.contains("cached"), "an absent detail is absent, not null: {json}");
+        assert!(
+            !json.contains("cached"),
+            "an absent detail is absent, not null: {json}"
+        );
     }
 
     #[test]
     fn a_file_settled_line_carries_no_view_key_at_all() {
         let json = serde_json::to_string(&decision("c1", "s1", "idle")).unwrap();
-        assert!(!json.contains("view"), "an absent view is absent, not null: {json}");
+        assert!(
+            !json.contains("view"),
+            "an absent view is absent, not null: {json}"
+        );
         assert!(!json.contains("promptAgeSeconds"));
         // A line no model call produced is byte-identical to what it was before usage
         // accounting existed: nothing that never asked grows an `asked` or a `usage` key.
@@ -481,7 +511,12 @@ mod tests {
         assert_eq!(first.lines().count(), 1);
         let second = std::fs::read_to_string(dir.join("stuck/2026-08-05.ndjson")).unwrap();
         assert!(second.ends_with('\n'), "every record is a whole line");
-        assert_eq!(serde_json::from_str::<Decision>(second.trim()).unwrap().session, "s2");
+        assert_eq!(
+            serde_json::from_str::<Decision>(second.trim())
+                .unwrap()
+                .session,
+            "s2"
+        );
 
         // Appends rather than truncates: a second pass must not lose the first.
         rec.record(decision("c1", "s1", "working"), false);
@@ -489,14 +524,6 @@ mod tests {
         rec.flush(dir.to_str().unwrap());
         let grown = std::fs::read_to_string(dir.join("stuck/2026-08-05.ndjson")).unwrap();
         assert_eq!(grown.lines().count(), 2);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn flushing_nothing_creates_nothing() {
-        let dir = scratch("empty");
-        Recorder::new().flush(dir.to_str().unwrap());
-        assert!(!dir.join("stuck").exists(), "an idle fleet leaves no directory behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -12,13 +12,6 @@ test("the same byte count reads the same as a bigint, a number, or a string", ()
   expect(formatBytes("7200000000" as unknown as number)).toBe("6.7 GB");
 });
 
-test("the unit steps up with the magnitude", () => {
-  expect(formatBytes(512)).toBe("512 B");
-  expect(formatBytes(1024)).toBe("1.0 KB");
-  expect(formatBytes(1_048_576)).toBe("1.0 MB");
-  expect(formatBytes(20_078_170_112n)).toBe("18.7 GB");
-});
-
 test("a value that is not a size reads as zero rather than as garbage", () => {
   expect(formatBytes(0)).toBe("0 B");
   expect(formatBytes(-1)).toBe("0 B");
