@@ -539,7 +539,6 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         "settle",
         "attaching the shared folder, home link and SSH access",
     );
-    crate::shared::ensure_now(&app, &spec.new_hostname).await;
     crate::homes::ensure_now(&app, &spec.new_hostname).await;
     // Before the store write below, so the bastion's forward allowlist and the clone's own
     // "ready" signal land together. It takes the id explicitly for that reason.
@@ -1137,7 +1136,6 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
         "settle",
         "attaching the shared folder, home link and SSH access",
     );
-    crate::shared::ensure_now(&app, &new_id).await;
     crate::homes::ensure_now(&app, &new_id).await;
     crate::ssh::allow_clone_now(&app, &new_id).await;
 
@@ -1797,11 +1795,11 @@ async fn run_unarchive(app: App, op_id: String, host_id: String) {
         }
     });
     drop(progress);
-    // A restart rebuilds the container's mount table and gives it a new pid, so the three
-    // out-of-container resources are gone even though the clone itself is intact. Re-apply them
-    // here for the same reason the create path does: an unarchived clone is presented as ready.
+    // A restart rebuilds the container's mount table and gives it a new pid, so the
+    // out-of-container resources are gone even though the clone itself is intact. Re-apply
+    // them here for the same reason the create path does: an unarchived clone is presented
+    // as ready. (The shared pool needs no re-apply: it is a create-time bind now.)
     crate::shm::ensure_now(&app, &host_id).await;
-    crate::shared::ensure_now(&app, &host_id).await;
     crate::homes::ensure_now(&app, &host_id).await;
     crate::ssh::allow_clone_now(&app, &host_id).await;
     push_current_tokens(&app, &host_id).await;

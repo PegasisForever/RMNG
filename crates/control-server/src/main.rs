@@ -279,10 +279,10 @@ async fn main() -> Result<()> {
             // used, which is what stops a new clone inheriting a retired one's history.
             tokio::spawn(ledger::run(app_for_bg.clone()));
             tokio::spawn(shm::run(app_for_bg.clone()));
-            // The shared folder: one pool at data/shared, mounted live into every running clone
-            // at /home/rmng/shared and served as the `shared` SMB share. Also needs `pid: "host"`,
-            // because the mount enters the clone's namespace by host PID.
-            tokio::spawn(shared::run(app_for_bg.clone()));
+            // The shared pool: one dir at data/shared, bound into every clone at
+            // /home/rmng/shared from first boot (see CreateSpec::shared_dir) and served
+            // as the `shared` SMB share. Ensured here once; the bind needs no upkeep.
+            shared::ensure_pool(&app_for_bg.config().data_dir);
             tokio::spawn(buildinfra::run(app_for_bg.clone()));
             // Scheduled chat delivery: fires operator-queued messages once their time passes.
             // Disk-backed, so anything that came due during a restart goes out on the first tick.

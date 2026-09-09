@@ -302,6 +302,9 @@ pub struct CreateSpec {
     /// `/home/rmng/clones` so every clone sees every home. Only used with
     /// `dataset_dir`; empty skips the mount.
     pub homes_dir: String,
+    /// Shared pool dir on the CT (absolute host path, e.g. `/data/shared`), bound at
+    /// `/home/rmng/shared`. Empty skips the mount (dev/test).
+    pub shared_dir: String,
 }
 
 /// A desired shared-infra container, the input to [`DockerCtl::ensure_infra_container`].
@@ -1525,6 +1528,16 @@ impl DockerCtl {
                     ..Default::default()
                 });
             }
+        }
+        // Shared pool, same ordinary bind: present from first boot and surviving
+        // restarts, unlike the retired live mount it replaces.
+        if !spec.shared_dir.trim().is_empty() {
+            mounts.push(Mount {
+                target: Some(crate::shared::clone_target()),
+                source: Some(spec.shared_dir.clone()),
+                typ: Some(MountTypeEnum::BIND),
+                ..Default::default()
+            });
         }
 
         let mem = (spec.memory_mb as i64) * 1024 * 1024;

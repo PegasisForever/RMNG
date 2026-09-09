@@ -1215,6 +1215,9 @@ pub async fn clone_container_gen2_from_tag(
         sock_source: sock_source_dir(app).await,
         dataset_dir: Some(crate::zfs::dataset_dir(hostname)),
         homes_dir: crate::zfs::HOMES_DIR.to_string(),
+        // Absolute host path (Docker resolves a relative bind source against the
+        // daemon's cwd); the pool itself is ensured at server startup.
+        shared_dir: crate::shared::shared_host_dir(&cfg.data_dir),
     };
     let container = match docker.create_clone_container(&spec).await {
         Ok(c) => c,
