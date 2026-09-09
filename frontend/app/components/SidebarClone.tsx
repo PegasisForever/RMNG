@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  Layers,
   Network,
   Terminal,
   Trash2,
@@ -256,6 +257,8 @@ export interface SidebarCloneProps {
   onDelete: () => void;
   /** Change this clone's account-group binding. */
   onChangeAccount: () => void;
+  /** Rebase this clone onto a preset's image (dataset + id kept). */
+  onRebase: () => void;
   /** Open the port-forward editor for this clone. */
   onPortForward: () => void;
   /** Gracefully stop a managed clone while retaining it. */
@@ -354,6 +357,7 @@ function CloneMenu({
   archived,
   busy,
   onChangeAccount,
+  onRebase,
   onPortForward,
   onArchive,
   onUnarchive,
@@ -371,6 +375,7 @@ function CloneMenu({
   archived: boolean;
   busy: boolean;
   onChangeAccount: () => void;
+  onRebase: () => void;
   onPortForward: () => void;
   onArchive: () => void;
   onUnarchive: () => void;
@@ -402,6 +407,7 @@ function CloneMenu({
       {managed && !archived ? (
         <>
           <MenuItem icon={UserCog} label="Change account…" onClick={onChangeAccount} />
+          <MenuItem icon={Layers} label="Rebase…" onClick={onRebase} />
           <MenuItem icon={Network} label="Port forward…" onClick={onPortForward} />
           {sshCommand ? (
             <CopySshMenuItem command={sshCommand} onCopy={onCopySshCommand} />
@@ -449,6 +455,7 @@ export function SidebarClone({
   onSelect,
   onDelete,
   onChangeAccount,
+  onRebase,
   onPortForward,
   onArchive,
   onUnarchive,
@@ -618,6 +625,7 @@ export function SidebarClone({
             archived={clone.archived ?? false}
             busy={busy}
             onChangeAccount={onChangeAccount}
+            onRebase={onRebase}
             onPortForward={onPortForward}
             onArchive={onArchive}
             onUnarchive={onUnarchive}

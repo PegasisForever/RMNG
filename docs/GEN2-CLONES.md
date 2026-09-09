@@ -99,8 +99,10 @@ dataset mount itself marks one.
   because the text hashes the same. Source keeps running. Overlay drift is
   silently dropped.
 - Rebase: record the old tag → stop → remove the old container (the name equals the
-  id, so both cannot exist together) → create from the new tag with the SAME dataset,
-  same id → start → wait ready. New one healthy: purge the old tag when unused. New
+  id, so both cannot exist together) → ensure the target preset's image (build on
+  miss, or forced by the rebuild checkbox) → create from it with the SAME dataset,
+  same id → start → wait ready. The clone's own preset bindings stay — rebase swaps
+  the image only. New one healthy: purge the old tag when unused. New
   one fails: auto-recreate from the old tag on the same dataset.
 - Delete: stop → remove container → `zfs destroy` dataset → destroy its origin
   snapshot when no other dataset references it (fork creates pair them 1:1, so this is
@@ -195,6 +197,7 @@ home) or fork (snapshot plus clone of a live source). No other create path.
 - Seed snapshot: DELETED as redundant. Every modal create forks a live source,
   so the source snapshot covers starting content. Pending code removal:
   `seed_snapshot` config field plus the `CloneFromSnapshot` home-source path.
-- Clone menu: rebase lives here (target picker). No separate fork item; the
-  new clone modal covers forking.
-- Open UI items: rebase target picker shape.
+- Clone menu: Rebase lives here. The dialog picks a preset (never an image list —
+  the list stays internal for garbage collection) plus a rebuild checkbox, and tracks
+  the op to settle. No separate fork item; the new clone modal covers forking.
+- Open UI items: none.

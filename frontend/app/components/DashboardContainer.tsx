@@ -21,6 +21,7 @@ import { CloneModalContainer } from "~/components/CloneModalContainer";
 import { TemplateModalContainer } from "~/components/TemplateModalContainer";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { PortForwardModal } from "~/components/PortForwardModal";
+import { RebaseModalContainer } from "~/components/RebaseModalContainer";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
@@ -67,6 +68,7 @@ import {
   putForwards,
   putMutedClones,
   putTicketOrder,
+  rebaseClone,
   refreshClaudeUsage,
   refreshCodexUsage,
   restartServer,
@@ -172,6 +174,9 @@ export function DashboardContainer({
   const now = useNow();
   const [changeClone, setChangeClone] = useState<Clone | null>(null);
   const [changing, setChanging] = useState(false);
+  // The clone a rebase dialog is open for (null = modal closed). The dialog owns the
+  // op lifecycle and closes itself on settle, like the template dialog.
+  const [rebaseCloneTarget, setRebaseCloneTarget] = useState<Clone | null>(null);
   // The group an "add account" OAuth login is in flight for (null = modal closed).
   const [importOpen, setImportOpen] = useState(false);
   // The dead account the sign-in modal is standing in for, or null for a plain import.
@@ -791,6 +796,7 @@ export function DashboardContainer({
             if (confirm(msg)) run(deleteClone(clone.id));
           },
           onChangeAccountClone: (clone) => setChangeClone(clone),
+          onRebaseClone: (clone) => setRebaseCloneTarget(clone),
           onPortForwardClone: (clone) => {
             setForwardError(null);
             setForwardClone(clone);
@@ -1027,6 +1033,17 @@ export function DashboardContainer({
               .catch((e: Error) => setError(e.message))
               .finally(() => setChanging(false));
           }}
+        />
+      ) : null}
+      {rebaseCloneTarget ? (
+        <RebaseModalContainer
+          cloneId={rebaseCloneTarget.id}
+          currentPreset={rebaseCloneTarget.presetName ?? null}
+          operations={state.operations}
+          onClose={() => setRebaseCloneTarget(null)}
+          // The dialog owns the whole lifecycle: it keeps itself open, renders the op's
+          // progress, and closes when the op settles.
+          onRebase={(preset, rebuild) => rebaseClone(rebaseCloneTarget.id, preset, rebuild)}
         />
       ) : null}
 

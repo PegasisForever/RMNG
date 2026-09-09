@@ -1686,11 +1686,17 @@ async fn fork(
 
 #[derive(Deserialize)]
 struct RebaseReq {
-    /// New base image tag for the clone's system image (dataset + id kept).
-    tag: String,
+    /// Target preset: the clone's system image becomes this preset's image (built on
+    /// miss). The dataset, id, and the clone's own preset bindings are kept.
+    #[serde(default)]
+    preset: String,
+    /// Rebuild the preset image even when its tag exists (a base release under the
+    /// same tag does not invalidate it otherwise).
+    #[serde(default)]
+    rebuild: bool,
 }
 
-/// `POST /api/hosts/:id/rebase` — rebase a gen-2 clone onto a new base tag (`{ tag }`).
+/// `POST /api/hosts/:id/rebase` — rebase a gen-2 clone onto a preset's image.
 /// The old container is replaced (name == id); on failure the old tag auto-recreates.
 /// Returns the driving Operation.
 async fn rebase(
@@ -1698,7 +1704,7 @@ async fn rebase(
     AxPath(id): AxPath<String>,
     Json(req): Json<RebaseReq>,
 ) -> Result<Json<Operation>, (StatusCode, String)> {
-    jobs::start_rebase(&app, &id, &req.tag)
+    jobs::start_rebase(&app, &id, &req.preset, req.rebuild)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }

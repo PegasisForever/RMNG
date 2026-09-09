@@ -98,6 +98,7 @@ export interface BoardProps {
   onSelectClone: (clone: Clone) => void;
   onDeleteClone: (clone: Clone) => void;
   onChangeAccountClone: (clone: Clone) => void;
+  onRebaseClone: (clone: Clone) => void;
   onPortForwardClone: (clone: Clone) => void;
   /** A card was dropped into a column flagged `archive` and is not archived yet. */
   onArchiveClone: (clone: Clone) => void;
@@ -226,6 +227,7 @@ export function Board({
   onSelectClone,
   onDeleteClone,
   onChangeAccountClone,
+  onRebaseClone,
   onPortForwardClone,
   onArchiveClone,
   onUnarchiveClone,
@@ -311,6 +313,7 @@ export function Board({
     onSelect: () => onSelectClone(clone),
     onDelete: () => onDeleteClone(clone),
     onChangeAccount: () => onChangeAccountClone(clone),
+    onRebase: () => onRebaseClone(clone),
     onPortForward: () => onPortForwardClone(clone),
     onArchive: () => onArchiveClone(clone),
     onUnarchive: () => onUnarchiveClone(clone),

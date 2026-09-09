@@ -86,6 +86,9 @@ export interface Clone {
   /** Parent clone id when this is a sub clone (one level deep only). Undefined/null = top-level.
    *  Cosmetic sidebar/`ps` grouping; a sub clone is otherwise an ordinary managed clone. */
   parent?: string | null;
+  /** Preset binding recorded at create/fork (server `preset_name`). Preselects the rebase
+   *  dialog's target — rebase itself never changes this binding. */
+  presetName?: string | null;
   /** Local port-forward rules; the native viewer runs the listeners. Live status
    *  arrives separately via the `forwards` SSE event, keyed by clone id then rule id. */
   forwards?: PortForward[];

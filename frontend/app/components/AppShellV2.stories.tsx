@@ -222,6 +222,7 @@ function makeBoard() {
     onSelectClone: fn(),
     onDeleteClone: fn(),
     onChangeAccountClone: toChangeAccount,
+    onRebaseClone: fn(),
     onPortForwardClone: toPortForward,
     onArchiveClone: fn(),
     onUnarchiveClone: fn(),

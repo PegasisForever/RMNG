@@ -1301,7 +1301,7 @@ pub async fn clone_container_gen2(
     let docker = &app.docker;
     // The preset Dockerfile decides the image: same text twice means one build, and the
     // tag is recorded below as `base_tag`. No label gate: FROM may name any image.
-    let tag = crate::derived::ensure_image(app, dockerfile, &mut on_progress).await?;
+    let tag = crate::derived::ensure_image(app, dockerfile, false, &mut on_progress).await?;
     if tag.is_empty() {
         bail!("a Dockerfile is required for a gen-2 clone");
     }

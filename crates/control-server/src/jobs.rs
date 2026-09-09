@@ -1308,9 +1308,16 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     }
 }
 
-/// Rebase a gen-2 clone onto a new base tag, keeping its dataset and id. Guard: the row
-/// must carry a base tag (gen-2), and no Running op on the clone.
-pub fn start_rebase(app: &App, host_id: &str, new_tag: &str) -> Result<Operation, JobError> {
+/// Rebase a gen-2 clone onto a preset's image, keeping its dataset and id. Guard: the
+/// row must carry a base tag (gen-2), the preset must exist, and no Running op on the
+/// clone. The image resolves + builds inside the background run, so build progress
+/// streams on the op; `rebuild` forces a fresh build even when the tag exists.
+pub fn start_rebase(
+    app: &App,
+    host_id: &str,
+    preset_name: &str,
+    rebuild: bool,
+) -> Result<Operation, JobError> {
     let st = app.store.get();
     let row = st.hosts.iter().find(|h| h.id == host_id).cloned();
     let Some(row) = row else {
@@ -1322,9 +1329,12 @@ pub fn start_rebase(app: &App, host_id: &str, new_tag: &str) -> Result<Operation
     if row.base_tag.is_none() {
         return Err(JobError(format!("'{host_id}' is not a gen-2 clone (no base tag)")));
     }
-    let new_tag = new_tag.trim().to_string();
-    if new_tag.is_empty() {
-        return Err(JobError("a base image tag is required".into()));
+    let preset_name = preset_name.trim().to_string();
+    if preset_name.is_empty() {
+        return Err(JobError("a preset is required".into()));
+    }
+    if !app.config().presets.iter().any(|p| p.name == preset_name) {
+        return Err(JobError(format!("unknown preset '{preset_name}'")));
     }
     if st
         .operations
@@ -1335,20 +1345,28 @@ pub fn start_rebase(app: &App, host_id: &str, new_tag: &str) -> Result<Operation
             "'{host_id}' already has an operation in flight"
         )));
     }
-    let op = make_op(OperationKind::Clone, host_id, Some(&new_tag));
+    let op = make_op(OperationKind::Clone, host_id, Some(&preset_name));
     let op_for_return = op.clone();
     let op_id = op.id.clone();
     app.store.mutate(|s| s.operations.push(op));
     let (app2, host_id) = (app.clone(), host_id.to_string());
-    tokio::spawn(async move { run_rebase(app2, op_id, host_id, new_tag).await });
+    tokio::spawn(async move { run_rebase(app2, op_id, host_id, preset_name, rebuild).await });
     Ok(op_for_return)
 }
 
-async fn run_rebase(app: App, op_id: String, host_id: String, new_tag: String) {
-    let progress = op_progress(&app, &op_id, OperationKind::Clone);
+async fn run_rebase(app: App, op_id: String, host_id: String, preset_name: String, rebuild: bool) {
+    let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
     let row = match app.store.get().hosts.into_iter().find(|h| h.id == host_id) {
         Some(h) => h,
         None => return fail_op(&app, &op_id, format!("unknown clone '{host_id}'")),
+    };
+    // Image follows the TARGET preset (built lazily here, so build progress streams on
+    // this op); env/playbook stay on the clone's own bindings — rebase swaps the image
+    // only, never the preset.
+    let dockerfile = crate::provision::preset_dockerfile(&app, Some(&preset_name));
+    let new_tag = match crate::derived::ensure_image(&app, &dockerfile, rebuild, &mut progress).await {
+        Ok(t) => t,
+        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
     };
     let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await;
     let (playbook, prompt) = gen2_playbook_prompt(&app, row.preset_name.as_deref());

@@ -34,10 +34,13 @@ fn lock_for(tag: &str) -> Arc<Mutex<()>> {
 }
 
 /// Ensure the image for a preset Dockerfile: tag = hash of the file text, build the
-/// text verbatim on miss. Empty text falls back to the default base Dockerfile.
+/// text verbatim on miss. `force` rebuilds even when the tag exists (the preset's
+/// rebuild checkbox: a base release under the same tag does not invalidate it
+/// otherwise). Empty text falls back to the default base Dockerfile.
 pub async fn ensure_image(
     app: &App,
     dockerfile: &str,
+    force: bool,
     mut on_progress: impl FnMut(&str, &str),
 ) -> Result<String> {
     let text = dockerfile.trim();
@@ -48,7 +51,7 @@ pub async fn ensure_image(
     };
     let tag = wire::config::dockerfile_tag(text);
 
-    if app.docker.image_exists(&tag).await? {
+    if !force && app.docker.image_exists(&tag).await? {
         return Ok(tag);
     }
     // One build per tag: a parallel create waits here, then finds the image present.
@@ -77,7 +80,7 @@ pub async fn prebuild(
     if dockerfile.trim().is_empty() {
         bail!("a Dockerfile is required to prebuild");
     }
-    ensure_image(app, dockerfile, &mut on_progress).await
+    ensure_image(app, dockerfile, false, &mut on_progress).await
 }
 
 #[cfg(test)]

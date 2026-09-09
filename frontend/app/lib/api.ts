@@ -150,6 +150,13 @@ export const forkClone = (
     ...(payload?.agentInstructions ? { agentInstructions: payload.agentInstructions } : {}),
     ...(payload?.claudeInstructions ? { claudeInstructions: payload.claudeInstructions } : {}),
   }).then((r) => (r as { op: Operation }).op);
+/** Rebase a gen-2 clone onto a preset's image (`preset`), keeping dataset + id and the
+ *  clone's own preset bindings. `rebuild` forces a fresh image build even when the tag
+ *  exists. Returns the driving Operation; progress streams over /events. */
+export const rebaseClone = (id: string, preset: string, rebuild: boolean) =>
+  postJson(`/api/hosts/${id}/rebase`, { preset, rebuild }).then(
+    (r) => (r as { op: Operation }).op,
+  );
 /** Gracefully stop a managed clone while retaining its container and per-clone data. */
 export const archiveClone = (id: string) =>
   postJson(`/api/hosts/${encodeURIComponent(id)}/archive`, {});
