@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 # Phase 20 — dev toolbox: the CT-104 dev-template app set, ALL via apt (no flatpak/snap):
 # dev/CLI tools, Docker, cloud CLIs, build libs, fonts, themes, browsers, Cursor, VS Code,
-# Celluloid/ffmpeg, Extension Manager, ONLYOFFICE, plus HMCL / Mission Center / Monaspace /
-# adw-gtk3 from their upstream releases, and the system-wide GNOME dconf defaults.
+# Zed, Celluloid/ffmpeg, Extension Manager, ONLYOFFICE, plus HMCL / Mission Center /
+# Monaspace / adw-gtk3 from their upstream releases, and the system-wide GNOME dconf defaults.
 #
-# BEST-EFFORT by design: these are genuinely optional apps, so a transient network/apt
-# failure WARNs (via `apti` / the `mc_install`+`mona_install` functions) rather than sinking
-# the build. The load-bearing base desktop is already in place from phase 10.
+# STRICT by design: every step below fails the build on error (via `set -euo pipefail`, no
+# warn-and-continue). A transient network/apt failure must fail here — not surface later as
+# a template with a silently missing editor, font set, or theme. The load-bearing base
+# desktop is already in place from phase 10.
 set -euo pipefail
 . /setup/lib.sh
 
 log "dev toolbox: third-party apt repos (docker/chrome/gh/cursor/mozilla/azure/gcloud/stripe)"
 . /etc/os-release; CODENAME="${VERSION_CODENAME:-resolute}"
-apt-get install -y -qq ca-certificates curl gnupg >/dev/null 2>&1 || warn "repo prereqs"
+apt-get install -y -qq ca-certificates curl gnupg >/dev/null 2>&1
 install -d -m0755 /etc/apt/keyrings
 
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/docker.gpg || warn "docker key"
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/docker.gpg
 echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $CODENAME stable" > /etc/apt/sources.list.d/docker.list
 
-curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/google-chrome.gpg || warn "chrome key"
+curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/google-chrome.gpg
 echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
 
-curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg || warn "gh key"
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
 echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
 
 # Cursor: its repo key is gated behind the download portal, so pin Anysphere's public
@@ -43,91 +44,124 @@ SRC
 # Firefox from Mozilla's apt repo (pinned over the snap-transitional). Skip if the base
 # image already ships a packages.mozilla.org source — else apt warns "configured twice".
 if ! grep -rqs packages.mozilla.org /etc/apt/sources.list.d/ 2>/dev/null; then
-  curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc 2>/dev/null && chmod a+r /etc/apt/keyrings/packages.mozilla.org.asc || warn "mozilla key"
+  curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc 2>/dev/null && chmod a+r /etc/apt/keyrings/packages.mozilla.org.asc
   echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" > /etc/apt/sources.list.d/mozilla.list
   printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla
 fi
 
-curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/microsoft.gpg || warn "msft key"
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/microsoft.gpg
 echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ noble main" > /etc/apt/sources.list.d/azure-cli.list
 # VS Code — same microsoft.gpg keyring imported just above; the `code` repo.
 echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list
 
-curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/cloud.google.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/cloud.google.gpg || warn "gcloud key"
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/cloud.google.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/cloud.google.gpg
 echo "deb [signed-by=/etc/apt/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list
 
-curl -fsSL https://packages.stripe.dev/api/security/keypair/stripe-cli-gpg/public | gpg --dearmor -o /etc/apt/keyrings/stripe.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/stripe.gpg || warn "stripe key"
+curl -fsSL https://packages.stripe.dev/api/security/keypair/stripe-cli-gpg/public | gpg --dearmor -o /etc/apt/keyrings/stripe.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/stripe.gpg
 echo "deb [signed-by=/etc/apt/keyrings/stripe.gpg] https://packages.stripe.dev/stripe-cli-debian-local stable main" > /etc/apt/sources.list.d/stripe.list
 
 # ngrok — its own keyring (dedicated, matching the per-repo keyring pattern above). No auth
 # token is baked here: NGROK_AUTHTOKEN is a per-clone preset env var (the agent reads it
 # natively), set through the Presets UI, consistent with the no-env-settings invariant.
-curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | gpg --dearmor -o /etc/apt/keyrings/ngrok.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/ngrok.gpg || warn "ngrok key"
+curl -fsSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | gpg --dearmor -o /etc/apt/keyrings/ngrok.gpg 2>/dev/null && chmod a+r /etc/apt/keyrings/ngrok.gpg
 echo "deb [signed-by=/etc/apt/keyrings/ngrok.gpg] https://ngrok-agent.s3.amazonaws.com buster main" > /etc/apt/sources.list.d/ngrok.list
 
 # ONLYOFFICE Desktop Editors — official repo (replaces the Flathub build). GPG-KEY file is
 # ASCII-armored; handle the binary case too just in case. "squeeze" is ONLYOFFICE's fixed
 # repo suite, not a Debian release.
 if curl -fsSL https://download.onlyoffice.com/GPG-KEY-ONLYOFFICE -o /tmp/oo.key 2>/dev/null; then
-  if grep -q "BEGIN PGP" /tmp/oo.key; then gpg --dearmor < /tmp/oo.key > /etc/apt/keyrings/onlyoffice.gpg || warn "onlyoffice key"; else cp /tmp/oo.key /etc/apt/keyrings/onlyoffice.gpg; fi
+  if grep -q "BEGIN PGP" /tmp/oo.key; then gpg --dearmor < /tmp/oo.key > /etc/apt/keyrings/onlyoffice.gpg; else cp /tmp/oo.key /etc/apt/keyrings/onlyoffice.gpg; fi
   chmod a+r /etc/apt/keyrings/onlyoffice.gpg; rm -f /tmp/oo.key
   echo "deb [signed-by=/etc/apt/keyrings/onlyoffice.gpg] https://download.onlyoffice.com/repo/debian squeeze main" > /etc/apt/sources.list.d/onlyoffice.list
-else
-  warn "onlyoffice key fetch failed"
 fi
 
-apt-get update -qq || warn "apt update after adding toolbox repos"
+apt-get update -qq
 
-log "dev toolbox: install (grouped so one bad package doesn't sink the rest)"
-apti fish ripgrep micro tmux just gh xdotool build-essential clang libclang-dev default-jdk
-apti docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin fuse-overlayfs
-apti azure-cli google-cloud-cli stripe ngrok
-apti libsodium23 libpq-dev libcairo2 libcairo2-dev
-apti fonts-noto-cjk fonts-noto-color-emoji papirus-icon-theme
-apti celluloid ffmpeg firefox google-chrome-stable cursor code
+log "dev toolbox: install (grouped for log readability — every group fails the build)"
+apt-get install -y -qq fish ripgrep micro tmux just gh xdotool build-essential clang libclang-dev default-jdk
+apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin fuse-overlayfs
+apt-get install -y -qq azure-cli google-cloud-cli stripe ngrok
+apt-get install -y -qq libsodium23 libpq-dev libcairo2 libcairo2-dev
+apt-get install -y -qq fonts-noto-cjk fonts-noto-color-emoji papirus-icon-theme
+apt-get install -y -qq celluloid ffmpeg firefox google-chrome-stable cursor code
 # Former Flathub apps now available via apt: Extension Manager (Ubuntu universe) + ONLYOFFICE.
-apti gnome-shell-extension-manager onlyoffice-desktopeditors
+apt-get install -y -qq gnome-shell-extension-manager onlyoffice-desktopeditors
+# desktop-file-utils: update-desktop-database for the .desktop entries shipped below
+# (Zed) and above (Mission Center) — installed, never assumed.
+apt-get install -y -qq desktop-file-utils
+
+# Zed editor (https://zed.dev) — pinned GitHub release tarball + sha256, installed
+# system-wide under /opt with a PATH wrapper + desktop entry (mirrors Mission Center).
+# Pinned, not `latest`: re-pin deliberately by bumping ZED_VERSION + ZED_SHA256 together.
+# The sha256 is the digest GitHub's release API reports for this exact asset file.
+ZED_VERSION=v1.19.2
+ZED_URL="https://github.com/zed-industries/zed/releases/download/${ZED_VERSION}/zed-linux-x86_64.tar.gz"
+ZED_SHA256=c5acff2e52ac3c64890cce85250734cf7279c1de56d5926e4f4e1d4cf676359c
+log "dev toolbox: Zed editor ${ZED_VERSION} (pinned + sha256-verified)"
+curl -fsSL "$ZED_URL" -o /tmp/zed.tar.gz
+echo "${ZED_SHA256}  /tmp/zed.tar.gz" | sha256sum -c -
+rm -rf /opt/zed.app
+tar -xzf /tmp/zed.tar.gz -C /opt
+rm -f /tmp/zed.tar.gz
+# Structure assertions: the tarball must unpack to zed.app/ with the launcher, the
+# libexec editor binary, and a .desktop file — an upstream layout change fails the build
+# here instead of shipping a broken install.
+[ -x /opt/zed.app/bin/zed ]
+[ -f /opt/zed.app/libexec/zed-editor ]
+ZED_DESKTOP="$(ls /opt/zed.app/share/applications/dev.zed.Zed.desktop /opt/zed.app/share/applications/zed.desktop 2>/dev/null | head -1 || true)"
+[ -n "$ZED_DESKTOP" ]
+# Same Icon=/Exec= rewrite the official install script applies, pointed at /opt.
+sed -e "s|Icon=zed|Icon=/opt/zed.app/share/icons/hicolor/512x512/apps/zed.png|g" -e "s|Exec=zed|Exec=/opt/zed.app/bin/zed|g" "$ZED_DESKTOP" > /usr/share/applications/dev.zed.Zed.desktop
+grep -q '^Exec=/opt/zed.app/bin/zed' /usr/share/applications/dev.zed.Zed.desktop
+grep -q '^Icon=/opt/zed.app/share/icons/hicolor/512x512/apps/zed.png' /usr/share/applications/dev.zed.Zed.desktop
+printf '#!/bin/sh\nexec /opt/zed.app/bin/zed "$@"\n' > /usr/local/bin/zed; chmod 755 /usr/local/bin/zed
+update-desktop-database /usr/share/applications >/dev/null 2>&1
+# Shared-library gate: Zed bundles most of itself under zed.app/lib, but the loader still
+# needs system X11/Wayland/audio libs. `ldd` names anything missing and the build fails
+# here — not at first launch inside a clone.
+ZED_MISSING="$(ldd /opt/zed.app/libexec/zed-editor 2>/dev/null | sed -n 's/^[[:space:]]*\(.*\) => not found$/\1/p' || true)"
+if [ -n "$ZED_MISSING" ]; then echo "  !! Zed missing system libs:$ZED_MISSING" >&2; exit 1; fi
+log "Zed installed: /opt/zed.app/bin/zed + dev.zed.Zed.desktop"
 
 log "dev toolbox: HMCL (latest .deb from its GitHub release)"
-# `|| true` inside the substitution (mirrors the NVM_TAG line in 30-user.sh): under
-# `set -euo pipefail`, an unreachable/rate-limited GitHub API makes `curl` fail and `grep`
-# find nothing (exit 1), which would otherwise abort this best-effort optional-app step.
-HMCL_URL="$(curl -fsSL https://api.github.com/repos/HMCL-dev/HMCL/releases/latest 2>/dev/null | grep -oE 'https://[^"]+/HMCL-[0-9.]+\.deb' | head -1 || true)"
-if [ -n "${HMCL_URL:-}" ] && curl -fsSL "$HMCL_URL" -o /tmp/hmcl.deb 2>/dev/null; then
-  apti /tmp/hmcl.deb && log "HMCL installed ($(basename "$HMCL_URL"))"; rm -f /tmp/hmcl.deb
-else
-  warn "could not fetch HMCL release"
-fi
+# Strict: an unreachable/rate-limited GitHub API fails the curl|grep pipeline (pipefail)
+# and aborts the build — a silently missing HMCL is worse than a red build.
+HMCL_URL="$(curl -fsSL https://api.github.com/repos/HMCL-dev/HMCL/releases/latest 2>/dev/null | grep -oE 'https://[^"]+/HMCL-[0-9.]+\.deb' | head -1)"
+curl -fsSL "$HMCL_URL" -o /tmp/hmcl.deb 2>/dev/null
+apt-get install -y -qq /tmp/hmcl.deb; rm -f /tmp/hmcl.deb
+log "HMCL installed ($(basename "$HMCL_URL"))"
 
 # Mission Center (system monitor) — no apt/deb upstream, only Flatpak + AppImage. Pull the
 # latest x86_64 AppImage, --appimage-extract it (no FUSE needed), install the raw tree under
-# /opt, and wire up a PATH wrapper + desktop entry (Exec rewritten to the wrapper). Defined
-# as a function so `set -e` is suppressed across the block (run as `mc_install && … || …`),
-# keeping this optional app from ever aborting the build.
+# /opt, and wire up a PATH wrapper + desktop entry (Exec rewritten to the wrapper). Every
+# failure inside aborts the build (strict): the `[ -d … ] || return 1` gates and the final
+# `mc_install` call below carry no `|| warn` anymore.
 mc_install(){
   local url d
   url="$(curl -fsSL 'https://gitlab.com/api/v4/projects/mission-center-devs%2Fmission-center/releases' 2>/dev/null | grep -oE 'https://[^"]+x86_64\.AppImage' | head -1)"
   [ -n "$url" ] || return 1
   curl -fsSL "$url" -o /tmp/mc.AppImage || return 1
   chmod +x /tmp/mc.AppImage
-  ( cd /tmp && rm -rf squashfs-root && /tmp/mc.AppImage --appimage-extract >/dev/null 2>&1 ) || true
+  ( cd /tmp && rm -rf squashfs-root && /tmp/mc.AppImage --appimage-extract >/dev/null 2>&1 )
   [ -d /tmp/squashfs-root ] || return 1
   rm -rf /opt/mission-center; mv /tmp/squashfs-root /opt/mission-center; chown -R root:root /opt/mission-center
   printf '#!/bin/sh\nexec /opt/mission-center/AppRun "$@"\n' > /usr/local/bin/mission-center; chmod 755 /usr/local/bin/mission-center
-  [ -d /opt/mission-center/usr/share/icons ] && cp -rn /opt/mission-center/usr/share/icons/* /usr/share/icons/ 2>/dev/null || true
-  d="$(ls /opt/mission-center/usr/share/applications/*.desktop 2>/dev/null | head -1)"; [ -n "$d" ] || d="$(ls /opt/mission-center/*.desktop 2>/dev/null | head -1)"
-  [ -n "$d" ] && sed -E 's#^Exec=.*#Exec=/usr/local/bin/mission-center#; s#^TryExec=.*#TryExec=/usr/local/bin/mission-center#' "$d" > /usr/share/applications/io.missioncenter.MissionCenter.desktop
-  update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
-  gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1 || true
+  [ -d /opt/mission-center/usr/share/icons ] && cp -rn /opt/mission-center/usr/share/icons/* /usr/share/icons/ 2>/dev/null
+  d="$(ls /opt/mission-center/usr/share/applications/*.desktop 2>/dev/null | head -1 || true)"; [ -n "$d" ] || d="$(ls /opt/mission-center/*.desktop 2>/dev/null | head -1 || true)"
+  [ -n "$d" ] || return 1
+  sed -E 's#^Exec=.*#Exec=/usr/local/bin/mission-center#; s#^TryExec=.*#TryExec=/usr/local/bin/mission-center#' "$d" > /usr/share/applications/io.missioncenter.MissionCenter.desktop
+  update-desktop-database /usr/share/applications >/dev/null 2>&1
+  gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1
   rm -f /tmp/mc.AppImage
 }
 log "dev toolbox: Mission Center (AppImage → extract → /opt + desktop entry)"
-mc_install && log "Mission Center installed" || warn "Mission Center install skipped"
+mc_install
+log "Mission Center installed"
 
 # Monaspace fonts (githubnext/monaspace) — full set: static (family "Monaspace Neon"),
 # frozen ("Monaspace Neon Frozen", texture-healing baked in — used as the default mono), and
 # variable ("Monaspace Neon Var"). frozen+variable are TTF, static is OTF — copy both.
-command -v unzip >/dev/null 2>&1 || apt-get install -y -qq unzip >/dev/null 2>&1 || warn "unzip unavailable; Monaspace may be skipped"
+command -v unzip >/dev/null 2>&1 || apt-get install -y -qq unzip >/dev/null 2>&1
 mona_install(){
   local json url v
   json="$(curl -fsSL https://api.github.com/repos/githubnext/monaspace/releases/latest 2>/dev/null)"
@@ -135,25 +169,25 @@ mona_install(){
   rm -rf /tmp/mona; mkdir -p /tmp/mona /usr/share/fonts/monaspace
   for v in static frozen variable; do
     url="$(echo "$json" | grep -oE "https://[^\"]+monaspace-$v-[^\"]+\.zip" | head -1)"
-    [ -n "$url" ] || continue
-    curl -fsSL "$url" -o "/tmp/mona/$v.zip" && unzip -oq "/tmp/mona/$v.zip" -d "/tmp/mona/$v" || true
+    [ -n "$url" ] || return 1
+    curl -fsSL "$url" -o "/tmp/mona/$v.zip"
+    unzip -oq "/tmp/mona/$v.zip" -d "/tmp/mona/$v"
   done
   find /tmp/mona -type f \( -iname '*.otf' -o -iname '*.ttf' \) -exec cp -f {} /usr/share/fonts/monaspace/ \;
-  fc-cache -f >/dev/null 2>&1 || true
+  fc-cache -f >/dev/null 2>&1
   rm -rf /tmp/mona
   [ -n "$(find /usr/share/fonts/monaspace -type f -name '*.ttf' 2>/dev/null | head -1)" ]
 }
 log "dev toolbox: Monaspace fonts (full: static + frozen + variable)"
-mona_install && log "Monaspace installed ($(find /usr/share/fonts/monaspace -type f 2>/dev/null | wc -l) files)" || warn "Monaspace install skipped"
+mona_install
+log "Monaspace installed ($(find /usr/share/fonts/monaspace -type f 2>/dev/null | wc -l) files)"
 
 # adw-gtk3 (https://github.com/lassekongo83/adw-gtk3) — a GTK3 theme matching libadwaita's
 # look, so legacy GTK3 apps stop clashing with the GTK4/libadwaita apps that already look
 # native. Pinned release tarball (NOT `main`); the sha256 below was independently downloaded
 # + hashed (matches the digest GitHub's own release-assets API reports for this file).
-# UNLIKE the best-effort apps above (HMCL / Mission Center / Monaspace), this is
-# LOAD-BEARING: it becomes the system default theme below, so a theme mismatch would be
-# visible product surface. No `apti`/`|| warn` here — a failed download, checksum mismatch,
-# or extract trips `set -e` and FAILS THE BUILD.
+# visible product surface. Like every step in this file now, a failed download, checksum
+# mismatch, or extract trips `set -e` and FAILS THE BUILD.
 ADW_GTK3_VERSION=v6.5
 ADW_GTK3_URL="https://github.com/lassekongo83/adw-gtk3/releases/download/${ADW_GTK3_VERSION}/adw-gtk3${ADW_GTK3_VERSION}.tar.xz"
 ADW_GTK3_SHA256=a81780fadfc432be0fc3d89c4ebb41aa28e4f032d42c36f9789c57dd10cfa41c
@@ -183,7 +217,7 @@ monospace-font-name='Monaspace Neon Frozen 11'
 [org/gnome/desktop/wm/preferences]
 button-layout='appmenu:minimize,maximize,close'
 DCONF
-dconf update 2>/dev/null || warn "dconf update failed"
+dconf update 2>/dev/null
 
 # Apt lists deliberately stay (dropped once, in the Dockerfile's tail cleanup) — same
 # reasoning as phase 10.

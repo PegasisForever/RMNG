@@ -11,13 +11,13 @@
 export DEBIAN_FRONTEND=noninteractive
 export SYSTEMD_OFFLINE=1
 
-# Plain build-log helpers. The exec-era `[ct]` progress protocol (the control-server parsed
+# Plain build-log helper. The exec-era `[ct]` progress protocol (the control-server parsed
 # `    [ct] <msg>` lines out of `docker exec`) is gone — this is a straight `docker build`,
 # so a step line is just a build-log line.
 log()  { echo "  >> $*"; }
-warn() { echo "  !! WARN: $*" >&2; }
 
-# apt install that WARNs instead of aborting — reserved for the genuinely optional
-# third-party toolbox apps (phase 20). A transient miss there degrades the toolbox; it must
-# never sink the whole template build. (Load-bearing steps deliberately do NOT use this.)
-apti() { apt-get install -y -qq "$@" || warn "install failed: $*"; }
+# Strict-build rule: every phase script runs under `set -euo pipefail` and NOTHING swallows
+# a failure — no `warn`, no `|| true` on real steps. A failed install fails the template
+# build here, not surfaces later as a degraded clone. The only tolerated fallbacks are
+# absence checks that branch on them explicitly (e.g. `if id ubuntu`, `command -v` gates
+# with a hard failure on the empty path).

@@ -39,16 +39,17 @@ log "create user $USERNAME + groups + linger"
 # templates never did). Everything downstream (tar ownership, XDG_RUNTIME_DIR paths, unit
 # files) assumes $USERNAME == uid 1000, so evict it and pin the uid explicitly.
 if id ubuntu >/dev/null 2>&1 && [ "$USERNAME" != ubuntu ]; then
-  userdel -r ubuntu 2>/dev/null || userdel ubuntu 2>/dev/null || warn "could not remove stock ubuntu user"
+  userdel -r ubuntu 2>/dev/null || userdel ubuntu 2>/dev/null
 fi
 id "$USERNAME" >/dev/null 2>&1 || useradd -m -s /bin/bash -u 1000 "$USERNAME"
 # SSH: the control-server injects authorized_keys here at provision. Pre-create the dir
 # with the exact perms/owner sshd StrictModes requires (else it silently ignores the key).
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "/home/$USERNAME/.ssh"
 usermod -aG sudo,render,video "$USERNAME"
-# docker group exists once docker-ce installed in the toolbox above; add the user so they can
-# run docker without sudo. Non-fatal if the group is absent (docker install failed).
-getent group docker >/dev/null 2>&1 && usermod -aG docker "$USERNAME" || warn "docker group absent; not added"
+# docker group exists because docker-ce installed in the toolbox phase (which now fails the
+# build on error); assert it here so a regression fails loudly instead of shipping clones
+# whose user cannot run docker without sudo.
+getent group docker && usermod -aG docker "$USERNAME"
 printf '%s:%s\n' "$USERNAME" "$PASSWORD" | chpasswd
 printf 'root:%s\n' "$PASSWORD" | chpasswd
 printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$USERNAME" > "/etc/sudoers.d/$USERNAME"; chmod 0440 "/etc/sudoers.d/$USERNAME"
@@ -57,13 +58,10 @@ printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$USERNAME" > "/etc/sudoers.d/$USERNAME"; c
 # writes; the user manager auto-starts on first boot of a real clone.
 mkdir -p /var/lib/systemd/linger && touch "/var/lib/systemd/linger/$USERNAME"
 
-# Default shell → fish for the clone user + root (fish installed in the dev toolbox above; it
-# registers itself in /etc/shells so chsh accepts it). Non-fatal if fish is missing (toolbox
-# is best-effort) — the shell then stays bash.
-FISH_SH="$(command -v fish || true)"
-if [ -n "$FISH_SH" ]; then
-  for u in "$USERNAME" root; do chsh -s "$FISH_SH" "$u" 2>/dev/null || usermod -s "$FISH_SH" "$u" || warn "set fish shell for $u"; done
-fi
+# Default shell → fish for the clone user + root. Fish installed in the dev toolbox phase,
+# which fails the build on error — so it is guaranteed present here, not probed.
+FISH_SH="$(command -v fish)"
+for u in "$USERNAME" root; do chsh -s "$FISH_SH" "$u" 2>/dev/null || usermod -s "$FISH_SH" "$u"; done
 
 # ~/.local/bin + ~/.cargo/bin on PATH for interactive shells. User-local tools install there
 # — Claude Code / uv → ~/.local/bin, rustup/cargo → ~/.cargo/bin — but neither fish (the
@@ -158,11 +156,10 @@ log "install standalone claude CLI (no node)"
 runuser -u "$USERNAME" -- bash -lc 'set -o pipefail; command -v claude >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash'
 
 # Codex CLI installs standalone (self-contained binary, no node) → ~/.local/bin/codex.
-# Warn-only: unlike claude, the agent-wrapper does not require codex, so a failed install
-# must not fail the template build. Idempotent (skips if already present).
+# Strict like everything else in the template: a failed install fails the build.
+# Idempotent (skips if already present).
 log "install standalone codex CLI (no node)"
-runuser -u "$USERNAME" -- bash -lc 'set -o pipefail; command -v codex >/dev/null 2>&1 || CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
-  || warn "codex install failed; codex accounts will be unavailable on clones from this template"
+runuser -u "$USERNAME" -- bash -lc 'set -o pipefail; command -v codex >/dev/null 2>&1 || CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh'
 
 # Shared user CLAUDE.md — operating memory read by EVERY `claude` on this clone: the
 # agent-wrapper's SDK agent (settingSources: ["user"]), the Claude Code it drives inside
@@ -248,7 +245,8 @@ jq --arg auth 'Bearer ${LINEAR_API_KEY}' \
 chown "$USERNAME:$USERNAME" "$CLAUDE_JSON"
 chmod 600 "$CLAUDE_JSON"
 
-# uv + rustup + nvm (load-bearing user toolchains), then fish-nvm (best-effort shell glue),
+# uv + rustup + nvm (load-bearing user toolchains), then fish-nvm (shell glue, strict like
+# everything else in the template),
 # all installed as the clone user. Subshell cd's to the user's home so fisher can getcwd
 # (root's cwd isn't readable by the user → fisher would otherwise spew "Unable to open the
 # current working directory"). Each load-bearing installer runs with an inner
@@ -271,10 +269,9 @@ log "user tools: uv (Astral) + rustup + nvm + fish-nvm"
   runuser -u "$USERNAME" -- bash -lc "set -o pipefail; [ -s \"\$HOME/.nvm/nvm.sh\" ] || { export PROFILE=\"\$HOME/.bashrc\"; curl -o- 'https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_TAG/install.sh' | bash; }"
   # fish-nvm — makes nvm/node/npm/npx/yarn work in fish (the default shell) by lazily
   # sourcing nvm via bass. Bootstrap fisher, then install it + its bass + fish-nvm deps.
-  # Best-effort: it depends on fish (a best-effort toolbox app) and node still works in bash
-  # via nvm without it. </dev/null: fisher must not inherit this script's stdin.
-  runuser -u "$USERNAME" -- fish -c 'curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher edc/bass FabioAntunes/fish-nvm' </dev/null \
-    || warn "fish-nvm install failed; node still works in bash via nvm"
+  # Strict: fish is guaranteed by the toolbox phase, so a failure here is real.
+  # </dev/null: fisher must not inherit this script's stdin.
+  runuser -u "$USERNAME" -- fish -c 'curl -sL https://raw.githubusercontent.com/jorgebucaran/fisher/main/functions/fisher.fish | source && fisher install jorgebucaran/fisher edc/bass FabioAntunes/fish-nvm' </dev/null
 )
 
 # Belt-and-braces: assert every load-bearing user toolchain actually landed. An installer
