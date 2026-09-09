@@ -118,6 +118,7 @@ const toCloneModalFromTicket = makeStoryLink("Clone/Components/CloneModalView", 
 const toSettings = makeStoryLink("Settings/Components/SettingsPanelView", "Default");
 const toImportAccount = makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn");
 const toChangeAccount = makeStoryLink("Clone/Components/ChangeAccountModalView", "BothProviders");
+const toRebaseModal = makeStoryLink("Clone/Components/RebaseModalView", "Default");
 const toPortForward = makeStoryLink("Modals/Components/PortForwardModal", "Default");
 const toTicketModal = makeStoryLink("Board/Components/TicketModalView", "Default");
 // A ticket card fills the side panel with the ticket, which is a state of this shell rather
@@ -222,7 +223,7 @@ function makeBoard() {
     onSelectClone: fn(),
     onDeleteClone: fn(),
     onChangeAccountClone: toChangeAccount,
-    onRebaseClone: fn(),
+    onRebaseClone: toRebaseModal,
     onPortForwardClone: toPortForward,
     onArchiveClone: fn(),
     onUnarchiveClone: fn(),

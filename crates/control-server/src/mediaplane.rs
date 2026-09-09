@@ -638,7 +638,7 @@ fn send_clip_to(handle: &MediaHandle, viewers: &Viewers, dest: &str, msg: Clipbo
 /// viewers (remote↔local + remote↔remote + viewer↔viewer).
 fn clip_dests(handle: &MediaHandle, viewers: &Viewers, source: &str) -> Vec<String> {
     let mut dests: Vec<String> =
-        handle.conns.lock().unwrap().keys().cloned().filter(|id| id != source).collect();
+        handle.conns.lock().unwrap().keys().filter(|&id| id != source).cloned().collect();
     for id in viewers.lock().unwrap().keys() {
         let src = viewer_src(*id);
         if src != source {

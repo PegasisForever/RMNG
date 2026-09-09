@@ -300,7 +300,7 @@ fn write_store(path: &Path, body: &impl Serialize) -> std::io::Result<()> {
     }
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let mut bytes = serde_json::to_vec_pretty(body)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     bytes.push(b'\n');
     std::fs::write(&tmp, &bytes)?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;

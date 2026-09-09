@@ -1173,7 +1173,7 @@ fn pi_task_output(root: &Path, task: &PiTask, now: f64) -> Option<(u64, f64)> {
     if !task.cwd.is_empty() {
         let under = task.cwd.strip_prefix('/').unwrap_or(&task.cwd);
         candidates.push(root.join(under).join(&task.output_path));
-        candidates.push(root.join(under).join(task.output_path.trim_start_matches("../").to_string()));
+        candidates.push(root.join(under).join(task.output_path.trim_start_matches("../")));
     }
     candidates.push(root.join(task.output_path.trim_start_matches('/')));
     for path in candidates {

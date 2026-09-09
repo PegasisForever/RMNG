@@ -19,9 +19,7 @@ use serde::{Deserialize, Serialize};
 use wire::{ClaudeUsage, ClaudeUsageWindow, CloneGroup, RmngClone};
 
 use crate::app::App;
-use crate::clone_ops::{
-    now_ms, rand_u64, run_clone_op, shuffle, snippet,
-};
+use crate::clone_ops::{now_ms, rand_u64, run_clone_op, shuffle, snippet};
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONSUME_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
@@ -555,7 +553,7 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
             continue;
         };
         // Archived clones cannot take a push; see `claude::push_stale_tokens_for`.
-        if !only.is_none_or(|want| want == email) || !host.managed || host.archived {
+        if only.is_some_and(|want| want != email) || !host.managed || host.archived {
             continue;
         }
         let Some(acct) = app.codex.get_by_email(email) else {
@@ -587,7 +585,12 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
             if !app.docker.is_running(id).await.unwrap_or(false) {
                 return (id, email, acct, None);
             }
-            (id, email, acct, Some(apply_clone_token(app, id, acct).await))
+            (
+                id,
+                email,
+                acct,
+                Some(apply_clone_token(app, id, acct).await),
+            )
         }))
         .await;
 
@@ -1065,7 +1068,9 @@ fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
     // Tail after the seconds: an optional `.fraction`, then an optional zone offset.
     let mut rest = s.get(19..)?;
     if let Some(frac) = rest.strip_prefix('.') {
-        let end = frac.find(|c: char| !c.is_ascii_digit()).unwrap_or(frac.len());
+        let end = frac
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(frac.len());
         if end == 0 {
             return None; // a bare '.' with no digits is malformed
         }
@@ -1073,8 +1078,7 @@ fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
     }
     let offset_secs = parse_zone_offset(rest)?;
     let days = days_from_civil(year, month, day);
-    let secs =
-        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    let secs = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
     Some(secs - offset_secs)
 }
 
@@ -1516,7 +1520,11 @@ pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Res
     tracing::info!(
         "replaced Codex account {old_email} with {new_email}: {} clone(s), pool(s) {}",
         moved.len(),
-        if joined.is_empty() { "none".to_string() } else { joined.join(", ") },
+        if joined.is_empty() {
+            "none".to_string()
+        } else {
+            joined.join(", ")
+        },
     );
 
     let bg = app.clone();
@@ -1666,7 +1674,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
                             if let Ok(raw2) =
                                 fetch_usage(&app.http, &fresh.access_token, &fresh.account_id).await
                             {
-                                let u2 = to_usage(&acct, raw2);
+                                let u2 = to_usage(acct, raw2);
                                 tracing::info!(
                                     "codex auto-reset after: {} 7d={:?} credits={:?}",
                                     acct.email,
@@ -1849,8 +1857,6 @@ mod tests {
         assert!(pick_judge_account(&accounts, "deleted@openai.com").is_none());
     }
 
-
-
     #[test]
     fn store_upsert_roundtrip() {
         let dir = std::env::temp_dir().join(format!("rmng-codex-store-{}", std::process::id()));
@@ -1904,8 +1910,14 @@ mod tests {
         let acct = sample_account();
         let codex: serde_json::Value = serde_json::from_str(&auth_json(&acct)).unwrap();
         let pi: serde_json::Value = serde_json::from_str(&pi_auth_json(&acct)).unwrap();
-        assert_eq!(codex["tokens"]["access_token"], pi["openai-codex"]["access"]);
-        assert_eq!(codex["tokens"]["account_id"], pi["openai-codex"]["accountId"]);
+        assert_eq!(
+            codex["tokens"]["access_token"],
+            pi["openai-codex"]["access"]
+        );
+        assert_eq!(
+            codex["tokens"]["account_id"],
+            pi["openai-codex"]["accountId"]
+        );
     }
 
     #[test]
@@ -2069,12 +2081,18 @@ mod tests {
     fn parses_rfc3339_z_and_offset_forms() {
         // Codex resets arrive as `...Z`, but the parser is kept identical to Claude's, so
         // it must also read fractional seconds and numeric offsets.
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"), Some(1_609_459_200));
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"),
+            Some(1_609_459_200)
+        );
         assert_eq!(
             parse_rfc3339_utc_secs("2026-07-24T22:00:00.469890+00:00"),
             Some(1_784_930_400)
         );
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"), Some(1_609_477_200));
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"),
+            Some(1_609_477_200)
+        );
         assert_eq!(parse_rfc3339_utc_secs("2021-13-01T00:00:00Z"), None);
     }
 

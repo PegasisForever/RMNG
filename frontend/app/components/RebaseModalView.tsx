@@ -21,8 +21,6 @@ export interface RebaseModalViewProps {
   /** Target preset whose image the clone adopts. */
   preset: string;
   onPresetChange: (name: string) => void;
-  /** Resolved FROM line of the picked preset's Dockerfile, shown as read-only text. */
-  presetImage: string | null;
   /** Force a fresh image build even when the tag exists. */
   rebuild: boolean;
   onRebuildChange: (rebuild: boolean) => void;
@@ -44,7 +42,6 @@ export function RebaseModalView({
   presets,
   preset,
   onPresetChange,
-  presetImage,
   rebuild,
   onRebuildChange,
   valid,
@@ -92,11 +89,6 @@ export function RebaseModalView({
                 ))
               )}
             </select>
-            {presetImage ? (
-              <p className="mt-1 font-mono text-[11px] text-slate-400 dark:text-slate-500">
-                base: {presetImage}
-              </p>
-            ) : null}
           </label>
           <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
             <input

@@ -14,7 +14,6 @@ const meta = {
     presets: makeClonePresets(),
     preset: "webapp",
     onPresetChange: fn(),
-    presetImage: "pegasis0/rmng-template:latest",
     rebuild: false,
     onRebuildChange: fn(),
     valid: true,

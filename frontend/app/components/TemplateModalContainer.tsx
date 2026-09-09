@@ -17,16 +17,6 @@ import { opPhase } from "~/lib/cloneDraft";
 import type { Operation } from "~/lib/types";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
-/** First FROM line of a Dockerfile, for the read-only base display. Shared with the
- *  rebase dialog, which shows the same line for its picked preset. */
-export function fromLine(dockerfile: string): string | null {
-  for (const line of dockerfile.split("\n")) {
-    const m = line.trim().match(/^FROM\s+(\S+)/i);
-    if (m) return m[1];
-  }
-  return null;
-}
-
 export function TemplateModalContainer({
   operations,
   onClose,
@@ -86,8 +76,6 @@ export function TemplateModalContainer({
   }, [opId, op, opSeen, failed]);
 
   const busy = starting || (!!opId && !failed);
-  const picked = presets.find((p) => p.name === preset);
-  const presetImage = picked ? fromLine(picked.dockerfile) : null;
 
   const submit = useCallback(() => {
     if (!valid || busy) return;
@@ -115,7 +103,6 @@ export function TemplateModalContainer({
       presets={presets}
       preset={preset}
       onPresetChange={setPreset}
-      presetImage={presetImage}
       valid={valid}
       busy={busy}
       error={error}

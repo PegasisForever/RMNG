@@ -9,7 +9,6 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { RebaseModalView } from "~/components/RebaseModalView";
-import { fromLine } from "~/components/TemplateModalContainer";
 import { getConfig } from "~/lib/api";
 import { opPhase } from "~/lib/cloneDraft";
 import type { Operation } from "~/lib/types";
@@ -76,8 +75,6 @@ export function RebaseModalContainer({
   }, [opId, op, opSeen, failed]);
 
   const busy = starting || (!!opId && !failed);
-  const picked = presets.find((p) => p.name === preset);
-  const presetImage = picked ? fromLine(picked.dockerfile) : null;
 
   const submit = useCallback(() => {
     if (!valid || busy) return;
@@ -100,7 +97,6 @@ export function RebaseModalContainer({
       presets={presets}
       preset={preset}
       onPresetChange={setPreset}
-      presetImage={presetImage}
       rebuild={rebuild}
       onRebuildChange={setRebuild}
       valid={valid}

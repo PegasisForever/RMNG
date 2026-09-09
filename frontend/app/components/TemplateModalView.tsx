@@ -22,8 +22,6 @@ export interface TemplateModalViewProps {
   /** Hand-picked preset driving env + accounts. */
   preset: string;
   onPresetChange: (name: string) => void;
-  /** Resolved base image for the picked preset, shown as read-only text. */
-  presetImage: string | null;
 
   /** The Clone button may fire. */
   valid: boolean;
@@ -43,7 +41,6 @@ export function TemplateModalView({
   presets,
   preset,
   onPresetChange,
-  presetImage,
   valid,
   busy,
   error,
@@ -105,11 +102,6 @@ export function TemplateModalView({
                 ))
               )}
             </select>
-            {presetImage ? (
-              <p className="mt-1 font-mono text-[11px] text-slate-400 dark:text-slate-500">
-                base: {presetImage}
-              </p>
-            ) : null}
           </label>
         </div>
 
