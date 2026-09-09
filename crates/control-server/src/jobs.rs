@@ -361,7 +361,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     .await
     {
         Ok(v) => v,
-        Err(e) => return fail_op(&app, &op_id, e.to_string()),
+        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
     };
 
     // The container is up and its daemon has registered (or timed out still-booting) — the op
@@ -798,7 +798,7 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
     if managed {
         let progress = op_progress(&app, &op_id, OperationKind::Delete);
         if let Err(e) = delete_clone(&app, &host_id, progress).await {
-            return fail_op(&app, &op_id, e.to_string());
+            return fail_op(&app, &op_id, format!("{e:#}"));
         }
     } else {
         // Unmanaged row: nothing to tear down, just unregister it.
