@@ -790,33 +790,6 @@ async fn clone_container_after_create(
     )
     .await;
 
-    // Mask `tmp.mount` and authorize the `sudo` group in polkit. Both are template-parity steps
-    // the reconciler applies to every clone; running them now means a clone's first `sudo` and
-    // its first `/tmp` write behave like an old clone's, not like an unreconciled one's.
-    // Content-idempotent rather than stamped, so there is nothing to record.
-    on_progress(
-        "inject",
-        "masking tmp.mount + installing the polkit sudo rule",
-    );
-    seed_step(
-        docker,
-        container,
-        hostname,
-        "tmp.mount mask",
-        crate::clone_reconcile::tmp_mount_mask_script(),
-        None,
-    )
-    .await;
-    seed_step(
-        docker,
-        container,
-        hostname,
-        "polkit sudo rule",
-        crate::clone_reconcile::polkit_sudo_rule_script(),
-        None,
-    )
-    .await;
-
     // The activity probe, so the new clone reports working-vs-stuck from its first turn
     // rather than from the reconciler's first pass 30s later. Stamped the same way, and
     // best-effort for the same reason: the reconciler is the backstop.
