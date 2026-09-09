@@ -127,9 +127,18 @@ pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     }
     tracing::info!(target: "overlay", "exporting {IMAGE_HOME} of {image_tag} for the home overlay");
     std::fs::create_dir_all(&dest).with_context(|| format!("mkdir {}", dest.display()))?;
+    // Unique per attempt: a previous export that died between create and remove leaves
+    // its reader behind, and a deterministic name would 409 the retry on it.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let reader = app
         .docker
-        .create_reader(image_tag, &format!("rmng-skel-{}", digest_path(&digest)))
+        .create_reader(
+            image_tag,
+            &format!("rmng-skel-{}-{}-{unique}", digest_path(&digest), std::process::id()),
+        )
         .await?;
     let tar = app.docker.download_home_tar(&reader, IMAGE_HOME).await;
     let _ = app.docker.remove_container(&reader).await;
