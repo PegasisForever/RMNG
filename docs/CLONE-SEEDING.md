@@ -117,25 +117,46 @@ container is running. Failures warn once per clone+step (`warned` set) and retry
 next pass; keys for vanished clones are dropped. An unresolvable control host skips
 the whole pass (warned globally) rather than rewriting the fleet into a degraded URL.
 
-- Archived-state sweep first: thaw paused-but-not-archived clones (an unreadable
-  pause state logs at debug and skips); stop archived-but-up ones. Skips clones
-  mid-rebase-swap and clones being committed
-  (thawing/env-syncing those would corrupt the swap/snapshot).
-- SSH ready: dirs + host keys + `authorized_keys`, version-stamped (`SSH_STAMP_VERSION`).
-  (No Codex CLI step: the template bakes it.)
-- `/etc/environment` sync: control env + per-clone identity key + preset env +
-  `ANTHROPIC_MODEL`, content-compared; restarts `agent-wrapper` only on a real
-  change (a blind restart would interrupt an in-flight chat turn every 30 s).
-- Codex parity files, content-stamped over the entries (parent dirs come from the
-  template — no prepare step, no prepare hash in the stamp).
-- `~/.claude.json` MCP merge, stamped.
-- `~/.cursor/mcp.json` MCP merge, stamped (Linear bearer re-resolved each pass).
-- Activity probe files + registration, stamped (parent dirs come from the template).
-- `~/.codex/config.toml` MCP merge, stamped.
-- Payload binaries refresh: hash-compare against the server's staged payloads;
-  on mismatch re-push and restart `rmng-clone-daemon` + `agent-wrapper`
-  (headless: restart guarded by `systemctl cat` plus a mask check — absent or masked
-  units skip cleanly instead of wedging the whole step).
+Assumption for the verdicts below: clones never intentionally change these files —
+drift comes only from server-side changes (settings, code), crashes, and corruption.
+The only event push today is Settings save (`config_put`): SSH keys (`apply_now`,
+30 s-bounded, loop retries) and monitor geometry (watched clone only). Everything
+else converges here.
+
+1. Archived-state sweep (thaw paused-but-not-archived; stop archived-but-up; skips
+   mid-rebase-swap and committing clones). NEEDED — not a file check: enforces the
+   stopped/archived invariant across crashes and daemon restarts. Not settings-driven;
+   could only move to Docker-events, a different mechanism.
+2. SSH ready (dirs + keys + `authorized_keys`, version-stamped). REPAIR ONLY — key
+   changes already push on save; pre-boot covers fresh clones. Keep for host-key
+   rotation and corruption; cannot drop the loop copy while rotation has no event.
+3. `/etc/environment` sync (content-compared; restarts `agent-wrapper` only on a real
+   change). NEEDED, MOVABLE TO SAVE — every input (control env excepted) originates
+   in settings/presets/keys. Extend `config_put` to compare-and-push like the SSH
+   and monitor handling; the loop keeps the repair role. The restart-on-change
+   subtlety moves with it.
+4. Codex parity files (content-stamped). NEEDED, MOVABLE TO SAVE — inputs are the
+   global prompt, playbook, and preset, all settings-side. Same compare-and-push
+   shape as 3.
+5. `~/.claude.json` MCP merge, stamped. NEEDED, MOVABLE TO SAVE for key/headless
+   changes (both visible in old-vs-merged config). Gap, independent of the loop:
+   a server-code change to the managed set does NOT re-push — the claude/codex
+   stamps are `v1 headless=…`, not content hashes (only cursor's script-hash stamp
+   re-pushes). Fix by content-hashing those stamps or bumping `v1`.
+6. `~/.cursor/mcp.json` MCP merge, stamped (Linear bearer re-resolved each pass).
+   Same verdict as 5, minus the gap (its stamp already tracks the key).
+7. Activity probe files + registration, content-stamped. NEEDED, MOVABLE TO A
+   POST-RESTART SWEEP — the only input is server code (hash covers it). A one-shot
+   push to running clones at server start replaces the 30 s poll for delivery; the
+   loop keeps corruption repair.
+8. `~/.codex/config.toml` MCP merge, stamped. Same verdict as 5 (including the gap).
+9. Payload binaries refresh (hash-compare; restarts daemon + wrapper; mask-aware
+   guard on headless). NEEDED, MOVABLE TO A POST-RESTART SWEEP — same reasoning
+   as 7: the hash is the delivery trigger for upgrades, polling adds only repair.
+
+Net: with 3+4+5+6+8 fanning out on save and 7+9 sweeping once at server start, the
+30 s loop degrades to repair-only (1, 2, corruption) and could run far less often.
+Not implemented — proposal only.
 
 NOT in this loop (one-shots elsewhere): home symlinks under `data/hosts`
 (synced once at server boot), overlay remounts after a server restart, the
