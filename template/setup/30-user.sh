@@ -158,34 +158,30 @@ runuser -u "$USERNAME" -- bash -lc 'set -o pipefail; command -v claude >/dev/nul
 
 # Codex CLI installs standalone (self-contained binary, no node) → ~/.local/bin/codex.
 # Strict like everything else in the template: a failed install fails the build.
-# Idempotent (skips if already present).
+# This is the SOLE source of the binary — the control-server no longer installs or
+# repairs it post-boot (install-if-missing scripts in three places were one truth in
+# three copies; the image won). Idempotent (skips if already present).
 log "install standalone codex CLI (no node)"
 runuser -u "$USERNAME" -- bash -lc 'set -o pipefail; command -v codex >/dev/null 2>&1 || CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh'
 
-# Shared user CLAUDE.md — operating memory read by EVERY `claude` on this clone: the
-# agent-wrapper's SDK agent (settingSources: ["user"]), the Claude Code it drives inside
-# Cursor to implement tickets, and any interactive `claude` a human opens. General
-# engineering guidance ONLY — deliberately NOT the desktop operating notes or the ticket
-# procedure (those are baked into the agent-wrapper and injected as its system prompt; the
-# ticket procedure must never reach the inner Cursor agent or it would recursively try to
-# open Cursor). install -d is idempotent — the claude installer already made ~/.claude.
-log "shared user CLAUDE.md (agent operating memory)"
+# The clone user's agent config dirs. The control-server writes ALL files under them at
+# clone creation (codex parity + MCP merges) and the reconciler keeps them current — the
+# template owns the directories (correct owner before anything lands, else tar invents
+# them root-owned) and never the content. Every parent the parity tar writes into must
+# exist here: Docker's tar extract invents a missing parent as root:root and the agent
+# then cannot write beside the placed file (seen live with ~/.pi/agent/AGENTS.md — the
+# wrapper could not write its MCP tool cache, so desktop tools never promoted).
+log "shared user agent config dirs (codex + pi, dirs only)"
 CLAUDE_DIR="/home/$USERNAME/.claude"
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "$CLAUDE_DIR"
-# The file itself is the control-server's: it writes the live global prompt here at clone
-# creation (codex parity) and the reconciler keeps it current. A baked static copy lived
-# here once and was always overwritten before any agent read it — single source of truth
-# means it is not baked anymore.
-
-# Shared user Codex + pi config dirs. Codex reads global guidance from ~/.codex/AGENTS.md
-# and MCP servers from ~/.codex/config.toml; pi's agent-wrapper reads ~/.pi/agent/AGENTS.md.
-# The control-server writes ALL of these files at clone creation (codex parity + MCP merges)
-# and the reconciler keeps them current — the template owns the directories (correct owner
-# before anything lands, else tar invents them root-owned) and never the content.
-log "shared user Codex + pi config dirs"
 CODEX_DIR="/home/$USERNAME/.codex"
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "$CODEX_DIR"
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "/home/$USERNAME/.pi" "/home/$USERNAME/.pi/agent"
+install -d -o "$USERNAME" -g "$USERNAME" -m755 "/home/$USERNAME/.config" "/home/$USERNAME/.config/rmng"
+install -d -o "$USERNAME" -g "$USERNAME" -m755 "/home/$USERNAME/.claude/skills/rmng-cli" "/home/$USERNAME/.agents/skills/rmng-cli"
+install -d -o "$USERNAME" -g "$USERNAME" -m755 "/home/$USERNAME/.cursor" "/home/$USERNAME/.cursor/rules"
+install -d -o "$USERNAME" -g "$USERNAME" -m755 "/home/$USERNAME/.rmng"
+install -d -m755 /etc/rmng
 
 # `~/.claude.json` is the control-server's: its MCP merge creates the file (`{}` when
 # missing) and owns the managed servers, at creation and in the loop. Not baked.

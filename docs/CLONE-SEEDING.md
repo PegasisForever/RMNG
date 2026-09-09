@@ -32,9 +32,11 @@ clone binaries.
   warns-and-continues.
 - Phase 30 (`template/setup/30-user.sh`): the clone user (uid 1000, passwordless sudo,
   linger, fish shell), interactive PATH rc, passwordless GNOME keyring, EMPTY config
-  dirs owned by the user (`~/.claude`, `~/.codex`, `~/.pi/agent` — the server fills
-  them; pre-creating avoids root-owned parents), user toolchains (claude / uv /
-  rustup / nvm / fish-nvm), and the `systemd --user` unit DEFINITIONS (headless
+  dirs owned by the user (`~/.claude`, `~/.codex`, `~/.pi/agent`, `~/.config[/rmng]`,
+  both `rmng-cli` skill dirs, `~/.cursor[/rules]`, `~/.rmng` — every parent the parity
+  tar writes into, so the extract never invents a root-owned dir; a test pins this
+  against phase 30), user toolchains (claude / uv / rustup / nvm / fish-nvm, plus the
+  Codex CLI — the image is its sole source, no post-boot install exists), and the `systemd --user` unit DEFINITIONS (headless
   gnome-shell + clone-daemon + agent-wrapper) with their wants-symlinks. The
   session-holder unit is NOT baked (the server ships it pre-boot on headed clones).
   Pre-creates `/opt/rmng/bin` EMPTY and `~/.ssh` (700, no host keys). Blanks
@@ -69,7 +71,10 @@ the same absence, so tolerating it here would only delay the failure by one pass
   preset vars; read by PAM and the lingering user manager at boot, which is why it
   cannot wait until after start — and why an unresolvable control host fails the op
   at create/fork/rebase/migrate instead of booting a degraded URL the loop could
-  never repair), and, only when the preset sets PATH,
+  never repair), headless unit MASKS (`gnome-headless` + `clone-daemon` → `/dev/null`
+  symlinks over the baked unit files, so the desktop never starts — no reload, no
+  pkill, no boot race; fails the op on upload error), and, only when the preset
+  sets PATH,
   `etc/fish/conf.d/rmng-preset-path.fish` + `etc/profile.d/rmng-preset-path.sh`.
 
 Mounts (create-spec binds, present from first boot — always mounted, no empty skips):
@@ -88,12 +93,10 @@ Container started (`docker.start_container`), then in order. Steps the loop back
 are best-effort (`seed_step` logs-and-continues, stamp withheld); steps with no
 backstop fail the op:
 
-1. Headless only: delete the desktop units (`gnome-headless` + `clone-daemon` unit
-   files and wants-symlinks), `daemon-reload`, `pkill` anything the user manager
-   already started in the boot race. `agent-wrapper` stays enabled. FAILS THE OP
-   on error — no loop step reaps a surviving desktop.
-2. `~/.codex` dir prep (ownership fix for old templates), then the Codex CLI
-   install (network pipe into the user account — must run live, post-start).
+1. Headless: nothing — the desktop units were masked pre-boot (list 2) and could
+   never have started.
+2. Codex CLI: none — the template bakes `codex` as its sole source (was: post-boot
+   install-if-missing here plus a loop ensure; three copies of one truth).
 3. Second tar: `~/.config/rmng/agent-instructions.md` (global + preset playbook,
    skipped when empty), the Codex parity files + stamp, the clone's stable SSH
    host key + current `authorized_keys` + stamp.
@@ -126,21 +129,20 @@ the whole pass (warned globally) rather than rewriting the fleet into a degraded
   mid-rebase-swap and clones being committed
   (thawing/env-syncing those would corrupt the swap/snapshot).
 - SSH ready: dirs + host keys + `authorized_keys`, version-stamped (`SSH_STAMP_VERSION`).
+  (No Codex CLI step: the template bakes it.)
 - `/etc/environment` sync: control env + per-clone identity key + preset env +
   `ANTHROPIC_MODEL`, content-compared; restarts `agent-wrapper` only on a real
   change (a blind restart would interrupt an in-flight chat turn every 30 s).
-- Codex CLI install (idempotent script, runs every pass).
-- Codex parity files, content-stamped over entries PLUS the prepare script (one
-  value source shared with the create path — a stamp mismatch used to force one
-  redundant re-push on every fresh clone).
+- Codex parity files, content-stamped over the entries (parent dirs come from the
+  template — no prepare step, no prepare hash in the stamp).
 - `~/.claude.json` MCP merge, stamped.
 - `~/.cursor/mcp.json` MCP merge, stamped (Linear bearer re-resolved each pass).
-- Activity probe files + registration, stamped.
+- Activity probe files + registration, stamped (parent dirs come from the template).
 - `~/.codex/config.toml` MCP merge, stamped.
 - Payload binaries refresh: hash-compare against the server's staged payloads;
   on mismatch re-push and restart `rmng-clone-daemon` + `agent-wrapper`
-  (headless: restart guarded by `systemctl cat` — absent units skip cleanly
-  instead of wedging the whole step).
+  (headless: restart guarded by `systemctl cat` plus a mask check — absent or masked
+  units skip cleanly instead of wedging the whole step).
 
 NOT in this loop (one-shots elsewhere): home symlinks under `data/hosts`
 (synced once at server boot), overlay remounts after a server restart, the

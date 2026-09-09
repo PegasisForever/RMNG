@@ -57,20 +57,6 @@ const WAIT_READY_POLL: Duration = Duration::from_secs(2);
 /// nothing to start by any path — the `[Install]` want, the `Wants=` pull, or a manual start — and
 /// there is no leftover mask symlink to reason about. `daemon-reload` then makes the (possibly
 /// already-running) user manager forget the units so nothing restarts them, and `pkill` reaps
-/// whatever it started in the pre-delete boot window. If the user bus is up gnome is running and
-/// the reload+pkill take effect; if it's down gnome isn't up yet and the missing files keep it from
-/// ever starting — either way it ends up dead. `agent-wrapper.service` is deliberately left enabled.
-const HEADLESS_DISABLE_SCRIPT: &str = r#"set -e
-u=/home/rmng/.config/systemd/user
-rm -f "$u/gnome-headless.service" "$u/rmng-clone-daemon.service" "$u/rmng-session-holder.service" \
-      "$u/default.target.wants/gnome-headless.service" "$u/default.target.wants/rmng-clone-daemon.service" \
-      "$u/default.target.wants/rmng-session-holder.service"
-runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user daemon-reload 2>/dev/null || true
-pkill -u 1000 -f '/opt/rmng/bin/rmng-clone-daemon' 2>/dev/null || true
-pkill -u 1000 -f 'gnome-shell --headless' 2>/dev/null || true
-exit 0
-"#;
-
 /// Headless clone: pin tmux's multi-client sizing policy, then ensure a default `main` tmux
 /// session exists (idempotent). Runs as the clone user via a login shell so PATH/SHELL match an
 /// interactive session. `termplane` re-creates a missing session on select, so the default session
@@ -433,6 +419,33 @@ async fn clone_container_after_create(
     }
     bins.push(crate::clone_reconcile::payload_stamp_entry_for(&bins));
     docker.upload_tar(container, bins).await?;
+    // Headless clone: mask the desktop units BEFORE first boot, while the container is
+    // still stopped. A mask (symlink → /dev/null over the baked unit file) keeps the
+    // session from ever starting: the wants-symlinks resolve to masked units and systemd
+    // skips them. No daemon-reload, no pkill — those only existed to reap the boot race
+    // the old post-start delete allowed. `agent-wrapper` stays enabled. Fails the op:
+    // a "headless" clone with a live desktop has no loop backstop.
+    // (The holder needs no mask: the template no longer bakes it and it is only
+    // injected on headed clones, above.)
+    if headless {
+        on_progress("inject", "headless: masking desktop units (pre-boot)");
+        docker
+            .upload_symlinks(
+                container,
+                &[
+                    (
+                        "home/rmng/.config/systemd/user/gnome-headless.service".to_string(),
+                        "/dev/null".to_string(),
+                    ),
+                    (
+                        "home/rmng/.config/systemd/user/rmng-clone-daemon.service".to_string(),
+                        "/dev/null".to_string(),
+                    ),
+                ],
+            )
+            .await
+            .with_context(|| format!("clone {hostname}: headless unit-mask upload failed"))?;
+    }
 
     // The clone's identity and env, written while the container is STILL STOPPED.
     //
@@ -500,69 +513,12 @@ async fn clone_container_after_create(
     );
     docker.start_container(container).await?;
 
-    // Headless clone: remove the desktop the instant the container is up — delete the
-    // `gnome-headless.service` + `rmng-clone-daemon.service` unit files (and their wants-symlinks)
-    // so nothing can start them via any path, plus a `daemon-reload` + `pkill` to reap anything
-    // the lingering user manager already started in the boot race (see `HEADLESS_DISABLE_SCRIPT`).
-    // `agent-wrapper` is left enabled. Runs before the ~seconds of Codex/env injects below.
-    if headless {
-        on_progress(
-            "inject",
-            "headless: removing desktop units (gnome-headless + clone-daemon + session-holder)",
-        );
-        // No loop backstop reaps a surviving desktop: a failed delete must fail the op,
-        // never boot a "headless" clone with a desktop.
-        let code = docker
-            .exec_script(
-                container,
-                HEADLESS_DISABLE_SCRIPT,
-                &[],
-                &[],
-                |_stream, line| {
-                    tracing::debug!(target: "provision", "headless-disable: {line}");
-                },
-            )
-            .await
-            .with_context(|| format!("clone {hostname}: headless desktop-disable exec failed"))?;
-        if code != 0 {
-            anyhow::bail!("clone {hostname}: headless desktop-disable exited {code}");
-        }
-    }
+    // (Headless desktop handling already happened pre-boot via unit masks — nothing
+    // could have started, so there is nothing to reap here.)
 
-    // Codex reads global guidance + MCP config from ~/.codex. Prepare the directory before the
-    // tar upload so ownership stays correct even for older templates where the Codex install
-    // did not create it.
-    on_progress("inject", "preparing Codex guidance + MCP config");
-    let code = docker
-        .exec_script(
-            container,
-            crate::clone_reconcile::codex_prepare_script(),
-            &[],
-            &[],
-            |_stream, line| {
-                tracing::debug!(target: "provision", "codex-prepare: {line}");
-            },
-        )
-        .await?;
-    if code != 0 {
-        tracing::warn!(
-            "clone {hostname}: Codex config directory prepare exited {code} (reconciler will retry)"
-        );
-    }
-    let code = docker
-        .exec_script(
-            container,
-            crate::clone_reconcile::codex_cli_install_script(),
-            &[],
-            &[],
-            |_stream, line| {
-                tracing::debug!(target: "provision", "codex-cli-install: {line}");
-            },
-        )
-        .await?;
-    if code != 0 {
-        tracing::warn!("clone {hostname}: Codex CLI install exited {code} (reconciler will retry)");
-    }
+    // Codex reads global guidance + MCP config from ~/.codex, whose parent dirs the
+    // template pre-creates with the right owner (phase 30) — no prepare step, and no CLI
+    // install step either: the template bakes `codex` as its sole source.
 
     // Build the second upload_tar: the files that had to wait for the container to be up. The
     // identity + env went in pre-boot, above.

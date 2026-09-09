@@ -2081,6 +2081,37 @@ impl DockerCtl {
     /// to `/`. uid/gid/mode are applied verbatim by the daemon (gotcha #2 — callers pass
     /// uid/gid 1000 for `home/rmng/**`). Paths are archive-relative (no leading slash);
     /// they extract relative to `/`.
+    /// Upload symlink entries (unit masks, …) into a container. Same transport as
+    /// [`upload_tar`](Self::upload_tar); works on a stopped container too.
+    pub async fn upload_symlinks(&self, container: &str, links: &[(String, String)]) -> Result<()> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, target) in links {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_mode(0o777);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_cksum();
+            builder
+                .append_link(&mut header, path.trim_start_matches('/'), target)
+                .with_context(|| format!("adding symlink {path} to tar"))?;
+        }
+        let archive = builder.into_inner().context("finalizing symlink tar")?;
+        self.daemon()?
+            .upload_to_container(
+                container,
+                Some(
+                    bollard::query_parameters::UploadToContainerOptionsBuilder::new()
+                        .path("/")
+                        .build(),
+                ),
+                bollard::body_full(archive.into()),
+            )
+            .await
+            .with_context(|| format!("uploading symlinks to {container}"))?;
+        Ok(())
+    }
+
     pub async fn upload_tar(&self, container: &str, entries: Vec<TarEntry>) -> Result<()> {
         let archive = build_tar(&entries).context("building upload tar")?;
         self.daemon()?

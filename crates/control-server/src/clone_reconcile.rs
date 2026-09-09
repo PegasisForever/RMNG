@@ -1019,35 +1019,16 @@ pub(crate) fn claude_mcp_stamp_entry_for(headless: bool) -> TarEntry {
     }
 }
 
-/// Stamp value for the Codex-parity step: the payload bytes plus the prepare script that
-/// creates their parent directories.
+/// Stamp value for the Codex-parity step: the payload bytes. The parent directories the
+/// entries land in are pre-created by the template with the right owner (see phase 30),
+/// so no prepare script rides the stamp anymore.
 pub(crate) fn codex_parity_desired(entries: &[TarEntry]) -> String {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    desired_payload_hash(entries).hash(&mut h);
-    codex_prepare_script().hash(&mut h);
-    format!("{:016x}", h.finish())
+    desired_payload_hash(entries)
 }
 
-pub(crate) fn codex_prepare_script() -> &'static str {
-    r#"set -e
-install -d -o rmng -g rmng -m700 /home/rmng/.codex
-install -d -o rmng -g rmng -m700 /home/rmng/.pi /home/rmng/.pi/agent
-install -d -o rmng -g rmng -m755 /home/rmng/.config /home/rmng/.config/rmng /home/rmng/.claude
-install -d -o rmng -g rmng -m755 /home/rmng/.claude/skills/rmng-cli /home/rmng/.agents/skills/rmng-cli
-install -d -o rmng -g rmng -m755 /home/rmng/.cursor /home/rmng/.cursor/rules
-install -d -o rmng -g rmng -m755 /home/rmng/.rmng
-mkdir -p /etc/rmng
-"#
-}
-
-pub(crate) fn codex_cli_install_script() -> &'static str {
-    r#"set -e
-if ! runuser -u rmng -- bash -lc 'command -v codex >/dev/null 2>&1'; then
-  runuser -u rmng -- bash -lc 'set -o pipefail; CODEX_NON_INTERACTIVE=1 curl -fsSL https://chatgpt.com/codex/install.sh | sh' \
-    || { echo "codex install failed" >&2; exit 1; }
-fi
-"#
-}
+/// Codex CLI install (post-boot repair) is gone: the template bakes `codex` and is
+/// its sole source. An install-if-missing script in three places was one truth in
+/// three copies; the image won.
 
 /// Prepare a clone's filesystem for the `authorized_keys` upload: just the two directories the
 /// tar entries land in. Creating `~/.ssh` 700 root-owned-by-rmng matters because sshd's
@@ -1095,12 +1076,13 @@ systemctl restart ssh
 "#
 }
 
-/// Restart the clone-daemon after a binary refresh — but only if its unit is present. Headless
-/// clones DELETE `rmng-clone-daemon.service` (control-server `provision.rs` HEADLESS_DISABLE_SCRIPT),
-/// so an unconditional `systemctl --user restart` exits 5 ("unit not loaded") and would abort the
-/// whole payload reconcile before the agent-wrapper restart + payload stamp ever run — permanently
-/// wedging binary refreshes on headless clones. Guard on `systemctl cat`: present ⇒ restart (a real
-/// restart failure still surfaces under `set -e` on headed clones); absent ⇒ skip cleanly.
+/// Restart the clone-daemon after a binary refresh — but only if its unit is present AND
+/// unmasked. Headless clones MASK `rmng-clone-daemon.service` (symlink → /dev/null, laid
+/// pre-boot by the create path), so a bare `systemctl --user restart` would fail on the mask
+/// and — under `set -e` — abort the whole payload reconcile before the agent-wrapper
+/// restart + payload stamp ever run, permanently wedging binary refreshes. Guard on
+/// `systemctl cat` (absent ⇒ skip) plus a `readlink` mask check (masked ⇒ skip); a real
+/// restart failure still surfaces under `set -e` on headed clones.
 ///
 /// The session holder is neither started nor restarted here, only enabled so it comes back on the
 /// next boot. It holds the clone's Mutter session and virtual monitors, and restarting it is
@@ -1122,7 +1104,8 @@ fn restart_clone_daemon_script(monitors: &str) -> String {
     format!(
         r#"set -e
 run_user() {{ runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 "$@"; }}
-if run_user systemctl --user cat rmng-clone-daemon.service >/dev/null 2>&1; then
+unit=/home/rmng/.config/systemd/user/rmng-clone-daemon.service
+if run_user systemctl --user cat rmng-clone-daemon.service >/dev/null 2>&1 && {{ [ ! -L "$unit" ] || [ "$(readlink "$unit")" != "/dev/null" ]; }}; then
   if [ ! -e /home/rmng/.rmng/monitors ]; then
     install -d -o rmng -g rmng /home/rmng/.rmng
     printf '%s\n' '{monitors}' > /home/rmng/.rmng/monitors
@@ -1133,7 +1116,7 @@ if run_user systemctl --user cat rmng-clone-daemon.service >/dev/null 2>&1; then
   run_user systemctl --user enable rmng-session-holder.service >/dev/null 2>&1 || true
   run_user systemctl --user restart rmng-clone-daemon.service
 else
-  echo "rmng-clone-daemon.service absent (headless clone) — skipping restart"
+  echo "rmng-clone-daemon.service absent or masked (headless clone) — skipping restart"
 fi
 "#
     )
@@ -1391,7 +1374,8 @@ async fn ensure_codex_parity(
         return Ok(false);
     }
 
-    exec_ok(app, clone_id, codex_prepare_script(), "prepare codex dirs").await?;
+    // Parent dirs come pre-created from the template (phase 30) with the right owner —
+    // no prepare step: the tar lands directly.
     app.docker
         .upload_tar(clone_id, entries)
         .await
@@ -1478,7 +1462,7 @@ async fn ensure_claude_hook(app: &App, clone_id: &str) -> Result<bool> {
     {
         return Ok(false);
     }
-    exec_ok(app, clone_id, codex_prepare_script(), "prepare clone dirs").await?;
+    // Parent dirs (~/.rmng, ~/.claude, ~/.cursor) come pre-created from the template.
     app.docker
         .upload_tar(clone_id, rmng_hook_entries())
         .await
@@ -1540,26 +1524,6 @@ async fn ensure_codex_mcp(app: &App, clone_id: &str, headless: bool) -> Result<b
         .await
         .with_context(|| format!("{clone_id}: writing codex mcp stamp"))?;
     Ok(true)
-}
-
-async fn ensure_codex_cli(app: &App, clone_id: &str) -> Result<()> {
-    let code = app
-        .docker
-        .exec_script(
-            clone_id,
-            codex_cli_install_script(),
-            &[],
-            &[],
-            |stream, line| {
-                tracing::debug!(target: "clone_reconcile", "{clone_id} codex cli {stream}: {line}");
-            },
-        )
-        .await
-        .with_context(|| format!("{clone_id}: ensuring Codex CLI"))?;
-    if code != 0 {
-        bail!("{clone_id}: Codex CLI install exited {code}");
-    }
-    Ok(())
 }
 
 async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Result<bool> {
@@ -1828,18 +1792,7 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
             }
         }
 
-        match ensure_codex_cli(app, id).await {
-            Ok(()) => {
-                warned.remove(&format!("{id}:codex-cli"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:codex-cli")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: Codex CLI reconcile failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: Codex CLI reconcile still failing: {e:#}");
-                }
-            }
-        }
+        // Codex CLI is the template's (baked, sole source) — no post-boot install step.
 
         // `gpt_models` (this clone's group GPT list, or the FALLBACK_GPT_MODELS safety net) was
         // resolved once per pass above, alongside the Claude Code default, from the group catalog.
@@ -2160,26 +2113,33 @@ mod tests {
     ///
     /// `~/.codex/config.toml` is the operator's file: `model`, `approval_policy`,
     /// `sandbox_*`, `[profiles.*]`, and their own `[mcp_servers.*]` all live there. It used to
-    /// Every parent directory the parity tar writes into must be created by the prepare
-    /// script first, owned by the clone user.
+    /// Every parent directory the parity tar writes into must be pre-created by the
+    /// template with the clone user's owner.
     ///
     /// Docker's tar extract invents a missing parent as root:root, and the agent then cannot
     /// write beside the file we placed. That is exactly what happened when `~/.pi/agent/AGENTS.md`
     /// was added without the matching `install -d`: the wrapper could not write its MCP tool
     /// cache, so the desktop tools were never promoted and every session ran proxy-only.
+    /// The directory source of truth is phase 30 — this test reads that script, so removing
+    /// a dir there fails here instead of in a clone.
+    const TEMPLATE_PHASE_30: &str = include_str!("../../../template/setup/30-user.sh");
+
     #[test]
-    fn the_prepare_script_owns_every_parity_parent_dir() {
-        let script = codex_prepare_script();
+    fn the_template_owns_every_parity_parent_dir() {
         for entry in codex_parity_entries(false, "prompt") {
             let parent = std::path::Path::new(&entry.path)
                 .parent()
                 .expect("entry has a parent")
                 .to_string_lossy()
                 .to_string();
+            // Template uses $USERNAME, so match the stable suffix, not the home path.
             let absolute = format!("/{parent}");
+            let suffix = absolute
+                .strip_prefix("/home/rmng")
+                .expect("parity entry lives under the clone home");
             assert!(
-                script.contains(&absolute),
-                "prepare script never creates {absolute}, so the tar extract would make it root-owned",
+                TEMPLATE_PHASE_30.contains(suffix),
+                "phase 30 never creates *{suffix}, so the tar extract would make it root-owned",
             );
         }
     }
@@ -2349,7 +2309,6 @@ mod tests {
     #[test]
     fn no_reconcile_script_removes_provider_credentials() {
         let scripts: Vec<(&str, String)> = vec![
-            ("codex_prepare", codex_prepare_script().to_string()),
             ("ssh_bootstrap", ssh_bootstrap_script().to_string()),
             ("claude_mcp", claude_mcp_script(false)),
             ("claude_mcp_headless", claude_mcp_script(true)),
@@ -2401,8 +2360,9 @@ mod tests {
             body.ends_with(prompt),
             "the prompt is the body, verbatim: {body}"
         );
-        // And the directory it lands in is made ahead of it, or tar creates it root-owned.
-        assert!(codex_prepare_script().contains("/home/rmng/.cursor/rules"));
+        // And the directory it lands in is made ahead of it (phase 30), or tar creates
+        // it root-owned.
+        assert!(TEMPLATE_PHASE_30.contains("/.cursor/rules"));
 
         // The node-agent MCP descriptor is part of the bundle.
         let desc = entries
@@ -2519,10 +2479,9 @@ mod tests {
                 assert!(body.contains(flag), "the ledger section has to name {flag}");
             }
         }
-        // The prepare script creates both skill directories.
-        let prep = codex_prepare_script();
-        assert!(prep.contains("/home/rmng/.claude/skills/rmng-cli"));
-        assert!(prep.contains("/home/rmng/.agents/skills/rmng-cli"));
+        // Phase 30 creates both skill directories.
+        assert!(TEMPLATE_PHASE_30.contains("/.claude/skills/rmng-cli"));
+        assert!(TEMPLATE_PHASE_30.contains("/.agents/skills/rmng-cli"));
     }
 
     #[test]
@@ -2737,10 +2696,12 @@ mod tests {
             !script.contains("start rmng-session-holder"),
             "starting the holder here races the outgoing daemon's monitors:\n{script}"
         );
-        // The daemon still restarts, and still only when its unit exists (headless clones
-        // delete it, and an unconditional restart would abort the whole reconcile there).
+        // The daemon still restarts, and still only when its unit exists and is unmasked
+        // (headless clones mask it, and an unconditional restart would abort the whole
+        // reconcile there).
         assert!(script.contains("systemctl --user restart rmng-clone-daemon.service"));
         assert!(script.contains("cat rmng-clone-daemon.service"));
+        assert!(script.contains("readlink"));
     }
 
     /// A clone that has never run a holder gets the active preset written into the holder's
