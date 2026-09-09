@@ -1046,11 +1046,18 @@ fn claude_mcp_stamp_path() -> &'static str {
     "etc/rmng/claude-mcp"
 }
 
-/// Desired stamp value — changes with the headless bit (and the `v1` shape tag, bumped if the
-/// managed server set changes), so the reconciler re-applies `claude_mcp_script` exactly when the
-/// desired `~/.claude.json` MCP set would differ.
+/// Desired stamp value — a hash of the merge script itself, so the headless bit, a
+/// managed-set code change, and any future change to the merge all re-apply on the next
+/// convergence trigger. (A `v1 headless=…` tag used to live here; it never re-pushed on
+/// code changes.)
 fn claude_mcp_desired(headless: bool) -> String {
-    format!("v1 headless={headless}")
+    desired_payload_hash(&[TarEntry {
+        path: "claude-mcp".into(),
+        data: claude_mcp_script(headless).into_bytes(),
+        mode: 0,
+        uid: 0,
+        gid: 0,
+    }])
 }
 
 pub(crate) fn claude_mcp_stamp_entry_for(headless: bool) -> TarEntry {
@@ -1529,10 +1536,16 @@ fn codex_mcp_stamp_path() -> &'static str {
     "etc/rmng/codex-mcp"
 }
 
-/// Desired stamp value — changes with the headless bit (and the `v1` shape tag, bumped if the
-/// managed server set changes), so the merge re-runs exactly when the desired tables differ.
+/// Desired stamp value — a hash of the merge script itself (see `claude_mcp_desired`:
+/// the old `v1` tag never re-pushed on managed-set code changes).
 fn codex_mcp_desired(headless: bool) -> String {
-    format!("v1 headless={headless}")
+    desired_payload_hash(&[TarEntry {
+        path: "codex-mcp".into(),
+        data: codex_mcp_merge_script(headless).into_bytes(),
+        mode: 0,
+        uid: 0,
+        gid: 0,
+    }])
 }
 
 pub(crate) fn codex_mcp_stamp_entry_for(headless: bool) -> TarEntry {
@@ -1620,154 +1633,54 @@ async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Re
     Ok(true)
 }
 
-/// The clones a commit is snapshotting right now, by clone id. A commit op records the image
-/// name as its `target` and the clone it came from as its `source`.
-fn clones_being_committed(ops: &[wire::Operation]) -> HashSet<&str> {
-    ops.iter()
-        .filter(|o| {
-            o.status == wire::OperationStatus::Running && o.kind == wire::OperationKind::Commit
-        })
-        .filter_map(|o| o.source.as_deref())
-        .collect()
-}
-
-/// Targets of Running Clone ops (create/fork/rebase): their containers are supposed
-/// to be booting right now, even when the row says archived (rebase keeps it so).
-fn clones_mid_swap(ops: &[wire::Operation]) -> HashSet<&str> {
-    ops.iter()
-        .filter(|o| {
-            o.status == wire::OperationStatus::Running && o.kind == wire::OperationKind::Clone
-        })
-        .map(|o| o.target.as_str())
-        .collect()
-}
-
-/// Make each managed clone's container agree with its `archived` flag: archived means the
-/// container is not up, and not archived means it is not frozen.
-///
-/// Two drifts, both of which leave a clone nothing else would ever notice, because every
-/// other sweep filters archived clones out.
-///
-/// An archived clone that is up again. A container the daemon SIGKILLs on shutdown is not one
-/// `docker stop` stopped, so `--restart unless-stopped` brings it back on the next boot: the
-/// clone runs its agent and burns CPU while the UI still shows it archived. That is the shape
-/// a clone archived by the build that froze them instead lands in.
-///
-/// A clone that is paused and not archived, which is a frozen leftover of that same build, and
-/// a frozen clone answers no exec and no sweep would ever reach it.
-///
-/// One thing does still pause a container on purpose: `commit_clone_image` freezes it so the
-/// image is a consistent snapshot. Thawing that mid-flight defeats the freeze and lets a file
-/// written afterwards land in the image, so a clone with a commit running is left alone. A
-/// commit whose server died leaves no `Running` op behind (`jobs::fail_stale_ops` at boot), so
-/// this cannot strand a frozen clone.
-async fn reconcile_archived_state(app: &App, warned: &mut HashSet<String>) {
-    let st = app.store.get();
-    let committing = clones_being_committed(&st.operations);
-    // A rebase boots a container for an archived row and the row stays archived
-    // throughout (it rests stopped again afterwards). Without this skip the sweep
-    // below stops the new container mid-rebase — and the rollback one too — and
-    // the op fails with "exited before its daemon registered". Rebase files a
-    // Running Clone op targeted at the clone, same as create/fork.
-    let swapping = clones_mid_swap(&st.operations);
-    for h in &st.hosts {
-        if !h.managed || !is_safe_id(&h.id) || committing.contains(h.id.as_str()) {
-            continue;
-        }
-        let id = h.id.as_str();
-        if swapping.contains(id) {
-            continue;
-        }
-        let paused = match app.docker.is_paused(id).await {
-            Ok(p) => p,
-            // Gone or the daemon is unreachable: nothing to stop, but say so at debug so
-            // a hung daemon does not make archived clones silently pile up.
-            Err(e) => {
-                tracing::debug!(target: "clone_reconcile", "clone {id}: pause state unreadable ({e:#}), skipping");
-                continue;
+/// SSH-only sync for one clone. Returns false when the rest of the chain must be
+/// skipped this time (SSH is the gate: without it no later exec can run).
+async fn sync_clone_ssh(app: &App, id: &str, warned: &mut HashSet<String>) -> bool {
+    match ensure_ssh_ready(app, id).await {
+        Ok(()) => {}
+        Err(e) => {
+            if warned.insert(format!("{id}:ssh")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: ssh reconcile failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: ssh reconcile still failing: {e:#}");
             }
-        };
-        if !h.archived {
-            if !paused {
-                continue;
-            }
-            match app.docker.unpause_container(id).await {
-                Ok(()) => tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: paused but not archived, thawed it"
-                ),
-                Err(e) => {
-                    if warned.insert(format!("{id}:unpause")) {
-                        tracing::warn!(target: "clone_reconcile", "clone {id}: thaw failed: {e:#}");
-                    }
-                }
-            }
-            continue;
-        }
-        // Archived, so it has to be down. `is_running` answers false for a paused container,
-        // which is why a frozen leftover needs the separate check to be caught here.
-        if !paused && !app.docker.is_running(id).await.unwrap_or(false) {
-            continue;
-        }
-        match app.docker.stop_even_if_paused(id).await {
-            Ok(()) => tracing::info!(
-                target: "clone_reconcile",
-                "clone {id}: archived but up, stopped it"
-            ),
-            Err(e) => {
-                if warned.insert(format!("{id}:restop")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: stop failed: {e:#}");
-                }
-            }
+            return false;
         }
     }
+    warned.remove(&format!("{id}:ssh"));
+    true
 }
 
-async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
-    reconcile_archived_state(app, warned).await;
-
-    let hosts: Vec<_> = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .filter(|h| h.managed && !h.archived && is_safe_id(&h.id))
-        .collect();
-
+/// Full content convergence for one clone: SSH, env, parity, the three MCP merges, the
+/// activity probe, and the payload refresh. Idempotent and stamped throughout: re-running
+/// a converged clone is a handful of `cat`s plus one env compare.
+///
+/// Callers (nothing here runs on a timer): the boot pass, Settings-save fan-out, and
+/// post-op convergence after fork/rebase/migrate. The 30 s loop runs SSH only.
+async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSet<String>) {
+    let id = h.id.as_str();
+    if !app.docker.is_running(id).await.unwrap_or(false) {
+        return;
+    }
+    if !sync_clone_ssh(app, id, warned).await {
+        return;
+    }
     let cfg = app.config();
-    // An unresolvable control host breaks every clone's env identically: skip the pass
-    // (warn-once) rather than rewriting the fleet into a degraded URL. It cannot heal
-    // pass-over-pass — the error below names the broken network config to fix.
+    // An unresolvable control host breaks this clone's env identically: skip it
+    // (warn-once) rather than rewriting it into a degraded URL. It cannot heal
+    // call-over-call — the error below names the broken network config to fix.
     let control_env = match crate::provision::control_env_vars(app).await {
         Ok(env) => {
-            warned.remove("control-env");
+            warned.remove(format!("{id}:control-env").as_str());
             env
         }
         Err(e) => {
-            if warned.insert("control-env".to_string()) {
-                tracing::warn!(target: "clone_reconcile", "control host unresolvable, skipping pass: {e:#}");
+            if warned.insert(format!("{id}:control-env")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: control host unresolvable, skipping: {e:#}");
             }
             return;
         }
     };
-
-    for h in &hosts {
-        let id = h.id.as_str();
-        if !app.docker.is_running(id).await.unwrap_or(false) {
-            continue;
-        }
-        match ensure_ssh_ready(app, id).await {
-            Ok(()) => {}
-            Err(e) => {
-                if warned.insert(format!("{id}:ssh")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: ssh reconcile failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: ssh reconcile still failing: {e:#}");
-                }
-                continue;
-            }
-        }
-        warned.remove(&format!("{id}:ssh"));
 
         let mut desired_env = control_env.clone();
         // Per-clone identity key (`RMNG_PROXY_KEY`): recomputed into `/etc/environment` on every
@@ -1860,7 +1773,8 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                 } else {
                     tracing::debug!(target: "clone_reconcile", "clone {id}: Codex parity reconcile still failing: {e:#}");
                 }
-                continue;
+                // No gate: later steps own independent stamps and dirs (template-made),
+                // so a parity failure must not hold MCP/hook convergence hostage.
             }
         }
 
@@ -1972,8 +1886,26 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
                 }
             }
         }
-    }
+}
 
+/// The 30 s loop: SSH only. Everything else converges via explicit triggers
+/// ([`sync_all_running`] at boot and on Settings save, post-op convergence after
+/// fork/rebase/migrate, pre-boot tar at create).
+async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
+    let hosts: Vec<_> = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| h.managed && !h.archived && is_safe_id(&h.id))
+        .collect();
+    for h in &hosts {
+        let id = h.id.as_str();
+        if !app.docker.is_running(id).await.unwrap_or(false) {
+            continue;
+        }
+        sync_clone_ssh(app, id, warned).await;
+    }
     let managed: HashSet<String> = hosts.iter().map(|h| h.id.clone()).collect();
     warned.retain(|key| {
         key.split_once(':')
@@ -1982,11 +1914,65 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
     });
 }
 
+/// Post-op convergence: run the full chain for one clone in the background after
+/// fork/rebase/migrate/unarchive complete. The clone may not be running yet (rebase ends
+/// stopped; migration restarts the fleet after the window), so this waits — bounded —
+/// for it to come up instead of assuming the op left it running. Fire-and-forget with
+/// logging: a failure surfaces in the warn log, and the next boot pass or Settings save
+/// retries. Replaces what the 30 s loop used to guarantee for these transitions.
+pub fn spawn_converge_after_start(app: &App, id: &str, why: &str) {
+    let app = app.clone();
+    let id = id.to_string();
+    let why = why.to_string();
+    tokio::spawn(async move {
+        // Poll for the container: 10 s cadence, 30 min cap. A clone that never comes up
+        // (still archived, deleted mid-wait) exits quietly — its next start re-triggers.
+        for _ in 0..180 {
+            let row = app.store.get().hosts.into_iter().find(|h| h.id == id);
+            let Some(h) = row else { return };
+            if !h.managed || !is_safe_id(&h.id) {
+                return;
+            }
+            if app.docker.is_running(&id).await.unwrap_or(false) {
+                let mut warned = HashSet::new();
+                sync_clone_contents(&app, &h, &mut warned).await;
+                tracing::info!(target: "clone_reconcile", "post-{why} sync converged {id}");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+        tracing::warn!(target: "clone_reconcile", "post-{why} sync gave up waiting for {id} to start");
+    });
+}
+
+/// Run the full content chain over every running managed clone: the boot pass, the
+/// Settings-save fan-out, and (single-clone, via the hosts filter at the call site)
+/// post-op convergence share this one entry point.
+pub async fn sync_all_running(app: &App, reason: &str) {
+    let hosts: Vec<_> = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| h.managed && !h.archived && is_safe_id(&h.id))
+        .collect();
+    let mut warned = HashSet::new();
+    let mut n = 0;
+    for h in &hosts {
+        sync_clone_contents(app, h, &mut warned).await;
+        n += 1;
+    }
+    tracing::info!(target: "clone_reconcile", "sync-all ({reason}): converged {n} clones");
+}
+
 pub async fn run(app: App) {
     tracing::info!(
-        "clone reconciler started (ssh + Codex config + binary refresh, every {}s)",
+        "clone reconciler started (one full boot pass, then SSH-only every {}s)",
         RECONCILE_INTERVAL.as_secs()
     );
+    // Boot pass: converge everything server code owns (payload, probe, MCP sets) right
+    // after a restart, so upgrades land without waiting on any timer.
+    sync_all_running(&app, "boot").await;
     let mut warned = HashSet::new();
     loop {
         reconcile_once(&app, &mut warned).await;
@@ -1997,101 +1983,6 @@ pub async fn run(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The thaw sweep must not touch a clone a commit is snapshotting. Thawing it defeats the
-    /// freeze the commit asked for, and the env sync that follows can write the source clone's
-    /// identity back into the file while it is still being read into the image.
-    #[test]
-    fn a_clone_under_commit_is_left_frozen() {
-        let op = |kind, status, source: &str| wire::Operation {
-            id: "op_1".into(),
-            kind,
-            target: "an-image".into(),
-            source: Some(source.to_string()),
-            status,
-            step: "commit".into(),
-            pct: 40.0,
-            message: String::new(),
-            log: Vec::new(),
-            started_at: 0,
-            finished_at: None,
-        };
-        let ops = vec![
-            op(
-                wire::OperationKind::Commit,
-                wire::OperationStatus::Running,
-                "being-committed",
-            ),
-            op(
-                wire::OperationKind::Commit,
-                wire::OperationStatus::Done,
-                "committed-already",
-            ),
-            op(
-                wire::OperationKind::Clone,
-                wire::OperationStatus::Running,
-                "being-cloned",
-            ),
-        ];
-        let busy = clones_being_committed(&ops);
-        assert!(busy.contains("being-committed"));
-        assert!(
-            !busy.contains("committed-already"),
-            "a finished commit holds nothing frozen"
-        );
-        assert!(
-            !busy.contains("being-cloned"),
-            "only a commit freezes a container"
-        );
-    }
-
-    /// The archived-state sweep must not stop a container a rebase just booted for
-    /// an archived row: the row stays archived throughout the swap (it rests
-    /// stopped again afterwards). Caught live: the sweep stopped the new
-    /// container mid-rebase — and the rollback one too.
-    #[test]
-    fn a_clone_mid_swap_is_left_booting() {
-        let op = |kind, status, target: &str| wire::Operation {
-            id: "op_1".into(),
-            kind,
-            target: target.to_string(),
-            source: None,
-            status,
-            step: "swap".into(),
-            pct: 40.0,
-            message: String::new(),
-            log: Vec::new(),
-            started_at: 0,
-            finished_at: None,
-        };
-        let ops = vec![
-            op(
-                wire::OperationKind::Clone,
-                wire::OperationStatus::Running,
-                "being-rebased",
-            ),
-            op(
-                wire::OperationKind::Clone,
-                wire::OperationStatus::Error,
-                "failed-already",
-            ),
-            op(
-                wire::OperationKind::Delete,
-                wire::OperationStatus::Running,
-                "being-deleted",
-            ),
-        ];
-        let busy = clones_mid_swap(&ops);
-        assert!(busy.contains("being-rebased"));
-        assert!(
-            !busy.contains("failed-already"),
-            "a finished op holds nothing booting"
-        );
-        assert!(
-            !busy.contains("being-deleted"),
-            "only a Clone op boots a container"
-        );
-    }
 
     /// The prepare script creates the dirs the `authorized_keys` upload needs and NOTHING else.
     /// It must never delete or rewrite a file under `~/.ssh`: those are the user's now, including

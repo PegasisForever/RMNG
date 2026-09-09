@@ -1231,6 +1231,8 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
         }
     });
     schedule_prune(app.clone(), op_id.clone(), PRUNE_DONE_MS);
+    // Forked home carries the source's files with a fresh /etc (no stamps): converge it.
+    crate::clone_reconcile::spawn_converge_after_start(&app, &new_id, "fork");
 
     // Kick off the agent, mirroring the create tail: an explicit ticket URL or first
     // message starts work on the fork; a pure inherit (no payload, no source ticket)
@@ -1366,6 +1368,8 @@ async fn run_rebase(app: App, op_id: String, host_id: String, preset_name: Strin
                 }
             });
             schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+            // Rebases end stopped (archived) or running: the waiter covers both.
+            crate::clone_reconcile::spawn_converge_after_start(&app, &host_id, "rebase");
         }
         Err(e) => {
             if was_archived {
@@ -1458,6 +1462,8 @@ async fn run_migrate(app: App, op_id: String, host_id: String) {
                 }
             });
             schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
+            // The fleet restarts after the window: the waiter catches this clone's boot.
+            crate::clone_reconcile::spawn_converge_after_start(&app, &host_id, "migrate");
         }
         Err(e) => fail_op(&app, &op_id, format!("{e:#}")),
     }
@@ -1808,6 +1814,8 @@ async fn run_unarchive(app: App, op_id: String, host_id: String) {
     crate::homes::ensure_now(&app, &host_id).await;
     crate::ssh::allow_clone_now(&app, &host_id).await;
     push_current_tokens(&app, &host_id).await;
+    // Fresh /etc on a carried-over home: converge content now that it boots.
+    crate::clone_reconcile::spawn_converge_after_start(&app, &host_id, "unarchive");
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
 }
 

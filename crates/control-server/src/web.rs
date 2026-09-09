@@ -1942,6 +1942,16 @@ async fn config_put(
     }
     // Keep the sidebar's live layout list/active marker in sync with the just-saved presets.
     mirror_layout_to_state(&app);
+    // Fan out content convergence: prompts, presets, and keys changed above reach running
+    // clones now — env, parity, and MCP merges re-resolve from the saved config. Detached:
+    // the PUT must not wait on Docker calls to a wedged clone (same reasoning as the SSH
+    // push above); each step is stamped and idempotent, so a slow fleet just converges late.
+    {
+        let app = app.clone();
+        tokio::spawn(async move {
+            crate::clone_reconcile::sync_all_running(&app, "settings-save").await;
+        });
+    }
     // Editing the active preset's geometry is the same kind of change as activating another
     // preset, so it lands the same way: on the clone the operator is watching, now, and on
     // every other clone when they switch to it. Compared rather than assumed, because most

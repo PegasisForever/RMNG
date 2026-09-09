@@ -110,54 +110,43 @@ remains post-boot needs a live container:
    `WAIT_READY_TIMEOUT`. Alive-but-unregistered reports ready with an explicit
    warning (check it in the UI); an exited container fails with its log tail.
 
-## 4. Reconciler loop (`clone_reconcile::run`, every 30 s)
+## 4. Convergence triggers (the 30 s loop is SSH-only)
 
-One pass (`reconcile_once`) covers managed, unarchived, id-safe clones whose
-container is running. Failures warn once per clone+step (`warned` set) and retry
-next pass; keys for vanished clones are dropped. An unresolvable control host skips
-the whole pass (warned globally) rather than rewriting the fleet into a degraded URL.
+The loop (`clone_reconcile::run`, every 30 s) runs ONE step: SSH ready (dirs + keys +
+host keys, version-stamped). Everything else converges via explicit triggers, all
+funnelling into the same full-chain function (`sync_clone_contents` — SSH, env,
+parity, three MCP merges, probe, payload; stamped and idempotent throughout):
 
-Assumption for the verdicts below: clones never intentionally change these files —
-drift comes only from server-side changes (settings, code), crashes, and corruption.
-The only event push today is Settings save (`config_put`): SSH keys (`apply_now`,
-30 s-bounded, loop retries) and monitor geometry (watched clone only). Everything
-else converges here.
+- Create: the single pre-boot tar (list 2) stamps everything — no trigger needed.
+- Server boot: one full pass over running clones (`sync_all_running`, reason `boot`),
+  so upgrades (payload, probe, MCP sets) land without waiting on any timer.
+- Settings save: one full pass (`sync_all_running`, reason `settings-save`),
+  detached — the PUT never waits on Docker. Env, parity, and MCP changes land now.
+- Fork / rebase / migrate / unarchive: `spawn_converge_after_start` per clone —
+  waits bounded (10 s cadence, 30 min cap) for the container to be running, then
+  runs the chain. Covers fresh `/etc` on carried-over homes; quiet no-op when the
+  clone never comes up (still archived, deleted mid-wait).
 
-1. Archived-state sweep (thaw paused-but-not-archived; stop archived-but-up; skips
-   mid-rebase-swap and committing clones). NEEDED — not a file check: enforces the
-   stopped/archived invariant across crashes and daemon restarts. Not settings-driven;
-   could only move to Docker-events, a different mechanism.
-2. SSH ready (dirs + keys + `authorized_keys`, version-stamped). REPAIR ONLY — key
-   changes already push on save; pre-boot covers fresh clones. Keep for host-key
-   rotation and corruption; cannot drop the loop copy while rotation has no event.
-3. `/etc/environment` sync (content-compared; restarts `agent-wrapper` only on a real
-   change). NEEDED, MOVABLE TO SAVE — every input (control env excepted) originates
-   in settings/presets/keys. Extend `config_put` to compare-and-push like the SSH
-   and monitor handling; the loop keeps the repair role. The restart-on-change
-   subtlety moves with it.
-4. Codex parity files (content-stamped). NEEDED, MOVABLE TO SAVE — inputs are the
-   global prompt, playbook, and preset, all settings-side. Same compare-and-push
-   shape as 3.
-5. `~/.claude.json` MCP merge, stamped. NEEDED, MOVABLE TO SAVE for key/headless
-   changes (both visible in old-vs-merged config). Gap, independent of the loop:
-   a server-code change to the managed set does NOT re-push — the claude/codex
-   stamps are `v1 headless=…`, not content hashes (only cursor's script-hash stamp
-   re-pushes). Fix by content-hashing those stamps or bumping `v1`.
-6. `~/.cursor/mcp.json` MCP merge, stamped (Linear bearer re-resolved each pass).
-   Same verdict as 5, minus the gap (its stamp already tracks the key).
-7. Activity probe files + registration, content-stamped. NEEDED, MOVABLE TO A
-   POST-RESTART SWEEP — the only input is server code (hash covers it). A one-shot
-   push to running clones at server start replaces the 30 s poll for delivery; the
-   loop keeps corruption repair.
-8. `~/.codex/config.toml` MCP merge, stamped. Same verdict as 5 (including the gap).
-9. Payload binaries refresh (hash-compare; restarts daemon + wrapper; mask-aware
-   guard on headless). NEEDED, MOVABLE TO A POST-RESTART SWEEP — same reasoning
-   as 7: the hash is the delivery trigger for upgrades, polling adds only repair.
+Removed, no replacement:
 
-Net: with 3+4+5+6+8 fanning out on save and 7+9 sweeping once at server start, the
-30 s loop degrades to repair-only (1, 2, corruption) and could run far less often.
-Not implemented — proposal only.
+1. Archived-state sweep — deleted with its commit/swap op filters and tests.
+   Crash-frozen clones no longer thaw themselves; archived-but-up clones no longer
+   stop themselves. Accepted: manual recovery, and nothing in the supported flows
+   produces those states anymore (commit freezes inside its op window; rebase rests
+   its own containers).
 
-NOT in this loop (one-shots elsewhere): home symlinks under `data/hosts`
-(synced once at server boot), overlay remounts after a server restart, the
-shared-pool dir ensure (server startup), SMB config render.
+What the loop still does, entry by entry:
+
+1. SSH ready: dirs + host keys + `authorized_keys`, version-stamped
+   (`SSH_STAMP_VERSION`). Key changes also push on save; pre-boot covers fresh
+   clones; this is the repair path (rotation, corruption).
+
+Convergence notes:
+
+- The claude/codex MCP stamps are content hashes of their merge scripts (cursor's
+  already was), so a managed-set code change re-pushes at the next trigger —
+  previously only a headless flip or key rotation did.
+- A trigger failure (wedged daemon mid-save) retries at the next trigger of any
+  kind; stamps make every pass cheap and every retry safe.
+- Manually `docker start`ing an archived container bypasses all triggers: it keeps
+  whatever settings it last converged. Supported starts go through unarchive.
