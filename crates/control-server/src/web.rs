@@ -1513,9 +1513,9 @@ async fn images_pull(
 async fn images_prebuild(
     State(app): State<App>,
     Json(body): Json<PrebuildReq>,
-) -> Result<Json<Operation>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     jobs::start_prebuild(&app, body.dockerfile)
-        .map(Json)
+        .map(|op| Json(json!({ "ok": true, "op": op })))
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
@@ -1649,7 +1649,7 @@ struct ForkReq {
 async fn fork(
     State(app): State<App>,
     Json(req): Json<ForkReq>,
-) -> Result<Json<Operation>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let cfg = app.config();
     let prefix = cfg.docker.hostname_prefix.as_str();
     let hostname = match req.hostname.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()) {
@@ -1680,7 +1680,7 @@ async fn fork(
             claude_instructions: req.claude_instructions,
         },
     )
-    .map(Json)
+    .map(|op| Json(json!({ "ok": true, "op": op })))
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
@@ -1703,9 +1703,9 @@ async fn rebase(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
     Json(req): Json<RebaseReq>,
-) -> Result<Json<Operation>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     jobs::start_rebase(&app, &id, &req.preset, req.rebuild)
-        .map(Json)
+        .map(|op| Json(json!({ "ok": true, "op": op })))
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
