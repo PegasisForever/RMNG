@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Phase 20 — dev toolbox: the CT-104 dev-template app set, ALL via apt (no flatpak/snap):
 # dev/CLI tools, Docker, cloud CLIs, build libs, fonts, themes, browsers, Cursor, VS Code,
-# Zed, Celluloid/ffmpeg, Extension Manager, ONLYOFFICE, plus HMCL / Mission Center /
+# Zed, Celluloid/ffmpeg, Extension Manager, ONLYOFFICE, plus Mission Center /
 # Monaspace / adw-gtk3 from their upstream releases, and the system-wide GNOME dconf defaults.
 #
 # STRICT by design: every step below fails the build on error (via `set -euo pipefail`, no
@@ -122,14 +122,6 @@ update-desktop-database /usr/share/applications >/dev/null 2>&1
 ZED_MISSING="$(ldd /opt/zed.app/libexec/zed-editor 2>/dev/null | sed -n 's/^[[:space:]]*\(.*\) => not found$/\1/p' || true)"
 if [ -n "$ZED_MISSING" ]; then echo "  !! Zed missing system libs:$ZED_MISSING" >&2; exit 1; fi
 log "Zed installed: /opt/zed.app/bin/zed + dev.zed.Zed.desktop"
-
-log "dev toolbox: HMCL (latest .deb from its GitHub release)"
-# Strict: an unreachable/rate-limited GitHub API fails the curl|grep pipeline (pipefail)
-# and aborts the build — a silently missing HMCL is worse than a red build.
-HMCL_URL="$(curl -fsSL https://api.github.com/repos/HMCL-dev/HMCL/releases/latest 2>/dev/null | grep -oE 'https://[^"]+/HMCL-[0-9.]+\.deb' | head -1)"
-curl -fsSL "$HMCL_URL" -o /tmp/hmcl.deb 2>/dev/null
-apt-get install -y -qq /tmp/hmcl.deb; rm -f /tmp/hmcl.deb
-log "HMCL installed ($(basename "$HMCL_URL"))"
 
 # Mission Center (system monitor) — no apt/deb upstream, only Flatpak + AppImage. Pull the
 # latest x86_64 AppImage, --appimage-extract it (no FUSE needed), install the raw tree under

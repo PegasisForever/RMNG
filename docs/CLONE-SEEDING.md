@@ -25,7 +25,7 @@ clone binaries.
 - Phase 20 (`template/setup/20-toolbox.sh`): dev toolbox via apt (CLI tools, Docker,
   cloud CLIs, browsers, Cursor, VS Code, fonts, ONLYOFFICE, …) plus dconf defaults,
   Zed editor (pinned v1.19.2 tarball + sha256 → `/opt/zed.app`, PATH wrapper,
-  desktop entry, ldd shared-library gate), HMCL / Mission Center / Monaspace /
+  desktop entry, ldd shared-library gate), Mission Center / Monaspace /
   adw-gtk3 from upstream releases. STRICT: any failure fails the build — nothing
   warns-and-continues.
 - Phase 30 (`template/setup/30-user.sh`): the clone user (uid 1000, passwordless sudo,
@@ -42,6 +42,14 @@ edit re-tags; empty text falls back to the default base Dockerfile.
 
 Deliberately NOT baked: `rmng-clone-daemon`, `agent-wrapper`, `rmng` CLI (list 2 —
 the server installs its own current copies, so a clone can never drift from it).
+
+Overlap warning: the template ALSO bakes static copies of four files list 3 overwrites
+with the live values on every create — `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
+`~/.codex/config.toml` (desktop + linear MCP defaults), and the `~/.claude.json`
+baseline (linear + desktop via jq). The baked copies are fallback so the image stands
+alone without provision; on a default fleet the inject writes byte-identical guidance
+over them and idempotent MCP merges. Drift risk: editing the baked text without the
+matching server default (or vice versa) shows one, then flips to the other.
 
 ## 2. Injected before boot (container created, still stopped)
 

@@ -90,7 +90,7 @@ COPY --from=gnome-build /out/gnome-shell.deb /tmp/gnome-shell.deb
 COPY template/setup/15-gnome-patch.sh /setup/15-gnome-patch.sh
 RUN /setup/15-gnome-patch.sh
 
-# Third-party apt repos, dev toolbox, HMCL/Mission Center/Monaspace, dconf defaults.
+# Third-party apt repos, dev toolbox, Mission Center/Monaspace, dconf defaults.
 COPY template/setup/20-toolbox.sh /setup/20-toolbox.sh
 RUN /setup/20-toolbox.sh
 
