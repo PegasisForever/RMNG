@@ -1673,6 +1673,17 @@ fn clones_being_committed(ops: &[wire::Operation]) -> HashSet<&str> {
         .collect()
 }
 
+/// Targets of Running Clone ops (create/fork/rebase): their containers are supposed
+/// to be booting right now, even when the row says archived (rebase keeps it so).
+fn clones_mid_swap(ops: &[wire::Operation]) -> HashSet<&str> {
+    ops.iter()
+        .filter(|o| {
+            o.status == wire::OperationStatus::Running && o.kind == wire::OperationKind::Clone
+        })
+        .map(|o| o.target.as_str())
+        .collect()
+}
+
 /// Make each managed clone's container agree with its `archived` flag: archived means the
 /// container is not up, and not archived means it is not frozen.
 ///
@@ -1695,11 +1706,20 @@ fn clones_being_committed(ops: &[wire::Operation]) -> HashSet<&str> {
 async fn reconcile_archived_state(app: &App, warned: &mut HashSet<String>) {
     let st = app.store.get();
     let committing = clones_being_committed(&st.operations);
+    // A rebase boots a container for an archived row and the row stays archived
+    // throughout (it rests stopped again afterwards). Without this skip the sweep
+    // below stops the new container mid-rebase — and the rollback one too — and
+    // the op fails with "exited before its daemon registered". Rebase files a
+    // Running Clone op targeted at the clone, same as create/fork.
+    let swapping = clones_mid_swap(&st.operations);
     for h in &st.hosts {
         if !h.managed || !is_safe_id(&h.id) || committing.contains(h.id.as_str()) {
             continue;
         }
         let id = h.id.as_str();
+        if swapping.contains(id) {
+            continue;
+        }
         let paused = match app.docker.is_paused(id).await {
             Ok(p) => p,
             Err(_) => continue, // gone or the daemon is unreachable; not this loop's problem
@@ -2078,6 +2098,54 @@ mod tests {
         assert!(
             !busy.contains("being-cloned"),
             "only a commit freezes a container"
+        );
+    }
+
+    /// The archived-state sweep must not stop a container a rebase just booted for
+    /// an archived row: the row stays archived throughout the swap (it rests
+    /// stopped again afterwards). Caught live: the sweep stopped the new
+    /// container mid-rebase — and the rollback one too.
+    #[test]
+    fn a_clone_mid_swap_is_left_booting() {
+        let op = |kind, status, target: &str| wire::Operation {
+            id: "op_1".into(),
+            kind,
+            target: target.to_string(),
+            source: None,
+            status,
+            step: "swap".into(),
+            pct: 40.0,
+            message: String::new(),
+            log: Vec::new(),
+            started_at: 0,
+            finished_at: None,
+        };
+        let ops = vec![
+            op(
+                wire::OperationKind::Clone,
+                wire::OperationStatus::Running,
+                "being-rebased",
+            ),
+            op(
+                wire::OperationKind::Clone,
+                wire::OperationStatus::Error,
+                "failed-already",
+            ),
+            op(
+                wire::OperationKind::Delete,
+                wire::OperationStatus::Running,
+                "being-deleted",
+            ),
+        ];
+        let busy = clones_mid_swap(&ops);
+        assert!(busy.contains("being-rebased"));
+        assert!(
+            !busy.contains("failed-already"),
+            "a finished op holds nothing booting"
+        );
+        assert!(
+            !busy.contains("being-deleted"),
+            "only a Clone op boots a container"
         );
     }
 
