@@ -33,29 +33,6 @@ fn hostname() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// The knobs every `POST /api/clone` mode shares, mirroring the controls the web dialog
-/// shows below its three tabs. The mode-specific fields (`hostname` / `ticket` / `create` /
-/// `plain`) are supplied separately by [`Client::clone_create`].
-#[derive(Debug, Default, Clone)]
-pub struct CloneOpts<'a> {
-    /// Claude account selection, verbatim: an email, `auto`, `none`, or `group:<pool>`.
-    /// `None`/blank ⇒ omit the key entirely, so the server walks its own chain (a sub clone
-    /// inherits its parent's selection; otherwise `auto`).
-    pub claude_account: Option<&'a str>,
-    /// Codex account selection, same forms. Independent of `claude_account` — a clone can
-    /// hold both.
-    pub codex_account: Option<&'a str>,
-    /// Env preset by name; `Some("none")` opts out of inheriting a parent's.
-    pub preset: Option<&'a str>,
-    pub headless: bool,
-    /// Nest under this clone id. `None` + not `top_level` ⇒ the server auto-detects the caller
-    /// from the address it called on, so a clone spawning a clone nests with no flags.
-    pub parent: Option<&'a str>,
-    pub top_level: bool,
-    pub agent_instructions: Option<&'a str>,
-    pub claude_instructions: Option<&'a str>,
-}
-
 /// What narrows a ledger search beside its pattern. Every field absent searches the whole corpus.
 #[derive(Debug, Default, Clone)]
 pub struct LedgerFilter<'a> {
@@ -246,53 +223,25 @@ impl Client {
         self.post_json("/api/activate", &json!({ "id": id })).await
     }
 
-    /// Start a clone. `mode` carries exactly one of the mode-selecting fields the server
-    /// dispatches on — `hostname`, `ticket`, `create`, or `plain` — and `opts` the shared rest.
-    ///
-    /// [`Client::with_identity`] attaches this process's own clone identity, which is how the
-    /// server picks the parent for sub-clone auto-nesting.
-    pub async fn clone_create(
+    /// Start a template clone: `{ plain: { title, message } }` plus an optional preset
+    /// name. The hostname derives server-side and the image builds on demand from the
+    /// preset's Dockerfile.
+    pub async fn clone_create_plain(
         &self,
-        image: &str,
-        mode: Value,
-        opts: &CloneOpts<'_>,
+        title: &str,
+        message: &str,
+        preset: Option<&str>,
     ) -> Result<Operation> {
-        let mut body = json!({ "image": image });
-        let obj = body.as_object_mut().unwrap();
-        for (k, v) in mode.as_object().into_iter().flatten() {
-            obj.insert(k.clone(), v.clone());
+        let mut body = json!({ "plain": { "title": title.trim(), "message": message.trim() } });
+        if let Some(p) = preset.map(str::trim).filter(|p| !p.is_empty()) {
+            body.as_object_mut()
+                .unwrap()
+                .insert("preset".into(), json!(p));
         }
-        if let Some(a) = opts.claude_account.map(str::trim).filter(|a| !a.is_empty()) {
-            obj.insert("claudeAccount".into(), json!(a));
-        }
-        if let Some(a) = opts.codex_account.map(str::trim).filter(|a| !a.is_empty()) {
-            obj.insert("codexAccount".into(), json!(a));
-        }
-        if let Some(p) = opts.preset {
-            obj.insert("preset".into(), json!(p));
-        }
-        if opts.headless {
-            obj.insert("headless".into(), json!(true));
-        }
-        if let Some(parent) = opts.parent.map(str::trim).filter(|p| !p.is_empty()) {
-            obj.insert("parent".into(), json!(parent));
-        }
-        if opts.top_level {
-            obj.insert("topLevel".into(), json!(true));
-        }
-        for (key, val) in [
-            ("agentInstructions", opts.agent_instructions),
-            ("claudeInstructions", opts.claude_instructions),
-        ] {
-            if let Some(v) = val.map(str::trim).filter(|v| !v.is_empty()) {
-                obj.insert(key.into(), json!(v));
-            }
-        }
-        let req = Self::with_identity(
-            self.http
-                .post(format!("{}/api/clone", self.base))
-                .json(&body),
-        );
+        let req = self
+            .http
+            .post(format!("{}/api/clone", self.base))
+            .json(&body);
         let v: Value = Self::check(req.send().await?).await?.json().await?;
         Ok(serde_json::from_value(
             v.get("op")

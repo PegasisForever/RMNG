@@ -56,7 +56,7 @@ $RMNG_CONTROL_URL` hint.
 | `board move` | the resolved `BoardColumn[]` after the move |
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
-| `clone create`, `clone create-from-ticket`, `clone create-with-new-ticket`, `clone create-plain` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
+| `clone create-plain` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
 | `clone rm`, `clone archive`, `clone restore` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
 | `clone cp` | `{ bytes, dst }` |
 | `clone self` | the caller's `Clone` record, or exit 1 outside a clone |
@@ -110,17 +110,15 @@ still move at the next rotation, whereas a pinned one cannot. The same six field
 present flat on the clone object (`claudeSelection`, `claudeAccountEmail`, `claudeGroup`, and
 the Codex twins); `accounts` is a convenience view over them, not extra data.
 
-### Creating clones — four verbs
+### Creating clones — one verb
 
-`create-from-ticket`, `create-with-new-ticket`, and `create-plain` are the CLI's mirror of the
-web dialog's three tabs; `create` is the fleet-CLI extra that names the host itself. Every
-clone-creating verb is prefixed `create-` so the action is unmistakable — the target alone
-(`ticket WE-142`) read like it acted *on* the ticket. Each prints the started op id (follow
-with `rmng op wait <op-id>`), or blocks with `--wait`.
+`create-plain` is the CLI mirror of the template dialog: a title-derived hostname, with the
+image building on demand from `--preset`. It prints the started op id (follow with
+`rmng op wait <op-id>`), or blocks with `--wait`.
 
-**Common flags** (all four): `--claude-account <A>`,
-`--codex-account <A>`, `--headless`, `--parent <C>` | `--top-level`, `--column <NAME>`,
-`--wait` `[--timeout <N>]`.
+**Flags:** `--title <T>` (required), `--message <M>` | `--message-file <PATH>` (first message
+auto-sent to the agent; omitted ⇒ nothing is sent), `--preset <P>` (required when any presets
+are configured), `--column <NAME>`, `--wait` `[--timeout <N>]`.
 
 `--column` files the new clone at the **top** of that column, by title or id. The name is
 resolved before anything is created, so a typo costs no clone. The id is written to the board
@@ -129,59 +127,9 @@ matching no clone, and the card appears at the top the moment the clone does. Na
 archive column files the clone there without archiving it, since archiving something that is
 still being created would race its own creation.
 
-**Account selections** take the same forms as `account swap`: an email, `auto`, `none`, or
-`group:<pool>`. Omitting them means `auto` — a new clone gets an account rather than none.
-
-**Run from inside a clone, a new clone auto-nests as a sub clone under the caller AND inherits
-the caller's account selections + env preset by default.** What is inherited is the *selection*,
-not the resolved account: a parent on `auto` that landed on some email passes on `auto`, so the
-child gets its own pick instead of being pinned to its parent's. `--parent <clone>` nests under a
-specific top-level clone; `--top-level` forces a top-level clone, skipping inheritance.
-
-#### `rmng clone create <HOSTNAME> [--preset <P>|--no-preset]`
-
-Exact hostname (a DNS label; `400` if taken), no ticket, no derived display name.
-
 ```sh
-rmng clone create w-cp --wait
+rmng clone create-plain --title 'Fix the flaky login test' --preset work --wait
 ```
-
-#### `rmng clone create-from-ticket <LINK-OR-ID> [--agent-instructions <T>] [--claude-instructions <T>]`
-
-Clone for an **existing** Linear ticket. The hostname derives from the ticket id
-(`WE-142` → `<prefix>we-142`) and **the preset is auto-selected from the ticket's team prefix**
-— there is deliberately no `--preset`, matching the dialog. The two instruction flags append to
-the built-in defaults and take precedence where they conflict.
-
-```sh
-rmng clone create-from-ticket WE-142 --wait
-```
-
-#### `rmng clone create-with-new-ticket --team <KEY> --title <T> [--description <MD>|--description-file <PATH>] [--agent-instructions <T>] [--claude-instructions <T>]`
-
-**Create** a Linear ticket, then clone for it. `--team` is a Linear team key (`we`) and must be
-a label on some preset — that preset is used, and its Linear API key opens the issue. Hence no
-`--preset` here either: the team key *is* the preset choice.
-
-The description is **markdown**, sent to Linear verbatim. `--description-file -` reads stdin,
-which is how to pass a multi-line body. A `/uploads/<name>` image reference written into it
-stays as written, and only renders for a reader on this server's network. The web dialog is
-where pasted images get re-hosted in Linear.
-
-```sh
-rmng clone create-with-new-ticket \
-  --team we --title 'Fix the flaky login test' --description-file - --wait <<'MD'
-The test fails ~1 in 5 runs on CI.
-
-- [ ] reproduce locally
-MD
-```
-
-#### `rmng clone create-plain --title <T> [--message <M>|--message-file <PATH>] [--preset <P>]`
-
-No-ticket clone with a title-derived hostname. `--message` is auto-sent to the agent as its
-first message (omitted ⇒ nothing is sent). `--preset` is required when any presets are
-configured.
 
 ### `rmng clone rm <CLONE> [-y|--yes] [--wait] [--timeout <N>]`
 
@@ -498,7 +446,7 @@ printed to stderr whenever the step or whole-percent changes.
 
 ## Seed a new clone
 
-`rmng clone create worker --headless --wait`
+`rmng clone create-plain --title worker --wait`
 
 Repeat `--seed` to copy more directories from the calling clone into the same paths.
 The server finishes the copies before the create operation reports success.

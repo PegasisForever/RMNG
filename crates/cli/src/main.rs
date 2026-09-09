@@ -6,7 +6,6 @@
 
 mod args;
 mod commands;
-mod linear;
 mod output;
 mod wait;
 
@@ -56,60 +55,6 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
     match &cli.cmd {
         Cmd::Clone(cmd) => match cmd {
             CloneCmd::Ls => commands::clone_ls(client, json).await,
-            CloneCmd::Create {
-                hostname,
-                preset,
-                no_preset,
-                common,
-            } => {
-                commands::clone_create(
-                    client,
-                    hostname,
-                    preset.as_deref(),
-                    *no_preset,
-                    common,
-                    json,
-                )
-                .await
-            }
-            CloneCmd::CreateFromTicket {
-                ticket,
-                agent_instructions,
-                claude_instructions,
-                common,
-            } => {
-                commands::clone_create_from_ticket(
-                    client,
-                    ticket,
-                    agent_instructions.as_ref(),
-                    claude_instructions.as_ref(),
-                    common,
-                    json,
-                )
-                .await
-            }
-            CloneCmd::CreateWithNewTicket {
-                team,
-                title,
-                description,
-                description_file,
-                agent_instructions,
-                claude_instructions,
-                common,
-            } => {
-                let body = args::read_text(description.as_ref(), description_file.as_ref())?;
-                commands::clone_create_with_new_ticket(
-                    client,
-                    team,
-                    title,
-                    &body,
-                    agent_instructions.as_ref(),
-                    claude_instructions.as_ref(),
-                    common,
-                    json,
-                )
-                .await
-            }
             CloneCmd::CreatePlain {
                 title,
                 message,

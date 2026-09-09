@@ -55,65 +55,23 @@ function getJson(url: string): Promise<unknown> {
  return request(url);
 }
 
-function delJson(url: string): Promise<unknown> {
- return request(url, { method: "DELETE" });
-}
-
-/** A Linear issue the client has already resolved, as the clone route takes it.
- *
- *  This is the answer rather than the question: the browser holds the preset keys, so it looks
- *  the issue up (or opens it), moves it to In Progress, and posts what came back. The server
- *  makes no Linear call and takes every field verbatim.
- *
- *  `ticket` is the only one it cannot do without. The hostname derives from it, and that step
- *  stays server-side because it needs the live clone list to guarantee uniqueness. */
-export interface CloneLinearMeta {
- /** Lowercase team key, e.g. `we`. Picks the preset when `preset` is omitted. */
- workspace: string;
- /** Linear identifier, e.g. `WE-142`. */
- ticket: string;
- ticketUrl: string;
- /** Linear's own `branchName`. */
- branch: string;
- /** The issue title, which becomes the clone's display name. */
- title: string;
- /** The issue's first Linear label. Omitted when it has none. */
- label?: string;
-}
-
-/** Clone payload: a Linear issue the client already resolved, or a plain no-ticket clone
- *  (just a container title + an optional first agent message).
- *  The ticket mode also accepts optional clone-agent + Claude Code overrides.
- *  `group` (both modes) OVERRIDES the account pool the clone binds; omit it to let the
- *  server resolve it (preset default → first configured group). Every clone binds one.
- *  `preset` picks the clone preset (env vars + Linear key): omitted means auto-select by
- *  ticket-id prefix in the ticket mode; plain sends a resolved name.
- *  `parent` nests the new clone as a sub clone under that clone id. */
-export type ClonePayload = (
- | ({ linear: CloneLinearMeta } & {
-    agentInstructions?: string;
-    claudeInstructions?: string;
-   })
- | { plain: { title: string; message: string } }
-) & {
- group?: string;
+/** Template-clone payload: a container title plus an optional first agent message.
+ *  The ticket/hostname modes are gone from `POST /api/clone` — forking a live clone lives
+ *  in the New clone dialog (`POST /api/fork`). `preset` picks the clone preset (env vars +
+ *  Linear key); omitted means the server requires one only while any presets exist. */
+export type ClonePayload = {
+ plain: { title: string; message: string };
  preset?: string;
- headless?: boolean;
- parent?: string;
- claudeAccount?: string;
- codexAccount?: string;
 };
 
-export const activate = (id: string | null) =>
- postJson("/api/activate", { id });
 /** Start a template clone (title + preset in `payload`). The server builds the
  *  effective preset's Dockerfile into the clone image — no caller-supplied base.
  *  Returns the driving Operation so the caller can follow it; progress streams
  *  over /events. */
 export const duplicateClone = (payload: ClonePayload) =>
- postJson("/api/clone", { image: "", ...payload }).then(
-  (r) => (r as { op: Operation }).op,
- );
+ postJson("/api/clone", payload).then((r) => (r as { op: Operation }).op);
+export const activate = (id: string | null) =>
+ postJson("/api/activate", { id });
 export const deleteClone = (id: string) => postJson("/api/delete", { id });
 /** Warm a preset image without creating: build the posted Dockerfile text on miss.
  *  The preset card's rebuild button posts the editor's current text (which may be

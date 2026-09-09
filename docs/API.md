@@ -584,66 +584,24 @@ because new work should land where somebody looks rather than at the bottom of a
 
 ### `POST /api/clone`
 
-Start a clone container from a clone-source image. Runs async — returns an `Operation` id
+Start a template clone from a preset. Runs async — returns an `Operation` id
 immediately; progress flows over `/events`. After the clone is up the server kicks off the
 agent's first message ([chat::kickoff_agent](../crates/control-server/src/chat.rs)).
 
-Body (one of three modes + optional account/instructions):
+Body:
 
 ```jsonc
 {
-  "image": "", // retired gen-1 field: accepted for compatibility, ignored (gen-2 derives the image from the preset)
-  // -- pick ONE mode --
-  "linear": { "workspace": "dev", "ticket": "DEV-123", "ticketUrl": "https://…",
-              "branch": "…", "title": "…", "label": "…" },  // a ticket the CLIENT resolved, OR
-  "plain":  { "title": "quick task", "message": "do X" },   // no ticket, OR
-  "hostname": "w-cp-claude",        // raw clone under this exact hostname (fleet CLI mode)
-  // -- optional --
-  "preset": "<name>" | "auto",      // clone preset (env + Linear key). Linear mode:
-                                    //   absent/"auto" auto-selects by the ticket's team
-                                    //   prefix (400 listing the presets if nothing matches).
-                                    //   Plain mode: REQUIRED while any presets exist.
-                                    //   Hostname mode: OPTIONAL (fleet workers usually
-                                    //   need none; a named preset still applies its env).
-  "claudeAccount": "a@b.com",       // Claude account SELECTION, verbatim: an email, "auto",
-                                    //   "none", or "group:<pool>". Absent ⇒ inherited from the
-                                    //   parent clone's selection (sub clone), else "auto".
-                                    //   Resolved at assign time, so an unknown email degrades
-                                    //   to the best-scored account with a warning, not a 400.
-  "codexAccount": "a@b.com",        // the Codex twin, same forms. Independent — a clone can
-                                    //   hold one, both, or neither.
-  "agentInstructions": "...",       // extra context for the agent-wrapper
-  "claudeInstructions": "...",      // extra instructions for Claude Code
-  "parent": "<clone-id>",           // nest as a sub clone under this clone (must be a managed
-                                    //   top-level one — nesting is ONE level deep). Honoured in
-                                    //   every mode; the web dialog's "sub clone of X" checkbox
-                                    //   sends it. Omitted ⇒ the caller clone is auto-detected
-                                    //   from its identity headers and nested under when it is
-                                    //   itself top-level; no key (e.g. a browser) ⇒ top-level.
-  "topLevel": true                  // force a top-level clone, skipping that auto-detection.
-                                    //   Mutually exclusive with `parent` (400).
+  "plain":  { "title": "quick task", "message": "do X" },
+  "preset": "<name>"  // REQUIRED while any presets exist.
 }
 ```
 
-**Linear mode makes no Linear call here.** The client (the web dialog or the `rmng` CLI)
-holds the preset keys, so it looks the issue up or opens it, moves it to In Progress, and
-posts what came back. Every field is stored verbatim. Only `ticket` is required; an omitted
-`workspace` falls back to the team part of the identifier.
+The selected preset's vars are written into the clone's `/etc/environment`, plus `LINEAR_API_KEY=<preset
+key>` (auths the clone's `linear` MCP). Hostname is derived (a slug of the
+plain title, with a numeric suffix on collision). Unknown fields are ignored.
+Returns `{ "ok": true, "op": Operation }` or `400 {error}`.
 
-`image` accepts a `repo:tag` reference (e.g. `pegasis0/rmng-template:latest`), a full `sha256:…` id, or a bare 64-hex id;
-whatever form is passed is canonicalized to the reference and recorded on the clone as
-`source`. The image must carry the `rmng.image=1` label (a raw non-image id is rejected). The
-selected preset's vars are written into the clone's `/etc/environment`, plus `LINEAR_API_KEY=<preset
-key>` (auths the clone's `linear` MCP). Hostname is derived (`pega-{ticket}` or a slug of the
-plain title, with a numeric suffix on collision). Returns `{ "ok": true, "op": Operation }` or
-`400 {error}`.
-
-**Hostname mode** (what `rmng clone create` sends): the caller owns the exact hostname — a DNS
-label, uniqueness enforced (`400` on a taken name) — with no ticket, no derived display name,
-and no kickoff first message. The account selections, `agentInstructions`, and
-`claudeInstructions` still apply. A sub clone created in this mode inherits its parent's account
-*selections* and preset unless the request names them — the selection, not the resolved account,
-so a parent on `auto` that landed on some email passes on `auto` and the child gets its own pick.
 Every clone also receives Codex parity files: `~/.codex/AGENTS.md` with the same
 disposable-sandbox guidance as Claude's shared `CLAUDE.md`, and the managed MCP tables **merged
 into** `~/.codex/config.toml` (never overwriting it — see the note below) with the

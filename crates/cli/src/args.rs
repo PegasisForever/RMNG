@@ -59,28 +59,11 @@ pub enum Cmd {
     },
 }
 
-/// Flags shared by every clone-creating verb (`create`, `create-from-ticket`,
-/// `create-with-new-ticket`, `create-plain`), matching the controls the web dialog shows
-/// below its three tabs.
+/// Flags shared by the clone-creating verbs. The template dialog's only controls are the
+/// preset picker and the board column, so that is all there is here: the server derives the
+/// hostname and the image, and applies the preset's own account defaults.
 #[derive(Args, Debug)]
 pub struct CreateArgs {
-    /// Claude account for the new clone: an email, `auto`, `none`, or `group:<pool>`.
-    /// Omitted inherits the parent's selection (inside a clone), else `auto`.
-    #[arg(long)]
-    pub claude_account: Option<String>,
-    /// Codex account, same forms. Independent of --claude-account.
-    #[arg(long)]
-    pub codex_account: Option<String>,
-    /// Headless clone: no desktop; the viewer shows a tmux tab view instead of a stream
-    #[arg(long)]
-    pub headless: bool,
-    /// Create as a sub clone under this parent clone id (must be top-level). Overrides the
-    /// default caller auto-detection. Conflicts with --top-level.
-    #[arg(long, conflicts_with = "top_level")]
-    pub parent: Option<String>,
-    /// Force a top-level clone even when run from inside a clone (skip auto-nesting)
-    #[arg(long)]
-    pub top_level: bool,
     /// Board column to file the new clone in, by title (`"In Progress"`) or id. It goes to
     /// the TOP of that column. Omitted, the board draws it in its home column as before.
     #[arg(long)]
@@ -106,62 +89,8 @@ pub fn read_text(inline: Option<&String>, file: Option<&PathBuf>) -> std::io::Re
 pub enum CloneCmd {
     /// List clones with live CPU, RAM, activity, and each provider's bound account
     Ls,
-    /// Create a clone under an exact hostname (no ticket, no derived name)
-    Create {
-        /// Exact hostname for the new clone (DNS label)
-        hostname: String,
-        /// Env preset name. Omitted inside a clone ⇒ inherit the parent's preset; use
-        /// --no-preset for none.
-        #[arg(long)]
-        preset: Option<String>,
-        /// Use no env preset (opt out of inheriting the parent's)
-        #[arg(long, conflicts_with = "preset")]
-        no_preset: bool,
-        #[command(flatten)]
-        common: CreateArgs,
-    },
-    /// Create a clone for an EXISTING Linear ticket (the web dialog's "Existing ticket" tab).
-    /// The hostname derives from the ticket id and the preset is auto-selected from its team
-    /// prefix — there is no --preset here, exactly as in the dialog.
-    CreateFromTicket {
-        /// Linear ticket link or bare id (e.g. `WE-142`)
-        ticket: String,
-        /// Extra clone-agent instructions, appended to the default (takes precedence)
-        #[arg(long)]
-        agent_instructions: Option<String>,
-        /// Extra Claude Code instructions, appended to the default (takes precedence)
-        #[arg(long)]
-        claude_instructions: Option<String>,
-        #[command(flatten)]
-        common: CreateArgs,
-    },
-    /// Create a Linear ticket AND a clone for it (the dialog's "New ticket" tab) — the only
-    /// verb that opens a new ticket. The team key selects the preset, whose Linear API key
-    /// creates the issue.
-    CreateWithNewTicket {
-        /// Linear team key the ticket is created in, e.g. `we` (must be a label on some preset)
-        #[arg(long)]
-        team: String,
-        /// Ticket title
-        #[arg(long)]
-        title: String,
-        /// Ticket description as **markdown**
-        #[arg(long, conflicts_with = "description_file")]
-        description: Option<String>,
-        /// Read the markdown description from a file (`-` for stdin)
-        #[arg(long, value_name = "PATH")]
-        description_file: Option<PathBuf>,
-        /// Extra clone-agent instructions, appended to the default (takes precedence)
-        #[arg(long)]
-        agent_instructions: Option<String>,
-        /// Extra Claude Code instructions, appended to the default (takes precedence)
-        #[arg(long)]
-        claude_instructions: Option<String>,
-        #[command(flatten)]
-        common: CreateArgs,
-    },
-    /// Create a no-ticket clone with a title-derived hostname (the dialog's "No ticket" tab).
-    /// Use `clone create` instead when you want to name the host yourself.
+    /// Create a template clone with a title-derived hostname. The image builds on demand
+    /// from the preset's Dockerfile.
     CreatePlain {
         /// Container title — the display name, and the stem of the derived hostname
         #[arg(long)]
@@ -592,122 +521,11 @@ mod tests {
         assert_eq!(cli.server.as_deref(), Some("http://x:9000"));
     }
 
+    /// `create-plain` is the only clone-creating verb: the template dialog as a command.
+    /// The hostname derives from `--title` and the image builds from `--preset`, so there is
+    /// nothing else to pass it beyond the board column and `--wait`.
     #[test]
-    fn clone_create_positional_hostname_and_from() {
-        let cli = Cli::parse_from([
-            "rmng",
-            "clone",
-            "create",
-            "w-cp",
-            "--claude-account",
-            "pooled",
-            "--wait",
-            "--timeout",
-            "120",
-        ]);
-        match cli.cmd {
-            Cmd::Clone(CloneCmd::Create {
-                hostname,
-                preset,
-                no_preset,
-                common,
-            }) => {
-                assert_eq!(hostname, "w-cp");
-                assert_eq!(common.claude_account.as_deref(), Some("pooled"));
-                assert!(!no_preset && !common.headless && !common.top_level);
-                assert_eq!(preset, None);
-                assert_eq!(common.parent, None);
-                assert!(common.wait.wait);
-                assert_eq!(common.wait.timeout, 120);
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    /// The three `create-*` verbs mirror the web dialog's three tabs. Every clone-creating
-    /// verb is named `create…` so the action is unmistakable — `clone ticket WE-142` read
-    /// like it did something TO the ticket. The ticket verbs deliberately expose NO
-    /// `--preset`: the server auto-selects it (from the ticket prefix, or from the team key),
-    /// exactly as the dialog does.
-    #[test]
-    fn clone_create_verbs_mirror_the_dialog_tabs() {
-        let cli = Cli::parse_from([
-            "rmng",
-            "clone",
-            "create-from-ticket",
-            "WE-142",
-            "--wait",
-            "--agent-instructions",
-            "be brief",
-        ]);
-        match cli.cmd {
-            Cmd::Clone(CloneCmd::CreateFromTicket {
-                ticket,
-                agent_instructions,
-                common,
-                ..
-            }) => {
-                assert_eq!(ticket, "WE-142");
-                assert_eq!(agent_instructions.as_deref(), Some("be brief"));
-                assert!(common.wait.wait);
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-        assert!(
-            Cli::try_parse_from([
-                "rmng",
-                "clone",
-                "create-from-ticket",
-                "WE-1",
-                "--preset",
-                "p",
-            ])
-            .is_err(),
-            "the ticket verb must not accept --preset (the server auto-selects it)"
-        );
-
-        let cli = Cli::parse_from([
-            "rmng",
-            "clone",
-            "create-with-new-ticket",
-            "--team",
-            "we",
-            "--title",
-            "Fix it",
-            "--description",
-            "# heading",
-        ]);
-        match cli.cmd {
-            Cmd::Clone(CloneCmd::CreateWithNewTicket {
-                team,
-                title,
-                description,
-                ..
-            }) => {
-                assert_eq!((team.as_str(), title.as_str()), ("we", "Fix it"));
-                assert_eq!(description.as_deref(), Some("# heading"));
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-        // --team and --title are required; --description ⊕ --description-file.
-        assert!(Cli::try_parse_from(["rmng", "clone", "create-with-new-ticket"]).is_err());
-        assert!(
-            Cli::try_parse_from([
-                "rmng",
-                "clone",
-                "create-with-new-ticket",
-                "--team",
-                "we",
-                "--title",
-                "x",
-                "--description",
-                "a",
-                "--description-file",
-                "b",
-            ])
-            .is_err()
-        );
-
+    fn clone_create_plain_takes_title_message_and_preset() {
         let cli = Cli::parse_from([
             "rmng",
             "clone",
@@ -729,6 +547,28 @@ mod tests {
                 assert_eq!(message, None);
             }
             other => panic!("wrong cmd: {other:?}"),
+        }
+
+        // The removed verbs stay removed: exact-hostname and ticket creates have no server
+        // mode behind them anymore.
+        for old in [
+            vec!["rmng", "clone", "create", "w-cp"],
+            vec!["rmng", "clone", "create-from-ticket", "WE-142"],
+            vec![
+                "rmng",
+                "clone",
+                "create-with-new-ticket",
+                "--team",
+                "we",
+                "--title",
+                "t",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(&old).is_err(),
+                "removed verb `{}` should no longer parse",
+                old[2]
+            );
         }
 
         // The pre-rename spellings are gone, not aliased — `clone ticket` / `clone new-ticket`
@@ -773,30 +613,18 @@ mod tests {
 
     #[test]
     fn clone_create_mutually_exclusive_flags() {
-        // --parent ⊕ --top-level, --preset ⊕ --no-preset. Opting out of an account needs no
-        // flag of its own: `--claude-account none` / `--codex-account none` says it, per
-        // provider, in the same vocabulary every other account value uses.
+        // --message ⊕ --message-file on create-plain.
         assert!(
             Cli::try_parse_from([
                 "rmng",
                 "clone",
-                "create",
-                "w-x",
-                "--parent",
-                "p",
-                "--top-level",
-            ])
-            .is_err()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "rmng",
-                "clone",
-                "create",
-                "w-x",
-                "--preset",
-                "p",
-                "--no-preset",
+                "create-plain",
+                "--title",
+                "t",
+                "--message",
+                "a",
+                "--message-file",
+                "b",
             ])
             .is_err()
         );
@@ -964,14 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn every_create_verb_can_name_a_column() {
-        let cli = Cli::parse_from(["rmng", "clone", "create", "c1", "--column", "In Progress"]);
-        match cli.cmd {
-            Cmd::Clone(CloneCmd::Create { common, .. }) => {
-                assert_eq!(common.column.as_deref(), Some("In Progress"));
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
+    fn create_plain_can_name_a_column() {
         let cli = Cli::parse_from([
             "rmng",
             "clone",

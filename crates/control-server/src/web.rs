@@ -890,119 +890,6 @@ async fn clone_self(
         .ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))
 }
 
-/// Resolve the parent clone for a fleet-CLI clone create (the sub-clone relationship).
-/// Precedence: a `topLevel` body flag → `None`; an explicit `parent` body id → validated as a
-/// top-level managed clone; otherwise auto-detect the calling clone with [`caller_clone`] and
-/// nest under it only when the caller is itself top-level. Nesting is one level deep, so a
-/// request from a sub clone (or from outside the fleet) yields a top-level clone.
-/// `topLevel` + `parent` is an error.
-fn resolve_parent(
-    app: &App,
-    body: &serde_json::Value,
-    headers: &HeaderMap,
-    peer: Option<std::net::IpAddr>,
-) -> Result<Option<String>, (StatusCode, String)> {
-    let bad = |m: String| (StatusCode::BAD_REQUEST, m);
-    let top_level = body
-        .get("topLevel")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let explicit = body
-        .get("parent")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if top_level && explicit.is_some() {
-        return Err(bad("`topLevel` and `parent` are mutually exclusive".into()));
-    }
-    if top_level {
-        return Ok(None);
-    }
-    let st = app.store.get();
-    let top_level_managed = |id: &str| {
-        st.hosts
-            .iter()
-            .any(|h| h.id == id && h.managed && h.parent.is_none())
-    };
-    if let Some(pid) = explicit {
-        return match st.hosts.iter().find(|h| h.id == pid) {
-            None => Err(bad(format!("parent clone '{pid}' not found"))),
-            Some(h) if !h.managed => {
-                Err(bad(format!("parent clone '{pid}' is not a managed clone")))
-            }
-            Some(h) if h.parent.is_some() => Err(bad(format!(
-                "parent clone '{pid}' is itself a sub clone; sub clones are one level deep"
-            ))),
-            Some(_) => Ok(Some(pid.to_string())),
-        };
-    }
-    // Auto-detect: the address the request came in on, falling back to the caller's headers.
-    Ok(caller_clone(app, headers, peer).filter(|id| top_level_managed(id)))
-}
-
-/// The effective account selections + preset for a fleet-CLI clone, applying sub-clone
-/// inheritance: a sub clone inherits its `parent`'s accounts / preset unless the request
-/// specified them (an explicit `--claude-account`/`--codex-account`/`--preset`, including
-/// `none`, counts as specified and overrides). No parent, or a parent with nothing to inherit,
-/// yields `None` — which the account layer reads as "auto". Pure — unit-tested. The returned
-/// preset borrows `presets` (the live config preset list).
-fn effective_accounts_preset<'a>(
-    parent: Option<&wire::RmngClone>,
-    claude_specified: bool,
-    claude_account: Option<String>,
-    codex_specified: bool,
-    codex_account: Option<String>,
-    preset_specified: bool,
-    explicit: Option<&'a wire::Preset>,
-    presets: &'a [wire::Preset],
-) -> (Option<String>, Option<String>, Option<&'a wire::Preset>) {
-    let preset = if preset_specified {
-        explicit
-    } else {
-        parent
-            .and_then(|h| h.preset_name.as_deref())
-            .and_then(|name| presets.iter().find(|p| p.name == name))
-    };
-    // Per provider, strongest first:
-    //   1. an explicit selection on the request,
-    //   2. the parent clone's selection (sub clone),
-    //   3. the effective preset's default,
-    //   4. nothing — which the account layer reads as `auto`.
-    //
-    // What is inherited at step 2 is the *selection*, not the resolved account: the parent may be
-    // on `auto` and have landed on a specific email, and a sub clone asking for `auto` should get
-    // its own pick rather than being pinned to whatever its parent happens to be running.
-    //
-    // A BLANK preset default is skipped rather than treated as a choice, which is what lets the
-    // chain reach step 4 — an explicit `none` on a preset is a real decision (boot tokenless) and
-    // must not be confused with having no opinion.
-    let claude = if claude_specified {
-        claude_account
-    } else {
-        parent
-            .and_then(|h| h.claude_selection.clone())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                preset
-                    .map(|p| p.claude_account.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            })
-    };
-    let codex = if codex_specified {
-        codex_account
-    } else {
-        parent
-            .and_then(|h| h.codex_selection.clone())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                preset
-                    .map(|p| p.codex_account.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            })
-    };
-    (claude, codex, preset)
-}
-
 /// Repoint any clone bound to a pool that this config save deleted, per provider.
 ///
 /// A clone's pool binding is `claude_group` + a `claude_selection` of `group:<name>`. When the
@@ -1050,98 +937,6 @@ fn heal_dangling_pool_bindings(app: &App, old: &wire::AppConfig, merged: &wire::
     }
 }
 
-/// One provider's account selection for the plain / ticket create modes, which have no parent to
-/// inherit from: an explicit request value, else the resolved preset's default, else `None`
-/// (read as `auto` downstream).
-///
-/// Split out so all three create modes agree on the preset step — hostname mode reaches it
-/// through [`effective_accounts_preset`]'s longer chain, and these two would otherwise silently
-/// ignore a preset's default.
-fn account_or_preset_default(
-    requested: Option<&String>,
-    preset: Option<&wire::Preset>,
-    pick: impl Fn(&wire::Preset) -> &str,
-) -> Option<String> {
-    if let Some(a) = requested {
-        return Some(a.clone());
-    }
-    preset
-        .map(|p| pick(p).trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// A Linear issue as everything downstream of the lookup needs it.
-///
-/// The client does the lookup and posts the answer in the `{linear}` mode. This is what it
-/// arrives as: the hostname base, the display name, and the whole [`LinearMeta`] are built
-/// from this and from nothing else.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct ResolvedIssue {
-    /// Lowercase team key, e.g. `"we"`. Picks the preset when the request names none.
-    prefix: String,
-    /// `WE-142`. Drives the hostname, so it is the one field a request cannot omit.
-    identifier: String,
-    title: String,
-    url: String,
-    branch: String,
-    /// The issue's first Linear label, which is what a clone stores. `None` when it has none.
-    label: Option<String>,
-}
-
-impl ResolvedIssue {
-    /// The `linear` object of a resolved-metadata request.
-    ///
-    /// The client already talked to Linear, so every field here is taken verbatim rather than
-    /// checked against the issue. That is the deliberate bargain of this mode: the server holds
-    /// no key and makes no call, and a wrong url on a clone is the cost.
-    ///
-    /// Only `ticket` is required. `workspace` falls back to the team part of the identifier,
-    /// which is where the server's own lookup gets it from too.
-    fn from_body(v: &serde_json::Value) -> Result<Self, String> {
-        let field = |k: &str| {
-            v.get(k)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        };
-        let identifier = field("ticket");
-        if identifier.is_empty() {
-            return Err("linear.ticket is required (a Linear identifier like \"WE-142\")".into());
-        }
-        let workspace = field("workspace").to_ascii_lowercase();
-        let prefix = if workspace.is_empty() {
-            identifier
-                .split('-')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase()
-        } else {
-            workspace
-        };
-        Ok(Self {
-            prefix,
-            identifier,
-            title: field("title"),
-            url: field("ticketUrl"),
-            branch: field("branch"),
-            label: Some(field("label")).filter(|s| !s.is_empty()),
-        })
-    }
-}
-
-/// Everything a ticket-backed clone request carries that is neither the issue nor the preset.
-/// Grouped so [`ticket_clone_spec`] takes one argument for them instead of seven.
-struct CloneRequestCommon {
-    image: String,
-    claude_account: Option<String>,
-    codex_account: Option<String>,
-    agent_instructions: Option<String>,
-    claude_instructions: Option<String>,
-    headless: bool,
-    parent: Option<String>,
-}
-
 /// The hostname for a new clone, plus the display name that goes with it: a duplicate ticket
 /// gets the next free hostname and its suffix in the name ("title (a)").
 fn derive_hostname(app: &App, base: &str, title: &str) -> (String, String) {
@@ -1155,96 +950,22 @@ fn derive_hostname(app: &App, base: &str, title: &str) -> (String, String) {
     (hostname, display)
 }
 
-/// `POST /api/clone` — start a clone from a source image. Body is one of:
-///   `{ image, linear: { workspace, ticket, ticketUrl, branch, title, label } }`
-///                                                       a ticket the CLIENT already resolved
-///                                                        in Linear (the web dialog and the
-///                                                        `rmng` CLI both send this). The
-///                                                        server makes no Linear call
-///   `{ image, plain: { title, message } }`            — no ticket (preset required if any exist)
-///   `{ image, hostname }`                             — raw clone under an exact hostname
-///                                                        (fleet CLI; preset optional, no ticket)
-/// plus optional `preset` (name; absent/"auto" = label auto-select in ticket mode) /
-/// `group` (the account pool this clone's agents route through) / `agentInstructions` /
-/// `claudeInstructions`. `image` is a clone-source image reference (e.g.
-/// `pegasis0/rmng-template:latest`) from `GET /api/images`.
-///
-/// Nothing here reaches Linear. Hostname derivation stays server-side in every mode:
-/// [`jobs::next_free_hostname`] needs the live clone list to guarantee uniqueness, which no
-/// client can see.
+/// `POST /api/clone` — start a template clone: `{ plain: { title, message } }` plus an
+/// optional `preset` name. The hostname derives server-side from the title, and the image
+/// builds on demand from the preset's Dockerfile. Async — returns `{ ok: true, op }`;
+/// progress streams over `/events`. Unknown fields are ignored.
 async fn clone(
     State(app): State<App>,
-    peer: Option<ConnectInfo<std::net::SocketAddr>>,
-    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let bad = |m: String| (StatusCode::BAD_REQUEST, m);
     let str_field = |k: &str| body.get(k).and_then(|v| v.as_str()).map(str::to_string);
-
-    // Retired gen-1 field, accepted for compatibility and ignored: gen-2 derives the
-    // image from the effective preset's Dockerfile (see `jobs::start_clone`).
-    let image = str_field("image").unwrap_or_default();
-    // Account selections, verbatim as the operator wrote them: an email, `auto`, `none`, or
-    // `group:<pool>`.
-    //
-    // A named POOL is validated here, at the boundary, because the assign-time path cannot fail
-    // usefully: `claude::pick_group_account` returns `None` for an unknown pool, which makes
-    // `resolve_assignment` return `None`, which makes `jobs::run_clone` skip the whole account
-    // step — producing a running, tokenless clone and not one line of explanation. A typo'd
-    // `--claude-account group:pooed` should not cost you a silent clone.
-    //
-    // An unknown *email* is deliberately NOT rejected: that path warns and falls back to the
-    // best-scored account, which is a recoverable outcome the operator can see in the account
-    // column, and rejecting it would break `auto`-style workflows against a not-yet-imported
-    // address.
-    let claude_account = str_field("claudeAccount");
-    let codex_account = str_field("codexAccount");
-    let cfg_pools = app.config();
-    let check_pool = |sel: Option<&String>, pools: &[wire::CloneGroup], flag: &str| {
-        let Some(name) = sel.and_then(|s| s.trim().strip_prefix("group:")) else {
-            return Ok(());
-        };
-        let name = name.trim();
-        if pools.iter().any(|p| p.name == name) {
-            return Ok(());
-        }
-        let known: Vec<&str> = pools.iter().map(|p| p.name.as_str()).collect();
-        Err(bad(format!(
-            "unknown {flag} pool '{name}' (configured: {})",
-            if known.is_empty() {
-                "none".to_string()
-            } else {
-                known.join(", ")
-            }
-        )))
-    };
-    check_pool(
-        claude_account.as_ref(),
-        &cfg_pools.clone_groups,
-        "claudeAccount",
-    )?;
-    check_pool(
-        codex_account.as_ref(),
-        &cfg_pools.codex_groups,
-        "codexAccount",
-    )?;
-    let agent_instructions = str_field("agentInstructions");
-    let claude_instructions = str_field("claudeInstructions");
-    // Cross-cutting like `group`/`preset`: a headless clone (no desktop) in any create mode.
-    let headless = body
-        .get("headless")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let cfg = app.config();
     let prefix = cfg.docker.hostname_prefix.clone();
 
-    // Whether the request carried a `preset` field at all (present ⇒ don't inherit the parent's
-    // preset on a sub clone). `auto`/`none`/empty resolve to "no explicit preset".
-    let preset_field = str_field("preset").map(|s| s.trim().to_string());
-    let preset_specified = preset_field.as_ref().is_some_and(|s| !s.is_empty());
-    // An explicitly chosen preset (by name); absent/"auto"/"none" means auto-select by the
-    // ticket's team prefix in `linear` mode and "required, so error" in plain mode.
-    let explicit = match preset_field
+    // An explicitly chosen preset (by name); "auto"/"none"/empty means none. Unknown → 400.
+    let explicit = match str_field("preset")
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "auto" && !s.eq_ignore_ascii_case("none"))
     {
         Some(name) => Some(
@@ -1255,203 +976,65 @@ async fn clone(
         ),
         None => None,
     };
-
-    // Sub-clone resolution, shared by every mode: a `topLevel` flag forces top-level, an
-    // explicit `parent` id is validated as a top-level managed clone, and otherwise the caller
-    // clone is auto-detected from its per-clone router key. The web dialog's "sub clone of X"
-    // checkbox sends `parent`, so this is NOT fleet-CLI-only — resolving it here rather than
-    // inside the hostname branch is what makes that checkbox work in the UI create modes.
-    let parent = resolve_parent(&app, &body, &headers, peer.map(|p| p.0.ip()))?;
-
-    // Raw hostname clone (fleet CLI): the caller owns the exact hostname; no ticket, no
-    // derived display name. A preset is optional — fleet workers usually need none; an
-    // explicitly chosen one still applies its env + playbook append. Hostname validity +
-    // uniqueness are gated by `start_clone`.
-    if let Some(hostname) = str_field("hostname")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        // A sub clone inherits its parent clone's group + preset BY DEFAULT — a clone created
-        // from inside a clone (the common case) should join the same account pool and env as its
-        // parent unless the caller overrides it (`--group <name|none>` / `--preset <name|none>`).
-        let parent_clone = parent
-            .as_deref()
-            .and_then(|pid| app.store.get().hosts.into_iter().find(|h| h.id == pid));
-        let (eff_claude, eff_codex, eff_preset) = effective_accounts_preset(
-            parent_clone.as_ref(),
-            claude_account.is_some(),
-            claude_account.clone(),
-            codex_account.is_some(),
-            codex_account.clone(),
-            preset_specified,
-            explicit,
-            &cfg.presets,
-        );
-        let spec = CloneSpec {
-            source_image: image,
-            new_hostname: hostname,
-            linear: None,
-            claude_account: eff_claude,
-            codex_account: eff_codex,
-            first_message: None,
-            agent_instructions,
-            claude_instructions,
-            preset_name: eff_preset.map(|p| p.name.clone()),
-            env: eff_preset
-                .map(crate::provision::preset_env_vars)
-                .unwrap_or_default(),
-            agent_playbook: compose_playbook(&cfg, eff_preset),
-            global_prompt: compose_global_prompt(&cfg, eff_preset),
-            headless,
-            parent,
-        };
-        let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
-        return Ok(Json(json!({ "ok": true, "op": op })));
-    }
-
-    // Plain (no-ticket) clone: a preset must be picked whenever any are configured.
-    if let Some(plain) = body.get("plain").filter(|v| v.is_object()) {
-        let title = plain
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let message = plain
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if title.is_empty() {
-            return Err(bad("plain.title is required".into()));
-        }
-        let env = match explicit {
-            Some(p) => crate::provision::preset_env_vars(p),
-            None if cfg.presets.is_empty() => Vec::new(),
-            None => {
-                return Err(bad(format!(
-                    "a preset is required (configured: {})",
-                    preset_names(&cfg)
-                )));
-            }
-        };
-        let (hostname, display) =
-            derive_hostname(&app, &naming::plain_hostname_base(&prefix, &title), &title);
-        let spec = CloneSpec {
-            source_image: image,
-            new_hostname: hostname,
-            linear: Some(LinearMeta {
-                display_name: Some(display),
-                ..Default::default()
-            }),
-            claude_account: account_or_preset_default(claude_account.as_ref(), explicit, |p| {
-                &p.claude_account
-            }),
-            codex_account: account_or_preset_default(codex_account.as_ref(), explicit, |p| {
-                &p.codex_account
-            }),
-            first_message: Some(message).filter(|m| !m.is_empty()),
-            agent_instructions,
-            claude_instructions,
-            preset_name: explicit.map(|p| p.name.clone()),
-            env,
-            agent_playbook: compose_playbook(&cfg, explicit),
-            global_prompt: compose_global_prompt(&cfg, explicit),
-            headless,
-            parent: parent.clone(),
-        };
-        let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
-        return Ok(Json(json!({ "ok": true, "op": op })));
-    }
-
-    let common = CloneRequestCommon {
-        image,
-        claude_account,
-        codex_account,
-        agent_instructions,
-        claude_instructions,
-        headless,
-        parent,
-    };
-
-    // Resolved-metadata mode: the CLIENT looked the ticket up in Linear (or opened it) and
-    // moved it to In Progress, and posts the answer. Nothing here reaches Linear.
-    let meta = body
-        .get("linear")
+    let plain = body
+        .get("plain")
         .filter(|v| v.is_object())
-        .ok_or_else(|| bad("body must include { linear }, { plain } or { hostname }".into()))?;
-    let issue = ResolvedIssue::from_body(meta).map_err(bad)?;
-    // The client normally names the preset it resolved. When it does not, the team prefix
-    // picks one, matching the labels a preset claims.
-    let preset = match explicit {
-        Some(p) => p.clone(),
-        None => naming::pick_preset_by_prefix(&cfg.presets, &issue.prefix)
-            .cloned()
-            .ok_or_else(|| {
-                bad(format!(
-                    "no preset matches ticket {}'s team {}. Pick a preset explicitly \
-                     (configured: {})",
-                    issue.identifier,
-                    issue.prefix.to_uppercase(),
-                    preset_names(&cfg),
-                ))
-            })?,
+        .ok_or_else(|| bad("body must include { plain: { title } }".into()))?;
+    let title = plain
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let message = plain
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        return Err(bad("plain.title is required".into()));
+    }
+    // A preset must be picked whenever any are configured.
+    let env = match explicit {
+        Some(p) => crate::provision::preset_env_vars(p),
+        None if cfg.presets.is_empty() => Vec::new(),
+        None => {
+            return Err(bad(format!(
+                "a preset is required (configured: {})",
+                preset_names(&cfg)
+            )));
+        }
     };
-    let spec = ticket_clone_spec(&app, &cfg, &prefix, &issue, &preset, common);
-    let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
-    Ok(Json(json!({ "ok": true, "op": op })))
-}
-
-/// The `CloneSpec` for a ticket-backed clone.
-///
-/// The hostname is derived here rather than by the caller, because uniqueness needs the live
-/// clone list and no client can see it.
-///
-/// `hostname_prefix` is `config.docker.hostnamePrefix` (e.g. `pega-`).
-fn ticket_clone_spec(
-    app: &App,
-    cfg: &wire::AppConfig,
-    hostname_prefix: &str,
-    issue: &ResolvedIssue,
-    preset: &wire::Preset,
-    common: CloneRequestCommon,
-) -> CloneSpec {
-    let base = naming::ticket_hostname_base(hostname_prefix, &issue.identifier);
-    let (hostname, display) = derive_hostname(app, &base, &issue.title);
-    CloneSpec {
-        source_image: common.image,
+    // The preset's own account defaults, if it names any; `None` reads as `auto` downstream.
+    let preset_default = |pick: fn(&wire::Preset) -> &str| -> Option<String> {
+        explicit
+            .map(|p| pick(p).trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let (hostname, display) =
+        derive_hostname(&app, &naming::plain_hostname_base(&prefix, &title), &title);
+    let spec = CloneSpec {
+        source_image: String::new(),
         new_hostname: hostname,
         linear: Some(LinearMeta {
-            workspace: Some(issue.prefix.clone()),
-            ticket: Some(issue.identifier.clone()),
-            ticket_url: Some(issue.url.clone()),
-            branch: Some(issue.branch.clone()),
             display_name: Some(display),
-            label: issue.label.clone(),
+            ..Default::default()
         }),
-        // Ticket mode's preset may have been label-auto-selected, so its account defaults are
-        // only knowable once the issue is resolved.
-        claude_account: account_or_preset_default(
-            common.claude_account.as_ref(),
-            Some(preset),
-            |p| &p.claude_account,
-        ),
-        codex_account: account_or_preset_default(
-            common.codex_account.as_ref(),
-            Some(preset),
-            |p| &p.codex_account,
-        ),
-        first_message: None,
-        agent_instructions: common.agent_instructions,
-        claude_instructions: common.claude_instructions,
-        preset_name: Some(preset.name.clone()),
-        env: crate::provision::preset_env_vars(preset),
-        agent_playbook: compose_playbook(cfg, Some(preset)),
-        global_prompt: compose_global_prompt(cfg, Some(preset)),
-        headless: common.headless,
-        parent: common.parent,
-    }
+        claude_account: preset_default(|p| &p.claude_account),
+        codex_account: preset_default(|p| &p.codex_account),
+        first_message: Some(message).filter(|m| !m.is_empty()),
+        agent_instructions: None,
+        claude_instructions: None,
+        preset_name: explicit.map(|p| p.name.clone()),
+        env,
+        agent_playbook: compose_playbook(&cfg, explicit),
+        global_prompt: compose_global_prompt(&cfg, explicit),
+        headless: false,
+        parent: None,
+    };
+    let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
+    Ok(Json(json!({ "ok": true, "op": op })))
 }
 
 fn preset_names(cfg: &wire::AppConfig) -> String {
@@ -2976,7 +2559,6 @@ async fn codex_rotate(State(app): State<App>) -> Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderName;
     use std::sync::Arc;
 
     fn test_app() -> App {
@@ -3124,266 +2706,50 @@ mod tests {
         assert_eq!(st.selected.as_deref(), Some("w1"));
     }
 
-    // --- POST /api/clone `hostname` mode (raw clone, fleet CLI) ---
+    // --- POST /api/clone (template clone: title + preset) ---
 
     #[tokio::test]
-    async fn clone_hostname_mode_registers_clone_op() {
+    async fn clone_plain_mode_registers_clone_op() {
         let app = test_app();
-        let body = json!({
-            "image": "tmpl:latest",
-            "hostname": "w-mod-claude",
-            "claudeAccount": "auto",
-        });
-        let resp = clone(State(app.clone()), None, HeaderMap::new(), Json(body))
-            .await
-            .unwrap()
-            .0;
+        let body = json!({ "plain": { "title": "encoder scratch", "message": "hi" } });
+        let resp = clone(State(app.clone()), Json(body)).await.unwrap().0;
         assert_eq!(resp["ok"], true);
         let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
         assert_eq!(op.kind, wire::OperationKind::Clone);
-        assert_eq!(op.target, "w-mod-claude");
-        assert_eq!(op.source.as_deref(), Some("tmpl:latest"));
         assert!(app.store.get().operations.iter().any(|o| o.id == op.id));
     }
 
     #[tokio::test]
-    async fn clone_hostname_mode_rejects_bad_label() {
+    async fn clone_plain_mode_rejects_unknown_preset() {
         let app = test_app();
-        let body = json!({ "image": "tmpl:latest", "hostname": "Not A Label!" });
-        let err = clone(State(app.clone()), None, HeaderMap::new(), Json(body))
-            .await
-            .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("DNS label"), "msg: {}", err.1);
-    }
-
-    #[tokio::test]
-    async fn clone_hostname_mode_rejects_unknown_preset() {
-        let app = test_app();
-        let body = json!({ "image": "tmpl:latest", "hostname": "w1", "preset": "nope" });
-        let err = clone(State(app.clone()), None, HeaderMap::new(), Json(body))
-            .await
-            .unwrap_err();
+        let body = json!({ "plain": { "title": "x" }, "preset": "nope" });
+        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
     }
 
-    // --- POST /api/clone `linear` mode (a ticket the client already resolved) ---
-    //
-    // The browser holds the preset keys, so it looks the issue up, moves it to In Progress and
-    // posts the answer. The server makes no Linear call in this mode. What must not change is
-    // the clone that comes out of it, which is what these cover.
-
-    /// A clone-source app whose one preset claims team WE, so a `WE-…` ticket auto-selects it.
-    fn ticket_app() -> App {
-        let app = test_app();
-        let mut cfg = app.config();
-        cfg.presets = vec![wire::Preset {
-            name: "work".into(),
-            labels: vec!["we".into()],
-            linear_key: "lin_w".into(),
-            claude_account: "auto".into(),
-            ..Default::default()
-        }];
-        *app.cfg.write().unwrap() = cfg;
-        app
-    }
-
-    const TICKET_URL: &str = "https://linear.app/acme/issue/WE-142/encoder-drops-frames";
-    const TICKET_BRANCH: &str = "pegasis/we-142-encoder-drops-frames";
-
-    /// The `linear` object the browser posts for `WE-142`.
-    fn issue_body() -> serde_json::Value {
-        json!({
-            "workspace": "we",
-            "ticket": "WE-142",
-            "ticketUrl": TICKET_URL,
-            "branch": TICKET_BRANCH,
-            "title": "Encoder drops frames",
-            "label": "backend",
-        })
-    }
-
-    /// The clone a resolved ticket makes: hostname off the ticket id, display name off the
-    /// title, the preset's env and account default carried through.
     #[tokio::test]
-    async fn resolved_metadata_builds_the_ticket_clone_spec() {
-        let app = ticket_app();
-        let cfg = app.config();
-        let preset = cfg.presets[0].clone();
-
-        let issue = ResolvedIssue::from_body(&issue_body()).unwrap();
-        let common = CloneRequestCommon {
-            image: "tmpl:latest".into(),
-            claude_account: None,
-            codex_account: None,
-            agent_instructions: Some("read the repo first".into()),
-            claude_instructions: None,
-            headless: false,
-            parent: None,
-        };
-        let spec = ticket_clone_spec(&app, &cfg, "pega-", &issue, &preset, common);
-
-        assert_eq!(spec.new_hostname, "pega-we-142");
-        assert_eq!(
-            spec.linear,
-            Some(LinearMeta {
-                workspace: Some("we".into()),
-                ticket: Some("WE-142".into()),
-                ticket_url: Some(TICKET_URL.into()),
-                branch: Some(TICKET_BRANCH.into()),
-                display_name: Some("Encoder drops frames".into()),
-                // The FIRST label only, which is what a clone stores.
-                label: Some("backend".into()),
-            })
-        );
-        assert_eq!(spec.preset_name.as_deref(), Some("work"));
-        assert_eq!(spec.claude_account.as_deref(), Some("auto"));
-        // Preset vars are gone (all static env lives in the preset Dockerfile); the only
-        // runtime preset inject is the Linear key.
-        assert!(
-            spec.env
-                .iter()
-                .any(|v| v.key == "LINEAR_API_KEY" && v.value == "lin_w")
-        );
-        assert_eq!(spec.env.len(), 1);
+    async fn clone_requires_a_title() {
+        let app = test_app();
+        let body = json!({ "plain": { "title": "   " } });
+        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("plain.title is required"), "msg: {}", err.1);
     }
 
-    /// `workspace` is a convenience, not a second source of truth: an omitted one falls back to
-    /// the team part of the identifier.
-    #[test]
-    fn an_omitted_workspace_falls_back_to_the_ticket_prefix() {
-        let issue = ResolvedIssue::from_body(&json!({ "ticket": "WE-142", "title": "x" })).unwrap();
-        assert_eq!(issue.prefix, "we");
-        // A blank label is no label rather than an empty one.
-        assert_eq!(issue.label, None);
-        assert_eq!(
-            ResolvedIssue::from_body(&json!({ "ticket": "WE-1", "label": "  " }))
-                .unwrap()
-                .label,
-            None
-        );
-    }
-
-    #[test]
-    fn a_resolved_ticket_with_no_identifier_is_refused() {
-        for body in [json!({}), json!({ "ticket": "   ", "title": "x" })] {
-            let err = ResolvedIssue::from_body(&body).unwrap_err();
-            assert!(err.contains("linear.ticket is required"), "msg: {err}");
+    #[tokio::test]
+    async fn clone_requires_a_plain_body() {
+        let app = test_app();
+        // Retired modes (hostname / linear) and a bare body all land here now.
+        for body in [
+            json!({ "hostname": "w-x" }),
+            json!({ "linear": { "ticket": "WE-142" } }),
+            json!({}),
+        ] {
+            let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+            assert!(err.1.contains("{ plain: { title } }"), "msg: {}", err.1);
         }
-    }
-
-    /// End to end through the handler: the mode starts a real clone operation, named after the
-    /// ticket, with no Linear key in play anywhere.
-    #[tokio::test]
-    async fn clone_linear_mode_starts_an_op_named_after_the_ticket() {
-        let app = ticket_app();
-        let body = json!({ "image": "tmpl:latest", "linear": issue_body(), "preset": "work" });
-
-        let resp = clone(State(app.clone()), None, HeaderMap::new(), Json(body))
-            .await
-            .unwrap()
-            .0;
-
-        assert_eq!(resp["ok"], true);
-        let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
-        assert_eq!(op.kind, wire::OperationKind::Clone);
-        assert_eq!(op.target, "pega-we-142");
-        assert!(app.store.get().operations.iter().any(|o| o.id == op.id));
-    }
-
-    /// No `preset` field: the team prefix picks one, matching the labels a preset claims. A
-    /// prefix nothing claims is a 400 that names the presets.
-    #[tokio::test]
-    async fn clone_linear_mode_auto_selects_the_preset_by_team_prefix() {
-        let app = ticket_app();
-        let ok = clone(
-            State(app.clone()),
-            None,
-            HeaderMap::new(),
-            Json(json!({ "image": "tmpl:latest", "linear": issue_body() })),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(ok["op"]["target"], "pega-we-142");
-
-        let err = clone(
-            State(app.clone()),
-            None,
-            HeaderMap::new(),
-            Json(json!({ "image": "tmpl:latest", "linear": { "ticket": "XX-9", "title": "t" } })),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(
-            err.1.contains("no preset matches ticket XX-9"),
-            "msg: {}",
-            err.1
-        );
-        assert!(err.1.contains("work"), "msg: {}", err.1);
-    }
-
-    /// An image and nothing else names no mode, so it is a 400 that lists the three.
-    #[tokio::test]
-    async fn a_clone_body_with_no_mode_names_the_modes() {
-        let app = test_app();
-        let err = clone(
-            State(app.clone()),
-            None,
-            HeaderMap::new(),
-            Json(json!({ "image": "tmpl:latest" })),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(
-            err.1.contains("{ linear }, { plain } or { hostname }"),
-            "msg: {}",
-            err.1
-        );
-    }
-
-    /// Every create mode honours `parent`, not just the fleet-CLI hostname mode.
-    ///
-    /// Regression: `parent` was resolved inside the hostname branch only, and the plain/ticket
-    /// branches hardcoded `parent: None`. The web dialog's "sub clone of X" checkbox sends
-    /// `parent` in plain/create mode, so it was silently dropped — the clone came back
-    /// top-level with no error. `resolve_parent` had its own passing unit test the whole time,
-    /// which is exactly why this slipped through: the bug was in who calls it.
-    ///
-    /// A source-level assert, deliberately. Every runtime route into `spec.parent` is gated by
-    /// a web-layer check identical to `start_clone`'s, so no request body can distinguish
-    /// "the branch propagated `parent`" from "the branch dropped it" — a behavioural test here
-    /// passes against the bug (verified: reverting both branches to `parent: None` leaves such
-    /// a test green). Observing the spec itself would need a Docker image or a test seam that
-    /// earns less than it costs, for three call sites in one function.
-    ///
-    /// So this asserts the property that actually broke: a `CloneSpec` literal in `clone()`
-    /// that hardcodes the field, rather than passing the resolved `parent` through.
-    #[test]
-    fn no_create_mode_hardcodes_parent_none() {
-        let src = include_str!("web.rs");
-        let handler = src
-            .split_once("async fn clone(")
-            .expect("clone handler")
-            .1
-            .split_once("\nfn preset_names(")
-            .expect("end of clone handler")
-            .0;
-        assert!(
-            !handler.contains("parent: None"),
-            "a CloneSpec in clone() hardcodes `parent: None` — the web dialog's \
-             \"sub clone of X\" checkbox sends `parent` in plain/create mode, so that \
-             silently drops it and the clone comes back top-level"
-        );
-        // And the resolution it must use is still shared across the modes, not per-branch.
-        assert_eq!(
-            handler.matches("resolve_parent(&app").count(),
-            1,
-            "`parent` should be resolved once for all create modes"
-        );
     }
 
     // --- sub clones: parent resolution + cascade delete ---
@@ -3398,44 +2764,6 @@ mod tests {
                 ..Default::default()
             });
         });
-    }
-
-    #[tokio::test]
-    async fn resolve_parent_explicit_flags_and_validation() {
-        let app = test_app();
-        push_clone(&app, "p", true, None); // top-level managed clone
-        push_clone(&app, "c", true, Some("p")); // its sub clone
-        push_clone(&app, "u", false, None); // unmanaged row
-        let empty = HeaderMap::new();
-
-        // `topLevel` forces a top-level clone; no hints also → top-level.
-        assert_eq!(
-            resolve_parent(&app, &json!({ "topLevel": true }), &empty, None).unwrap(),
-            None
-        );
-        assert_eq!(
-            resolve_parent(&app, &json!({}), &empty, None).unwrap(),
-            None
-        );
-        // A valid explicit top-level parent is accepted.
-        assert_eq!(
-            resolve_parent(&app, &json!({ "parent": "p" }), &empty, None).unwrap(),
-            Some("p".into())
-        );
-        // A sub clone, an unmanaged row, and an unknown id are all rejected as parents.
-        for pid in ["c", "u", "ghost"] {
-            assert!(resolve_parent(&app, &json!({ "parent": pid }), &empty, None).is_err());
-        }
-        // `parent` + `topLevel` together is an error.
-        assert!(
-            resolve_parent(
-                &app,
-                &json!({ "parent": "p", "topLevel": true }),
-                &empty,
-                None
-            )
-            .is_err()
-        );
     }
 
     /// Deleting a pool must not strand the clones bound to it.
@@ -3517,324 +2845,6 @@ mod tests {
         assert_eq!(cx.codex_group, None);
         // ...and the Claude side of that same clone was never bound, so it stays unset.
         assert_eq!(cx.claude_selection, None);
-    }
-
-    /// A typo'd pool name must be a 400, not a silently tokenless clone.
-    ///
-    /// `claude::pick_group_account` returns `None` for an unknown pool, which cascades into
-    /// `resolve_assignment` returning `None` and `jobs::run_clone` skipping the account step
-    /// entirely — a running clone with no token and nothing in the log. The boundary check is
-    /// the only place this can still fail usefully.
-    #[tokio::test]
-    async fn clone_rejects_an_unknown_account_pool() {
-        let app = test_app();
-        *app.cfg.write().unwrap() = wire::AppConfig {
-            clone_groups: vec![wire::CloneGroup {
-                name: "pooled".into(),
-                accounts: vec![],
-            }],
-            codex_groups: vec![wire::CloneGroup {
-                name: "gpt".into(),
-                accounts: vec![],
-            }],
-            ..app.config()
-        };
-        let create =
-            |body: serde_json::Value| clone(State(app.clone()), None, HeaderMap::new(), Json(body));
-
-        // A configured pool is accepted (reaches the op, i.e. past validation).
-        let ok = create(json!({
-            "image": "tmpl:latest", "hostname": "w-ok", "claudeAccount": "group:pooled",
-        }))
-        .await;
-        assert!(ok.is_ok(), "a configured pool must pass validation");
-
-        // A typo is a 400 naming what IS configured, per provider.
-        let err = create(json!({
-            "image": "tmpl:latest", "hostname": "w-bad", "claudeAccount": "group:pooed",
-        }))
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(
-            err.1.contains("pooed") && err.1.contains("pooled"),
-            "unhelpful: {}",
-            err.1
-        );
-
-        // The two providers have independent pool lists — a Claude pool is not a Codex pool.
-        let err = create(json!({
-            "image": "tmpl:latest", "hostname": "w-x", "codexAccount": "group:pooled",
-        }))
-        .await
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-
-        // Non-pool selections are untouched: an email may legitimately not be imported yet.
-        // Distinct hostnames — a repeat would trip the duplicate-name check, not the pool check.
-        for (i, sel) in ["auto", "none", "nobody@example.com"].iter().enumerate() {
-            let r = create(json!({
-                "image": "tmpl:latest",
-                "hostname": format!("w-sel-{i}"),
-                "claudeAccount": sel,
-            }))
-            .await;
-            assert!(r.is_ok(), "selection {sel:?} must not be rejected");
-        }
-    }
-
-    /// The preset default is step 3 of the chain — weaker than an explicit request and weaker
-    /// than a parent's inherited selection, stronger than nothing.
-    #[test]
-    fn preset_account_default_fills_the_gap_but_never_outranks() {
-        let presets = vec![wire::Preset {
-            name: "backend".into(),
-            claude_account: "group:pooled".into(),
-            codex_account: "gpt@team.com".into(),
-            ..Default::default()
-        }];
-        let p = Some(&presets[0]);
-
-        // No request, no parent → the preset decides, per provider.
-        let (c, x, _) =
-            effective_accounts_preset(None, false, None, false, None, true, p, &presets);
-        assert_eq!(c.as_deref(), Some("group:pooled"));
-        assert_eq!(x.as_deref(), Some("gpt@team.com"));
-
-        // An explicit request outranks it — including an explicit `none`, which is a real
-        // choice (boot tokenless) and must not fall through to the preset.
-        let (c, x, _) = effective_accounts_preset(
-            None,
-            true,
-            Some("me@x.com".into()),
-            true,
-            None,
-            true,
-            p,
-            &presets,
-        );
-        assert_eq!(c.as_deref(), Some("me@x.com"));
-        assert_eq!(
-            x, None,
-            "an explicit clear must not be back-filled by the preset"
-        );
-
-        // A parent's selection outranks it too (sub clones follow their parent, not the preset).
-        let parent = wire::RmngClone {
-            id: "p".into(),
-            claude_selection: Some("auto".into()),
-            ..Default::default()
-        };
-        let (c, x, _) =
-            effective_accounts_preset(Some(&parent), false, None, false, None, true, p, &presets);
-        assert_eq!(
-            c.as_deref(),
-            Some("auto"),
-            "the parent wins over the preset"
-        );
-        // ...but only for the provider the parent actually had. Codex still falls to the preset.
-        assert_eq!(x.as_deref(), Some("gpt@team.com"));
-    }
-
-    /// A BLANK preset default means "no opinion" and must fall through, NOT be treated as an
-    /// empty selection. Confusing the two would silently bind every clone of an unconfigured
-    /// preset to an empty string instead of letting the account layer pick.
-    #[test]
-    fn a_blank_preset_default_is_no_opinion() {
-        let presets = vec![wire::Preset {
-            name: "bare".into(),
-            ..Default::default()
-        }];
-        let (c, x, _) = effective_accounts_preset(
-            None,
-            false,
-            None,
-            false,
-            None,
-            true,
-            Some(&presets[0]),
-            &presets,
-        );
-        assert_eq!(c, None);
-        assert_eq!(x, None);
-        // Whitespace is not an opinion either.
-        let ws = vec![wire::Preset {
-            name: "ws".into(),
-            claude_account: "   ".into(),
-            ..Default::default()
-        }];
-        let (c, _, _) =
-            effective_accounts_preset(None, false, None, false, None, true, Some(&ws[0]), &ws);
-        assert_eq!(c, None);
-    }
-
-    /// The plain / ticket create modes have no parent, so they use the shorter helper — which
-    /// must agree with the chain above on the two rules that matter.
-    #[test]
-    fn account_or_preset_default_matches_the_chain() {
-        let preset = wire::Preset {
-            name: "p".into(),
-            claude_account: "group:pooled".into(),
-            ..Default::default()
-        };
-        let req = "me@x.com".to_string();
-        // Request wins.
-        assert_eq!(
-            account_or_preset_default(Some(&req), Some(&preset), |p| &p.claude_account).as_deref(),
-            Some("me@x.com")
-        );
-        // Absent request → the preset's default.
-        assert_eq!(
-            account_or_preset_default(None, Some(&preset), |p| &p.claude_account).as_deref(),
-            Some("group:pooled")
-        );
-        // Blank preset default, and no preset at all, both fall through.
-        let bare = wire::Preset {
-            name: "bare".into(),
-            ..Default::default()
-        };
-        assert_eq!(
-            account_or_preset_default(None, Some(&bare), |p| &p.claude_account),
-            None
-        );
-        assert_eq!(
-            account_or_preset_default(None, None, |p| &p.claude_account),
-            None
-        );
-    }
-
-    #[test]
-    fn sub_clone_inherits_accounts_and_preset_unless_overridden() {
-        let presets = vec![
-            wire::Preset {
-                name: "parent-preset".into(),
-                ..Default::default()
-            },
-            wire::Preset {
-                name: "override-preset".into(),
-                ..Default::default()
-            },
-        ];
-        // The parent is on `auto` and has LANDED on a concrete account. What a sub clone
-        // inherits is the *selection*, not the resolved email — otherwise a child asking for
-        // `auto` would be silently pinned to whatever its parent happens to be running.
-        let parent = wire::RmngClone {
-            id: "p".into(),
-            managed: true,
-            claude_selection: Some("auto".into()),
-            claude_account_email: Some("landed@x.com".into()),
-            codex_selection: Some("group:gpt".into()),
-            preset_name: Some("parent-preset".into()),
-            ..Default::default()
-        };
-        let name = |p: Option<&wire::Preset>| p.map(|p| p.name.clone());
-
-        // Nothing specified → inherit all three from the parent.
-        let (c, x, pr) = effective_accounts_preset(
-            Some(&parent),
-            false,
-            None,
-            false,
-            None,
-            false,
-            None,
-            &presets,
-        );
-        assert_eq!(
-            c,
-            Some("auto".into()),
-            "the selection is inherited, not the resolved email"
-        );
-        assert_eq!(x, Some("group:gpt".into()));
-        assert_eq!(name(pr), Some("parent-preset".into()));
-
-        // Explicit values override inheritance, per provider independently.
-        let (c, x, pr) = effective_accounts_preset(
-            Some(&parent),
-            true,
-            Some("me@x.com".into()),
-            false,
-            None,
-            true,
-            Some(&presets[1]),
-            &presets,
-        );
-        assert_eq!(c, Some("me@x.com".into()));
-        assert_eq!(
-            x,
-            Some("group:gpt".into()),
-            "an unspecified provider still inherits"
-        );
-        assert_eq!(name(pr), Some("override-preset".into()));
-
-        // Explicit `none` (specified, but resolving to None) opts out of inheritance.
-        let (c, x, pr) =
-            effective_accounts_preset(Some(&parent), true, None, true, None, true, None, &presets);
-        assert_eq!(c, None);
-        assert_eq!(x, None);
-        assert_eq!(pr, None);
-
-        // No parent → no inheritance.
-        let (c, x, pr) =
-            effective_accounts_preset(None, false, None, false, None, false, None, &presets);
-        assert_eq!(c, None);
-        assert_eq!(x, None);
-        assert!(pr.is_none());
-
-        // Parent names a preset that no longer exists → gracefully no preset.
-        let orphan = wire::RmngClone {
-            preset_name: Some("gone".into()),
-            ..parent.clone()
-        };
-        let (_c, _x, pr) = effective_accounts_preset(
-            Some(&orphan),
-            false,
-            None,
-            false,
-            None,
-            false,
-            None,
-            &presets,
-        );
-        assert!(pr.is_none());
-    }
-
-    #[tokio::test]
-    async fn resolve_parent_auto_detects_caller_router_key() {
-        let app = test_app();
-        push_clone(&app, "p", true, None);
-        push_clone(&app, "c", true, Some("p"));
-        let header = |key: &str| {
-            let mut h = HeaderMap::new();
-            h.insert(
-                HeaderName::from_static("x-rmng-proxy-key"),
-                key.parse().unwrap(),
-            );
-            h
-        };
-
-        // A top-level caller's own router key nests the new clone under it.
-        let key_p = app.clone_keys.mint("p");
-        assert_eq!(
-            resolve_parent(&app, &json!({}), &header(&key_p), None).unwrap(),
-            Some("p".into())
-        );
-        // A sub-clone caller can't nest deeper (one level) → top-level.
-        let key_c = app.clone_keys.mint("c");
-        assert_eq!(
-            resolve_parent(&app, &json!({}), &header(&key_c), None).unwrap(),
-            None
-        );
-        // An unrecognized key → top-level.
-        assert_eq!(
-            resolve_parent(&app, &json!({}), &header("bogus"), None).unwrap(),
-            None
-        );
-        // An explicit `topLevel` overrides the caller key.
-        assert_eq!(
-            resolve_parent(&app, &json!({ "topLevel": true }), &header(&key_p), None).unwrap(),
-            None
-        );
     }
 
     #[tokio::test]
@@ -3954,11 +2964,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(me.0.id, "pega-we-649");
-
-        // The same answer decides where a sub clone nests, which is the other half of the damage:
-        // a terminal in pega-we-649 would have hung its sub clone off pega-template.
-        let parent = resolve_parent(&app, &serde_json::json!({}), &headers, peer).unwrap();
-        assert_eq!(parent.as_deref(), Some("pega-we-649"));
     }
 
     /// An IPv4 peer on a dual-stack listener arrives mapped into IPv6, and the same clone has to
