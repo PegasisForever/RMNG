@@ -49,7 +49,7 @@ apt-get install -y -qq \
 
 # Default terminal → Ptyxis (installed above in place of gnome-console; gnome-shell doesn't
 # Recommend Console, so dropping it from the list is enough — nothing pulls it back).
-update-alternatives --set x-terminal-emulator /usr/bin/ptyxis 2>/dev/null || true
+update-alternatives --set x-terminal-emulator /usr/bin/ptyxis 2>/dev/null
 
 # /var/lib/dbus/machine-id must be a SYMLINK to /etc/machine-id (the Debian norm), not the
 # regular file dbus's postinst bakes here. With a baked file, systemd "initializes the
@@ -64,7 +64,7 @@ ln -sf /etc/machine-id /var/lib/dbus/machine-id
 # starts in a container, yet its D-Bus activation file still asks systemd for it — the bus
 # name never appears and any client (gnome-control-center/Settings) blocks ~25s per call.
 log "mask ModemManager (D-Bus activation otherwise hangs Settings)"
-systemctl mask ModemManager.service >/dev/null 2>&1 || true
+systemctl mask ModemManager.service >/dev/null 2>&1
 
 # Mask RealtimeKit (rtkit-daemon). Same failure class as ModemManager above: in a container it
 # can't create its RT-priority threads (RLIMIT_RTPRIO=0) and comes up wedged during the boot
@@ -74,12 +74,12 @@ systemctl mask ModemManager.service >/dev/null 2>&1 || true
 # portal timeouts at launch (file manager >1 min, found live). Headless clones don't need RT
 # audio scheduling, so mask it: the property read fast-fails and the portal starts clean.
 log "mask rtkit-daemon (wedges xdg-desktop-portal → slow GTK app launches; RT unused headless)"
-systemctl mask rtkit-daemon.service >/dev/null 2>&1 || true
+systemctl mask rtkit-daemon.service >/dev/null 2>&1
 
 # Mask the udev units. In a privileged container systemd-udevd sees the HOST's uevents (it
 # should never manage the host's devices from inside a guest).
 log "mask systemd-udevd + udev-trigger (host uevents)"
-systemctl mask systemd-udevd.service systemd-udev-trigger.service >/dev/null 2>&1 || true
+systemctl mask systemd-udevd.service systemd-udev-trigger.service >/dev/null 2>&1
 
 # Mask tpm-udev too (arrives via systemd's own libtss2 dep chain on resolute). Its .path
 # unit watches PathChanged=/dev — which churns so hard during container boot that the unit
@@ -88,14 +88,14 @@ systemctl mask systemd-udevd.service systemd-udev-trigger.service >/dev/null 2>&
 # template boot smoke). The unit only fixes /dev/tpm* permissions and no rmng container
 # ever gets a TPM device, so mask both halves.
 log "mask tpm-udev (boot /dev churn trips its start limit; no TPM in a container)"
-systemctl mask tpm-udev.path tpm-udev.service >/dev/null 2>&1 || true
+systemctl mask tpm-udev.path tpm-udev.service >/dev/null 2>&1
 
 # Ubuntu 26.04's basic.target wants tmp.mount, whose packaged unit mounts /tmp as tmpfs
 # (size=50%). Clones already have a disk-backed overlay rootfs and agents often use /tmp for
 # large build/download scratch space, so keep /tmp on regular container disk. /dev/shm stays
 # tmpfs and is sized separately by DockerCtl for Chromium/Electron.
 log "mask tmp.mount (/tmp should use regular container disk, not tmpfs)"
-systemctl mask tmp.mount >/dev/null 2>&1 || true
+systemctl mask tmp.mount >/dev/null 2>&1
 
 # The header's "NO gdm3 / NO gnome-remote-desktop" isn't free: gnome-shell *Recommends*
 # gdm3 and the desktop pulls gnome-remote-desktop, so the recommends-on install above drags
@@ -109,12 +109,12 @@ systemctl mask tmp.mount >/dev/null 2>&1 || true
 # (The explicitly-installed VA/PipeWire packages above are apt-marked manual, so autoremove
 # leaves them — Mesa VA-API decode stays intact.)
 log "strip gdm3 + g-r-d + NetworkManager/ModemManager (Recommends pull-ins); go DM-less"
-apt-get purge -y -qq gdm3 gnome-remote-desktop network-manager modemmanager >/dev/null 2>&1 || true
-apt-mark manual iproute2 >/dev/null 2>&1 || true
-apt-get autoremove --purge -y -qq >/dev/null 2>&1 || true
+apt-get purge -y -qq gdm3 gnome-remote-desktop network-manager modemmanager >/dev/null 2>&1
+apt-mark manual iproute2 >/dev/null 2>&1
+apt-get autoremove --purge -y -qq >/dev/null 2>&1
 # No display manager → default to multi-user.target. The headless GNOME user unit starts via
 # linger, independent of graphical.target / any DM.
-systemctl set-default multi-user.target >/dev/null 2>&1 || true
+systemctl set-default multi-user.target >/dev/null 2>&1
 
 # Going DM-less costs polkit its notion of a login session, so grant the sudo group outright.
 # With no GDM there is no seat/TTY session: linger opens the clone user's only logind session

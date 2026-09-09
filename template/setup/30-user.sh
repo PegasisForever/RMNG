@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Phase 30 — the clone user + everything under its home. Creates the uid-1000 user (groups,
 # passwordless sudo, linger), sets fish as the shell, drops the interactive PATH rc, the
-# passwordless GNOME keyring, the shared CLAUDE.md + the linear MCP, installs the user
+# passwordless GNOME keyring, the config dirs the control-server fills (Codex/pi guidance
+# + MCP), installs the user
 # toolchains (claude / uv / rustup / nvm / fish-nvm), and writes the systemd --user units
 # (headless gnome-shell + clone-daemon + agent-wrapper) with their wants symlinks. Cheapest,
 # most-frequently-tweaked layer → runs last, so a change here never re-runs phases 10/20.
@@ -39,7 +40,7 @@ log "create user $USERNAME + groups + linger"
 # templates never did). Everything downstream (tar ownership, XDG_RUNTIME_DIR paths, unit
 # files) assumes $USERNAME == uid 1000, so evict it and pin the uid explicitly.
 if id ubuntu >/dev/null 2>&1 && [ "$USERNAME" != ubuntu ]; then
-  userdel -r ubuntu 2>/dev/null || userdel ubuntu 2>/dev/null
+  userdel -r ubuntu
 fi
 id "$USERNAME" >/dev/null 2>&1 || useradd -m -s /bin/bash -u 1000 "$USERNAME"
 # SSH: the control-server injects authorized_keys here at provision. Pre-create the dir
@@ -61,7 +62,7 @@ mkdir -p /var/lib/systemd/linger && touch "/var/lib/systemd/linger/$USERNAME"
 # Default shell → fish for the clone user + root. Fish installed in the dev toolbox phase,
 # which fails the build on error — so it is guaranteed present here, not probed.
 FISH_SH="$(command -v fish)"
-for u in "$USERNAME" root; do chsh -s "$FISH_SH" "$u" 2>/dev/null || usermod -s "$FISH_SH" "$u"; done
+for u in "$USERNAME" root; do usermod -s "$FISH_SH" "$u"; done
 
 # ~/.local/bin + ~/.cargo/bin on PATH for interactive shells. User-local tools install there
 # — Claude Code / uv → ~/.local/bin, rustup/cargo → ~/.cargo/bin — but neither fish (the
@@ -171,79 +172,23 @@ runuser -u "$USERNAME" -- bash -lc 'set -o pipefail; command -v codex >/dev/null
 log "shared user CLAUDE.md (agent operating memory)"
 CLAUDE_DIR="/home/$USERNAME/.claude"
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "$CLAUDE_DIR"
-cat > "$CLAUDE_DIR/CLAUDE.md" <<'CLAUDEMD'
-# Working in this clone
+# The file itself is the control-server's: it writes the live global prompt here at clone
+# creation (codex parity) and the reconciler keeps it current. A baked static copy lived
+# here once and was always overwritten before any agent read it — single source of truth
+# means it is not baked anymore.
 
-This machine is a **disposable, single-purpose dev sandbox** that belongs to you,
-with **passwordless `sudo`**. Install packages, toolchains, and global CLIs freely
-and reconfigure the system as needed — the machine itself is throwaway and there is
-no other user to disturb. Optimize for getting the task done.
-
-## When you're blocked
-
-If you're genuinely stuck — missing access or credentials, an ambiguous
-requirement, or a call that's the human's to make — **stop and ask** rather than
-guessing or thrashing. A precise question beats a confident wrong turn.
-CLAUDEMD
-chown "$USERNAME:$USERNAME" "$CLAUDE_DIR/CLAUDE.md"
-chmod 644 "$CLAUDE_DIR/CLAUDE.md"
-
-# Shared user Codex instructions + MCP config. Codex reads global guidance from
-# ~/.codex/AGENTS.md and MCP servers from ~/.codex/config.toml. The control-server
-# rewrites these files at clone creation/reconciliation with clone-specific settings;
-# the template carries only static guidance and desktop/Linear MCP defaults.
-log "shared user Codex AGENTS.md + MCP config"
+# Shared user Codex + pi config dirs. Codex reads global guidance from ~/.codex/AGENTS.md
+# and MCP servers from ~/.codex/config.toml; pi's agent-wrapper reads ~/.pi/agent/AGENTS.md.
+# The control-server writes ALL of these files at clone creation (codex parity + MCP merges)
+# and the reconciler keeps them current — the template owns the directories (correct owner
+# before anything lands, else tar invents them root-owned) and never the content.
+log "shared user Codex + pi config dirs"
 CODEX_DIR="/home/$USERNAME/.codex"
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "$CODEX_DIR"
-# pi's config dir, used by the agent-wrapper. It holds the global AGENTS.md the
-# control-server writes plus the MCP tool cache the wrapper writes at runtime, so it has
-# to be owned by the clone user before anything lands in it.
 install -d -o "$USERNAME" -g "$USERNAME" -m700 "/home/$USERNAME/.pi" "/home/$USERNAME/.pi/agent"
-cat > "$CODEX_DIR/AGENTS.md" <<'CODEXAGENTS'
-# Working in this clone
 
-This machine is a **disposable, single-purpose dev sandbox** that belongs to you,
-with **passwordless `sudo`**. Install packages, toolchains, and global CLIs freely
-and reconfigure the system as needed — the machine itself is throwaway and there is
-no other user to disturb. Optimize for getting the task done.
-
-## When you're blocked
-
-If you're genuinely stuck — missing access or credentials, an ambiguous
-requirement, or a call that's the human's to make — **stop and ask** rather than
-guessing or thrashing. A precise question beats a confident wrong turn.
-CODEXAGENTS
-cat > "$CODEX_DIR/config.toml" <<'CODEXCONFIG'
-# Managed by RMNG. Re-created by the control-server clone reconciler.
-
-[mcp_servers.desktop]
-url = "http://127.0.0.1:9004"
-
-[mcp_servers.linear]
-url = "https://mcp.linear.app/mcp"
-bearer_token_env_var = "LINEAR_API_KEY"
-CODEXCONFIG
-chown "$USERNAME:$USERNAME" "$CODEX_DIR/AGENTS.md" "$CODEX_DIR/config.toml"
-chmod 644 "$CODEX_DIR/AGENTS.md"
-chmod 600 "$CODEX_DIR/config.toml"
-
-# User-scope `desktop` + `linear` MCP for every `claude` on the clone (interactive shell, inner
-# Cursor agent; the agent-wrapper registers the same two programmatically). mcpServers lives in
-# ~/.claude.json — a top-level key; settings.json does NOT support it. This is the HEADED baseline:
-# the control-server removes `desktop` from ~/.claude.json on headless clones (no clone-daemon /
-# :9004 there), mirroring how it deletes the desktop units. ${LINEAR_API_KEY} stays literal here
-# (single-quoted jq arg): claude expands it at runtime from the session env, where per-clone
-# /etc/environment (written by the control-server) put the chosen preset's key. No key in the env
-# (e.g. on the base image) ⇒ claude skips the server with a "missing environment variables" warning.
-log "user-scope desktop + linear MCP → ~/.claude.json"
-CLAUDE_JSON="/home/$USERNAME/.claude.json"
-[ -s "$CLAUDE_JSON" ] || echo '{}' > "$CLAUDE_JSON"
-jq --arg auth 'Bearer ${LINEAR_API_KEY}' \
-  '.mcpServers.linear = {"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":$auth}}
-   | .mcpServers.desktop = {"type":"http","url":"http://127.0.0.1:9004"}' \
-  "$CLAUDE_JSON" > "$CLAUDE_JSON.tmp" && mv "$CLAUDE_JSON.tmp" "$CLAUDE_JSON"
-chown "$USERNAME:$USERNAME" "$CLAUDE_JSON"
-chmod 600 "$CLAUDE_JSON"
+# `~/.claude.json` is the control-server's: its MCP merge creates the file (`{}` when
+# missing) and owns the managed servers, at creation and in the loop. Not baked.
 
 # uv + rustup + nvm (load-bearing user toolchains), then fish-nvm (shell glue, strict like
 # everything else in the template),
@@ -304,21 +249,6 @@ Restart=on-failure
 [Install]
 WantedBy=default.target
 UNIT
-cat > "$UDIR/rmng-session-holder.service" <<UNIT
-[Unit]
-Description=rmng session holder (Mutter session + virtual monitors)
-After=gnome-headless.service
-Wants=gnome-headless.service
-[Service]
-Type=simple
-Environment=WAYLAND_DISPLAY=wayland-0
-${MONITORS:+Environment=RMNG_MONITORS=$MONITORS}
-ExecStart=$BINDIR/rmng-clone-daemon --session-holder
-Restart=on-failure
-RestartSec=2
-[Install]
-WantedBy=default.target
-UNIT
 cat > "$UDIR/rmng-clone-daemon.service" <<UNIT
 [Unit]
 Description=rmng clone-daemon (capture + input)
@@ -358,29 +288,9 @@ RestartSec=2
 WantedBy=default.target
 UNIT
 
-# Base session env every clone gets (NOT a preset): identifies the desktop so apps,
-# xdg-desktop-portal (it picks the GNOME backend from XDG_CURRENT_DESKTOP), dark-mode/
-# settings portal, and theming behave like a real GNOME session. Per-clone /etc/environment
-# is written by the control-server at clone create with these defaults plus the selected
-# preset/control vars; the template keeps the same defaults for direct/manual boots.
-tmp_env="$(mktemp)"
-keys_env="$(mktemp)"
-trap 'rm -f "$tmp_env" "$keys_env"' EXIT
-cat > "$tmp_env.rmng" <<'ENVD'
-XDG_CURRENT_DESKTOP=GNOME
-XDG_SESSION_DESKTOP=gnome
-DESKTOP_SESSION=gnome
-XDG_SESSION_CLASS=user
-XDG_MENU_PREFIX=gnome-
-XDG_SESSION_TYPE=wayland
-ENVD
-sed 's/=.*//' "$tmp_env.rmng" | sort -u > "$keys_env"
-if [ -f /etc/environment ]; then
-  awk -F= 'NR==FNR { drop[$1]=1; next } !($1 in drop)' "$keys_env" /etc/environment > "$tmp_env"
-fi
-cat "$tmp_env.rmng" >> "$tmp_env"
-install -m 0644 -o root -g root "$tmp_env" /etc/environment
-rm -f "$tmp_env.rmng"
+# /etc/environment is the control-server's: its pre-boot tar writes the same six
+# session keys plus the per-clone control/preset vars, and the reconciler keeps
+# them current. Not baked.
 
 chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config"
 # Enable for auto-start by creating the wants symlinks directly (a plain `ln`, no bus or
@@ -388,7 +298,7 @@ chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config"
 # so the symlinks are what carry over into the image; they take effect on the first boot of a
 # real clone (linger, marked above, starts the user manager then).
 WANTS="$UDIR/default.target.wants"; install -d -o "$USERNAME" -g "$USERNAME" "$WANTS"
-for u in gnome-headless rmng-session-holder rmng-clone-daemon agent-wrapper; do
+for u in gnome-headless rmng-clone-daemon agent-wrapper; do
   ln -sf "../$u.service" "$WANTS/$u.service"
 done
 chown -h "$USERNAME:$USERNAME" "$WANTS"/*.service

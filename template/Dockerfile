@@ -114,7 +114,7 @@ RUN mkdir -p /etc/ssh/sshd_config.d \
       'PermitRootLogin no' \
       'KbdInteractiveAuthentication no' \
       'PubkeyAuthentication yes' \
-      'AllowUsers rmng' \
+      "AllowUsers $USERNAME" \
       'X11Forwarding no' \
       > /etc/ssh/sshd_config.d/10-rmng.conf \
  && systemctl enable ssh

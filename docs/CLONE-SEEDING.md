@@ -29,27 +29,26 @@ clone binaries.
   adw-gtk3 from upstream releases. STRICT: any failure fails the build — nothing
   warns-and-continues.
 - Phase 30 (`template/setup/30-user.sh`): the clone user (uid 1000, passwordless sudo,
-  linger, fish shell), interactive PATH rc, passwordless GNOME keyring, shared
-  CLAUDE.md + linear MCP, user toolchains (claude / uv / rustup / nvm / fish-nvm),
-  and the `systemd --user` units (headless gnome-shell + clone-daemon +
-  agent-wrapper) with their wants-symlinks. Pre-creates `/opt/rmng/bin` EMPTY and
-  `~/.ssh` (700, no host keys). Blanks machine-id (one baked id would identify the
-  whole fleet).
+  linger, fish shell), interactive PATH rc, passwordless GNOME keyring, EMPTY config
+  dirs owned by the user (`~/.claude`, `~/.codex`, `~/.pi/agent` — the server fills
+  them; pre-creating avoids root-owned parents), user toolchains (claude / uv /
+  rustup / nvm / fish-nvm), and the `systemd --user` unit DEFINITIONS (headless
+  gnome-shell + clone-daemon + agent-wrapper) with their wants-symlinks. The
+  session-holder unit is NOT baked (the server ships it pre-boot on headed clones).
+  Pre-creates `/opt/rmng/bin` EMPTY and `~/.ssh` (700, no host keys). Blanks
+  machine-id (one baked id would identify the whole fleet). Enables + hardens sshd
+  (`AllowUsers $USERNAME`). Symlinks the dbus machine-id.
 
 **Preset images** (`derived.rs`): each preset carries its own FULL Dockerfile, used
 verbatim (no FROM rewrite, no digest pinning). Tag = hash of the file text, so any
 edit re-tags; empty text falls back to the default base Dockerfile.
 
 Deliberately NOT baked: `rmng-clone-daemon`, `agent-wrapper`, `rmng` CLI (list 2 —
-the server installs its own current copies, so a clone can never drift from it).
-
-Overlap warning: the template ALSO bakes static copies of four files list 3 overwrites
-with the live values on every create — `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
-`~/.codex/config.toml` (desktop + linear MCP defaults), and the `~/.claude.json`
-baseline (linear + desktop via jq). The baked copies are fallback so the image stands
-alone without provision; on a default fleet the inject writes byte-identical guidance
-over them and idempotent MCP merges. Drift risk: editing the baked text without the
-matching server default (or vice versa) shows one, then flips to the other.
+the server installs its own current copies, so a clone can never drift from it) —
+and, after the SSOT audit, none of the server-owned content either: no `CLAUDE.md` /
+`AGENTS.md` bodies, no MCP files, no `/etc/environment` session keys, no holder unit.
+The template owns directories, packages, users, and unit DEFINITIONS; the server owns
+all per-clone content.
 
 ## 2. Injected before boot (container created, still stopped)
 
