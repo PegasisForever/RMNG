@@ -9,9 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::config::ChromaMode;
-pub use crate::socket::{
-    ClipboardData, ClipboardOffer, ClipboardRequest, CursorMeta, CursorShape,
-};
+pub use crate::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, CursorMeta, CursorShape};
 
 /// Server → viewer, sent **once at connect before any video frame** (port-1 tag 4):
 /// the active chroma mode for this session. The viewer uses it to choose its decode
@@ -112,7 +110,10 @@ pub enum ViewContent {
     /// sessions belong to so the viewer rebuilds the terminal (fresh scrollback/grids) when the
     /// selection moves to a different headless clone — two clones can share a session name (`main`),
     /// so the name alone can't distinguish them.
-    Terminal { clone: String, sessions: Vec<String> },
+    Terminal {
+        clone: String,
+        sessions: Vec<String>,
+    },
 }
 
 /// Server → viewer (port-1 tag 3): the complete view for the selected clone. `monitors` is
@@ -186,7 +187,12 @@ mod tests {
 
     #[test]
     fn to_viewer_tagged() {
-        let m = ToViewer::Video(VideoAu { monitor_id: 0, idr: true, pts: 1, annexb: vec![0, 0, 1] });
+        let m = ToViewer::Video(VideoAu {
+            monitor_id: 0,
+            idr: true,
+            pts: 1,
+            annexb: vec![0, 0, 1],
+        });
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"t\":\"video\""));
         assert_eq!(serde_json::from_str::<ToViewer>(&s).unwrap(), m);

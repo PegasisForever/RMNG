@@ -163,7 +163,10 @@ mod tests {
 
     #[test]
     fn messages_round_trip() {
-        let to = ToHolder::Input(InputMsg::Button { button: 0x110, pressed: true });
+        let to = ToHolder::Input(InputMsg::Button {
+            button: 0x110,
+            pressed: true,
+        });
         let back: ToHolder = serde_json::from_slice(&serde_json::to_vec(&to).unwrap()).unwrap();
         assert_eq!(to, back);
 
@@ -179,8 +182,7 @@ mod tests {
                 primary: false,
             }],
         };
-        let back: FromHolder =
-            serde_json::from_slice(&serde_json::to_vec(&from).unwrap()).unwrap();
+        let back: FromHolder = serde_json::from_slice(&serde_json::to_vec(&from).unwrap()).unwrap();
         assert_eq!(from, back);
     }
 
@@ -207,7 +209,10 @@ mod tests {
             primary: true,
         };
         let p = m.placement();
-        assert_eq!((p.id, p.x, p.y, p.width, p.height, p.primary), (2, 3840, 100, 1280, 720, true));
+        assert_eq!(
+            (p.id, p.x, p.y, p.width, p.height, p.primary),
+            (2, 3840, 100, 1280, 720, true)
+        );
     }
 
     #[test]

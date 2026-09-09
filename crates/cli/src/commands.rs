@@ -280,24 +280,26 @@ pub async fn clone_rm(
     started(client, op, wait, json, "delete", false).await
 }
 
-/// `rmng clone fork <source> <new-id>` — snapshot + clone the source home, create from
-/// its recorded base tag.
+/// `rmng clone fork <source>` — snapshot + clone the source home, create from
+/// its recorded base tag. The new hostname derives server-side.
 pub async fn fork(
     client: &Client,
     source: &str,
-    new_id: &str,
     headless: bool,
     preset: Option<String>,
     claude_account: Option<String>,
     codex_account: Option<String>,
     message: Option<String>,
-    wait: &WaitArgs,
+    common: &CreateArgs,
     json: bool,
 ) -> Result<u8> {
+    let column = match common.column.as_deref() {
+        Some(name) => Some(resolve_column(client, name).await?),
+        None => None,
+    };
     let op = client
         .fork_with(
             source,
-            new_id,
             &control_client::ForkOpts {
                 preset: preset.as_deref(),
                 claude_account: claude_account.as_deref(),
@@ -308,18 +310,20 @@ pub async fn fork(
             },
         )
         .await?;
-    started(client, op, wait, json, "fork", false).await
+    file_started_clone(client, &op, column.as_deref()).await?;
+    started(client, op, &common.wait, json, "fork", false).await
 }
 
 /// `rmng clone rebase <clone> --tag <tag>` — new system image under the kept home.
 pub async fn rebase(
     client: &Client,
     clone: &str,
-    tag: &str,
+    preset: &str,
+    rebuild: bool,
     wait: &WaitArgs,
     json: bool,
 ) -> Result<u8> {
-    let op = client.rebase(clone, tag).await?;
+    let op = client.rebase(clone, preset, rebuild).await?;
     started(client, op, wait, json, "rebase", false).await
 }
 

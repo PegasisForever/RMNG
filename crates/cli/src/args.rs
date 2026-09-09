@@ -132,12 +132,10 @@ pub enum CloneCmd {
         wait: WaitArgs,
     },
     /// Fork a gen-2 clone: snapshot + clone the source home, create from its recorded
-    /// base tag (`rmng clone fork <source> <new-id>`).
+    /// base tag (`rmng clone fork <source>`). The new hostname derives server-side.
     Fork {
         /// Source gen-2 clone id
         source: String,
-        /// New clone id (DNS label, must be unused)
-        new_id: String,
         /// Headless (no desktop) fork
         #[arg(long)]
         headless: bool,
@@ -155,17 +153,23 @@ pub enum CloneCmd {
         /// (omitted sends nothing unless a ticket URL is inherited)
         #[arg(long)]
         message: Option<String>,
+        /// Read the first message from a file (`-` for stdin)
+        #[arg(long, value_name = "PATH", conflicts_with = "message")]
+        message_file: Option<PathBuf>,
         #[command(flatten)]
-        wait: WaitArgs,
+        common: CreateArgs,
     },
-    /// Rebase a gen-2 clone onto a new base tag, keeping its dataset and id
-    /// (`rmng clone rebase <clone> --tag <tag>`).
+    /// Rebase a gen-2 clone onto a preset's image, keeping its dataset and id
+    /// (`rmng clone rebase <clone> --preset <name> [--rebuild]`).
     Rebase {
         /// Clone id
         clone: String,
-        /// New base image tag for the clone's system image
+        /// Target preset: the clone's system image becomes this preset's image
         #[arg(long)]
-        tag: String,
+        preset: String,
+        /// Rebuild the preset image even when its tag exists
+        #[arg(long)]
+        rebuild: bool,
         #[command(flatten)]
         wait: WaitArgs,
     },

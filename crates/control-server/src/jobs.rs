@@ -932,6 +932,11 @@ pub fn start_fork(app: &App, spec: ForkSpec) -> Result<Operation, JobError> {
             "'{source_id}' or '{new_id}' already has an operation in flight"
         )));
     }
+    if let Some(name) = spec.preset_name.as_deref() {
+        if !app.config().presets.iter().any(|p| p.name == name) {
+            return Err(JobError(format!("unknown preset '{name}'")));
+        }
+    }
     let op = make_op(OperationKind::Clone, new_id, Some(source_id));
     let op_for_return = op.clone();
     let op_id = op.id.clone();

@@ -47,7 +47,10 @@ pub fn pack_y444_to_stacked_nv12(
     y_stride: usize,
     c_stride: usize,
 ) -> Vec<u8> {
-    assert!(w % 2 == 0 && h % 2 == 0, "AVC444 pack needs even dimensions");
+    assert!(
+        w % 2 == 0 && h % 2 == 0,
+        "AVC444 pack needs even dimensions"
+    );
     let (cw, ch) = (w / 2, h / 2);
     let chroma_off = w * 2 * h;
     let mut out = vec![0u8; stacked_nv12_len(w, h)];
@@ -82,7 +85,10 @@ pub fn pack_y444_to_stacked_nv12(
 /// from a tightly-packed stacked `W×2H` NV12 buffer. The CPU reference used by the viewer's
 /// fallback path and the round-trip test.
 pub fn unpack_stacked_nv12_to_y444(buf: &[u8], w: usize, h: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-    assert!(w % 2 == 0 && h % 2 == 0, "AVC444 unpack needs even dimensions");
+    assert!(
+        w % 2 == 0 && h % 2 == 0,
+        "AVC444 unpack needs even dimensions"
+    );
     let (cw, ch) = (w / 2, h / 2);
     let chroma_off = w * 2 * h;
     let mut y = vec![0u8; w * h];
@@ -93,15 +99,15 @@ pub fn unpack_stacked_nv12_to_y444(buf: &[u8], w: usize, h: usize) -> (Vec<u8>, 
             y[py * w + px] = buf[py * w + px]; // main luma
             let (i, j, xc, yc) = (px & 1, py & 1, px >> 1, py >> 1);
             let cb_v = match (i, j) {
-                (0, 0) => buf[chroma_off + yc * w + 2 * xc],      // Cb00 (main U)
-                (1, 0) => buf[(h + yc) * w + xc],                 // Cb01 (aux TL)
-                (0, 1) => buf[(h + yc) * w + (cw + xc)],          // Cb10 (aux TR)
-                _ => buf[(h + ch + yc) * w + xc],                 // Cb11 (aux BL)
+                (0, 0) => buf[chroma_off + yc * w + 2 * xc], // Cb00 (main U)
+                (1, 0) => buf[(h + yc) * w + xc],            // Cb01 (aux TL)
+                (0, 1) => buf[(h + yc) * w + (cw + xc)],     // Cb10 (aux TR)
+                _ => buf[(h + ch + yc) * w + xc],            // Cb11 (aux BL)
             };
             let cr_v = match (i, j) {
-                (0, 0) => buf[chroma_off + yc * w + 2 * xc + 1],  // Cr00 (main V)
-                (1, 0) => buf[(h + ch + yc) * w + (cw + xc)],     // Cr01 (aux BR)
-                (0, 1) => buf[chroma_off + (ch + yc) * w + 2 * xc],     // Cr10 (aux U)
+                (0, 0) => buf[chroma_off + yc * w + 2 * xc + 1], // Cr00 (main V)
+                (1, 0) => buf[(h + ch + yc) * w + (cw + xc)],    // Cr01 (aux BR)
+                (0, 1) => buf[chroma_off + (ch + yc) * w + 2 * xc], // Cr10 (aux U)
                 _ => buf[chroma_off + (ch + yc) * w + 2 * xc + 1], // Cr11 (aux V)
             };
             cb[py * w + px] = cb_v;
@@ -124,7 +130,10 @@ pub fn unpack_stacked_nv12_to_rgba(
     w: usize,
     h: usize,
 ) -> Vec<u8> {
-    assert!(w % 2 == 0 && h % 2 == 0, "AVC444 unpack needs even dimensions");
+    assert!(
+        w % 2 == 0 && h % 2 == 0,
+        "AVC444 unpack needs even dimensions"
+    );
     let ch = h / 2;
     let mut out = vec![0u8; w * h * 4];
 
@@ -133,7 +142,10 @@ pub fn unpack_stacked_nv12_to_rgba(
     // 1440p frame caps a client around ~27fps — too slow to reconstruct a 60fps 4:4:4 stream.
     // This is the exact inverse gather of `pack_y444_to_stacked_nv12` (byte-identical output, the
     // round-trip test guards it); `std::thread::scope` keeps it dependency-free.
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, h.max(1));
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, h.max(1));
     let rows_per = h.div_ceil(threads);
     std::thread::scope(|s| {
         let mut y0 = 0usize;
@@ -180,7 +192,11 @@ fn ycbcr_to_rgb_bt601(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
     let d = cb as f32 - 128.0;
     let e = cr as f32 - 128.0;
     let clamp = |v: f32| v.round().clamp(0.0, 255.0) as u8;
-    (clamp(c + 1.596_027 * e), clamp(c - 0.391_762 * d - 0.812_968 * e), clamp(c + 2.017_232 * d))
+    (
+        clamp(c + 1.596_027 * e),
+        clamp(c - 0.391_762 * d - 0.812_968 * e),
+        clamp(c + 2.017_232 * d),
+    )
 }
 
 #[cfg(test)]
@@ -201,7 +217,13 @@ mod tests {
     #[test]
     fn pack_unpack_roundtrip_is_lossless() {
         // A few even sizes incl. the 1440p/1080p targets (small enough to be fast).
-        for &(w, h) in &[(4usize, 4usize), (8, 6), (64, 48), (1920, 1080), (2560, 1440)] {
+        for &(w, h) in &[
+            (4usize, 4usize),
+            (8, 6),
+            (64, 48),
+            (1920, 1080),
+            (2560, 1440),
+        ] {
             let (mut y, mut cb, mut cr) = (vec![0u8; w * h], vec![0u8; w * h], vec![0u8; w * h]);
             fill(&mut y, 1);
             fill(&mut cb, 2);
@@ -234,7 +256,15 @@ mod tests {
         let rgba = unpack_stacked_nv12_to_rgba(luma, w, chroma, w, w, h);
         for p in 0..w * h {
             let (r, g, b) = ycbcr_to_rgb_bt601(yg[p], cbg[p], crg[p]);
-            assert_eq!((rgba[p * 4], rgba[p * 4 + 1], rgba[p * 4 + 2], rgba[p * 4 + 3]), (r, g, b, 255));
+            assert_eq!(
+                (
+                    rgba[p * 4],
+                    rgba[p * 4 + 1],
+                    rgba[p * 4 + 2],
+                    rgba[p * 4 + 3]
+                ),
+                (r, g, b, 255)
+            );
         }
     }
 

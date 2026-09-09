@@ -133,7 +133,11 @@ pub struct PortForward {
 #[serde(rename_all = "camelCase")]
 // The Rust type is `RmngClone` (a bare `Clone` would shadow `std::clone::Clone`); the
 // exported TypeScript type and every user-facing reference is a plain `Clone`.
-#[ts(export, rename = "Clone", export_to = "../../../frontend/app/lib/wire/")]
+#[ts(
+    export,
+    rename = "Clone",
+    export_to = "../../../frontend/app/lib/wire/"
+)]
 pub struct RmngClone {
     /// Stable id; equals the Docker container name for a managed clone.
     pub id: String,

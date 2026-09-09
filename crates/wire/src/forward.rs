@@ -110,9 +110,17 @@ mod tests {
 
     #[test]
     fn header_round_trips_without_token() {
-        let h = ForwardHeader { token: None, host_id: "h".into(), id: "f22".into(), remote_port: 22 };
+        let h = ForwardHeader {
+            token: None,
+            host_id: "h".into(),
+            id: "f22".into(),
+            remote_port: 22,
+        };
         let json = serde_json::to_string(&h).unwrap();
-        assert!(!json.contains("token"), "None token must be omitted: {json}");
+        assert!(
+            !json.contains("token"),
+            "None token must be omitted: {json}"
+        );
         assert_eq!(serde_json::from_str::<ForwardHeader>(&json).unwrap(), h);
     }
 }

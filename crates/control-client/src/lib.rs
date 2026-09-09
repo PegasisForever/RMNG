@@ -250,24 +250,20 @@ impl Client {
         )?)
     }
 
-    /// Fork a gen-2 clone (snapshot + clone the source home).
-    pub async fn fork(&self, source: &str, new_id: &str, headless: bool) -> Result<Operation> {
+    /// Fork a gen-2 clone (snapshot + clone the source home). The new hostname
+    /// always derives server-side from the ticket or title.
+    pub async fn fork(&self, source: &str, headless: bool) -> Result<Operation> {
         self.post_json(
             "/api/fork",
-            &json!({ "source": source, "hostname": new_id, "headless": headless }),
+            &json!({ "source": source, "headless": headless }),
         )
         .await
     }
 
     /// Fork with optional ticket/preset/account overrides (`None` = inherit the source).
     /// Keys are camelCase to match the server's `ForkReq`.
-    pub async fn fork_with(
-        &self,
-        source: &str,
-        new_id: &str,
-        opts: &ForkOpts<'_>,
-    ) -> Result<Operation> {
-        let mut body = json!({ "source": source, "hostname": new_id });
+    pub async fn fork_with(&self, source: &str, opts: &ForkOpts<'_>) -> Result<Operation> {
+        let mut body = json!({ "source": source });
         let obj = body.as_object_mut().unwrap();
         if opts.headless {
             obj.insert("headless".into(), json!(true));
@@ -290,10 +286,14 @@ impl Client {
         self.post_json("/api/fork", &body).await
     }
 
-    /// Rebase a gen-2 clone onto a new base tag (dataset + id kept).
-    pub async fn rebase(&self, id: &str, tag: &str) -> Result<Operation> {
-        self.post_json(&format!("/api/hosts/{id}/rebase"), &json!({ "tag": tag }))
-            .await
+    /// Rebase a gen-2 clone onto a preset's image (dataset + id kept). `rebuild`
+    /// forces a fresh image build even when the tag exists.
+    pub async fn rebase(&self, id: &str, preset: &str, rebuild: bool) -> Result<Operation> {
+        self.post_json(
+            &format!("/api/hosts/{id}/rebase"),
+            &json!({ "preset": preset, "rebuild": rebuild }),
+        )
+        .await
     }
 
     /// Destroy a managed clone (or unregister a plain clone).

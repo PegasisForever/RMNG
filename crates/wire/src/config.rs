@@ -915,7 +915,10 @@ mod tests {
         .unwrap();
         assert_eq!(c.presets.len(), 2);
         assert!(c.presets[0].labels.is_empty() && c.presets[0].linear_key.is_empty());
-        assert_eq!(c.presets[0].dockerfile, "FROM pegasis0/rmng-template:latest");
+        assert_eq!(
+            c.presets[0].dockerfile,
+            "FROM pegasis0/rmng-template:latest"
+        );
         assert_eq!(c.presets[1].labels, vec!["Frontend"]);
         assert_eq!(c.presets[1].linear_key, "K1");
         // Round-trips as camelCase.
@@ -1037,7 +1040,10 @@ mod tests {
         let r = c.redacted();
         assert_eq!(r.judge.codex_email.as_deref(), Some("alex@example.com"));
         let v = serde_json::to_value(&r.judge).unwrap();
-        assert!(v.get("codexModel").is_some(), "round-trips as camelCase: {v}");
+        assert!(
+            v.get("codexModel").is_some(),
+            "round-trips as camelCase: {v}"
+        );
     }
 
     #[test]

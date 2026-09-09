@@ -42,13 +42,3 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
 }
-
-/// The result of a clone-to-clone copy (retired with `rmng clone cp`): bytes moved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct CopyResult {
-    /// Bytes of tar stream forwarded to the daemon.
-    pub bytes: u64,
-    /// The absolute path inside the clone the archive was extracted at.
-    pub dst: String,
-}

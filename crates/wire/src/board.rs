@@ -80,7 +80,10 @@ pub fn resolve_columns(columns: &[BoardColumn], clones: &[RmngClone]) -> Vec<Boa
                 })
                 .cloned()
                 .collect();
-            BoardColumn { clone_ids, ..column.clone() }
+            BoardColumn {
+                clone_ids,
+                ..column.clone()
+            }
         })
         .collect();
     if out.is_empty() {
@@ -113,7 +116,9 @@ fn home_for(columns: &[BoardColumn], clone: &RmngClone) -> String {
 /// The column holding `clone_id`, or `None` when nothing claims it. Pass resolved columns to
 /// include the ones drawn in their home column.
 pub fn column_of<'a>(columns: &'a [BoardColumn], clone_id: &str) -> Option<&'a BoardColumn> {
-    columns.iter().find(|c| c.clone_ids.iter().any(|id| id == clone_id))
+    columns
+        .iter()
+        .find(|c| c.clone_ids.iter().any(|id| id == clone_id))
 }
 
 /// Put `clone_id` at `to_index` of `to_column`, taking it out of wherever it was.
@@ -129,12 +134,19 @@ pub fn move_card(
     columns
         .iter()
         .map(|column| {
-            let mut clone_ids: Vec<String> =
-                column.clone_ids.iter().filter(|id| *id != clone_id).cloned().collect();
+            let mut clone_ids: Vec<String> = column
+                .clone_ids
+                .iter()
+                .filter(|id| *id != clone_id)
+                .cloned()
+                .collect();
             if column.id == to_column {
                 clone_ids.insert(to_index.min(clone_ids.len()), clone_id.to_string());
             }
-            BoardColumn { clone_ids, ..column.clone() }
+            BoardColumn {
+                clone_ids,
+                ..column.clone()
+            }
         })
         .collect()
 }
@@ -148,7 +160,11 @@ pub fn find_column<'a>(columns: &'a [BoardColumn], name: &str) -> Option<&'a Boa
     columns
         .iter()
         .find(|c| c.title.trim().to_lowercase() == wanted)
-        .or_else(|| columns.iter().find(|c| c.id.trim().to_lowercase() == wanted))
+        .or_else(|| {
+            columns
+                .iter()
+                .find(|c| c.id.trim().to_lowercase() == wanted)
+        })
 }
 
 #[cfg(test)]
@@ -156,11 +172,19 @@ mod tests {
     use super::*;
 
     fn clone(id: &str, archived: bool) -> RmngClone {
-        RmngClone { id: id.into(), archived, managed: true, ..Default::default() }
+        RmngClone {
+            id: id.into(),
+            archived,
+            managed: true,
+            ..Default::default()
+        }
     }
 
     fn sub(id: &str, parent: &str) -> RmngClone {
-        RmngClone { parent: Some(parent.into()), ..clone(id, false) }
+        RmngClone {
+            parent: Some(parent.into()),
+            ..clone(id, false)
+        }
     }
 
     fn columns() -> Vec<BoardColumn> {
@@ -190,7 +214,12 @@ mod tests {
     fn a_clone_no_column_claims_lands_in_the_first_column() {
         let out = resolve_columns(
             &columns(),
-            &[clone("a", false), clone("b", false), clone("c", false), clone("d", false)],
+            &[
+                clone("a", false),
+                clone("b", false),
+                clone("c", false),
+                clone("d", false),
+            ],
         );
         assert_eq!(out[0].clone_ids, ["a", "b", "d"]);
         assert_eq!(out[1].clone_ids, ["c"]);

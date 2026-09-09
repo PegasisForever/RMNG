@@ -188,7 +188,9 @@ pub enum DaemonMsg {
     Cursor(CursorMeta),
     /// The clone's actual monitor layout (after the daemon applies the configured one).
     /// A struct variant (not a bare `Vec`) so it serializes under the internal `t` tag.
-    Layout { monitors: Vec<MonitorPlacement> },
+    Layout {
+        monitors: Vec<MonitorPlacement>,
+    },
     /// A clone app put something on the clipboard — advertises the MIME types
     /// (rich + lazy: bytes are fetched only on [`ClipboardRequest`]).
     ClipboardOffer(ClipboardOffer),
@@ -226,7 +228,9 @@ pub enum ServerMsg {
     /// rebuilds a fresh Mutter session with this set, switches capture + input to it, then
     /// stops the old session (make-before-break). Sent on the daemon's `Hello` and on every
     /// `POST /api/layout/activate`.
-    SetMonitors { monitors: Vec<crate::control::MonitorSpec> },
+    SetMonitors {
+        monitors: Vec<crate::control::MonitorSpec>,
+    },
     /// Start or stop capturing this clone's monitors.
     ///
     /// Capture is what makes the compositor paint: a clone with a screencast consumer
@@ -238,7 +242,9 @@ pub enum ServerMsg {
     /// So the server keeps capture on only while a viewer is watching this clone, and the
     /// daemon wakes it briefly on its own for an on-demand screenshot. An older daemon
     /// decodes this to `Unknown` and keeps capturing, which is the previous behaviour.
-    Capture { active: bool },
+    Capture {
+        active: bool,
+    },
     ClipboardOffer(ClipboardOffer),
     ClipboardRequest(ClipboardRequest),
     ClipboardData(ClipboardData),
@@ -373,11 +379,10 @@ pub mod chunk {
 pub(crate) mod serde_bytes_b64 {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
         for chunk in bytes.chunks(3) {
             let b = [
                 chunk[0],
@@ -387,8 +392,16 @@ pub(crate) mod serde_bytes_b64 {
             let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
             out.push(ALPHABET[(n >> 18 & 63) as usize] as char);
             out.push(ALPHABET[(n >> 12 & 63) as usize] as char);
-            out.push(if chunk.len() > 1 { ALPHABET[(n >> 6 & 63) as usize] as char } else { '=' });
-            out.push(if chunk.len() > 2 { ALPHABET[(n & 63) as usize] as char } else { '=' });
+            out.push(if chunk.len() > 1 {
+                ALPHABET[(n >> 6 & 63) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[(n & 63) as usize] as char
+            } else {
+                '='
+            });
         }
         s.serialize_str(&out)
     }
@@ -400,7 +413,10 @@ pub(crate) mod serde_bytes_b64 {
             table[c as usize] = i as u8;
         }
         let mut out = Vec::with_capacity(s.len() / 4 * 3);
-        let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'=' && !b.is_ascii_whitespace()).collect();
+        let bytes: Vec<u8> = s
+            .bytes()
+            .filter(|&b| b != b'=' && !b.is_ascii_whitespace())
+            .collect();
         for chunk in bytes.chunks(4) {
             let mut n = 0u32;
             let mut bits = 0;
@@ -432,8 +448,17 @@ mod tests {
     #[test]
     fn a_hello_without_the_fresh_flag_reads_as_an_existing_session() {
         let old: Hello = serde_json::from_str(r#"{"clone_id":"w1"}"#).unwrap();
-        assert_eq!(old, Hello { clone_id: "w1".into(), fresh_session: false });
-        let new = Hello { clone_id: "w1".into(), fresh_session: true };
+        assert_eq!(
+            old,
+            Hello {
+                clone_id: "w1".into(),
+                fresh_session: false
+            }
+        );
+        let new = Hello {
+            clone_id: "w1".into(),
+            fresh_session: true,
+        };
         let back: Hello = serde_json::from_slice(&serde_json::to_vec(&new).unwrap()).unwrap();
         assert_eq!(back, new);
     }
@@ -454,7 +479,10 @@ mod tests {
         let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         let parts = chunk::split(&payload, 7);
         assert_eq!(parts.len(), payload.len().div_ceil(chunk::CHUNK_BYTES));
-        assert!(parts.iter().all(|p| chunk::is_chunk(p)), "every piece is marked");
+        assert!(
+            parts.iter().all(|p| chunk::is_chunk(p)),
+            "every piece is marked"
+        );
         assert!(parts.iter().all(|p| p.len() <= chunk::CHUNK_BYTES + 20));
 
         let mut join = chunk::Reassembler::default();
@@ -483,7 +511,11 @@ mod tests {
         for part in chunk::split(&second, 2) {
             done = join.push(&part).or(done);
         }
-        assert_eq!(done, Some(second), "the abandoned prefix is gone, not prepended");
+        assert_eq!(
+            done,
+            Some(second),
+            "the abandoned prefix is gone, not prepended"
+        );
     }
 
     #[test]
@@ -502,12 +534,20 @@ mod tests {
 
     #[test]
     fn input_msg_tagged_roundtrip() {
-        let m = InputMsg::PointerMove { monitor_id: 0, x: 12.0, y: 34.0 };
+        let m = InputMsg::PointerMove {
+            monitor_id: 0,
+            x: 12.0,
+            y: 34.0,
+        };
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("\"kind\":\"pointer_move\""));
         assert_eq!(serde_json::from_str::<InputMsg>(&s).unwrap(), m);
 
-        let c = InputMsg::AxisContinuous { dx: 1.5, dy: -3.0, flags: axis_flags::SOURCE_FINGER };
+        let c = InputMsg::AxisContinuous {
+            dx: 1.5,
+            dy: -3.0,
+            flags: axis_flags::SOURCE_FINGER,
+        };
         let s = serde_json::to_string(&c).unwrap();
         assert!(s.contains("\"kind\":\"axis_continuous\""), "{s}");
         assert_eq!(serde_json::from_str::<InputMsg>(&s).unwrap(), c);
@@ -516,14 +556,28 @@ mod tests {
     #[test]
     fn cursor_meta_hidden_roundtrip() {
         // Hide transition: flag serialized, roundtrips.
-        let c = CursorMeta { monitor_id: 1, x: 5, y: 6, shape: None, warp: false, hidden: true };
+        let c = CursorMeta {
+            monitor_id: 1,
+            x: 5,
+            y: 6,
+            shape: None,
+            warp: false,
+            hidden: true,
+        };
         let s = serde_json::to_string(&c).unwrap();
         assert!(s.contains("\"hidden\":true"), "{s}");
         assert_eq!(serde_json::from_str::<CursorMeta>(&s).unwrap(), c);
 
         // Visible / position-only: flag omitted on the wire, defaults on decode
         // (old daemons never send it).
-        let c = CursorMeta { monitor_id: 1, x: 5, y: 6, shape: None, warp: false, hidden: false };
+        let c = CursorMeta {
+            monitor_id: 1,
+            x: 5,
+            y: 6,
+            shape: None,
+            warp: false,
+            hidden: false,
+        };
         let s = serde_json::to_string(&c).unwrap();
         assert!(!s.contains("hidden"), "{s}");
         let old = r#"{"monitor_id":1,"x":5,"y":6}"#;
@@ -532,12 +586,18 @@ mod tests {
 
     #[test]
     fn clipboard_msg_tags() {
-        let offer = ClipboardMsg::Offer(ClipboardOffer { serial: 1, mime_types: vec!["text/html".into()] });
+        let offer = ClipboardMsg::Offer(ClipboardOffer {
+            serial: 1,
+            mime_types: vec!["text/html".into()],
+        });
         let s = serde_json::to_string(&offer).unwrap();
         assert!(s.contains("\"k\":\"offer\""), "{s}");
         assert_eq!(serde_json::from_str::<ClipboardMsg>(&s).unwrap(), offer);
 
-        let req = DaemonMsg::ClipboardRequest(ClipboardRequest { serial: 2, mime_type: "image/png".into() });
+        let req = DaemonMsg::ClipboardRequest(ClipboardRequest {
+            serial: 2,
+            mime_type: "image/png".into(),
+        });
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains("\"t\":\"clipboard_request\""), "{s}");
         assert_eq!(serde_json::from_str::<DaemonMsg>(&s).unwrap(), req);
@@ -545,8 +605,17 @@ mod tests {
 
     #[test]
     fn base64_roundtrips() {
-        for case in [vec![], vec![0u8], vec![1, 2, 3], (0u8..=255).collect::<Vec<_>>()] {
-            let data = ClipboardData { serial: 1, mime_type: "x".into(), bytes: case.clone() };
+        for case in [
+            vec![],
+            vec![0u8],
+            vec![1, 2, 3],
+            (0u8..=255).collect::<Vec<_>>(),
+        ] {
+            let data = ClipboardData {
+                serial: 1,
+                mime_type: "x".into(),
+                bytes: case.clone(),
+            };
             let s = serde_json::to_string(&data).unwrap();
             let back: ClipboardData = serde_json::from_str(&s).unwrap();
             assert_eq!(back.bytes, case);
@@ -555,7 +624,11 @@ mod tests {
         // off-by-one in the tail would show as a corrupt image rather than a failed decode.
         for len in 4_093..4_100 {
             let case: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
-            let data = ClipboardData { serial: 1, mime_type: "image/png".into(), bytes: case.clone() };
+            let data = ClipboardData {
+                serial: 1,
+                mime_type: "image/png".into(),
+                bytes: case.clone(),
+            };
             let s = serde_json::to_string(&data).unwrap();
             let back: ClipboardData = serde_json::from_str(&s).unwrap();
             assert_eq!(back.bytes, case, "length {len}");
@@ -566,7 +639,13 @@ mod tests {
     fn server_msg_set_monitors_tag() {
         use crate::control::MonitorSpec;
         let m = ServerMsg::SetMonitors {
-            monitors: vec![MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+            monitors: vec![MonitorSpec {
+                width: 1920,
+                height: 1080,
+                x: 0,
+                y: 0,
+                primary: true,
+            }],
         };
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["t"], "set_monitors");
@@ -580,8 +659,8 @@ mod tests {
     // fatal socket error and dropping the connection.
     #[test]
     fn server_msg_unknown_variant_is_ok_not_err() {
-        let back: ServerMsg =
-            serde_json::from_str(r#"{"t":"some_future_variant","foo":42}"#).expect("unknown tag → Ok");
+        let back: ServerMsg = serde_json::from_str(r#"{"t":"some_future_variant","foo":42}"#)
+            .expect("unknown tag → Ok");
         assert_eq!(back, ServerMsg::Unknown);
         // A known variant still round-trips.
         let ack: ServerMsg = serde_json::from_str(r#"{"t":"ack","monitor_id":1,"seq":7}"#).unwrap();
@@ -590,8 +669,8 @@ mod tests {
 
     #[test]
     fn daemon_msg_unknown_variant_is_ok_not_err() {
-        let back: DaemonMsg =
-            serde_json::from_str(r#"{"t":"some_future_variant","foo":42}"#).expect("unknown tag → Ok");
+        let back: DaemonMsg = serde_json::from_str(r#"{"t":"some_future_variant","foo":42}"#)
+            .expect("unknown tag → Ok");
         assert_eq!(back, DaemonMsg::Unknown);
         let hello: DaemonMsg = serde_json::from_str(r#"{"t":"hello","clone_id":"c1"}"#).unwrap();
         assert!(matches!(hello, DaemonMsg::Hello(_)));

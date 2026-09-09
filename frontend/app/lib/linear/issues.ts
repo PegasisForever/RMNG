@@ -323,8 +323,9 @@ export interface CloneLinearMeta {
  ticketUrl: string;
  /** Linear's own `branchName`. */
  branch: string;
- /** The issue title, which becomes the clone's display name. */
- title: string;
+ /** The issue title, which becomes the clone's display name. Named for the
+  *  fork endpoint's `displayName` field, which is the only name it reads. */
+ displayName: string;
  /** The issue's first Linear label. Omitted when it has none. */
  label?: string;
 }
@@ -334,7 +335,7 @@ export function cloneLinearMeta(issue: ResolvedIssue): CloneLinearMeta {
   ticket: issue.identifier,
   ticketUrl: issue.url,
   branch: issue.branch,
-  title: issue.title,
+  displayName: issue.title,
  };
  const label = issue.labels[0];
  if (label !== undefined && label !== "") meta.label = label;

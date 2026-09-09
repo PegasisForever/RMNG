@@ -23,7 +23,9 @@ import type { LinearTicket } from "./types";
 // --- splitting the identifier the query filters by ---------------------------
 
 test("a link and a bare id both split into the team key and number Linear filters by", () => {
-  expect(issueRefOf("https://linear.app/acme/issue/WE-142/encoder-drops-frames")).toEqual({
+  expect(
+    issueRefOf("https://linear.app/acme/issue/WE-142/encoder-drops-frames"),
+  ).toEqual({
     teamKey: "WE",
     number: 142,
     identifier: "WE-142",
@@ -71,7 +73,9 @@ test("an issue node maps to what a clone stores, plus the state the move reads",
 // The reason this shape is not `LinearTicket`: that one drops an issue whose state type it
 // cannot model, and a `triage` ticket is a real ticket somebody wants a clone for.
 test("a state type nothing models is carried verbatim, not dropped", () => {
-  expect(issueFromNode("we", { ...NODE, state: { type: "triage" } })?.stateType).toBe("triage");
+  expect(
+    issueFromNode("we", { ...NODE, state: { type: "triage" } })?.stateType,
+  ).toBe("triage");
 });
 
 test("an issue with no branch name and no labels still maps", () => {
@@ -98,8 +102,12 @@ test("a node with no identifier is nothing, which is what makes a miss readable"
 test("asking with no key at all says so rather than reporting a missing ticket", async () => {
   const ref = { teamKey: "WE", number: 1, identifier: "WE-1", prefix: "we" };
 
-  await expect(fetchIssueAny([], ref)).rejects.toThrow(/no preset has a Linear API key/);
-  await expect(fetchIssueAny(["", "   "], ref)).rejects.toThrow(/no preset has a Linear API key/);
+  await expect(fetchIssueAny([], ref)).rejects.toThrow(
+    /no preset has a Linear API key/,
+  );
+  await expect(fetchIssueAny(["", "   "], ref)).rejects.toThrow(
+    /no preset has a Linear API key/,
+  );
 });
 
 // --- which state an issue is moved into --------------------------------------
@@ -128,8 +136,12 @@ test("a team with no such name falls back to its first started state", () => {
 });
 
 test("a team with no started state at all answers nothing", () => {
-  expect(pickInProgressStateId([{ id: "todo", name: "Todo", type: "unstarted" }])).toBeNull();
-  expect(pickInProgressStateId([{ name: "In Progress", type: "started" }])).toBeNull();
+  expect(
+    pickInProgressStateId([{ id: "todo", name: "Todo", type: "unstarted" }]),
+  ).toBeNull();
+  expect(
+    pickInProgressStateId([{ name: "In Progress", type: "started" }]),
+  ).toBeNull();
   expect(pickInProgressStateId([])).toBeNull();
   expect(pickInProgressStateId(null)).toBeNull();
 });
@@ -170,13 +182,15 @@ test("the clone route is sent Linear's own answer, first label only", () => {
     ticket: "WE-142",
     ticketUrl: "https://linear.app/acme/issue/WE-142/encoder-drops-frames",
     branch: "pegasis/we-142-encoder-drops-frames",
-    title: "Encoder drops frames",
+    displayName: "Encoder drops frames",
     label: "backend",
   });
 });
 
 test("an issue with no labels sends no label field at all", () => {
-  const meta = cloneLinearMeta(issueFromNode("we", { ...NODE, labels: { nodes: [] } })!);
+  const meta = cloneLinearMeta(
+    issueFromNode("we", { ...NODE, labels: { nodes: [] } })!,
+  );
 
   expect("label" in meta).toBe(false);
 });

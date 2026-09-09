@@ -73,31 +73,34 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             CloneCmd::Restore { clone, wait } => commands::restore(client, clone, wait, json).await,
             CloneCmd::Fork {
                 source,
-                new_id,
                 headless,
                 preset,
                 claude_account,
                 codex_account,
                 message,
-                wait,
+                message_file,
+                common,
             } => {
+                let body = args::read_text(message.as_ref(), message_file.as_ref())?;
                 commands::fork(
                     client,
                     source,
-                    new_id,
                     *headless,
                     preset.clone(),
                     claude_account.clone(),
                     codex_account.clone(),
-                    message.clone(),
-                    wait,
+                    (!body.is_empty()).then_some(body),
+                    common,
                     json,
                 )
                 .await
             }
-            CloneCmd::Rebase { clone, tag, wait } => {
-                commands::rebase(client, clone, tag, wait, json).await
-            }
+            CloneCmd::Rebase {
+                clone,
+                preset,
+                rebuild,
+                wait,
+            } => commands::rebase(client, clone, preset, *rebuild, wait, json).await,
             CloneCmd::Ssh { clone } => commands::clone_ssh(client, clone, json).await,
             CloneCmd::Exec {
                 clone,

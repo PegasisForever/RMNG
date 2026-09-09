@@ -1128,11 +1128,6 @@ async fn unarchive(
 struct ForkReq {
     /// Source gen-2 clone id.
     source: String,
-    /// New clone id (DNS label, must be unused). Omitted = derive server-side from
-    /// the ticket identifier or title, like create does (uniqueness needs the live
-    /// clone list, which no client can see).
-    #[serde(default)]
-    hostname: Option<String>,
     /// Headless (no desktop) fork.
     #[serde(default)]
     headless: bool,
@@ -1167,32 +1162,26 @@ async fn fork(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let cfg = app.config();
     let prefix = cfg.docker.hostname_prefix.as_str();
-    let hostname = match req
-        .hostname
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
+    // The hostname always derives server-side from the ticket identifier or title,
+    // like create does (uniqueness needs the live clone list, which no client
+    // can see). No caller names the fork itself.
+    let base = match req
+        .linear
+        .as_ref()
+        .and_then(|l| l.ticket.clone())
+        .filter(|t| !t.is_empty())
     {
-        Some(h) => h,
+        Some(ticket) => naming::ticket_hostname_base(prefix, &ticket),
         None => {
-            let base = match req
+            let title = req
                 .linear
                 .as_ref()
-                .and_then(|l| l.ticket.clone())
-                .filter(|t| !t.is_empty())
-            {
-                Some(ticket) => naming::ticket_hostname_base(prefix, &ticket),
-                None => {
-                    let title = req
-                        .linear
-                        .as_ref()
-                        .and_then(|l| l.display_name.clone())
-                        .unwrap_or_default();
-                    naming::plain_hostname_base(prefix, &title)
-                }
-            };
-            derive_hostname(&app, &base, "").0
+                .and_then(|l| l.display_name.clone())
+                .unwrap_or_default();
+            naming::plain_hostname_base(prefix, &title)
         }
     };
+    let hostname = derive_hostname(&app, &base, "").0;
     jobs::start_fork(
         &app,
         jobs::ForkSpec {
