@@ -129,7 +129,11 @@ fn mcp_descriptor_json(headless: bool) -> String {
             o
         })
         .collect();
-    serde_json::to_string_pretty(&serde_json::json!(servers)).unwrap_or_else(|_| "[]".into())
+    // Infallible in practice: the input is the static managed set, which always serializes.
+    // The expect (not a silent `"[]"`) keeps a serialization regression loud — an empty
+    // array here would silently strip every managed server from every clone.
+    serde_json::to_string_pretty(&serde_json::json!(servers))
+        .expect("static managed MCP set serializes")
 }
 
 /// The `mcpServers` object Cursor should hold, and the names it must not.
@@ -961,7 +965,10 @@ fn codex_parity_stamp_entry(hash: &str) -> TarEntry {
 }
 
 pub(crate) fn codex_parity_stamp_entry_for(entries: &[TarEntry]) -> TarEntry {
-    codex_parity_stamp_entry(&desired_payload_hash(entries))
+    // Single value source with the loop's own write path (`ensure_codex_parity` stamps
+    // `codex_parity_desired`): hashing entries alone wrote a stamp the loop never matches,
+    // so every fresh clone ate one redundant re-push.
+    codex_parity_stamp_entry(&codex_parity_desired(entries))
 }
 
 /// Interactive Claude Code (and the inner Cursor agent / any human `claude`) reads its MCP servers
@@ -1665,7 +1672,12 @@ async fn reconcile_archived_state(app: &App, warned: &mut HashSet<String>) {
         }
         let paused = match app.docker.is_paused(id).await {
             Ok(p) => p,
-            Err(_) => continue, // gone or the daemon is unreachable; not this loop's problem
+            // Gone or the daemon is unreachable: nothing to stop, but say so at debug so
+            // a hung daemon does not make archived clones silently pile up.
+            Err(e) => {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: pause state unreadable ({e:#}), skipping");
+                continue;
+            }
         };
         if !h.archived {
             if !paused {
@@ -1715,7 +1727,21 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         .collect();
 
     let cfg = app.config();
-    let control_env = crate::provision::control_env_vars(app).await;
+    // An unresolvable control host breaks every clone's env identically: skip the pass
+    // (warn-once) rather than rewriting the fleet into a degraded URL. It cannot heal
+    // pass-over-pass — the error below names the broken network config to fix.
+    let control_env = match crate::provision::control_env_vars(app).await {
+        Ok(env) => {
+            warned.remove("control-env");
+            env
+        }
+        Err(e) => {
+            if warned.insert("control-env".to_string()) {
+                tracing::warn!(target: "clone_reconcile", "control host unresolvable, skipping pass: {e:#}");
+            }
+            return;
+        }
+    };
 
     for h in &hosts {
         let id = h.id.as_str();
@@ -1743,11 +1769,15 @@ async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
         if let Some(preset) = preset_for_clone(&cfg, h) {
             desired_env.extend(crate::provision::preset_env_vars(preset));
         } else if h.preset_name.as_ref().is_some_and(|s| !s.trim().is_empty()) {
-            tracing::warn!(
-                target: "clone_reconcile",
-                "clone {id}: preset {:?} no longer exists; preserving unmanaged /etc/environment keys",
-                h.preset_name
-            );
+            // Warn-once: stripping the keys would wipe live config on a preset rename, so
+            // preservation is the behavior — the warn only needs saying once per clone.
+            if warned.insert(format!("{}:preset", id)) {
+                tracing::warn!(
+                    target: "clone_reconcile",
+                    "clone {id}: preset {:?} no longer exists; preserving unmanaged /etc/environment keys",
+                    h.preset_name
+                );
+            }
         }
         // Claude Code's default model (ANTHROPIC_MODEL). The create path seeds this same var
         // from the same helper, so a fresh clone already has it and this pass is a no-op

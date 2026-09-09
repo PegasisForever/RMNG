@@ -296,15 +296,15 @@ pub struct CreateSpec {
     /// The daemon path is `<this>/clones.sock`; empty skips the mount (dev/test).
     pub sock_source: String,
     /// Merged home-overlay view on the CT (e.g. `/srv/rmng-homes/.merged/<id>`),
-    /// bound at `/home/rmng`. `None` keeps the legacy overlay home (gen-1 behavior).
+    /// bound at `/home/rmng`. Always `Some` from the create path; `None` mounts no home
+    /// (only meaningful for flows that bring their own).
     pub home_dir: Option<String>,
     /// Gen-2 homes parent dir on the CT (e.g. `/srv/rmng-homes`), bound at
-    /// `/home/rmng/clones` so every clone sees every home. Only used with
-    /// `dataset_dir`; empty skips the mount.
+    /// `/home/rmng/clones` so every clone sees every home. Always mounted alongside
+    /// `home_dir`.
     pub homes_dir: String,
     /// Shared pool dir on the CT (absolute host path, e.g.
-    /// `/srv/rmng-homes/.shared`), bound at `/home/rmng/shared`. Empty skips the
-    /// mount (dev/test).
+    /// `/srv/rmng-homes/.shared`), bound at `/home/rmng/shared`. Always mounted.
     pub shared_dir: String,
 }
 
@@ -1547,35 +1547,35 @@ impl DockerCtl {
         // clones created after the probe saw lxcfs get them; existing containers are
         // untouched.
         mounts.extend(lxcfs_proc_mounts(self.env.read().await.lxcfs_ok));
-        // Clone home: the merged overlay view at /home/rmng.
-        if let Some(dir) = spec.home_dir.as_deref().filter(|s| !s.trim().is_empty()) {
+        // Clone home: the merged overlay view at /home/rmng. Always mounted: the single
+        // create caller always passes a merged path, and a clone without its home is
+        // never a valid output — fail at Docker, loudly, rather than boot half a clone.
+        if let Some(dir) = spec.home_dir.as_deref() {
             mounts.push(Mount {
                 target: Some("/home/rmng".to_string()),
                 source: Some(dir.to_string()),
                 typ: Some(MountTypeEnum::BIND),
                 ..Default::default()
             });
-            if !spec.homes_dir.trim().is_empty() {
-                mounts.push(Mount {
-                    target: Some("/home/rmng/clones".to_string()),
-                    source: Some(spec.homes_dir.clone()),
-                    typ: Some(MountTypeEnum::BIND),
-                    // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
-                    // copies straight across any home. No `read_only` here.
-                    ..Default::default()
-                });
-            }
-        }
-        // Shared pool, same ordinary bind: present from first boot and surviving
-        // restarts, unlike the retired live mount it replaces.
-        if !spec.shared_dir.trim().is_empty() {
             mounts.push(Mount {
-                target: Some(crate::shared::clone_target()),
-                source: Some(spec.shared_dir.clone()),
+                target: Some("/home/rmng/clones".to_string()),
+                source: Some(spec.homes_dir.clone()),
                 typ: Some(MountTypeEnum::BIND),
+                // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
+                // copies straight across any home. No `read_only` here.
                 ..Default::default()
             });
         }
+        // Shared pool, same ordinary bind: present from first boot and surviving
+        // restarts, unlike the retired live mount it replaces. Always mounted, same
+        // reasoning: `shared_host_dir` never yields empty, and a pool-less clone would
+        // silently diverge from every sibling.
+        mounts.push(Mount {
+            target: Some(crate::shared::clone_target()),
+            source: Some(spec.shared_dir.clone()),
+            typ: Some(MountTypeEnum::BIND),
+            ..Default::default()
+        });
 
         let mem = (spec.memory_mb as i64) * 1024 * 1024;
         let host_config = HostConfig {

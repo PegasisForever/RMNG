@@ -16,6 +16,7 @@
 //! `open_tree`/`move_mount` used to cover clones that predated the feature; it died with the
 //! last of those.)
 
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 
 /// The clone user's uid and gid (see [`crate::docker::CLONE_USER`]). The pool's root directory
@@ -37,32 +38,31 @@ pub(crate) fn clone_target() -> String {
 
 /// The pool as an absolute host path for the container bind. Lexical only (no symlink
 /// resolution); mirrors the `absolute` helper in smb.rs, which needs the same for smb.conf.
-/// The homes parent is an absolute constant, so unlike the old `data/`-relative pool this
-/// can never degrade into a daemon-relative bind source.
+/// The homes parent is an absolute constant, so `absolute` cannot fail here — the expect
+/// names the invariant instead of silently degrading to a relative bind source.
 pub(crate) fn shared_host_dir() -> String {
-    let abs = std::path::absolute(shared_root()).unwrap_or_else(|_| shared_root());
+    let abs = std::path::absolute(shared_root()).expect("HOMES_DIR is an absolute constant");
     abs.to_string_lossy().into_owned()
 }
 
 /// Create the pool (clone-owned) if needed. Runs once at server startup; the create path
 /// relies on it, because Docker would otherwise invent a missing bind source as root-owned
-/// and break the read-write-both-sides design.
-pub fn ensure_pool() {
+/// and break the read-write-both-sides design. Returns the failure instead of logging
+/// past it: a server that cannot ensure the pool must not boot clones into it.
+pub fn ensure_pool() -> anyhow::Result<()> {
     let root = shared_root();
-    if let Err(e) = std::fs::create_dir_all(&root) {
-        tracing::error!(target: "shared", "creating {}: {e}", root.display());
-        return;
-    }
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("creating the shared pool at {}", root.display()))?;
     // Owned by the clone user, so a clone writing through the mount needs nothing further.
-    if let Err(e) = std::os::unix::fs::chown(&root, Some(CLONE_UID), Some(CLONE_UID)) {
-        tracing::warn!(target: "shared", "chown {}: {e}", root.display());
-    }
+    std::os::unix::fs::chown(&root, Some(CLONE_UID), Some(CLONE_UID))
+        .with_context(|| format!("chowning the shared pool at {}", root.display()))?;
     tracing::info!(
         target: "shared",
         "shared pool ready at {} (binds at {} from first boot)",
         root.display(),
         clone_target(),
     );
+    Ok(())
 }
 
 #[cfg(test)]

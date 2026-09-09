@@ -283,8 +283,13 @@ async fn main() -> Result<()> {
             // The shared pool: one dir at <homes>/.shared (daemon-visible, unlike
             // anything under data/), bound into every clone at /home/rmng/shared
             // from first boot (see CreateSpec::shared_dir) and served as the
-            // `shared` SMB share. Ensured here once; the bind needs no upkeep.
-            shared::ensure_pool();
+            // `shared` SMB share. Ensured here once; the bind needs no upkeep. A pool
+            // failure aborts startup: booting clones without it silently breaks the
+            // read-write-both-sides design (Docker would invent a root-owned dir).
+            if let Err(e) = shared::ensure_pool() {
+                tracing::error!(target: "shared", "ensuring the shared pool: {e:#} — aborting startup");
+                std::process::exit(1);
+            }
             tokio::spawn(buildinfra::run(app_for_bg.clone()));
             // Scheduled chat delivery: fires operator-queued messages once their time passes.
             // Disk-backed, so anything that came due during a restart goes out on the first tick.

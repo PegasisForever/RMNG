@@ -330,9 +330,14 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // The clone's full session env, composed in the same precedence order the per-clone resync
     // uses (`provision::compose_clone_env`): the control URL, the per-clone identity key
     // (RMNG_PROXY_KEY — minted server-side, never serialized onto `RmngClone`/state), the
-    // operator's preset, then Claude Code's default model.
+    // operator's preset, then Claude Code's default model. An unresolvable control host
+    // fails the op: booting the clone into a degraded URL helps nobody (see control_env_vars).
+    let control = match control_env_vars(&app).await {
+        Ok(vars) => vars,
+        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
+    };
     let env = crate::provision::compose_clone_env(
-        control_env_vars(&app).await,
+        control,
         crate::provision::clone_key_env_vars(&app, &spec.new_hostname),
         &spec.env,
     );
@@ -852,7 +857,11 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
 /// Everything a gen-2 fork/rebase/migrate needs from the source row's preset: the clone's
 /// full session env (control URL + per-clone identity key + preset vars; the gen-2 create
 /// path filters it to dynamic keys for inject and static keys for the image build).
-async fn gen2_create_env(app: &App, preset_name: Option<&str>, new_id: &str) -> Vec<wire::EnvVar> {
+async fn gen2_create_env(
+    app: &App,
+    preset_name: Option<&str>,
+    new_id: &str,
+) -> anyhow::Result<Vec<wire::EnvVar>> {
     let vars: Vec<wire::EnvVar> = app
         .config()
         .presets
@@ -860,11 +869,11 @@ async fn gen2_create_env(app: &App, preset_name: Option<&str>, new_id: &str) -> 
         .find(|p| Some(p.name.as_str()) == preset_name)
         .map(preset_env_vars)
         .unwrap_or_default();
-    compose_clone_env(
-        control_env_vars(app).await,
+    Ok(compose_clone_env(
+        control_env_vars(app).await?,
         clone_key_env_vars(app, new_id),
         &vars,
-    )
+    ))
 }
 
 fn gen2_playbook_prompt(app: &App, preset_name: Option<&str>) -> (String, String) {
@@ -963,7 +972,10 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     // Payload wins, source fills the gaps: an explicit preset re-derives env/playbook,
     // otherwise the source's preset drives the fork (unchanged legacy behavior).
     let preset_name = spec.preset_name.clone().or(src.preset_name.clone());
-    let env = gen2_create_env(&app, preset_name.as_deref(), &new_id).await;
+    let env = match gen2_create_env(&app, preset_name.as_deref(), &new_id).await {
+        Ok(env) => env,
+        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
+    };
     let (playbook, prompt) = gen2_playbook_prompt(&app, preset_name.as_deref());
     let base_tag = match fork_clone(
         &app,
@@ -1306,7 +1318,10 @@ async fn run_rebase(app: App, op_id: String, host_id: String, preset_name: Strin
             Ok(t) => t,
             Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
         };
-    let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await;
+    let env = match gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await {
+        Ok(env) => env,
+        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
+    };
     let (playbook, prompt) = gen2_playbook_prompt(&app, row.preset_name.as_deref());
     // An archived clone rests stopped, but the swap below boots a container (and the
     // rollback arm recreates one too). Remember the rest state and put it back down
@@ -1419,7 +1434,10 @@ async fn run_migrate(app: App, op_id: String, host_id: String) {
     if let Err(e) = app.docker.stop_even_if_paused(&host_id).await {
         tracing::warn!("migrate {host_id}: pre-stop failed: {e} (continuing)");
     }
-    let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await;
+    let env = match gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await {
+        Ok(env) => env,
+        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
+    };
     // Playbook/prompt injects are skipped: the copied home already carries the files the
     // gen-1 create wrote; re-injecting would only rewrite identical content.
     match migrate_one(&app, &host_id, &base, &env, "", "", row.headless, progress).await {

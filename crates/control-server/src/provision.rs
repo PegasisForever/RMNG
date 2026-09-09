@@ -19,7 +19,7 @@
 //! each preset's Dockerfile into a hash tag on demand); the retired gen-1 registry-template
 //! pull is gone.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::time::{Duration, Instant};
 
 use wire::EnvVar;
@@ -158,7 +158,12 @@ pub(crate) fn base_session_env_vars() -> Vec<EnvVar> {
 /// **Nothing here points at an inference endpoint.** Agents talk to Anthropic/OpenAI directly,
 /// authenticated by the short-lived tokens the server writes into their credential files (see
 /// [`crate::claude::apply_clone_token`]).
-pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
+///
+/// Fails when the control host does not resolve: that is a broken network config, and the
+/// clone would come up brain-dead (its daemon could never phone home either) — fail fast
+/// with the reason instead of booting it into a degraded URL the loop could never repair
+/// (it resolves through this same function).
+pub async fn control_env_vars(app: &App) -> Result<Vec<EnvVar>> {
     let cfg = app.config();
     let ev = |key: &str, value: String| EnvVar {
         key: key.to_string(),
@@ -166,26 +171,19 @@ pub async fn control_env_vars(app: &App) -> Vec<EnvVar> {
     };
     let mut vars = Vec::new();
 
-    match app.docker.control_host().await {
-        Ok(control) => {
-            // The fleet `rmng` CLI's control-server base URL, so a clone can run `rmng …`
-            // without `--server` — a bare `rmng clone ls`/`rmng clone ssh`/`rmng clone create …`
-            // (the latter spawning a sub clone) just works. The CLI resolves `--server` >
-            // `$RMNG_CONTROL_URL` > `http://localhost:9000`; inside a clone `localhost:9000`
-            // is unreachable, so this points it at the `rmng-control` alias.
-            vars.push(ev(
-                "RMNG_CONTROL_URL",
-                format!("http://{control}:{}", cfg.listen.web),
-            ));
-        }
-        Err(e) => tracing::warn!(
-            "control_env_vars: could not resolve the control-server host ({e}); the in-clone \
-             `rmng` CLI will need an explicit --server until the next reconcile (inference is \
-             unaffected — agents authenticate with the credentials the server injects, not \
-             with anything reached over this URL)"
-        ),
-    }
-    vars
+    // The fleet `rmng` CLI's control-server base URL, so a clone can run `rmng …`
+    // without `--server` — a bare `rmng clone ls`/`rmng clone ssh`/`rmng clone create …`
+    // (the latter spawning a sub clone) just works. The CLI resolves `--server` >
+    // `$RMNG_CONTROL_URL` > `http://localhost:9000`; inside a clone `localhost:9000`
+    // is unreachable, so this points it at the `rmng-control` alias.
+    let control = app.docker.control_host().await.with_context(|| {
+        "resolving the control-server host for the in-clone RMNG_CONTROL_URL"
+    })?;
+    vars.push(ev(
+        "RMNG_CONTROL_URL",
+        format!("http://{control}:{}", cfg.listen.web),
+    ));
+    Ok(vars)
 }
 
 /// The PER-CLONE identity env: the clone's stable bearer key, as `RMNG_PROXY_KEY`.
@@ -409,39 +407,32 @@ async fn clone_container_after_create(
     // no longer carries clone-daemon/agent-wrapper. This is the SOLE delivery path: the
     // control-server always copies its own current payloads in before boot, so a fresh clone's
     // `systemd --user` units always exec binaries that match THIS server (no runtime
-    // hash-check / hot-swap engine, and none of its create-time churn). `payload` is None only
-    // in a dev checkout with nothing staged under `embedded-bin/` — then the clone boots with
-    // no daemon (WARN), matching the pre-existing dev caveat. upload_tar works on a stopped
-    // container.
-    let mut bins: Vec<TarEntry> = CLONE_BINARIES
-        .iter()
-        .filter_map(|b| {
-            crate::assets::payload(b.payload).map(|data| TarEntry {
-                path: format!("{}/{}", b.dir, b.bin),
-                data,
-                mode: 0o755,
-                uid: 0,
-                gid: 0,
-            })
-        })
-        .collect();
-    if bins.is_empty() {
-        tracing::warn!(
-            "clone {hostname}: no clone binaries staged (assets::payload empty) — it will boot \
-             without clone-daemon/agent-wrapper; stage crates/control-server/embedded-bin/ for dev"
-        );
-    } else {
-        on_progress("inject", "installing clone binaries (pre-boot)");
-        if bins.len() == CLONE_BINARIES.len() {
-            // Same set the reconcile loop hashes, in the same order, so a fresh clone's stamp
-            // already matches and the first pass does not re-push everything it just got.
-            if !headless {
-                bins.push(crate::clone_reconcile::session_holder_unit_entry());
-            }
-            bins.push(crate::clone_reconcile::payload_stamp_entry_for(&bins));
-        }
-        docker.upload_tar(container, bins).await?;
+    // hash-check / hot-swap engine, and none of its create-time churn). A missing payload
+    // is a broken server build or an unstaged dev checkout — fail the op, never boot a
+    // daemonless clone: the loop's own refresh hard-errors on the same absence, so
+    // tolerating it here would only delay the failure by one pass. Dev checkouts stage
+    // with the same payloads the image build COPYs (see the Dockerfile's /out stage).
+    // upload_tar works on a stopped container.
+    let mut bins: Vec<TarEntry> = Vec::with_capacity(CLONE_BINARIES.len());
+    for b in CLONE_BINARIES {
+        let data = crate::assets::payload(b.payload)
+            .with_context(|| format!("clone payload '{}' is not staged", b.payload))?;
+        bins.push(TarEntry {
+            path: format!("{}/{}", b.dir, b.bin),
+            data,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        });
     }
+    on_progress("inject", "installing clone binaries (pre-boot)");
+    // Same set the reconcile loop hashes, in the same order, so a fresh clone's stamp
+    // already matches and the first pass does not re-push everything it just got.
+    if !headless {
+        bins.push(crate::clone_reconcile::session_holder_unit_entry());
+    }
+    bins.push(crate::clone_reconcile::payload_stamp_entry_for(&bins));
+    docker.upload_tar(container, bins).await?;
 
     // The clone's identity and env, written while the container is STILL STOPPED.
     //
@@ -519,6 +510,8 @@ async fn clone_container_after_create(
             "inject",
             "headless: removing desktop units (gnome-headless + clone-daemon + session-holder)",
         );
+        // No loop backstop reaps a surviving desktop: a failed delete must fail the op,
+        // never boot a "headless" clone with a desktop.
         let code = docker
             .exec_script(
                 container,
@@ -530,9 +523,9 @@ async fn clone_container_after_create(
                 },
             )
             .await
-            .unwrap_or(0);
+            .with_context(|| format!("clone {hostname}: headless desktop-disable exec failed"))?;
         if code != 0 {
-            tracing::warn!("clone {hostname}: headless desktop-disable exited {code} (non-fatal)");
+            anyhow::bail!("clone {hostname}: headless desktop-disable exited {code}");
         }
     }
 
@@ -664,24 +657,33 @@ async fn clone_container_after_create(
     // rather than from the reconciler's first pass 30s later. Stamped the same way, and
     // best-effort for the same reason: the reconciler is the backstop.
     on_progress("inject", "installing the activity probe");
-    let hook_ok = docker
+    // Same seed pattern as the MCP steps above with one inline difference: tar and register
+    // are two calls, so a failure names which one. Either way the stamp is withheld and the
+    // loop's ensure_claude_hook retries — tolerance here is the designed retry, not a mask.
+    let tar_ok = docker
         .upload_tar(container, crate::clone_reconcile::rmng_hook_entries())
         .await
-        .is_ok()
-        && docker
-            .exec_script(
-                container,
-                &crate::clone_reconcile::claude_hook_script(),
-                &[],
-                &[],
-                |_stream, line| {
-                    tracing::debug!(target: "provision", "claude-hook: {line}");
-                },
-            )
-            .await
-            .unwrap_or(1)
-            == 0;
-    if hook_ok {
+        .inspect_err(|e| {
+            tracing::warn!("clone {hostname}: activity probe tar failed: {e:#} (reconciler will retry)");
+        })
+        .is_ok();
+    let reg_ok = docker
+        .exec_script(
+            container,
+            &crate::clone_reconcile::claude_hook_script(),
+            &[],
+            &[],
+            |_stream, line| {
+                tracing::debug!(target: "provision", "claude-hook: {line}");
+            },
+        )
+        .await
+        .inspect_err(|e| {
+            tracing::warn!("clone {hostname}: activity probe register exec failed: {e:#} (reconciler will retry)");
+        })
+        .unwrap_or(1)
+        == 0;
+    if tar_ok && reg_ok {
         if let Err(e) = docker
             .upload_tar(
                 container,
@@ -692,7 +694,7 @@ async fn clone_container_after_create(
             tracing::warn!("clone {hostname}: writing claude hook stamp failed: {e:#} (non-fatal)");
         }
     } else {
-        tracing::warn!("clone {hostname}: activity probe install failed (reconciler will retry)");
+        tracing::warn!("clone {hostname}: activity probe install incomplete (reconciler will retry)");
     }
 
     // The bashrc block can't go in the tar (it's an APPEND, not a whole file — /etc/bash.bashrc
@@ -712,9 +714,9 @@ async fn clone_container_after_create(
             })
             .await?;
         if code != 0 {
-            // Non-fatal: the preset PATH still reaches fish + login shells; only non-login
-            // interactive bash misses it. Warn rather than tear the clone down.
-            tracing::warn!("clone {hostname}: bashrc preset-PATH append exited {code} (non-fatal)");
+            // No loop step re-appends this block: fail the op rather than ship a clone
+            // whose non-login bash silently misses the preset PATH.
+            anyhow::bail!("clone {hostname}: bashrc preset-PATH append exited {code}");
         }
     }
 

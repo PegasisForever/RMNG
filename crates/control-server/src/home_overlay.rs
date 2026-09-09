@@ -69,26 +69,44 @@ pub fn merged_dir(homes: &str, id: &str) -> PathBuf {
     Path::new(homes).join(MERGED_DIR).join(id)
 }
 
-/// Lowerdir currently mounted at `merged`, if it is an overlay mount.
-fn mounted_lower(merged: &Path) -> Option<String> {
-    let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+/// Lowerdir currently mounted at `merged`, if it is an overlay mount. A mountinfo line
+/// naming our mountpoint without a parseable lowerdir is an error, not an unmounted
+/// verdict: remounting blind over it risks EBUSY and hides a world we do not understand.
+fn mounted_lower(merged: &Path) -> Result<Option<String>> {
+    let info = std::fs::read_to_string("/proc/self/mountinfo")
+        .context("reading /proc/self/mountinfo")?;
     let wanted = merged.to_string_lossy();
-    info.lines().find_map(|line| lower_of_line(line, &wanted))
+    let mut found: Option<&str> = None;
+    for line in info.lines() {
+        if let Some((fields, _)) = line.split_once(" - ") {
+            if fields.split_whitespace().nth(4) == Some(wanted.as_ref()) {
+                found = Some(line);
+                break;
+            }
+        }
+    }
+    found.map(|line| lower_of_line_strict(line, &wanted)).transpose()
 }
 
 /// Parse one mountinfo line: the mount point is the 5th pre-separator field, the
 /// lowerdir hides in the comma-separated super options after it. Pure so tests can
-/// pin the shape without mounting anything.
-fn lower_of_line(line: &str, wanted: &str) -> Option<String> {
-    let (fields, after) = line.split_once(" - ")?;
-    if fields.split_whitespace().nth(4)? != wanted {
-        return None;
+/// pin the shape without mounting anything. Strict: the caller only passes lines already
+/// matched on mountpoint, so anything unparseable here is an error.
+fn lower_of_line_strict(line: &str, wanted: &str) -> Result<String> {
+    let (fields, after) = line
+        .split_once(" - ")
+        .with_context(|| format!("mountinfo line without separator: {line}"))?;
+    let point = fields.split_whitespace().nth(4).unwrap_or("<short>");
+    if point != wanted {
+        anyhow::bail!("mountinfo line for {point} reached the strict parser for {wanted}");
     }
     after
         .split_whitespace()
-        .nth(2)?
+        .nth(2)
+        .with_context(|| format!("mountinfo line without super options: {line}"))?
         .split(',')
         .find_map(|o| o.strip_prefix("lowerdir=").map(str::to_string))
+        .with_context(|| format!("overlay mount without lowerdir: {line}"))
 }
 
 /// Unpack an image-home tar into `dest`, stripping the single top-level directory the
@@ -129,11 +147,12 @@ pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     tracing::info!(target: "overlay", "exporting {IMAGE_HOME} of {image_tag} for the home overlay");
     std::fs::create_dir_all(&dest).with_context(|| format!("mkdir {}", dest.display()))?;
     // Unique per attempt: a previous export that died between create and remove leaves
-    // its reader behind, and a deterministic name would 409 the retry on it.
+    // its reader behind, and a deterministic name would 409 the retry on it. Pre-epoch
+    // clocks do not exist; fail loudly instead of reusing a colliding `0`.
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .expect("system clock before the epoch")
+        .as_nanos();
     let reader = app
         .docker
         .create_reader(
@@ -208,7 +227,7 @@ pub async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) -> Resu
     if !lower.is_dir() {
         anyhow::bail!("skeleton missing for {digest} (export it first)");
     }
-    match mounted_lower(merged) {
+    match mounted_lower(merged)? {
         Some(cur) if cur.contains(&digest_path(digest)) => return Ok(()),
         Some(_) => unmount_merged(merged),
         None => {}
@@ -225,7 +244,13 @@ pub async fn remount_all(app: App) {
         .hosts
         .into_iter()
         .filter(|h| h.managed && h.dataset.is_some())
-        .map(|h| (h.id, h.dataset.unwrap_or_default(), h.base_tag))
+        .map(|h| {
+            let dataset = h
+                .dataset
+                .clone()
+                .expect("managed clone passed the is_some filter without a dataset");
+            (h.id, dataset, h.base_tag)
+        })
         .collect();
     // Mount paths come from HOMES_DIR (the mountpoint), never the dataset name.
     let homes = crate::zfs::HOMES_DIR;
@@ -282,9 +307,9 @@ mod tests {
     fn mounted_lower_reads_the_overlay_options() {
         let line = MOUNTINFO.lines().nth(1).unwrap();
         assert_eq!(
-            lower_of_line(line, "/srv/rmng-homes/.merged/pega-x"),
-            Some("/srv/rmng-homes/.skeleton/sha256-ab".to_string())
+            lower_of_line_strict(line, "/srv/rmng-homes/.merged/pega-x").unwrap(),
+            "/srv/rmng-homes/.skeleton/sha256-ab".to_string()
         );
-        assert_eq!(lower_of_line(line, "/nope"), None);
+        assert!(lower_of_line_strict(line, "/nope").is_err());
     }
 }
