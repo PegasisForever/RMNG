@@ -5,8 +5,10 @@ Where every byte of a clone comes from. Sources: `template/` (image),
 (loop), `crates/control-server/src/derived.rs` (preset images).
 
 Design rule: the post-boot inject (list 3) is the reconciler loop (list 4) run once, early.
-Each step is best-effort at create time and stamped; a missing stamp means the loop
-re-runs that step on its next pass. Withholding the stamp IS the retry.
+Steps the loop backstops are best-effort at create time and stamped; a missing stamp
+means the loop re-runs that step on its next pass. Withholding the stamp IS the retry.
+Steps with NO loop backstop (payload presence, headless unit delete, bashrc append,
+resolvable control host) fail the op instead — booting a half-clone helps nobody.
 
 ## 1. Baked into the image
 
@@ -55,7 +57,8 @@ all per-clone content.
 `clone_container_after_create` in `provision.rs`, via `upload_tar` (works on stopped
 containers) — plus the create-spec bind mounts, which are also fixed before start:
 
-Files:
+Files (a missing payload fails the op — no daemonless boot; the loop hard-errors on
+the same absence, so tolerating it here would only delay the failure by one pass):
 
 - Clone binaries (`CLONE_BINARIES`, `provision.rs:1461`): `rmng-clone-daemon` +
   `agent-wrapper` → `/opt/rmng/bin` (0755), `rmng` CLI → `/usr/local/bin` — plus,
@@ -64,10 +67,12 @@ Files:
 - Identity: `etc/machine-id` (fresh random per clone, 0444 — systemd-in-docker
   would otherwise run transient), `etc/environment` (base session + control URLs +
   preset vars; read by PAM and the lingering user manager at boot, which is why it
-  cannot wait until after start), and, only when the preset sets PATH,
+  cannot wait until after start — and why an unresolvable control host fails the op
+  at create/fork/rebase/migrate instead of booting a degraded URL the loop could
+  never repair), and, only when the preset sets PATH,
   `etc/fish/conf.d/rmng-preset-path.fish` + `etc/profile.d/rmng-preset-path.sh`.
 
-Mounts (create-spec binds, present from first boot):
+Mounts (create-spec binds, present from first boot — always mounted, no empty skips):
 
 - Home overlay merged view → `/home/rmng` (template home as shared lower layer,
   per-clone dataset as upper).
@@ -77,14 +82,16 @@ Mounts (create-spec binds, present from first boot):
   rejects it as a bind source).
 - Clone media socket dir.
 
-## 3. Injected after boot (provision, best-effort + stamps)
+## 3. Injected after boot (provision: stamped steps + fail-loud steps)
 
-Container started (`docker.start_container`), then in order. Every `seed_step`
-logs-and-continues on failure; the loop retries whatever is unstamped:
+Container started (`docker.start_container`), then in order. Steps the loop backstops
+are best-effort (`seed_step` logs-and-continues, stamp withheld); steps with no
+backstop fail the op:
 
 1. Headless only: delete the desktop units (`gnome-headless` + `clone-daemon` unit
    files and wants-symlinks), `daemon-reload`, `pkill` anything the user manager
-   already started in the boot race. `agent-wrapper` stays enabled.
+   already started in the boot race. `agent-wrapper` stays enabled. FAILS THE OP
+   on error — no loop step reaps a surviving desktop.
 2. `~/.codex` dir prep (ownership fix for old templates), then the Codex CLI
    install (network pipe into the user account — must run live, post-start).
 3. Second tar: `~/.config/rmng/agent-instructions.md` (global + preset playbook,
@@ -95,29 +102,37 @@ logs-and-continues on failure; the loop retries whatever is unstamped:
 5. `~/.cursor/mcp.json` MCP servers + stamp (`LINEAR_API_KEY` resolved to its
    value here — Cursor does not expand env references).
 6. `~/.codex/config.toml` MCP servers (merge — the operator's file) + stamp.
-7. Activity probe: hook files tar + registration script + stamp.
+7. Activity probe: hook files tar + registration script + stamp. Tar vs register
+   failures are logged separately; either way the stamp is withheld and the loop
+   retries.
 8. Preset-PATH append to `/etc/bash.bashrc` (append, not a file — tar cannot do
-   it; idempotent delete-then-append; non-fatal; only when the preset sets PATH).
-9. Headless: start the default `main` tmux session, report ready. Headed: poll
-   the mediaplane for the clone-daemon's `Hello` until `WAIT_READY_TIMEOUT`,
-   then report ready.
+   it; idempotent delete-then-append; only when the preset sets PATH). FAILS THE
+   OP on error — no loop step re-appends it.
+9. Headless: start the default `main` tmux session, report ready (convenience only —
+   `termplane` recreates a missing session on select). Headed: poll the mediaplane
+   for the clone-daemon's `Hello` until `WAIT_READY_TIMEOUT`. Alive-but-unregistered
+   reports ready with an explicit warning (check it in the UI); an exited container
+   fails with its log tail.
 
 ## 4. Reconciler loop (`clone_reconcile::run`, every 30 s)
 
 One pass (`reconcile_once`) covers managed, unarchived, id-safe clones whose
 container is running. Failures warn once per clone+step (`warned` set) and retry
-next pass; keys for vanished clones are dropped.
+next pass; keys for vanished clones are dropped. An unresolvable control host skips
+the whole pass (warned globally) rather than rewriting the fleet into a degraded URL.
 
-- Archived-state sweep first: thaw paused-but-not-archived clones; stop
-  archived-but-up ones. Skips clones mid-rebase-swap and clones being committed
+- Archived-state sweep first: thaw paused-but-not-archived clones (an unreadable
+  pause state logs at debug and skips); stop archived-but-up ones. Skips clones
+  mid-rebase-swap and clones being committed
   (thawing/env-syncing those would corrupt the swap/snapshot).
 - SSH ready: dirs + host keys + `authorized_keys`, version-stamped (`SSH_STAMP_VERSION`).
 - `/etc/environment` sync: control env + per-clone identity key + preset env +
   `ANTHROPIC_MODEL`, content-compared; restarts `agent-wrapper` only on a real
   change (a blind restart would interrupt an in-flight chat turn every 30 s).
 - Codex CLI install (idempotent script, runs every pass).
-- Codex parity files, content-stamped (prepare script rides the stamp because it
-  owns the parent dirs).
+- Codex parity files, content-stamped over entries PLUS the prepare script (one
+  value source shared with the create path — a stamp mismatch used to force one
+  redundant re-push on every fresh clone).
 - `~/.claude.json` MCP merge, stamped.
 - `~/.cursor/mcp.json` MCP merge, stamped (Linear bearer re-resolved each pass).
 - Activity probe files + registration, stamped.
