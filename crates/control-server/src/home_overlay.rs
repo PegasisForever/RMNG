@@ -117,7 +117,8 @@ fn unpack_skeleton(tar_bytes: &[u8], dest: &Path) -> Result<()> {
 /// is no home to mount.
 pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     let digest = app.docker.image_id(image_tag).await?;
-    let dest = skeleton_dir(&app.config().docker.homes_parent, &digest);
+    // NB: mount paths come from HOMES_DIR (the mountpoint), not the dataset name.
+    let dest = skeleton_dir(crate::zfs::HOMES_DIR, &digest);
     let marker = dest.join(SKEL_MARKER);
     if std::fs::read_to_string(&marker)
         .map(|s| s.trim() == digest)
@@ -226,7 +227,8 @@ pub async fn remount_all(app: App) {
         .filter(|h| h.managed && h.dataset.is_some())
         .map(|h| (h.id, h.dataset.unwrap_or_default(), h.base_tag))
         .collect();
-    let homes = app.config().docker.homes_parent.clone();
+    // Mount paths come from HOMES_DIR (the mountpoint), never the dataset name.
+    let homes = crate::zfs::HOMES_DIR;
     for (id, dataset, tag) in &rows {
         let Some(tag) = tag.as_deref().filter(|t| !t.trim().is_empty()) else {
             tracing::warn!(target: "overlay", "remount: {id} has no recorded image; skipping");

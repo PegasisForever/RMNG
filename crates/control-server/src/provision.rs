@@ -1084,7 +1084,13 @@ pub async fn clone_container_gen2_from_tag(
     // shows through on fresh datasets and user files persist in the upper.
     let dataset = std::path::PathBuf::from(crate::zfs::dataset_dir(hostname));
     let digest = crate::home_overlay::ensure_skeleton(app, &tag).await?;
-    let merged = crate::home_overlay::merged_dir(&parent, hostname);
+    // NB: mount paths come from HOMES_DIR (the mountpoint), not `parent` (the ZFS
+    // dataset name) — the daemon rejects relative bind sources.
+    let merged = crate::home_overlay::merged_dir(crate::zfs::HOMES_DIR, hostname);
+    debug_assert!(
+        merged.is_absolute(),
+        "overlay merged view must be an absolute bind source"
+    );
     crate::home_overlay::ensure_mounted(&dataset, &digest, &merged).await?;
 
     on_progress("create", &format!("creating container {hostname}"));
