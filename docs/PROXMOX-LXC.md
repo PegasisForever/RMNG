@@ -1,15 +1,18 @@
 # Running RMNG's Docker host on a Proxmox LXC CT
 
-RMNG drives a **local Docker daemon**, not `pct`. An unprivileged Proxmox LXC CT is a good
-place to *run that Docker daemon* (nested Docker on a shared kernel). The CT-wide live resource
-summary intentionally supports the documented production layout only: CT 105 with cgroup v2,
-an enforced 16-CPU capacity, and a ZFS-backed rootfs. Once Docker is up and healthy in the CT, follow
-[DEPLOY.md](DEPLOY.md) as you would on any host.
+RMNG drives a **local Docker daemon**, not `pct`. A **privileged** Proxmox LXC CT is where
+that Docker daemon runs (nested Docker on a shared kernel). Privileged is a hard requirement
+since gen-2: every clone home is its own ZFS dataset, and only a privileged CT can hold
+`/dev/zfs` plus the homes mount (§1c). This is a one-way trip — an existing unprivileged CT
+is converted via dump → restore-as-privileged (see [GEN2-CLONES.md](GEN2-CLONES.md) §4).
+The CT-wide live resource summary intentionally supports the documented production layout
+only: CT 105 with cgroup v2, an enforced 16-CPU capacity, and a ZFS-backed rootfs. Once
+Docker is up and healthy in the CT, follow [DEPLOY.md](DEPLOY.md) as you would on any host.
 
-## 1. Create an unprivileged CT with nesting + the render node
+## 1. Create a privileged CT with nesting + the render node
 
-Use an Ubuntu 26.04 CT template. The RMNG clones need nested Docker and a GPU render node, so
-the CT needs these node-side settings (`/etc/pve/lxc/<id>.conf`):
+Use an Ubuntu 26.04 CT template (unprivileged OFF). The CT needs nested Docker and a GPU
+render node, so set these node-side settings (`/etc/pve/lxc/<id>.conf`):
 
 ```conf
 # Nested containers + keyring (Docker-in-LXC). `fuse=1` is only needed for the OPTIONAL
@@ -17,17 +20,16 @@ the CT needs these node-side settings (`/etc/pve/lxc/<id>.conf`):
 features: nesting=1,keyctl=1,fuse=1
 
 # GPU render node passthrough for VA-API (encode on the control-server, capture in clones).
+# Still required: the setup wizard's environment check gates finishing setup on it, and the
+# video plane needs it at runtime. There is deliberately NO kfd/compute node anymore:
+# clone-side GPU support was removed, and clones capture fine without it (verified Sep 2026:
+# first clone on a fresh CT screenshots with renderD128 alone).
 dev0: /dev/dri/renderD128,mode=0666
 
-# GPU compute node passthrough (AMD KFD → ROCm/HIP) so clones can run GPU compute, not just
-# render. Clones are privileged Docker containers, so they inherit EVERY device node present
-# in the CT's /dev — the same mechanism that delivers renderD128 above — so passing kfd into
-# the CT is all that's needed; there is no per-clone device wiring in the control-server.
-# (Use the path-based `dev` entry, not a raw `lxc.cgroup2.devices.allow c <major>:0`: KFD's
-# major is dynamically allocated and changes across boots.)
-dev1: /dev/kfd,mode=0666
-
 # Let the guest's Docker/systemd operate without the host AppArmor profile fighting it.
+# Still required on privileged CTs too (verified Sep 2026: without these lines `docker run`
+# dies with "AppArmor enabled on system but the docker-default profile could not be
+# loaded: permission denied").
 # The unconfined profile alone is NOT enough for nested Docker: the runtime still probes
 # /sys/kernel/security/apparmor and dies with "Could not check if docker-default AppArmor
 # profile was loaded: permission denied". The /dev/null bind makes nested runtimes see
@@ -52,8 +54,8 @@ The sidebar’s `LXC` header is measured from CT 105 itself rather than by addin
 reads the CT-root cgroup through `/proc/1/root`: CPU comes from `cpu.stat` against its enforced
 16-CPU capacity, and memory includes every CT process with the same swap-aware/cache-excluding policy used for
 clone rows. Disk is `statvfs` usage of the CT root filesystem, so this ZFS rootfs figure is
-physical and compression-aware. There is deliberately no logical/pre-compression disk metric: the
-unprivileged CT cannot read ZFS `logicalused`, and RMNG does not query the Proxmox host for it.
+physical and compression-aware. There is deliberately no logical/pre-compression disk metric:
+RMNG does not query the Proxmox host for ZFS `logicalused`.
 
 ## 1b. Raise the kernel keyring quotas on the Proxmox host
 
@@ -70,6 +72,48 @@ kernel.keys.maxbytes = 2000000
 EOF
 sysctl --system
 ```
+
+## 1c. ZFS in the CT + the homes dataset (gen-2, required)
+
+Every clone home is a ZFS dataset under one parent, e.g. `rpool/rmng-homes` (the pool name
+differs per host). The control-server creates per-clone datasets from inside its own mount
+namespace, so three things must be true before it ever runs:
+
+On the **Proxmox host**:
+
+```sh
+# Find the ZFS device number (usually 10:249) and allow the CT to hold the node.
+ls -l /dev/zfs
+# ... then in /etc/pve/lxc/<id>.conf (10:249 here — use what you measured):
+# lxc.cgroup2.devices.allow: c 10:249 rwm
+
+# The parent dataset, mounted into the CT at the fixed /srv/rmng-homes path:
+zfs create -o mountpoint=/srv/rmng-homes-fresh rpool/rmng-homes-fresh
+# ... then in /etc/pve/lxc/<id>.conf:
+# mp0: /srv/rmng-homes-fresh,mp=/srv/rmng-homes
+```
+
+Do NOT bind-mount the host `/dev/zfs` (`lxc.mount.entry` for it breaks nested container
+mount joins: every `docker exec` silently lands on CT files). Restart the CT after editing
+its conf.
+
+Inside the **CT**:
+
+```sh
+apt-get install -y zfsutils-linux
+mknod /dev/zfs c 10 249   # same major:minor as the host node; lives on the CT /dev
+                          # tmpfs, so re-create it after every CT restart (the
+                          # control-server re-creates its own at boot, but your shell
+                          # needs this one for manual zfs)
+zfs list                  # must work
+```
+
+Smoke-test snapshot/clone/destroy timing on a scratch dataset before going further
+([GEN2-CLONES.md](GEN2-CLONES.md) §5.2). Then tell the server which parent is yours BEFORE
+the first create — Settings → Docker → homes parent, or
+`PUT /api/config {"docker":{"homesParent":"rpool/rmng-homes-fresh"}}`. The default
+(`tank/rmng/homes`) fits almost nobody; a first create with the wrong parent fails with
+`no such pool`, cleanly but confusingly. The setup wizard does not ask for this yet.
 
 ## 2. Install Docker in the CT
 
@@ -199,6 +243,8 @@ systemctl reload docker
 ```sh
 docker info | grep -i 'storage driver'    # overlay2 (or overlayfs on Docker ≥29) — NOT vfs
 ls -l /dev/dri/renderD128                  # the render node must be present in the CT
+ls -l /dev/zfs && zfs list | head -n 2     # ZFS usable (§1c)
+ls -d /srv/rmng-homes                      # the homes mount (§1c)
 docker run --rm hello-world                # nested Docker actually runs
 ```
 
@@ -215,8 +261,24 @@ build cache & Docker Hub mirror".
 
 ## 4. Deploy RMNG
 
-Now the CT is just a Docker host. Continue with [DEPLOY.md](DEPLOY.md): pull/build the image,
-`docker compose up -d` (or the `docker run` one-liner), open `http://<ct-ip>:9000`, and run
-the setup wizard. The wizard's environment checklist (`GET /api/setup/env`) will confirm the
-Docker daemon, the `/srv/rmng-sock` mount, and `/dev/dri/renderD128` from inside the CT, plus
-the advisory lxcfs row (§2b).
+Now the CT is just a Docker host. Do NOT use `docker compose` (it prefixes volume names and
+loses the completed setup); run the control-server directly, with the homes dir bound
+**shared** — datasets are created from inside this container, and only a shared bind
+propagates their mounts into dockerd's namespace (without it `docker create` fails with
+`bind source path does not exist`):
+
+```sh
+docker pull pegasis0/rmng:latest
+docker run -d --name rmng --privileged --pid=host --restart unless-stopped \
+  -p 445:445 -p 2222:2222 -p 9000:9000 -p 9001:9001 -p 9005:9005 \
+  -v /var/run/docker.sock:/var/run/docker.sock -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
+  -v /srv/rmng-homes:/srv/rmng-homes:shared \
+  -e RUST_LOG=info,tower_http=warn pegasis0/rmng:latest
+```
+
+Then open `http://<ct-ip>:9000` and run the setup wizard. The wizard's environment checklist
+(`GET /api/setup/env`) confirms the Docker daemon, the `/srv/rmng-sock` mount, and
+`/dev/dri/renderD128` from inside the CT, plus the advisory lxcfs row (§2b). Before the
+first create, set the homes parent (§1c) and size the clones to the CT (Settings → Docker →
+clone CPUs/memory — the defaults assume a 32-core fleet host and fail small CTs with a
+CPU-range error). See [DEPLOY.md](DEPLOY.md) for ports, volumes, and upgrade notes.

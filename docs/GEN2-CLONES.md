@@ -182,6 +182,26 @@ One window, one per-clone report of bytes plus pass or fail.
   invalidate the preset image. Refresh is manual (edit or rebuild button).
 - Inner Docker state drops at migration and re-pulls.
 
+## 8. Rehearsal notes (Sep 2026, replicas of CT 105 + CT 106)
+
+Two replica CTs were built at the exact Sep-5 server + both real configs (secrets
+scrubbed), seeded with live/archived/headless/sub-clone rows plus the real edge rows
+(missing preset, empty preset), then migrated end to end: 4/4 and 4/4, data matching to
+the kilobyte on 2 GB homes, archived staying stopped, the rest restarting. Procedure
+lessons for the real window:
+
+- `pct push` reads **host** paths: `scp` files to the host first.
+- The old server creates only from a **locally present** image (no pull): pull the
+  template into the CT before seeding or verifying anything.
+- Filing archive the instant a create settles races: retry archive a few times.
+- The host row lands **seconds after** its op reports Done: poll rows, not just ops.
+- Restore-as-privileged maps ownership cleanly (files land 0:0, no fix step needed).
+- Set `docker.homesParent` BEFORE the new server's first boot (the old API drops the
+  unknown key, so it must be a stopped-server config edit, not a PUT).
+- Stop a CT before starting its privileged double: DHCP hands both the same IP.
+- The new server recreates `/dev/zfs` at boot when missing, but your shell still needs
+  a manual `mknod` after every CT restart for hand-run `zfs`.
+
 ## 7. UI (decided, not built)
 
 Clones come into being exactly two ways: template create (base image plus empty

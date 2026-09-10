@@ -44,20 +44,15 @@ docker save pegasis0/rmng | ssh <host> docker load
 
 ## 2. Run the control-server
 
-The reference deployment is [`compose.yaml`](../compose.yaml) at the repo root. It builds
-`rmng:latest` from source and brings the hub up:
-
-```sh
-docker compose up -d --build          # builds rmng:latest, then starts it
-```
-
-To pull the published image instead of building, point compose's `image:` at `pegasis0/rmng`
-and run `docker compose up -d` (no `--build`). The equivalent one-liner off the registry:
+Never use `docker compose` here: it prefixes the volume names and loses the completed
+setup. The reference deployment is one `docker run` (a Proxmox CT needs the homes bind
+with it — see [PROXMOX-LXC.md](PROXMOX-LXC.md) §1c/§4):
 
 ```sh
 docker run -d --name rmng --privileged --init --pid host --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
+  -v /srv/rmng-homes:/srv/rmng-homes:shared \
   -p 9000:9000 -p 9001:9001 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
@@ -71,6 +66,7 @@ What each piece is for:
 | `-v /var/run/docker.sock:…` | the daemon the server drives via bollard |
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
+| `-v /srv/rmng-homes:/srv/rmng-homes:shared` | the clone-home datasets (gen-2). Load-bearing: datasets are created from inside this container, and only a **shared** bind propagates their mounts into dockerd's namespace (plus server-side home reads/writes). Omit it and the first create fails with `bind source path does not exist` |
 | `-p 9000:9000` and `-p 9001:9001` | the web API and video ports |
 | `-p 9005:9005` | the port-forward data plane (viewer↔clone TCP splice) |
 | `-p 445:445` | the two SMB shares: `clones` browses every running clone's `/home/rmng`, and `shared` is the one pool every clone sees at `/home/rmng/shared` |
