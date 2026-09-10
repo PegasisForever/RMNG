@@ -1018,6 +1018,11 @@ async fn clone(
             .map(|p| pick(p).trim().to_string())
             .filter(|s| !s.is_empty())
     };
+    // Startup script: default on everywhere, opt out per request.
+    let run_startup_script = body
+        .get("runStartupScript")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let (hostname, display) =
         derive_hostname(&app, &naming::plain_hostname_base(&prefix, &title), &title);
     let spec = CloneSpec {
@@ -1038,6 +1043,7 @@ async fn clone(
         global_prompt: compose_global_prompt(&cfg, explicit),
         headless: false,
         parent: None,
+        run_startup_script,
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
@@ -1129,6 +1135,10 @@ async fn unarchive(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ForkReq {
@@ -1157,6 +1167,9 @@ struct ForkReq {
     agent_instructions: Option<String>,
     #[serde(default)]
     claude_instructions: Option<String>,
+    /// Run the preset's startup script as the clone user. Default on; opt out per request.
+    #[serde(default = "default_true")]
+    run_startup_script: bool,
 }
 
 /// `POST /api/fork` — fork a gen-2 clone (`{ source }` plus the optional
@@ -1201,6 +1214,7 @@ async fn fork(
             first_message: req.first_message,
             agent_instructions: req.agent_instructions,
             claude_instructions: req.claude_instructions,
+            run_startup_script: req.run_startup_script,
         },
     )
     .map(|op| Json(json!({ "ok": true, "op": op })))

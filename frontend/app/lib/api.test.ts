@@ -39,7 +39,10 @@ afterEach(() => {
 test("duplicateClone resolves the wrapped op", async () => {
   const seen: { url: string; init?: RequestInit }[] = [];
   stubFetch(seen);
-  const got = await duplicateClone({ plain: { title: "x", message: "" } });
+  const got = await duplicateClone({
+    plain: { title: "x", message: "" },
+    runStartupScript: true,
+  });
   expect(got.id).toBe("op-1");
   expect(seen[0].url).toBe("/api/clone");
 });
@@ -47,7 +50,10 @@ test("duplicateClone resolves the wrapped op", async () => {
 test("forkClone resolves the wrapped op", async () => {
   const seen: { url: string; init?: RequestInit }[] = [];
   stubFetch(seen);
-  const got = await forkClone("src-id", true, { preset: "webapp" });
+  const got = await forkClone("src-id", true, {
+    preset: "webapp",
+    runStartupScript: true,
+  });
   expect(got.id).toBe("op-1");
   expect(seen[0].url).toBe("/api/fork");
 });

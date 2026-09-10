@@ -63,6 +63,8 @@ pub struct ForkOpts<'a> {
     pub agent_instructions: Option<&'a str>,
     pub claude_instructions: Option<&'a str>,
     pub headless: bool,
+    /// Run the preset's startup script (default true: pass false only to opt out).
+    pub run_startup_script: bool,
 }
 
 impl Client {
@@ -249,6 +251,7 @@ impl Client {
         title: &str,
         message: &str,
         preset: Option<&str>,
+        run_startup_script: bool,
     ) -> Result<Operation> {
         let mut body = json!({ "plain": { "title": title.trim(), "message": message.trim() } });
         if let Some(p) = preset.map(str::trim).filter(|p| !p.is_empty()) {
@@ -256,6 +259,12 @@ impl Client {
                 .unwrap()
                 .insert("preset".into(), json!(p));
         }
+        // Always explicit: the server defaults on, but the wire should say what the
+        // operator asked so a default change can never silently flip old callers.
+        body.as_object_mut().unwrap().insert(
+            "runStartupScript".into(),
+            json!(run_startup_script),
+        );
         self.post_op("/api/clone", &body).await
     }
 
@@ -292,6 +301,8 @@ impl Client {
         if let Some(linear) = &opts.linear {
             obj.insert("linear".into(), linear.clone());
         }
+        // Always explicit, same reasoning as create (see above).
+        obj.insert("runStartupScript".into(), json!(opts.run_startup_script));
         self.post_op("/api/fork", &body).await
     }
 

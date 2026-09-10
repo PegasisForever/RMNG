@@ -68,6 +68,9 @@ pub struct CreateArgs {
     /// the TOP of that column. Omitted, the board draws it in its home column as before.
     #[arg(long)]
     pub column: Option<String>,
+    /// Skip the preset's startup script (it runs as the clone user by default).
+    #[arg(long)]
+    pub no_startup_script: bool,
     #[command(flatten)]
     pub wait: WaitArgs,
 }

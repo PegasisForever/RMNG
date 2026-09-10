@@ -62,6 +62,8 @@ function getJson(url: string): Promise<unknown> {
 export type ClonePayload = {
  plain: { title: string; message: string };
  preset?: string;
+ /** Run the preset's startup script. Always sent explicitly; the server defaults on. */
+ runStartupScript: boolean;
 };
 
 /** Start a template clone (title + preset in `payload`). The server builds the
@@ -99,6 +101,8 @@ export interface ForkPayload {
  firstMessage?: string;
  agentInstructions?: string;
  claudeInstructions?: string;
+ /** Run the preset's startup script. Always sent explicitly; the server defaults on. */
+ runStartupScript: boolean;
 }
 
 export const forkClone = (
@@ -109,6 +113,7 @@ export const forkClone = (
  postJson("/api/fork", {
   source,
   ...(headless ? { headless } : {}),
+  runStartupScript: payload?.runStartupScript ?? true,
   ...(payload?.preset ? { preset: payload.preset } : {}),
   ...(payload?.linear ? { linear: payload.linear } : {}),
   ...(payload?.claudeAccount ? { claudeAccount: payload.claudeAccount } : {}),

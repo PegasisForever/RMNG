@@ -177,12 +177,14 @@ mod tests {
         let incoming = serde_json::json!({
             "presets": [
                 { "name": "med", "labels": [" Backend ", ""], "linearKey": "",
-                  "dockerfile": "FROM base:x" },
+                  "dockerfile": "FROM base:x", "startupScript": "echo hi" },
                 { "name": "new", "labels": [], "linearKey": "NEW-KEY", "vars": [] },
             ],
         });
         let merged = merge_update(&base, incoming).unwrap();
         assert_eq!(merged.presets.len(), 2);
+        assert_eq!(merged.presets[0].startup_script, "echo hi");
+        assert_eq!(merged.presets[1].startup_script, "");
         assert_eq!(merged.presets[0].linear_key, ""); // blank clears the stored key
         assert_eq!(merged.presets[0].labels, vec!["Backend"]); // trimmed, blanks dropped
         assert_eq!(merged.presets[0].dockerfile, "FROM base:x");
@@ -879,6 +881,12 @@ fn merge_presets(_base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // Startup script: verbatim text, blank clears it (empty means nothing runs).
+        let startup_script = r
+            .get("startupScript")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         // Default account selections. Unlike `linearKey` a blank does NOT keep the stored value:
         // blank is a meaningful state here ("no opinion — fall through to the next resolution
         // step"), so the editor must be able to clear one back to it.
@@ -897,6 +905,7 @@ fn merge_presets(_base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire
             codex_account: account("codexAccount"),
             agent_playbook,
             global_prompt,
+            startup_script,
             // Empty box resets to the default base Dockerfile (a Dockerfile without
             // FROM cannot build, so there is no meaningful empty state to keep).
             dockerfile: r

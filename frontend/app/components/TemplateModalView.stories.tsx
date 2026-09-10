@@ -15,6 +15,8 @@ const meta = {
     presets: makeClonePresets(),
     preset: "webapp",
     onPresetChange: fn(),
+    runStartupScript: true,
+    onRunStartupScriptChange: fn(),
     valid: false,
     busy: false,
     error: null,

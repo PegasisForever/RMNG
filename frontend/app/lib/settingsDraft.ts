@@ -57,6 +57,7 @@ export interface PresetDraft {
   codexAccount: string;
   agentPlaybook: string;
   globalPrompt: string;
+  startupScript: string;
   dockerfile: string;
 }
 
@@ -113,6 +114,7 @@ export function newPreset(): PresetDraft {
     codexAccount: "",
     agentPlaybook: "",
     globalPrompt: "",
+    startupScript: "",
     dockerfile: "FROM pegasis0/rmng-template:latest",
   };
 }
@@ -158,6 +160,7 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       codexAccount: p.codexAccount,
       agentPlaybook: p.agentPlaybook,
       globalPrompt: p.globalPrompt,
+      startupScript: p.startupScript ?? "",
       dockerfile: p.dockerfile ?? "FROM pegasis0/rmng-template:latest",
     })),
     hostnamePrefix: c.docker.hostnamePrefix,
@@ -266,6 +269,7 @@ export function settingsPatch(
         codexAccount: p.codexAccount,
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
+        startupScript: p.startupScript,
         dockerfile:
           p.dockerfile.trim() === ""
             ? "FROM pegasis0/rmng-template:latest"

@@ -233,7 +233,7 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     println!("e2e: create '{title}' ...");
     let op = r
         .client
-        .clone_create_plain(&title, "", Some(preset))
+        .clone_create_plain(&title, "", Some(preset), true)
         .await
         .context("POST /api/clone")?;
     r.wait_op(&op, "create").await?;

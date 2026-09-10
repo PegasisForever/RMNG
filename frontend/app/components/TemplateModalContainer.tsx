@@ -32,6 +32,7 @@ export function TemplateModalContainer({
   const [title, setTitle] = useState("");
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
   const [preset, setPreset] = useState("");
+  const [runStartupScript, setRunStartupScript] = useState(true);
   // The started clone operation: its id once the POST returns, plus a local error.
   const [opId, setOpId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -89,12 +90,13 @@ export function TemplateModalContainer({
     const payload: ClonePayload = {
       plain: { title: title.trim(), message: "" },
       ...(preset ? { preset } : {}),
+      runStartupScript,
     };
     onClone(payload)
       .then((started) => setOpId(started.id))
       .catch((e: Error) => setError(e.message))
       .finally(() => setStarting(false));
-  }, [valid, busy, title, preset, onClone]);
+  }, [valid, busy, title, preset, runStartupScript, onClone]);
 
   return (
     <TemplateModalView
@@ -103,6 +105,8 @@ export function TemplateModalContainer({
       presets={presets}
       preset={preset}
       onPresetChange={setPreset}
+      runStartupScript={runStartupScript}
+      onRunStartupScriptChange={setRunStartupScript}
       valid={valid}
       busy={busy}
       error={error}

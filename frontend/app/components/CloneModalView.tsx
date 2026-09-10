@@ -236,6 +236,8 @@ export function CloneModalView({
           <CloneOptionsRow
             headless={draft.headless}
             onHeadlessChange={(headless) => onDraftChange("headless", headless)}
+            runStartupScript={draft.runStartupScript}
+            onRunStartupScriptChange={(run) => onDraftChange("runStartupScript", run)}
           />
         </div>
 

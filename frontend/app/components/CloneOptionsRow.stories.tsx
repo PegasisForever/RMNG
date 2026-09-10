@@ -16,6 +16,8 @@ const meta = {
   args: {
     headless: false,
     onHeadlessChange: fn(),
+    runStartupScript: true,
+    onRunStartupScriptChange: fn(),
   },
   render: (args) => (
     <Frame>

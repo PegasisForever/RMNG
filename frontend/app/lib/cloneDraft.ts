@@ -47,6 +47,8 @@ export interface CloneDraft {
   plainPreset: string;
   /** Headless clone: no desktop, so the viewer shows a tmux tab view instead of a stream. */
   headless: boolean;
+  /** Run the preset's startup script as the clone user. On unless unchecked. */
+  runStartupScript: boolean;
 }
 
 /** The form as the dialog opens it. `ticket` is seeded when something opened the dialog with
@@ -67,6 +69,7 @@ export function emptyCloneDraft(ticket = ""): CloneDraft {
     codexAccount: "",
     plainPreset: "",
     headless: false,
+    runStartupScript: true,
   };
 }
 

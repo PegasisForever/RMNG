@@ -228,7 +228,9 @@ pub async fn clone_create_plain(
         Some(name) => Some(resolve_column(client, name).await?),
         None => None,
     };
-    let op = client.clone_create_plain(title, message, preset).await?;
+    let op = client
+        .clone_create_plain(title, message, preset, !common.no_startup_script)
+        .await?;
     file_started_clone(client, &op, column.as_deref()).await?;
     started(client, op, &common.wait, json, "clone", true).await
 }
@@ -306,6 +308,7 @@ pub async fn fork(
                 codex_account: codex_account.as_deref(),
                 first_message: message.as_deref(),
                 headless,
+                run_startup_script: !common.no_startup_script,
                 ..Default::default()
             },
         )

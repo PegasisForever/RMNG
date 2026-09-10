@@ -153,6 +153,11 @@ pub struct Preset {
     /// Empty ⇒ no append. Non-secret. (Layer **c**: global prompt, all agents, this preset only.)
     #[serde(default)]
     pub global_prompt: String,
+    /// Optional per-preset startup script, edited in Settings. Runs as the clone user as
+    /// the last step of create/fork when the caller opts in (frontend defaults on, CLI
+    /// defaults off). Empty ⇒ nothing to run. Non-secret.
+    #[serde(default)]
+    pub startup_script: String,
     /// The FULL Dockerfile this preset's clones build from, edited in Settings by
     /// anyone (single user, trusted network, no auth). Defaults to
     /// `FROM pegasis0/rmng-template:latest`. May hold secrets (ENV lines) — accepted:
@@ -174,6 +179,7 @@ impl Default for Preset {
             codex_account: String::new(),
             agent_playbook: String::new(),
             global_prompt: String::new(),
+            startup_script: String::new(),
             dockerfile: default_preset_dockerfile(),
         }
     }
@@ -189,6 +195,7 @@ impl Preset {
             codex_account: self.codex_account.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
+            startup_script: self.startup_script.clone(),
             dockerfile: self.dockerfile.clone(),
         }
     }
@@ -216,6 +223,7 @@ pub struct PresetRedacted {
     pub codex_account: String,
     pub agent_playbook: String,
     pub global_prompt: String,
+    pub startup_script: String,
     pub dockerfile: String,
 }
 
@@ -939,6 +947,7 @@ mod tests {
                     codex_account: String::new(),
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
+                    startup_script: String::new(),
                     dockerfile: "FROM x:latest".into(),
                 },
                 Preset {

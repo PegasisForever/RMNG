@@ -219,6 +219,7 @@ export function CloneModalContainer({
   async function buildForkPayload(): Promise<ForkPayload> {
     const base: ForkPayload = {
       ...(preset ? { preset: preset.name } : {}),
+      runStartupScript: draft.runStartupScript,
       ...(draft.claudeAccount ? { claudeAccount: draft.claudeAccount } : {}),
       ...(draft.codexAccount ? { codexAccount: draft.codexAccount } : {}),
       ...(draft.mode !== "plain" && draft.agentInstructions.trim()

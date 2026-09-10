@@ -65,6 +65,7 @@ const presets: PresetRedacted[] = [
     codexAccount: "",
     agentPlaybook: "",
     globalPrompt: "",
+    startupScript: "",
     dockerfile: "FROM pegasis0/rmng-template:latest",
   },
   {
@@ -75,6 +76,7 @@ const presets: PresetRedacted[] = [
     codexAccount: "",
     agentPlaybook: "",
     globalPrompt: "",
+    startupScript: "",
     dockerfile: "FROM pegasis0/rmng-template:latest",
   },
   {
@@ -85,6 +87,7 @@ const presets: PresetRedacted[] = [
     codexAccount: "",
     agentPlaybook: "",
     globalPrompt: "",
+    startupScript: "",
     dockerfile: "FROM pegasis0/rmng-template:latest",
   },
 ];
@@ -141,6 +144,7 @@ test("a key claimed by two presets goes to the first in config order", () => {
       codexAccount: "",
       agentPlaybook: "",
       globalPrompt: "",
+    startupScript: "",
       dockerfile: "FROM pegasis0/rmng-template:latest",
     },
   ];

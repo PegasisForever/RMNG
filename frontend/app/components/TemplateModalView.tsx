@@ -22,6 +22,9 @@ export interface TemplateModalViewProps {
   /** Hand-picked preset driving env + accounts. */
   preset: string;
   onPresetChange: (name: string) => void;
+  /** Run the preset's startup script as the clone user. On unless unchecked. */
+  runStartupScript: boolean;
+  onRunStartupScriptChange: (run: boolean) => void;
 
   /** The Clone button may fire. */
   valid: boolean;
@@ -41,6 +44,8 @@ export function TemplateModalView({
   presets,
   preset,
   onPresetChange,
+  runStartupScript,
+  onRunStartupScriptChange,
   valid,
   busy,
   error,
@@ -102,6 +107,19 @@ export function TemplateModalView({
                 ))
               )}
             </select>
+          </label>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <label className="flex cursor-pointer items-center gap-2" title="Runs the preset's startup script as the clone user when the clone is created">
+            <input
+              type="checkbox"
+              checked={runStartupScript}
+              disabled={busy}
+              onChange={(e) => onRunStartupScriptChange(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+            />
+            Run startup script
           </label>
         </div>
 

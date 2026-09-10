@@ -81,6 +81,9 @@ pub struct CloneSpec {
     /// validated by the caller (`web::clone`): the parent exists, is managed, and is itself
     /// top-level. `None` = top-level clone. Persisted on `RmngClone.parent`; purely cosmetic.
     pub parent: Option<String>,
+    /// Run the preset's startup script as the clone user as the last settle step.
+    /// Every caller defaults this on; opt out per request, never per preset.
+    pub run_startup_script: bool,
 }
 
 fn now_ms() -> i64 {
@@ -253,6 +256,85 @@ pub fn next_free_hostname(app: &App, base: &str) -> String {
 /// Validate + register a clone op, then drive it in the background. Images clone
 /// concurrently (nothing on the source to lock), so there is no source-busy check — only the
 /// hostname's validity + uniqueness are gated.
+/// How long the preset startup script may run before the create/fork op stops waiting.
+/// Best-effort: on timeout the script keeps running in the clone, the op just moves on.
+const STARTUP_SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Op-log lines keep this tail of the script's combined output; the full text goes to tracing.
+const STARTUP_SCRIPT_LOG_TAIL: usize = 4000;
+
+/// Run the effective preset's startup script as the clone user, as the last settle step
+/// of create/fork. The script arrives over stdin (`bash -s`), so no quoting layer sits
+/// between the Settings text and the interpreter. Best-effort: any failure or timeout is
+/// logged to the op, never fatal to the clone — a broken script must not fail a healthy
+/// provision.
+async fn run_startup_script(app: &App, op_id: &str, clone_id: &str, preset_name: Option<&str>) {
+    let cfg = app.config();
+    let script = preset_name
+        .and_then(|n| cfg.presets.iter().find(|p| p.name == n))
+        .map(|p| p.startup_script.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(script) = script else {
+        patch_op(app, op_id, |op| {
+            op.log.push("startup script: none configured".into())
+        });
+        return;
+    };
+    let cmd = ["bash".to_string(), "-s".to_string()];
+    let run = app.docker.exec_capture(
+        clone_id,
+        &cmd,
+        "rmng",
+        Some("/home/rmng"),
+        &[],
+        Some(script.as_bytes()),
+    );
+    match tokio::time::timeout(STARTUP_SCRIPT_TIMEOUT, run).await {
+        Err(_) => {
+            tracing::warn!("startup script on {clone_id} timed out (left running)");
+            patch_op(app, op_id, |op| {
+                op.log.push(
+                    "startup script: timed out after 5m, left running in the clone".into(),
+                )
+            });
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("startup script on {clone_id} failed to start: {e:#}");
+            patch_op(app, op_id, |op| {
+                op.log
+                    .push(format!("startup script: failed to start: {e:#}"))
+            });
+        }
+        Ok(Ok(out)) => {
+            let mut combined = out.stdout;
+            if !out.stderr.trim().is_empty() {
+                combined.push_str("\n--- stderr ---\n");
+                combined.push_str(&out.stderr);
+            }
+            tracing::info!(
+                "startup script on {clone_id} exited {}: {combined}",
+                out.exit_code
+            );
+            // Floor the cut to a char boundary so the slice cannot panic.
+            let tail = String::from_utf8_lossy(combined.as_bytes());
+            let tail = if tail.len() > STARTUP_SCRIPT_LOG_TAIL {
+                let mut cut = tail.len() - STARTUP_SCRIPT_LOG_TAIL;
+                while !tail.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                format!("…[truncated]\n{}", &tail[cut..])
+            } else {
+                tail.into_owned()
+            };
+            // A failing script is still a successful provision: logged, never fatal.
+            patch_op(app, op_id, |op| {
+                op.log
+                    .push(format!("startup script: exit {}", out.exit_code));
+                op.log.push(tail);
+            });
+        }
+    }
+}
+
 pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
     // The preset Dockerfile decides the image; no caller-supplied base is needed.
     let _ = spec.source_image.as_str();
@@ -548,6 +630,16 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // Before the store write below, so the bastion's forward allowlist and the clone's own
     // "ready" signal land together. It takes the id explicitly for that reason.
     crate::ssh::allow_clone_now(&app, &spec.new_hostname).await;
+
+    // Last settle step: the preset's startup script as the clone user (best-effort).
+    if spec.run_startup_script {
+        progress("settle", "running the preset startup script");
+        run_startup_script(&app, &op_id, &spec.new_hostname, spec.preset_name.as_deref()).await;
+    } else {
+        patch_op(&app, &op_id, |op| {
+            op.log.push("startup script: skipped by request".into())
+        });
+    }
 
     // Register the fully-provisioned clone and mark the op done — the clone is now genuinely
     // connectable. A clone's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
@@ -897,6 +989,9 @@ pub struct ForkSpec {
     pub source_id: String,
     pub new_hostname: String,
     pub headless: bool,
+    /// Same as [`CloneSpec::run_startup_script`]: run the preset's startup script as the
+    /// clone user as the last settle step. Defaults on; opt out per request.
+    pub run_startup_script: bool,
     pub preset_name: Option<String>,
     pub linear: Option<LinearMeta>,
     pub claude_account: Option<String>,
@@ -1150,6 +1245,16 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     );
     crate::homes::ensure_now(&app, &new_id).await;
     crate::ssh::allow_clone_now(&app, &new_id).await;
+
+    // Last settle step, mirroring create: the preset's startup script (best-effort).
+    if spec.run_startup_script {
+        progress("settle", "running the preset startup script");
+        run_startup_script(&app, &op_id, &new_id, preset_name.as_deref()).await;
+    } else {
+        patch_op(&app, &op_id, |op| {
+            op.log.push("startup script: skipped by request".into())
+        });
+    }
 
     let daemon_up = app.media.is_connected(&new_id);
     let dataset = crate::zfs::dataset_name(&app.config().docker.homes_parent, &new_id);

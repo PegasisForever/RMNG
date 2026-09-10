@@ -18,6 +18,7 @@ export function makePreset(overrides: Partial<PresetRedacted> = {}): PresetRedac
     codexAccount: "",
     agentPlaybook: "",
     globalPrompt: "",
+    startupScript: "",
     dockerfile: "FROM pegasis0/rmng-template:latest",
     ...overrides,
   };
