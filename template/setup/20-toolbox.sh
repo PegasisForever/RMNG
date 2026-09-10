@@ -145,7 +145,7 @@ printf '#!/bin/sh\nexec /opt/mission-center/AppRun "$@"\n' > /usr/local/bin/miss
 # Icons: upstream ships a single top-level .svg (themed Icon= name, no icon tree).
 # Install it into hicolor/scalable where the themed lookup finds it.
 mc_icon="$(ls /opt/mission-center/*.svg 2>/dev/null | head -1 || true)"
-if [ -z "$mc_icon" ]; then echo "  !! no top-level .svg under /opt/mission-center:" >&2; ls -la /opt/mission-center/ >&2; exit 1; fi
+if [ -z "$mc_icon" ]; then echo "  !! no top-level .svg; state dump:" >&2; id >&2; ls -lad /opt /tmp /tmp/squashfs-root /opt/mission-center >&2; ls -la /opt/ >&2; mount | grep -E " /opt| /tmp" >&2; exit 1; fi
 install -d /usr/share/icons/hicolor/scalable/apps
 cp "$mc_icon" /usr/share/icons/hicolor/scalable/apps/
 d="$(ls /opt/mission-center/usr/share/applications/*.desktop 2>/dev/null | head -1 || true)"; [ -n "$d" ] || d="$(ls /opt/mission-center/*.desktop 2>/dev/null | head -1 || true)"
