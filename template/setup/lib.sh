@@ -11,6 +11,12 @@
 export DEBIAN_FRONTEND=noninteractive
 export SYSTEMD_OFFLINE=1
 
+# errtrace: WITHOUT `set -E`, an ERR trap set at top level never fires inside shell
+# functions or command substitutions — exactly where every phase does its real work —
+# which is how a strict build can die without naming the step. (Found live: three silent
+# Mission Center failures before this line existed.)
+set -E
+
 # Plain build-log helper. The exec-era `[ct]` progress protocol (the control-server parsed
 # `    [ct] <msg>` lines out of `docker exec`) is gone — this is a straight `docker build`,
 # so a step line is just a build-log line.
