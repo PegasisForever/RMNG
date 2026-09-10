@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -1162,14 +1163,9 @@ pub(crate) fn codex_parity_stamp_entry_for(entries: &[TarEntry]) -> TarEntry {
 /// Anything present-but-unparseable is a hard error — matching the old jq merges, which
 /// failed on those rather than silently repairing a file the operator may be editing.
 /// Reads straight from the clone's live home (merged view), no daemon roundtrip.
-async fn read_json_merge_base(
-    _app: &App,
-    clone_id: &str,
-    rel_path: &str,
-    label: &str,
-) -> Result<serde_json::Value> {
-    let raw = match crate::home_overlay::read_clone_home(clone_id, rel_path)
-        .with_context(|| format!("{clone_id}: reading {label}"))?
+fn read_json_merge_base(homes: &Path, clone_id: &str, rel_path: &str) -> Result<serde_json::Value> {
+    let raw = match crate::home_overlay::read_home_file(homes, clone_id, rel_path)
+        .with_context(|| format!("{clone_id}: reading ~/{rel_path}"))?
     {
         None => return Ok(serde_json::json!({})),
         Some(bytes) => bytes,
@@ -1178,33 +1174,157 @@ async fn read_json_merge_base(
     if text.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
-    serde_json::from_str(&text).with_context(|| format!("{clone_id}: {label} is not valid JSON"))
+    serde_json::from_str(&text)
+        .with_context(|| format!("{clone_id}: ~/{rel_path} is not valid JSON"))
 }
 
-/// Write one managed guest file straight into the clone's live home (atomic temp +
-/// rename, 0600, clone-owned) — the clone sees it instantly, with no guest shell and no
-/// tar roundtrip.
-async fn upload_guest_file(
-    _app: &App,
-    clone_id: &str,
-    rel_path: &str,
-    data: Vec<u8>,
-    label: &str,
-) -> Result<()> {
-    upload_guest_file_at_mode(_app, clone_id, rel_path, data, 0o600, label).await
+/// Each group has one completion stamp. Hooks share a stamp with their probe.
+#[derive(Clone, Copy)]
+enum HomeContent {
+    Claude,
+    Cursor,
+    Pi,
+    Hooks,
+    Codex,
 }
 
-/// [`upload_guest_file`] with an explicit mode (hook registrations are 0644, not 0600).
-async fn upload_guest_file_at_mode(
-    _app: &App,
-    clone_id: &str,
-    rel_path: &str,
-    data: Vec<u8>,
-    mode: u32,
-    label: &str,
-) -> Result<()> {
-    crate::home_overlay::write_clone_home(clone_id, rel_path, &data, mode)
-        .with_context(|| format!("{clone_id}: writing {label}"))
+impl HomeContent {
+    const ALL: [Self; 5] = [
+        Self::Claude,
+        Self::Cursor,
+        Self::Pi,
+        Self::Hooks,
+        Self::Codex,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "claude-mcp",
+            Self::Cursor => "cursor-mcp",
+            Self::Pi => "pi-mcp",
+            Self::Hooks => "claude-hook",
+            Self::Codex => "codex-mcp",
+        }
+    }
+
+    fn stamp(self, headless: bool, linear_key: &str) -> TarEntry {
+        match self {
+            Self::Claude => claude_mcp_stamp_entry_for(headless),
+            Self::Cursor => cursor_mcp_stamp_entry_for(headless, linear_key),
+            Self::Pi => pi_mcp_stamp_entry_for(headless, linear_key),
+            Self::Hooks => claude_hook_stamp_entry(),
+            Self::Codex => codex_mcp_stamp_entry_for(headless),
+        }
+    }
+
+    fn entries(
+        self,
+        homes: &Path,
+        id: &str,
+        headless: bool,
+        linear_key: &str,
+    ) -> Result<Vec<TarEntry>> {
+        let json = |path| read_json_merge_base(homes, id, path);
+        let mut entries = if matches!(self, Self::Hooks) {
+            rmng_hook_entries()
+        } else {
+            Vec::new()
+        };
+        let mut add = |path: &str, text: String, mode| {
+            entries.push(TarEntry {
+                path: format!("home/rmng/{path}"),
+                data: text.into_bytes(),
+                mode,
+                uid: CLONE_UID,
+                gid: CLONE_GID,
+            })
+        };
+        match self {
+            Self::Claude => add(
+                ".claude.json",
+                merge_claude_mcp(&json(".claude.json")?, headless)?.to_string(),
+                0o600,
+            ),
+            Self::Cursor => add(
+                ".cursor/mcp.json",
+                merge_cursor_mcp(&json(".cursor/mcp.json")?, headless, linear_key)?.to_string(),
+                0o600,
+            ),
+            Self::Pi => add(
+                ".config/mcp/mcp.json",
+                merge_pi_mcp(&json(".config/mcp/mcp.json")?, headless, linear_key)?.to_string(),
+                0o600,
+            ),
+            Self::Hooks => {
+                add(
+                    ".claude/settings.json",
+                    merge_claude_hooks(&json(".claude/settings.json")?)?.to_string(),
+                    0o644,
+                );
+                add(
+                    ".cursor/hooks.json",
+                    merge_cursor_hooks(&json(".cursor/hooks.json")?)?.to_string(),
+                    0o644,
+                );
+            }
+            Self::Codex => {
+                let raw = crate::home_overlay::read_home_file(homes, id, ".codex/config.toml")?
+                    .unwrap_or_default();
+                add(
+                    ".codex/config.toml",
+                    merge_codex_config(&String::from_utf8_lossy(&raw), headless),
+                    0o600,
+                );
+            }
+        }
+        Ok(entries)
+    }
+}
+
+/// Render against the mounted home, including inherited image files and fork carryover.
+/// No writes occur until every merge succeeds. Provision uploads files and stamps pre-boot.
+pub(crate) fn managed_home_entries(
+    homes: &Path,
+    id: &str,
+    headless: bool,
+    linear_key: &str,
+) -> Result<Vec<TarEntry>> {
+    let mut entries = Vec::new();
+    for content in HomeContent::ALL {
+        entries.extend(
+            content
+                .entries(homes, id, headless, linear_key)
+                .with_context(|| format!("{id}: merging {}", content.label()))?,
+        );
+        entries.push(content.stamp(headless, linear_key));
+    }
+    Ok(entries)
+}
+
+async fn ensure_home_content(
+    app: &App,
+    id: &str,
+    content: HomeContent,
+    headless: bool,
+    linear_key: &str,
+) -> Result<bool> {
+    let stamp = content.stamp(headless, linear_key);
+    if read_stamp(app, id, &stamp.path, content.label())
+        .await?
+        .as_deref()
+        == Some(String::from_utf8_lossy(&stamp.data).trim())
+    {
+        return Ok(false);
+    }
+    for entry in content.entries(Path::new(crate::zfs::HOMES_DIR), id, headless, linear_key)? {
+        let path = entry
+            .path
+            .strip_prefix("home/rmng/")
+            .expect("managed home entry");
+        crate::home_overlay::write_clone_home(id, path, &entry.data, entry.mode)?;
+    }
+    app.docker.upload_tar(id, vec![stamp]).await?;
+    Ok(true)
 }
 
 /// Interactive Claude Code (and the inner Cursor agent / any human `claude`) reads its MCP servers
@@ -1637,185 +1757,6 @@ async fn ensure_codex_parity(
     Ok(true)
 }
 
-/// Keep interactive Claude Code's `~/.claude.json` MCP set in sync (desktop headed-only, linear
-/// always). Read-merge-write against the clone's live home: no guest shell, and the operator's
-/// project history in that file is never at the mercy of a heredoc. Stamped on the
-/// canonical merge output so it only runs when the desired set changes — retrofitting
-/// `desktop` onto existing headed clones and removing it from existing headless ones on
-/// the reconciler's next pass.
-async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<bool> {
-    let desired = claude_mcp_desired(headless);
-    if read_stamp(app, clone_id, claude_mcp_stamp_path(), "claude mcp")
-        .await?
-        .as_deref()
-        == Some(desired.as_str())
-    {
-        return Ok(false);
-    }
-    let base = read_json_merge_base(app, clone_id, ".claude.json", "~/.claude.json").await?;
-    let merged = merge_claude_mcp(&base, headless)
-        .with_context(|| format!("{clone_id}: merging ~/.claude.json MCP"))?;
-    upload_guest_file(
-        app,
-        clone_id,
-        ".claude.json",
-        merged.to_string().into_bytes(),
-        "~/.claude.json MCP",
-    )
-    .await?;
-    app.docker
-        .upload_tar(clone_id, vec![claude_mcp_stamp_entry_for(headless)])
-        .await
-        .with_context(|| format!("{clone_id}: writing claude mcp stamp"))?;
-    Ok(true)
-}
-
-/// Keep Cursor's `~/.cursor/mcp.json` pointed at the same managed servers, so the agent a person
-/// drives in the clone's IDE has the tools the CLI agents already have. Read-merge-write
-/// against the clone's live home; stamped on a hash of the canonical output, so a headless flip or a
-/// rotated Linear key re-applies on the next pass.
-async fn ensure_cursor_mcp(
-    app: &App,
-    clone_id: &str,
-    headless: bool,
-    linear_key: &str,
-) -> Result<bool> {
-    let desired = cursor_mcp_desired(headless, linear_key);
-    if read_stamp(app, clone_id, cursor_mcp_stamp_path(), "cursor mcp")
-        .await?
-        .as_deref()
-        == Some(desired.as_str())
-    {
-        return Ok(false);
-    }
-    let base =
-        read_json_merge_base(app, clone_id, ".cursor/mcp.json", "~/.cursor/mcp.json").await?;
-    let merged = merge_cursor_mcp(&base, headless, linear_key)
-        .with_context(|| format!("{clone_id}: merging ~/.cursor/mcp.json MCP"))?;
-    upload_guest_file(
-        app,
-        clone_id,
-        ".cursor/mcp.json",
-        merged.to_string().into_bytes(),
-        "~/.cursor/mcp.json MCP",
-    )
-    .await?;
-    app.docker
-        .upload_tar(
-            clone_id,
-            vec![cursor_mcp_stamp_entry_for(headless, linear_key)],
-        )
-        .await
-        .with_context(|| format!("{clone_id}: writing cursor mcp stamp"))?;
-    Ok(true)
-}
-
-/// Keep the pi-mcp-adapter's user-global `~/.config/mcp/mcp.json` pointed at the same
-/// managed servers, so a TUI pi with the adapter extension installed gets the tools with
-/// zero config. Read-merge-write against the clone's live home; stamped like the rest.
-async fn ensure_pi_mcp(
-    app: &App,
-    clone_id: &str,
-    headless: bool,
-    linear_key: &str,
-) -> Result<bool> {
-    let desired = pi_mcp_desired(headless, linear_key);
-    if read_stamp(app, clone_id, pi_mcp_stamp_path(), "pi mcp")
-        .await?
-        .as_deref()
-        == Some(desired.as_str())
-    {
-        return Ok(false);
-    }
-    let base = read_json_merge_base(
-        app,
-        clone_id,
-        ".config/mcp/mcp.json",
-        "~/.config/mcp/mcp.json",
-    )
-    .await?;
-    let merged = merge_pi_mcp(&base, headless, linear_key)
-        .with_context(|| format!("{clone_id}: merging ~/.config/mcp/mcp.json MCP"))?;
-    upload_guest_file(
-        app,
-        clone_id,
-        ".config/mcp/mcp.json",
-        merged.to_string().into_bytes(),
-        "~/.config/mcp/mcp.json MCP",
-    )
-    .await?;
-    app.docker
-        .upload_tar(clone_id, vec![pi_mcp_stamp_entry_for(headless, linear_key)])
-        .await
-        .with_context(|| format!("{clone_id}: writing pi mcp stamp"))?;
-    Ok(true)
-}
-
-/// Install the activity probe and register it in Claude Code's settings.
-///
-/// Claude Code reloads `settings.json` live, so an already-running agent picks the hooks up
-/// with no restart. Confirmed on a 32-clone fleet: seven clones that were sitting idle at
-/// install time logged events on their next turn without being touched.
-async fn ensure_claude_hook(app: &App, clone_id: &str) -> Result<bool> {
-    let desired = claude_hook_desired();
-    if read_stamp(app, clone_id, claude_hook_stamp_path(), "claude hook")
-        .await?
-        .as_deref()
-        == Some(desired.as_str())
-    {
-        return Ok(false);
-    }
-    // Probe straight into the live home (0755: it executes); parents come pre-created
-    // from the template, with write_clone_home as backstop.
-    crate::home_overlay::write_clone_home(
-        clone_id,
-        ".rmng/hook.py",
-        RMNG_HOOK_PY.as_bytes(),
-        0o755,
-    )
-    .with_context(|| format!("{clone_id}: writing the activity probe"))?;
-    // Registrations merge into the operator's own settings files (0644, as before).
-    for (rel, label, merged) in [
-        (
-            ".claude/settings.json",
-            "~/.claude/settings.json",
-            merge_claude_hooks(
-                &read_json_merge_base(
-                    app,
-                    clone_id,
-                    ".claude/settings.json",
-                    "~/.claude/settings.json",
-                )
-                .await?,
-            ),
-        ),
-        (
-            ".cursor/hooks.json",
-            "~/.cursor/hooks.json",
-            merge_cursor_hooks(
-                &read_json_merge_base(app, clone_id, ".cursor/hooks.json", "~/.cursor/hooks.json")
-                    .await?,
-            ),
-        ),
-    ] {
-        let merged = merged.with_context(|| format!("{clone_id}: merging {label} hooks"))?;
-        upload_guest_file_at_mode(
-            app,
-            clone_id,
-            rel,
-            merged.to_string().into_bytes(),
-            0o644,
-            label,
-        )
-        .await?;
-    }
-    app.docker
-        .upload_tar(clone_id, vec![claude_hook_stamp_entry()])
-        .await
-        .with_context(|| format!("{clone_id}: writing claude hook stamp"))?;
-    Ok(true)
-}
-
 fn codex_mcp_stamp_path() -> &'static str {
     "etc/rmng/codex-mcp"
 }
@@ -1842,42 +1783,6 @@ pub(crate) fn codex_mcp_stamp_entry_for(headless: bool) -> TarEntry {
         uid: 0,
         gid: 0,
     }
-}
-
-/// Keep Codex's `~/.codex/config.toml` MCP tables in sync (desktop headed-only, linear always),
-/// merging rather than overwriting so the operator's own settings in that file survive.
-/// Read-merge-write against the clone's live home.
-async fn ensure_codex_mcp(app: &App, clone_id: &str, headless: bool) -> Result<bool> {
-    let desired = codex_mcp_desired(headless);
-    if read_stamp(app, clone_id, codex_mcp_stamp_path(), "codex mcp")
-        .await?
-        .as_deref()
-        == Some(desired.as_str())
-    {
-        return Ok(false);
-    }
-    // Missing file merges from empty (the old script created it); TOML is line-merged so
-    // nothing present-but-unusual can fail the parse — it passes through untouched.
-    let current = crate::home_overlay::read_clone_home(clone_id, ".codex/config.toml")
-        .with_context(|| format!("{clone_id}: reading ~/.codex/config.toml"))?;
-    let text = current
-        .as_deref()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .unwrap_or_default();
-    let merged = merge_codex_config(&text, headless);
-    upload_guest_file(
-        app,
-        clone_id,
-        ".codex/config.toml",
-        merged.into_bytes(),
-        "~/.codex/config.toml MCP",
-    )
-    .await?;
-    app.docker
-        .upload_tar(clone_id, vec![codex_mcp_stamp_entry_for(headless)])
-        .await
-        .with_context(|| format!("{clone_id}: writing codex mcp stamp"))?;
-    Ok(true)
 }
 
 async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Result<bool> {
@@ -2075,117 +1980,23 @@ async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSe
         }
     }
 
-    // Interactive Claude Code's `~/.claude.json` MCP set (desktop headed-only + linear). jq
-    // merge, stamped on the headless bit. Best-effort — a failure is logged and retried.
-    match ensure_claude_mcp(app, id, h.headless).await {
-        Ok(true) => {
-            warned.remove(&format!("{id}:claude-mcp"));
-            tracing::info!(
-                target: "clone_reconcile",
-                "clone {id}: synced ~/.claude.json MCP servers (headless={})",
-                h.headless
-            );
-        }
-        Ok(false) => {
-            warned.remove(&format!("{id}:claude-mcp"));
-        }
-        Err(e) => {
-            if warned.insert(format!("{id}:claude-mcp")) {
-                tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile failed: {e:#}");
-            } else {
-                tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile still failing: {e:#}");
+    // Independent stamps: a failed merge must not block another content group.
+    for content in HomeContent::ALL {
+        let label = content.label();
+        let key = format!("{id}:{label}");
+        match ensure_home_content(app, id, content, h.headless, &linear_key).await {
+            Ok(changed) => {
+                warned.remove(&key);
+                if changed {
+                    tracing::info!(target: "clone_reconcile", "clone {id}: synced {label} (headless={})", h.headless);
+                }
             }
-        }
-    }
-
-    // Cursor's `~/.cursor/mcp.json`, the same managed set the CLI agents get. Merged, not
-    // rewritten: the operator's own servers share that file.
-    match ensure_cursor_mcp(app, id, h.headless, &linear_key).await {
-        Ok(true) => {
-            warned.remove(&format!("{id}:cursor-mcp"));
-            tracing::info!(
-                target: "clone_reconcile",
-                "clone {id}: synced ~/.cursor/mcp.json MCP servers (headless={})",
-                h.headless
-            );
-        }
-        Ok(false) => {
-            warned.remove(&format!("{id}:cursor-mcp"));
-        }
-        Err(e) => {
-            if warned.insert(format!("{id}:cursor-mcp")) {
-                tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile failed: {e:#}");
-            } else {
-                tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile still failing: {e:#}");
-            }
-        }
-    }
-
-    // The pi-mcp-adapter's `~/.config/mcp/mcp.json`: same set, adapter schema.
-    // Merged, not rewritten: the operator's own servers share that file.
-    match ensure_pi_mcp(app, id, h.headless, &linear_key).await {
-        Ok(true) => {
-            warned.remove(&format!("{id}:pi-mcp"));
-            tracing::info!(
-                target: "clone_reconcile",
-                "clone {id}: synced ~/.config/mcp/mcp.json MCP servers (headless={})",
-                h.headless
-            );
-        }
-        Ok(false) => {
-            warned.remove(&format!("{id}:pi-mcp"));
-        }
-        Err(e) => {
-            if warned.insert(format!("{id}:pi-mcp")) {
-                tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.config/mcp/mcp.json MCP reconcile failed: {e:#}");
-            } else {
-                tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.config/mcp/mcp.json MCP reconcile still failing: {e:#}");
-            }
-        }
-    }
-
-    // The activity probe: `~/.rmng/hook.py` plus its registration under `.hooks` in
-    // `~/.claude/settings.json`. What tells working from stuck (see `crate::stuck`).
-    // Stamped on a hash of the script, so editing it re-pushes fleet-wide by itself.
-    match ensure_claude_hook(app, id).await {
-        Ok(true) => {
-            warned.remove(&format!("{id}:claude-hook"));
-            tracing::info!(
-                target: "clone_reconcile",
-                "clone {id}: installed the activity probe and registered its hooks"
-            );
-        }
-        Ok(false) => {
-            warned.remove(&format!("{id}:claude-hook"));
-        }
-        Err(e) => {
-            if warned.insert(format!("{id}:claude-hook")) {
-                tracing::warn!(target: "clone_reconcile", "clone {id}: activity probe install failed: {e:#}");
-            } else {
-                tracing::debug!(target: "clone_reconcile", "clone {id}: activity probe install still failing: {e:#}");
-            }
-        }
-    }
-
-    // Codex's `~/.codex/config.toml` MCP tables. A MERGE, not a rewrite: everything else in
-    // that file is the operator's (model, approval_policy, sandbox, their own MCP servers).
-    match ensure_codex_mcp(app, id, h.headless).await {
-        Ok(true) => {
-            warned.remove(&format!("{id}:codex-mcp"));
-            tracing::info!(
-                target: "clone_reconcile",
-                "clone {id}: merged ~/.codex/config.toml MCP servers (headless={})",
-                h.headless
-            );
-        }
-        Ok(false) => {
-            warned.remove(&format!("{id}:codex-mcp"));
-        }
-        Err(e) => {
-            if warned.insert(format!("{id}:codex-mcp")) {
-                tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.codex/config.toml MCP merge failed: {e:#}");
-            } else {
-                tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.codex/config.toml MCP merge still failing: {e:#}");
+            Err(e) => {
+                if warned.insert(key) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: {label} reconcile failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: {label} reconcile still failing: {e:#}");
+                }
             }
         }
     }
@@ -2708,48 +2519,147 @@ mod tests {
         assert!(TEMPLATE_PHASE_30.contains("/.agents/skills/rmng-cli"));
     }
 
-    /// The create path renders merge-owned files by running the merges on an empty base
-    /// (single code path for create and converge — no separate initial renderers). The
-    /// template bakes none of the targets, so on a fresh clone the base is always empty.
     #[test]
-    fn preboot_files_are_the_merges_on_empty_base() {
-        // ~/.claude.json: headed gets both servers, headless skips desktop.
-        let v = merge_claude_mcp(&serde_json::json!({}), false).unwrap();
-        assert_eq!(
-            v["mcpServers"]["linear"]["url"],
-            "https://mcp.linear.app/mcp"
-        );
-        assert_eq!(
-            v["mcpServers"]["linear"]["headers"]["Authorization"],
-            "Bearer ${LINEAR_API_KEY}"
-        );
-        assert_eq!(v["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
-        let v = merge_claude_mcp(&serde_json::json!({}), true).unwrap();
-        assert!(v["mcpServers"].get("desktop").is_none());
-        assert!(v["mcpServers"].get("linear").is_some());
-        // ~/.cursor/mcp.json: merge sets exactly the wanted servers.
-        let v = merge_cursor_mcp(&serde_json::json!({}), false, "lin_key").unwrap();
-        assert_eq!(v["mcpServers"], cursor_mcp_want(false, "lin_key"));
-        // ~/.codex/config.toml: merge renders the managed tables onto nothing.
-        let toml = codex_mcp_toml(false);
-        assert!(toml.contains("[mcp_servers.desktop]") && toml.contains("[mcp_servers.linear]"));
-        assert!(!codex_mcp_toml(true).contains("desktop"));
-        assert_eq!(merge_codex_config("", false), toml);
-        // Hook registrations: whole-`.hooks` assignment on `{}` (+ version for Cursor).
-        let v: serde_json::Value = serde_json::from_str(&claude_settings_initial()).unwrap();
-        assert_eq!(v["hooks"].as_object().unwrap().len(), HOOK_EVENTS.len());
-        for event in HOOK_EVENTS {
-            let cmd = v["hooks"][event][0]["hooks"][0]["command"]
-                .as_str()
-                .unwrap();
-            assert_eq!(cmd, HOOK_IN_CLONE, "{event} points at the probe");
+    fn preboot_content_preserves_carried_files_and_matches_live_content() {
+        use crate::home_overlay::write_home_file;
+        let homes = std::env::temp_dir().join(format!("rmng-content-{}", std::process::id()));
+        for (headless, key) in [
+            (false, ""),
+            (true, ""),
+            (false, "lin_key"),
+            (true, "lin_key"),
+        ] {
+            let _ = std::fs::remove_dir_all(&homes);
+            std::fs::create_dir_all(homes.join(".merged/c1")).unwrap();
+            let empty = managed_home_entries(&homes, "c1", headless, key).unwrap();
+            let user = br#"{"keep":42,"mcpServers":{"custom":{"command":"user"}}}"#;
+            for entry in &empty {
+                if let Some(path) = entry.path.strip_prefix("home/rmng/") {
+                    let data = if path.ends_with(".json") {
+                        user.as_slice()
+                    } else if path.ends_with(".toml") {
+                        b"model = \"user-model\"\n[mcp_servers.custom]\ncommand = \"user\"\n"
+                    } else {
+                        continue;
+                    };
+                    write_home_file(&homes, "c1", path, data, entry.mode).unwrap();
+                }
+            }
+            let entries = managed_home_entries(&homes, "c1", headless, key).unwrap();
+            assert_eq!(entries.len(), 12); // Seven files and five independent completion stamps.
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|e| &e.path)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                12
+            );
+            let json = |path: &str| -> serde_json::Value {
+                serde_json::from_slice(&entries.iter().find(|e| e.path == path).unwrap().data)
+                    .unwrap()
+            };
+            for name in [".claude.json", ".cursor/mcp.json", ".config/mcp/mcp.json"] {
+                let v = json(&format!("home/rmng/{name}"));
+                assert_eq!(v["keep"], 42);
+                assert_eq!(v["mcpServers"]["custom"]["command"], "user");
+                assert_eq!(v["mcpServers"].get("desktop").is_some(), !headless);
+                assert_eq!(
+                    v["mcpServers"].get("linear").is_some(),
+                    name == ".claude.json" || !key.is_empty()
+                );
+            }
+            if !key.is_empty() {
+                assert_eq!(
+                    json("home/rmng/.cursor/mcp.json")["mcpServers"]["linear"]["headers"]["Authorization"],
+                    format!("Bearer {key}")
+                );
+                assert_eq!(
+                    json("home/rmng/.config/mcp/mcp.json")["mcpServers"]["linear"]["bearerTokenEnv"],
+                    "LINEAR_API_KEY"
+                );
+            }
+            for (path, count) in [
+                (".claude/settings.json", HOOK_EVENTS.len()),
+                (".cursor/hooks.json", CURSOR_HOOK_EVENTS.len()),
+            ] {
+                let v = json(&format!("home/rmng/{path}"));
+                assert_eq!(v["keep"], 42);
+                assert_eq!(v["hooks"].as_object().unwrap().len(), count);
+            }
+            let codex = &entries
+                .iter()
+                .find(|e| e.path.ends_with("config.toml"))
+                .unwrap()
+                .data;
+            let codex = String::from_utf8_lossy(codex);
+            assert!(
+                codex.contains("model = \"user-model\"") && codex.contains("[mcp_servers.custom]")
+            );
+            assert_eq!(codex.contains("[mcp_servers.desktop]"), !headless);
+            assert!(codex.contains("bearer_token_env_var = \"LINEAR_API_KEY\""));
+            for content in HomeContent::ALL {
+                let stamp = content.stamp(headless, key);
+                let index = entries.iter().position(|e| e.path == stamp.path).unwrap();
+                assert_eq!(entries[index].data, stamp.data);
+                assert_eq!(
+                    (entries[index].mode, entries[index].uid, entries[index].gid),
+                    (0o644, 0, 0)
+                );
+                // The live path uses these exact entries; its stamp follows every file.
+                for live in content.entries(&homes, "c1", headless, key).unwrap() {
+                    let position = entries.iter().position(|e| e.path == live.path).unwrap();
+                    assert!(position < index);
+                    assert_eq!(entries[position].data, live.data);
+                }
+            }
+            for entry in &entries {
+                if let Some(path) = entry.path.strip_prefix("home/rmng/") {
+                    assert_eq!((entry.uid, entry.gid), (1000, 1000));
+                    let mode = if path.ends_with("hook.py") {
+                        0o755
+                    } else if path.ends_with("settings.json") || path.ends_with("hooks.json") {
+                        0o644
+                    } else {
+                        0o600
+                    };
+                    assert_eq!(entry.mode, mode);
+                    write_home_file(&homes, "c1", path, &entry.data, entry.mode).unwrap();
+                }
+            }
+            let repeated = managed_home_entries(&homes, "c1", headless, key).unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|e| (&e.path, &e.data))
+                    .collect::<Vec<_>>(),
+                repeated
+                    .iter()
+                    .map(|e| (&e.path, &e.data))
+                    .collect::<Vec<_>>()
+            );
         }
-        let v: serde_json::Value = serde_json::from_str(&cursor_hooks_initial()).unwrap();
-        assert_eq!(v["version"], 1);
-        assert_eq!(
-            v["hooks"].as_object().unwrap().len(),
-            CURSOR_HOOK_EVENTS.len()
-        );
+        std::fs::remove_dir_all(homes).unwrap();
+    }
+
+    #[test]
+    fn malformed_carried_content_returns_no_bundle_and_writes_nothing() {
+        let homes =
+            std::env::temp_dir().join(format!("rmng-content-invalid-{}", std::process::id()));
+        let path = homes.join(".merged/c1/.cursor/hooks.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bad in ["{broken", "[]"] {
+            std::fs::write(&path, bad).unwrap();
+            assert!(managed_home_entries(&homes, "c1", false, "key").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
+            assert!(!homes.join(".merged/c1/.rmng/hook.py").exists());
+        }
+        std::fs::write(&path, " \n").unwrap();
+        assert!(managed_home_entries(&homes, "c1", true, "").is_ok());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(managed_home_entries(&homes, "c1", false, "key").is_err());
+        std::fs::remove_dir_all(homes).unwrap();
     }
 
     #[test]

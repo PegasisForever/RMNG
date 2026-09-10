@@ -1,8 +1,8 @@
-import { moveMember, type TreeGroup } from "./groupTree";
-
 /** Editor-only identity. Names and list positions are not identities. */
-export interface EditorGroup extends TreeGroup {
+export interface EditorGroup {
   id: string;
+  name: string;
+  accounts: string[];
 }
 
 export type TreeDragItem =
@@ -46,12 +46,16 @@ export function applyTreeDrop(
     return null;
   if (from === to && (target.index === index || target.index === index + 1))
     return null;
-  const next = moveMember(
-    groups,
-    { group: from, index },
-    { group: to, index: target.index },
-  );
-  return next?.map((group, i) => ({ ...group, id: groups[i].id })) ?? null;
+  if (from !== to && groups[to].accounts.includes(item.email)) return null;
+  const next = groups.map((group) => ({
+    ...group,
+    accounts: [...group.accounts],
+  }));
+  next[from].accounts.splice(index, 1);
+  const insertAt =
+    from === to && index < target.index ? target.index - 1 : target.index;
+  next[to].accounts.splice(insertAt, 0, item.email);
+  return next;
 }
 
 export function isDuplicateDrop(

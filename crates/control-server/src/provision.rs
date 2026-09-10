@@ -471,13 +471,8 @@ async fn clone_container_after_create(
     );
     bins.extend(identity);
 
-    // Everything below is whole files rendered server-side, so it all joins the same
-    // pre-boot tar instead of waiting for the container: the agent playbook, Codex
-    // parity + stamp, SSH material + stamp, and the initial contents of the four
-    // merge-owned files (the template bakes none of them, so on a fresh clone
-    // merge-on-empty equals this exact content — see the `*_initial` renderers, each
-    // tested against the same source as its loop merge). The loop still merges for
-    // lived-in clones, operator edits, and fork-carryover; the create path never merges.
+    // Render content before boot. Merge-owned files use the mounted home as their base,
+    // preserving both image defaults and fork/rebase carryover.
     let mut entries: Vec<TarEntry> = Vec::new();
     // The Settings-editable agent playbook (global + preset append), read by the agent-wrapper
     // at startup (AGENT_INSTRUCTIONS_PATH). Empty ⇒ skip; the wrapper then uses its baked-in
@@ -510,71 +505,12 @@ async fn clone_container_after_create(
         Err(e) => tracing::warn!("clone {hostname}: ssh material skipped: {e}"),
     }
 
-    // Initial contents of the merge-owned files, rendered by the merges themselves on
-    // an empty base (modes match what each loop merge sets, so a matching stamp means
-    // the loop never rewrites them). One code path for create and converge.
-    let linear_key = crate::clone_reconcile::env_value(env, "LINEAR_API_KEY");
-    for (path, data, mode) in [
-        (
-            format!("home/{CLONE_USER}/.claude.json"),
-            crate::clone_reconcile::merge_claude_mcp(&serde_json::json!({}), headless)
-                .with_context(|| format!("clone {hostname}: rendering initial ~/.claude.json"))?
-                .to_string()
-                .into_bytes(),
-            0o600,
-        ),
-        (
-            format!("home/{CLONE_USER}/.cursor/mcp.json"),
-            crate::clone_reconcile::merge_cursor_mcp(&serde_json::json!({}), headless, &linear_key)
-                .with_context(|| format!("clone {hostname}: rendering initial ~/.cursor/mcp.json"))?
-                .to_string()
-                .into_bytes(),
-            0o600,
-        ),
-        (
-            format!("home/{CLONE_USER}/.codex/config.toml"),
-            crate::clone_reconcile::codex_mcp_toml(headless).into_bytes(),
-            0o600,
-        ),
-        (
-            format!("home/{CLONE_USER}/.config/mcp/mcp.json"),
-            crate::clone_reconcile::merge_pi_mcp(&serde_json::json!({}), headless, &linear_key)
-                .with_context(|| {
-                    format!("clone {hostname}: rendering initial ~/.config/mcp/mcp.json")
-                })?
-                .to_string()
-                .into_bytes(),
-            0o600,
-        ),
-        (
-            format!("home/{CLONE_USER}/.claude/settings.json"),
-            crate::clone_reconcile::claude_settings_initial().into_bytes(),
-            0o644,
-        ),
-        (
-            format!("home/{CLONE_USER}/.cursor/hooks.json"),
-            crate::clone_reconcile::cursor_hooks_initial().into_bytes(),
-            0o644,
-        ),
-    ] {
-        entries.push(TarEntry {
-            path,
-            data,
-            mode,
-            uid: CLONE_UID,
-            gid: CLONE_GID,
-        });
-    }
-    entries.push(crate::clone_reconcile::claude_mcp_stamp_entry_for(headless));
-    entries.push(crate::clone_reconcile::cursor_mcp_stamp_entry_for(
+    entries.extend(crate::clone_reconcile::managed_home_entries(
+        std::path::Path::new(crate::zfs::HOMES_DIR),
+        hostname,
         headless,
-        &linear_key,
-    ));
-    entries.push(crate::clone_reconcile::codex_mcp_stamp_entry_for(headless));
-    // The activity probe file rides the tar; its registration is rendered above as initial
-    // content. Stamp withheld only if this whole upload fails (then the loop retries).
-    entries.extend(crate::clone_reconcile::rmng_hook_entries());
-    entries.push(crate::clone_reconcile::claude_hook_stamp_entry());
+        &crate::clone_reconcile::env_value(env, "LINEAR_API_KEY"),
+    )?);
 
     // The single pre-boot tar: binaries + identity + content + stamps in one daemon
     // Post-start injects are down to the headless tmux session and wait-ready: every file
@@ -750,7 +686,12 @@ pub async fn delete_clone(
 /// vars live in the profile Dockerfile lines (stage 3); only per-clone dynamic keys are
 /// injected here. `ANTHROPIC_MODEL` is seeded at create (same value the reconciler
 /// enforces) so fresh clones have a model before the first reconcile pass.
-const GEN2_DYNAMIC_KEYS: [&str; 3] = ["RMNG_CONTROL_URL", "RMNG_PROXY_KEY", "ANTHROPIC_MODEL"];
+const GEN2_DYNAMIC_KEYS: [&str; 4] = [
+    "RMNG_CONTROL_URL",
+    "RMNG_PROXY_KEY",
+    "ANTHROPIC_MODEL",
+    "LINEAR_API_KEY",
+];
 
 /// Filter create-time env down to the dynamic keys a gen-2 clone injects.
 fn gen2_dynamic_env(env: &[EnvVar]) -> Vec<EnvVar> {
@@ -1117,6 +1058,13 @@ pub async fn rebase_clone(
 
     on_progress("stop", &format!("stopping {host_id} for rebase"));
     app.docker.stop_even_if_paused(host_id).await?;
+    // Check the stopped home; invalid content leaves the old container intact for recovery.
+    crate::clone_reconcile::managed_home_entries(
+        std::path::Path::new(crate::zfs::HOMES_DIR),
+        host_id,
+        headless,
+        &crate::clone_reconcile::env_value(env, "LINEAR_API_KEY"),
+    )?;
     app.docker.remove_container(host_id).await?;
 
     match clone_container_gen2_from_tag(
@@ -1466,9 +1414,9 @@ mod tests {
     }
 
     #[test]
-    fn gen2_dynamic_env_keeps_model_key() {
-        // ANTHROPIC_MODEL is seeded at create so fresh clones have a model before the
-        // first reconcile pass; static keys stay out (they bake into the image).
+    fn gen2_dynamic_env_keeps_model_and_linear_keys() {
+        // Model and Linear credentials must reach first boot and content rendering;
+        // static keys stay out (they bake into the image).
         let env = |key: &str| wire::EnvVar {
             key: key.into(),
             value: "v".into(),
@@ -1477,6 +1425,7 @@ mod tests {
             env("RMNG_CONTROL_URL"),
             env("RMNG_PROXY_KEY"),
             env("ANTHROPIC_MODEL"),
+            env("LINEAR_API_KEY"),
             env("SOME_STATIC"),
         ])
         .into_iter()
@@ -1484,7 +1433,12 @@ mod tests {
         .collect();
         assert_eq!(
             got,
-            vec!["RMNG_CONTROL_URL", "RMNG_PROXY_KEY", "ANTHROPIC_MODEL"]
+            vec![
+                "RMNG_CONTROL_URL",
+                "RMNG_PROXY_KEY",
+                "ANTHROPIC_MODEL",
+                "LINEAR_API_KEY"
+            ]
         );
     }
 

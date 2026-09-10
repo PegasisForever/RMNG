@@ -31,6 +31,10 @@ test("a member moves once into the selected group, retaining unrelated reference
   ]);
   expect(output?.map((group) => group.id)).toEqual(["a", "b", "c", "d"]);
   expect(input).toEqual(original);
+  output?.forEach((group, i) => {
+    expect(group).not.toBe(input[i]);
+    expect(group.accounts).not.toBe(input[i].accounts);
+  });
 });
 
 test("member insertion boundaries work in both directions and at either end", () => {
@@ -102,6 +106,14 @@ test("groups retain identities and members through successive reorders, even wit
     { kind: "group", index: 0 },
   );
   expect(up).toEqual(original);
+  const moved = applyTreeDrop(down!, member, {
+    kind: "member",
+    groupId: "b",
+    index: 1,
+  });
+  expect(moved?.map((group) => group.id)).toEqual(["b", "c", "d", "a"]);
+  expect(moved?.[0].accounts).toEqual(["d@x", "a@x"]);
+  expect(moved?.[3].accounts).toEqual(["b@x", "c@x"]);
 });
 
 test("invalid or stale drops cannot alter another item", () => {
@@ -123,9 +135,21 @@ test("invalid or stale drops cannot alter another item", () => {
     [member, { kind: "member", groupId: "b", index: -1 }],
     [member, { kind: "member", groupId: "b", index: 9 }],
     [member, { kind: "member", groupId: "b", index: Number.NaN }],
+    [member, { kind: "member", groupId: "b", index: 0.5 }],
+    [member, { kind: "member", groupId: "b", index: Infinity }],
+    [
+      { ...member, groupId: "missing" },
+      { kind: "member", groupId: "b", index: 0 },
+    ],
+    [
+      { kind: "group", groupId: "a" },
+      { kind: "group", index: -1 },
+    ],
   ];
-  for (const [item, target] of cases)
+  for (const [item, target] of cases) {
     expect(applyTreeDrop(tree(), item, target)).toBeNull();
+    expect(applyTreeDrop([], item, target)).toBeNull();
+  }
 });
 
 test("every possible member drop preserves the membership multiset and leaves the input unchanged", () => {

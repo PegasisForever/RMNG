@@ -80,10 +80,11 @@ the same absence, so tolerating it here would only delay the failure by one pass
   `etc/fish/conf.d/rmng-preset-path.fish` + `etc/profile.d/rmng-preset-path.sh`.
 - Content: playbook (`~/.config/rmng/agent-instructions.md`, skipped when empty),
   Codex parity files + stamp, SSH host key + `authorized_keys` + stamp, probe file
-  (`~/.rmng/hook.py`) + stamp, and the initial contents of the four merge-owned
-  files (`~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex/config.toml`,
-  `~/.claude/settings.json`, `~/.cursor/hooks.json`) + their four stamps — all
-  rendered server-side, all stamped so the loop's first pass is a no-op.
+  (`~/.rmng/hook.py`), and six merge-owned files: `~/.claude.json`,
+  `~/.cursor/mcp.json`, `~/.codex/config.toml`, `~/.config/mcp/mcp.json`,
+  `~/.claude/settings.json`, and `~/.cursor/hooks.json`. Pre-boot and live updates
+  share merge rules and five completion stamps; carried user fields survive.
+  Malformed JSON fails before upload; rebase also checks before removing its container.
 
 Mounts (create-spec binds, present from first boot — always mounted, no empty skips):
 
@@ -114,7 +115,7 @@ remains post-boot needs a live container:
 
 There is no reconciler loop. `clone_reconcile::run` does one full boot pass and exits.
 Everything converges via explicit triggers, all funnelling into the same full-chain
-function (`sync_clone_contents` — SSH, env, parity, three MCP merges, probe, payload;
+function (`sync_clone_contents` — SSH, env, parity, four MCP merges, probe, payload;
 stamped and idempotent throughout):
 
 - Create: the single pre-boot tar (list 2) stamps everything — no trigger needed.
