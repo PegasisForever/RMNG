@@ -130,7 +130,7 @@ log "Zed installed: /opt/zed.app/bin/zed + dev.zed.Zed.desktop"
 # `mc_install` call below carry no `|| warn` anymore.
 mc_install(){
   local url d
-  url="$(curl -fsSL 'https://gitlab.com/api/v4/projects/mission-center-devs%2Fmission-center/releases' 2>/dev/null | grep -oE 'https://[^"]+x86_64\.AppImage' | head -1)"
+  url="$(curl -fsSL 'https://gitlab.com/api/v4/projects/mission-center-devs%2Fmission-center/releases' 2>/dev/null | grep -oE 'https://[^"]+x86_64\.AppImage' | head -1 || true)"
   [ -n "$url" ] || return 1
   curl -fsSL "$url" -o /tmp/mc.AppImage || return 1
   chmod +x /tmp/mc.AppImage
@@ -164,7 +164,7 @@ mona_install(){
   [ -n "$json" ] || return 1
   rm -rf /tmp/mona; mkdir -p /tmp/mona /usr/share/fonts/monaspace
   for v in static frozen variable; do
-    url="$(echo "$json" | grep -oE "https://[^\"]+monaspace-$v-[^\"]+\.zip" | head -1)"
+    url="$(echo "$json" | grep -oE "https://[^\"]+monaspace-$v-[^\"]+\.zip" | head -1 || true)"
     [ -n "$url" ] || return 1
     curl -fsSL "$url" -o "/tmp/mona/$v.zip"
     unzip -oq "/tmp/mona/$v.zip" -d "/tmp/mona/$v"
@@ -172,7 +172,7 @@ mona_install(){
   find /tmp/mona -type f \( -iname '*.otf' -o -iname '*.ttf' \) -exec cp -f {} /usr/share/fonts/monaspace/ \;
   fc-cache -f >/dev/null 2>&1
   rm -rf /tmp/mona
-  [ -n "$(find /usr/share/fonts/monaspace -type f -name '*.ttf' 2>/dev/null | head -1)" ]
+  [ -n "$(find /usr/share/fonts/monaspace -type f -name '*.ttf' 2>/dev/null | head -1 || true)" ]
 }
 log "dev toolbox: Monaspace fonts (full: static + frozen + variable)"
 mona_install
