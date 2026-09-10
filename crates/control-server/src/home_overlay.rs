@@ -111,9 +111,12 @@ fn lower_of_line_strict(line: &str, wanted: &str) -> Result<String> {
 
 /// Unpack an image-home tar into `dest`, stripping the single top-level directory the
 /// daemon wraps entries in. Dotfiles survive (read_dir yields them); ownership stays as
-/// archived, matching the image.
+/// archived, matching the image — `set_preserve_ownerships` is load-bearing here, the
+/// tar crate otherwise unpacks everything as the server's own uid (root) and the clone
+/// user cannot read its own home (found live: every unit stayed inactive, no Hello).
 fn unpack_skeleton(tar_bytes: &[u8], dest: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(tar_bytes);
+    archive.set_preserve_ownerships(true);
     for entry in archive.entries().context("reading skeleton tar")? {
         let mut entry = entry.context("skeleton tar entry")?;
         let path = entry.path().context("skeleton entry path")?.into_owned();
@@ -137,14 +140,22 @@ pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     let digest = app.docker.image_id(image_tag).await?;
     // NB: mount paths come from HOMES_DIR (the mountpoint), not the dataset name.
     let dest = skeleton_dir(crate::zfs::HOMES_DIR, &digest);
+    // Marker carries a version: v1 skeletons were exported WITHOUT ownership (tar-crate
+    // default) and must be re-exported, not trusted. Bump on any export-format change.
     let marker = dest.join(SKEL_MARKER);
     if std::fs::read_to_string(&marker)
-        .map(|s| s.trim() == digest)
+        .map(|s| s.trim() == format!("v2:{digest}"))
         .unwrap_or(false)
     {
         return Ok(digest);
     }
     tracing::info!(target: "overlay", "exporting {IMAGE_HOME} of {image_tag} for the home overlay");
+    // A stale dir (old marker) may hold wrongly-owned files the unpack would merge with:
+    // wipe it so the export is exactly the image, not image-over-leftovers.
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest)
+            .with_context(|| format!("clearing stale skeleton {}", dest.display()))?;
+    }
     std::fs::create_dir_all(&dest).with_context(|| format!("mkdir {}", dest.display()))?;
     // Unique per attempt: a previous export that died between create and remove leaves
     // its reader behind, and a deterministic name would 409 the retry on it. Pre-epoch
@@ -164,7 +175,7 @@ pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     let _ = app.docker.remove_container(&reader).await;
     let tar = tar?;
     unpack_skeleton(&tar, &dest)?;
-    std::fs::write(&marker, format!("{digest}\n")).context("writing skeleton marker")?;
+    std::fs::write(&marker, format!("v2:{digest}\n")).context("writing skeleton marker")?;
     Ok(digest)
 }
 
