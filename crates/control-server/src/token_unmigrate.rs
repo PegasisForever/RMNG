@@ -153,7 +153,7 @@ fn expiry_ms(expired: Option<&str>) -> Option<i64> {
     if raw.is_empty() {
         return None;
     }
-    crate::claude::parse_rfc3339_utc_secs(raw).map(|secs| secs * 1000)
+    crate::pool::parse_rfc3339_utc_secs(raw).map(|secs| secs * 1000)
 }
 
 /// Parse one auth-dir credential file body + its file name into a [`Recovered`]. `kind` comes

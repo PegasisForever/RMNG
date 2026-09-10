@@ -421,7 +421,7 @@ pub async fn remount_all(app: App) {
             }
         };
         if let Err(e) =
-            ensure_mounted(Path::new(dataset), &digest, &merged_dir(&homes, id)).await
+            ensure_mounted(Path::new(dataset), &digest, &merged_dir(homes, id)).await
         {
             tracing::warn!(target: "overlay", "remount: {id}: {e:#}");
         }

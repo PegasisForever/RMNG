@@ -806,7 +806,7 @@ fn codex_events(path: &Path, session: &str) -> Vec<HookEvent> {
         let ts = raw
             .timestamp
             .as_deref()
-            .and_then(crate::claude::parse_rfc3339_utc_secs)
+            .and_then(crate::pool::parse_rfc3339_utc_secs)
             .map_or(0.0, |secs| secs as f64);
         let str_at = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_string);
         let base = HookEvent {
@@ -984,7 +984,7 @@ fn pi_ts(line_ts: Option<&str>, msg_ts: Option<i64>) -> f64 {
         return ms as f64 / 1000.0;
     }
     line_ts
-        .and_then(crate::claude::parse_rfc3339_utc_secs)
+        .and_then(crate::pool::parse_rfc3339_utc_secs)
         .map_or(0.0, |secs| secs as f64)
 }
 

@@ -371,7 +371,7 @@ struct CodexUsageRec {
 /// use and the `±HH:MM` form (a clone in a non-UTC zone). Sub-second precision is dropped —
 /// irrelevant here, where the coarsest consumer is a 5-minute activity window.
 fn parse_ts_ms(s: &str) -> Option<i64> {
-    crate::claude::parse_rfc3339_utc_secs(s).map(|secs| secs * 1000)
+    crate::pool::parse_rfc3339_utc_secs(s).map(|secs| secs * 1000)
 }
 
 /// Whether a model id names the Fable family.

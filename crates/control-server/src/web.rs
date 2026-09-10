@@ -3,7 +3,6 @@
 //! are ported.
 
 use std::convert::Infallible;
-use std::path::Path;
 use std::time::Duration;
 
 use axum::{
@@ -2059,11 +2058,7 @@ async fn setup_env(State(app): State<App>) -> Json<wire::SetupEnv> {
 async fn server_version(State(app): State<App>) -> Json<wire::UpdateStatus> {
     let reference = wire::SERVER_IMAGE;
     let self_id = app.docker.env().await.self_container;
-    Json(
-        app.docker
-            .check_update(&reference, self_id.as_deref())
-            .await,
-    )
+    Json(app.docker.check_update(reference, self_id.as_deref()).await)
 }
 
 /// `POST /api/server/update` — pull `config.docker.serverImage` and swap the running
@@ -2071,7 +2066,7 @@ async fn server_version(State(app): State<App>) -> Json<wire::UpdateStatus> {
 /// server restarts mid-op, and the rebooted server's reconcile finalizes it.
 async fn server_update(State(app): State<App>) -> Result<Json<Operation>, (StatusCode, String)> {
     let reference = wire::SERVER_IMAGE;
-    jobs::start_update(&app, &reference)
+    jobs::start_update(&app, reference)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
@@ -2405,7 +2400,7 @@ async fn claude_swap(
     );
     crate::clone_ops::validate_group(&app, bound_group.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let assignment = crate::claude::resolve_assignment(
+    let assignment = crate::pool::resolve_assignment::<crate::pool::ClaudePool>(
         &app,
         claude_req.as_deref(),
         host.claude_account_email.as_deref(),
@@ -2419,21 +2414,21 @@ async fn claude_swap(
                 .into(),
         )
     })?;
-    let selection = crate::claude::normalize_selection(claude_req.as_deref());
+    let selection = crate::pool::normalize_selection(claude_req.as_deref());
     let (group, email) = match assignment {
-        crate::claude::Assignment::Group { name, initial } => {
+        crate::pool::Assignment::Group { name, initial } => {
             crate::claude::push_account_to_clone(&app, &host.id, &initial)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
             (Some(name), Some(initial))
         }
-        crate::claude::Assignment::Account(a) => {
+        crate::pool::Assignment::Account(a) => {
             crate::claude::push_account_to_clone(&app, &host.id, &a)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
             (None, Some(a))
         }
-        crate::claude::Assignment::AutoPending => (None, None),
+        crate::pool::Assignment::AutoPending => (None, None),
     };
     let (id, email_set, group_set, sel_set) = (
         host.id.clone(),
@@ -2532,7 +2527,7 @@ async fn codex_swap(
     );
     crate::clone_ops::validate_group(&app, bound_group.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let assignment = crate::codex::resolve_assignment(
+    let assignment = crate::pool::resolve_assignment::<crate::pool::CodexPool>(
         &app,
         codex_req.as_deref(),
         host.codex_account_email.as_deref(),
@@ -2546,21 +2541,21 @@ async fn codex_swap(
                 .into(),
         )
     })?;
-    let selection = crate::codex::normalize_selection(codex_req.as_deref());
+    let selection = crate::pool::normalize_selection(codex_req.as_deref());
     let (group, email) = match assignment {
-        crate::codex::Assignment::Group { name, initial } => {
+        crate::pool::Assignment::Group { name, initial } => {
             crate::codex::push_account_to_clone(&app, &host.id, &initial)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
             (Some(name), Some(initial))
         }
-        crate::codex::Assignment::Account(a) => {
+        crate::pool::Assignment::Account(a) => {
             crate::codex::push_account_to_clone(&app, &host.id, &a)
                 .await
                 .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
             (None, Some(a))
         }
-        crate::codex::Assignment::AutoPending => (None, None),
+        crate::pool::Assignment::AutoPending => (None, None),
     };
     let (id, email_set, group_set, sel_set) = (
         host.id.clone(),
@@ -2934,7 +2929,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        crate::clone_ops::sweep_ungrouped_accounts(&app).await.unwrap();
+        crate::clone_ops::sweep_ungrouped_accounts(&app)
+            .await
+            .unwrap();
         assert!(app.claude.get_by_email("kept@x.com").is_some());
         assert!(app.claude.get_by_email("gone@x.com").is_none());
     }

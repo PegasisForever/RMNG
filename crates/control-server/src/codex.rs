@@ -14,10 +14,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use wire::{ClaudeUsage, ClaudeUsageWindow, CloneGroup, RmngClone};
+use wire::{ClaudeUsage, ClaudeUsageWindow};
 
 use crate::app::App;
-use crate::clone_ops::{now_ms, rand_u64, shuffle, snippet};
+use crate::clone_ops::{now_ms, rand_u64, snippet};
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONSUME_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
@@ -31,13 +31,6 @@ const REFRESH_LEAD_MS: i64 = 2 * 60 * 60 * 1000;
 /// `claude::REFRESH_SPREAD_MS`.
 const REFRESH_SPREAD_MS: i64 = 90 * 60 * 1000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-const STAGGER: Duration = Duration::from_millis(400);
-
-// scoring knobs. Codex exposes only a weekly (7d) limit — the 5h session window Claude
-// still has was removed upstream — so rotation scores/gates purely on the 7d window.
-const SEVEN_DAY_CAP_PCT: f64 = 95.0;
-const RESET_STICKY_MARGIN_SECS: i64 = 15 * 60;
-const UTIL_STICKY_MARGIN_PCT: f64 = 5.0;
 const ROTATE_SECS: u64 = 600;
 /// Auto-reset only fires when every account's 7d window is at least this far from
 /// resetting (spec: "more than 24h from the next 7d reset").
@@ -46,10 +39,7 @@ const RESET_MIN_HEADROOM_SECS: i64 = 24 * 3600;
 /// Merge the `openai-codex` provider entry into a pi `auth.json` body, preserving the
 /// operator's other providers. A missing, corrupt, or non-object current file seeds
 /// from the fragment alone — same rule the old guest-side jq merge used.
-fn merge_pi_auth(
-    current: Option<&[u8]>,
-    fragment: &serde_json::Value,
-) -> serde_json::Value {
+fn merge_pi_auth(current: Option<&[u8]>, fragment: &serde_json::Value) -> serde_json::Value {
     let mut cur = current
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
         .and_then(|v| v.as_object().cloned())
@@ -183,7 +173,7 @@ impl CodexStore {
 
     /// Emails whose stored token still works: the accounts a clone may be handed. See
     /// [`account_usable`].
-    fn usable_emails(&self) -> Vec<String> {
+    pub(crate) fn usable_emails(&self) -> Vec<String> {
         let now = now_ms();
         self.accounts
             .lock()
@@ -494,8 +484,13 @@ pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredCodexAcco
         bail!("refusing to apply a non-JWT codex access token");
     }
     // `~/.codex/auth.json` is server-owned wholesale: overwrite, never merge.
-    crate::home_overlay::write_clone_home(host_id, ".codex/auth.json", auth_json(acct).as_bytes(), 0o600)
-        .with_context(|| format!("{host_id}: writing Codex auth"))?;
+    crate::home_overlay::write_clone_home(
+        host_id,
+        ".codex/auth.json",
+        auth_json(acct).as_bytes(),
+        0o600,
+    )
+    .with_context(|| format!("{host_id}: writing Codex auth"))?;
     // pi's file belongs to the operator (their other providers live in it): merge only
     // the `openai-codex` key, never overwrite. Upload only on change.
     let fragment: serde_json::Value = serde_json::from_str(&pi_auth_json(acct))
@@ -507,8 +502,13 @@ pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredCodexAcco
         .as_deref()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
     if current_value.as_ref() != Some(&merged) {
-        crate::home_overlay::write_clone_home(host_id, ".pi/agent/auth.json", merged.to_string().as_bytes(), 0o600)
-            .with_context(|| format!("{host_id}: writing pi auth"))?;
+        crate::home_overlay::write_clone_home(
+            host_id,
+            ".pi/agent/auth.json",
+            merged.to_string().as_bytes(),
+            0o600,
+        )
+        .with_context(|| format!("{host_id}: writing pi auth"))?;
     }
     Ok(())
 }
@@ -888,7 +888,9 @@ fn choose_reset_target(
     if !enabled || account_count == 0 || facts.len() != account_count {
         return None; // off, no accounts, or incomplete fresh data → never fire.
     }
-    let all_capped = facts.iter().all(|f| f.seven_pct > SEVEN_DAY_CAP_PCT);
+    let all_capped = facts
+        .iter()
+        .all(|f| f.seven_pct > crate::pool::SEVEN_DAY_CAP_PCT);
     let none_soon = facts
         .iter()
         .all(|f| f.seven_reset_at - now_secs >= RESET_MIN_HEADROOM_SECS);
@@ -914,278 +916,6 @@ fn choose_reset_target(
 }
 
 /// Drop marks whose 7d window has already elapsed (account is now in a new window).
-fn prune_marks(marks: &mut Vec<wire::CodexResetMark>, now_secs: i64) {
-    marks.retain(|m| m.window_resets_at > now_secs);
-}
-
-// --- scoring + assignment (mirrors claude.rs) -----------------------------
-
-const AUTO: &str = "auto";
-
-/// Canonicalize a raw account-selection string — the Codex twin of the Claude rule:
-/// `"auto"` or an account email; blank and legacy `"none"` both read as `"auto"`.
-pub fn normalize_selection(requested: Option<&str>) -> String {
-    let want = requested.unwrap_or("").trim();
-    if want.is_empty() || want.eq_ignore_ascii_case("none") {
-        AUTO.to_string()
-    } else {
-        want.to_string()
-    }
-}
-
-struct Scored {
-    email: String,
-    score: f64,
-    eligible: bool,
-}
-
-fn clamp01(n: f64) -> f64 {
-    n.clamp(0.0, 1.0)
-}
-
-fn score_accounts(app: &App) -> Vec<Scored> {
-    let st = app.store.get();
-    let usage: HashMap<&str, &ClaudeUsage> = st
-        .claude_accounts
-        .iter()
-        .filter(|u| u.provider == Some(wire::Provider::Codex))
-        .map(|u| (u.email.as_str(), u))
-        .collect();
-    let mut clones: HashMap<&str, u32> = HashMap::new();
-    for h in &st.hosts {
-        if let Some(e) = &h.codex_account_email {
-            *clones.entry(e.as_str()).or_insert(0) += 1;
-        }
-    }
-    app.codex
-        .usable_emails()
-        .into_iter()
-        .map(|email| {
-            let u = usage.get(email.as_str());
-            let seven = u
-                .and_then(|u| u.seven_day.as_ref())
-                .map(|w| w.pct)
-                .unwrap_or(0.0);
-            let headroom = clamp01((100.0 - seven) / 100.0);
-            let n = *clones.get(email.as_str()).unwrap_or(&0) as f64;
-            let score = headroom - 0.5 * n;
-            let eligible = seven < SEVEN_DAY_CAP_PCT;
-            Scored {
-                email,
-                score,
-                eligible,
-            }
-        })
-        .collect()
-}
-
-fn best_scored(app: &App) -> Option<String> {
-    let scored = score_accounts(app);
-    if scored.is_empty() {
-        return None;
-    }
-    let mut pool: Vec<&Scored> = scored.iter().filter(|s| s.eligible).collect();
-    if pool.is_empty() {
-        let members: Vec<String> = scored.iter().map(|s| s.email.clone()).collect();
-        return best_saturated_email(&rotation_candidates(app, &members), &clone_counts(app));
-    }
-    pool.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    pool.first().map(|s| s.email.clone())
-}
-
-pub fn resolve_clone_account(app: &App, requested: Option<&str>) -> Option<String> {
-    let emails = app.codex.emails();
-    if emails.is_empty() {
-        return None;
-    }
-    let want = requested.unwrap_or("").trim();
-    if !want.is_empty() && want != AUTO {
-        if let Some(hit) = emails.iter().find(|e| e.as_str() == want) {
-            return Some(hit.clone());
-        }
-        tracing::warn!("codex account '{want}' not imported; using recommended");
-    }
-    best_scored(app)
-}
-
-pub enum Assignment {
-    Account(String),
-    Group { name: String, initial: String },
-    AutoPending,
-}
-
-/// `current` is the clone's account now (for a swap); resolving a group makes the pick
-/// sticky — a clone moving from a pinned account into a group that already contains it
-/// keeps that account instead of cold-starting. Pass `None` for a fresh clone at create.
-pub fn resolve_assignment(
-    app: &App,
-    requested: Option<&str>,
-    current: Option<&str>,
-    group: Option<&str>,
-) -> Option<Assignment> {
-    let want = requested.unwrap_or("").trim();
-    // A legacy `"none"` falls through to the auto path (no tokenless state anymore).
-    // Legacy `group:<name>` selection, or an auto selection on a group-bound clone —
-    // the Codex twin of the Claude rule.
-    let group_name = want
-        .strip_prefix("group:")
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .or(group)
-        .filter(|_| want.is_empty() || want.eq_ignore_ascii_case(AUTO) || want.starts_with("group:"));
-    if let Some(name) = group_name {
-        let initial = pick_group_account(app, name, current)?;
-        return Some(Assignment::Group {
-            name: name.to_string(),
-            initial,
-        });
-    }
-    match resolve_clone_account(app, requested) {
-        Some(account) => Some(Assignment::Account(account)),
-        None if requested.is_some() && (want.is_empty() || want.eq_ignore_ascii_case(AUTO)) => {
-            Some(Assignment::AutoPending)
-        }
-        None => None,
-    }
-}
-
-fn clone_counts(app: &App) -> HashMap<String, u32> {
-    let mut m = HashMap::new();
-    for h in &app.store.get().hosts {
-        if let Some(e) = &h.codex_account_email {
-            *m.entry(e.clone()).or_insert(0) += 1;
-        }
-    }
-    m
-}
-
-fn seven_day_pct(app: &App, email: &str) -> f64 {
-    app.store
-        .get()
-        .claude_accounts
-        .iter()
-        .filter(|u| u.provider == Some(wire::Provider::Codex))
-        .find(|u| u.email == email)
-        .and_then(|u| u.seven_day.as_ref())
-        .map(|w| w.pct)
-        .unwrap_or(0.0)
-}
-
-#[derive(Debug, Clone)]
-struct RotationCandidate {
-    email: String,
-    seven_pct: f64,
-    seven_reset: Option<i64>,
-}
-
-/// Parse an RFC-3339 timestamp to epoch seconds. Accepts the fixed
-/// `YYYY-MM-DDTHH:MM:SS` head, then an optional `.fraction`, then an optional zone
-/// (`Z`/`z`, `±HH:MM`, or `±HHMM`; absent means UTC). Codex resets arrive as `...Z` (from
-/// [`crate::docker::epoch_to_rfc3339`]); the offset forms keep this in lockstep with the
-/// Claude copy, which must also read the Anthropic API's `+00:00` timestamps. Sub-second
-/// precision is dropped (the rotator compares whole seconds).
-fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
-    if s.len() < 19
-        || s.get(4..5)? != "-"
-        || s.get(7..8)? != "-"
-        || s.get(10..11)? != "T"
-        || s.get(13..14)? != ":"
-        || s.get(16..17)? != ":"
-    {
-        return None;
-    }
-    let year: i32 = s.get(0..4)?.parse().ok()?;
-    let month: u32 = s.get(5..7)?.parse().ok()?;
-    let day: u32 = s.get(8..10)?.parse().ok()?;
-    let hour: u32 = s.get(11..13)?.parse().ok()?;
-    let minute: u32 = s.get(14..16)?.parse().ok()?;
-    let second: u32 = s.get(17..19)?.parse().ok()?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    // Tail after the seconds: an optional `.fraction`, then an optional zone offset.
-    let mut rest = s.get(19..)?;
-    if let Some(frac) = rest.strip_prefix('.') {
-        let end = frac
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(frac.len());
-        if end == 0 {
-            return None; // a bare '.' with no digits is malformed
-        }
-        rest = &frac[end..];
-    }
-    let offset_secs = parse_zone_offset(rest)?;
-    let days = days_from_civil(year, month, day);
-    let secs = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
-    Some(secs - offset_secs)
-}
-
-/// A trailing RFC-3339 zone designator → its offset from UTC in seconds (`+05:30` →
-/// 19800). Empty or `Z`/`z` is UTC; otherwise `±HH:MM` or `±HHMM`.
-fn parse_zone_offset(z: &str) -> Option<i64> {
-    if z.is_empty() || z == "Z" || z == "z" {
-        return Some(0);
-    }
-    let sign = match z.as_bytes()[0] {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let digits: String = z[1..].chars().filter(|c| *c != ':').collect();
-    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hh: i64 = digits.get(0..2)?.parse().ok()?;
-    let mm: i64 = digits.get(2..4)?.parse().ok()?;
-    if hh > 23 || mm > 59 {
-        return None;
-    }
-    Some(sign * (hh * 3_600 + mm * 60))
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let y = year - i32::from(month <= 2);
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = month as i32 + if month > 2 { -3 } else { 9 };
-    let doy = (153 * mp + 2) / 5 + day as i32 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    i64::from(era * 146_097 + doe - 719_468)
-}
-
-fn rotation_candidates(app: &App, members: &[String]) -> Vec<RotationCandidate> {
-    let known = app.codex.usable_emails();
-    let st = app.store.get();
-    members
-        .iter()
-        .filter(|email| known.iter().any(|k| &k == email))
-        .map(|email| {
-            let usage = st
-                .claude_accounts
-                .iter()
-                .filter(|u| u.provider == Some(wire::Provider::Codex))
-                .find(|u| u.email == *email);
-            let seven = usage.and_then(|u| u.seven_day.as_ref());
-            RotationCandidate {
-                email: email.clone(),
-                seven_pct: seven.map(|w| w.pct).unwrap_or(0.0),
-                seven_reset: seven
-                    .and_then(|w| w.resets_at.as_deref())
-                    .and_then(parse_rfc3339_utc_secs),
-            }
-        })
-        .collect()
-}
-
 /// Whether this account can be handed to a clone: it holds a token that has not expired AND
 /// its refresh chain has not been rejected. The Codex twin of `crate::claude::account_usable`
 /// — see there for why expiry alone is not enough.
@@ -1194,282 +924,12 @@ fn account_usable(acct: &StoredCodexAccount, now: i64) -> bool {
         && !crate::claude::grant_rejected(acct.last_refresh.as_ref())
 }
 
-fn is_exhausted(seven: f64) -> bool {
-    seven >= SEVEN_DAY_CAP_PCT
-}
-
-fn exhausted(app: &App, email: &str) -> bool {
-    is_exhausted(seven_day_pct(app, email))
-}
-
-/// Accounts among `members` that can take work: imported, holding a token that still
-/// works, and not exhausted.
-fn eligible_members(app: &App, members: &[String]) -> Vec<String> {
-    let known = app.codex.usable_emails();
-    members
-        .iter()
-        .filter(|email| known.iter().any(|k| &k == email))
-        .filter(|email| !exhausted(app, email))
-        .cloned()
-        .collect()
-}
-
-fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
-    eligible_members(app, &group.accounts)
-}
-
-/// Stickiness first (see the Claude twin): if the clone's `current` account is an
-/// eligible member of the group, keep it instead of rebalancing off it. Otherwise pick
-/// the least-loaded / least-used eligible member.
-fn pick_group_account(app: &App, group_name: &str, current: Option<&str>) -> Option<String> {
-    let cfg = app.config();
-    let group = cfg.groups.iter().find(|g| g.name == group_name)?;
-    let counts = clone_counts(app);
-    let mut pool = eligible_group_accounts(app, group);
-    if let Some(cur) = current {
-        if pool.iter().any(|e| e == cur) {
-            return Some(cur.to_string());
-        }
-    }
-    if pool.is_empty() {
-        return best_saturated_email(&rotation_candidates(app, &group.accounts), &counts);
-    }
-    shuffle(&mut pool);
-    pool.into_iter().min_by_key(|email| {
-        let load = *counts.get(email).unwrap_or(&0);
-        let pct = seven_day_pct(app, email).round() as u32;
-        (load, pct)
-    })
-}
-
-fn assign_rotation(
-    clones: &[RmngClone],
-    eligible: &[String],
-    usage: &HashMap<String, f64>,
-) -> Vec<(RmngClone, String)> {
-    let mut used: HashMap<String, u32> = HashMap::new();
-    let mut out: Vec<(RmngClone, String)> = Vec::with_capacity(clones.len());
-    let mut homeless: Vec<RmngClone> = Vec::new();
-    for c in clones {
-        match &c.codex_account_email {
-            Some(e) if eligible.contains(e) => {
-                *used.entry(e.clone()).or_insert(0) += 1;
-                out.push((c.clone(), e.clone()));
-            }
-            _ => homeless.push(c.clone()),
-        }
-    }
-    shuffle(&mut homeless);
-    for host in homeless {
-        let pick = eligible
-            .iter()
-            .min_by_key(|email| {
-                let load = *used.get(*email).unwrap_or(&0);
-                let pct = usage.get(*email).copied().unwrap_or(0.0).round() as u32;
-                (load, pct, rand_u64() as u32)
-            })
-            .expect("eligible is non-empty")
-            .clone();
-        *used.entry(pick.clone()).or_insert(0) += 1;
-        out.push((host, pick));
-    }
-    out
-}
-
-fn pct_key(pct: f64) -> u32 {
-    if !pct.is_finite() {
-        return 0;
-    }
-    (pct.max(0.0) * 100.0).round() as u32
-}
-
-fn saturated_rank(candidate: &RotationCandidate, load: u32) -> (u8, i64, u32, u32, u32) {
-    let (seven_missing, seven_reset) = match candidate.seven_reset {
-        Some(reset) => (0, reset),
-        None => (1, i64::MAX),
-    };
-    (
-        seven_missing,
-        seven_reset,
-        pct_key(candidate.seven_pct),
-        load,
-        rand_u64() as u32,
-    )
-}
-
-fn best_saturated_candidate<'a>(
-    candidates: &'a [RotationCandidate],
-    used: &HashMap<String, u32>,
-) -> Option<&'a RotationCandidate> {
-    candidates.iter().min_by_key(|candidate| {
-        saturated_rank(candidate, *used.get(&candidate.email).unwrap_or(&0))
-    })
-}
-
-fn best_saturated_email(
-    candidates: &[RotationCandidate],
-    used: &HashMap<String, u32>,
-) -> Option<String> {
-    best_saturated_candidate(candidates, used).map(|candidate| candidate.email.clone())
-}
-
-fn keep_saturated_current(current: &RotationCandidate, best: &RotationCandidate) -> bool {
-    if current.email == best.email {
-        return true;
-    }
-    match (current.seven_reset, best.seven_reset) {
-        (Some(current_reset), Some(best_reset)) => {
-            current_reset <= best_reset + RESET_STICKY_MARGIN_SECS
-        }
-        (None, None) => current.seven_pct <= best.seven_pct + UTIL_STICKY_MARGIN_PCT,
-        _ => false,
-    }
-}
-
-fn assign_saturated_rotation(
-    clones: &[RmngClone],
-    candidates: &[RotationCandidate],
-) -> Vec<(RmngClone, String)> {
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-
-    let mut used: HashMap<String, u32> = HashMap::new();
-    let mut out: Vec<(RmngClone, String)> = Vec::with_capacity(clones.len());
-    let mut homeless: Vec<RmngClone> = Vec::new();
-
-    for clone in clones {
-        let current = clone.codex_account_email.as_ref().and_then(|email| {
-            candidates
-                .iter()
-                .find(|candidate| candidate.email == *email)
-        });
-        let best = best_saturated_candidate(candidates, &used).expect("candidates is non-empty");
-        if let Some(current) = current {
-            if keep_saturated_current(current, best) {
-                *used.entry(current.email.clone()).or_insert(0) += 1;
-                out.push((clone.clone(), current.email.clone()));
-                continue;
-            }
-        }
-        homeless.push(clone.clone());
-    }
-
-    shuffle(&mut homeless);
-    for host in homeless {
-        let pick = best_saturated_candidate(candidates, &used)
-            .expect("candidates is non-empty")
-            .email
-            .clone();
-        *used.entry(pick.clone()).or_insert(0) += 1;
-        out.push((host, pick));
-    }
-
-    out
-}
-
-async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[RmngClone]) {
-    let candidates = rotation_candidates(app, members);
-    if candidates.is_empty() {
-        tracing::info!(
-            "codex rotate: pool '{label}' has no imported account; leaving {} clone(s)",
-            clones.len()
-        );
-        return;
-    }
-
-    let eligible: Vec<String> = candidates
-        .iter()
-        .filter(|candidate| !is_exhausted(candidate.seven_pct))
-        .map(|candidate| candidate.email.clone())
-        .collect();
-    let assignments = if eligible.is_empty() {
-        tracing::info!(
-            "codex rotate: pool '{label}' has no under-cap account; using saturated fallback for {} clone(s)",
-            clones.len()
-        );
-        assign_saturated_rotation(clones, &candidates)
-    } else {
-        let usage: HashMap<String, f64> = candidates
-            .iter()
-            .filter(|candidate| eligible.contains(&candidate.email))
-            .map(|candidate| (candidate.email.clone(), candidate.seven_pct))
-            .collect();
-        assign_rotation(clones, &eligible, &usage)
-    };
-
-    for (host, email) in assignments {
-        if host.codex_account_email.as_deref() == Some(email.as_str()) {
-            continue;
-        }
-        // Record first, deliver second. See the Claude twin in `crate::claude::rotate_pool`
-        // for why: a binding written only on a successful push strands every clone that
-        // cannot take one.
-        tracing::info!(
-            "codex rotate[{label}]: {} {} -> {}",
-            host.id,
-            host.codex_account_email.as_deref().unwrap_or("none"),
-            email
-        );
-        let (id, bound) = (host.id.clone(), email.clone());
-        app.store.mutate(|s| {
-            if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                h.codex_account_email = Some(bound);
-            }
-        });
-        app.codex.forget_pushed(&host.id);
-        if host.archived {
-            continue; // stopped container: no exec can land, and the push pass skips it too
-        }
-        if let Err(e) = push_account_to_clone(app, &host.id, &email).await {
-            tracing::warn!(
-                "codex rotate[{label}]: {} is now bound to {email}, but installing its token \
-                 failed (the next reconcile pass retries): {e}",
-                host.id
-            );
-        }
-        tokio::time::sleep(STAGGER).await;
-    }
-}
-
-fn auto_pool_clones(hosts: &[RmngClone]) -> Vec<RmngClone> {
-    hosts
-        .iter()
-        .filter(|h| {
-            h.managed
-            && h.codex_group.is_none()
-            && h.group.is_none()
-            && h.codex_selection.as_deref() == Some(AUTO)
-        })
-        .cloned()
-        .collect()
+fn prune_marks(marks: &mut Vec<wire::CodexResetMark>, now_secs: i64) {
+    marks.retain(|m| m.window_resets_at > now_secs);
 }
 
 pub async fn rotate_once(app: &App) {
-    let cfg = app.config();
-    let hosts = app.store.get().hosts;
-    let mut by_group: HashMap<String, Vec<RmngClone>> = HashMap::new();
-    for h in &hosts {
-        // Live-group-first, sticky otherwise (see the Claude twin).
-        let gname = if h.group.is_some() && h.codex_selection.as_deref() == Some(AUTO) {
-            h.group.as_deref()
-        } else {
-            h.codex_group.as_deref()
-        };
-        if let (Some(g), true) = (gname, h.managed) {
-            by_group.entry(g.to_string()).or_default().push(h.clone());
-        }
-    }
-    for (gname, clones) in by_group {
-        let Some(group) = cfg.groups.iter().find(|g| g.name == gname) else {
-            continue;
-        };
-        rotate_pool(app, &gname, &group.accounts, &clones).await;
-    }
-    let auto = auto_pool_clones(&hosts);
-    if !auto.is_empty() {
-        rotate_pool(app, "auto", &app.codex.usable_emails(), &auto).await;
-    }
+    crate::pool::rotate_once::<crate::pool::CodexPool>(app).await
 }
 
 /// Delete an imported Codex account by email, then heal the fleet — the Codex twin of
@@ -1533,23 +993,7 @@ pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
 /// The Codex twin of `crate::claude::repoint_clones` — see there for why both bindings move
 /// and why this is separate from the config write.
 fn repoint_clones(app: &App, old: &str, new: &str) -> Vec<String> {
-    let (old, new) = (old.to_string(), new.to_string());
-    let mut moved = Vec::new();
-    app.store.mutate(|s| {
-        for h in &mut s.hosts {
-            if h.codex_selection.as_deref() == Some(old.as_str()) {
-                h.codex_selection = Some(new.clone());
-            }
-            if h.codex_account_email.as_deref() == Some(old.as_str()) {
-                h.codex_account_email = Some(new.clone());
-                moved.push(h.id.clone());
-            }
-        }
-    });
-    for id in &moved {
-        app.codex.forget_pushed(id);
-    }
-    moved
+    crate::pool::repoint_clones::<crate::pool::CodexPool>(app, old, new)
 }
 
 /// Hand everything `old_email` holds to `new_email`, then delete it — the Codex twin of
@@ -1567,7 +1011,7 @@ pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Res
     }
 
     let mut cfg = app.config();
-    let joined = crate::claude::swap_pool_member(&mut cfg.groups, old_email, new_email);
+    let joined = crate::pool::swap_pool_member(&mut cfg.groups, old_email, new_email);
     crate::config::save(&cfg).context("saving the replacement's pool membership")?;
     *app.cfg.write().unwrap() = cfg;
 
@@ -1623,7 +1067,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
 
     for (i, acct) in accts.iter().enumerate() {
         if i > 0 {
-            tokio::time::sleep(STAGGER).await;
+            tokio::time::sleep(crate::pool::STAGGER).await;
         }
         let outcome = async {
             let (fresh, rotated) = fresh_access_token(app, &acct.email).await?;
@@ -1800,8 +1244,13 @@ pub async fn run_poller(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::{
+        CodexPool, RotationCandidate, assign_rotation, assign_saturated_rotation,
+        auto_pool_clones, is_exhausted,
+    };
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
+    use wire::RmngClone;
 
     /// Parity with `claude::jittered_lead_never_drops_below_the_floor`: the offset only
     /// ever adds lead, and it is derived from the email so a batch of accounts imported
@@ -2039,7 +1488,7 @@ mod tests {
             clone_host("c2", Some("z@gone")),
         ];
         for _ in 0..50 {
-            let got = assign_rotation(&clones, &eligible, &HashMap::new());
+            let got = assign_rotation::<CodexPool>(&clones, &eligible, &HashMap::new());
             let by_id: HashMap<_, _> = got.iter().map(|(h, e)| (h.id.clone(), e.clone())).collect();
             assert_eq!(by_id["c1"], "a@o");
             assert_eq!(by_id["c2"], "b@o");
@@ -2053,15 +1502,64 @@ mod tests {
     ) -> RotationCandidate {
         RotationCandidate {
             email: email.to_string(),
+            five_pct: 0.0,
             seven_pct,
+            five_reset: None,
             seven_reset,
         }
     }
 
     #[test]
     fn codex_exhaustion_threshold_is_95_7d() {
-        assert!(!is_exhausted(94.9));
-        assert!(is_exhausted(95.0));
+        assert!(!is_exhausted::<CodexPool>(0.0, 94.9));
+        assert!(is_exhausted::<CodexPool>(0.0, 95.0));
+    }
+
+    #[test]
+    fn saturated_prefers_soonest_7d_reset_when_all_weekly_capped() {
+        // Everyone is weekly-capped → soonest weekly reset wins. This pins the unified
+        // ranking to the old Codex order (Codex has no 5h window, so the class key is
+        // constant and the reset decides, exactly as before the merge).
+        let candidates = [
+            codex_rotation_candidate("soon@o", 97.0, Some(500_000)),
+            codex_rotation_candidate("late@o", 96.0, Some(600_000)),
+        ];
+        let clones = [clone_host("c1", Some("late@o"))];
+
+        let got = assign_saturated_rotation::<CodexPool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@o");
+    }
+
+    #[test]
+    fn saturated_keeps_current_when_its_reset_is_close_to_best() {
+        // c1 sits on soon@o, whose reset is within the sticky margin of best's — churning
+        // it onto late@o would buy nothing.
+        let candidates = [
+            codex_rotation_candidate("soon@o", 97.0, Some(500_000)),
+            codex_rotation_candidate("late@o", 96.0, Some(500_100)),
+        ];
+        let clones = [clone_host("c1", Some("soon@o"))];
+
+        let got = assign_saturated_rotation::<CodexPool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@o");
+    }
+
+    #[test]
+    fn auto_pool_is_only_managed_ungrouped_auto_clones() {
+        let hosts = vec![
+            host_sel("auto1", true, None, Some("auto")),        // in
+            host_sel("pinned", true, None, Some("me@o")),       // out: pinned to an email
+            host_sel("legacy", true, None, None),               // out: legacy None == pinned
+            host_sel("grouped", true, Some("g"), Some("auto")), // out: named group handles it
+            host_sel("stopped", false, None, Some("auto")),     // out: unmanaged
+        ];
+        let picked: Vec<String> = auto_pool_clones::<CodexPool>(&hosts)
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(picked, vec!["auto1"]);
     }
 
     fn host_sel(id: &str, managed: bool, group: Option<&str>, sel: Option<&str>) -> RmngClone {

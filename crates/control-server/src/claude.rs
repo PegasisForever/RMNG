@@ -31,10 +31,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use wire::{ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, CloneGroup, RmngClone};
+use wire::{ClaudeSpend, ClaudeUsage, ClaudeUsageWindow};
 
 use crate::app::App;
-use crate::clone_ops::{now_ms, rand_u64, shuffle, snippet};
+use crate::clone_ops::{now_ms, snippet};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// Who an access token belongs to. Same endpoint the sign-in uses (`crate::oauth`), read
@@ -60,13 +60,6 @@ const REFRESH_LEAD_MS: i64 = 2 * 60 * 60 * 1000;
 /// spreads the expiries for good: a refreshed token expires 8 hours after its own refresh.
 const REFRESH_SPREAD_MS: i64 = 90 * 60 * 1000;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-const STAGGER: Duration = Duration::from_millis(400);
-
-// scoring knobs (clone-accounts.server.ts)
-const SESSION_HEADROOM_PCT: f64 = 20.0;
-const SEVEN_DAY_CAP_PCT: f64 = 95.0;
-const RESET_STICKY_MARGIN_SECS: i64 = 15 * 60;
-const UTIL_STICKY_MARGIN_PCT: f64 = 5.0;
 /// How often group-bound clones are checked against their group's eligible accounts.
 /// Sticky: a pass moves a clone only if its account fell out of eligibility — an
 /// account switch always cold-starts the clone's Anthropic prompt cache, so staying
@@ -242,7 +235,7 @@ impl ClaudeStore {
     }
 
     /// Emails whose stored token still works: the accounts a clone may be handed.
-    fn usable_emails(&self) -> Vec<String> {
+    pub(crate) fn usable_emails(&self) -> Vec<String> {
         let now = now_ms();
         self.accounts
             .lock()
@@ -817,7 +810,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
 
     for (i, acct) in accts.iter().enumerate() {
         if i > 0 {
-            tokio::time::sleep(STAGGER).await;
+            tokio::time::sleep(crate::pool::STAGGER).await;
         }
         let outcome = async {
             let (fresh, rotated) = fresh_access_token(app, &acct.email).await?;
@@ -891,683 +884,12 @@ async fn poll_inner(app: &App) -> Result<bool> {
     Ok(any429)
 }
 
-// --- scoring + assignment (clone-accounts.server.ts) ----------------------
-
-const AUTO: &str = "auto";
-
-/// Canonicalize a raw account-selection string into its stored form: `"auto"` or an
-/// account email. Missing/blank → `"auto"`; a legacy `"none"` (retired: there is no
-/// explicit tokenless state anymore — a side without a pin and without provider members
-/// in scope simply gets no token) also reads as `"auto"`.
-pub fn normalize_selection(requested: Option<&str>) -> String {
-    let want = requested.unwrap_or("").trim();
-    if want.is_empty() || want.eq_ignore_ascii_case("none") {
-        AUTO.to_string()
-    } else {
-        want.to_string()
-    }
-}
-
-struct Scored {
-    email: String,
-    score: f64,
-    eligible: bool,
-}
-
-fn clamp01(n: f64) -> f64 {
-    n.clamp(0.0, 1.0)
-}
-
-fn score_accounts(app: &App) -> Vec<Scored> {
-    let st = app.store.get();
-    let usage: HashMap<&str, &ClaudeUsage> = st
-        .claude_accounts
-        .iter()
-        .filter(|u| u.provider != Some(wire::Provider::Codex))
-        .map(|u| (u.email.as_str(), u))
-        .collect();
-    let mut clones: HashMap<&str, u32> = HashMap::new();
-    for h in &st.hosts {
-        if let Some(e) = &h.claude_account_email {
-            *clones.entry(e.as_str()).or_insert(0) += 1;
-        }
-    }
-    app.claude
-        .usable_emails()
-        .into_iter()
-        .map(|email| {
-            let u = usage.get(email.as_str());
-            let five = u
-                .and_then(|u| u.five_hour.as_ref())
-                .map(|w| w.pct)
-                .unwrap_or(0.0);
-            let seven = u
-                .and_then(|u| u.seven_day.as_ref())
-                .map(|w| w.pct)
-                .unwrap_or(0.0);
-            let headroom = clamp01((100.0 - five) / 100.0);
-            // reset-soon term omitted (ISO reset parsing TODO) → 0.
-            let n = *clones.get(email.as_str()).unwrap_or(&0) as f64;
-            let score = headroom - 0.5 * n;
-            let eligible = (100.0 - five >= SESSION_HEADROOM_PCT) && seven < SEVEN_DAY_CAP_PCT;
-            Scored {
-                email,
-                score,
-                eligible,
-            }
-        })
-        .collect()
-}
-
-fn best_scored(app: &App) -> Option<String> {
-    let scored = score_accounts(app);
-    if scored.is_empty() {
-        return None;
-    }
-    let mut pool: Vec<&Scored> = scored.iter().filter(|s| s.eligible).collect();
-    if pool.is_empty() {
-        let members: Vec<String> = scored.iter().map(|s| s.email.clone()).collect();
-        return best_saturated_email(&rotation_candidates(app, &members), &clone_counts(app));
-    }
-    pool.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    pool.first().map(|s| s.email.clone())
-}
-
-/// Resolve a clone request's account selection to a concrete account email.
-pub fn resolve_clone_account(app: &App, requested: Option<&str>) -> Option<String> {
-    let emails = app.claude.emails();
-    if emails.is_empty() {
-        return None;
-    }
-    let want = requested.unwrap_or("").trim();
-    if !want.is_empty() && want != AUTO {
-        if let Some(hit) = emails.iter().find(|e| e.as_str() == want) {
-            return Some(hit.clone());
-        }
-        tracing::warn!("clone account '{want}' not imported; using recommended");
-    }
-    best_scored(app)
-}
-
-// --- groups: selection + rotation -----------------------------------------
-
-/// What a clone is bound to (accounts by email). `Group` carries the initial pick to
-/// apply right away; `AutoPending` records explicit auto intent before an imported
-/// account exists.
-pub enum Assignment {
-    Account(String),
-    Group { name: String, initial: String },
-    AutoPending,
-}
-
-/// Resolve a selection string to an [`Assignment`]: an email / `auto` → a single
-/// account, or — when the selection is `auto`/blank and the clone is group-bound — a group
-/// (with an initial account picked from it). A legacy `group:<name>`
-/// selection still binds that group (transport compat with old clients); new writers
-/// store `auto` + the clone-level `group` instead. Explicit `auto` without imported
-/// accounts is kept as pending auto; outer `None` means no usable concrete assignment
-/// and no explicit pending-auto intent.
-///
-/// `current` is the clone's account right now (for a swap); when resolving a group it
-/// makes the pick sticky — a clone moving from a pinned account into a group that
-/// already contains that account keeps it, rather than cold-starting its prompt cache.
-/// Pass `None` when there's no incumbent (a fresh clone at create time).
-pub fn resolve_assignment(
-    app: &App,
-    requested: Option<&str>,
-    current: Option<&str>,
-    group: Option<&str>,
-) -> Option<Assignment> {
-    let want = requested.unwrap_or("").trim();
-    // A legacy `"none"` falls through to the auto path (no tokenless state anymore).
-    // Legacy `group:<name>` selection, or an auto selection on a group-bound clone.
-    let group_name = want
-        .strip_prefix("group:")
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .or(group)
-        .filter(|_| want.is_empty() || want.eq_ignore_ascii_case(AUTO) || want.starts_with("group:"));
-    if let Some(name) = group_name {
-        let initial = pick_group_account(app, name, current)?;
-        return Some(Assignment::Group {
-            name: name.to_string(),
-            initial,
-        });
-    }
-    match resolve_clone_account(app, requested) {
-        Some(account) => Some(Assignment::Account(account)),
-        None if requested.is_some() && (want.is_empty() || want.eq_ignore_ascii_case(AUTO)) => {
-            Some(Assignment::AutoPending)
-        }
-        None => None,
-    }
-}
-
-/// How many clones each account email is currently assigned to.
-fn clone_counts(app: &App) -> HashMap<String, u32> {
-    let mut m = HashMap::new();
-    for h in &app.store.get().hosts {
-        if let Some(e) = &h.claude_account_email {
-            *m.entry(e.clone()).or_insert(0) += 1;
-        }
-    }
-    m
-}
-
-/// The 5h utilization for `email` from the latest usage view (0 if unknown).
-fn five_hour_pct(app: &App, email: &str) -> f64 {
-    app.store
-        .get()
-        .claude_accounts
-        .iter()
-        .filter(|u| u.provider != Some(wire::Provider::Codex))
-        .find(|u| u.email == email)
-        .and_then(|u| u.five_hour.as_ref())
-        .map(|w| w.pct)
-        .unwrap_or(0.0)
-}
-
-/// The 7d utilization for `email` from the latest usage view (0 if unknown).
-fn seven_day_pct(app: &App, email: &str) -> f64 {
-    app.store
-        .get()
-        .claude_accounts
-        .iter()
-        .filter(|u| u.provider != Some(wire::Provider::Codex))
-        .find(|u| u.email == email)
-        .and_then(|u| u.seven_day.as_ref())
-        .map(|w| w.pct)
-        .unwrap_or(0.0)
-}
-
-#[derive(Debug, Clone)]
-struct RotationCandidate {
-    email: String,
-    five_pct: f64,
-    seven_pct: f64,
-    five_reset: Option<i64>,
-    seven_reset: Option<i64>,
-}
-
-/// Parse an RFC-3339 timestamp to epoch seconds. Accepts the fixed
-/// `YYYY-MM-DDTHH:MM:SS` head, then an optional `.fraction`, then an optional zone
-/// (`Z`/`z`, `±HH:MM`, or `±HHMM`; absent means UTC). The Anthropic usage API returns
-/// e.g. `2026-07-24T22:00:00.469612+00:00`, while Codex resets arrive as `...Z` — both
-/// must parse. Sub-second precision is dropped (the rotator compares whole seconds).
-pub(crate) fn parse_rfc3339_utc_secs(s: &str) -> Option<i64> {
-    if s.len() < 19
-        || s.get(4..5)? != "-"
-        || s.get(7..8)? != "-"
-        || s.get(10..11)? != "T"
-        || s.get(13..14)? != ":"
-        || s.get(16..17)? != ":"
-    {
-        return None;
-    }
-    let year: i32 = s.get(0..4)?.parse().ok()?;
-    let month: u32 = s.get(5..7)?.parse().ok()?;
-    let day: u32 = s.get(8..10)?.parse().ok()?;
-    let hour: u32 = s.get(11..13)?.parse().ok()?;
-    let minute: u32 = s.get(14..16)?.parse().ok()?;
-    let second: u32 = s.get(17..19)?.parse().ok()?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    // Tail after the seconds: an optional `.fraction`, then an optional zone offset.
-    let mut rest = s.get(19..)?;
-    if let Some(frac) = rest.strip_prefix('.') {
-        let end = frac
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(frac.len());
-        if end == 0 {
-            return None; // a bare '.' with no digits is malformed
-        }
-        rest = &frac[end..];
-    }
-    let offset_secs = parse_zone_offset(rest)?;
-    let days = days_from_civil(year, month, day);
-    let secs = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
-    Some(secs - offset_secs)
-}
-
-/// A trailing RFC-3339 zone designator → its offset from UTC in seconds (`+05:30` →
-/// 19800). Empty or `Z`/`z` is UTC; otherwise `±HH:MM` or `±HHMM`.
-fn parse_zone_offset(z: &str) -> Option<i64> {
-    if z.is_empty() || z == "Z" || z == "z" {
-        return Some(0);
-    }
-    let sign = match z.as_bytes()[0] {
-        b'+' => 1,
-        b'-' => -1,
-        _ => return None,
-    };
-    let digits: String = z[1..].chars().filter(|c| *c != ':').collect();
-    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let hh: i64 = digits.get(0..2)?.parse().ok()?;
-    let mm: i64 = digits.get(2..4)?.parse().ok()?;
-    if hh > 23 || mm > 59 {
-        return None;
-    }
-    Some(sign * (hh * 3_600 + mm * 60))
-}
-
-fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let y = year - i32::from(month <= 2);
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = month as i32 + if month > 2 { -3 } else { 9 };
-    let doy = (153 * mp + 2) / 5 + day as i32 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    i64::from(era * 146_097 + doe - 719_468)
-}
-
-fn rotation_candidates(app: &App, members: &[String]) -> Vec<RotationCandidate> {
-    let known = app.claude.usable_emails();
-    let st = app.store.get();
-    members
-        .iter()
-        .filter(|email| known.iter().any(|k| &k == email))
-        .map(|email| {
-            let usage = st
-                .claude_accounts
-                .iter()
-                .filter(|u| u.provider != Some(wire::Provider::Codex))
-                .find(|u| u.email == *email);
-            let five = usage.and_then(|u| u.five_hour.as_ref());
-            let seven = usage.and_then(|u| u.seven_day.as_ref());
-            RotationCandidate {
-                email: email.clone(),
-                five_pct: five.map(|w| w.pct).unwrap_or(0.0),
-                seven_pct: seven.map(|w| w.pct).unwrap_or(0.0),
-                five_reset: five
-                    .and_then(|w| w.resets_at.as_deref())
-                    .and_then(parse_rfc3339_utc_secs),
-                seven_reset: seven
-                    .and_then(|w| w.resets_at.as_deref())
-                    .and_then(parse_rfc3339_utc_secs),
-            }
-        })
-        .collect()
-}
-
-/// Whether an account is out of usable headroom: 5h over the session cap or 7d at the
-/// weekly cap. Pure decision (see [`exhausted`] for the store-backed wrapper).
-fn is_exhausted(five: f64, seven: f64) -> bool {
-    (100.0 - five) < SESSION_HEADROOM_PCT || seven >= SEVEN_DAY_CAP_PCT
-}
-
-/// [`is_exhausted`] against `email`'s latest usage view.
-fn exhausted(app: &App, email: &str) -> bool {
-    is_exhausted(five_hour_pct(app, email), seven_day_pct(app, email))
-}
-
-/// Accounts among `members` that can take work: imported, holding a token that still
-/// works, and not exhausted. (A member with no token, or with a dead one, is dropped.)
-fn eligible_members(app: &App, members: &[String]) -> Vec<String> {
-    let known = app.claude.usable_emails();
-    members
-        .iter()
-        .filter(|email| known.iter().any(|k| &k == email))
-        .filter(|email| !exhausted(app, email))
-        .cloned()
-        .collect()
-}
-
-/// Group members that are imported accounts and not exhausted. Missing usage counts as
-/// eligible (0% util).
-fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
-    eligible_members(app, &group.accounts)
-}
-
-/// Pick one account from group `group_name` for a new assignment. Stickiness first: if
-/// the clone's `current` account is an eligible member of the group, keep it — switching
-/// accounts cold-starts the clone's Anthropic prompt cache, so a clone moving from a
-/// pinned account into a group that already contains it shouldn't be rebalanced off it
-/// (mirrors the rotator's keep-if-eligible rule in [`assign_rotation`]). Otherwise: among
-/// eligible members (or any member if none are eligible), fewest assigned clones first,
-/// then lowest 5h usage, random tiebreak. `None` if the group is empty / has no imported
-/// members.
-fn pick_group_account(app: &App, group_name: &str, current: Option<&str>) -> Option<String> {
-    let cfg = app.config();
-    let group = cfg.groups.iter().find(|g| g.name == group_name)?;
-    let counts = clone_counts(app);
-    let mut pool = eligible_group_accounts(app, group);
-    if let Some(cur) = current {
-        if pool.iter().any(|e| e == cur) {
-            return Some(cur.to_string());
-        }
-    }
-    if pool.is_empty() {
-        // All over the cap → still need a valid token; fall back to any imported member.
-        return best_saturated_email(&rotation_candidates(app, &group.accounts), &counts);
-    }
-    shuffle(&mut pool); // randomize ties
-    pool.into_iter().min_by_key(|email| {
-        let load = *counts.get(email).unwrap_or(&0);
-        let pct = five_hour_pct(app, email).round() as u32;
-        (load, pct)
-    })
-}
-
-/// Sticky assignment of `clones` to `eligible` account emails (5h utilization in
-/// `usage`), returning `(clone, email)` pairs. A clone whose current account is
-/// still eligible **keeps it** — switching cold-starts the clone's Anthropic prompt
-/// cache, so a clone is never moved just to even out spread. Only clones without an
-/// eligible account (over the 5h cap, removed from the group, or unassigned) are
-/// placed: fewest assigned clones first (keepers counted), then lowest 5h usage,
-/// random tiebreak.
-fn assign_rotation(
-    clones: &[RmngClone],
-    eligible: &[String],
-    usage: &HashMap<String, f64>,
-) -> Vec<(RmngClone, String)> {
-    let mut used: HashMap<String, u32> = HashMap::new();
-    let mut out: Vec<(RmngClone, String)> = Vec::with_capacity(clones.len());
-    let mut homeless: Vec<RmngClone> = Vec::new();
-    for c in clones {
-        match &c.claude_account_email {
-            Some(e) if eligible.contains(e) => {
-                *used.entry(e.clone()).or_insert(0) += 1;
-                out.push((c.clone(), e.clone()));
-            }
-            _ => homeless.push(c.clone()),
-        }
-    }
-    shuffle(&mut homeless);
-    for host in homeless {
-        let pick = eligible
-            .iter()
-            .min_by_key(|email| {
-                let load = *used.get(*email).unwrap_or(&0);
-                let pct = usage.get(*email).copied().unwrap_or(0.0).round() as u32;
-                (load, pct, rand_u64() as u32)
-            })
-            .expect("eligible is non-empty")
-            .clone();
-        *used.entry(pick.clone()).or_insert(0) += 1;
-        out.push((host, pick));
-    }
-    out
-}
-
-fn pct_key(pct: f64) -> u32 {
-    if !pct.is_finite() {
-        return 0;
-    }
-    (pct.max(0.0) * 100.0).round() as u32
-}
-
-/// Rank an exhausted account for the saturated fallback (every account is over a cap, but
-/// a clone still needs *some* token). The overriding goal is to land on the account that
-/// becomes usable **soonest**:
-///
-/// - An account at the 7d weekly cap is stuck until its weekly reset (days away) no matter
-///   how empty its 5h window is, so it must never be preferred over an account that is
-///   merely over the 5h session cap (which frees up at the next 5h reset, hours away at
-///   most). `seven_capped` is therefore the first sort key.
-/// - Within a class, order by the *binding* window: soonest reset, then lowest usage
-///   (the fallback when the reset timestamp is unknown), then fewest clones.
-fn saturated_rank(candidate: &RotationCandidate, load: u32) -> (u8, u8, i64, u32, u32, u32) {
-    let seven_capped = candidate.seven_pct >= SEVEN_DAY_CAP_PCT;
-    // The window that actually gates this account: the 7d window when it's weekly-capped,
-    // else the 5h session window (an exhausted, non-weekly-capped account is over the 5h
-    // cap by definition, so the 5h reset is when it frees up).
-    let (reset, pct) = if seven_capped {
-        (candidate.seven_reset, candidate.seven_pct)
-    } else {
-        (candidate.five_reset, candidate.five_pct)
-    };
-    let (missing, reset) = match reset {
-        Some(reset) => (0, reset),
-        None => (1, i64::MAX),
-    };
-    (
-        seven_capped as u8,
-        missing,
-        reset,
-        pct_key(pct),
-        load,
-        rand_u64() as u32,
-    )
-}
-
-fn best_saturated_candidate<'a>(
-    candidates: &'a [RotationCandidate],
-    used: &HashMap<String, u32>,
-) -> Option<&'a RotationCandidate> {
-    candidates.iter().min_by_key(|candidate| {
-        saturated_rank(candidate, *used.get(&candidate.email).unwrap_or(&0))
-    })
-}
-
-fn best_saturated_email(
-    candidates: &[RotationCandidate],
-    used: &HashMap<String, u32>,
-) -> Option<String> {
-    best_saturated_candidate(candidates, used).map(|candidate| candidate.email.clone())
-}
-
-/// Keep a clone on its current (saturated) account rather than churning it — but only when
-/// the current account isn't meaningfully worse than the best. A current account stuck at
-/// the weekly cap is dropped in favour of one that frees up at the 5h reset; within the
-/// same class, keep it if its binding reset is within [`RESET_STICKY_MARGIN_SECS`] of best's
-/// (or, when resets are unknown, its usage within [`UTIL_STICKY_MARGIN_PCT`]).
-fn keep_saturated_current(current: &RotationCandidate, best: &RotationCandidate) -> bool {
-    if current.email == best.email {
-        return true;
-    }
-    let current_capped = current.seven_pct >= SEVEN_DAY_CAP_PCT;
-    let best_capped = best.seven_pct >= SEVEN_DAY_CAP_PCT;
-    if current_capped != best_capped {
-        // Different classes: keep current only if it's the sooner-freeing (5h-only) one.
-        // `best` is the top-ranked candidate, so `best_capped` implies every account is
-        // weekly-capped; the only reachable mismatch is a weekly-capped current against a
-        // non-capped best → switch.
-        return !current_capped;
-    }
-    let (current_reset, current_pct, best_reset, best_pct) = if current_capped {
-        (
-            current.seven_reset,
-            current.seven_pct,
-            best.seven_reset,
-            best.seven_pct,
-        )
-    } else {
-        (
-            current.five_reset,
-            current.five_pct,
-            best.five_reset,
-            best.five_pct,
-        )
-    };
-    match (current_reset, best_reset) {
-        (Some(current_reset), Some(best_reset)) => {
-            current_reset <= best_reset + RESET_STICKY_MARGIN_SECS
-        }
-        (None, None) => current_pct <= best_pct + UTIL_STICKY_MARGIN_PCT,
-        _ => false,
-    }
-}
-
-fn assign_saturated_rotation(
-    clones: &[RmngClone],
-    candidates: &[RotationCandidate],
-) -> Vec<(RmngClone, String)> {
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-
-    let mut used: HashMap<String, u32> = HashMap::new();
-    let mut out: Vec<(RmngClone, String)> = Vec::with_capacity(clones.len());
-    let mut homeless: Vec<RmngClone> = Vec::new();
-
-    for clone in clones {
-        let current = clone.claude_account_email.as_ref().and_then(|email| {
-            candidates
-                .iter()
-                .find(|candidate| candidate.email == *email)
-        });
-        let best = best_saturated_candidate(candidates, &used).expect("candidates is non-empty");
-        if let Some(current) = current {
-            if keep_saturated_current(current, best) {
-                *used.entry(current.email.clone()).or_insert(0) += 1;
-                out.push((clone.clone(), current.email.clone()));
-                continue;
-            }
-        }
-        homeless.push(clone.clone());
-    }
-
-    shuffle(&mut homeless);
-    for host in homeless {
-        let pick = best_saturated_candidate(candidates, &used)
-            .expect("candidates is non-empty")
-            .email
-            .clone();
-        *used.entry(pick.clone()).or_insert(0) += 1;
-        out.push((host, pick));
-    }
-
-    out
-}
-
-/// Rotate one pool of clones over candidate account emails `members`. Drops members
-/// that aren't imported. When at least one account is under the hard limits, clones
-/// stick to eligible accounts exactly as before. When every imported candidate is over
-/// a limit, the saturated fallback picks the account that frees up soonest — one over
-/// only the 5h cap (back at its next 5h reset) ahead of any stuck at the weekly cap.
-async fn rotate_pool(app: &App, label: &str, members: &[String], clones: &[RmngClone]) {
-    let candidates = rotation_candidates(app, members);
-    if candidates.is_empty() {
-        tracing::info!(
-            "rotate: pool '{label}' has no imported account; leaving {} clone(s)",
-            clones.len()
-        );
-        return;
-    }
-
-    let eligible: Vec<String> = candidates
-        .iter()
-        .filter(|candidate| !is_exhausted(candidate.five_pct, candidate.seven_pct))
-        .map(|candidate| candidate.email.clone())
-        .collect();
-    let assignments = if eligible.is_empty() {
-        tracing::info!(
-            "rotate: pool '{label}' has no under-cap account; using saturated fallback for {} clone(s)",
-            clones.len()
-        );
-        assign_saturated_rotation(clones, &candidates)
-    } else {
-        let usage: HashMap<String, f64> = candidates
-            .iter()
-            .filter(|candidate| eligible.contains(&candidate.email))
-            .map(|candidate| (candidate.email.clone(), candidate.five_pct))
-            .collect();
-        assign_rotation(clones, &eligible, &usage)
-    };
-
-    for (host, email) in assignments {
-        if host.claude_account_email.as_deref() == Some(email.as_str()) {
-            continue; // unchanged (sticky keep) → no rewrite
-        }
-        // Record the decision BEFORE delivering it. The binding is this server's own data;
-        // the push is best-effort delivery into a container that may not be able to take
-        // one. Writing it only on a successful push froze every clone that could not: an
-        // archived clone on a dead account was re-picked and re-thrown-away every pass,
-        // measured on CT 105 as twelve clones stuck on three `invalid_grant` accounts, the
-        // same warning line repeating every ten minutes for as long as the log went back.
-        // `push_stale_tokens` is the retry, and it closes the gap for a running clone whose
-        // push fails here within one poll.
-        tracing::info!(
-            "rotate[{label}]: {} {} -> {}",
-            host.id,
-            host.claude_account_email.as_deref().unwrap_or("none"),
-            email
-        );
-        let (id, bound) = (host.id.clone(), email.clone());
-        app.store.mutate(|s| {
-            if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                h.claude_account_email = Some(bound);
-            }
-        });
-        app.claude.forget_pushed(&host.id);
-        // An archived clone's container is stopped or frozen, so an exec into it cannot
-        // succeed. `push_stale_tokens_for` already skips these for the same reason; leaving
-        // them in scope here bought nothing and cost a docker round trip plus `STAGGER` per
-        // clone on every pass, forever.
-        if host.archived {
-            continue;
-        }
-        if let Err(e) = push_account_to_clone(app, &host.id, &email).await {
-            tracing::warn!(
-                "rotate[{label}]: {} is now bound to {email}, but installing its token failed \
-                 (the next reconcile pass retries): {e}",
-                host.id
-            );
-        }
-        tokio::time::sleep(STAGGER).await; // gentle on the daemon
-    }
-}
-
-/// Managed clones bound to the implicit "auto" pool: `claude_selection == "auto"` and
-/// not in a named group. Legacy hosts with `claude_selection == None` are treated as
-/// pinned (never rotated).
-fn auto_pool_clones(hosts: &[RmngClone]) -> Vec<RmngClone> {
-    hosts
-        .iter()
-        .filter(|h| {
-            h.managed
-            && h.claude_group.is_none()
-            && h.group.is_none()
-            && h.claude_selection.as_deref() == Some(AUTO)
-        })
-        .cloned()
-        .collect()
-}
-
 /// One rotation pass over every named group plus the implicit "auto" pool (all imported
 /// accounts, recomputed live). Sticky: a clone moves only when its account exhausts or
-/// leaves its pool. See [`rotate_pool`] / [`assign_rotation`].
+/// leaves its pool. The pass itself lives in [`crate::pool`]; this entry point keeps the
+/// call sites (swap, delete, refresh) on the provider they mean.
 pub async fn rotate_once(app: &App) {
-    let cfg = app.config();
-    let hosts = app.store.get().hosts;
-    // Named groups.
-    let mut by_group: HashMap<String, Vec<RmngClone>> = HashMap::new();
-    for h in &hosts {
-        // A group-bound clone with an `auto` selection rotates in its live group even
-        // when its sticky still names an older one (group changed under it) or is empty
-        // (bound but never resolved). Otherwise the sticky rules (legacy ungrouped rows).
-        let gname = if h.group.is_some() && h.claude_selection.as_deref() == Some(AUTO) {
-            h.group.as_deref()
-        } else {
-            h.claude_group.as_deref()
-        };
-        if let (Some(g), true) = (gname, h.managed) {
-            by_group.entry(g.to_string()).or_default().push(h.clone());
-        }
-    }
-    for (gname, clones) in by_group {
-        let Some(group) = cfg.groups.iter().find(|g| g.name == gname) else {
-            continue; // group deleted → leave its clones on their current account
-        };
-        rotate_pool(app, &gname, &group.accounts, &clones).await;
-    }
-    // "auto" == a live group of every account that can still run a clone.
-    let auto = auto_pool_clones(&hosts);
-    if !auto.is_empty() {
-        rotate_pool(app, "auto", &app.claude.usable_emails(), &auto).await;
-    }
+    crate::pool::rotate_once::<crate::pool::ClaudePool>(app).await
 }
 
 /// Delete an imported Claude account by email, then heal the fleet.
@@ -1643,33 +965,6 @@ pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
     Ok(on_it)
 }
 
-/// Put `new` wherever `old` sat in `pools`, and take `old` out. Returns the pool names
-/// `new` ended up in.
-///
-/// Membership is the whole reason a replacement account is usable at all: an account in no
-/// pool is one the rotator will never hand to a clone. Idempotent on both halves, so an
-/// account already in a pool is not duplicated and a pool without `old` is untouched.
-pub(crate) fn swap_pool_member(
-    pools: &mut [wire::CloneGroup],
-    old: &str,
-    new: &str,
-) -> Vec<String> {
-    let mut joined = Vec::new();
-    for pool in pools.iter_mut() {
-        if !pool.accounts.iter().any(|a| a == old) {
-            continue;
-        }
-        if !pool.accounts.iter().any(|a| a == new) {
-            pool.accounts.push(new.to_string());
-        }
-        joined.push(pool.name.clone());
-    }
-    for pool in pools.iter_mut() {
-        pool.accounts.retain(|a| a != old);
-    }
-    joined
-}
-
 /// Move both of a clone's Claude bindings from `old` to `new`, fleet-wide, in one mutation.
 /// Returns the ids that were running `old`.
 ///
@@ -1682,23 +977,7 @@ pub(crate) fn swap_pool_member(
 /// [`crate::config::save`] writes a fixed relative path, so a test that reached it would drop
 /// a `config.json` in whatever directory it ran in.
 fn repoint_clones(app: &App, old: &str, new: &str) -> Vec<String> {
-    let (old, new) = (old.to_string(), new.to_string());
-    let mut moved = Vec::new();
-    app.store.mutate(|s| {
-        for h in &mut s.hosts {
-            if h.claude_selection.as_deref() == Some(old.as_str()) {
-                h.claude_selection = Some(new.clone());
-            }
-            if h.claude_account_email.as_deref() == Some(old.as_str()) {
-                h.claude_account_email = Some(new.clone());
-                moved.push(h.id.clone());
-            }
-        }
-    });
-    for id in &moved {
-        app.claude.forget_pushed(id);
-    }
-    moved
+    crate::pool::repoint_clones::<crate::pool::ClaudePool>(app, old, new)
 }
 
 /// Hand everything `old_email` holds to `new_email`, then delete `old_email`.
@@ -1724,7 +1003,7 @@ pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Res
     }
 
     let mut cfg = app.config();
-    let joined = swap_pool_member(&mut cfg.groups, old_email, new_email);
+    let joined = crate::pool::swap_pool_member(&mut cfg.groups, old_email, new_email);
     crate::config::save(&cfg).context("saving the replacement's pool membership")?;
     *app.cfg.write().unwrap() = cfg;
 
@@ -1840,10 +1119,7 @@ enum IdentityMerge {
     Skipped(String),
 }
 
-fn merge_claude_identity(
-    current: Option<&[u8]>,
-    patch: &serde_json::Value,
-) -> IdentityMerge {
+fn merge_claude_identity(current: Option<&[u8]>, patch: &serde_json::Value) -> IdentityMerge {
     let mut cur = serde_json::Map::new();
     if let Some(bytes) = current {
         let raw = String::from_utf8_lossy(bytes);
@@ -1902,10 +1178,7 @@ fn merge_claude_identity(
             .cloned()
             .unwrap_or(serde_json::Value::Null),
     );
-    cur.insert(
-        "oauthAccount".to_string(),
-        serde_json::Value::Object(block),
-    );
+    cur.insert("oauthAccount".to_string(), serde_json::Value::Object(block));
     let merged = serde_json::Value::Object(cur);
     let before = match current {
         Some(bytes) => serde_json::from_slice::<serde_json::Value>(bytes).ok(),
@@ -1940,14 +1213,23 @@ fn push_key(acct: &StoredClaudeAccount) -> String {
 /// The token alone used to be the whole push, which left `~/.claude.json` naming whoever the
 /// clone ran before. Measured on CT 105 on 2026-09-04: 11 of 14 readable clones declared an
 /// account that was not the one their token belonged to. See [`identity_json`].
-pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredClaudeAccount) -> Result<()> {
+pub async fn apply_clone_token(
+    _app: &App,
+    host_id: &str,
+    acct: &StoredClaudeAccount,
+) -> Result<()> {
     let token = acct.access_token.trim();
     if !token.starts_with("sk-ant-") {
         bail!("refusing to apply a non-`sk-ant-` token");
     }
     // The credentials file is server-owned wholesale: overwrite, never merge.
-    crate::home_overlay::write_clone_home(host_id, ".claude/.credentials.json", credentials_json(token).as_bytes(), 0o600)
-        .with_context(|| format!("{host_id}: writing Claude credentials"))?;
+    crate::home_overlay::write_clone_home(
+        host_id,
+        ".claude/.credentials.json",
+        credentials_json(token).as_bytes(),
+        0o600,
+    )
+    .with_context(|| format!("{host_id}: writing Claude credentials"))?;
     // The identity is a separate outcome from the token. A clone that took the token and
     // refused the identity still works, so this is a warning rather than a failed push.
     if let Some(patch_str) = identity_json(acct) {
@@ -1958,11 +1240,20 @@ pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredClaudeAcc
         match merge_claude_identity(current.as_deref(), &patch) {
             IdentityMerge::Current => {}
             IdentityMerge::Updated(body) => {
-                crate::home_overlay::write_clone_home(host_id, ".claude.json", body.as_bytes(), 0o600)
-                    .with_context(|| format!("{host_id}: writing ~/.claude.json identity"))?;
+                crate::home_overlay::write_clone_home(
+                    host_id,
+                    ".claude.json",
+                    body.as_bytes(),
+                    0o600,
+                )
+                .with_context(|| format!("{host_id}: writing ~/.claude.json identity"))?;
             }
             IdentityMerge::Skipped(reason) => {
-                tracing::warn!("{host_id} kept {}'s token but not its identity: {}", acct.email, reason);
+                tracing::warn!(
+                    "{host_id} kept {}'s token but not its identity: {}",
+                    acct.email,
+                    reason
+                );
             }
         }
     }
@@ -2165,6 +1456,12 @@ pub async fn run_poller(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::{
+        Assignment, ClaudePool, RotationCandidate, assign_rotation, assign_saturated_rotation,
+        eligible_members, is_exhausted, normalize_selection, parse_rfc3339_utc_secs,
+        pick_group_account, repoint_clones, resolve_assignment, swap_pool_member,
+    };
+    use wire::{CloneGroup, RmngClone};
 
     // The exact shapes Claude Code v2 emits — `claude auth status` (camelCase JSON)
     // and `~/.claude/.credentials.json` (camelCase, nested under `claudeAiOauth`).
@@ -2341,7 +1638,7 @@ mod tests {
         // Every clone is assigned an account from the eligible set, never outside it.
         let eligible = [acct("a@x"), acct("b@x")];
         let clones = [clone_host("c1", Some("z@outside")), clone_host("c2", None)];
-        for (_h, picked) in assign_rotation(&clones, &eligible, &HashMap::new()) {
+        for (_h, picked) in assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new()) {
             assert!(eligible.contains(&picked), "{picked} not in group");
         }
     }
@@ -2357,7 +1654,7 @@ mod tests {
             clone_host("c3", None),
         ];
         for _ in 0..50 {
-            let got = assign_rotation(&clones, &eligible, &HashMap::new());
+            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
             let mut emails: Vec<_> = got.iter().map(|(_, e)| e.clone()).collect();
             emails.sort();
             emails.dedup();
@@ -2376,7 +1673,7 @@ mod tests {
         let eligible = [acct("a@x"), acct("b@x")];
         let clones = [clone_host("c1", Some("a@x"))];
         for _ in 0..50 {
-            let got = assign_rotation(&clones, &eligible, &HashMap::new());
+            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
             assert_eq!(got[0].1, "a@x");
         }
     }
@@ -2391,7 +1688,7 @@ mod tests {
             clone_host("c2", Some("z@gone")),
         ];
         for _ in 0..50 {
-            let got = assign_rotation(&clones, &eligible, &HashMap::new());
+            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
             let by_id: HashMap<_, _> = got.iter().map(|(h, e)| (h.id.clone(), e.clone())).collect();
             assert_eq!(by_id["c1"], "a@x");
             assert_eq!(by_id["c2"], "b@x");
@@ -2405,7 +1702,7 @@ mod tests {
         let clones = [clone_host("c1", None)];
         let usage = HashMap::from([(acct("hot@x"), 72.0), (acct("cold@x"), 5.0)]);
         for _ in 0..50 {
-            let got = assign_rotation(&clones, &eligible, &usage);
+            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &usage);
             assert_eq!(got[0].1, "cold@x");
         }
     }
@@ -2418,7 +1715,7 @@ mod tests {
             clone_host("c1", Some("only@x")),
             clone_host("c2", Some("old@x")),
         ];
-        let got = assign_rotation(&clones, &eligible, &HashMap::new());
+        let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
         assert!(got.iter().all(|(_, e)| e == "only@x"));
     }
 
@@ -2445,7 +1742,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "rmng-claude-sticky-{}-{}",
             std::process::id(),
-            rand_u64()
+            crate::clone_ops::rand_u64()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
@@ -2480,7 +1777,7 @@ mod tests {
         // Repeated: a non-sticky pick would randomize across {a@x, b@x} and flake.
         let app = app_with_group(&["a@x", "b@x"]);
         for _ in 0..25 {
-            match resolve_assignment(&app, Some("group:team"), Some("b@x"), None) {
+            match resolve_assignment::<ClaudePool>(&app, Some("group:team"), Some("b@x"), None) {
                 Some(Assignment::Group { name, initial }) => {
                     assert_eq!(name, "team");
                     assert_eq!(initial, "b@x", "must keep the current member on group swap");
@@ -2495,7 +1792,7 @@ mod tests {
         // A current account not in the group (or no incumbent) → a real group member.
         let app = app_with_group(&["a@x", "b@x"]);
         for current in [Some("z@outside"), None] {
-            match resolve_assignment(&app, Some("group:team"), current, None) {
+            match resolve_assignment::<ClaudePool>(&app, Some("group:team"), current, None) {
                 Some(Assignment::Group { initial, .. }) => {
                     assert!(
                         matches!(initial.as_str(), "a@x" | "b@x"),
@@ -2512,7 +1809,7 @@ mod tests {
             id: id.into(),
             managed: true,
             claude_account_email: Some(account.into()),
-            claude_selection: Some(AUTO.into()),
+            claude_selection: Some(crate::pool::AUTO.into()),
             ..Default::default()
         }
     }
@@ -2850,7 +2147,7 @@ mod tests {
 
         assert_eq!(app.claude.usable_emails(), vec!["live@x".to_string()]);
         assert_eq!(
-            pick_group_account(&app, "team", Some("revoked@x")).unwrap(),
+            pick_group_account::<ClaudePool>(&app, "team", Some("revoked@x")).unwrap(),
             "live@x"
         );
     }
@@ -2995,7 +2292,7 @@ mod tests {
         // through `crate::config::save`, which writes a fixed relative path and would leave a
         // `config.json` behind in whatever directory the suite ran in. The pool half is
         // covered by `a_replacement_inherits_every_pool_the_old_account_sat_in`.
-        let moved = repoint_clones(&app, "old@x", "new@x");
+        let moved = repoint_clones::<ClaudePool>(&app, "old@x", "new@x");
         assert_eq!(moved, vec!["pinned".to_string(), "pooled".to_string()]);
         delete_account(&app, "old@x").await.unwrap();
 
@@ -3045,7 +2342,10 @@ mod tests {
 
         assert_eq!(app.claude.usable_emails(), vec!["live@x".to_string()]);
         let members = vec!["live@x".to_string(), "dead@x".to_string()];
-        assert_eq!(eligible_members(&app, &members), vec!["live@x".to_string()]);
+        assert_eq!(
+            eligible_members::<ClaudePool>(&app, &members),
+            vec!["live@x".to_string()]
+        );
         // Still imported. Deleting it is the operator's call, and a clone pinned to it by
         // name still resolves, so the pin reports a real error instead of silently moving.
         assert!(app.claude.emails().contains(&"dead@x".to_string()));
@@ -3060,7 +2360,7 @@ mod tests {
         kill_token(&app, "dead@x");
 
         assert_eq!(
-            pick_group_account(&app, "team", Some("dead@x")).unwrap(),
+            pick_group_account::<ClaudePool>(&app, "team", Some("dead@x")).unwrap(),
             "live@x"
         );
     }
@@ -3106,7 +2406,7 @@ mod tests {
         ];
         let clones = [clone_host("c1", Some("stuck@x"))];
 
-        let got = assign_saturated_rotation(&clones, &candidates);
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
 
         assert_eq!(got[0].1, "soon@x");
     }
@@ -3120,7 +2420,7 @@ mod tests {
         ];
         let clones = [clone_host("c1", Some("late@x"))];
 
-        let got = assign_saturated_rotation(&clones, &candidates);
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
 
         assert_eq!(got[0].1, "soon@x");
     }
@@ -3135,7 +2435,7 @@ mod tests {
         ];
         let clones = [clone_host("c1", Some("late@x"))];
 
-        let got = assign_saturated_rotation(&clones, &candidates);
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
 
         assert_eq!(got[0].1, "soon@x");
     }
@@ -3149,7 +2449,7 @@ mod tests {
         ];
         let clones = [clone_host("c1", Some("hot@x"))];
 
-        let got = assign_saturated_rotation(&clones, &candidates);
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
 
         assert_eq!(got[0].1, "cool@x");
     }
@@ -3164,7 +2464,7 @@ mod tests {
         ];
         let clones = [clone_host("c1", Some("current@x"))];
 
-        let got = assign_saturated_rotation(&clones, &candidates);
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
 
         assert_eq!(got[0].1, "current@x");
     }
@@ -3178,18 +2478,33 @@ mod tests {
         ];
         let clones = [clone_host("c1", Some("unknown@x"))];
 
-        let got = assign_saturated_rotation(&clones, &candidates);
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
 
         assert_eq!(got[0].1, "known@x");
     }
 
     #[test]
     fn exhaustion_threshold_is_80_5h_or_95_7d() {
-        assert!(!is_exhausted(80.0, 0.0), "exactly 80% 5h is still eligible");
-        assert!(is_exhausted(80.1, 0.0), "just over 80% 5h is exhausted");
-        assert!(!is_exhausted(0.0, 94.9), "under the 7d cap is eligible");
-        assert!(is_exhausted(0.0, 95.0), "hitting the 7d cap is exhausted");
-        assert!(!is_exhausted(79.9, 94.9), "both under caps is eligible");
+        assert!(
+            !is_exhausted::<ClaudePool>(80.0, 0.0),
+            "exactly 80% 5h is still eligible"
+        );
+        assert!(
+            is_exhausted::<ClaudePool>(80.1, 0.0),
+            "just over 80% 5h is exhausted"
+        );
+        assert!(
+            !is_exhausted::<ClaudePool>(0.0, 94.9),
+            "under the 7d cap is eligible"
+        );
+        assert!(
+            is_exhausted::<ClaudePool>(0.0, 95.0),
+            "hitting the 7d cap is exhausted"
+        );
+        assert!(
+            !is_exhausted::<ClaudePool>(79.9, 94.9),
+            "both under caps is eligible"
+        );
     }
 
     #[test]
@@ -3259,7 +2574,10 @@ mod tests {
             host_sel("grouped", true, Some("g"), Some("auto")), // out: named group handles it
             host_sel("stopped", false, None, Some("auto")),     // out: unmanaged
         ];
-        let picked: Vec<String> = auto_pool_clones(&hosts).into_iter().map(|h| h.id).collect();
+        let picked: Vec<String> = crate::pool::auto_pool_clones::<ClaudePool>(&hosts)
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
         assert_eq!(picked, vec!["auto1"]);
     }
 }

@@ -292,9 +292,8 @@ async fn run_startup_script(app: &App, op_id: &str, clone_id: &str, preset_name:
         Err(_) => {
             tracing::warn!("startup script on {clone_id} timed out (left running)");
             patch_op(app, op_id, |op| {
-                op.log.push(
-                    "startup script: timed out after 5m, left running in the clone".into(),
-                )
+                op.log
+                    .push("startup script: timed out after 5m, left running in the clone".into())
             });
         }
         Ok(Err(e)) => {
@@ -500,17 +499,17 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     let mut claude_selection: Option<String> = None;
     let mut claude_account_email: Option<String> = None;
     let mut claude_group: Option<String> = None;
-    if let Some(assignment) = crate::claude::resolve_assignment(
+    if let Some(assignment) = crate::pool::resolve_assignment::<crate::pool::ClaudePool>(
         &app,
         claude_req.as_deref(),
         None,
         bound_group.as_deref(),
     ) {
-        let selection = crate::claude::normalize_selection(claude_req.as_deref());
+        let selection = crate::pool::normalize_selection(claude_req.as_deref());
         let (group, account) = match assignment {
-            crate::claude::Assignment::Group { name, initial } => (Some(name), Some(initial)),
-            crate::claude::Assignment::Account(a) => (None, Some(a)),
-            crate::claude::Assignment::AutoPending => (None, None),
+            crate::pool::Assignment::Group { name, initial } => (Some(name), Some(initial)),
+            crate::pool::Assignment::Account(a) => (None, Some(a)),
+            crate::pool::Assignment::AutoPending => (None, None),
         };
         claude_selection = Some(selection);
         claude_account_email = account.clone();
@@ -523,7 +522,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
                 // a failure is logged, not fatal to the clone create.
                 match crate::claude::clear_clone_token(&app, &spec.new_hostname).await {
                     Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push("account: auto (pending imported account)".into())
+                        op.log
+                            .push("account: auto (pending imported account)".into())
                     }),
                     Err(e) => {
                         tracing::warn!("clear_clone_token({}) failed: {e}", spec.new_hostname);
@@ -563,17 +563,17 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     let mut codex_selection: Option<String> = None;
     let mut codex_account_email: Option<String> = None;
     let mut codex_group: Option<String> = None;
-    if let Some(assignment) = crate::codex::resolve_assignment(
+    if let Some(assignment) = crate::pool::resolve_assignment::<crate::pool::CodexPool>(
         &app,
         codex_req.as_deref(),
         None,
         bound_group.as_deref(),
     ) {
-        let selection = crate::codex::normalize_selection(codex_req.as_deref());
+        let selection = crate::pool::normalize_selection(codex_req.as_deref());
         let (group, account) = match assignment {
-            crate::codex::Assignment::Group { name, initial } => (Some(name), Some(initial)),
-            crate::codex::Assignment::Account(a) => (None, Some(a)),
-            crate::codex::Assignment::AutoPending => (None, None),
+            crate::pool::Assignment::Group { name, initial } => (Some(name), Some(initial)),
+            crate::pool::Assignment::Account(a) => (None, Some(a)),
+            crate::pool::Assignment::AutoPending => (None, None),
         };
         codex_selection = Some(selection);
         codex_account_email = account.clone();
@@ -583,7 +583,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
                 // Pending: no account can take this side yet (see the Claude block).
                 match crate::codex::clear_clone_token(&app, &spec.new_hostname).await {
                     Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push("codex account: auto (pending imported account)".into())
+                        op.log
+                            .push("codex account: auto (pending imported account)".into())
                     }),
                     Err(e) => {
                         tracing::warn!(
@@ -642,7 +643,13 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // Last settle step: the preset's startup script as the clone user (best-effort).
     if spec.run_startup_script {
         progress("settle", "running the preset startup script");
-        run_startup_script(&app, &op_id, &spec.new_hostname, spec.preset_name.as_deref()).await;
+        run_startup_script(
+            &app,
+            &op_id,
+            &spec.new_hostname,
+            spec.preset_name.as_deref(),
+        )
+        .await;
     } else {
         patch_op(&app, &op_id, |op| {
             op.log.push("startup script: skipped by request".into())
@@ -1130,19 +1137,17 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     let mut claude_account_email = src.claude_account_email.clone();
     let mut claude_group = src.claude_group.clone();
     if spec.claude_account.is_some() || group_changed {
-        let selection = crate::claude::normalize_selection(claude_req.as_deref());
-        if let Some(assignment) = crate::claude::resolve_assignment(
+        let selection = crate::pool::normalize_selection(claude_req.as_deref());
+        if let Some(assignment) = crate::pool::resolve_assignment::<crate::pool::ClaudePool>(
             &app,
             claude_req.as_deref(),
             src.claude_account_email.as_deref(),
             bound_group.as_deref(),
         ) {
             let (group, account) = match assignment {
-                crate::claude::Assignment::Group { name, initial } => {
-                    (Some(name), Some(initial))
-                }
-                crate::claude::Assignment::Account(a) => (None, Some(a)),
-                crate::claude::Assignment::AutoPending => (None, None),
+                crate::pool::Assignment::Group { name, initial } => (Some(name), Some(initial)),
+                crate::pool::Assignment::Account(a) => (None, Some(a)),
+                crate::pool::Assignment::AutoPending => (None, None),
             };
             claude_selection = Some(selection);
             claude_account_email = account.clone();
@@ -1152,7 +1157,8 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
                     Ok(()) => {
                         app.claude.forget_pushed(&new_id);
                         patch_op(&app, &op_id, |op| {
-                            op.log.push("account: auto (pending imported account)".into())
+                            op.log
+                                .push("account: auto (pending imported account)".into())
                         })
                     }
                     Err(e) => {
@@ -1200,19 +1206,17 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     let mut codex_account_email = src.codex_account_email.clone();
     let mut codex_group = src.codex_group.clone();
     if spec.codex_account.is_some() || group_changed {
-        let selection = crate::codex::normalize_selection(codex_req.as_deref());
-        if let Some(assignment) = crate::codex::resolve_assignment(
+        let selection = crate::pool::normalize_selection(codex_req.as_deref());
+        if let Some(assignment) = crate::pool::resolve_assignment::<crate::pool::CodexPool>(
             &app,
             codex_req.as_deref(),
             src.codex_account_email.as_deref(),
             bound_group.as_deref(),
         ) {
             let (group, account) = match assignment {
-                crate::codex::Assignment::Group { name, initial } => {
-                    (Some(name), Some(initial))
-                }
-                crate::codex::Assignment::Account(a) => (None, Some(a)),
-                crate::codex::Assignment::AutoPending => (None, None),
+                crate::pool::Assignment::Group { name, initial } => (Some(name), Some(initial)),
+                crate::pool::Assignment::Account(a) => (None, Some(a)),
+                crate::pool::Assignment::AutoPending => (None, None),
             };
             codex_selection = Some(selection);
             codex_account_email = account.clone();
@@ -1222,7 +1226,8 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
                     Ok(()) => {
                         app.codex.forget_pushed(&new_id);
                         patch_op(&app, &op_id, |op| {
-                            op.log.push("codex account: auto (pending imported account)".into())
+                            op.log
+                                .push("codex account: auto (pending imported account)".into())
                         })
                     }
                     Err(e) => {

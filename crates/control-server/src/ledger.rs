@@ -1421,7 +1421,7 @@ pub struct SearchQuery {
 
 /// Epoch milliseconds for an RFC3339 stamp, sharing the account pollers' parser.
 fn ts_ms(ts: &str) -> Option<i64> {
-    crate::claude::parse_rfc3339_utc_secs(ts).map(|secs| secs * 1000)
+    crate::pool::parse_rfc3339_utc_secs(ts).map(|secs| secs * 1000)
 }
 
 /// The ledger files to search, newest first.

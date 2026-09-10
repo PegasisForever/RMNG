@@ -33,6 +33,7 @@ mod smb;
 mod ssh;
 mod state;
 mod oauth;
+mod pool;
 mod stuck;
 mod stucklog;
 mod termplane;
@@ -131,7 +132,7 @@ async fn main() -> Result<()> {
     // container, or an image built without `GIT_SHA`) keeps the per-boot id instead.
     {
         let reference = wire::SERVER_IMAGE;
-        let (repo, _) = crate::docker::split_reference(&reference);
+        let (repo, _) = crate::docker::split_reference(reference);
         if let Some(id) = app.docker.env().await.self_container {
             match app.docker.self_image_info(&id, &repo).await {
                 Ok(info) => {

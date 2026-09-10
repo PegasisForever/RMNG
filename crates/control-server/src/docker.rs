@@ -46,7 +46,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
-use wire::{DockerConfig, EnvCheckRow, ExecResult, SetupEnv, UpdateStatus};
+use wire::{EnvCheckRow, ExecResult, SetupEnv, UpdateStatus};
 
 // --- Constants ------------------------------------------------------------------------
 
