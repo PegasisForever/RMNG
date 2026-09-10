@@ -73,12 +73,10 @@ export interface SettingsPanelViewProps {
   onImportAccount: () => void;
   onReplaceAccount: (account: ClaudeUsage) => void;
 
-  /** First-run setup has finished, so the clone subnet is read-only. */
-  setupComplete: boolean;
   /** The last failed load or save, in the panel's own banner. */
   error: string | null;
-  /** The last save touched a port/socket/video setting, so the restart banner stands until a
-   *  later save clears it. */
+  /** The last save touched the chroma mode, so the restart banner stands until a later
+   *  save clears it. */
   restartRequired: boolean;
   saving: boolean;
   /** The post-save confirmation, which the container clears after a beat. */

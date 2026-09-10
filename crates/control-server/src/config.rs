@@ -268,11 +268,10 @@ mod tests {
             accounts: vec![],
         }];
         base.codex = CodexConfig {
-            poll_secs: 600,
-            usage_polling: true,
             ..Default::default()
         };
-        // Editor sends the full group list + a codex config patch.
+        // Editor sends the full group list + a codex config patch (retired poll keys
+        // are dropped silently).
         let incoming = serde_json::json!({
             "cloneGroups": [{ "name": "team", "accounts": [] }],
             "codex": { "pollSecs": 300, "usagePolling": false },
@@ -280,11 +279,10 @@ mod tests {
         let merged = merge_update(&base, incoming).unwrap();
         assert_eq!(merged.clone_groups.len(), 1);
         assert_eq!(merged.clone_groups[0].name, "team");
-        assert_eq!(merged.codex.poll_secs, 300);
-        assert!(!merged.codex.usage_polling);
         // A codex-only patch leaves the groups untouched.
         let m2 =
-            merge_update(&merged, serde_json::json!({ "codex": { "pollSecs": 120 } })).unwrap();
+            merge_update(&merged, serde_json::json!({ "codex": { "autoReset": true } })).unwrap();
+        assert!(m2.codex.auto_reset);
         assert_eq!(
             m2.clone_groups.len(),
             1,
@@ -293,86 +291,38 @@ mod tests {
         assert_eq!(m2.clone_groups[0].name, "team");
     }
 
-    /// A base config that has finished first-run setup (one-time fields locked).
+    /// A base config that has finished first-run setup (latch locked).
     fn setup_done() -> AppConfig {
         let mut base = AppConfig::default();
         base.setup_complete = true;
-        base.docker.subnet = "10.99.0.0/24".into();
         base
     }
 
     #[test]
-    fn one_time_fields_rejected_after_setup() {
+    fn setup_latch_is_one_way() {
         let base = setup_done();
-        // docker.subnet
-        let e = merge_update(
-            &base,
-            serde_json::json!({ "docker": { "subnet": "10.42.0.0/24" } }),
-        )
-        .unwrap_err();
-        assert!(e.to_string().contains("subnet"), "err: {e}");
-        assert!(e.to_string().contains("first-run"), "err: {e}");
-        // A no-op resend of the same value is fine (final value == base value).
+        // setupComplete cannot be turned off.
+        let e = merge_update(&base, serde_json::json!({ "setupComplete": false })).unwrap_err();
+        assert!(e.to_string().contains("setupComplete"), "err: {e}");
+        // Retired keys (subnet, dataDir, …) are dropped silently, never an error.
         let ok = merge_update(
             &base,
-            serde_json::json!({ "docker": { "subnet": "10.99.0.0/24" } }),
+            serde_json::json!({ "docker": { "subnet": "10.42.0.0/24" }, "dataDir": "" }),
         )
         .unwrap();
-        assert_eq!(ok.docker.subnet, "10.99.0.0/24");
-        // Blank strings are unchanged (deep-merge protects them) — never an error.
-        let ok = merge_update(
-            &base,
-            serde_json::json!({ "dataDir": "", "docker": { "subnet": "" } }),
-        )
-        .unwrap();
-        assert_eq!(ok.docker.subnet, "10.99.0.0/24");
+        assert!(ok.setup_complete);
     }
 
     #[test]
-    fn one_time_fields_editable_before_setup() {
-        // Before setup completes, the one-time fields are freely editable. Unknown keys
-        // (retired Advanced-pane fields) are dropped silently.
-        let base = AppConfig::default(); // setup_complete == false
-        let merged = merge_update(
+    fn retired_subnet_keys_are_dropped_not_validated() {
+        // The subnet is hardcoded now; a stale client sending one is ignored, never an error.
+        let base = AppConfig::default();
+        let ok = merge_update(
             &base,
-            serde_json::json!({
-                "dataDir": "elsewhere",
-                "cloneSocket": "/run/other/clones.sock",
-                "docker": { "subnet": "10.42.0.0/24" },
-            }),
+            serde_json::json!({ "docker": { "subnet": "banana/24" } }),
         )
         .unwrap();
-        assert_eq!(merged.docker.subnet, "10.42.0.0/24");
-    }
-
-    #[test]
-    fn subnet_validated_at_merge() {
-        let base = AppConfig::default(); // pre-setup: subnet is editable, but must be valid
-        let set = |s: &str| serde_json::json!({ "docker": { "subnet": s } });
-        // Valid CIDRs across the allowed prefix range are accepted.
-        for good in ["10.99.0.0/24", "172.30.0.0/16", "192.168.0.0/20"] {
-            let ok = merge_update(&base, set(good)).unwrap();
-            assert_eq!(ok.docker.subnet, good);
-        }
-        // Bad format / bad prefix / non-IP are all rejected, naming the field.
-        for bad in [
-            "10.99.0.0",    // no prefix
-            "10.99.0.0/",   // empty prefix
-            "10.99.0.0/8",  // prefix too wide (<16)
-            "10.99.0.0/25", // prefix too narrow (>24)
-            "10.99.0/24",   // not a full IPv4 address
-            "banana/24",    // non-IP
-            "fd00::/24",    // IPv6 not supported
-        ] {
-            let e = merge_update(&base, set(bad)).unwrap_err();
-            assert!(
-                e.to_string().contains("docker.subnet"),
-                "subnet {bad:?} err: {e}"
-            );
-        }
-        // Blank = unchanged (deep-merge collapses it before validation) — never an error.
-        let ok = merge_update(&base, set("")).unwrap();
-        assert_eq!(ok.docker.subnet, base.docker.subnet);
+        assert_eq!(ok.docker.hostname_prefix, base.docker.hostname_prefix);
     }
 
     #[test]
@@ -489,10 +439,7 @@ mod tests {
         // No change → no restart.
         assert!(!restart_required(&base, &base.clone()));
 
-        // Each restart-required trigger flips it true.
-        let mut n = base.clone();
-        n.docker.socket = "/run/docker.sock".into();
-        assert!(restart_required(&base, &n));
+        // The only restart-required trigger flips it true.
         let mut n = base.clone();
         n.chroma = wire::ChromaMode::Yuv444;
         assert!(restart_required(&base, &n));
@@ -697,7 +644,6 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
             .unwrap_or_default();
     }
     enforce_categories(base, &merged)?;
-    validate_docker_subnet(&merged.docker.subnet)?;
     validate_layout_presets(&mut merged.layout_presets)?;
     Ok(merged)
 }
@@ -741,24 +687,6 @@ fn validate_layout_presets(presets: &mut [wire::LayoutPreset]) -> Result<()> {
     Ok(())
 }
 
-/// Reject a `docker.subnet` that isn't an IPv4 CIDR with a `/16`–`/24` prefix (the
-/// design range for the `rmng` bridge: room for the `.1` gateway / `.2` control-server /
-/// `.10+` clone pool without an absurdly large network). Validated on the merged value,
-/// so a bad subnet can never be saved; blank-string "unchanged" is already collapsed by
-/// `deep_merge`, so this always sees a concrete value (the default is valid).
-fn validate_docker_subnet(subnet: &str) -> Result<()> {
-    let ok = subnet.split_once('/').is_some_and(|(ip, prefix)| {
-        ip.parse::<std::net::Ipv4Addr>().is_ok()
-            && prefix.parse::<u8>().is_ok_and(|p| (16..=24).contains(&p))
-    });
-    if !ok {
-        bail!(
-            "docker.subnet must be an IPv4 CIDR with a /16–/24 prefix (e.g. 10.99.0.0/24), got {subnet:?}"
-        );
-    }
-    Ok(())
-}
-
 /// Guard the effect-category invariants on a merged config. Once first-run setup has
 /// completed (`base.setup_complete`), the **one-time** field (the Docker subnet, baked into
 /// the rmng bridge at setup) can't change, and the `setupComplete` latch can't be undone. Blank-string
@@ -770,24 +698,17 @@ fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
             "setupComplete cannot be turned off — it is a one-way latch set during first-run setup"
         );
     }
-    if base.setup_complete {
-        if merged.docker.subnet != base.docker.subnet {
-            bail!(
-                "docker.subnet is a one-time setting (baked into the rmng network at first-run setup) and cannot be changed after setup"
-            );
-        }
-    }
     Ok(())
 }
 
-/// Whether applying `new` over `old` requires a server restart to take effect. The
-/// restart-required settings are the ones wired once at startup: the Docker daemon socket
-/// (the bollard client is built at startup) and the chroma mode. Ports, paths, and
-/// directories are hardcoded now (see `wire`), not settings at all. Everything else
-/// applies live. Consumed by web.rs's `PUT /api/config` handler, which surfaces the
-/// result as `ConfigPutResponse.restart_required`.
+/// Whether applying `new` over `old` requires a server restart to take effect. The only
+/// restart-required setting left is the chroma mode (wired once at startup). Ports, paths,
+/// directories, sockets, subnets, images, and poll intervals are hardcoded now (see
+/// `wire`), not settings at all. Everything else applies live. Consumed by web.rs's
+/// `PUT /api/config` handler, which surfaces the result as
+/// `ConfigPutResponse.restart_required`.
 pub fn restart_required(old: &AppConfig, new: &AppConfig) -> bool {
-    old.docker.socket != new.docker.socket || old.chroma != new.chroma
+    old.chroma != new.chroma
 }
 
 /// Merge the UI's preset rows by name: every field is taken verbatim from the row

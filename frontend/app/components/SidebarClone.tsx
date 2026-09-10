@@ -284,9 +284,9 @@ export interface SidebarCloneProps {
   /** Live runtime status for this clone's forwards (from the `forwards` SSE event),
    *  merged into the compact forwards chips by rule id. */
   forwardRuntime?: ForwardRuntime[];
-  /** The `-J` jump target for the copied command, already resolved: `ssh.publicHost` from
-   *  config, or this page's own address when no override is configured. The container reads
-   *  the page's address, so a card never has to. */
+  /** The `-J` jump target for the copied command, already resolved: this page's own
+   *  address (no override exists anymore). The container reads the page's address, so a
+   *  card never has to. */
   sshPublicHost: string;
   /** `listen.bastion` — the bastion `sshd` port the copied command jumps through. */
   bastionPort: number;

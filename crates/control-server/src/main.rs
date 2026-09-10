@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
     // Runs after `self_setup`, which is what detects the self-container id. A dev run (no self
     // container, or an image built without `GIT_SHA`) keeps the per-boot id instead.
     {
-        let reference = app.config().docker.server_image;
+        let reference = wire::SERVER_IMAGE;
         let (repo, _) = crate::docker::split_reference(&reference);
         if let Some(id) = app.docker.env().await.self_container {
             match app.docker.self_image_info(&id, &repo).await {
@@ -151,11 +151,10 @@ async fn main() -> Result<()> {
     // daemon (or a first-run image pull) logs and retries next boot, same posture as
     // `ensure_network`. 120 s covers a cold pull of registry + buildkit.
     {
-        let cfg = app.config();
-        if cfg.setup_complete && cfg.docker.build_infra_enabled {
+        if app.config().setup_complete {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(120),
-                app.docker.ensure_build_infra(&cfg.docker),
+                app.docker.ensure_build_infra(),
             )
             .await
             {

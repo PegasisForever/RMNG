@@ -69,16 +69,8 @@ async fn run_helper(handoff_path: &str) -> i32 {
             return 1;
         }
     };
-    // Build a bollard client from config (respects a custom docker.socket). config.json is in
-    // the /data volume, which is mounted into the helper too, so config::load() works here.
-    let cfg = match crate::config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(target: "update", "loading config in helper: {e}");
-            return 1;
-        }
-    };
-    let docker = crate::docker::DockerCtl::connect(&cfg.docker);
+    // Build a bollard client (fixed socket). No config needed here.
+    let docker = crate::docker::DockerCtl::connect();
     let spec = &handoff.spec;
 
     // Stop + remove the old container (frees the name + published ports).

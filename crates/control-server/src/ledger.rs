@@ -1346,7 +1346,6 @@ fn tail_clone(clone: &str, home: &Path, dir: &Path) {
 /// than spawned for exactly that reason: spawning it would race the teardown it exists to beat.
 /// It never fails the caller and it is bounded by [`CLONE_TAIL_TIMEOUT`].
 pub async fn tail_once(app: &App, clone: &str) {
-    let cfg = app.config();
     let Some(dir) = clone_dir(&app.data_dir(), clone) else {
         return;
     };
@@ -1363,7 +1362,6 @@ pub async fn tail_once(app: &App, clone: &str) {
 
 /// One pass across the fleet.
 async fn tail_fleet(app: &App) {
-    let cfg = app.config();
     let root = crate::homes::hosts_root(&app.data_dir());
     let hosts: Vec<String> = app
         .store

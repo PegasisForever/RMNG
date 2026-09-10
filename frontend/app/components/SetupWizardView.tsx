@@ -36,7 +36,7 @@ export interface SetupWizardViewProps {
   error: string | null;
   /** A config PUT is in flight. Locks the footer. */
   saving: boolean;
-  /** Next refuses to advance: a failing required check or an invalid subnet. */
+  /** Next refuses to advance: a failing required check. */
   nextDisabled: boolean;
   onNext: () => void;
   onBack: () => void;
@@ -111,11 +111,7 @@ export function SetupWizardView({
 
           {/* Step 1: Environment. */}
           {step === 0 ? (
-            <SetupEnvironmentStep
-              subnet={draft.subnet}
-              envChecklist={envChecklist}
-              onSubnetChange={(subnet) => onDraftChange("subnet", subnet)}
-            />
+            <SetupEnvironmentStep envChecklist={envChecklist} />
           ) : null}
 
           {/* Step 2: Server. */}

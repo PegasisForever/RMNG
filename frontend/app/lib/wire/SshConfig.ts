@@ -10,9 +10,4 @@ export type SshConfig = {
 /**
  * Authorized SSH public keys, one full line each (`ssh-ed25519 AAAA… comment`).
  */
-authorizedKeys: Array<string>, 
-/**
- * Public host/IP the copied command's `-J` jump targets. Empty ⇒ the UI infers it
- * from the address it's already served on. Not secret.
- */
-publicHost: string, };
+authorizedKeys: Array<string>, };

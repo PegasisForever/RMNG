@@ -7,18 +7,6 @@
  */
 export type DockerConfig = { 
 /**
- * Docker daemon unix socket the control-server drives clones through, e.g.
- * `/var/run/docker.sock`. **Restart-required**: the bollard client is built at
- * startup.
- */
-socket: string, 
-/**
- * CIDR for the user-defined `rmng` bridge network (`.1` gateway, `.2` control-server,
- * `.10+` clone pool). **One-time**: baked into the network + every clone's static IP
- * at first-run setup (validated `/16`–`/24` at config merge).
- */
-subnet: string, 
-/**
  * Prefix for derived clone hostnames/names, e.g. `pega-` → `pega-dev-123`. Sanitized
  * to DNS-label-safe chars at use; blank in the UI keeps the stored value. Immediate
  * (carried from the retired `proxmox.hostname_prefix`).
@@ -32,45 +20,6 @@ cloneCpus: number,
  * Memory limit per clone in MiB (+8 GiB swap), matching LXC parity.
  */
 cloneMemoryMb: number, 
-/**
- * Registry reference the setup wizard pulls the clone template from. The pulled image
- * keeps this `repo:tag` as its clone-source reference (no local retag), so it's also
- * exactly what the image picker lists and what clones are created FROM. Immediate-apply
- * (read fresh per pull); no secret (public image over the local daemon), so it passes
- * through the redacted view.
- */
-templateReference: string, 
-/**
- * Registry reference the in-product self-update pulls the control-server image from
- * (and digest-compares against for update-available detection). Immediate-apply (read
- * fresh per check/update); no secret (public image over the local daemon), so it
- * passes through the redacted view.
- */
-serverImage: string, 
-/**
- * Master switch for the shared Docker build infra (pull-through Hub mirror + remote
- * BuildKit). When true (default), the control-server ensures the `rmng-registry` /
- * `rmng-buildkit` containers at startup and the `buildinfra` reconciler applies the
- * mirror + remote builder to every running clone. When false, none of that runs and
- * already-created infra / already-migrated clones are left in place (a pure "stop
- * managing" — no destructive teardown). Immediate-apply (read fresh each tick).
- */
-buildInfraEnabled: boolean, 
-/**
- * Image for the pull-through Docker Hub cache container (`rmng-registry`). Overridable
- * (an operator may pin a digest); a change triggers a recreate at next boot.
- */
-registryImage: string, 
-/**
- * Image for the shared BuildKit daemon container (`rmng-buildkit`). Overridable; a
- * change triggers a recreate at next boot.
- */
-buildkitImage: string, 
-/**
- * BuildKit cache GC ceiling in GiB (`keepBytes`). Caps the shared layer cache so it
- * cannot grow unbounded. A change triggers a `rmng-buildkit` recreate at next boot.
- */
-buildkitCacheGb: number, 
 /**
  * REMOVED `profile_lines`: presets carry their own full Dockerfile now.
  * Template home seed snapshot (`<dataset>@<snap>`). A create clones the new home

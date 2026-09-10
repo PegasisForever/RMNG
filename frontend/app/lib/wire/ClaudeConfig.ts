@@ -2,10 +2,6 @@
 
 export type ClaudeConfig = { 
 /**
- * Usage poll interval (seconds, floored at 15).
- */
-pollSecs: bigint, 
-/**
  * Account email pinned to the top of the usage list.
  */
 pinnedEmail: string | null, };

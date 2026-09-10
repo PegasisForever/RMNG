@@ -837,7 +837,7 @@ async fn run_update(app: App, op_id: String, reference: String) {
     if let Err(e) = crate::update::write_handoff(&handoff) {
         return fail_op(&app, &op_id, format!("writing handoff: {e:#}"));
     }
-    let socket = app.config().docker.socket;
+    let socket = wire::DOCKER_SOCKET.to_string();
     if let Err(e) = app
         .docker
         .launch_upgrade_helper(&reference, &self_id, &socket)

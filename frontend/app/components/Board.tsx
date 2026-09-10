@@ -73,9 +73,9 @@ export interface BoardProps {
    *  picked last. The clone keeps the video stream and its notes underneath regardless. */
   selectedId: string | null;
   /** The `-J` jump target for each card's copied SSH command, already resolved by the
-   *  container: `ssh.publicHost` from config, or this page's own address without one. */
+   *  container: this page's own address (no override exists anymore). */
   sshPublicHost: string;
-  /** `listen.bastion` — the bastion `sshd` port those commands jump through. */
+  /** The bastion `sshd` port those commands jump through (hardcoded on the server). */
   bastionPort: number;
   /** The control rail, drawn first in the strip (see BoardRail). */
   rail: ReactNode;

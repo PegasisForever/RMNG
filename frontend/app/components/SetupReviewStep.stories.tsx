@@ -28,13 +28,11 @@ type Story = StoryObj<typeof meta>;
 /** A complete first run: every field filled in. */
 export const Default: Story = {};
 
-/** The barest rig the wizard will finish: no hostname prefix, one screen, and a subnet field
- *  the operator emptied. The two blanks read differently on purpose — a missing prefix is a
- *  choice, a missing subnet is a gap. */
+/** The barest rig the wizard will finish: no hostname prefix, one screen. A missing
+ *  prefix is a choice, not a gap. */
 export const Minimal: Story = {
   args: {
     draft: makeSetupDraft({
-      subnet: "",
       hostnamePrefix: "",
       monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
     }),

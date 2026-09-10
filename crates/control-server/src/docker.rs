@@ -256,13 +256,10 @@ pub struct DockerCtl {
     /// bind) and a socket that appears later (dev: dockerd restart) heals without a
     /// server restart. std (not tokio) lock: never held across an await.
     client: std::sync::RwLock<Result<Docker, String>>,
-    /// The resolved daemon socket path (config `docker.socket`, default applied).
+    /// The daemon socket path ([`wire::DOCKER_SOCKET`]).
     socket: String,
-    /// The user-configured subnet (validated `/16`–`/24` IPv4 CIDR at config merge).
-    /// Interior-mutable so a wizard subnet change reaches the lazily-materialized `rmng`
-    /// bridge: `config_put` pushes it via [`Self::set_subnet`] before the network is created
-    /// (otherwise the bridge would be built with the boot-time default and every later boot
-    /// would reject the mismatched network).
+    /// The clone-network subnet ([`wire::DOCKER_SUBNET`]), read when the `rmng` bridge
+    /// is lazily materialized.
     subnet: std::sync::RwLock<String>,
     env: RwLock<EnvReport>,
 }
@@ -439,14 +436,8 @@ impl DockerCtl {
     /// the sock bind). A failed client build (missing socket file) is stored; every
     /// daemon-touching call surfaces it via [`Self::daemon`], and `self_setup` reports
     /// it as the failing `dockerDaemon` env row.
-    pub fn connect(cfg: &DockerConfig) -> Self {
-        let socket = cfg.socket.trim();
-        let socket = if socket.is_empty() {
-            "/var/run/docker.sock"
-        } else {
-            socket
-        }
-        .to_string();
+    pub fn connect() -> Self {
+        let socket = wire::DOCKER_SOCKET.to_string();
         let client = build_client(&socket).map_err(|e| {
             tracing::warn!(target: "docker", "{e:#} — booting anyway; the setup wizard shows the failure");
             format!("{e:#}")
@@ -454,17 +445,9 @@ impl DockerCtl {
         Self {
             client: std::sync::RwLock::new(client),
             socket,
-            subnet: std::sync::RwLock::new(cfg.subnet.clone()),
+            subnet: std::sync::RwLock::new(wire::DOCKER_SUBNET.to_string()),
             env: RwLock::new(EnvReport::default()),
         }
-    }
-
-    /// Refresh the cached subnet from config. The `rmng` bridge is materialized lazily
-    /// (wizard finish / first clone), so the subnet the operator sets in the wizard must be
-    /// pushed here *before* that happens — see the field doc. Called from `config_put` on
-    /// every config write, so the long-lived ctl never drifts from the persisted config.
-    pub fn set_subnet(&self, subnet: &str) {
-        *self.subnet.write().unwrap() = subnet.to_string();
     }
 
     /// The bollard client (cheap `Arc` clone), rebuilding it first if the initial build
@@ -944,7 +927,7 @@ impl DockerCtl {
     /// the `rmng` bridge, labeled `rmng.infra=1`, `restart: unless-stopped`. Idempotent:
     /// create-if-absent, start-if-stopped, recreate-if-image-drifted (cache volumes survive a
     /// recreate). MUST run after `ensure_network` (the containers attach to `NETWORK`).
-    pub async fn ensure_build_infra(&self, cfg: &wire::DockerConfig) -> Result<()> {
+    pub async fn ensure_build_infra(&self) -> Result<()> {
         self.ensure_volume(crate::buildinfra::REGISTRY_DATA_VOL)
             .await?;
         self.ensure_volume(crate::buildinfra::BUILDKIT_CACHE_VOL)
@@ -952,7 +935,7 @@ impl DockerCtl {
 
         self.ensure_infra_container(InfraSpec {
             name: crate::buildinfra::REGISTRY_CONTAINER,
-            image: cfg.registry_image.clone(),
+            image: wire::REGISTRY_IMAGE.to_string(),
             cmd: None,
             env: vec!["REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io".to_string()],
             mounts: vec![Mount {
@@ -969,7 +952,7 @@ impl DockerCtl {
 
         self.ensure_infra_container(InfraSpec {
             name: crate::buildinfra::BUILDKIT_CONTAINER,
-            image: cfg.buildkit_image.clone(),
+            image: wire::BUILDKIT_IMAGE.to_string(),
             // moby/buildkit's ENTRYPOINT is `buildkitd`; these are its args.
             cmd: Some(vec![
                 "--addr".to_string(),
@@ -987,12 +970,12 @@ impl DockerCtl {
             privileged: true,
             files: vec![TarEntry {
                 path: "etc/buildkit/buildkitd.toml".to_string(),
-                data: crate::buildinfra::render_buildkitd_toml(cfg.buildkit_cache_gb).into_bytes(),
+                data: crate::buildinfra::render_buildkitd_toml(wire::BUILDKIT_CACHE_GB).into_bytes(),
                 mode: 0o644,
                 uid: 0,
                 gid: 0,
             }],
-            config_fingerprint: Some(cfg.buildkit_cache_gb.to_string()),
+            config_fingerprint: Some(wire::BUILDKIT_CACHE_GB.to_string()),
         })
         .await?;
         Ok(())
@@ -3012,38 +2995,25 @@ mod tests {
     /// bare `docker run` without the sock bind). The build error is deferred to
     /// `daemon()`, which carries the socket path in its message for the env row.
     #[test]
-    fn connect_without_socket_defers_the_error() {
-        let cfg = DockerConfig {
-            socket: "/nonexistent/rmng-test-docker.sock".into(),
-            ..Default::default()
-        };
-        let ctl = DockerCtl::connect(&cfg); // must not panic
-        let err = format!(
-            "{:#}",
-            ctl.daemon()
-                .expect_err("daemon() must fail without a socket")
-        );
-        assert!(
-            err.contains("/nonexistent/rmng-test-docker.sock"),
-            "error should name the socket path: {err}"
-        );
+    fn connect_uses_the_hardcoded_socket() {
+        // Construction never panics, socket or no socket (the no-socket boot path: bare
+        // `docker run` without the sock bind). The build error is deferred to `daemon()`,
+        // which carries the socket path in its message for the env row.
+        let ctl = DockerCtl::connect(); // must not panic
+        if let Err(e) = ctl.daemon() {
+            assert!(
+                format!("{e:#}").contains(wire::DOCKER_SOCKET),
+                "error should name the socket path: {e:#}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn set_subnet_refreshes_derived_network_params() {
-        // The `rmng` bridge is derived from DockerCtl.subnet at materialization time (wizard
-        // finish / first clone). Before the fix `subnet` was a boot-time snapshot, so a
-        // wizard subnet change never reached ensure_network — the bridge came up on the old
-        // default and every later boot rejected the mismatch. `set_subnet` must make the
-        // derived params (here the dev-mode gateway, same SubnetPlan ensure_network uses)
-        // reflect the new subnet immediately.
-        let ctl = DockerCtl::connect(&DockerConfig {
-            subnet: "10.99.0.0/24".into(),
-            ..Default::default()
-        });
+    async fn network_params_derive_from_the_hardcoded_subnet() {
+        // The `rmng` bridge derives from the hardcoded subnet (no wizard override exists
+        // anymore, so there is nothing to refresh).
+        let ctl = DockerCtl::connect();
         assert_eq!(ctl.control_host().await.unwrap(), "10.99.0.1");
-        ctl.set_subnet("10.98.0.0/24");
-        assert_eq!(ctl.control_host().await.unwrap(), "10.98.0.1");
     }
 
     // --- subnet plan ------------------------------------------------------------------

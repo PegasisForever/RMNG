@@ -22,27 +22,14 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     ],
     activeLayout: "Default",
     docker: {
-      socket: "/var/run/docker.sock",
-      subnet: "10.99.0.0/24",
       hostnamePrefix: "pega-",
       cloneCpus: 16,
       cloneMemoryMb: 32768,
-      templateReference: "pegasis0/rmng-template:latest",
-      serverImage: "pegasis0/rmng:latest",
-      buildInfraEnabled: true,
-      registryImage: "registry:2.8.3",
-      buildkitImage: "moby/buildkit:v0.17.2",
-      buildkitCacheGb: 40,
       seedSnapshot: null,
       homesParent: "tank/rmng/homes",
     },
-    claude: { pollSecs: BigInt(600), pinnedEmail: "alex@example.com" },
-    codex: {
-      pollSecs: BigInt(600),
-      pinnedEmail: null,
-      usagePolling: true,
-      autoReset: false,
-    },
+    claude: { pinnedEmail: "alex@example.com" },
+    codex: { pinnedEmail: null, autoReset: false },
     cloneGroups: [{ name: "pooled", accounts: ["alex@example.com"] }],
     codexGroups: [],
     presets: [
@@ -61,7 +48,6 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     chroma: "yuv420",
     ssh: {
       authorizedKeys: ["ssh-ed25519 AAAA me@laptop"],
-      publicHost: "rmng.example.com",
     },
     agentPlaybook: "playbook",
     globalPrompt: "prompt",
@@ -73,8 +59,8 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
 /** The patch, narrowed to the shape the tests read. `settingsPatch` returns `unknown` because
  *  it is a request body, not a value this app consumes. */
 type Patch = {
-  docker: { subnet?: string; hostnamePrefix: string };
-  claude: { pollSecs: number; pinnedEmail: string | null };
+  docker: { hostnamePrefix: string };
+  claude: { pinnedEmail: string | null };
   codex: { pinnedEmail: string | null };
   cloneGroups: { name: string; accounts: string[] }[];
   codexGroups: { name: string; accounts: string[] }[];
@@ -135,13 +121,15 @@ test("the form never shares an array with the config it was seeded from", () => 
 
 // --- what a save sends --------------------------------------------------------------------
 
-test("the subnet is only sent before first-run setup finishes", () => {
-  // It is baked into the rmng bridge and every clone's static IP, so afterwards the server
-  // rejects a change anyway. Omitted rather than sent unchanged.
+test("the docker patch names only the fields the panel still edits", () => {
+  // Hostname prefix + sizing. The subnet, socket, and images are hardcoded on the server.
   const draft = settingsDraftFrom(config());
 
-  expect(patch(draft, true).docker.subnet).toBeUndefined();
-  expect(patch(draft, false).docker.subnet).toBe("10.99.0.0/24");
+  expect(Object.keys(patch(draft, true).docker).sort()).toEqual([
+    "cloneCpus",
+    "cloneMemoryMb",
+    "hostnamePrefix",
+  ]);
 });
 
 test("a half-typed pool is dropped rather than saved unnamed", () => {

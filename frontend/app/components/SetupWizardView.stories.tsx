@@ -3,7 +3,7 @@ import { fn } from "storybook/test";
 
 import { SetupWizardView } from "./SetupWizardView";
 import { EnvChecklistView } from "./EnvChecklistView";
-import { nextDisabled, subnetOk, type SetupDraft } from "~/lib/setupDraft";
+import { nextDisabled, type SetupDraft } from "~/lib/setupDraft";
 import { makeSetupDraft } from "./__fixtures__/appConfig";
 import { makeEnvCheckRow, makeEnvRows } from "./__fixtures__/setupEnv";
 
@@ -45,15 +45,13 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** Step 1 on a ready host. Back is dead because there is nowhere behind this, and Next is
- *  live because every required check passed and the subnet parses. */
+ *  live because every required check passed. */
 export const Environment: Story = { args: { ...base() } };
 
-/** Step 1 on a host that cannot run clones, with a subnet the server would reject as well.
- *  Next is dead, and both reasons are on screen. */
+/** Step 1 on a host that cannot run clones. Next is dead, and the reason is on screen. */
 export const EnvironmentBlocked: Story = {
   args: {
     ...base(),
-    draft: makeSetupDraft({ subnet: "10.0.0.0/8" }),
     envChecklist: checklist([
       makeEnvCheckRow({
         ok: false,
@@ -85,8 +83,7 @@ export const Saving: Story = {
   args: { ...base(), step: 1, saving: true, nextDisabled: true },
 };
 
-/** The Finish click, mid-flight. Same lock, different word, because this one also latches the
- *  one-time subnet. */
+/** The Finish click, mid-flight. Same lock, different word, because this one latches setup. */
 export const Finishing: Story = {
   args: { ...base(), step: 2, saving: true },
 };
@@ -94,5 +91,4 @@ export const Finishing: Story = {
 // Keep the helper imports referenced: the blocked/saving stories set nextDisabled by hand,
 // but the rule they mirror lives here.
 void nextDisabled;
-void subnetOk;
 type _Draft = SetupDraft;

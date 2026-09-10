@@ -281,7 +281,6 @@ export function SettingsPanelContainer({
       }
       onImportAccount={onImportAccount}
       onReplaceAccount={onReplaceAccount}
-      setupComplete={!!config?.setupComplete}
       error={error}
       restartRequired={restartRequired}
       saving={saving}

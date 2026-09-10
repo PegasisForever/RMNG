@@ -21,9 +21,7 @@ const meta = {
   component: SetupEnvironmentStep,
   parameters: { layout: "centered" },
   args: {
-    subnet: "10.99.0.0/24",
     envChecklist: checklist(),
-    onSubnetChange: fn(),
   },
   render: (args) => (
     <Frame>
@@ -35,12 +33,10 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** A host that is ready and a subnet the server will accept. This is the only combination
- *  that unlocks the wizard's Next button. */
+/** A host that is ready. This is the only combination that unlocks the wizard's Next button. */
 export const ChecksPassing: Story = {};
 
-/** Docker is unreachable. The checklist says so in red and the wizard cannot advance, however
- *  good the subnet below it is. */
+/** Docker is unreachable. The checklist says so in red and the wizard cannot advance. */
 export const ChecksFailing: Story = {
   args: {
     envChecklist: checklist([
@@ -48,16 +44,4 @@ export const ChecksFailing: Story = {
       ...makeEnvRows().slice(1),
     ]),
   },
-};
-
-/** A subnet the server would reject: the hint under the field turns red and states the rule.
- *  /8 is the common mistake, and it is too wide for the bridge. */
-export const InvalidSubnet: Story = {
-  args: { subnet: "10.0.0.0/8" },
-};
-
-/** Nothing typed yet. The field keeps its grey explanation of what the addresses are used
- *  for rather than accusing the operator of an error they have not made. */
-export const BlankSubnet: Story = {
-  args: { subnet: "" },
 };

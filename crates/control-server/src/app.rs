@@ -96,7 +96,7 @@ impl App {
         // `DockerCtl::connect` is infallible and I/O-free: even a missing socket FILE
         // (bare `docker run` without the sock bind) boots the server — the failure is
         // surfaced per call and by `self_setup`'s env report, so the wizard shows it.
-        let docker = Arc::new(DockerCtl::connect(&cfg.docker));
+        let docker = Arc::new(DockerCtl::connect());
         Self {
             store,
             cfg: Arc::new(RwLock::new(cfg)),

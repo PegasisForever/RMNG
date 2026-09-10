@@ -1891,7 +1891,6 @@ async fn config_put(
     // The ctl snapshots the subnet at boot from the DEFAULT config; without this, finishing
     // the wizard with a non-default subnet would create the bridge with that stale default,
     // then the next boot (ctl rebuilt from config) would reject the mismatched network.
-    app.docker.set_subnet(&merged.docker.subnet);
     // A wizard-finish flip (`setupComplete` false → true) is where the lazy `rmng` network is
     // first materialized AND the control-server attaches itself at `.2` — both live in
     // `self_setup` (gated on `setup_complete`, which was still false at startup, so this flip
@@ -2044,7 +2043,7 @@ async fn setup_env(State(app): State<App>) -> Json<wire::SetupEnv> {
 /// image (registry digest compare, no pull). Never 500s: registry/daemon failures land in
 /// `UpdateStatus.error` so the UI always renders.
 async fn server_version(State(app): State<App>) -> Json<wire::UpdateStatus> {
-    let reference = app.config().docker.server_image;
+    let reference = wire::SERVER_IMAGE;
     let self_id = app.docker.env().await.self_container;
     Json(
         app.docker
@@ -2057,7 +2056,7 @@ async fn server_version(State(app): State<App>) -> Json<wire::UpdateStatus> {
 /// control-server container onto it. Returns the driving Operation (kind `update`); the
 /// server restarts mid-op, and the rebooted server's reconcile finalizes it.
 async fn server_update(State(app): State<App>) -> Result<Json<Operation>, (StatusCode, String)> {
-    let reference = app.config().docker.server_image;
+    let reference = wire::SERVER_IMAGE;
     jobs::start_update(&app, &reference)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))

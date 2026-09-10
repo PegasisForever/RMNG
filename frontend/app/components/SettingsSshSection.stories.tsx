@@ -17,10 +17,8 @@ const meta = {
   parameters: { layout: "centered" },
   args: {
     authorizedKeys: draft.ssh.authorizedKeys,
-    publicHost: draft.ssh.publicHost,
     bastionPort: 2222,
     onAuthorizedKeysChange: fn(),
-    onPublicHostChange: fn(),
   },
   render: (args) => (
     <Frame>
@@ -32,14 +30,14 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** One key installed and a host named, which is what makes the per-clone Copy SSH command
- *  button produce something that works from a laptop. */
+/** One key installed, which is what makes the per-clone Copy SSH command button produce
+ *  something that works from a laptop (the jump targets the page's own address). */
 export const Default: Story = {};
 
 /** No keys pasted, so nothing can reach the bastion and the copied command would fail at the
- *  jump. The host override is blank too, which means the page's own address is used. */
+ *  jump. */
 export const NoKeys: Story = {
-  args: { authorizedKeys: [], publicHost: "" },
+  args: { authorizedKeys: [] },
 };
 
 /** Several keys, one per line, which is how a second laptop or a CI runner gets in. */

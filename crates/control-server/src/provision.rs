@@ -149,7 +149,6 @@ pub(crate) fn base_session_env_vars() -> Vec<EnvVar> {
 /// with the reason instead of booting it into a degraded URL the loop could never repair
 /// (it resolves through this same function).
 pub async fn control_env_vars(app: &App) -> Result<Vec<EnvVar>> {
-    let cfg = app.config();
     let ev = |key: &str, value: String| EnvVar {
         key: key.to_string(),
         value,

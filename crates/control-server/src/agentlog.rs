@@ -746,7 +746,6 @@ fn scan_clone_capped(home: &Path, scan: &mut CloneScan, scan_cap: usize, enum_ca
 /// One pass across the fleet: scan every running managed clone, stamp activity, and fold new
 /// tokens into the persisted totals.
 async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
-    let cfg = app.config();
     let root = crate::homes::hosts_root(&app.data_dir());
     let all = app.store.get().hosts;
     // Only a RUNNING clone has logs to read — an archived one's container is stopped, so

@@ -139,10 +139,10 @@ export function DashboardContainer({
   stats: Record<string, ContainerStats>;
   lxcStats: LxcStats | null;
   forwards: Record<string, ForwardRuntime[]>;
-  /** `ssh.publicHost` (config) — threaded down to each card's copied SSH command;
-   *  empty ⇒ falls back to `window.location.hostname`. */
+  /** Threaded down to each card's copied SSH command; empty ⇒ falls back to
+   *  `window.location.hostname`. (Always empty now — no override exists anymore.) */
   sshPublicHost: string;
-  /** `listen.bastion` — the bastion `sshd` port the copied SSH commands jump through. */
+  /** The bastion `sshd` port the copied SSH commands jump through (hardcoded). */
   bastionPort: number;
   /** Configured Claude pools (`config.cloneGroups`) — the rail's usage list groups by these. */
   cloneGroups: CloneGroup[];

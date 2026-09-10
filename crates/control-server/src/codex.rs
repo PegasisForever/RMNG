@@ -1602,7 +1602,6 @@ async fn poll_inner(app: &App) -> Result<bool> {
         return Ok(false);
     }
 
-    let usage_polling = cfg.codex.usage_polling;
     let mut any429 = false;
     let mut views = Vec::with_capacity(accts.len());
     let mut fleet: Vec<FleetFacts> = Vec::with_capacity(accts.len());
@@ -1617,12 +1616,6 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 // Deliver before the usage fetch: this account's clones are holding the
                 // token the refresh above just replaced.
                 push_stale_tokens_for(app, Some(&acct.email)).await;
-            }
-            if !usage_polling {
-                // Refresh + push still happen; skip the usage fetch, publish a base view.
-                let mut b = codex_base(acct);
-                b.error = Some("usage polling disabled (codex.usagePolling=false)".into());
-                return Ok::<_, anyhow::Error>((b, None));
             }
             let raw = fetch_usage(&app.http, &fresh.access_token, &fresh.account_id).await?;
             let facts = gate_facts(&acct.id, &raw); // borrow before `raw` moves into to_usage
@@ -1775,7 +1768,7 @@ pub async fn run_poller(app: App) {
                 false
             }
         };
-        let base = Duration::from_secs(app.config().codex.poll_secs.max(15));
+        let base = Duration::from_secs(wire::CODEX_POLL_SECS.max(15));
         let delay = if any429 {
             backoff = (backoff + 1).min(8);
             let escalate = backoff.saturating_sub(2);

@@ -39,6 +39,26 @@ pub const DATA_DIR: &str = "data";
 /// Unix socket the clone-daemons connect to (media plane over `SCM_RIGHTS`, not the
 /// network). Fixed by the container's shared sock volume.
 pub const CLONE_SOCKET: &str = "/srv/rmng-sock/clones.sock";
+/// Docker daemon unix socket the control-server drives clones through.
+pub const DOCKER_SOCKET: &str = "/var/run/docker.sock";
+/// CIDR for the user-defined `rmng` bridge network (`.1` gateway, `.2` control-server,
+/// `.10+` clone pool). Baked into the network + every clone's static IP at first-run setup.
+pub const DOCKER_SUBNET: &str = "10.99.0.0/24";
+/// Registry reference the in-product self-update pulls the control-server image from
+/// (and digest-compares against for update-available detection).
+pub const SERVER_IMAGE: &str = "pegasis0/rmng:latest";
+/// The shared Docker build infra (pull-through Hub mirror + remote BuildKit) always runs.
+pub const BUILD_INFRA_ENABLED: bool = true;
+/// Images + cache size for that build infra.
+pub const REGISTRY_IMAGE: &str = "registry:2.8.3";
+pub const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.17.2";
+pub const BUILDKIT_CACHE_GB: u32 = 40;
+/// Usage poll intervals (seconds, floored at 15 by the pollers). Nobody changes these.
+pub const CLAUDE_POLL_SECS: u64 = 600;
+pub const CODEX_POLL_SECS: u64 = 600;
+/// The Codex poller always fetches usage (the `usagePolling=false` escape hatch for a
+/// drifting `/wham/usage` shape is gone; a drift is fixed in code now).
+pub const CODEX_USAGE_POLLING: bool = true;
 
 /// Chroma subsampling mode for the port-1 viewer video stream.
 ///
@@ -69,10 +89,6 @@ pub struct SshConfig {
     /// Authorized SSH public keys, one full line each (`ssh-ed25519 AAAA… comment`).
     #[serde(default)]
     pub authorized_keys: Vec<String>,
-    /// Public host/IP the copied command's `-J` jump targets. Empty ⇒ the UI infers it
-    /// from the address it's already served on. Not secret.
-    #[serde(default)]
-    pub public_host: String,
 }
 
 /// One environment variable in a preset.
@@ -226,16 +242,6 @@ pub struct CloneGroup {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct DockerConfig {
-    /// Docker daemon unix socket the control-server drives clones through, e.g.
-    /// `/var/run/docker.sock`. **Restart-required**: the bollard client is built at
-    /// startup.
-    #[serde(default = "default_docker_socket")]
-    pub socket: String,
-    /// CIDR for the user-defined `rmng` bridge network (`.1` gateway, `.2` control-server,
-    /// `.10+` clone pool). **One-time**: baked into the network + every clone's static IP
-    /// at first-run setup (validated `/16`–`/24` at config merge).
-    #[serde(default = "default_docker_subnet")]
-    pub subnet: String,
     /// Prefix for derived clone hostnames/names, e.g. `pega-` → `pega-dev-123`. Sanitized
     /// to DNS-label-safe chars at use; blank in the UI keeps the stored value. Immediate
     /// (carried from the retired `proxmox.hostname_prefix`).
@@ -247,39 +253,6 @@ pub struct DockerConfig {
     /// Memory limit per clone in MiB (+8 GiB swap), matching LXC parity.
     #[serde(default = "default_clone_memory_mb")]
     pub clone_memory_mb: u32,
-    /// Registry reference the setup wizard pulls the clone template from. The pulled image
-    /// keeps this `repo:tag` as its clone-source reference (no local retag), so it's also
-    /// exactly what the image picker lists and what clones are created FROM. Immediate-apply
-    /// (read fresh per pull); no secret (public image over the local daemon), so it passes
-    /// through the redacted view.
-    #[serde(default = "default_template_reference")]
-    pub template_reference: String,
-    /// Registry reference the in-product self-update pulls the control-server image from
-    /// (and digest-compares against for update-available detection). Immediate-apply (read
-    /// fresh per check/update); no secret (public image over the local daemon), so it
-    /// passes through the redacted view.
-    #[serde(default = "default_server_image")]
-    pub server_image: String,
-    /// Master switch for the shared Docker build infra (pull-through Hub mirror + remote
-    /// BuildKit). When true (default), the control-server ensures the `rmng-registry` /
-    /// `rmng-buildkit` containers at startup and the `buildinfra` reconciler applies the
-    /// mirror + remote builder to every running clone. When false, none of that runs and
-    /// already-created infra / already-migrated clones are left in place (a pure "stop
-    /// managing" — no destructive teardown). Immediate-apply (read fresh each tick).
-    #[serde(default = "default_build_infra_enabled")]
-    pub build_infra_enabled: bool,
-    /// Image for the pull-through Docker Hub cache container (`rmng-registry`). Overridable
-    /// (an operator may pin a digest); a change triggers a recreate at next boot.
-    #[serde(default = "default_registry_image")]
-    pub registry_image: String,
-    /// Image for the shared BuildKit daemon container (`rmng-buildkit`). Overridable; a
-    /// change triggers a recreate at next boot.
-    #[serde(default = "default_buildkit_image")]
-    pub buildkit_image: String,
-    /// BuildKit cache GC ceiling in GiB (`keepBytes`). Caps the shared layer cache so it
-    /// cannot grow unbounded. A change triggers a `rmng-buildkit` recreate at next boot.
-    #[serde(default = "default_buildkit_cache_gb")]
-    pub buildkit_cache_gb: u32,
     /// REMOVED `profile_lines`: presets carry their own full Dockerfile now.
     /// Template home seed snapshot (`<dataset>@<snap>`). A create clones the new home
     /// from it by default, so template clones start with content; empty means a fresh
@@ -294,12 +267,6 @@ pub struct DockerConfig {
     pub homes_parent: String,
 }
 
-fn default_docker_socket() -> String {
-    "/var/run/docker.sock".into()
-}
-fn default_docker_subnet() -> String {
-    "10.99.0.0/24".into()
-}
 fn default_hostname_prefix() -> String {
     "pega-".into()
 }
@@ -308,24 +275,6 @@ fn default_clone_cpus() -> u32 {
 }
 fn default_clone_memory_mb() -> u32 {
     32768
-}
-fn default_template_reference() -> String {
-    "pegasis0/rmng-template:latest".into()
-}
-fn default_server_image() -> String {
-    "pegasis0/rmng:latest".into()
-}
-fn default_build_infra_enabled() -> bool {
-    true
-}
-fn default_registry_image() -> String {
-    "registry:2.8.3".into()
-}
-fn default_buildkit_image() -> String {
-    "moby/buildkit:v0.17.2".into()
-}
-fn default_buildkit_cache_gb() -> u32 {
-    40
 }
 fn default_homes_parent() -> String {
     "tank/rmng/homes".into()
@@ -338,17 +287,9 @@ fn default_preset_dockerfile() -> String {
 impl Default for DockerConfig {
     fn default() -> Self {
         Self {
-            socket: default_docker_socket(),
-            subnet: default_docker_subnet(),
             hostname_prefix: default_hostname_prefix(),
             clone_cpus: default_clone_cpus(),
             clone_memory_mb: default_clone_memory_mb(),
-            template_reference: default_template_reference(),
-            server_image: default_server_image(),
-            build_infra_enabled: default_build_infra_enabled(),
-            registry_image: default_registry_image(),
-            buildkit_image: default_buildkit_image(),
-            buildkit_cache_gb: default_buildkit_cache_gb(),
             seed_snapshot: None,
             homes_parent: default_homes_parent(),
         }
@@ -379,8 +320,6 @@ pub fn dockerfile_tag(dockerfile: &str) -> String {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ClaudeConfig {
-    /// Usage poll interval (seconds, floored at 15).
-    pub poll_secs: u64,
     /// Account email pinned to the top of the usage list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_email: Option<String>,
@@ -388,10 +327,7 @@ pub struct ClaudeConfig {
 
 impl Default for ClaudeConfig {
     fn default() -> Self {
-        Self {
-            poll_secs: 600,
-            pinned_email: None,
-        }
+        Self { pinned_email: None }
     }
 }
 
@@ -440,32 +376,19 @@ fn default_codex_judge_model() -> String {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct CodexConfig {
-    /// Usage poll interval (seconds, floored at 15 by the poller).
-    pub poll_secs: u64,
     /// Account email pinned to the top of the usage list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_email: Option<String>,
-    /// Poll the ChatGPT usage endpoint. When false, the poller still refreshes + pushes
-    /// tokens and publishes base views (with an explanatory `error`), but skips the usage
-    /// fetch — an escape hatch if the unofficial `/wham/usage` shape drifts.
-    #[serde(default = "default_true")]
-    pub usage_polling: bool,
     /// When true, auto-spend one banked reset credit once every managed Codex account
     /// is over the weekly cap with no 7d reset within 24h (see `codex.rs` fleet gate).
     #[serde(default)]
     pub auto_reset: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Default for CodexConfig {
     fn default() -> Self {
         Self {
-            poll_secs: 600,
             pinned_email: None,
-            usage_polling: true,
             auto_reset: false,
         }
     }
@@ -736,9 +659,16 @@ mod tests {
         .unwrap();
         assert!(!old.setup_complete);
         assert!(!d.setup_complete);
-        assert_eq!(d.docker.socket, "/var/run/docker.sock");
-        assert_eq!(d.docker.subnet, "10.99.0.0/24");
-        assert_eq!(d.docker.template_reference, "pegasis0/rmng-template:latest");
+        assert_eq!(DOCKER_SOCKET, "/var/run/docker.sock");
+        assert_eq!(DOCKER_SUBNET, "10.99.0.0/24");
+        assert_eq!(SERVER_IMAGE, "pegasis0/rmng:latest");
+        assert!(BUILD_INFRA_ENABLED);
+        assert_eq!(REGISTRY_IMAGE, "registry:2.8.3");
+        assert_eq!(BUILDKIT_IMAGE, "moby/buildkit:v0.17.2");
+        assert_eq!(BUILDKIT_CACHE_GB, 40);
+        assert_eq!(CLAUDE_POLL_SECS, 600);
+        assert_eq!(CODEX_POLL_SECS, 600);
+        assert!(CODEX_USAGE_POLLING);
         let mons = AppConfig::default().effective_monitors();
         assert_eq!(mons.len(), 2);
         assert_eq!(
@@ -751,8 +681,9 @@ mod tests {
     }
 
     #[test]
-    fn docker_config_build_infra_defaults_when_absent() {
-        // An older config.json (no build-infra fields) must load with the feature ON.
+    fn docker_config_ignores_retired_keys() {
+        // A config.json written before the hardcoding still loads: the retired keys
+        // (socket, subnet, images, poll intervals, public host) are dropped, never an error.
         let json = r#"{
             "socket": "/var/run/docker.sock",
             "subnet": "10.99.0.0/24",
@@ -760,13 +691,15 @@ mod tests {
             "cloneCpus": 16,
             "cloneMemoryMb": 32768,
             "templateReference": "pegasis0/rmng-template:latest",
-            "serverImage": "pegasis0/rmng:latest"
+            "serverImage": "pegasis0/rmng:latest",
+            "buildInfraEnabled": false,
+            "registryImage": "other",
+            "buildkitImage": "other",
+            "buildkitCacheGb": 1
         }"#;
         let cfg: DockerConfig = serde_json::from_str(json).unwrap();
-        assert!(cfg.build_infra_enabled, "feature defaults on");
-        assert_eq!(cfg.registry_image, "registry:2.8.3");
-        assert_eq!(cfg.buildkit_image, "moby/buildkit:v0.17.2");
-        assert_eq!(cfg.buildkit_cache_gb, 40);
+        assert_eq!(cfg.hostname_prefix, "pega-");
+        assert_eq!(cfg.clone_cpus, 16);
     }
 
     #[test]
@@ -824,39 +757,28 @@ mod tests {
 
     #[test]
     fn codex_config_defaults_and_passthrough() {
-        // Defaults: 600s poll, no pinned email, usage polling ON.
+        // Defaults: no pinned email, no auto-reset. Retired poll keys in JSON are dropped.
         let c = AppConfig::default();
-        assert_eq!(c.codex.poll_secs, 600);
         assert!(c.codex.pinned_email.is_none());
-        assert!(c.codex.usage_polling, "usage_polling defaults to true");
         assert!(!c.codex.auto_reset, "auto_reset defaults to false");
-        // Missing keys fall back to defaults (older config.json stays valid).
-        let d: AppConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(d.codex.poll_secs, 600);
-        assert!(d.codex.usage_polling);
-        // usage_polling can be turned off from JSON (camelCase).
         let off: AppConfig = serde_json::from_str(
             r#"{ "codex": { "pollSecs": 300, "usagePolling": false, "autoReset": true } }"#,
         )
         .unwrap();
-        assert_eq!(off.codex.poll_secs, 300);
-        assert!(!off.codex.usage_polling);
         assert!(off.codex.auto_reset, "autoReset parses from camelCase JSON");
         // Redaction passes codex through (non-secret).
         let r = AppConfig {
             codex: CodexConfig {
-                poll_secs: 120,
-                usage_polling: false,
+                auto_reset: true,
                 ..Default::default()
             },
             ..Default::default()
         }
         .redacted();
-        assert_eq!(r.codex.poll_secs, 120);
-        assert!(!r.codex.usage_polling);
+        assert!(r.codex.auto_reset);
         // Round-trips as camelCase.
         let v = serde_json::to_value(&CodexConfig::default()).unwrap();
-        assert!(v.get("usagePolling").is_some());
+        assert!(v.get("autoReset").is_some());
     }
 
     /// The redacted view vends the Linear key rather than hiding it: the browser calls Linear
@@ -866,9 +788,7 @@ mod tests {
         let c = AppConfig {
             setup_complete: true,
             docker: DockerConfig {
-                subnet: "10.42.0.0/24".into(),
                 hostname_prefix: "dev-".into(),
-                template_reference: "pegasis0/rmng-template:v9".into(),
                 ..Default::default()
             },
             presets: vec![
@@ -907,10 +827,7 @@ mod tests {
         assert_eq!(r.presets[1].linear_key, "");
         // Non-secret fields pass through verbatim; the Docker backend has no secret.
         assert!(r.setup_complete);
-        assert_eq!(r.docker.subnet, "10.42.0.0/24");
         assert_eq!(r.docker.hostname_prefix, "dev-");
-        // template_reference is non-secret — it passes through the redacted view intact.
-        assert_eq!(r.docker.template_reference, "pegasis0/rmng-template:v9");
     }
 
     /// Which provider answers is a choice rather than a credential, so it passes through
@@ -1023,19 +940,16 @@ mod tests {
         let mut c = AppConfig::default();
         c.ssh = SshConfig {
             authorized_keys: vec!["ssh-ed25519 AAAA me@laptop".into()],
-            public_host: "rmng.example.com".into(),
         };
         let json = serde_json::to_string(&c).unwrap();
         assert!(
             json.contains("\"authorizedKeys\""),
             "camelCase key missing: {json}"
         );
-        assert!(
-            json.contains("\"publicHost\":\"rmng.example.com\""),
-            "{json}"
-        );
-        let back: AppConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.ssh, c.ssh);
+        // A retired publicHost key in an old file is dropped, never an error.
+        let back: AppConfig =
+            serde_json::from_str(r#"{"ssh":{"publicHost":"rmng.example.com"}}"#).unwrap();
+        assert!(back.ssh.authorized_keys.is_empty());
     }
 
     #[test]

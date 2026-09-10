@@ -30,30 +30,16 @@ export function makeAppConfig(
     ],
     activeLayout: "Default",
     docker: {
-      socket: "/var/run/docker.sock",
-      subnet: "10.99.0.0/24",
       hostnamePrefix: "pega-",
       cloneCpus: 16,
       cloneMemoryMb: 32768,
-      templateReference: "pegasis0/rmng-template:latest",
-      serverImage: "pegasis0/rmng:latest",
-      buildInfraEnabled: true,
-      registryImage: "registry:2.8.3",
-      buildkitImage: "moby/buildkit:v0.17.2",
-      buildkitCacheGb: 40,
       seedSnapshot: null,
       homesParent: "tank/rmng/homes",
     },
     claude: {
-      pollSecs: BigInt(600),
       pinnedEmail: "alex@example.com",
     },
-    codex: {
-      pollSecs: BigInt(600),
-      pinnedEmail: null,
-      usagePolling: true,
-      autoReset: false,
-    },
+    codex: { pinnedEmail: null, autoReset: false },
     // Built per call, down to the member list, so two configs from this builder never share
     // an array with each other or with the accounts fixture module.
     cloneGroups: makeCloneGroups(),
@@ -66,7 +52,6 @@ export function makeAppConfig(
       authorizedKeys: [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop",
       ],
-      publicHost: "rmng.example.com",
     },
     agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
     globalPrompt:

@@ -65,18 +65,11 @@ export interface SettingsDraft {
   layoutPresets: LayoutPresetDraft[];
   presets: PresetDraft[];
   hostnamePrefix: string;
-  /** One-time: baked into the rmng bridge and every clone IP at first-run setup. */
-  subnet: string;
   cloneCpus: number;
   cloneMemoryMb: number;
-  claude: { pollSecs: number; pinnedEmail: string };
+  claude: { pinnedEmail: string };
   claudeGroups: GroupDraft[];
-  codex: {
-    pollSecs: number;
-    pinnedEmail: string;
-    usagePolling: boolean;
-    autoReset: boolean;
-  };
+  codex: { pinnedEmail: string; autoReset: boolean };
   codexGroups: GroupDraft[];
   chroma: ChromaMode;
   agentPlaybook: string;
@@ -158,12 +151,9 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       dockerfile: p.dockerfile ?? "FROM pegasis0/rmng-template:latest",
     })),
     hostnamePrefix: c.docker.hostnamePrefix,
-    subnet: c.docker.subnet,
     cloneCpus: c.docker.cloneCpus,
     cloneMemoryMb: c.docker.cloneMemoryMb,
     claude: {
-      ...c.claude,
-      pollSecs: Number(c.claude.pollSecs),
       pinnedEmail: c.claude.pinnedEmail ?? "",
     },
     claudeGroups: c.cloneGroups.map((g) => ({
@@ -171,9 +161,8 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       accounts: [...g.accounts],
     })),
     codex: {
-      ...c.codex,
-      pollSecs: Number(c.codex.pollSecs),
       pinnedEmail: c.codex.pinnedEmail ?? "",
+      autoReset: c.codex.autoReset,
     },
     codexGroups: c.codexGroups.map((g) => ({
       name: g.name,
@@ -188,7 +177,6 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     },
     ssh: {
       authorizedKeys: c.ssh?.authorizedKeys ?? [],
-      publicHost: c.ssh?.publicHost ?? "",
     },
   };
 }
@@ -203,16 +191,13 @@ function savedGroups(groups: GroupDraft[]): GroupDraft[] {
 }
 
 /**
- * What a save sends.
- *
- * `setupComplete` is the config's own flag, and it gates exactly one field: the subnet is
- * baked into the rmng bridge and every clone's static IP at first-run setup, so after setup
- * it is read-only and the server rejects a change anyway. Before setup it is sent; after, it
- * is omitted entirely rather than sent unchanged.
+ * What a save sends. (`setupComplete` is kept as a parameter because the wizard shares the
+ * save path; no field in the patch is gated on it anymore — the one-time subnet is
+ * hardcoded.)
  */
 export function settingsPatch(
   draft: SettingsDraft,
-  setupComplete: boolean,
+  _setupComplete: boolean,
 ): unknown {
   return {
     layoutPresets: draft.layoutPresets
@@ -225,7 +210,6 @@ export function settingsPatch(
       hostnamePrefix: draft.hostnamePrefix,
       cloneCpus: draft.cloneCpus,
       cloneMemoryMb: draft.cloneMemoryMb,
-      ...(setupComplete ? {} : { subnet: draft.subnet }),
     },
     claude: { ...draft.claude, pinnedEmail: draft.claude.pinnedEmail || null },
     cloneGroups: savedGroups(draft.claudeGroups),

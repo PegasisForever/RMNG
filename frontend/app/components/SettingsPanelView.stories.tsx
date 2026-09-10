@@ -107,7 +107,6 @@ const meta = {
       "Settings/Components/ImportAccountModalView",
       "Replacing",
     ),
-    setupComplete: true,
     error: null,
     restartRequired: false,
     saving: false,
@@ -195,9 +194,9 @@ export const RestartRequired: Story = {
   args: { ...base(), restartRequired: true, category: "server" },
 };
 
-/** First-run setup: subnet is still editable (not yet baked in). */
+/** First-run setup: the clones pane before any clone exists. */
 export const PreSetup: Story = {
-  args: { ...base(), setupComplete: false, category: "clones" },
+  args: { ...base(), category: "clones" },
 };
 
 /** Nothing imported and no groups configured. The account list and the group editor both

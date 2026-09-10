@@ -148,7 +148,6 @@ pub async fn remove_link(app: &App, id: &str) {
 /// at boot to repair crash windows; the create job links eagerly and the delete job
 /// unlinks, so nothing ticks.
 pub async fn sync_all(app: App) {
-    let cfg = app.config();
     let root = hosts_root(&app.data_dir());
     let _ = std::fs::create_dir_all(&root);
 

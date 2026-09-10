@@ -14,7 +14,6 @@ function base() {
   const draft = makeSettingsDraft();
   return {
     hostnamePrefix: draft.hostnamePrefix,
-    subnet: draft.subnet,
     cloneCpus: draft.cloneCpus,
     cloneMemoryMb: draft.cloneMemoryMb,
   };
@@ -26,10 +25,8 @@ const meta = {
   parameters: { layout: "centered" },
   args: {
     ...base(),
-    subnetLocked: true,
     testMessage: null,
     onHostnamePrefixChange: fn(),
-    onSubnetChange: fn(),
     onCloneCpusChange: fn(),
     onCloneMemoryMbChange: fn(),
     onTest: fn(),
@@ -44,15 +41,8 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** A rig past first-run setup: the subnet is greyed out and its hint says why, because it is
- *  baked into the bridge and every clone's static IP. */
+/** The fleet's Docker defaults: hostname prefix plus per-clone sizing. */
 export const Default: Story = {};
-
-/** During first-run setup, and the only moment the subnet is editable. The hint changes to
- *  the rule the value has to satisfy. */
-export const PreSetup: Story = {
-  args: { subnetLocked: false },
-};
 
 /** The Docker probe answered. The same line carries the failure, prefixed with ✗ instead. */
 export const Probed: Story = {

@@ -5,13 +5,10 @@
 import { expect, test } from "bun:test";
 
 import {
-  isValidSubnet,
   layoutPresetsPatch,
   nextDisabled,
   serverPatch,
   setupDraftFrom,
-  subnetOk,
-  subnetPatch,
 } from "./setupDraft";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
@@ -26,32 +23,19 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     ],
     activeLayout: "Default",
     docker: {
-      socket: "/var/run/docker.sock",
-      subnet: "10.99.0.0/24",
       hostnamePrefix: "pega-",
       cloneCpus: 16,
       cloneMemoryMb: 32768,
-      templateReference: "pegasis0/rmng-template:latest",
-      serverImage: "pegasis0/rmng:latest",
-      buildInfraEnabled: true,
-      registryImage: "registry:2.8.3",
-      buildkitImage: "moby/buildkit:v0.17.2",
-      buildkitCacheGb: 40,
       seedSnapshot: null,
       homesParent: "tank/rmng/homes",
     },
-    claude: { pollSecs: BigInt(600), pinnedEmail: null },
-    codex: {
-      pollSecs: BigInt(600),
-      pinnedEmail: null,
-      usagePolling: true,
-      autoReset: false,
-    },
+    claude: { pinnedEmail: null },
+    codex: { pinnedEmail: null, autoReset: false },
     cloneGroups: [],
     codexGroups: [],
     presets: [],
     chroma: "yuv420",
-    ssh: { authorizedKeys: [], publicHost: "" },
+    ssh: { authorizedKeys: [] },
     agentPlaybook: "",
     globalPrompt: "",
     judge: { codexModel: "gpt-5.6-luna", codexEmail: null },
@@ -95,11 +79,6 @@ test("the seed follows activeLayout, not the first preset", () => {
     ],
   });
   expect(setupDraftFrom(c).monitors[0].width).toBe(3840);
-});
-
-test("step 1 sends the trimmed subnet and nothing else", () => {
-  const draft = { ...setupDraftFrom(config()), subnet: "  10.42.0.0/22  " };
-  expect(subnetPatch(draft)).toEqual({ docker: { subnet: "10.42.0.0/22" } });
 });
 
 test("step 2 patches only the three docker fields it edits", () => {
@@ -164,30 +143,11 @@ test("an active layout the config does not name is appended, not swapped in", ()
   expect(presets.map((p) => p.name)).toEqual(["Other"]);
 });
 
-test("a /16 to /24 IPv4 CIDR is the only thing the subnet accepts", () => {
-  expect(isValidSubnet("10.99.0.0/24")).toBe(true);
-  expect(isValidSubnet("10.99.0.0/16")).toBe(true);
-  expect(isValidSubnet("10.0.0.0/8")).toBe(false);
-  expect(isValidSubnet("10.99.0.0/25")).toBe(false);
-  expect(isValidSubnet("10.99.0/24")).toBe(false);
-  expect(isValidSubnet("10.99.0.256/24")).toBe(false);
-  expect(isValidSubnet("10.99.0.0/24/8")).toBe(false);
-  expect(isValidSubnet("10.99.0.0")).toBe(false);
-});
-
-test("a blank subnet is not valid — the bridge needs one", () => {
-  expect(subnetOk("   ")).toBe(false);
-  expect(subnetOk(" 10.99.0.0/24 ")).toBe(true);
-});
-
-test("Next is blocked by a failing check, a bad subnet, and a save", () => {
-  const args = { step: 0, saving: false, envOk: true, subnetOk: true };
+test("Next is blocked by a failing check and a save", () => {
+  const args = { step: 0, saving: false, envOk: true };
   expect(nextDisabled(args)).toBe(false);
   expect(nextDisabled({ ...args, envOk: false })).toBe(true);
-  expect(nextDisabled({ ...args, subnetOk: false })).toBe(true);
   expect(nextDisabled({ ...args, saving: true })).toBe(true);
   // The environment gate applies to step 1 only: a failing check does not lock step 2.
-  expect(
-    nextDisabled({ ...args, step: 1, envOk: false, subnetOk: false }),
-  ).toBe(false);
+  expect(nextDisabled({ ...args, step: 1, envOk: false })).toBe(false);
 });

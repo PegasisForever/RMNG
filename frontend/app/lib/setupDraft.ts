@@ -12,9 +12,7 @@
 //     preset in the list. The wizard edits ONE arrangement (the active preset, else the first)
 //     and round-trips the others exactly as the server sent them. `settingsPatch` would
 //     rewrite presets the wizard never showed the operator.
-//   - `docker.subnet` belongs to step 1, so it never appears in the step-2 patch even
-//     though the panel writes it in one PUT.
-//
+
 // Only `monitorPatch` is genuinely the same rule, so only `monitorPatch` is shared.
 
 import { monitorPatch, type MonitorDraft } from "~/lib/settingsDraft";
@@ -27,8 +25,6 @@ export const SETUP_STEPS = ["Environment", "Server", "Finish"] as const;
 
 /** Everything the first-run wizard can edit, as one model. */
 export interface SetupDraft {
- /** One-time: baked into the rmng bridge and every clone's static IP when setup latches. */
- subnet: string;
  hostnamePrefix: string;
  cloneCpus: number;
  cloneMemoryMb: number;
@@ -36,25 +32,6 @@ export interface SetupDraft {
   *  from the config, not from here — the wizard has no preset picker. */
  monitors: MonitorDraft[];
  chroma: ChromaMode;
-}
-
-/** Mirror of the server's `validate_docker_subnet`: an IPv4 CIDR with a /16–/24 prefix. */
-export function isValidSubnet(s: string): boolean {
- const [ip, prefix, ...rest] = s.split("/");
- if (rest.length > 0 || prefix === undefined) return false;
- const p = Number(prefix);
- if (!Number.isInteger(p) || p < 16 || p > 24) return false;
- const octets = ip.split(".");
- return (
-  octets.length === 4 &&
-  octets.every((o) => /^\d+$/.test(o) && Number(o) >= 0 && Number(o) <= 255)
- );
-}
-
-/** The subnet field holds something the server will accept. Blank is not valid: the wizard
- *  cannot create the bridge without one. */
-export function subnetOk(subnet: string): boolean {
- return subnet.trim().length > 0 && isValidSubnet(subnet.trim());
 }
 
 /** The name of the arrangement the wizard edits, mirroring the server's
@@ -76,7 +53,6 @@ export function setupDraftFrom(c: AppConfigRedacted): SetupDraft {
  const active =
   c.layoutPresets.find((p) => p.name === c.activeLayout) ?? c.layoutPresets[0];
  return {
-  subnet: c.docker.subnet,
   hostnamePrefix: c.docker.hostnamePrefix,
   cloneCpus: c.docker.cloneCpus,
   cloneMemoryMb: c.docker.cloneMemoryMb,
@@ -85,16 +61,6 @@ export function setupDraftFrom(c: AppConfigRedacted): SetupDraft {
    : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
   chroma: c.chroma,
  };
-}
-
-/**
- * What step 1 (Environment) sends: the one-time subnet, trimmed.
- *
- * The server latches it when the Finish step flips `setupComplete`, so this is the last
- * moment it can be written.
- */
-export function subnetPatch(draft: SetupDraft): unknown {
- return { docker: { subnet: draft.subnet.trim() } };
 }
 
 /**
@@ -129,8 +95,7 @@ export function layoutPresetsPatch(
 /**
  * What step 2 (Server) sends: the fleet defaults, the edited arrangement, and the ports.
  *
- * `docker` names only the three fields this step edits. The subnet went in step 1, so it
- * does not appear here.
+ * `docker` names only the three fields this step edits.
  */
 export function serverPatch(
  draft: SetupDraft,
@@ -149,14 +114,14 @@ export function serverPatch(
 
 /** Whether the wizard refuses to advance.
  *
- *  The Environment step blocks until every required check passes AND the subnet is valid.
- *  Every step blocks while a save is in flight. */
+ *  The Environment step blocks until every required check passes. Every step blocks while
+ *  a save is in flight. (The clone-network subnet used to gate this step; it is hardcoded
+ *  on the server now.) */
 export function nextDisabled(args: {
  step: number;
  saving: boolean;
  /** Every required environment check passes. */
  envOk: boolean;
- subnetOk: boolean;
 }): boolean {
- return args.saving || (args.step === 0 && (!args.envOk || !args.subnetOk));
+ return args.saving || (args.step === 0 && !args.envOk);
 }

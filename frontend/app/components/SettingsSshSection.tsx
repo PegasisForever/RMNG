@@ -1,26 +1,21 @@
 // The SSH Access section's body: the public keys installed on the bastion and every clone,
-// the host the copied `ssh -J …` command points at, and the bastion port those two are used
-// against.
+// and the bastion port those keys are used against. The copied `ssh -J …` command targets
+// this page's own address (the public-host override is gone — every rig left it empty).
 //
-// The port is read-only here because it is bound when the control-server starts, so it is
-// shown for reference rather than edited. It is edited in Advanced, where the other
-// restart-required ports live.
+// The port is read-only here because it is hardcoded on the server, so it is shown for
+// reference rather than edited.
 import { Field, settingsInput } from "~/components/SettingsFields";
 
 export function SettingsSshSection({
   authorizedKeys,
-  publicHost,
   bastionPort,
   onAuthorizedKeysChange,
-  onPublicHostChange,
 }: {
   /** One full `ssh-ed25519 AAAA… comment` line each. */
   authorizedKeys: string[];
-  publicHost: string;
-  /** The bastion `sshd` port, for reference. Fixed at startup. */
+  /** The bastion `sshd` port, for reference. Hardcoded on the server. */
   bastionPort: number;
   onAuthorizedKeysChange: (keys: string[]) => void;
-  onPublicHostChange: (host: string) => void;
 }) {
   return (
     <div className="space-y-3">
@@ -34,15 +29,6 @@ export function SettingsSshSection({
           spellCheck={false}
           rows={4}
           className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
-        />
-      </Field>
-      <Field label="Public host override">
-        <input
-          value={publicHost}
-          onChange={(e) => onPublicHostChange(e.target.value)}
-          placeholder="auto — inferred from this page's address"
-          spellCheck={false}
-          className={settingsInput}
         />
       </Field>
       <div>

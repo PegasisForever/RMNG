@@ -3,9 +3,8 @@
 //
 // The route renders this INSTEAD of the dashboard while `!setupComplete`. Each step persists
 // via `putConfig` on Next; a failed PUT blocks the advance and surfaces the standard red
-// banner. The one-time fields (subnet) stay editable here because the server only latches them
-// once `setupComplete` flips (via the Finish step's `putConfig({ setupComplete: true })`,
-// which also ensures the `rmng` bridge network).
+// banner. The Finish step's `putConfig({ setupComplete: true })` latches setup and also
+// ensures the `rmng` bridge network.
 import { useCallback, useState } from "react";
 
 import { EnvChecklistContainer } from "~/components/EnvChecklistContainer";
@@ -16,8 +15,6 @@ import {
   serverPatch,
   SETUP_STEPS,
   setupDraftFrom,
-  subnetOk,
-  subnetPatch,
   type SetupDraft,
 } from "~/lib/setupDraft";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
@@ -80,13 +77,8 @@ export function SetupWizardContainer({
   async function next() {
     if (saving) return;
     if (step === 0) {
-      if (!subnetOk(draft.subnet)) {
-        setError(
-          "Enter a valid IPv4 CIDR subnet (/16–/24), e.g. 10.99.0.0/24.",
-        );
-        return;
-      }
-      if (!(await persist(subnetPatch(draft)))) return;
+      // Step 1 sends nothing now (the clone subnet is hardcoded on the server); it only
+      // gates on the environment checks.
     } else if (step === 1) {
       if (!(await persist(serverPatch(draft, config)))) return;
     }
@@ -133,12 +125,7 @@ export function SetupWizardContainer({
       envChecklist={<EnvChecklistContainer onChange={onEnvChange} />}
       error={error}
       saving={saving}
-      nextDisabled={nextDisabled({
-        step,
-        saving,
-        envOk,
-        subnetOk: subnetOk(draft.subnet),
-      })}
+      nextDisabled={nextDisabled({ step, saving, envOk })}
       onNext={next}
       onBack={back}
       onFinish={finish}

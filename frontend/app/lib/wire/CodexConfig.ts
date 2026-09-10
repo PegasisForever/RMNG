@@ -2,19 +2,9 @@
 
 export type CodexConfig = { 
 /**
- * Usage poll interval (seconds, floored at 15 by the poller).
- */
-pollSecs: bigint, 
-/**
  * Account email pinned to the top of the usage list.
  */
 pinnedEmail: string | null, 
-/**
- * Poll the ChatGPT usage endpoint. When false, the poller still refreshes + pushes
- * tokens and publishes base views (with an explanatory `error`), but skips the usage
- * fetch — an escape hatch if the unofficial `/wham/usage` shape drifts.
- */
-usagePolling: boolean, 
 /**
  * When true, auto-spend one banked reset credit once every managed Codex account
  * is over the weekly cap with no 7d reset within 24h (see `codex.rs` fleet gate).

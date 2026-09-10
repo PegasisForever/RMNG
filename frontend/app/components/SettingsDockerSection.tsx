@@ -1,9 +1,9 @@
 // The Docker / Clones section's body: the Docker probe, the clone naming setting,
-// the one-time clone subnet, and the per-clone resource limits.
+// and the per-clone resource limits. (The clone subnet used to be editable here during
+// first-run setup; it is hardcoded on the server now.)
 //
 // Each field carries its own effect badge because this section's header has none: the
-// settings under it do not all take effect at the same moment, and the subnet does not take
-// effect at all once first-run setup has finished.
+// settings under it do not all take effect at the same moment.
 import {
   EffectBadge,
   FieldHeading,
@@ -12,28 +12,20 @@ import {
 
 export function SettingsDockerSection({
   hostnamePrefix,
-  subnet,
-  subnetLocked,
   cloneCpus,
   cloneMemoryMb,
   testMessage,
   onHostnamePrefixChange,
-  onSubnetChange,
   onCloneCpusChange,
   onCloneMemoryMbChange,
   onTest,
 }: {
   hostnamePrefix: string;
-  subnet: string;
-  /** First-run setup has finished, so the subnet is baked into the rmng bridge and every
-   *  clone IP and can no longer be changed. */
-  subnetLocked: boolean;
   cloneCpus: number;
   cloneMemoryMb: number;
   /** The result of the last Docker probe, in the panel's own words. */
   testMessage: string | null;
   onHostnamePrefixChange: (value: string) => void;
-  onSubnetChange: (value: string) => void;
   onCloneCpusChange: (value: number) => void;
   onCloneMemoryMbChange: (value: number) => void;
   onTest: () => void;
@@ -67,24 +59,6 @@ export function SettingsDockerSection({
           <code>{hostnamePrefix || "pega-"}</code>dev-123 /{" "}
           <code>{hostnamePrefix || "pega-"}</code>my-task. Lowercased +
           sanitized to a DNS label; blank keeps the current value.
-        </p>
-      </div>
-      {/* Subnet is baked into the rmng bridge + every clone's static IP at first-run
-          setup, so it's one-time: editable only during first-run setup. */}
-      <div>
-        <FieldHeading label="Clone network subnet" effect="one-time" />
-        <input
-          value={subnet}
-          onChange={(e) => onSubnetChange(e.target.value)}
-          disabled={subnetLocked}
-          placeholder="10.99.0.0/24"
-          spellCheck={false}
-          className={`mt-0.5 ${settingsInput} disabled:bg-slate-50 dark:disabled:bg-slate-900 disabled:text-slate-400 dark:disabled:text-slate-500`}
-        />
-        <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
-          {subnetLocked
-            ? "Set during first-run setup — baked into the rmng network + clone IPs, cannot be changed."
-            : "IPv4 CIDR (/16–/24) for the rmng bridge — .1 gateway, .2 control-server, .10+ clone pool."}
         </p>
       </div>
       <div className="grid grid-cols-2 gap-3">

@@ -181,11 +181,7 @@ export function ClaudePane({
     <>
       <Section title="Claude">
         <SettingsProviderFields
-          pollSecs={draft.claude.pollSecs}
           pinnedEmail={draft.claude.pinnedEmail}
-          onPollSecsChange={(v) =>
-            onDraftChange("claude", { ...draft.claude, pollSecs: v })
-          }
           onPinnedEmailChange={(v) =>
             onDraftChange("claude", { ...draft.claude, pinnedEmail: v })
           }
@@ -238,20 +234,13 @@ export function CodexPane({
     <>
       <Section title="Codex">
         <SettingsProviderFields
-          pollSecs={draft.codex.pollSecs}
           pinnedEmail={draft.codex.pinnedEmail}
-          onPollSecsChange={(v) =>
-            onDraftChange("codex", { ...draft.codex, pollSecs: v })
-          }
           onPinnedEmailChange={(v) =>
             onDraftChange("codex", { ...draft.codex, pinnedEmail: v })
           }
-          codexToggles={{
-            usagePolling: draft.codex.usagePolling,
-            autoReset: draft.codex.autoReset,
-            onUsagePollingChange: (v) =>
-              onDraftChange("codex", { ...draft.codex, usagePolling: v }),
-            onAutoResetChange: (v) =>
+          autoReset={{
+            value: draft.codex.autoReset,
+            onChange: (v) =>
               onDraftChange("codex", { ...draft.codex, autoReset: v }),
           }}
         />
@@ -294,7 +283,6 @@ export function CodexPane({
 export function ClonesPane({
   draft,
   onDraftChange,
-  setupComplete,
   testMessage,
   onTestDocker,
 }: SettingsPaneProps) {
@@ -303,13 +291,10 @@ export function ClonesPane({
       <Section title="Docker / Clones">
         <SettingsDockerSection
           hostnamePrefix={draft.hostnamePrefix}
-          subnet={draft.subnet}
-          subnetLocked={setupComplete}
           cloneCpus={draft.cloneCpus}
           cloneMemoryMb={draft.cloneMemoryMb}
           testMessage={testMessage}
           onHostnamePrefixChange={(v) => onDraftChange("hostnamePrefix", v)}
-          onSubnetChange={(v) => onDraftChange("subnet", v)}
           onCloneCpusChange={(v) => onDraftChange("cloneCpus", v)}
           onCloneMemoryMbChange={(v) => onDraftChange("cloneMemoryMb", v)}
           onTest={onTestDocker}
@@ -383,13 +368,9 @@ export function ServerPane({
       >
         <SettingsSshSection
           authorizedKeys={draft.ssh.authorizedKeys}
-          publicHost={draft.ssh.publicHost}
           bastionPort={2222}
           onAuthorizedKeysChange={(keys) =>
             onDraftChange("ssh", { ...draft.ssh, authorizedKeys: keys })
-          }
-          onPublicHostChange={(host) =>
-            onDraftChange("ssh", { ...draft.ssh, publicHost: host })
           }
         />
       </Section>

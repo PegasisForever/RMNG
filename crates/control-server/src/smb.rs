@@ -249,7 +249,6 @@ async fn supervise() {
 /// Render the config, provision the account, then supervise smbd forever. Spawned once at
 /// startup from `main` alongside `homes::run`.
 pub async fn run(app: App) {
-    let cfg = app.config();
     let hosts = absolute(homes::hosts_root(&app.data_dir()));
     let shared = absolute(crate::shared::shared_root());
     // Harmless if `homes` and `shared` already made them, and required when they have not:

@@ -101,9 +101,6 @@ pub async fn run(app: App) {
     let mut done: HashSet<String> = HashSet::new();
     loop {
         tokio::time::sleep(RECONCILE_INTERVAL).await;
-        if !app.config().docker.build_infra_enabled {
-            continue;
-        }
         let managed: Vec<_> = app.store.get().hosts.into_iter().filter(|h| h.managed).collect();
         for host in &managed {
             if done.contains(&host.id) {
@@ -123,9 +120,6 @@ pub async fn run(app: App) {
 /// rather than waiting a reconcile tick. No-op when the feature is off. The reconciler is the
 /// backstop if the clone's inner dockerd isn't up yet here.
 pub async fn apply_to_clone(app: &App, clone_id: &str) {
-    if !app.config().docker.build_infra_enabled {
-        return;
-    }
     let _ = try_apply(app, clone_id).await;
 }
 

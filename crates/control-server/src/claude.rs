@@ -2131,7 +2131,7 @@ pub async fn run_poller(app: App) {
                 false
             }
         };
-        let base = Duration::from_secs(app.config().claude.poll_secs.max(15));
+        let base = Duration::from_secs(wire::CLAUDE_POLL_SECS.max(15));
         let delay = if any429 {
             backoff = (backoff + 1).min(8);
             let escalate = backoff.saturating_sub(2);
