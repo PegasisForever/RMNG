@@ -13,17 +13,6 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
 function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
-    listen: {
-      web: 9000,
-      video: 9001,
-      daemonMcp: 9004,
-      forward: 9005,
-      bastion: 2222,
-    },
-    agentPort: 4096,
-    dataDir: "/data",
-    staticDir: "",
-    cloneSocket: "/srv/rmng-sock/clones.sock",
     setupComplete: true,
     layoutPresets: [
       {
@@ -142,7 +131,6 @@ test("the form never shares an array with the config it was seeded from", () => 
   expect(draft.layoutPresets[0].monitors[0]).not.toBe(
     c.layoutPresets[0].monitors[0],
   );
-  expect(draft.listen).not.toBe(c.listen);
 });
 
 // --- what a save sends --------------------------------------------------------------------

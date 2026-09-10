@@ -1841,13 +1841,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
-        let app = App::new(
-            store,
-            wire::AppConfig {
-                data_dir: dir.to_string_lossy().into_owned(),
-                ..Default::default()
-            },
-        );
+        let app = App::new(store, wire::AppConfig::default(), &dir.to_string_lossy());
         let mut acct = sample_account();
         acct.expires_at = 0; // long expired, so a refresh is due
         acct.last_refresh = Some(crate::claude::RefreshRecord {

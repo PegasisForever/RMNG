@@ -31,8 +31,9 @@ pub mod socket;
 pub mod viewer;
 
 pub use config::{
-    AppConfig, AppConfigRedacted, ChromaMode, ClaudeConfig, CloneGroup, CodexConfig,
-    ConfigPutResponse, DockerConfig, EnvCheckRow, EnvVar, ImageInfo, JudgeConfig, ListenConfig,
+    AGENT_PORT, CLONE_SOCKET, DATA_DIR, PORT_BASTION, PORT_DAEMON_MCP, PORT_FORWARD,
+    PORT_VIDEO, PORT_WEB, AppConfig, AppConfigRedacted, ChromaMode, ClaudeConfig, CloneGroup,
+    CodexConfig, ConfigPutResponse, DockerConfig, EnvCheckRow, EnvVar, ImageInfo, JudgeConfig,
     Preset, PresetRedacted, SetupEnv, SshConfig,
 };
 pub use control::{

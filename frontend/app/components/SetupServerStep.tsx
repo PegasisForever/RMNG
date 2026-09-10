@@ -1,18 +1,10 @@
 // Step 2 of the first-run wizard: the fleet's server-side defaults. Clone naming, the
-// per-clone resource limits, the monitor arrangement every clone boots with, the viewer's
-// chroma mode, and the listen ports.
+// per-clone resource limits, the monitor arrangement every clone boots with, and the
+// viewer's chroma mode. (Ports and directories used to be editable here; they are
+// hardcoded now, so this step edits everything the wizard still owns.)
 //
 // It takes the wizard's whole model plus one updater, the same pair `SetupWizardView` holds
-// and `SetupReviewStep` reads, rather than a value/setter couple per field. Seven of the nine
-// fields are edited here, so the couples were most of the prop surface; the two it does not
-// edit (the subnet and the template reference) belong to the steps that do.
-//
-// The ports are collapsed by default because a first run almost never changes them, and the
-// four numbers underneath are the ones a wrong guess makes unreachable. The open flag is a
-// prop rather than local state so the collapsed and expanded forms are both a story, and it
-// is not part of the model: nothing outside this step reads it and nothing saves it.
-import { ChevronDown, ChevronRight } from "lucide-react";
-
+// and `SetupReviewStep` reads, rather than a value/setter couple per field.
 import { MonitorsEditor } from "~/components/MonitorsEditor";
 import { Field, settingsInput } from "~/components/SettingsFields";
 import type { SetupDraft } from "~/lib/setupDraft";
@@ -21,8 +13,6 @@ import type { ChromaMode } from "~/lib/wire/ChromaMode";
 export function SetupServerStep({
   draft,
   onDraftChange,
-  portsOpen,
-  onPortsOpenChange,
 }: {
   /** The whole wizard form. The monitors in it are the one arrangement the wizard edits:
    *  there is no preset picker here, because which named preset this becomes is decided by
@@ -30,9 +20,6 @@ export function SetupServerStep({
   draft: SetupDraft;
   /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
   onDraftChange: <K extends keyof SetupDraft>(key: K, value: SetupDraft[K]) => void;
-  /** The ports block is expanded. */
-  portsOpen: boolean;
-  onPortsOpenChange: (open: boolean) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -94,41 +81,6 @@ export function SetupServerStep({
         </select>
       </Field>
 
-      {/* Ports — collapsed by default. */}
-      <div className="border-t border-slate-100 dark:border-slate-800 pt-3">
-        <button
-          type="button"
-          onClick={() => onPortsOpenChange(!portsOpen)}
-          className="flex items-center gap-1 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
-        >
-          {portsOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-          {portsOpen ? "Hide" : "Show"} ports
-        </button>
-        {portsOpen ? (
-          <div className="mt-2 grid grid-cols-2 gap-3">
-            {(["web", "video", "daemonMcp"] as const).map((k) => (
-              <Field key={k} label={`Port: ${k}`}>
-                <input
-                  type="number"
-                  value={draft.listen[k]}
-                  onChange={(e) =>
-                    onDraftChange("listen", { ...draft.listen, [k]: Number(e.target.value) || 0 })
-                  }
-                  className={settingsInput}
-                />
-              </Field>
-            ))}
-            <Field label="Agent-wrapper port">
-              <input
-                type="number"
-                value={draft.agentPort}
-                onChange={(e) => onDraftChange("agentPort", Number(e.target.value) || 0)}
-                className={settingsInput}
-              />
-            </Field>
-          </div>
-        ) : null}
-      </div>
     </div>
   );
 }

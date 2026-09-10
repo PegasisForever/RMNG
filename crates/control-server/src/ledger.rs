@@ -1347,10 +1347,10 @@ fn tail_clone(clone: &str, home: &Path, dir: &Path) {
 /// It never fails the caller and it is bounded by [`CLONE_TAIL_TIMEOUT`].
 pub async fn tail_once(app: &App, clone: &str) {
     let cfg = app.config();
-    let Some(dir) = clone_dir(&cfg.data_dir, clone) else {
+    let Some(dir) = clone_dir(&app.data_dir(), clone) else {
         return;
     };
-    let home = crate::homes::hosts_root(&cfg.data_dir).join(clone);
+    let home = crate::homes::hosts_root(&app.data_dir()).join(clone);
     let id = clone.to_string();
     let work = tokio::task::spawn_blocking(move || tail_clone(&id, &home, &dir));
     if tokio::time::timeout(CLONE_TAIL_TIMEOUT, work)
@@ -1364,7 +1364,7 @@ pub async fn tail_once(app: &App, clone: &str) {
 /// One pass across the fleet.
 async fn tail_fleet(app: &App) {
     let cfg = app.config();
-    let root = crate::homes::hosts_root(&cfg.data_dir);
+    let root = crate::homes::hosts_root(&app.data_dir());
     let hosts: Vec<String> = app
         .store
         .get()
@@ -1374,7 +1374,7 @@ async fn tail_fleet(app: &App) {
         .map(|h| h.id)
         .collect();
     for id in hosts {
-        let Some(dir) = clone_dir(&cfg.data_dir, &id) else {
+        let Some(dir) = clone_dir(&app.data_dir(), &id) else {
             continue;
         };
         let home = root.join(&id);
@@ -2355,7 +2355,7 @@ mod tests {
     #[tokio::test]
     async fn a_fleet_pass_tails_the_running_clones_and_a_final_pass_catches_the_rest() {
         let app = crate::app::App::test_app();
-        let data = app.config().data_dir.clone();
+        let data = app.data_dir();
         let root = Path::new(&data);
         std::fs::create_dir_all(crate::homes::hosts_root(&data)).unwrap();
 

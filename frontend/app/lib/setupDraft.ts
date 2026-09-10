@@ -21,7 +21,6 @@ import { monitorPatch, type MonitorDraft } from "~/lib/settingsDraft";
 import type { Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
-import type { ListenConfig } from "~/lib/wire/ListenConfig";
 
 /** The wizard's steps, in order. The indexes are the step numbers everywhere else. */
 export const SETUP_STEPS = ["Environment", "Server", "Finish"] as const;
@@ -37,8 +36,6 @@ export interface SetupDraft {
   *  from the config, not from here — the wizard has no preset picker. */
  monitors: MonitorDraft[];
  chroma: ChromaMode;
- listen: ListenConfig;
- agentPort: number;
 }
 
 /** Mirror of the server's `validate_docker_subnet`: an IPv4 CIDR with a /16–/24 prefix. */
@@ -87,8 +84,6 @@ export function setupDraftFrom(c: AppConfigRedacted): SetupDraft {
    ? active.monitors.map((m) => ({ ...m }))
    : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
   chroma: c.chroma,
-  listen: { ...c.listen },
-  agentPort: c.agentPort,
  };
 }
 
@@ -149,8 +144,6 @@ export function serverPatch(
   },
   layoutPresets: layoutPresetsPatch(draft, config),
   chroma: draft.chroma,
-  listen: draft.listen,
-  agentPort: draft.agentPort,
  };
 }
 

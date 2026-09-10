@@ -47,7 +47,7 @@ fn short_id() -> String {
 }
 
 async fn base_url(app: &App, host: &RmngClone) -> String {
-    format!("http://{}:{}", app.dial_clone(host).await, app.config().agent_port)
+    format!("http://{}:{}", app.dial_clone(host).await, wire::AGENT_PORT)
 }
 
 // --- chat storage (mirrors notes) ------------------------------------------
@@ -158,7 +158,7 @@ fn build_scheduled(text: &str, at: i64, now: i64) -> Result<ScheduledMessage, St
 /// Queue a message for later delivery to `host_id`. Rejects past times and blank text.
 pub fn schedule_message(app: &App, host_id: &str, text: &str, at: i64) -> Result<ScheduledMessage, String> {
     let mut msg = build_scheduled(text, at, now_ms())?;
-    let data_dir = app.config().data_dir;
+    let data_dir = app.data_dir();
     {
         let _guard = app.chat.schedule_io.lock().unwrap();
         let mut list = load_schedules(&data_dir, host_id);
@@ -177,7 +177,7 @@ pub fn schedule_message(app: &App, host_id: &str, text: &str, at: i64) -> Result
 /// Cancel a pending scheduled message. `false` when no such id is queued (already fired,
 /// or already cancelled from another tab).
 pub fn cancel_schedule(app: &App, host_id: &str, sid: &str) -> bool {
-    let data_dir = app.config().data_dir;
+    let data_dir = app.data_dir();
     let removed = {
         let _guard = app.chat.schedule_io.lock().unwrap();
         let mut list = load_schedules(&data_dir, host_id);
@@ -244,7 +244,7 @@ struct ChatSnapshot {
 /// The `{ busy, activity, messages, scheduled }` snapshot as JSON — the chat history plus the
 /// clone agent's live working state. Used by the SSE bus and the fleet MCP `read_chat`.
 pub fn snapshot_json(app: &App, host_id: &str) -> String {
-    let data_dir = app.config().data_dir;
+    let data_dir = app.data_dir();
     let snap = ChatSnapshot {
         busy: app.chat.busy.lock().unwrap().contains(host_id),
         activity: app.chat.activity.lock().unwrap().get(host_id).cloned(),
@@ -313,7 +313,7 @@ fn clip_activity(s: &str) -> String {
 }
 
 fn push_message(app: &App, host_id: &str, role: ChatRole, text: String) {
-    let data_dir = app.config().data_dir;
+    let data_dir = app.data_dir();
     let mut chat = load_chat(&data_dir, host_id);
     chat.messages.push(ChatMessage { id: short_id(), role, text, ts: now_ms() });
     save_chat(&data_dir, host_id, &chat);
@@ -560,7 +560,7 @@ pub async fn run_scheduler(app: App) {
 ///   (within the grace window) for an unarchive rather than vanishing.
 /// - **the clone no longer exists** — unrecoverable; dropped with a warning.
 fn tick_schedules(app: &App) {
-    let data_dir = app.config().data_dir;
+    let data_dir = app.data_dir();
     let dir = std::path::Path::new(&data_dir).join("schedules");
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     let ids: Vec<String> = entries
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn schedule_round_trips_through_disk_and_snapshot() {
         let app = App::test_app();
-        let dd = app.config().data_dir;
+        let dd = app.data_dir();
         let now = now_ms();
         let a = schedule_message(&app, "c1", "later", now + 3_600_000).unwrap();
         let b = schedule_message(&app, "c1", "sooner", now + 60_000).unwrap();
@@ -758,14 +758,14 @@ mod tests {
         let app = App::test_app();
         // A traversal id has no valid path, so nothing is written and nothing loads back.
         let _ = schedule_message(&app, "../evil", "x", now_ms() + 60_000);
-        assert!(load_schedules(&app.config().data_dir, "../evil").is_empty());
-        assert!(schedule_path(&app.config().data_dir, "../evil").is_none());
+        assert!(load_schedules(wire::DATA_DIR, "../evil").is_empty());
+        assert!(schedule_path(wire::DATA_DIR, "../evil").is_none());
     }
 
     #[tokio::test]
     async fn tick_drops_schedules_for_unknown_clones_but_keeps_archived_ones() {
         let app = App::test_app();
-        let dd = app.config().data_dir;
+        let dd = app.data_dir();
         app.store.mutate(|s| {
             s.hosts.push(RmngClone {
                 id: "sleeping".into(),
@@ -792,7 +792,7 @@ mod tests {
     #[tokio::test]
     async fn expired_message_leaves_a_notice_in_the_transcript() {
         let app = App::test_app();
-        let dd = app.config().data_dir;
+        let dd = app.data_dir();
         app.store.mutate(|s| {
             s.hosts.push(RmngClone { id: "wedged".into(), host: "wedged".into(), ..Default::default() });
         });
@@ -816,7 +816,7 @@ mod tests {
     #[tokio::test]
     async fn tick_leaves_due_message_queued_while_the_clone_is_busy() {
         let app = App::test_app();
-        let dd = app.config().data_dir;
+        let dd = app.data_dir();
         app.store.mutate(|s| {
             s.hosts.push(RmngClone { id: "worker".into(), host: "worker".into(), ..Default::default() });
         });

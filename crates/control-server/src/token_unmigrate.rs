@@ -330,7 +330,7 @@ pub type PoolSnapshot = std::collections::HashMap<String, String>;
 /// migration ever looks. That is not hypothetical: it is what happened on the first real
 /// migration, where every clone fell back to `auto` instead of its former pool. Harmless where
 /// there is one pool; wrong wherever pools hold different accounts.
-pub fn read_raw_clone_pools(cfg: &wire::AppConfig) -> PoolSnapshot {
+pub fn read_raw_clone_pools(path: &std::path::Path) -> PoolSnapshot {
     #[derive(Deserialize, Default)]
     struct RawHost {
         #[serde(default)]
@@ -343,8 +343,7 @@ pub fn read_raw_clone_pools(cfg: &wire::AppConfig) -> PoolSnapshot {
         #[serde(default)]
         hosts: Vec<RawHost>,
     }
-    let path = crate::config::state_path(cfg);
-    let raw: RawState = std::fs::read(&path)
+    let raw: RawState = std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
@@ -464,7 +463,7 @@ fn rebuild_groups(recovered: &[Recovered], kind: &str) -> Vec<wire::CloneGroup> 
 /// `pools_before` must come from [`read_raw_clone_pools`] called BEFORE any state mutation —
 /// see that function for why reading it here would be too late.
 pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
-    let data_dir = app.config().data_dir.clone();
+    let data_dir = app.data_dir();
     let data_path = PathBuf::from(&data_dir);
     let stamp = data_path.join(STAMP);
 
@@ -817,11 +816,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rmng-poolsnap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let cfg = wire::AppConfig {
-            data_dir: dir.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        let path = crate::config::state_path(&cfg);
+        let path = dir.join("state.json");
 
         // A `state.json` as the group-proxy era wrote it: `group` per clone, no account fields.
         std::fs::write(
@@ -833,7 +828,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        let before = read_raw_clone_pools(&cfg);
+        let before = read_raw_clone_pools(&path);
         assert_eq!(before.get("a").map(String::as_str), Some("Personal"));
         assert_eq!(before.get("b").map(String::as_str), Some("Medi"));
         assert_eq!(
@@ -851,7 +846,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        let after = read_raw_clone_pools(&cfg);
+        let after = read_raw_clone_pools(&path);
         assert_eq!(
             after.get("a").map(String::as_str),
             Some(""),

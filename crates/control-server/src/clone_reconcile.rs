@@ -1567,7 +1567,7 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
     }
     exec_ok(app, clone_id, &ssh_prepare_script(), "prepare ssh dirs").await?;
     let entries = crate::ssh::clone_ssh_tar_entries(
-        &app.config().data_dir,
+        &app.data_dir(),
         clone_id,
         &app.config().ssh.authorized_keys,
     )?;

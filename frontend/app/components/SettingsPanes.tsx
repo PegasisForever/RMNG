@@ -6,11 +6,9 @@
 // A pane takes the whole panel prop bag rather than a hand-picked slice. Seven prop interfaces
 // restating the same forty fields would be the only other way to say it, and every one of them
 // would have to be updated in step with the panel's.
-import { useState } from "react";
 
 import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
 import { SettingsAccountList } from "~/components/SettingsAccountList";
-import { SettingsAdvancedSection } from "~/components/SettingsAdvancedSection";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
 import { Field, Section, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
@@ -336,7 +334,6 @@ export function ServerPane({
 }: SettingsPaneProps) {
   // Whether the ports-and-directories block is expanded. Ephemeral: it is not part of the
   // form, nothing outside this pane reads it, and it resets every time the pane is left.
-  const [advanced, setAdvanced] = useState(false);
 
   return (
     <>
@@ -387,29 +384,13 @@ export function ServerPane({
         <SettingsSshSection
           authorizedKeys={draft.ssh.authorizedKeys}
           publicHost={draft.ssh.publicHost}
-          bastionPort={draft.listen.bastion}
+          bastionPort={2222}
           onAuthorizedKeysChange={(keys) =>
             onDraftChange("ssh", { ...draft.ssh, authorizedKeys: keys })
           }
           onPublicHostChange={(host) =>
             onDraftChange("ssh", { ...draft.ssh, publicHost: host })
           }
-        />
-      </Section>
-
-      {/* Ports + dirs. These need a full control-server restart. */}
-      <Section title="Advanced">
-        <SettingsAdvancedSection
-          listen={draft.listen}
-          agentPort={draft.agentPort}
-          dataDir={draft.dataDir}
-          staticDir={draft.staticDir}
-          cloneSocket={draft.cloneSocket}
-          open={advanced}
-          onOpenChange={setAdvanced}
-          onListenChange={(listen) => onDraftChange("listen", listen)}
-          onAgentPortChange={(port) => onDraftChange("agentPort", port)}
-          onStaticDirChange={(dir) => onDraftChange("staticDir", dir)}
         />
       </Section>
     </>

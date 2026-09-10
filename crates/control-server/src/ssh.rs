@@ -288,7 +288,7 @@ fn render_bastion_files(app: &App, data_dir: &str, extra: Option<&str>) -> bool 
     let key_path = std::path::absolute(bastion_hostkey_path(data_dir))
         .unwrap_or_else(|_| bastion_hostkey_path(data_dir));
     let want = render_bastion_sshd_config(
-        cfg.listen.bastion,
+        wire::PORT_BASTION,
         key_path.to_str().unwrap_or_default(),
         BASTION_AUTHORIZED_KEYS,
         &ids,
@@ -347,7 +347,7 @@ async fn push_keys_to_clones(app: &App, pushed: &mut HashMap<String, u64>) {
 /// rather than waiting for the reconcile tick. Rewrites the bastion `authorized_keys`
 /// (read fresh by sshd per connection — no reload needed) and pushes to running clones.
 pub async fn apply_now(app: &App) {
-    let data_dir = app.config().data_dir.clone();
+    let data_dir = app.data_dir();
     if render_bastion_files(app, &data_dir, None) {
         reload_sshd().await;
     }
@@ -362,7 +362,7 @@ pub async fn apply_now(app: &App) {
 /// the allowlist and the "clone is ready" signal land together instead of a reconcile tick
 /// apart. The reconcile loop re-renders from the store thereafter and keeps the same entry.
 pub async fn allow_clone_now(app: &App, id: &str) {
-    let data_dir = app.config().data_dir.clone();
+    let data_dir = app.data_dir();
     if render_bastion_files(app, &data_dir, Some(id)) {
         reload_sshd().await;
     }
@@ -450,7 +450,7 @@ async fn ensure_bastion_account() {
 /// forever with capped backoff. Never returns. Empty keys are fine — the bastion just runs
 /// with an empty `authorized_keys` (no one can auth) and `PermitOpen none`.
 pub async fn run(app: App) {
-    let data_dir = app.config().data_dir.clone();
+    let data_dir = app.data_dir();
     if let Err(e) = ensure_hostkey(&bastion_hostkey_path(&data_dir)) {
         tracing::error!(target: "ssh", "bastion host key generation failed: {e}");
     }
@@ -465,7 +465,7 @@ pub async fn run(app: App) {
         match spawn_sshd() {
             Ok(child) => {
                 spawn_error_logged = false;
-                tracing::info!(target: "ssh", "bastion sshd listening on :{}", app.config().listen.bastion);
+                tracing::info!(target: "ssh", "bastion sshd listening on :{}", wire::PORT_BASTION);
                 run_sshd(child, &app, &data_dir, &mut pushed).await;
             }
             Err(e) if !spawn_error_logged => {

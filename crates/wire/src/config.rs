@@ -15,40 +15,30 @@ use ts_rs::TS;
 
 use crate::control::{LayoutPreset, MonitorSpec};
 
-/// The control-server listen ports: video, web, the in-clone daemon MCP, and the forward
-/// data plane (see README).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct ListenConfig {
-    pub web: u16,
-    pub video: u16,
-    /// The clone-daemon's in-clone HTTP MCP port. The control-server proxies desktop/window
-    /// tools (`POST /api/hosts/:id/mcp`) to `http://{clone}:{daemon_mcp}`; each clone-daemon
-    /// listens here (set via `RMNG_DAEMON_MCP_PORT`). Same value for every clone.
-    #[serde(default = "default_daemon_mcp")]
-    pub daemon_mcp: u16,
-    /// The control-server's port-forward data plane. The viewer opens one TCP
-    /// connection here per accepted local socket; the server splices to the clone.
-    /// Restart-required (bound at startup).
-    #[serde(default = "default_forward")]
-    pub forward: u16,
-    /// The bastion `sshd` port (jump host into clones). Restart-required (bound at startup).
-    #[serde(default = "default_bastion")]
-    pub bastion: u16,
-}
-
-fn default_daemon_mcp() -> u16 {
-    9004
-}
-
-fn default_forward() -> u16 {
-    9005
-}
-
-fn default_bastion() -> u16 {
-    2222
-}
+/// Hardcoded control-server ports and paths (formerly the Settings "Advanced" pane).
+/// Nothing here is user-serviceable: changing a port would desync the clones that bake
+/// these values in at provision, and the directories are baked into volume mounts — so
+/// they live in code, not in `config.json` (old files still carrying the keys load fine;
+/// serde drops unknown fields).
+pub const PORT_WEB: u16 = 9000;
+pub const PORT_VIDEO: u16 = 9001;
+/// The clone-daemon's in-clone HTTP MCP port. The control-server proxies desktop/window
+/// tools (`POST /api/hosts/:id/mcp`) to `http://{clone}:{PORT_DAEMON_MCP}`; each
+/// clone-daemon listens here (set via `RMNG_DAEMON_MCP_PORT`). Same value for every clone.
+pub const PORT_DAEMON_MCP: u16 = 9004;
+/// The control-server's port-forward data plane. The viewer opens one TCP connection here
+/// per accepted local socket; the server splices to the clone.
+pub const PORT_FORWARD: u16 = 9005;
+/// The bastion `sshd` port (jump host into clones).
+pub const PORT_BASTION: u16 = 2222;
+/// agent-wrapper port on each clone (chat proxy + reload nudge).
+pub const AGENT_PORT: u16 = 4096;
+/// Data directory (state.json, chats, uploads, hosts mounts, secrets). Fixed at `/data`
+/// in the container (the mounted volume).
+pub const DATA_DIR: &str = "data";
+/// Unix socket the clone-daemons connect to (media plane over `SCM_RIGHTS`, not the
+/// network). Fixed by the container's shared sock volume.
+pub const CLONE_SOCKET: &str = "/srv/rmng-sock/clones.sock";
 
 /// Chroma subsampling mode for the port-1 viewer video stream.
 ///
@@ -66,18 +56,6 @@ pub enum ChromaMode {
     Yuv420,
     /// 4:4:4 — AVC444 double-height stream (≤1440p per monitor).
     Yuv444,
-}
-
-impl Default for ListenConfig {
-    fn default() -> Self {
-        Self {
-            web: 9000,
-            video: 9001,
-            daemon_mcp: default_daemon_mcp(),
-            forward: default_forward(),
-            bastion: default_bastion(),
-        }
-    }
 }
 
 /// SSH access settings. The control-server always runs a jump-only bastion `sshd`
@@ -498,27 +476,6 @@ impl Default for CodexConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
-    #[serde(default)]
-    pub listen: ListenConfig,
-    /// agent-wrapper port on each clone (chat proxy + reload nudge).
-    #[serde(default = "default_agent_port")]
-    pub agent_port: u16,
-    /// Data directory (state.json, chats, uploads, hosts mounts, secrets).
-    #[serde(default = "default_data_dir")]
-    pub data_dir: String,
-    /// Built frontend bundle directory served on the web port. Empty (the default) serves
-    /// the installed frontend (`/usr/local/share/rmng/static` in the image, else the repo
-    /// dev build); a non-empty path overrides it (dev hot-reload without a rebuild).
-    /// Restart-required (the static-file service is wired at startup).
-    #[serde(default = "default_static_dir")]
-    pub static_dir: String,
-    /// Unix socket the clone-daemons connect to (media plane over `SCM_RIGHTS`, not the
-    /// network). **One-time**: baked into every CT's socket bind-mount and clone-daemon
-    /// unit (`RMNG_SOCKET`) at provision, so it can only be set during first-run setup
-    /// (changing it later wouldn't update already-provisioned CTs). Also restart-required
-    /// for pre-latch edits, since the server binds it at startup.
-    #[serde(default = "default_clone_socket")]
-    pub clone_socket: String,
     /// Latched `true` by the first-run setup wizard once setup is complete; gates the
     /// frontend until then. The Proxmox-era grandfather rule is gone: an old `config.json`
     /// re-runs the wizard (new machine, no network / base image), so this stays `false`
@@ -580,11 +537,6 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            listen: ListenConfig::default(),
-            agent_port: default_agent_port(),
-            data_dir: default_data_dir(),
-            static_dir: default_static_dir(),
-            clone_socket: default_clone_socket(),
             setup_complete: false,
             layout_presets: Vec::new(),
             active_layout: String::new(),
@@ -603,9 +555,6 @@ impl Default for AppConfig {
     }
 }
 
-fn default_agent_port() -> u16 {
-    4096
-}
 /// The shipped agent playbook: the wrapper's merged instructions file, embedded so the
 /// control-server can seed the setting and inject it without a runtime file dependency.
 /// Same file the agent-wrapper bakes in as its fallback (single source of truth).
@@ -618,15 +567,6 @@ fn default_agent_playbook() -> String {
 /// single source of truth for the body the control-server writes to CLAUDE.md / AGENTS.md.
 pub fn default_global_prompt() -> String {
     "# Working in this clone\n\nThis machine is a **disposable, single-purpose dev sandbox** that belongs to you,\nwith **passwordless `sudo`**. Install packages, toolchains, and global CLIs freely\nand reconfigure the system as needed — the machine itself is throwaway and there is\nno other user to disturb. Optimize for getting the task done.\n\n## When you're blocked\n\nIf you're genuinely stuck — missing access or credentials, an ambiguous\nrequirement, or a call that's the human's to make — **stop and ask** rather than\nguessing or thrashing. A precise question beats a confident wrong turn.\n".to_string()
-}
-fn default_data_dir() -> String {
-    "data".into()
-}
-fn default_static_dir() -> String {
-    String::new()
-}
-fn default_clone_socket() -> String {
-    "/srv/rmng-sock/clones.sock".into()
 }
 
 impl AppConfig {
@@ -665,11 +605,6 @@ impl AppConfig {
     /// through verbatim; what the redaction still does is make it write-only on the way back.
     pub fn redacted(&self) -> AppConfigRedacted {
         AppConfigRedacted {
-            listen: self.listen,
-            agent_port: self.agent_port,
-            data_dir: self.data_dir.clone(),
-            static_dir: self.static_dir.clone(),
-            clone_socket: self.clone_socket.clone(),
             setup_complete: self.setup_complete,
             layout_presets: self.layout_presets.clone(),
             active_layout: self.active_layout.clone(),
@@ -700,11 +635,6 @@ impl AppConfig {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct AppConfigRedacted {
-    pub listen: ListenConfig,
-    pub agent_port: u16,
-    pub data_dir: String,
-    pub static_dir: String,
-    pub clone_socket: String,
     pub setup_complete: bool,
     pub layout_presets: Vec<LayoutPreset>,
     pub active_layout: String,
@@ -799,8 +729,12 @@ mod tests {
     fn defaults_are_sane() {
         // Missing keys fall back to the same defaults (older config.json stays valid).
         let d: AppConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(d.static_dir, "");
-        assert_eq!(d.clone_socket, "/srv/rmng-sock/clones.sock");
+        // Retired Advanced-pane keys in an old file are dropped, never an error.
+        let old: AppConfig = serde_json::from_str(
+            r#"{"listen":{"web":9000},"agentPort":4096,"dataDir":"data","staticDir":"","cloneSocket":"/srv/rmng-sock/clones.sock"}"#,
+        )
+        .unwrap();
+        assert!(!old.setup_complete);
         assert!(!d.setup_complete);
         assert_eq!(d.docker.socket, "/var/run/docker.sock");
         assert_eq!(d.docker.subnet, "10.99.0.0/24");
@@ -930,7 +864,6 @@ mod tests {
     #[test]
     fn redaction_vends_the_linear_key() {
         let c = AppConfig {
-            clone_socket: "/srv/rmng-sock/clones.sock".into(),
             setup_complete: true,
             docker: DockerConfig {
                 subnet: "10.42.0.0/24".into(),
@@ -973,7 +906,6 @@ mod tests {
         // panel's write-only key input tests to show itself as unset.
         assert_eq!(r.presets[1].linear_key, "");
         // Non-secret fields pass through verbatim; the Docker backend has no secret.
-        assert_eq!(r.clone_socket, "/srv/rmng-sock/clones.sock");
         assert!(r.setup_complete);
         assert_eq!(r.docker.subnet, "10.42.0.0/24");
         assert_eq!(r.docker.hostname_prefix, "dev-");
@@ -1117,14 +1049,18 @@ mod tests {
 }
 
 #[cfg(test)]
-mod listen_tests {
+mod port_tests {
     use super::*;
 
     #[test]
-    fn listen_config_forward_defaults_9005() {
-        assert_eq!(ListenConfig::default().forward, 9005);
-        // absent in JSON → default
-        let lc: ListenConfig = serde_json::from_str(r#"{"web":9000,"video":9001}"#).unwrap();
-        assert_eq!(lc.forward, 9005);
+    fn hardcoded_ports_match_the_old_defaults() {
+        assert_eq!(PORT_WEB, 9000);
+        assert_eq!(PORT_VIDEO, 9001);
+        assert_eq!(PORT_DAEMON_MCP, 9004);
+        assert_eq!(PORT_FORWARD, 9005);
+        assert_eq!(PORT_BASTION, 2222);
+        assert_eq!(AGENT_PORT, 4096);
+        assert_eq!(DATA_DIR, "data");
+        assert_eq!(CLONE_SOCKET, "/srv/rmng-sock/clones.sock");
     }
 }

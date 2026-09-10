@@ -747,7 +747,7 @@ fn scan_clone_capped(home: &Path, scan: &mut CloneScan, scan_cap: usize, enum_ca
 /// tokens into the persisted totals.
 async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
     let cfg = app.config();
-    let root = crate::homes::hosts_root(&cfg.data_dir);
+    let root = crate::homes::hosts_root(&app.data_dir());
     let all = app.store.get().hosts;
     // Only a RUNNING clone has logs to read — an archived one's container is stopped, so
     // `homes` has removed its symlink.
@@ -1742,7 +1742,7 @@ mod tests {
         // working-vs-stuck, but `should_flag_unread` still reads it to tell an idle clone the
         // operator has already seen from one that just went quiet.
         let app = app_with(&[("evil", false)], &[]);
-        let dir = crate::homes::hosts_root(&app.config().data_dir);
+        let dir = crate::homes::hosts_root(&app.data_dir());
         let home = dir.join("evil");
         let proj = home.join(".claude/projects/-home-rmng");
         std::fs::create_dir_all(&proj).unwrap();

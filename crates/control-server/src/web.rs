@@ -107,21 +107,10 @@ pub fn router(app: App) -> Router {
         .route("/api/codex/delete", post(codex_delete))
         .route("/api/codex/rotate", post(codex_rotate));
 
-    // Frontend from the filesystem: a non-empty `static_dir` overrides (dev hot-reload
-    // without a rebuild); otherwise the assets search path resolves it (the image's
-    // /usr/local/share/rmng/static, else the repo dev build). The router is built once
-    // at startup, so `static_dir` is restart-required by construction.
-    let cfg_dir = app.config().static_dir;
-    let dir = if !cfg_dir.is_empty() && Path::new(&cfg_dir).is_dir() {
-        Some(std::path::PathBuf::from(&cfg_dir))
-    } else {
-        if !cfg_dir.is_empty() {
-            tracing::warn!(
-                "static_dir '{cfg_dir}' is not a directory; using the installed frontend"
-            );
-        }
-        crate::assets::static_dir()
-    };
+    // Frontend from the filesystem: the image's /usr/local/share/rmng/static, else the
+    // repo dev build (see `assets::static_dir`). No override: the old `static_dir` config
+    // (dev hot-reload without a rebuild) is gone with the Advanced pane.
+    let dir = crate::assets::static_dir();
     let routes = match dir {
         Some(dir) => {
             let index = dir.join("index.html");
@@ -146,7 +135,7 @@ pub fn router(app: App) -> Router {
 }
 
 pub async fn serve(app: App) -> anyhow::Result<()> {
-    let port = app.config().listen.web;
+    let port = wire::PORT_WEB;
     let router = router(app);
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -544,7 +533,7 @@ async fn proxy_to_daemon(
     name: &str,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let port = app.config().listen.daemon_mcp;
+    let port = wire::PORT_DAEMON_MCP;
     let url = format!("http://{}:{port}/", app.dial_clone(host).await);
     let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": name, "arguments": args } });
     let resp = app
@@ -1343,7 +1332,7 @@ struct NotesBody {
 }
 
 async fn notes_get(State(app): State<App>, AxPath(id): AxPath<String>) -> Json<serde_json::Value> {
-    let blocks = files::load_notes(&app.config().data_dir, &id).unwrap_or_default();
+    let blocks = files::load_notes(&app.data_dir(), &id).unwrap_or_default();
     Json(json!({ "blocks": blocks }))
 }
 
@@ -1352,7 +1341,7 @@ async fn notes_save(
     AxPath(id): AxPath<String>,
     Json(body): Json<NotesBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    files::save_notes(&app.config().data_dir, &id, &body.blocks)
+    files::save_notes(&app.data_dir(), &id, &body.blocks)
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
@@ -1373,7 +1362,7 @@ async fn upload(
                 .bytes()
                 .await
                 .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-            let url = files::save_upload(&app.config().data_dir, &ct, &bytes)
+            let url = files::save_upload(&app.data_dir(), &ct, &bytes)
                 .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
             return Ok(Json(json!({ "url": url })));
         }
@@ -1796,7 +1785,7 @@ async fn ledger_search(
     if pattern.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "q is required".into()));
     }
-    let data_dir = app.config().data_dir;
+    let data_dir = app.data_dir();
     let query = crate::ledger::SearchQuery {
         pattern,
         clone: q
@@ -1837,7 +1826,7 @@ async fn ledger_read(
     State(app): State<App>,
     axum::extract::Query(q): axum::extract::Query<LedgerReadQuery>,
 ) -> Result<Json<crate::ledger::Range>, (StatusCode, String)> {
-    let data_dir = app.config().data_dir;
+    let data_dir = app.data_dir();
     let offset = q.offset.unwrap_or(0);
     let len = q.len.unwrap_or(64 * 1024);
     tokio::task::spawn_blocking(move || {
@@ -1851,7 +1840,7 @@ async fn ledger_read(
 
 /// `GET /uploads/:file` — serve a stored upload by its generated name.
 async fn uploads_serve(State(app): State<App>, AxPath(file): AxPath<String>) -> Response {
-    match files::read_upload(&app.config().data_dir, &file) {
+    match files::read_upload(&app.data_dir(), &file) {
         Ok((bytes, ct)) => ([(header::CONTENT_TYPE, ct)], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
@@ -2589,11 +2578,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
-        let cfg = wire::AppConfig {
-            data_dir: dir.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        App::new(store, cfg)
+        let cfg = wire::AppConfig::default();
+        App::new(store, cfg, &dir.to_string_lossy())
     }
 
     fn column(id: &str, clone_ids: &[&str]) -> wire::BoardColumn {

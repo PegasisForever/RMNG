@@ -56,10 +56,6 @@ export function SetupWizardView({
   onBack,
   onFinish,
 }: SetupWizardViewProps) {
-  // Whether the ports block on the Server step is expanded. Ephemeral: it is not part of the
-  // form, nothing outside this card reads it, and it resets every time the wizard mounts.
-  const [portsOpen, setPortsOpen] = useState(false);
-
   return (
     <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-slate-900 p-4">
       <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl">
@@ -124,12 +120,7 @@ export function SetupWizardView({
 
           {/* Step 2: Server. */}
           {step === 1 ? (
-            <SetupServerStep
-              draft={draft}
-              onDraftChange={onDraftChange}
-              portsOpen={portsOpen}
-              onPortsOpenChange={setPortsOpen}
-            />
+            <SetupServerStep draft={draft} onDraftChange={onDraftChange} />
           ) : null}
 
           {/* Step 3: Finish. Clone images build on demand from each preset's Dockerfile,

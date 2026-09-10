@@ -18,17 +18,6 @@ export function makeAppConfig(
   overrides: Partial<AppConfigRedacted> = {},
 ): AppConfigRedacted {
   return {
-    listen: {
-      web: 9000,
-      video: 9001,
-      daemonMcp: 9004,
-      forward: 9005,
-      bastion: 2222,
-    },
-    agentPort: 4096,
-    dataDir: "/data",
-    staticDir: "",
-    cloneSocket: "/srv/rmng-sock/clones.sock",
     setupComplete: true,
     layoutPresets: [
       {

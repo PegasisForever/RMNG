@@ -18,7 +18,6 @@ import { ordered, type AcctOrder } from "~/lib/accountOrder";
 import type { ClaudeUsage } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
-import type { ListenConfig } from "~/lib/wire/ListenConfig";
 import type { SshConfig } from "~/lib/wire/SshConfig";
 
 /** One monitor in a layout preset. Same shape as the wire `MonitorSpec`; named separately
@@ -79,11 +78,6 @@ export interface SettingsDraft {
     autoReset: boolean;
   };
   codexGroups: GroupDraft[];
-  listen: ListenConfig;
-  agentPort: number;
-  dataDir: string;
-  staticDir: string;
-  cloneSocket: string;
   chroma: ChromaMode;
   agentPlaybook: string;
   globalPrompt: string;
@@ -185,11 +179,6 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       name: g.name,
       accounts: [...g.accounts],
     })),
-    listen: { ...c.listen },
-    agentPort: c.agentPort,
-    dataDir: c.dataDir,
-    staticDir: c.staticDir,
-    cloneSocket: c.cloneSocket,
     chroma: c.chroma,
     agentPlaybook: c.agentPlaybook,
     globalPrompt: c.globalPrompt,
@@ -242,11 +231,6 @@ export function settingsPatch(
     cloneGroups: savedGroups(draft.claudeGroups),
     codex: { ...draft.codex, pinnedEmail: draft.codex.pinnedEmail || null },
     codexGroups: savedGroups(draft.codexGroups),
-    listen: draft.listen,
-    agentPort: draft.agentPort,
-    dataDir: draft.dataDir,
-    staticDir: draft.staticDir,
-    cloneSocket: draft.cloneSocket,
     chroma: draft.chroma,
     ssh: draft.ssh,
     agentPlaybook: draft.agentPlaybook,

@@ -6,7 +6,6 @@ import type { CodexConfig } from "./CodexConfig";
 import type { DockerConfig } from "./DockerConfig";
 import type { JudgeConfig } from "./JudgeConfig";
 import type { LayoutPreset } from "./LayoutPreset";
-import type { ListenConfig } from "./ListenConfig";
 import type { PresetRedacted } from "./PresetRedacted";
 import type { SshConfig } from "./SshConfig";
 
@@ -20,7 +19,7 @@ import type { SshConfig } from "./SshConfig";
  * key, which the browser needs, or an account token that lives in its own store rather than
  * in the config.
  */
-export type AppConfigRedacted = { listen: ListenConfig, agentPort: number, dataDir: string, staticDir: string, cloneSocket: string, setupComplete: boolean, layoutPresets: Array<LayoutPreset>, activeLayout: string, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, cloneGroups: Array<CloneGroup>, codexGroups: Array<CloneGroup>, presets: Array<PresetRedacted>, chroma: ChromaMode, ssh: SshConfig, agentPlaybook: string, globalPrompt: string, 
+export type AppConfigRedacted = { setupComplete: boolean, layoutPresets: Array<LayoutPreset>, activeLayout: string, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, cloneGroups: Array<CloneGroup>, codexGroups: Array<CloneGroup>, presets: Array<PresetRedacted>, chroma: ChromaMode, ssh: SshConfig, agentPlaybook: string, globalPrompt: string, 
 /**
  * Which GPT the stuck detector asks, and which Codex account pays for it.
  */

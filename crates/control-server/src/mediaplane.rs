@@ -327,9 +327,9 @@ pub fn spawn(app: App, init: MediaInit) {
     // (`App::dial_clone`) from the forward-data serve threads.
     let rt_handle = tokio::runtime::Handle::current();
     let cfg = app.config();
-    let video_port = cfg.listen.video;
-    let forward_port = cfg.listen.forward;
-    let sock_path = cfg.clone_socket.clone();
+    let video_port = wire::PORT_VIDEO;
+    let forward_port = wire::PORT_FORWARD;
+    let sock_path = wire::CLONE_SOCKET.to_string();
     // Chroma mode is global + fixed at launch (restart-required); snapshot it once for
     // the accept loop so every viewer connect uses the same value the encoders were
     // built with, rather than re-reading it live per connect.

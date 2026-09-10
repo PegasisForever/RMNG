@@ -20,8 +20,6 @@ const meta = {
     // every edit, so one draft behind every story is how an edit in one leaks into the next.
     draft: makeSetupDraft(),
     onDraftChange: fn(),
-    portsOpen: false,
-    onPortsOpenChange: fn(),
   },
   render: (args) => (
     <Frame>
@@ -33,15 +31,8 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** The normal first run: a two-monitor arrangement carried over from the config, and the
- *  ports folded away because almost nobody changes them. */
+/** The normal first run: a two-monitor arrangement carried over from the config. */
 export const Default: Story = { args: { draft: makeSetupDraft() } };
-
-/** Ports expanded. Four numbers that make the server unreachable if they are wrong, which is
- *  why they are behind a click. */
-export const PortsOpen: Story = {
-  args: { draft: makeSetupDraft(), portsOpen: true },
-};
 
 /** No prefix typed, so the example hostname under the field falls back to the one the server
  *  would use. */
@@ -59,13 +50,12 @@ export const SingleMonitor: Story = {
   },
 };
 
-/** The step wired to local state instead of the wizard: every field really edits, the monitor
- *  editor really rearranges the preview, and the ports block really folds. */
+/** The step wired to local state instead of the wizard: every field really edits and the
+ *  monitor editor really rearranges the preview. */
 export const Interactive: Story = {
   args: { draft: makeSetupDraft() },
   render: function Render(args) {
     const [draft, setDraft] = useState(args.draft);
-    const [portsOpen, setPortsOpen] = useState(args.portsOpen);
     return (
       <Frame>
         <SetupServerStep
@@ -74,11 +64,6 @@ export const Interactive: Story = {
           onDraftChange={<K extends keyof SetupDraft>(key: K, value: SetupDraft[K]) => {
             setDraft((d) => ({ ...d, [key]: value }));
             args.onDraftChange(key, value);
-          }}
-          portsOpen={portsOpen}
-          onPortsOpenChange={(open) => {
-            setPortsOpen(open);
-            args.onPortsOpenChange(open);
           }}
         />
       </Frame>

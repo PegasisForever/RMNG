@@ -109,8 +109,8 @@ export function SettingsPanelContainer({
   const [saved, setSaved] = useState(false);
   const [testMsg, setTestMsg] = useState<string | null>(null);
   const [judgeTestMsg, setJudgeTestMsg] = useState<string | null>(null);
-  // True after a save that touched a restart-required setting (ports / cloneSocket /
-  // staticDir / chroma) — surfaces a persistent banner until a later save clears it.
+  // True after a save that touched a restart-required setting (docker socket /
+  // chroma) — surfaces a persistent banner until a later save clears it.
   const [restartRequired, setRestartRequired] = useState(false);
   // Control-server's own version + update-available status (fetched on open; re-checked
   // on demand via the "Check for updates" button).

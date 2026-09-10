@@ -2438,14 +2438,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
         let cfg = wire::AppConfig {
-            data_dir: dir.to_string_lossy().into_owned(),
             clone_groups: vec![CloneGroup {
                 name: "team".into(),
                 accounts: members.iter().map(|s| s.to_string()).collect(),
             }],
             ..Default::default()
         };
-        let app = App::new(store, cfg);
+        let app = App::new(store, cfg, &dir.to_string_lossy());
         for m in members {
             app.claude.update_account(&stored(m)).unwrap();
         }

@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     }
 
     let cfg = config::load()?;
-    let store = Arc::new(state::StateStore::load(config::state_path(&cfg))?);
+    let store = Arc::new(state::StateStore::load(config::state_path())?);
     state::spawn_watcher(store.clone());
 
     // Self-heal the ZFS device node (see zfs::ensure_dev_zfs): /dev is tmpfs, so the
@@ -83,9 +83,9 @@ async fn main() -> Result<()> {
     // Snapshot each clone's retired `group` binding BEFORE anything mutates the state store.
     // `RmngClone` has no such field any more, so the first `store.mutate` below persists
     // `state.json` without it and the binding is unrecoverable — see `read_raw_clone_pools`.
-    let pools_before = token_unmigrate::read_raw_clone_pools(&cfg);
+    let pools_before = token_unmigrate::read_raw_clone_pools(&config::state_path());
 
-    let app = app::App::new(store, cfg);
+    let app = app::App::new(store, cfg, wire::DATA_DIR);
 
     // Seed ControlState with the config's active layout + preset names so the sidebar
     // switcher renders correctly on a fresh boot, before any `/api/config` PUT or

@@ -141,18 +141,16 @@ mod tests {
 
     #[test]
     fn merge_preserves_blank_scalars_and_applies_changes() {
-        let mut base = AppConfig::default();
-        base.static_dir = "existing-static".into();
-        // The UI sends back a blank unchanged scalar, plus real changes.
+        let base = AppConfig::default();
+        // The UI sends back a blank unchanged scalar, plus real changes. Unknown keys
+        // (e.g. the retired Advanced-pane fields) are dropped, never an error.
         let incoming = serde_json::json!({
             "listen": { "web": 9100 },
             "staticDir": "",
+            "dataDir": "data",
             "docker": { "hostnamePrefix": "clone-" },
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.listen.web, 9100);
-        assert_eq!(merged.listen.video, 9001);
-        assert_eq!(merged.static_dir, "existing-static");
         assert_eq!(merged.docker.hostname_prefix, "clone-");
     }
 
@@ -299,8 +297,6 @@ mod tests {
     fn setup_done() -> AppConfig {
         let mut base = AppConfig::default();
         base.setup_complete = true;
-        base.data_dir = "data".into();
-        base.clone_socket = "/srv/rmng-sock/clones.sock".into();
         base.docker.subnet = "10.99.0.0/24".into();
         base
     }
@@ -308,18 +304,6 @@ mod tests {
     #[test]
     fn one_time_fields_rejected_after_setup() {
         let base = setup_done();
-        // data_dir
-        let e = merge_update(&base, serde_json::json!({ "dataDir": "other" })).unwrap_err();
-        assert!(e.to_string().contains("dataDir"), "err: {e}");
-        assert!(e.to_string().contains("first-run"), "err: {e}");
-        // cloneSocket
-        let e = merge_update(
-            &base,
-            serde_json::json!({ "cloneSocket": "/tmp/other.sock" }),
-        )
-        .unwrap_err();
-        assert!(e.to_string().contains("cloneSocket"), "err: {e}");
-        assert!(e.to_string().contains("first-run"), "err: {e}");
         // docker.subnet
         let e = merge_update(
             &base,
@@ -328,14 +312,13 @@ mod tests {
         .unwrap_err();
         assert!(e.to_string().contains("subnet"), "err: {e}");
         assert!(e.to_string().contains("first-run"), "err: {e}");
-        // A no-op resend of the same values is fine (final value == base value).
+        // A no-op resend of the same value is fine (final value == base value).
         let ok = merge_update(
             &base,
-            serde_json::json!({ "dataDir": "data", "cloneSocket": "/srv/rmng-sock/clones.sock", "docker": { "subnet": "10.99.0.0/24" } }),
+            serde_json::json!({ "docker": { "subnet": "10.99.0.0/24" } }),
         )
         .unwrap();
-        assert_eq!(ok.data_dir, "data");
-        assert_eq!(ok.clone_socket, "/srv/rmng-sock/clones.sock");
+        assert_eq!(ok.docker.subnet, "10.99.0.0/24");
         // Blank strings are unchanged (deep-merge protects them) — never an error.
         let ok = merge_update(
             &base,
@@ -347,7 +330,8 @@ mod tests {
 
     #[test]
     fn one_time_fields_editable_before_setup() {
-        // Before setup completes, the one-time fields are freely editable.
+        // Before setup completes, the one-time fields are freely editable. Unknown keys
+        // (retired Advanced-pane fields) are dropped silently.
         let base = AppConfig::default(); // setup_complete == false
         let merged = merge_update(
             &base,
@@ -358,8 +342,6 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(merged.data_dir, "elsewhere");
-        assert_eq!(merged.clone_socket, "/run/other/clones.sock");
         assert_eq!(merged.docker.subnet, "10.42.0.0/24");
     }
 
@@ -509,25 +491,10 @@ mod tests {
 
         // Each restart-required trigger flips it true.
         let mut n = base.clone();
-        n.listen.web = 8080;
-        assert!(restart_required(&base, &n));
-        let mut n = base.clone();
-        n.listen.video = 8081;
-        assert!(restart_required(&base, &n));
-        let mut n = base.clone();
-        n.clone_socket = "/tmp/other.sock".into();
-        assert!(restart_required(&base, &n));
-        let mut n = base.clone();
         n.docker.socket = "/run/docker.sock".into();
         assert!(restart_required(&base, &n));
         let mut n = base.clone();
-        n.static_dir = "frontend/build/client".into();
-        assert!(restart_required(&base, &n));
-        let mut n = base.clone();
         n.chroma = wire::ChromaMode::Yuv444;
-        assert!(restart_required(&base, &n));
-        let mut n = base.clone();
-        n.listen.bastion = 2200;
         assert!(restart_required(&base, &n));
 
         // A non-trigger field (immediate-apply) does NOT require a restart.
@@ -679,9 +646,9 @@ mod tests {
     }
 }
 
-/// Resolve the state.json path: always `<data_dir>/state.json`.
-pub fn state_path(cfg: &AppConfig) -> PathBuf {
-    Path::new(&cfg.data_dir).join("state.json")
+/// Resolve the state.json path: always `<DATA_DIR>/state.json`.
+pub fn state_path() -> PathBuf {
+    Path::new(wire::DATA_DIR).join("state.json")
 }
 
 /// Atomically write `config.json` at 0600 (it holds secrets).
@@ -793,8 +760,8 @@ fn validate_docker_subnet(subnet: &str) -> Result<()> {
 }
 
 /// Guard the effect-category invariants on a merged config. Once first-run setup has
-/// completed (`base.setup_complete`), the **one-time** fields (baked into clones at
-/// provision) can't change, and the `setupComplete` latch can't be undone. Blank-string
+/// completed (`base.setup_complete`), the **one-time** field (the Docker subnet, baked into
+/// the rmng bridge at setup) can't change, and the `setupComplete` latch can't be undone. Blank-string
 /// "unchanged" fields are already collapsed by `deep_merge`, so these compare final
 /// values — a client re-sending the current value is a no-op, not an error.
 fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
@@ -804,16 +771,6 @@ fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
         );
     }
     if base.setup_complete {
-        if merged.data_dir != base.data_dir {
-            bail!(
-                "dataDir is a one-time setting (set during first-run setup) and cannot be changed after setup"
-            );
-        }
-        if merged.clone_socket != base.clone_socket {
-            bail!(
-                "cloneSocket is a one-time setting (set during first-run setup) and cannot be changed after setup"
-            );
-        }
         if merged.docker.subnet != base.docker.subnet {
             bail!(
                 "docker.subnet is a one-time setting (baked into the rmng network at first-run setup) and cannot be changed after setup"
@@ -824,19 +781,13 @@ fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
 }
 
 /// Whether applying `new` over `old` requires a server restart to take effect. The
-/// restart-required settings are the ones wired once at startup: the four listen ports,
-/// the clone-daemon unix socket, the Docker daemon socket (the bollard client is built
-/// at startup), the static-file directory, and the chroma mode. Everything else applies
-/// live. Consumed by web.rs's `PUT /api/config` handler, which surfaces the result as
-/// `ConfigPutResponse.restart_required`.
+/// restart-required settings are the ones wired once at startup: the Docker daemon socket
+/// (the bollard client is built at startup) and the chroma mode. Ports, paths, and
+/// directories are hardcoded now (see `wire`), not settings at all. Everything else
+/// applies live. Consumed by web.rs's `PUT /api/config` handler, which surfaces the
+/// result as `ConfigPutResponse.restart_required`.
 pub fn restart_required(old: &AppConfig, new: &AppConfig) -> bool {
-    old.listen.web != new.listen.web
-        || old.listen.video != new.listen.video
-        || old.listen.bastion != new.listen.bastion
-        || old.clone_socket != new.clone_socket
-        || old.docker.socket != new.docker.socket
-        || old.static_dir != new.static_dir
-        || old.chroma != new.chroma
+    old.docker.socket != new.docker.socket || old.chroma != new.chroma
 }
 
 /// Merge the UI's preset rows by name: every field is taken verbatim from the row

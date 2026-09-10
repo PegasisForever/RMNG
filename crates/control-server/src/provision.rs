@@ -166,7 +166,7 @@ pub async fn control_env_vars(app: &App) -> Result<Vec<EnvVar>> {
     })?;
     vars.push(ev(
         "RMNG_CONTROL_URL",
-        format!("http://{control}:{}", cfg.listen.web),
+        format!("http://{control}:{}", wire::PORT_WEB),
     ));
     Ok(vars)
 }
@@ -503,7 +503,7 @@ async fn clone_container_after_create(
     // the loop's ensure_ssh_ready retries — the designed retry, not a mask.
     // `authorized_keys` is the only `~/.ssh` file provisioned; a config baked into the source
     // image stays exactly as the image left it (the server no longer reads or writes it).
-    match crate::ssh::clone_ssh_tar_entries(&cfg.data_dir, hostname, &cfg.ssh.authorized_keys) {
+    match crate::ssh::clone_ssh_tar_entries(&app.data_dir(), hostname, &cfg.ssh.authorized_keys) {
         Ok(mut ssh_entries) => {
             ssh_entries.push(crate::clone_reconcile::ssh_stamp_entry());
             entries.append(&mut ssh_entries);
@@ -1447,8 +1447,8 @@ async fn sock_source_dir(app: &App) -> String {
             return src.to_string();
         }
     }
-    // Dev mode / not-yet-probed: use the directory of the configured clone socket path.
-    let sock = app.config().clone_socket;
+    // Dev mode / not-yet-probed: use the directory of the clone socket path.
+    let sock = wire::CLONE_SOCKET;
     std::path::Path::new(&sock)
         .parent()
         .map(|p| p.to_string_lossy().into_owned())

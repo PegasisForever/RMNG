@@ -17,17 +17,6 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
 function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
-    listen: {
-      web: 9000,
-      video: 9001,
-      daemonMcp: 9004,
-      forward: 9005,
-      bastion: 2222,
-    },
-    agentPort: 4096,
-    dataDir: "/data",
-    staticDir: "",
-    cloneSocket: "/srv/rmng-sock/clones.sock",
     setupComplete: false,
     layoutPresets: [
       {
@@ -76,7 +65,6 @@ type ServerPatch = {
   docker: Record<string, unknown>;
   layoutPresets: { name: string; monitors: { width: number; x: number }[] }[];
   chroma: string;
-  agentPort: number;
 };
 
 test("a rig with no layout preset gets one 1080p monitor to edit", () => {

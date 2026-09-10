@@ -18,7 +18,7 @@ const meta = {
   args: {
     authorizedKeys: draft.ssh.authorizedKeys,
     publicHost: draft.ssh.publicHost,
-    bastionPort: draft.listen.bastion,
+    bastionPort: 2222,
     onAuthorizedKeysChange: fn(),
     onPublicHostChange: fn(),
   },

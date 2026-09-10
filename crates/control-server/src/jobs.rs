@@ -240,7 +240,7 @@ pub fn next_free_hostname(app: &App, base: &str) -> String {
             taken.insert(o.target.clone());
         }
     }
-    taken.extend(crate::ledger::reserved_names(&app.config().data_dir));
+    taken.extend(crate::ledger::reserved_names(&app.data_dir()));
     if !taken.contains(base) {
         return base.to_string();
     }
@@ -364,7 +364,7 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
     // the name to a new clone would file two unrelated histories in one bucket, so the name stays
     // spent until the operator says otherwise. `next_free_hostname` skips these, so only an
     // exact-hostname create (the fleet CLI's `clone create <hostname>`) reaches this rejection.
-    let data_dir = app.config().data_dir;
+    let data_dir = app.data_dir();
     if crate::ledger::reserved_names(&data_dir).contains(&spec.new_hostname) {
         return Err(JobError(format!(
             "a retired clone was named '{name}'; its transcript ledger still holds that history. \
@@ -939,7 +939,7 @@ async fn run_delete(app: App, op_id: String, host_id: String, managed: bool) {
         }
     }
     schedule_prune(app.clone(), op_id, PRUNE_DONE_MS);
-    let dd = app.config().data_dir;
+    let dd = app.data_dir();
     crate::files::delete_notes(&dd, &host_id);
     crate::chat::delete_chat(&dd, &host_id);
     // Anything the operator queued for a clone that no longer exists can never be delivered.
@@ -1965,11 +1965,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
-        let cfg = wire::AppConfig {
-            data_dir: dir.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        App::new(store, cfg)
+        let cfg = wire::AppConfig::default();
+        App::new(store, cfg, &dir.to_string_lossy())
     }
 
     fn running_op(id: &str, target: &str) -> Operation {
@@ -1990,7 +1987,7 @@ mod tests {
 
     /// Stand in for a clone that has been deleted: its ledger directory is all that is left.
     fn retire(app: &App, id: &str) {
-        let dir = crate::ledger::ledger_root(&app.config().data_dir).join(id);
+        let dir = crate::ledger::ledger_root(&app.data_dir()).join(id);
         std::fs::create_dir_all(dir).unwrap();
     }
 

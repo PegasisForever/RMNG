@@ -67,6 +67,10 @@ pub struct App {
     /// changes (`web::activate`) and read by the monitor to suppress a `working → idle`
     /// notification for a clone whose latest output the operator has already seen.
     pub views: Arc<crate::monitor::ViewTracker>,
+    /// Filesystem root for state.json, chats, uploads, hosts mounts, secrets. NOT in
+    /// `config.json` (nothing user-serviceable selects it): production passes
+    /// [`wire::DATA_DIR`], tests pass a temp dir.
+    data_dir: String,
     /// What this process is, for the browser's benefit. Starts as a per-boot id and becomes
     /// the running image's git revision once Docker answers at startup. `/events` sends it on
     /// connect, and a page that sees it change reloads itself, so an upgraded server never
@@ -85,10 +89,10 @@ fn boot_id() -> String {
 }
 
 impl App {
-    pub fn new(store: Arc<StateStore>, cfg: AppConfig) -> Self {
-        let claude = Arc::new(ClaudeStore::load(&cfg.data_dir));
-        let codex = Arc::new(CodexStore::load(&cfg.data_dir));
-        let clone_keys = Arc::new(CloneKeys::load(&cfg.data_dir));
+    pub fn new(store: Arc<StateStore>, cfg: AppConfig, data_dir: &str) -> Self {
+        let claude = Arc::new(ClaudeStore::load(data_dir));
+        let codex = Arc::new(CodexStore::load(data_dir));
+        let clone_keys = Arc::new(CloneKeys::load(data_dir));
         // `DockerCtl::connect` is infallible and I/O-free: even a missing socket FILE
         // (bare `docker run` without the sock bind) boots the server — the failure is
         // surfaced per call and by `self_setup`'s env report, so the wizard shows it.
@@ -96,6 +100,7 @@ impl App {
         Self {
             store,
             cfg: Arc::new(RwLock::new(cfg)),
+            data_dir: data_dir.to_string(),
             // A paused clone keeps its IP and its listening sockets, so a connection to one
             // is accepted by the kernel and then answered by nobody — a dial that used to
             // fail instantly against a stopped clone now hangs instead. These two bounds are
@@ -150,6 +155,11 @@ impl App {
         self.cfg.read().unwrap().clone()
     }
 
+    /// The filesystem root for state-adjacent files (see the field docs).
+    pub fn data_dir(&self) -> String {
+        self.data_dir.clone()
+    }
+
     /// A minimal App backed by a throwaway temp data dir, for unit tests in sibling
     /// modules (state + stores are file-isolated; Docker is constructed I/O-free).
     #[cfg(test)]
@@ -165,11 +175,8 @@ impl App {
         std::fs::create_dir_all(&dir).unwrap();
         let store =
             std::sync::Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
-        let cfg = wire::AppConfig {
-            data_dir: dir.to_string_lossy().into_owned(),
-            ..Default::default()
-        };
-        Self::new(store, cfg)
+        let cfg = wire::AppConfig::default();
+        Self::new(store, cfg, &dir.to_string_lossy())
     }
 
     /// What to dial a clone's in-clone services at (agent-wrapper chat and the clone-daemon

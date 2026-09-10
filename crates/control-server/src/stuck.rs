@@ -2901,7 +2901,7 @@ pub async fn resolve_fleet(
     app: &crate::app::App,
     ids: Vec<String>,
 ) -> HashMap<String, wire::MonitorState> {
-    let data_dir = app.config().data_dir.clone();
+    let data_dir = app.data_dir();
 
     let reads = ids.into_iter().map(|id| {
         let data_dir = data_dir.clone();

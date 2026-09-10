@@ -122,7 +122,7 @@ pub async fn ensure_now(app: &App, id: &str) {
     if !is_safe_id(id) {
         return;
     }
-    let root = hosts_root(&app.config().data_dir);
+    let root = hosts_root(&app.data_dir());
     let _ = std::fs::create_dir_all(&root);
     ensure_for(app, &root, id).await;
 }
@@ -134,7 +134,7 @@ pub async fn remove_link(app: &App, id: &str) {
     if !is_safe_id(id) {
         return;
     }
-    let p = hosts_root(&app.config().data_dir).join(id);
+    let p = hosts_root(&app.data_dir()).join(id);
     if matches!(
         std::fs::symlink_metadata(&p),
         Ok(m) if m.file_type().is_symlink()
@@ -149,7 +149,7 @@ pub async fn remove_link(app: &App, id: &str) {
 /// unlinks, so nothing ticks.
 pub async fn sync_all(app: App) {
     let cfg = app.config();
-    let root = hosts_root(&cfg.data_dir);
+    let root = hosts_root(&app.data_dir());
     let _ = std::fs::create_dir_all(&root);
 
     // Only managed clones with a path-safe id are candidates — archived included.
