@@ -553,12 +553,23 @@ pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
         }
     }
 
-    // 4. Rebuild the two group lists from the source directories and persist them.
-    let clone_groups = rebuild_groups(&recovered, "claude");
-    let codex_groups = rebuild_groups(&recovered, "codex");
+    // 4. Rebuild the single group list from both providers' source directories and
+    // persist it (same-named pools merge members).
+    let mut groups = rebuild_groups(&recovered, "claude");
+    for g in rebuild_groups(&recovered, "codex") {
+        match groups.iter_mut().find(|m| m.name == g.name) {
+            Some(m) => {
+                for email in g.accounts {
+                    if !m.accounts.contains(&email) {
+                        m.accounts.push(email);
+                    }
+                }
+            }
+            None => groups.push(g),
+        }
+    }
     let mut cfg = app.config();
-    cfg.clone_groups = clone_groups;
-    cfg.codex_groups = codex_groups;
+    cfg.groups = groups;
     // Carry each preset's pool binding across. The group-proxy era had ONE provider-agnostic
     // `Preset.group`; the restored model has one default per provider, so a preset that pointed
     // at `Personal` now defaults BOTH providers to `group:Personal` — the closest thing to what

@@ -98,6 +98,8 @@ export interface ForkPayload {
  };
  claudeAccount?: string;
  codexAccount?: string;
+ /** Pool binding: name binds, null unbinds, omitted inherits the source's group. */
+ group?: string | null;
  firstMessage?: string;
  agentInstructions?: string;
  claudeInstructions?: string;
@@ -118,6 +120,7 @@ export const forkClone = (
   ...(payload?.linear ? { linear: payload.linear } : {}),
   ...(payload?.claudeAccount ? { claudeAccount: payload.claudeAccount } : {}),
   ...(payload?.codexAccount ? { codexAccount: payload.codexAccount } : {}),
+  ...("group" in (payload ?? {}) ? { group: payload?.group ?? null } : {}),
   ...(payload?.firstMessage ? { firstMessage: payload.firstMessage } : {}),
   ...(payload?.agentInstructions
    ? { agentInstructions: payload.agentInstructions }
@@ -241,10 +244,11 @@ export const completeLogin = (
 /** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */
 export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
 
-/** Change a clone's Claude account/group. `account` is "auto", "none", an email, or
- *  "group:<name>". `account` in the reply is null when set to "none". */
-export const swapClaudeAccount = (clone: string, account: string) =>
- postJson("/api/claude/swap", { host: clone, account }) as Promise<{
+/** Change a clone's Claude account + pool binding. `account` is "auto", "none", or an
+ *  email; `group` binds the whole clone (null unbinds, undefined keeps). `account` in
+ *  the reply is null when set to "none". */
+export const swapClaudeAccount = (clone: string, account: string, group?: string | null) =>
+ postJson("/api/claude/swap", { host: clone, account, group }) as Promise<{
   ok: boolean;
   account: string | null;
   group: string | null;
@@ -261,8 +265,8 @@ export const deleteClaudeAccount = (account: string) =>
 
 export const refreshCodexUsage = () => postJson("/api/codex/refresh", {});
 
-export const swapCodexAccount = (clone: string, account: string) =>
- postJson("/api/codex/swap", { host: clone, account }) as Promise<{
+export const swapCodexAccount = (clone: string, account: string, group?: string | null) =>
+ postJson("/api/codex/swap", { host: clone, account, group }) as Promise<{
   ok: boolean;
   account: string | null;
   group: string | null;

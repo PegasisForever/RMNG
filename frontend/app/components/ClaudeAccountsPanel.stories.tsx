@@ -5,8 +5,7 @@ import { ClaudeAccountsPanel } from "./ClaudeAccountsPanel";
 import {
   accountsNow,
   makeClaudeAccounts,
-  makeCloneGroups,
-  makeCodexGroups,
+  makeGroups,
   makeUsage,
 } from "./__fixtures__/accounts";
 
@@ -24,8 +23,7 @@ const meta = {
     accounts: makeClaudeAccounts(accountsNow),
     // Nothing dragged: the rows keep the order they arrive in.
     accountOrder: {},
-    cloneGroups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
+    groups: makeGroups(),
     locale: "en-GB",
     // The same instant the account fixtures are anchored to, so every pace marker and reset
     // countdown is reproducible. The container reads a ticking clock here.
@@ -51,7 +49,7 @@ export const Default: Story = {};
 
 /** No pools configured, so there is nothing to group by and the list stays flat. */
 export const NoPools: Story = {
-  args: { cloneGroups: [], codexGroups: [] },
+  args: { groups: [] },
 };
 
 /** The order the operator dragged out in Settings, applied. Reversing the Claude bucket moves
@@ -79,12 +77,11 @@ export const ProblemStates: Story = {
       makeUsage({ email: "alex@example.com", fiveHour: { pct: 42, resetsAt: null } }),
       makeUsage({ email: "broken@example.com", error: "401 from the usage endpoint" }),
     ],
-    cloneGroups: [{ name: "pooled", accounts: [] }],
-    codexGroups: [],
+    groups: [{ name: "pooled", accounts: [] }],
   },
 };
 
 /** Nothing imported yet. The whole panel collapses to the one action that gets it started. */
 export const NoAccounts: Story = {
-  args: { accounts: [], cloneGroups: [], codexGroups: [] },
+  args: { accounts: [], groups: [] },
 };

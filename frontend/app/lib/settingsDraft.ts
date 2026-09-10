@@ -67,9 +67,9 @@ export interface SettingsDraft {
   hostnamePrefix: string;
   cloneCpus: number;
   cloneMemoryMb: number;
-  claudeGroups: GroupDraft[];
+  /** The single pool list: each pool may mix Claude and Codex accounts. */
+  groups: GroupDraft[];
   codex: { autoReset: boolean };
-  codexGroups: GroupDraft[];
   chroma: ChromaMode;
   agentPlaybook: string;
   globalPrompt: string;
@@ -151,17 +151,13 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     hostnamePrefix: c.docker.hostnamePrefix,
     cloneCpus: c.docker.cloneCpus,
     cloneMemoryMb: c.docker.cloneMemoryMb,
-    claudeGroups: c.cloneGroups.map((g) => ({
+    groups: c.groups.map((g) => ({
       name: g.name,
       accounts: [...g.accounts],
     })),
     codex: {
       autoReset: c.codex.autoReset,
     },
-    codexGroups: c.codexGroups.map((g) => ({
-      name: g.name,
-      accounts: [...g.accounts],
-    })),
     chroma: c.chroma,
     agentPlaybook: c.agentPlaybook,
     globalPrompt: c.globalPrompt,
@@ -205,9 +201,8 @@ export function settingsPatch(
       cloneCpus: draft.cloneCpus,
       cloneMemoryMb: draft.cloneMemoryMb,
     },
-    cloneGroups: savedGroups(draft.claudeGroups),
+    groups: savedGroups(draft.groups),
     codex: { autoReset: draft.codex.autoReset },
-    codexGroups: savedGroups(draft.codexGroups),
     chroma: draft.chroma,
     ssh: draft.ssh,
     agentPlaybook: draft.agentPlaybook,

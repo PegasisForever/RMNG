@@ -1,8 +1,8 @@
-// A Claude-account picker shared by the clone modal and the per-clone change control.
-// Value is one of: "auto" (rotate across all imported accounts), "none" (install no
-// token), an account email, or "group:<name>" (binds the clone to a named pool). The
-// server rotates "auto" and group clones; a pinned email is left fixed.
-import type { CloneGroup } from "~/lib/wire/CloneGroup";
+// One side's account picker, shared by the clone modal and the per-clone change control.
+// Value is one of: "auto" (rotate — inside the clone's group when bound, fleet-wide
+// otherwise), "none" (install no token), or an account email (pinned, group or not).
+// Group binding moved to its own single picker: a clone binds at most one pool, which
+// feeds both sides.
 import type { ClaudeUsage } from "~/lib/types";
 
 /** "me@pegasis.site — 5h 12% · 7d 40%" (usage suffix only when known). */
@@ -21,8 +21,11 @@ export function AccountGroupSelect({
   className,
   blankLabel,
 }: {
-  groups: CloneGroup[];
-  /** Assignable accounts (imported Claude accounts). */
+  /** Pools to offer as `group:<name>`. Only preset defaults take this: a preset's
+   *  per-side default may name a pool (template clones bind it at creation). Clone +
+   *  change pickers leave it unset — their group binding is the single shared picker. */
+  groups?: { name: string; accounts: string[] }[];
+  /** Assignable accounts (imported accounts of this picker's provider). */
   accounts: ClaudeUsage[];
   value: string;
   onChange: (value: string) => void;
@@ -38,7 +41,7 @@ export function AccountGroupSelect({
       {blankLabel ? <option value="">{blankLabel}</option> : null}
       <option value="auto">Auto (all accounts)</option>
       <option value="none">None (no token)</option>
-      {groups.length > 0 ? (
+      {groups && groups.length > 0 ? (
         <optgroup label="Groups">
           {groups.map((g) => (
             <option key={`group:${g.name}`} value={`group:${g.name}`}>

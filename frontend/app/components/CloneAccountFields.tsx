@@ -1,9 +1,9 @@
-// The clone dialog's two account pickers, one per provider.
+// The clone dialog's group picker plus the two per-side account pickers.
 //
-// Both are OVERRIDES. Blank means "follow the resolved preset's default", and the blank
-// option says which account or pool that is, so the operator can see what they are overriding
-// before they override it. Picking anything else pins the clone to that pool or account
-// regardless of preset.
+// All three are OVERRIDES. Blank means "follow the source", and the blank option says what
+// that is, so the operator can see what they are overriding before they override it.
+// Picking a pool binds the clone once (both sides draw from it); picking anything else on
+// a side pins that side regardless of pool.
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { cloneField, cloneLabel } from "~/components/cloneFieldStyles";
 import type { ClaudeUsage } from "~/lib/types";
@@ -17,35 +17,53 @@ function blankLabel(fromPreset: string | undefined): string {
 
 export function CloneAccountFields({
   accounts,
-  claudeGroups,
-  codexGroups,
+  groups,
+  sourceGroup,
   preset,
+  group,
   claudeAccount,
   codexAccount,
+  onGroupChange,
   onClaudeAccountChange,
   onCodexAccountChange,
 }: {
   /** Both providers' rows, flat and tagged by `provider`, the way `ControlState` carries
    *  them. Each picker takes its own side. */
   accounts: ClaudeUsage[];
-  /** Configured Claude pools (`config.cloneGroups`). */
-  claudeGroups: CloneGroup[];
-  /** Configured Codex pools (`config.codexGroups`). */
-  codexGroups: CloneGroup[];
+  /** The single configured pool list (`config.groups`). */
+  groups: CloneGroup[];
+  /** The source clone's pool, for the blank label. Null when the source binds none. */
+  sourceGroup: string | null;
   /** The preset that will drive the clone, for the two blank labels. Undefined before one
    *  resolves, which is what leaves them reading "Preset default / auto". */
   preset: PresetRedacted | undefined;
+  group: string;
   claudeAccount: string;
   codexAccount: string;
+  onGroupChange: (value: string) => void;
   onClaudeAccountChange: (value: string) => void;
   onCodexAccountChange: (value: string) => void;
 }) {
   return (
     <>
       <label className={`mt-3 ${cloneLabel}`}>
+        Group
+        <select value={group} onChange={(e) => onGroupChange(e.target.value)} className={cloneField}>
+          <option value="">
+            {sourceGroup ? `Source default (group:${sourceGroup})` : "Source default / auto"}
+          </option>
+          <option value="none">None (no pool)</option>
+          {groups.map((g) => (
+            <option key={g.name} value={g.name}>
+              {g.name} ({g.accounts.length})
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className={`mt-3 ${cloneLabel}`}>
         Claude account
         <AccountGroupSelect
-          groups={claudeGroups}
           accounts={accounts.filter((a) => a.provider !== "codex")}
           value={claudeAccount}
           blankLabel={blankLabel(preset?.claudeAccount)}
@@ -57,7 +75,6 @@ export function CloneAccountFields({
       <label className={`mt-3 ${cloneLabel}`}>
         Codex account
         <AccountGroupSelect
-          groups={codexGroups}
           accounts={accounts.filter((a) => a.provider === "codex")}
           value={codexAccount}
           blankLabel={blankLabel(preset?.codexAccount)}

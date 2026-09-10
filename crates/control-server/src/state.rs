@@ -155,7 +155,7 @@ impl StateStore {
 fn read_from_disk(path: &Path) -> (ControlState, bool) {
     match std::fs::read_to_string(path) {
         Ok(s) => match serde_json::from_str(&s) {
-            Ok(state) => (state, true),
+            Ok(state) => (migrate_clone_groups(state), true),
             Err(e) => {
                 tracing::error!(
                     "state.json parse error ({e}); running without persisting until it parses again"
@@ -165,6 +165,51 @@ fn read_from_disk(path: &Path) -> (ControlState, bool) {
         },
         Err(_) => (ControlState::default(), true),
     }
+}
+
+/// One-shot migration of the retired per-side `group:<name>` selections into the single
+/// clone-level `group` (both sides naming it → it; one side → that side; different sides →
+/// the Claude side wins with a warning — only reachable from hand-written state). Runs on
+/// every load but only rewrites rows that still carry a `group:` selection, so migrated
+/// state passes through untouched. Persisted on the next regular save.
+fn migrate_clone_groups(mut state: ControlState) -> ControlState {
+    fn extract(sel: &Option<String>) -> Option<String> {
+        sel.as_deref()
+            .and_then(|s| s.strip_prefix("group:"))
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+    }
+    for h in state.hosts.iter_mut() {
+        if h.group.is_some() {
+            continue;
+        }
+        let g1 = extract(&h.claude_selection);
+        let g2 = extract(&h.codex_selection);
+        let group = match (g1, g2) {
+            (Some(a), Some(b)) => {
+                if a != b {
+                    tracing::warn!(
+                        "clone {} bound to two different groups ({a:?} vs {b:?}) — keeping {a:?}",
+                        h.id
+                    );
+                }
+                Some(a)
+            }
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        if let Some(g) = group {
+            if h.claude_selection.as_deref().is_some_and(|s| s.starts_with("group:")) {
+                h.claude_selection = Some("auto".to_string());
+            }
+            if h.codex_selection.as_deref().is_some_and(|s| s.starts_with("group:")) {
+                h.codex_selection = Some("auto".to_string());
+            }
+            // A side pinned to an email keeps its pin; the group feeds its `auto` side(s).
+            h.group = Some(g);
+        }
+    }
+    state
 }
 
 fn persist(path: &Path, contents: &str) -> Result<()> {
@@ -215,6 +260,43 @@ pub fn spawn_watcher(store: std::sync::Arc<StateStore>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn load_migrates_group_selections_into_the_shared_group() {
+        let mut state = ControlState::default();
+        state.hosts = vec![
+            wire::RmngClone {
+                id: "both".into(),
+                claude_selection: Some("group:team".into()),
+                codex_selection: Some("group:team".into()),
+                ..Default::default()
+            },
+            wire::RmngClone {
+                id: "split".into(),
+                claude_selection: Some("group:a".into()),
+                codex_selection: Some("group:b".into()),
+                ..Default::default()
+            },
+            wire::RmngClone {
+                id: "pinned".into(),
+                claude_selection: Some("me@x.com".into()),
+                codex_selection: Some("group:team".into()),
+                ..Default::default()
+            },
+        ];
+        let out = migrate_clone_groups(state);
+        let by_id = |id: &str| out.hosts.iter().find(|h| h.id == id).unwrap();
+        let both = by_id("both");
+        assert_eq!(both.group.as_deref(), Some("team"));
+        assert_eq!(both.claude_selection.as_deref(), Some("auto"));
+        assert_eq!(both.codex_selection.as_deref(), Some("auto"));
+        // Conflict → the Claude side wins.
+        assert_eq!(by_id("split").group.as_deref(), Some("a"));
+        // An explicit pin survives; the group feeds the other side.
+        let pinned = by_id("pinned");
+        assert_eq!(pinned.group.as_deref(), Some("team"));
+        assert_eq!(pinned.claude_selection.as_deref(), Some("me@x.com"));
+        assert_eq!(pinned.codex_selection.as_deref(), Some("auto"));
+    }
 
     /// The one thing that makes a downgrade during an outage survivable.
     ///

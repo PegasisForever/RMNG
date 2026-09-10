@@ -403,13 +403,19 @@ pub struct AppConfig {
     pub claude: ClaudeConfig,
     #[serde(default)]
     pub codex: CodexConfig,
-    /// Named account pools a clone can be bound to for rotation (members are
-    /// emails of imported accounts, from the server's `claude-accounts.json`).
+    /// Named account pools a clone can be bound to for rotation. One list for both
+    /// providers — members are emails of imported accounts (Claude and Codex mixed);
+    /// each side's rotator only sees its own provider's members. A clone binds at most
+    /// one group (see `RmngClone::group`), which feeds both sides.
     #[serde(default)]
+    pub groups: Vec<CloneGroup>,
+    /// Retired split lists (folded into `groups` by `migrate_legacy` on load).
+    /// Parse-only: never written back.
+    #[serde(default, skip_serializing)]
     pub clone_groups: Vec<CloneGroup>,
-    /// Named Codex account pools a clone can be bound to for rotation (members are emails
-    /// of imported Codex accounts, from the server's `codex-accounts.json`).
-    #[serde(default)]
+    /// Retired split lists (folded into `groups` by `migrate_legacy` on load).
+    /// Parse-only: never written back.
+    #[serde(default, skip_serializing)]
     pub codex_groups: Vec<CloneGroup>,
     /// Clone presets (env vars + Linear key + auto-select ticket labels). Auto-selected
     /// by ticket label when cloning from a ticket; required pick otherwise.
@@ -451,6 +457,7 @@ impl Default for AppConfig {
             docker: DockerConfig::default(),
             claude: ClaudeConfig::default(),
             codex: CodexConfig::default(),
+            groups: Vec::new(),
             clone_groups: Vec::new(),
             codex_groups: Vec::new(),
             presets: Vec::new(),
@@ -519,8 +526,7 @@ impl AppConfig {
             docker: self.docker.clone(),
             claude: self.claude.clone(),
             codex: self.codex.clone(),
-            clone_groups: self.clone_groups.clone(),
-            codex_groups: self.codex_groups.clone(),
+            groups: self.groups.clone(),
             presets: self.presets.iter().map(Preset::redacted).collect(),
             chroma: self.chroma,
             ssh: self.ssh.clone(),
@@ -549,8 +555,7 @@ pub struct AppConfigRedacted {
     pub docker: DockerConfig,
     pub claude: ClaudeConfig,
     pub codex: CodexConfig,
-    pub clone_groups: Vec<CloneGroup>,
-    pub codex_groups: Vec<CloneGroup>,
+    pub groups: Vec<CloneGroup>,
     pub presets: Vec<PresetRedacted>,
     pub chroma: ChromaMode,
     pub ssh: SshConfig,

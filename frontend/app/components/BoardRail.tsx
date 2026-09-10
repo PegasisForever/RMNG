@@ -35,10 +35,8 @@ export interface BoardRailProps {
   /** The operator's own ordering of those rows, as dragged out in Settings. The route
    *  subscribes to the shared store and passes the value, so a drag there reorders here. */
   accountOrder: AcctOrder;
-  /** Configured Claude pools (`config.cloneGroups`) — the usage list groups by these. */
-  cloneGroups?: CloneGroup[];
-  /** Configured Codex pools (`config.codexGroups`). */
-  codexGroups?: CloneGroup[];
+  /** The single configured pool list (`config.groups`) — the usage list groups by these. */
+  groups?: CloneGroup[];
   /** Formats the usage bars' reset-time tooltips. Read once by the route (the operator's
    *  `navigator.language`) and handed down, so a story can pin it. */
   locale: string;
@@ -66,8 +64,7 @@ export interface BoardRailProps {
 export function BoardRail({
   accounts,
   accountOrder,
-  cloneGroups,
-  codexGroups,
+  groups,
   locale,
   now,
   lxcStats,
@@ -140,8 +137,7 @@ export function BoardRail({
       <ClaudeAccountsPanel
         accounts={accounts}
         accountOrder={accountOrder}
-        cloneGroups={cloneGroups}
-        codexGroups={codexGroups}
+        groups={groups}
         locale={locale}
         now={now}
         onImport={onImportAccount}

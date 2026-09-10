@@ -885,10 +885,10 @@ async fn clone_self(
         .ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))
 }
 
-/// Repoint any clone bound to a pool that this config save deleted, per provider.
+/// Repoint any clone bound to a pool that this config save deleted.
 ///
-/// A clone's pool binding is `claude_group` + a `claude_selection` of `group:<name>`. When the
-/// pool is gone, both are meaningless: the rotator skips unknown groups, so the clone is frozen
+/// A clone's pool binding is its clone-level `group` (+ per-side stickies). When the pool is
+/// gone, all three are meaningless: the rotator skips unknown groups, so the clone is frozen
 /// on its last account forever. `auto` is the honest replacement — the clone keeps working and
 /// rejoins normal rotation across every imported account — and it is what the operator would
 /// get had they never named a pool.
@@ -897,36 +897,37 @@ async fn clone_self(
 /// deleted, and only for pools that actually disappeared in THIS save. A periodic sweep would
 /// also "heal" a clone whose pool is merely absent because config failed to load.
 fn heal_dangling_pool_bindings(app: &App, old: &wire::AppConfig, merged: &wire::AppConfig) {
-    let gone = |before: &[wire::CloneGroup], after: &[wire::CloneGroup]| -> Vec<String> {
-        before
-            .iter()
-            .filter(|b| !after.iter().any(|a| a.name == b.name))
-            .map(|b| b.name.clone())
-            .collect()
-    };
-    let claude_gone = gone(&old.clone_groups, &merged.clone_groups);
-    let codex_gone = gone(&old.codex_groups, &merged.codex_groups);
-    if claude_gone.is_empty() && codex_gone.is_empty() {
+    let gone: Vec<String> = old
+        .groups
+        .iter()
+        .filter(|b| !merged.groups.iter().any(|a| a.name == b.name))
+        .map(|b| b.name.clone())
+        .collect();
+    if gone.is_empty() {
         return;
     }
-    let mut healed: Vec<(String, &'static str, String)> = Vec::new();
+    let mut healed: Vec<(String, String)> = Vec::new();
     app.store.mutate(|s| {
         for h in s.hosts.iter_mut() {
-            if let Some(g) = h.claude_group.clone().filter(|g| claude_gone.contains(g)) {
-                h.claude_group = None;
-                h.claude_selection = Some("auto".to_string());
-                healed.push((h.id.clone(), "claude", g));
-            }
-            if let Some(g) = h.codex_group.clone().filter(|g| codex_gone.contains(g)) {
-                h.codex_group = None;
-                h.codex_selection = Some("auto".to_string());
-                healed.push((h.id.clone(), "codex", g));
+            if h.group.clone().is_some_and(|g| gone.contains(&g)) {
+                let g = h.group.take().unwrap();
+                // Only a side that was actually drawing from the pool rejoins `auto`;
+                // a side pinned to an explicit email keeps its pin (operator's choice).
+                if h.claude_group.is_some() {
+                    h.claude_group = None;
+                    h.claude_selection = Some("auto".to_string());
+                }
+                if h.codex_group.is_some() {
+                    h.codex_group = None;
+                    h.codex_selection = Some("auto".to_string());
+                }
+                healed.push((h.id.clone(), g));
             }
         }
     });
-    for (clone, provider, pool) in healed {
+    for (clone, pool) in healed {
         tracing::info!(
-            "clone {clone}: {provider} pool {pool:?} was deleted — repointed at `auto` so it \
+            "clone {clone}: pool {pool:?} was deleted — repointed at `auto` so it \
              keeps rotating instead of freezing on its current account"
         );
     }
@@ -1148,6 +1149,9 @@ struct ForkReq {
     /// Codex account selection override (`None` = inherit).
     #[serde(default)]
     codex_account: Option<String>,
+    /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent inherits.
+    #[serde(default)]
+    group: Option<Option<String>>,
     /// First message override for the agent kickoff.
     #[serde(default)]
     first_message: Option<String>,
@@ -1200,6 +1204,7 @@ async fn fork(
             linear: req.linear,
             claude_account: req.claude_account,
             codex_account: req.codex_account,
+            group: req.group,
             first_message: req.first_message,
             agent_instructions: req.agent_instructions,
             claude_instructions: req.claude_instructions,
@@ -2347,6 +2352,10 @@ struct SwapReq {
     host: String,
     /// Account email, `auto`, `none`, or `group:<name>`.
     account: String,
+    /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent keeps.
+    /// A `group:<name>` account implies the bind.
+    #[serde(default)]
+    group: Option<Option<String>>,
 }
 
 /// `POST /api/claude/swap` — change a clone's Claude account/group. `account` is an
@@ -2374,10 +2383,20 @@ async fn claude_swap(
             format!("'{}' is not a managed clone", host.id),
         ));
     }
+    // A `group:<name>` account rebinds the whole clone (both sides draw from it
+    // afterwards); the selection is stored as `auto`. Explicit email/`none` overrides
+    // this side only — the clone-level group stays for the other side.
+    let (bound_group, claude_req, _) = crate::clone_ops::split_group_binding(
+        Some(req.account.clone()),
+        None,
+        host.group.clone(),
+        req.group.clone(),
+    );
     let assignment = crate::claude::resolve_assignment(
         &app,
-        Some(&req.account),
+        claude_req.as_deref(),
         host.claude_account_email.as_deref(),
+        bound_group.as_deref(),
     )
     .ok_or_else(|| {
         (
@@ -2387,7 +2406,7 @@ async fn claude_swap(
                 .into(),
         )
     })?;
-    let selection = crate::claude::normalize_selection(Some(&req.account));
+    let selection = crate::claude::normalize_selection(claude_req.as_deref());
     let (group, email) = match assignment {
         crate::claude::Assignment::None => {
             crate::claude::clear_clone_token(&app, &host.id)
@@ -2421,6 +2440,7 @@ async fn claude_swap(
             h.claude_account_email = email_set;
             h.claude_group = group_set;
             h.claude_selection = Some(sel_set);
+            h.group = bound_group.clone();
         }
     });
     Ok(Json(
@@ -2469,6 +2489,10 @@ struct CodexSwapReq {
     host: String,
     /// Account email, `auto`, `none`, or `group:<name>`.
     account: String,
+    /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent keeps.
+    /// A `group:<name>` account implies the bind.
+    #[serde(default)]
+    group: Option<Option<String>>,
 }
 
 /// `POST /api/codex/swap` — change a clone's Codex account/group.
@@ -2494,10 +2518,17 @@ async fn codex_swap(
             format!("'{}' is not a managed clone", host.id),
         ));
     }
+    let (bound_group, _, codex_req) = crate::clone_ops::split_group_binding(
+        None,
+        Some(req.account.clone()),
+        host.group.clone(),
+        req.group.clone(),
+    );
     let assignment = crate::codex::resolve_assignment(
         &app,
-        Some(&req.account),
+        codex_req.as_deref(),
         host.codex_account_email.as_deref(),
+        bound_group.as_deref(),
     )
     .ok_or_else(|| {
         (
@@ -2507,7 +2538,7 @@ async fn codex_swap(
                 .into(),
         )
     })?;
-    let selection = crate::codex::normalize_selection(Some(&req.account));
+    let selection = crate::codex::normalize_selection(codex_req.as_deref());
     let (group, email) = match assignment {
         crate::codex::Assignment::None => {
             crate::codex::clear_clone_token(&app, &host.id)
@@ -2541,6 +2572,7 @@ async fn codex_swap(
             h.codex_account_email = email_set;
             h.codex_group = group_set;
             h.codex_selection = Some(sel_set);
+            h.group = bound_group.clone();
         }
     });
     Ok(Json(
@@ -2766,22 +2798,23 @@ mod tests {
             accounts: vec![],
         };
         let old = wire::AppConfig {
-            clone_groups: vec![pool("keep"), pool("doomed")],
-            codex_groups: vec![pool("gpt")],
+            groups: vec![pool("keep"), pool("doomed"), pool("gpt")],
             ..Default::default()
         };
         app.store.mutate(|s| {
             s.hosts = vec![
                 wire::RmngClone {
                     id: "bound".into(),
+                    group: Some("doomed".into()),
                     claude_group: Some("doomed".into()),
-                    claude_selection: Some("group:doomed".into()),
+                    claude_selection: Some("auto".into()),
                     ..Default::default()
                 },
                 wire::RmngClone {
                     id: "survivor".into(),
+                    group: Some("keep".into()),
                     claude_group: Some("keep".into()),
-                    claude_selection: Some("group:keep".into()),
+                    claude_selection: Some("auto".into()),
                     ..Default::default()
                 },
                 wire::RmngClone {
@@ -2791,18 +2824,20 @@ mod tests {
                     ..Default::default()
                 },
                 wire::RmngClone {
-                    id: "codex-bound".into(),
+                    id: "mixed".into(),
+                    group: Some("gpt".into()),
                     codex_group: Some("gpt".into()),
-                    codex_selection: Some("group:gpt".into()),
+                    codex_selection: Some("auto".into()),
+                    claude_selection: Some("me@x.com".into()),
+                    claude_account_email: Some("me@x.com".into()),
                     ..Default::default()
                 },
             ];
         });
 
-        // Drop `doomed` (Claude) and `gpt` (Codex); keep `keep`.
+        // Drop `doomed` and `gpt`; keep `keep`.
         let merged = wire::AppConfig {
-            clone_groups: vec![pool("keep")],
-            codex_groups: vec![],
+            groups: vec![pool("keep")],
             ..Default::default()
         };
         heal_dangling_pool_bindings(&app, &old, &merged);
@@ -2817,21 +2852,24 @@ mod tests {
         };
         // The stranded clone keeps working, on `auto`, and no longer names a pool that is gone.
         let bound = by_id("bound");
+        assert_eq!(bound.group, None);
         assert_eq!(bound.claude_selection.as_deref(), Some("auto"));
         assert_eq!(bound.claude_group, None);
         // A clone on a surviving pool is untouched — healing must be scoped to what was deleted.
         let survivor = by_id("survivor");
-        assert_eq!(survivor.claude_selection.as_deref(), Some("group:keep"));
+        assert_eq!(survivor.group.as_deref(), Some("keep"));
+        assert_eq!(survivor.claude_selection.as_deref(), Some("auto"));
         assert_eq!(survivor.claude_group.as_deref(), Some("keep"));
         // A pinned clone is not a pool clone; an explicit pin is the operator's choice to keep.
         let pinned = by_id("pinned");
         assert_eq!(pinned.claude_selection.as_deref(), Some("me@x.com"));
-        // Providers heal independently.
-        let cx = by_id("codex-bound");
-        assert_eq!(cx.codex_selection.as_deref(), Some("auto"));
-        assert_eq!(cx.codex_group, None);
-        // ...and the Claude side of that same clone was never bound, so it stays unset.
-        assert_eq!(cx.claude_selection, None);
+        // A clone whose group is gone heals on both sides even when one side was pinned:
+        // the pin stays (operator's choice) but the dead binding is gone.
+        let mixed = by_id("mixed");
+        assert_eq!(mixed.group, None);
+        assert_eq!(mixed.codex_selection.as_deref(), Some("auto"));
+        assert_eq!(mixed.codex_group, None);
+        assert_eq!(mixed.claude_selection.as_deref(), Some("me@x.com"));
     }
 
     #[tokio::test]

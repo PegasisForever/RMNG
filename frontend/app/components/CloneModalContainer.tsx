@@ -106,8 +106,7 @@ export function CloneModalContainer({
   }, [clonesLoading, sources.length]);
 
   // Account pools and presets (from config).
-  const [claudeGroups, setClaudeGroups] = useState<CloneGroup[]>([]);
-  const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
+  const [groups, setGroups] = useState<CloneGroup[]>([]);
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
   // Config settled (loaded or failed). `presets` starts empty, which is indistinguishable
   // from "none configured" — without this the missing-key warning flashes on every open.
@@ -121,8 +120,7 @@ export function CloneModalContainer({
     getConfig()
       .then((c) => {
         setPresets(c.presets);
-        setClaudeGroups(c.cloneGroups);
-        setCodexGroups(c.codexGroups);
+        setGroups(c.groups);
       })
       .catch(() => {
         // Config unreachable — just no preset/group options.
@@ -237,6 +235,7 @@ export function CloneModalContainer({
       runStartupScript: draft.runStartupScript,
       ...(draft.claudeAccount ? { claudeAccount: draft.claudeAccount } : {}),
       ...(draft.codexAccount ? { codexAccount: draft.codexAccount } : {}),
+      ...(draft.group ? { group: draft.group === "none" ? null : draft.group } : {}),
       ...(draft.mode !== "plain" && draft.agentInstructions.trim()
         ? { agentInstructions: draft.agentInstructions.trim() }
         : {}),
@@ -300,8 +299,7 @@ export function CloneModalContainer({
       clones={sources}
       clonesLoading={clonesLoading}
       accounts={accounts}
-      claudeGroups={claudeGroups}
-      codexGroups={codexGroups}
+      groups={groups}
       presets={presets}
       teamKeys={teamKeys}
       parsedTicket={parsedTicket}

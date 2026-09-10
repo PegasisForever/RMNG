@@ -14,8 +14,7 @@ import type { Clone } from "~/lib/types";
 import {
   accountsNow,
   makeClaudeAccounts,
-  makeCloneGroups,
-  makeCodexGroups,
+  makeGroups,
 } from "./__fixtures__/accounts";
 import { makeBoardColumn, makeBoardColumns } from "./__fixtures__/board";
 import { chatActivity, chatMessages, chatNow, scheduledMessages } from "./__fixtures__/chat";
@@ -162,8 +161,7 @@ function makeRail() {
     // The container subscribes to the shared order store and passes the value; nothing has
     // been dragged in a story, so the accounts stay in the order they arrive.
     accountOrder: {},
-    cloneGroups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
+    groups: makeGroups(),
     // The container's clock. Pinned to the instant the account fixtures are written for, so
     // each bar's pace marker and reset countdown are the same on every machine and every day.
     now: accountsNow,
@@ -338,7 +336,7 @@ export const EmptyBoard: Story = {
       tickets: makeTicketColumn([]),
       selectedId: null,
     },
-    rail: { ...makeRail(), accounts: [], cloneGroups: [], codexGroups: [], lxcStats: null },
+    rail: { ...makeRail(), accounts: [], groups: [], lxcStats: null },
     selectedClone: null,
   },
 };

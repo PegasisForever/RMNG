@@ -42,11 +42,13 @@ claudeAccountEmail: string | null,
  */
 claudeGroup: string | null, 
 /**
- * The operator's Claude *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`,
- * or an account email. Distinguishes an auto-managed clone (server picks the best
- * account and may hot-swap it) from one pinned to a fixed account or opted out of
- * a token entirely — `claude_account_email` alone can't tell these apart. `None` on
- * clones created before this field / when no Claude account is configured.
+ * The operator's Claude *selection* verbatim: `"auto"`, `"none"`, or an account
+ * email. Distinguishes an auto-managed clone (server picks the best account and may
+ * hot-swap it) from one pinned to a fixed account or opted out of a token entirely —
+ * `claude_account_email` alone can't tell these apart. Group binding moved to the
+ * shared [`RmngClone::group`]: with a group set, an `"auto"` selection resolves
+ * inside it. `None` on clones created before this field / when no Claude account is
+ * configured.
  */
 claudeSelection: string | null, 
 /**
@@ -61,10 +63,19 @@ codexAccountEmail: string | null,
  */
 codexGroup: string | null, 
 /**
- * The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
- * an account email — the Codex twin of `claude_selection`.
+ * The operator's Codex *selection* verbatim: `"auto"`, `"none"`, or an account
+ * email — the Codex twin of `claude_selection`. Group binding is shared (see
+ * [`RmngClone::group`]).
  */
 codexSelection: string | null, 
+/**
+ * Name of the single account pool this clone draws BOTH providers' accounts from
+ * (`None` = no pool). With a group set, an `"auto"` per-side selection resolves to
+ * the least-used member of that side's provider inside the group; an explicit email
+ * or `"none"` on a side overrides the group for that side only. `claude_group` /
+ * `codex_group` record the group each side's current account was picked from.
+ */
+group: string | null, 
 /**
  * Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
  * string: the workspace set is config (Settings → Linear API keys), not an enum.

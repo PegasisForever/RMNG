@@ -51,10 +51,8 @@ export interface MobileUsageSectionProps {
   /** The operator's own ordering of those rows, dragged out in desktop Settings. Read from
    *  the shared store by the dashboard container and handed down. */
   accountOrder: AcctOrder;
-  /** Configured Claude pools (`config.cloneGroups`) — the usage list groups by these. */
-  cloneGroups?: CloneGroup[];
-  /** Configured Codex pools (`config.codexGroups`). */
-  codexGroups?: CloneGroup[];
+  /** The single configured pool list (`config.groups`) — the usage list groups by these. */
+  groups?: CloneGroup[];
   /** Formats the usage bars' reset-time tooltips. Read once by the route (the operator's
    *  `navigator.language`) and handed down, so a story can pin it. */
   locale: string;
@@ -76,8 +74,7 @@ export interface MobileUsageSectionProps {
 export function MobileUsageSection({
   accounts,
   accountOrder,
-  cloneGroups = [],
-  codexGroups = [],
+  groups = [],
   locale,
   now,
   usageOpen,
@@ -114,8 +111,7 @@ export function MobileUsageSection({
           <ClaudeAccountsPanel
             accounts={accounts}
             accountOrder={accountOrder}
-            cloneGroups={cloneGroups}
-            codexGroups={codexGroups}
+            groups={groups}
             locale={locale}
             now={now}
             onRefresh={onRefresh}

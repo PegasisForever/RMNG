@@ -39,10 +39,8 @@ export interface CloneModalViewProps {
   /** Imported accounts, both providers in one flat list, so the two pickers can label each
    *  option with its usage. */
   accounts: ClaudeUsage[];
-  /** Configured Claude pools (`config.cloneGroups`). */
-  claudeGroups: CloneGroup[];
-  /** Configured Codex pools (`config.codexGroups`). */
-  codexGroups: CloneGroup[];
+  /** The single configured pool list (`config.groups`). */
+  groups: CloneGroup[];
   /** Every configured preset, in config order. */
   presets: PresetRedacted[];
   /** The team keys the presets declare, for the New-ticket tab's dropdown. */
@@ -76,8 +74,7 @@ export function CloneModalView({
   clones,
   clonesLoading,
   accounts,
-  claudeGroups,
-  codexGroups,
+  groups,
   presets,
   teamKeys,
   parsedTicket,
@@ -91,6 +88,18 @@ export function CloneModalView({
   onSubmit,
   onClose,
 }: CloneModalViewProps) {
+  // The fork source's pool, for the group picker's blank label. A legacy `group:<name>`
+  // side selection reads as that group (the server migrates it on load; the picker only
+  // ever writes the shared binding).
+  const sourceClone = clones.find((c) => c.id === draft.source);
+  const sourceGroup =
+    sourceClone?.group ??
+    sourceClone?.claudeSelection?.match(/^group:(.+)$/)?.[1] ??
+    sourceClone?.codexSelection?.match(/^group:(.+)$/)?.[1] ??
+    sourceClone?.claudeGroup ??
+    sourceClone?.codexGroup ??
+    null;
+
   // Escape closes regardless of focus — a document-level listener since the backdrop click no
   // longer does (see below). Guarded the same as the backdrop was: no closing out from under a
   // running fork operation. While `busy` the dialog still holds its slot in the Escape stack,
@@ -235,11 +244,13 @@ export function CloneModalView({
           {draft.mode !== "template" ? (
             <CloneAccountFields
               accounts={accounts}
-              claudeGroups={claudeGroups}
-              codexGroups={codexGroups}
+              groups={groups}
+              sourceGroup={sourceGroup}
               preset={preset}
+              group={draft.group}
               claudeAccount={draft.claudeAccount}
               codexAccount={draft.codexAccount}
+              onGroupChange={(value) => onDraftChange("group", value)}
               onClaudeAccountChange={(value) => onDraftChange("claudeAccount", value)}
               onCodexAccountChange={(value) => onDraftChange("codexAccount", value)}
             />

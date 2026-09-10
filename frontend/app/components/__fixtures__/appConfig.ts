@@ -11,7 +11,7 @@ import { setupDraftFrom, type SetupDraft } from "~/lib/setupDraft";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
-import { makeCloneGroups, makeCodexGroups } from "./accounts";
+import { makeGroups } from "./accounts";
 import { makeClonePresets } from "./presets";
 
 export function makeAppConfig(
@@ -40,8 +40,7 @@ export function makeAppConfig(
     codex: { autoReset: false },
     // Built per call, down to the member list, so two configs from this builder never share
     // an array with each other or with the accounts fixture module.
-    cloneGroups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
+    groups: makeGroups(),
     // The same set both dialogs resolve against: the config IS where their team keys come
     // from, so the Settings panel lists exactly the presets the ticket dialog offers.
     presets: makeClonePresets(),

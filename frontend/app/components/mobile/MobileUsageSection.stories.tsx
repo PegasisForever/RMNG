@@ -6,8 +6,7 @@ import { MobileUsageSection } from "./MobileUsageSection";
 import {
   accountsNow,
   makeClaudeAccounts,
-  makeCloneGroups,
-  makeCodexGroups,
+  makeGroups,
   makeUsage,
 } from "../__fixtures__/accounts";
 import { makeStoryLink } from "../__fixtures__/storyLinks";
@@ -22,8 +21,7 @@ function base() {
   return {
     accounts: makeClaudeAccounts(accountsNow),
     accountOrder: {},
-    cloneGroups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
+    groups: makeGroups(),
   };
 }
 
@@ -76,7 +74,7 @@ export const NoData: Story = {
 /** Nothing imported. The fold still opens, onto the panel's own empty state and the one
  *  action that gets it started. */
 export const NoAccounts: Story = {
-  args: { ...base(), accounts: [], cloneGroups: [], codexGroups: [], usageOpen: true },
+  args: { ...base(), accounts: [], groups: [], usageOpen: true },
 };
 
 /** Before the container's clock has ticked. Every bar keeps its fill and drops its pace

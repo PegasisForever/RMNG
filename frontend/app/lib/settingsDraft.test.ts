@@ -30,8 +30,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     },
     claude: {},
     codex: { autoReset: false },
-    cloneGroups: [{ name: "pooled", accounts: ["alex@example.com"] }],
-    codexGroups: [],
+    groups: [{ name: "pooled", accounts: ["alex@example.com"] }],
     presets: [
       {
         name: "webapp",
@@ -61,8 +60,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
 type Patch = {
   docker: { hostnamePrefix: string };
   codex: { autoReset: boolean };
-  cloneGroups: { name: string; accounts: string[] }[];
-  codexGroups: { name: string; accounts: string[] }[];
+  groups: { name: string; accounts: string[] }[];
   layoutPresets: {
     name: string;
     monitors: {
@@ -112,7 +110,7 @@ test("the form never shares an array with the config it was seeded from", () => 
   const c = config();
   const draft = settingsDraftFrom(c);
 
-  expect(draft.claudeGroups[0].accounts).not.toBe(c.cloneGroups[0].accounts);
+  expect(draft.groups[0].accounts).not.toBe(c.groups[0].accounts);
   expect(draft.layoutPresets[0].monitors[0]).not.toBe(
     c.layoutPresets[0].monitors[0],
   );
@@ -133,12 +131,12 @@ test("the docker patch names only the fields the panel still edits", () => {
 
 test("a half-typed pool is dropped rather than saved unnamed", () => {
   const draft = settingsDraftFrom(config());
-  draft.claudeGroups = [
+  draft.groups = [
     { name: "  pooled  ", accounts: ["alex@example.com"] },
     { name: "   ", accounts: ["sam@example.com"] },
   ];
 
-  expect(patch(draft).cloneGroups).toEqual([
+  expect(patch(draft).groups).toEqual([
     { name: "pooled", accounts: ["alex@example.com"] },
   ]);
 });
@@ -147,11 +145,11 @@ test("repeated pool members are deduped", () => {
   // The checkbox editor cannot produce a duplicate, but a hand-edited config can, and a
   // repeated email would skew group selection.
   const draft = settingsDraftFrom(config());
-  draft.codexGroups = [
+  draft.groups = [
     { name: "team", accounts: ["a@x.com", "a@x.com", "b@x.com"] },
   ];
 
-  expect(patch(draft).codexGroups).toEqual([
+  expect(patch(draft).groups).toEqual([
     { name: "team", accounts: ["a@x.com", "b@x.com"] },
   ]);
 });

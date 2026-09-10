@@ -194,11 +194,13 @@ pub struct RmngClone {
     /// set, `claude_account_email` holds the current pick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_group: Option<String>,
-    /// The operator's Claude *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`,
-    /// or an account email. Distinguishes an auto-managed clone (server picks the best
-    /// account and may hot-swap it) from one pinned to a fixed account or opted out of
-    /// a token entirely — `claude_account_email` alone can't tell these apart. `None` on
-    /// clones created before this field / when no Claude account is configured.
+    /// The operator's Claude *selection* verbatim: `"auto"`, `"none"`, or an account
+    /// email. Distinguishes an auto-managed clone (server picks the best account and may
+    /// hot-swap it) from one pinned to a fixed account or opted out of a token entirely —
+    /// `claude_account_email` alone can't tell these apart. Group binding moved to the
+    /// shared [`RmngClone::group`]: with a group set, an `"auto"` selection resolves
+    /// inside it. `None` on clones created before this field / when no Claude account is
+    /// configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_selection: Option<String>,
     /// Email of the imported Codex (ChatGPT) account whose token is written into this
@@ -210,10 +212,18 @@ pub struct RmngClone {
     /// `None` when bound to a single fixed Codex account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_group: Option<String>,
-    /// The operator's Codex *selection* verbatim: `"auto"`, `"none"`, `"group:<name>"`, or
-    /// an account email — the Codex twin of `claude_selection`.
+    /// The operator's Codex *selection* verbatim: `"auto"`, `"none"`, or an account
+    /// email — the Codex twin of `claude_selection`. Group binding is shared (see
+    /// [`RmngClone::group`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_selection: Option<String>,
+    /// Name of the single account pool this clone draws BOTH providers' accounts from
+    /// (`None` = no pool). With a group set, an `"auto"` per-side selection resolves to
+    /// the least-used member of that side's provider inside the group; an explicit email
+    /// or `"none"` on a side overrides the group for that side only. `claude_group` /
+    /// `codex_group` record the group each side's current account was picked from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`). An open
     /// string: the workspace set is config (Settings → Linear API keys), not an enum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -799,11 +809,11 @@ mod tests {
         let bv = serde_json::to_value(&bare).unwrap();
         assert!(bv.get("codexAccountEmail").is_none());
         assert!(bv.get("claudeAccountEmail").is_none());
-        // A `state.json` row written under the group-proxy model carries a `group` key that
-        // no longer exists; serde drops it rather than failing the whole file.
+        // A `state.json` row carrying the single clone-level `group` parses it back.
         let old: RmngClone =
             serde_json::from_str(r#"{"id":"h3","host":"h3","group":"team"}"#).unwrap();
         assert_eq!(old.id, "h3");
+        assert_eq!(old.group.as_deref(), Some("team"));
         assert!(old.claude_account_email.is_none());
         // Round-trips.
         let back: RmngClone = serde_json::from_value(v).unwrap();

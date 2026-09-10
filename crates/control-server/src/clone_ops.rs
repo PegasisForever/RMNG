@@ -107,6 +107,56 @@ fn provider_rank(p: Option<wire::Provider>) -> u8 {
 /// stable-sorted by provider rank so grouping is deterministic. This is what lets the
 /// Claude and Codex pollers coexist without clobbering each other (each poller previously
 /// did `s.claude_accounts = views`, which would erase the other provider).
+/// Resolve the clone-level group from an explicit `group` request field plus legacy
+/// `group:<name>` per-side selections. `explicit` is the request's `group` key:
+/// `Some(name)` binds, `Some("")` unbinds, `None` (key absent) keeps the legacy behavior
+/// below. Without it, both sides naming the same group → that group; one side → that
+/// side; different groups → the Claude side wins (warn — only reachable from a
+/// hand-written request; the UI offers a single picker); neither → `inherit` (the source
+/// clone's group for fork; create passes `None`). Selections carrying a `group:` prefix
+/// are rewritten to `"auto"` (they resolve inside the group now).
+pub(crate) fn split_group_binding(
+    claude_sel: Option<String>,
+    codex_sel: Option<String>,
+    inherit: Option<String>,
+    explicit: Option<Option<String>>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let rewrite = |sel: Option<String>| {
+        sel.map(|s| {
+            if s.trim_start().starts_with("group:") {
+                "auto".to_string()
+            } else {
+                s
+            }
+        })
+    };
+    if let Some(g) = explicit {
+        let group = g.filter(|s| !s.trim().is_empty());
+        return (group, rewrite(claude_sel), rewrite(codex_sel));
+    }
+    fn extract(sel: &Option<String>) -> Option<String> {
+        sel.as_deref()
+            .and_then(|s| s.strip_prefix("group:"))
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+    }
+    let g1 = extract(&claude_sel);
+    let g2 = extract(&codex_sel);
+    let group = match (g1, g2) {
+        (Some(a), Some(b)) => {
+            if a != b {
+                tracing::warn!(
+                    "clone bound to two different groups ({a:?} vs {b:?}) — keeping {a:?}"
+                );
+            }
+            Some(a)
+        }
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => inherit,
+    };
+    (group, rewrite(claude_sel), rewrite(codex_sel))
+}
+
 pub(crate) fn replace_provider_views(
     app: &App,
     provider: wire::Provider,
@@ -228,6 +278,38 @@ fn b64url_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn split_group_binding_prefers_the_explicit_group() {
+        // Explicit bind wins; legacy prefixes in the sides are neutralized to auto.
+        let (g, claude, codex) = split_group_binding(
+            Some("group:old".into()),
+            Some("me@x.com".into()),
+            Some("old".into()),
+            Some(Some("new".into())),
+        );
+        assert_eq!(g.as_deref(), Some("new"));
+        assert_eq!(claude.as_deref(), Some("auto"));
+        assert_eq!(codex.as_deref(), Some("me@x.com"));
+        // Explicit unbind clears even an inherited group.
+        let (g, _, _) = split_group_binding(
+            None,
+            None,
+            Some("old".into()),
+            Some(Some(String::new())),
+        );
+        assert_eq!(g, None);
+        // Absent key keeps the legacy behavior: prefixes bind, else inherit.
+        let (g, claude, _) = split_group_binding(
+            Some("group:team".into()),
+            None,
+            Some("other".into()),
+            None,
+        );
+        assert_eq!(g.as_deref(), Some("team"));
+        assert_eq!(claude.as_deref(), Some("auto"));
+        let (g, _, _) = split_group_binding(None, None, Some("other".into()), None);
+        assert_eq!(g.as_deref(), Some("other"));
+    }
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
 

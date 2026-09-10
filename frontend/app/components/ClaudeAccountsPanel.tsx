@@ -81,11 +81,13 @@ function Bar({
   );
 }
 
-/** One rendered section: a configured pool, or the leftovers that belong to none. */
+/** One rendered section: a configured pool (both providers' members together), or one
+ *  provider's leftovers that belong to no pool. */
 export interface AccountSection {
   /** Pool name, or null for the accounts no pool claims. */
   name: string | null;
-  /** Which provider's pools this came from, so two pools sharing a name stay distinct. */
+  /** Leftover sections are per provider; pool sections always read "claude" (vestigial —
+   *  a pool holds both providers now, and pool names are unique). */
   provider: "claude" | "codex";
   accounts: ClaudeUsage[];
 }
@@ -100,21 +102,22 @@ export interface AccountSection {
  *  worth seeing, and it is exactly the state that leaves clones bound to it unassigned. */
 export function groupAccounts(
   ordered: ClaudeUsage[],
-  cloneGroups: CloneGroup[],
-  codexGroups: CloneGroup[],
+  groups: CloneGroup[],
 ): AccountSection[] {
   const out: AccountSection[] = [];
+  const claimed = new Set<string>();
+  for (const group of groups) {
+    const emails = new Set(group.accounts);
+    // One section per pool holding BOTH providers' members: a pool is one binding now,
+    // so its Claude and Codex members belong on screen together.
+    const accounts = ordered.filter((a) => emails.has(a.email));
+    accounts.forEach((a) => claimed.add(a.id));
+    out.push({ name: group.name, provider: "claude", accounts });
+  }
   for (const provider of ["claude", "codex"] as const) {
-    const rows = ordered.filter((a) => (a.provider ?? "claude") === provider);
-    const groups = provider === "claude" ? cloneGroups : codexGroups;
-    const claimed = new Set<string>();
-    for (const group of groups) {
-      const emails = new Set(group.accounts);
-      const accounts = rows.filter((a) => emails.has(a.email));
-      accounts.forEach((a) => claimed.add(a.id));
-      out.push({ name: group.name, provider, accounts });
-    }
-    const loose = rows.filter((a) => !claimed.has(a.id));
+    const loose = ordered.filter(
+      (a) => (a.provider ?? "claude") === provider && !claimed.has(a.id),
+    );
     if (loose.length > 0) out.push({ name: null, provider, accounts: loose });
   }
   return out;
@@ -205,8 +208,7 @@ function Row({
 export function ClaudeAccountsPanel({
   accounts,
   accountOrder,
-  cloneGroups = [],
-  codexGroups = [],
+  groups = [],
   locale,
   now,
   onRefresh,
@@ -218,10 +220,8 @@ export function ClaudeAccountsPanel({
    *  subscribes to the shared store and hands the value down, which is what keeps this panel
    *  and the Settings lists in step without either one reading the store during render. */
   accountOrder: AcctOrder;
-  /** Configured Claude pools (`config.cloneGroups`). With none, the list stays flat. */
-  cloneGroups?: CloneGroup[];
-  /** Configured Codex pools (`config.codexGroups`). */
-  codexGroups?: CloneGroup[];
+  /** The single configured pool list (`config.groups`). With none, the list stays flat. */
+  groups?: CloneGroup[];
   /** Formats each bar's reset-time tooltip. Read on the container's side of the seam
    *  (`navigator.language`) and passed down, so the panel draws the same string for the same
    *  props on every machine and a story can pin it. */
@@ -245,8 +245,8 @@ export function ClaudeAccountsPanel({
   );
   // With no pools configured there is nothing to group by, so the list stays flat.
   const sections =
-    cloneGroups.length + codexGroups.length > 0
-      ? groupAccounts(rows, cloneGroups, codexGroups)
+    groups.length > 0
+      ? groupAccounts(rows, groups)
       : [];
   const [busy, setBusy] = useState(false);
   const wrap = (fn: () => void | Promise<void>) => async () => {

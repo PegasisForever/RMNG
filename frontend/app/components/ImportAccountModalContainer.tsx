@@ -15,16 +15,13 @@ import { ImportAccountModalView } from "~/components/ImportAccountModalView";
 import { beginLogin, completeLogin } from "~/lib/api";
 
 export function ImportAccountModalContainer({
-  claudeGroups,
-  codexGroups,
+  groupNames,
   replacing,
   onClose,
   onImported,
 }: {
-  /** Pool names from `config.cloneGroups`. */
-  claudeGroups: string[];
-  /** Pool names from `config.codexGroups`. */
-  codexGroups: string[];
+  /** Pool names from the single `config.groups` list — one list for both providers. */
+  groupNames: string[];
   /** An account this sign-in stands in for. Its provider is the one being signed in, so the
    *  provider tabs go away, and its pools are inherited, so the pool picker does too. */
   replacing?: { provider: "claude" | "codex"; email: string } | null;
@@ -40,11 +37,9 @@ export function ImportAccountModalContainer({
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const groups = provider === "codex" ? codexGroups : claudeGroups;
+  const groups = groupNames;
 
-  // A URL per provider, asked for on open and again on a provider switch. The pool resets
-  // with it: the two providers keep separate pools, so one picked for Claude means nothing
-  // to Codex.
+  // A URL per provider, asked for on open and again on a provider switch.
   useEffect(() => {
     let cancelled = false;
     setLoginUrl(null);

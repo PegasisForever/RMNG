@@ -25,8 +25,8 @@ const meta = {
   component: SettingsGroupsEditor,
   parameters: { layout: "centered" },
   args: {
-    groups: makeSettingsDraft().claudeGroups,
-    accountEmails: emails("claude"),
+    groups: makeSettingsDraft().groups,
+    accountEmails: [...emails("claude"), ...emails("codex")],
     noAccountsHint: CLAUDE_HINT,
     onChange: fn(),
   },
@@ -40,19 +40,9 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Two Claude pools over the same two accounts. An account can sit in several pools; the
+/** Two pools over mixed Claude + Codex members. An account can sit in several pools; the
  *  pools are how a clone's binding is resolved, not a partition. */
-export const Claude: Story = { args: { groups: makeSettingsDraft().claudeGroups } };
-
-/** The Codex twin, over the independent Codex pool. A clone binds one pool of each provider,
- *  which is why the two lists never merge. */
-export const Codex: Story = {
-  args: {
-    groups: makeSettingsDraft().codexGroups,
-    accountEmails: emails("codex"),
-    noAccountsHint: CODEX_HINT,
-  },
-};
+export const Mixed: Story = { args: { groups: makeSettingsDraft().groups } };
 
 /** No pools configured. Every clone then falls through to the server's own account chain. */
 export const Empty: Story = {
@@ -63,7 +53,7 @@ export const Empty: Story = {
  *  account does not help a Codex pool. */
 export const NoAccountsImported: Story = {
   args: {
-    groups: makeSettingsDraft().codexGroups,
+    groups: makeSettingsDraft().groups,
     accountEmails: [],
     noAccountsHint: CODEX_HINT,
   },
@@ -77,7 +67,7 @@ export const UnnamedRow: Story = {
 
 /** Wired to local state: renaming, ticking a member and adding a pool all take effect. */
 export const Interactive: Story = {
-  args: { groups: makeSettingsDraft().claudeGroups },
+  args: { groups: makeSettingsDraft().groups },
   render: function Render(args) {
     const [groups, setGroups] = useState(args.groups);
     return (

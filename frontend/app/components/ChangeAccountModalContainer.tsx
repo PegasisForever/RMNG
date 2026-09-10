@@ -11,20 +11,28 @@ import { getConfig } from "~/lib/api";
 import type { ClaudeUsage, Clone } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
-/** Current selection for a clone: the verbatim selection when recorded ("auto", "none",
- *  `group:<name>`, or an email), else derived from its group/account for legacy clones.
- *  A legacy clone with no account is effectively tokenless, so showing "none" lets
- *  choosing "auto" submit the swap that enrolls it in rotation. */
+/** The clone's pool: the shared binding, else a legacy sticky for a clone the server
+ *  has not re-saved yet. */
+export function currentGroup(clone: Clone): string | null {
+  return clone.group ?? clone.claudeGroup ?? clone.codexGroup ?? null;
+}
+
+/** Current side selection ("auto", "none", or an email). A legacy `group:<name>`
+ *  selection reads as "auto" — the group half of that binding now lives in
+ *  {@link currentGroup}. A legacy clone with no account is effectively tokenless, so
+ *  showing "none" lets choosing "auto" submit the swap that enrolls it in rotation. */
 export function currentValue(clone: Clone): string {
-  if (clone.claudeSelection) return clone.claudeSelection;
-  if (clone.claudeGroup) return `group:${clone.claudeGroup}`;
-  return clone.claudeAccountEmail ?? "none";
+  const sel = clone.claudeSelection ??
+    (clone.claudeGroup ? `group:${clone.claudeGroup}` : undefined);
+  if (!sel) return clone.claudeAccountEmail ?? "none";
+  return sel.startsWith("group:") ? "auto" : sel;
 }
 
 export function currentCodexValue(clone: Clone): string {
-  if (clone.codexSelection) return clone.codexSelection;
-  if (clone.codexGroup) return `group:${clone.codexGroup}`;
-  return clone.codexAccountEmail ?? "none";
+  const sel = clone.codexSelection ??
+    (clone.codexGroup ? `group:${clone.codexGroup}` : undefined);
+  if (!sel) return clone.codexAccountEmail ?? "none";
+  return sel.startsWith("group:") ? "auto" : sel;
 }
 
 export function ChangeAccountModalContainer({
@@ -42,18 +50,17 @@ export function ChangeAccountModalContainer({
   codexAccounts: ClaudeUsage[];
   busy: boolean;
   onClose: () => void;
-  onSubmit: (claude: string, codex: string) => void;
+  onSubmit: (claude: string, codex: string, group: string | null) => void;
 }) {
   const [claudeValue, setClaudeValue] = useState(() => currentValue(clone));
   const [codexValue, setCodexValue] = useState(() => currentCodexValue(clone));
+  const [groupValue, setGroupValue] = useState<string | null>(() => currentGroup(clone));
   const [groups, setGroups] = useState<CloneGroup[]>([]);
-  const [codexGroups, setCodexGroups] = useState<CloneGroup[]>([]);
 
   useEffect(() => {
     getConfig()
       .then((c) => {
-        setGroups(c.cloneGroups);
-        setCodexGroups(c.codexGroups);
+        setGroups(c.groups);
       })
       .catch(() => {
         // Config unreachable — only accounts (no group options).
@@ -66,14 +73,15 @@ export function ChangeAccountModalContainer({
       accounts={accounts}
       groups={groups}
       codexAccounts={codexAccounts}
-      codexGroups={codexGroups}
+      groupValue={groupValue}
       claudeValue={claudeValue}
       codexValue={codexValue}
       busy={busy}
+      onGroupChange={setGroupValue}
       onClaudeValueChange={setClaudeValue}
       onCodexValueChange={setCodexValue}
       onClose={onClose}
-      onSubmit={() => onSubmit(claudeValue, codexValue)}
+      onSubmit={() => onSubmit(claudeValue, codexValue, groupValue)}
     />
   );
 }

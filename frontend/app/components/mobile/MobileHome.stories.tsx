@@ -7,8 +7,7 @@ import { PhoneFrame } from "~/stories/PhoneFrame";
 import {
   accountsNow,
   makeClaudeAccounts,
-  makeCloneGroups,
-  makeCodexGroups,
+  makeGroups,
 } from "../__fixtures__/accounts";
 import { makeBoardColumns } from "../__fixtures__/board";
 import { hosts } from "../__fixtures__/clones";
@@ -29,8 +28,7 @@ function base() {
     // The dashboard container subscribes to the shared order store and passes the value.
     // Nothing has been dragged in a story, so the rows keep the order they arrive in.
     accountOrder: {},
-    cloneGroups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
+    groups: makeGroups(),
     // The container's clock, pinned to the instant the account fixtures are written for, so
     // each bar's pace marker and reset countdown read the same on every machine.
     now: accountsNow,
@@ -91,7 +89,7 @@ export const NoClones: Story = {
 
 /** Nothing imported and nothing cloned, so both sections have to say so. */
 export const NothingYet: Story = {
-  args: { ...base(), accounts: [], cloneGroups: [], codexGroups: [], columns: [], clones: [] },
+  args: { ...base(), accounts: [], groups: [], columns: [], clones: [] },
 };
 
 /** The banner, carrying the failure a phone actually hits: the control server went out of

@@ -86,14 +86,11 @@ export function makeCloneGroup(overrides: Partial<CloneGroup> = {}): CloneGroup 
 }
 
 /** The configured Claude pools, freshly built, down to each pool's member array. */
-export function makeCloneGroups(): CloneGroup[] {
+/** The configured pools (one list, Claude and Codex members mixed), freshly built. */
+export function makeGroups(): CloneGroup[] {
   return [
     makeCloneGroup({ name: "pooled", accounts: ["alex@example.com", "sam@example.com"] }),
     makeCloneGroup({ name: "solo", accounts: ["alex@example.com"] }),
+    makeCloneGroup({ name: "team", accounts: ["alex@openai.com", "sam@example.com"] }),
   ];
-}
-
-/** The configured Codex pools, freshly built. */
-export function makeCodexGroups(): CloneGroup[] {
-  return [makeCloneGroup({ name: "team", accounts: ["alex@openai.com"] })];
 }

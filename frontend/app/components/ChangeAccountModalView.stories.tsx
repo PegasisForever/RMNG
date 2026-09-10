@@ -6,8 +6,7 @@ import { ChangeAccountModalView } from "./ChangeAccountModalView";
 import {
   accountsNow,
   makeClaudeAccounts,
-  makeCloneGroups,
-  makeCodexGroups,
+  makeGroups,
 } from "./__fixtures__/accounts";
 import { makeCloneDualProvider, makeCloneWorking } from "./__fixtures__/clones";
 
@@ -18,8 +17,7 @@ function makeAccountLists() {
   return {
     accounts: accounts.filter((a) => a.provider !== "codex"),
     codexAccounts: accounts.filter((a) => a.provider === "codex"),
-    groups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
+    groups: makeGroups(),
   };
 }
 
@@ -30,9 +28,11 @@ const meta = {
   args: {
     cloneName: makeCloneWorking().displayName ?? makeCloneWorking().id,
     ...makeAccountLists(),
+    groupValue: null,
     claudeValue: "alex@example.com",
     codexValue: "none",
     busy: false,
+    onGroupChange: fn(),
     onClaudeValueChange: fn(),
     onCodexValueChange: fn(),
     onClose: fn(),
@@ -47,16 +47,16 @@ type Story = StoryObj<typeof meta>;
  *  show and the heading says "Accounts" rather than naming one provider. */
 export const BothProviders: Story = { args: { ...makeAccountLists() } };
 
-/** A clone bound to a pool instead of an account. The server keeps it on one member until
- *  that member exhausts, then moves it to the least-used one. */
+/** A clone bound to a pool instead of an account. The server keeps each side on one member
+ *  until that member exhausts, then moves it to the least-used one of its own provider. */
 export const BoundToPool: Story = {
-  args: { ...makeAccountLists(), claudeValue: "group:pooled", codexValue: "group:team" },
+  args: { ...makeAccountLists(), groupValue: "team", claudeValue: "auto", codexValue: "auto" },
 };
 
 /** No Codex accounts and no Codex pools configured. The second picker disappears and the
  *  heading narrows to the one provider this rig actually has. */
 export const ClaudeOnly: Story = {
-  args: { ...makeAccountLists(), codexAccounts: [], codexGroups: [], codexValue: "none" },
+  args: { ...makeAccountLists(), codexAccounts: [], groups: [], codexValue: "none" },
 };
 
 /** A clone holding both providers at once, which is what the sub-clone helpers usually look
@@ -66,7 +66,8 @@ export const DualProvider: Story = {
     ...makeAccountLists(),
     cloneName: makeCloneDualProvider().displayName ?? makeCloneDualProvider().id,
     claudeValue: "alex@example.com",
-    codexValue: "group:team",
+    codexValue: "auto",
+    groupValue: "team",
   },
 };
 
@@ -83,13 +84,19 @@ export const Interactive: Story = {
   render: function Render(args) {
     const [claudeValue, setClaudeValue] = useState(args.claudeValue);
     const [codexValue, setCodexValue] = useState(args.codexValue);
+    const [groupValue, setGroupValue] = useState(args.groupValue);
     const [busy, setBusy] = useState(false);
     return (
       <ChangeAccountModalView
         {...args}
+        groupValue={groupValue}
         claudeValue={claudeValue}
         codexValue={codexValue}
         busy={busy}
+        onGroupChange={(next) => {
+          setGroupValue(next);
+          args.onGroupChange(next);
+        }}
         onClaudeValueChange={(next) => {
           setClaudeValue(next);
           args.onClaudeValueChange(next);

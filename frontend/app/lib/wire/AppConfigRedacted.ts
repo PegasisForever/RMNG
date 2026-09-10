@@ -19,7 +19,7 @@ import type { SshConfig } from "./SshConfig";
  * key, which the browser needs, or an account token that lives in its own store rather than
  * in the config.
  */
-export type AppConfigRedacted = { setupComplete: boolean, layoutPresets: Array<LayoutPreset>, activeLayout: string, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, cloneGroups: Array<CloneGroup>, codexGroups: Array<CloneGroup>, presets: Array<PresetRedacted>, chroma: ChromaMode, ssh: SshConfig, agentPlaybook: string, globalPrompt: string, 
+export type AppConfigRedacted = { setupComplete: boolean, layoutPresets: Array<LayoutPreset>, activeLayout: string, docker: DockerConfig, claude: ClaudeConfig, codex: CodexConfig, groups: Array<CloneGroup>, presets: Array<PresetRedacted>, chroma: ChromaMode, ssh: SshConfig, agentPlaybook: string, globalPrompt: string, 
 /**
  * Which GPT the stuck detector asks, and which Codex account pays for it.
  */

@@ -112,6 +112,34 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
         || has_proxmox
         || retired_clone_mcp
         || retired_detector_url;
+    // Retired split pool lists → one `groups` list (one-shot, when `groups` is still
+    // empty). Same-named pools merge members (deduped); either side alone survives.
+    if cfg.groups.is_empty() && (!cfg.clone_groups.is_empty() || !cfg.codex_groups.is_empty()) {
+        let mut merged: Vec<wire::CloneGroup> = Vec::new();
+        for g in cfg
+            .clone_groups
+            .drain(..)
+            .chain(cfg.codex_groups.drain(..))
+        {
+            match merged.iter_mut().find(|m| m.name == g.name) {
+                Some(m) => {
+                    for email in g.accounts {
+                        if !m.accounts.contains(&email) {
+                            m.accounts.push(email);
+                        }
+                    }
+                }
+                None => merged.push(g),
+            }
+        }
+        tracing::info!(
+            "folding retired clone_groups/codex_groups into one groups list ({} pool(s))",
+            merged.len()
+        );
+        cfg.groups = merged;
+        changed = true;
+    }
+
     // Legacy single `monitors` array → a "Default" layout preset (one-shot). Only when
     // the new `layout_presets` is still empty (don't clobber an already-migrated config).
     if cfg.layout_presets.is_empty() {
@@ -222,6 +250,22 @@ mod tests {
         assert_eq!(cfg.presets.len(), 1);
         assert_eq!(cfg.presets[0].name, "kept");
 
+        // Split pool lists fold into one `groups` (same-named merge members, deduped).
+        let mut cfg = AppConfig::default();
+        cfg.clone_groups = vec![
+            wire::CloneGroup { name: "team".into(), accounts: vec!["a@x.com".into()] },
+            wire::CloneGroup { name: "solo".into(), accounts: vec!["b@x.com".into()] },
+        ];
+        cfg.codex_groups = vec![wire::CloneGroup {
+            name: "team".into(),
+            accounts: vec!["z@o.com".into(), "a@x.com".into()],
+        }];
+        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
+        assert_eq!(cfg.groups.len(), 2);
+        let team = cfg.groups.iter().find(|g| g.name == "team").unwrap();
+        assert_eq!(team.accounts, vec!["a@x.com", "z@o.com"]);
+        assert!(cfg.clone_groups.is_empty() && cfg.codex_groups.is_empty());
+
         // Fully-migrated file → no rewrite.
         let raw = serde_json::json!({ "presets": [{ "name": "p" }] });
         let mut cfg = AppConfig::default();
@@ -232,38 +276,32 @@ mod tests {
     fn merge_replaces_account_pools_wholesale() {
         // The editor always sends the full pool list, so a plain array replace is right.
         let mut base = AppConfig::default();
-        base.clone_groups = vec![wire::CloneGroup {
+        base.groups = vec![wire::CloneGroup {
             name: "old".into(),
             accounts: vec![],
         }];
         let incoming = serde_json::json!({
-            "cloneGroups": [
+            "groups": [
                 { "name": "team", "accounts": ["a@x.com"] },
                 { "name": "beta", "accounts": [] },
             ],
-            "codexGroups": [{ "name": "gpt", "accounts": ["z@o.com"] }],
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.clone_groups.len(), 2);
-        assert_eq!(merged.clone_groups[0].name, "team");
-        assert_eq!(merged.clone_groups[0].accounts, vec!["a@x.com"]);
-        assert_eq!(merged.clone_groups[1].name, "beta");
-        // The two providers' pools are independent.
-        assert_eq!(merged.codex_groups.len(), 1);
-        assert_eq!(merged.codex_groups[0].name, "gpt");
-        // An empty array clears the pools outright — unlike the group-proxy model there is no
-        // "every clone must bind one" invariant to re-seed a default for.
-        let cleared = merge_update(&merged, serde_json::json!({ "cloneGroups": [] })).unwrap();
-        assert!(cleared.clone_groups.is_empty());
-        // Clearing one provider leaves the other alone.
-        assert_eq!(cleared.codex_groups.len(), 1);
+        assert_eq!(merged.groups.len(), 2);
+        assert_eq!(merged.groups[0].name, "team");
+        assert_eq!(merged.groups[0].accounts, vec!["a@x.com"]);
+        assert_eq!(merged.groups[1].name, "beta");
+        // An empty array clears the pools outright — there is no "every clone must bind
+        // one" invariant to re-seed a default for.
+        let cleared = merge_update(&merged, serde_json::json!({ "groups": [] })).unwrap();
+        assert!(cleared.groups.is_empty());
     }
 
     #[test]
     fn merge_replaces_account_pools_alongside_codex_config() {
         use wire::CodexConfig;
         let mut base = AppConfig::default();
-        base.clone_groups = vec![wire::CloneGroup {
+        base.groups = vec![wire::CloneGroup {
             name: "old".into(),
             accounts: vec![],
         }];
@@ -273,22 +311,18 @@ mod tests {
         // Editor sends the full group list + a codex config patch (retired poll keys
         // are dropped silently).
         let incoming = serde_json::json!({
-            "cloneGroups": [{ "name": "team", "accounts": [] }],
+            "groups": [{ "name": "team", "accounts": [] }],
             "codex": { "pollSecs": 300, "usagePolling": false },
         });
         let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.clone_groups.len(), 1);
-        assert_eq!(merged.clone_groups[0].name, "team");
+        assert_eq!(merged.groups.len(), 1);
+        assert_eq!(merged.groups[0].name, "team");
         // A codex-only patch leaves the groups untouched.
         let m2 =
             merge_update(&merged, serde_json::json!({ "codex": { "autoReset": true } })).unwrap();
         assert!(m2.codex.auto_reset);
-        assert_eq!(
-            m2.clone_groups.len(),
-            1,
-            "codex patch must not disturb pools"
-        );
-        assert_eq!(m2.clone_groups[0].name, "team");
+        assert_eq!(m2.groups.len(), 1, "codex patch must not disturb pools");
+        assert_eq!(m2.groups[0].name, "team");
     }
 
     /// A base config that has finished first-run setup (latch locked).

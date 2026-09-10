@@ -137,8 +137,7 @@ export function PresetsPane({
         <SettingsPresetList
           presets={draft.presets}
           accounts={accounts}
-          claudeGroups={draft.claudeGroups}
-          codexGroups={draft.codexGroups}
+          groups={draft.groups}
           onChange={(presets) => onDraftChange("presets", presets)}
         />
       </Section>
@@ -146,10 +145,9 @@ export function PresetsPane({
   );
 }
 
-/** Claude: the provider's own polling and pin, the imported accounts clones draw from, and the
- *  named pools built out of them. */
-/** LLM: both providers' accounts and pools in one pane. The two providers' pools are
- *  independent, and a clone binds one of each, so neither list is a filter of the other. */
+/** LLM: both providers' accounts plus the one shared pool list in a single pane. A pool
+ *  may mix Claude and Codex accounts; each side's rotator only sees its own members, and
+ *  a clone binds at most one pool, which feeds both sides. */
 export function LlmPane({
   draft,
   onDraftChange,
@@ -175,19 +173,6 @@ export function LlmPane({
           onReorder={(ids) => onReorderAccounts("claude", ids)}
           onImport={onImportAccount}
           onReplace={onReplaceAccount}
-        />
-      </Section>
-
-      <Section
-        title="Claude groups"
-        effect="immediate"
-        hint="A pool of accounts. A clone bound to a group keeps its account (preserving its prompt cache) until that account is exhausted (80% 5h or 95% 7d), then moves to the least-used member."
-      >
-        <SettingsGroupsEditor
-          groups={draft.claudeGroups}
-          accountEmails={rows.claude.map((a) => a.email)}
-          noAccountsHint="Import some accounts first to add them to a group."
-          onChange={(groups) => onDraftChange("claudeGroups", groups)}
         />
       </Section>
 
@@ -217,16 +202,19 @@ export function LlmPane({
         </label>
       </Section>
 
+      {/* One pool list for both providers: members may mix Claude and Codex accounts.
+          Each side rotates within its own members (Claude: 80% 5h or 95% 7d exhausts;
+          Codex: 95% weekly), keeping its account otherwise to preserve prompt cache. */}
       <Section
-        title="Codex groups"
+        title="Groups"
         effect="immediate"
-        hint="A pool of Codex accounts. A clone bound to a group keeps its account until that account passes 95% of its weekly (7d) limit, then moves to the least-used member."
+        hint="A pool of accounts a clone binds as one. A bound clone keeps its account until that account exhausts, then moves to the least-used member of its own provider."
       >
         <SettingsGroupsEditor
-          groups={draft.codexGroups}
-          accountEmails={rows.codex.map((a) => a.email)}
-          noAccountsHint="Import some Codex accounts first to add them to a group."
-          onChange={(groups) => onDraftChange("codexGroups", groups)}
+          groups={draft.groups}
+          accountEmails={[...rows.claude, ...rows.codex].map((a) => a.email)}
+          noAccountsHint="Import some accounts first to add them to a group."
+          onChange={(groups) => onDraftChange("groups", groups)}
         />
       </Section>
     </>

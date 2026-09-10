@@ -45,6 +45,9 @@ export interface CloneDraft {
    *  every clone made here would silently override the preset. */
   claudeAccount: string;
   codexAccount: string;
+  /** Pool OVERRIDE, same shape as the account overrides: "" follows the source (omit),
+   *  "none" unbinds (send null), a name binds. Groups are offered but never required. */
+  group: string;
   /** No-ticket tab: the hand-picked preset. The ticket tabs never pick one by hand. */
   plainPreset: string;
   /** Template tab: the hand-picked preset whose Dockerfile builds the image. */
@@ -71,6 +74,7 @@ export function emptyCloneDraft(ticket = ""): CloneDraft {
     claudeInstructions: "",
     claudeAccount: "",
     codexAccount: "",
+    group: "",
     plainPreset: "",
     templatePreset: "",
     headless: false,

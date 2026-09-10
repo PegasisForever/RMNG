@@ -1,10 +1,11 @@
-// Change a clone's Claude and Codex account/group after creation, markup half. Mirrors the
-// clone dialog's picker (auto / account / group); binding to a group lets the server move the
-// clone to another member account when its current one exhausts (sticky otherwise).
+// Change a clone's group + per-side accounts after creation, markup half. One group
+// picker feeds both sides; each side then picks auto (rotate inside the group when bound,
+// fleet-wide otherwise), a pinned email, or none. Binding to a group lets the server move
+// the clone to another member account when its current one exhausts (sticky otherwise).
 //
-// Controlled: the container seeds both selections from what the clone is bound to now, and
-// owns the swap calls. Nothing here reads the server, so each combination the operator can
-// pick is a story.
+// Controlled: the container seeds the group + both selections from what the clone is bound
+// to now, and owns the swap calls. Nothing here reads the server, so each combination the
+// operator can pick is a story.
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import type { ClaudeUsage } from "~/lib/types";
 import { useModalEscape } from "~/lib/useModalEscape";
@@ -18,10 +19,11 @@ export function ChangeAccountModalView({
   accounts,
   groups,
   codexAccounts,
-  codexGroups,
+  groupValue,
   claudeValue,
   codexValue,
   busy,
+  onGroupChange,
   onClaudeValueChange,
   onCodexValueChange,
   onClose,
@@ -31,25 +33,26 @@ export function ChangeAccountModalView({
   cloneName: string;
   /** Assignable Claude accounts. */
   accounts: ClaudeUsage[];
-  /** Configured Claude pools (`config.cloneGroups`). */
+  /** The single configured pool list (`config.groups`) — one binding feeds both sides. */
   groups: CloneGroup[];
   /** Assignable Codex accounts. */
   codexAccounts: ClaudeUsage[];
-  /** Configured Codex pools (`config.codexGroups`). */
-  codexGroups: CloneGroup[];
-  /** "auto", "none", an email, or `group:<name>`. */
+  /** The bound pool name, or null for no pool. */
+  groupValue: string | null;
+  /** "auto", "none", or an email. */
   claudeValue: string;
   codexValue: string;
   /** A swap is in flight. */
   busy: boolean;
+  onGroupChange: (value: string | null) => void;
   onClaudeValueChange: (value: string) => void;
   onCodexValueChange: (value: string) => void;
   onClose: () => void;
   onSubmit: () => void;
 }) {
-  // The Codex picker only shows when Codex accounts/groups are configured; the title
-  // reflects both providers only when both are actually changeable here.
-  const showCodex = codexAccounts.length > 0 || codexGroups.length > 0;
+  // The Codex picker only shows when Codex accounts exist or a pool could carry Codex
+  // members; the title reflects both providers only when both are actually changeable.
+  const showCodex = codexAccounts.length > 0 || groups.length > 0;
 
   // Escape closes regardless of focus — a document-level listener since the backdrop click no
   // longer does (see below), and since nothing here autofocuses: on open the focus is still on
@@ -65,14 +68,29 @@ export function ChangeAccountModalView({
           {showCodex ? "Accounts" : "Claude account"} · <span className="text-emerald-700 dark:text-emerald-400">{cloneName}</span>
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Pick a single account, a group (stays on one account until it exhausts,
-          then swaps to the least-used member), or “none” to remove this clone’s token.
+          Pick a pool (both sides draw from it), then per side an account: auto rotates
+          inside the pool, a single account pins it, “none” removes this clone’s token.
         </p>
 
         <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
+          Group
+          <select
+            value={groupValue ?? ""}
+            onChange={(e) => onGroupChange(e.target.value || null)}
+            className={select}
+          >
+            <option value="">None (no pool)</option>
+            {groups.map((g) => (
+              <option key={g.name} value={g.name}>
+                {g.name} ({g.accounts.length})
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
           Claude account
           <AccountGroupSelect
-            groups={groups}
             accounts={accounts}
             value={claudeValue}
             onChange={onClaudeValueChange}
@@ -84,7 +102,6 @@ export function ChangeAccountModalView({
           <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
             Codex account
             <AccountGroupSelect
-              groups={codexGroups}
               accounts={codexAccounts}
               value={codexValue}
               onChange={onCodexValueChange}

@@ -56,6 +56,9 @@ export interface Clone {
   codexAccountEmail?: string;
   codexGroup?: string;
   codexSelection?: string;
+  /** Name of the single account pool this clone draws both providers' accounts from.
+   *  Absent means no pool: `auto` sides rotate fleet-wide. */
+  group?: string;
   /** Linear workspace name this clone's ticket belongs to (selects the card color). */
   linearWorkspace?: string;
   /** Linear ticket identifier, e.g. "WE-142". */

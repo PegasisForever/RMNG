@@ -7,8 +7,7 @@ import { MarkdownEditorView } from "./MarkdownEditorView";
 import {
   accountsNow,
   makeClaudeAccounts,
-  makeCloneGroups,
-  makeCodexGroups,
+  makeGroups,
 } from "./__fixtures__/accounts";
 import { cloneTicketUrl, makeCloneDraft } from "./__fixtures__/cloneDialog";
 import { makeCloneWorking } from "./__fixtures__/clones";
@@ -72,8 +71,7 @@ function sources() {
   return {
     clones,
     accounts: makeClaudeAccounts(accountsNow),
-    claudeGroups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
+    groups: makeGroups(),
   };
 }
 

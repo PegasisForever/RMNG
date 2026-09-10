@@ -199,7 +199,7 @@ export const NoAccounts: Story = {
   args: {
     ...base(),
     accounts: [],
-    draft: makeSettingsDraft({ claudeGroups: [], codexGroups: [] }),
+    draft: makeSettingsDraft({ groups: [] }),
     category: "llm",
   },
 };

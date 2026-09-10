@@ -130,8 +130,7 @@ export function DashboardContainer({
   forwards,
   sshPublicHost,
   bastionPort,
-  cloneGroups,
-  codexGroups,
+  groups,
   presets,
 }: {
   state: ControlState;
@@ -143,10 +142,8 @@ export function DashboardContainer({
   sshPublicHost: string;
   /** The bastion `sshd` port the copied SSH commands jump through (hardcoded). */
   bastionPort: number;
-  /** Configured Claude pools (`config.cloneGroups`) — the rail's usage list groups by these. */
-  cloneGroups: CloneGroup[];
-  /** Configured Codex pools (`config.codexGroups`). */
-  codexGroups: CloneGroup[];
+  /** The single configured pool list (`config.groups`) — the rail's usage list groups by these. */
+  groups: CloneGroup[];
   /** Configured presets (`config.presets`). Their labels are the ticket dialog's team keys. */
   presets: PresetRedacted[];
 }) {
@@ -768,8 +765,7 @@ export function DashboardContainer({
         rail={{
           accounts,
           accountOrder: acctOrder,
-          cloneGroups,
-          codexGroups,
+          groups,
           now,
           lxcStats,
           operations: state.operations,
@@ -1018,8 +1014,7 @@ export function DashboardContainer({
 
       {importOpen ? (
         <ImportAccountModalContainer
-          claudeGroups={cloneGroups.map((g) => g.name)}
-          codexGroups={codexGroups.map((g) => g.name)}
+          groupNames={groups.map((g) => g.name)}
           replacing={
             replacing
               ? {
@@ -1047,11 +1042,11 @@ export function DashboardContainer({
           codexAccounts={codexAccounts}
           busy={changing}
           onClose={() => setChangeClone(null)}
-          onSubmit={(claude, codex) => {
+          onSubmit={(claude, codex, group) => {
             setChanging(true);
             Promise.all([
-              swapClaudeAccount(changeClone.id, claude),
-              swapCodexAccount(changeClone.id, codex),
+              swapClaudeAccount(changeClone.id, claude, group),
+              swapCodexAccount(changeClone.id, codex, group),
             ])
               .then(() => {
                 setError(null);

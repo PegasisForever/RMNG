@@ -18,17 +18,14 @@ import { newPreset, type GroupDraft, type PresetDraft } from "~/lib/settingsDraf
 export function SettingsPresetList({
   presets,
   accounts,
-  claudeGroups,
-  codexGroups,
+  groups,
   onChange,
 }: {
   presets: PresetDraft[];
   /** Both providers' rows, flat and tagged by `provider`. Each picker takes its own side. */
   accounts: ClaudeUsage[];
-  /** The Claude pools the form currently holds, so a pool renamed above is offered here. */
-  claudeGroups: GroupDraft[];
-  /** The Codex pools the form currently holds. */
-  codexGroups: GroupDraft[];
+  /** The pools the form currently holds, so a pool renamed above is offered here. */
+  groups: GroupDraft[];
   onChange: (presets: PresetDraft[]) => void;
 }) {
   const replace = (i: number, next: Partial<PresetDraft>) =>
@@ -42,8 +39,7 @@ export function SettingsPresetList({
           key={i}
           preset={p}
           accounts={accounts}
-          claudeGroups={claudeGroups}
-          codexGroups={codexGroups}
+          groups={groups}
           onChange={(next) => replace(i, next)}
           onRemove={() => onChange(presets.filter((_, j) => j !== i))}
         />
@@ -62,15 +58,13 @@ export function SettingsPresetList({
 function PresetCard({
   preset: p,
   accounts,
-  claudeGroups,
-  codexGroups,
+  groups,
   onChange,
   onRemove,
 }: {
   preset: PresetDraft;
   accounts: ClaudeUsage[];
-  claudeGroups: GroupDraft[];
-  codexGroups: GroupDraft[];
+  groups: GroupDraft[];
   onChange: (next: Partial<PresetDraft>) => void;
   onRemove: () => void;
 }) {
@@ -141,7 +135,7 @@ function PresetCard({
         <div className="w-1/2">
           <Field label="Claude default">
             <AccountGroupSelect
-              groups={claudeGroups}
+              groups={groups}
               accounts={accounts.filter((a) => (a.provider ?? "claude") === "claude")}
               value={p.claudeAccount}
               blankLabel="Claude: no default"
@@ -153,7 +147,7 @@ function PresetCard({
         <div className="w-1/2">
           <Field label="Codex default">
             <AccountGroupSelect
-              groups={codexGroups}
+              groups={groups}
               accounts={accounts.filter((a) => a.provider === "codex")}
               value={p.codexAccount}
               blankLabel="Codex: no default"

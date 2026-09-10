@@ -64,15 +64,12 @@ function PaneFallback({ label }: { label: string }) {
 
 export function MobileDashboardContainer({
   state,
-  cloneGroups,
-  codexGroups,
+  groups,
   presets,
 }: {
   state: ControlState;
-  /** Configured Claude pools (`config.cloneGroups`) — the usage list groups by these. */
-  cloneGroups: CloneGroup[];
-  /** Configured Codex pools (`config.codexGroups`). */
-  codexGroups: CloneGroup[];
+  /** The single configured pool list (`config.groups`) — the usage list groups by these. */
+  groups: CloneGroup[];
   /** Configured presets (`config.presets`). Their Linear keys are what read a clone's own
    *  ticket, which is the one thing on this screen the control server does not send. */
   presets: PresetRedacted[];
@@ -272,8 +269,7 @@ export function MobileDashboardContainer({
       <MobileHome
         accounts={state.claudeAccounts ?? []}
         accountOrder={acctOrder}
-        cloneGroups={cloneGroups}
-        codexGroups={codexGroups}
+        groups={groups}
         // Read here rather than in the usage bars, so the reset-time tooltips are a function
         // of the page's props like everything else it draws.
         locale={browserLocale()}
@@ -297,8 +293,7 @@ export function MobileDashboardContainer({
       />
       {importOpen ? (
         <ImportAccountModalContainer
-          claudeGroups={cloneGroups.map((g) => g.name)}
-          codexGroups={codexGroups.map((g) => g.name)}
+          groupNames={groups.map((g) => g.name)}
           replacing={
             replacing
               ? {

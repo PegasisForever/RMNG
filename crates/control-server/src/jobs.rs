@@ -479,13 +479,24 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // clone's ~/.claude/.credentials.json now (the server refreshes + re-pushes it thereafter).
     // A group-bound clone records its group; the rotator re-balances it. "none" installs no
     // token AND strips any credentials the image carried, so the clone boots provably tokenless.
+    // One group for both sides: legacy `group:<name>` picks in either account field bind
+    // the clone once (see `split_group_binding`); both `auto` sides then resolve inside it.
+    let (bound_group, claude_req, codex_req) = crate::clone_ops::split_group_binding(
+        spec.claude_account.clone(),
+        spec.codex_account.clone(),
+        None,
+        None,
+    );
     let mut claude_selection: Option<String> = None;
     let mut claude_account_email: Option<String> = None;
     let mut claude_group: Option<String> = None;
-    if let Some(assignment) =
-        crate::claude::resolve_assignment(&app, spec.claude_account.as_deref(), None)
-    {
-        let selection = crate::claude::normalize_selection(spec.claude_account.as_deref());
+    if let Some(assignment) = crate::claude::resolve_assignment(
+        &app,
+        claude_req.as_deref(),
+        None,
+        bound_group.as_deref(),
+    ) {
+        let selection = crate::claude::normalize_selection(claude_req.as_deref());
         let (group, account, pending_auto) = match assignment {
             crate::claude::Assignment::Group { name, initial } => {
                 (Some(name), Some(initial), false)
@@ -550,10 +561,13 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     let mut codex_selection: Option<String> = None;
     let mut codex_account_email: Option<String> = None;
     let mut codex_group: Option<String> = None;
-    if let Some(assignment) =
-        crate::codex::resolve_assignment(&app, spec.codex_account.as_deref(), None)
-    {
-        let selection = crate::codex::normalize_selection(spec.codex_account.as_deref());
+    if let Some(assignment) = crate::codex::resolve_assignment(
+        &app,
+        codex_req.as_deref(),
+        None,
+        bound_group.as_deref(),
+    ) {
+        let selection = crate::codex::normalize_selection(codex_req.as_deref());
         let (group, account, pending_auto) = match assignment {
             crate::codex::Assignment::Group { name, initial } => (Some(name), Some(initial), false),
             crate::codex::Assignment::Account(a) => (None, Some(a), false),
@@ -666,6 +680,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             codex_selection: codex_selection.clone(),
             codex_account_email: codex_account_email.clone(),
             codex_group: codex_group.clone(),
+            group: bound_group.clone(),
             preset_name: spec.preset_name.clone(),
             headless: spec.headless,
             parent: spec.parent.clone(),
@@ -996,6 +1011,10 @@ pub struct ForkSpec {
     pub linear: Option<LinearMeta>,
     pub claude_account: Option<String>,
     pub codex_account: Option<String>,
+    /// Clone-level pool binding: `Some(Some(name))` binds, `Some(None)` unbinds,
+    /// `None` inherits the source's group. New writers use this; legacy `group:<name>`
+    /// account picks still bind (see `split_group_binding`).
+    pub group: Option<Option<String>>,
     pub first_message: Option<String>,
     pub agent_instructions: Option<String>,
     pub claude_instructions: Option<String>,
@@ -1095,14 +1114,26 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     // account / auto-pending / none, token pushed or credentials cleared). Omitted
     // fields inherit the source's bindings with the tokens pushed fresh (short-lived —
     // never copied from the source's files). Best-effort per provider: logged, not fatal.
+    // Fork inherits the source's group; an override naming another `group:<name>`
+    // rebinds the fork (both `auto` sides resolve inside the new group below).
+    let (bound_group, claude_req, codex_req) = crate::clone_ops::split_group_binding(
+        spec.claude_account.clone().or(src.claude_selection.clone()),
+        spec.codex_account.clone().or(src.codex_selection.clone()),
+        src.group.clone(),
+        spec.group.clone(),
+    );
+    let group_changed = bound_group != src.group;
     let mut claude_selection = src.claude_selection.clone();
     let mut claude_account_email = src.claude_account_email.clone();
     let mut claude_group = src.claude_group.clone();
-    if spec.claude_account.is_some() {
-        let selection = crate::claude::normalize_selection(spec.claude_account.as_deref());
-        if let Some(assignment) =
-            crate::claude::resolve_assignment(&app, spec.claude_account.as_deref(), None)
-        {
+    if spec.claude_account.is_some() || group_changed {
+        let selection = crate::claude::normalize_selection(claude_req.as_deref());
+        if let Some(assignment) = crate::claude::resolve_assignment(
+            &app,
+            claude_req.as_deref(),
+            src.claude_account_email.as_deref(),
+            bound_group.as_deref(),
+        ) {
             let (group, account, pending_auto) = match assignment {
                 crate::claude::Assignment::Group { name, initial } => {
                     (Some(name), Some(initial), false)
@@ -1169,11 +1200,14 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     let mut codex_selection = src.codex_selection.clone();
     let mut codex_account_email = src.codex_account_email.clone();
     let mut codex_group = src.codex_group.clone();
-    if spec.codex_account.is_some() {
-        let selection = crate::codex::normalize_selection(spec.codex_account.as_deref());
-        if let Some(assignment) =
-            crate::codex::resolve_assignment(&app, spec.codex_account.as_deref(), None)
-        {
+    if spec.codex_account.is_some() || group_changed {
+        let selection = crate::codex::normalize_selection(codex_req.as_deref());
+        if let Some(assignment) = crate::codex::resolve_assignment(
+            &app,
+            codex_req.as_deref(),
+            src.codex_account_email.as_deref(),
+            bound_group.as_deref(),
+        ) {
             let (group, account, pending_auto) = match assignment {
                 crate::codex::Assignment::Group { name, initial } => {
                     (Some(name), Some(initial), false)
@@ -1309,6 +1343,7 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
             codex_selection: codex_selection.clone(),
             codex_account_email: codex_account_email.clone(),
             codex_group: codex_group.clone(),
+            group: bound_group.clone(),
             preset_name: preset_name.clone(),
             headless,
             linear_workspace,

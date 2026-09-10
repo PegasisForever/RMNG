@@ -1025,13 +1025,21 @@ pub fn resolve_assignment(
     app: &App,
     requested: Option<&str>,
     current: Option<&str>,
+    group: Option<&str>,
 ) -> Option<Assignment> {
     let want = requested.unwrap_or("").trim();
     if want.eq_ignore_ascii_case(NONE) {
         return Some(Assignment::None);
     }
-    if let Some(name) = want.strip_prefix("group:") {
-        let name = name.trim();
+    // Legacy `group:<name>` selection, or an auto selection on a group-bound clone —
+    // the Codex twin of the Claude rule.
+    let group_name = want
+        .strip_prefix("group:")
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .or(group)
+        .filter(|_| want.is_empty() || want.eq_ignore_ascii_case(AUTO) || want.starts_with("group:"));
+    if let Some(name) = group_name {
         let initial = pick_group_account(app, name, current)?;
         return Some(Assignment::Group {
             name: name.to_string(),
@@ -1217,7 +1225,7 @@ fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
 /// the least-loaded / least-used eligible member.
 fn pick_group_account(app: &App, group_name: &str, current: Option<&str>) -> Option<String> {
     let cfg = app.config();
-    let group = cfg.codex_groups.iter().find(|g| g.name == group_name)?;
+    let group = cfg.groups.iter().find(|g| g.name == group_name)?;
     let counts = clone_counts(app);
     let mut pool = eligible_group_accounts(app, group);
     if let Some(cur) = current {
@@ -1430,7 +1438,10 @@ fn auto_pool_clones(hosts: &[RmngClone]) -> Vec<RmngClone> {
     hosts
         .iter()
         .filter(|h| {
-            h.managed && h.codex_group.is_none() && h.codex_selection.as_deref() == Some(AUTO)
+            h.managed
+            && h.codex_group.is_none()
+            && h.group.is_none()
+            && h.codex_selection.as_deref() == Some(AUTO)
         })
         .cloned()
         .collect()
@@ -1441,12 +1452,18 @@ pub async fn rotate_once(app: &App) {
     let hosts = app.store.get().hosts;
     let mut by_group: HashMap<String, Vec<RmngClone>> = HashMap::new();
     for h in &hosts {
-        if let (Some(g), true) = (&h.codex_group, h.managed) {
-            by_group.entry(g.clone()).or_default().push(h.clone());
+        // Live-group-first, sticky otherwise (see the Claude twin).
+        let gname = if h.group.is_some() && h.codex_selection.as_deref() == Some(AUTO) {
+            h.group.as_deref()
+        } else {
+            h.codex_group.as_deref()
+        };
+        if let (Some(g), true) = (gname, h.managed) {
+            by_group.entry(g.to_string()).or_default().push(h.clone());
         }
     }
     for (gname, clones) in by_group {
-        let Some(group) = cfg.codex_groups.iter().find(|g| g.name == gname) else {
+        let Some(group) = cfg.groups.iter().find(|g| g.name == gname) else {
             continue;
         };
         rotate_pool(app, &gname, &group.accounts, &clones).await;
@@ -1552,7 +1569,7 @@ pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Res
     }
 
     let mut cfg = app.config();
-    let joined = crate::claude::swap_pool_member(&mut cfg.codex_groups, old_email, new_email);
+    let joined = crate::claude::swap_pool_member(&mut cfg.groups, old_email, new_email);
     crate::config::save(&cfg).context("saving the replacement's pool membership")?;
     *app.cfg.write().unwrap() = cfg;
 

@@ -214,8 +214,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       <div className="h-dvh">
         <MobileDashboardContainer
           state={state}
-          cloneGroups={cfg.cloneGroups}
-          codexGroups={cfg.codexGroups}
+          groups={cfg.groups}
           presets={cfg.presets}
         />
       </div>
@@ -229,8 +228,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       forwards={forwards}
       sshPublicHost=""
       bastionPort={2222}
-      cloneGroups={cfg.cloneGroups}
-      codexGroups={cfg.codexGroups}
+      groups={cfg.groups}
       presets={cfg.presets}
     />
   );

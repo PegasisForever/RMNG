@@ -20,8 +20,7 @@ function base() {
   return {
     presets: draft.presets,
     accounts: makeClaudeAccounts(accountsNow),
-    claudeGroups: draft.claudeGroups,
-    codexGroups: draft.codexGroups,
+    groups: draft.groups,
   };
 }
 
@@ -63,7 +62,7 @@ export const Empty: Story = {
 /** No accounts imported and no pools configured, so both pickers fall back to the two options
  *  that never depend on config: rotate over everything, or install no token at all. */
 export const NothingToDefaultTo: Story = {
-  args: { ...base(), accounts: [], claudeGroups: [], codexGroups: [] },
+  args: { ...base(), accounts: [], groups: [] },
 };
 
 /** Wired to local state: renaming, adding a variable, dropping a preset and picking a

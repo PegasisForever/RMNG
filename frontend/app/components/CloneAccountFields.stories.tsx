@@ -6,8 +6,7 @@ import { CloneAccountFields } from "./CloneAccountFields";
 import {
   accountsNow,
   makeClaudeAccounts,
-  makeCloneGroups,
-  makeCodexGroups,
+  makeGroups,
 } from "./__fixtures__/accounts";
 import { makeClonePresets, makePreset } from "./__fixtures__/presets";
 
@@ -22,8 +21,10 @@ function Frame({ children }: { children: ReactNode }) {
 function pools() {
   return {
     accounts: makeClaudeAccounts(accountsNow),
-    claudeGroups: makeCloneGroups(),
-    codexGroups: makeCodexGroups(),
+    groups: makeGroups(),
+    sourceGroup: "team",
+    group: "",
+    onGroupChange: fn(),
   };
 }
 
@@ -78,14 +79,14 @@ export const NoPreset: Story = {
   args: { ...pools(), preset: undefined },
 };
 
-/** Overridden by hand: this clone is pinned to one Claude account and one Codex pool, and it
- *  stays there whatever preset it ends up on. */
+/** Overridden by hand: this clone draws from one pool and pins its Claude side to one
+ *  account, and it stays there whatever preset it ends up on. */
 export const Overridden: Story = {
-  args: { ...pools(), claudeAccount: "sam@example.com", codexAccount: "group:team" },
+  args: { ...pools(), group: "team", claudeAccount: "sam@example.com" },
 };
 
 /** Nothing imported and no pools configured. Both pickers fall back to the two options that
  *  never depend on config: rotate over everything, or install no token at all. */
 export const NothingConfigured: Story = {
-  args: { accounts: [], claudeGroups: [], codexGroups: [], preset: undefined },
+  args: { accounts: [], groups: [], sourceGroup: null, group: "", preset: undefined },
 };

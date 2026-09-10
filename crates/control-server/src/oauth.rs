@@ -310,13 +310,11 @@ pub async fn complete(
 /// An unknown name is an error rather than a silently created pool: pools are config the
 /// operator maintains, and inventing one here would put an account somewhere no clone is
 /// bound to. Already being a member is not an error, and does not duplicate the entry.
-fn join_group(app: &App, provider: Provider, email: &str, group: &str) -> Result<()> {
+fn join_group(app: &App, _provider: Provider, email: &str, group: &str) -> Result<()> {
     let mut cfg = app.config();
-    let pools = match provider {
-        Provider::Claude => &mut cfg.clone_groups,
-        Provider::Codex => &mut cfg.codex_groups,
-    };
-    add_to_pool(pools, email, group)?;
+    // One pool list for both providers; membership is by email, so joining is
+    // provider-agnostic (each side's rotator only sees its own members).
+    add_to_pool(&mut cfg.groups, email, group)?;
     crate::config::save(&cfg).context("saving the pool membership")?;
     *app.cfg.write().unwrap() = cfg;
     tracing::info!("added {email} to the {group} pool");

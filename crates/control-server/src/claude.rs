@@ -1005,10 +1005,13 @@ pub enum Assignment {
     None,
 }
 
-/// Resolve a selection string to an [`Assignment`]: `none` → no token, `group:<name>` →
-/// a group (with an initial account picked from it), else an email / `auto` → a single
-/// account. Explicit `auto` without imported accounts is kept as pending auto; outer
-/// `None` means no usable concrete assignment and no explicit pending-auto intent.
+/// Resolve a selection string to an [`Assignment`]: `none` → no token, an email /
+/// `auto` → a single account, or — when the selection is `auto`/blank and the clone is
+/// group-bound — a group (with an initial account picked from it). A legacy `group:<name>`
+/// selection still binds that group (transport compat with old clients); new writers
+/// store `auto` + the clone-level `group` instead. Explicit `auto` without imported
+/// accounts is kept as pending auto; outer `None` means no usable concrete assignment
+/// and no explicit pending-auto intent.
 ///
 /// `current` is the clone's account right now (for a swap); when resolving a group it
 /// makes the pick sticky — a clone moving from a pinned account into a group that
@@ -1018,13 +1021,20 @@ pub fn resolve_assignment(
     app: &App,
     requested: Option<&str>,
     current: Option<&str>,
+    group: Option<&str>,
 ) -> Option<Assignment> {
     let want = requested.unwrap_or("").trim();
     if want.eq_ignore_ascii_case(NONE) {
         return Some(Assignment::None);
     }
-    if let Some(name) = want.strip_prefix("group:") {
-        let name = name.trim();
+    // Legacy `group:<name>` selection, or an auto selection on a group-bound clone.
+    let group_name = want
+        .strip_prefix("group:")
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .or(group)
+        .filter(|_| want.is_empty() || want.eq_ignore_ascii_case(AUTO) || want.starts_with("group:"));
+    if let Some(name) = group_name {
         let initial = pick_group_account(app, name, current)?;
         return Some(Assignment::Group {
             name: name.to_string(),
@@ -1233,7 +1243,7 @@ fn eligible_group_accounts(app: &App, group: &CloneGroup) -> Vec<String> {
 /// members.
 fn pick_group_account(app: &App, group_name: &str, current: Option<&str>) -> Option<String> {
     let cfg = app.config();
-    let group = cfg.clone_groups.iter().find(|g| g.name == group_name)?;
+    let group = cfg.groups.iter().find(|g| g.name == group_name)?;
     let counts = clone_counts(app);
     let mut pool = eligible_group_accounts(app, group);
     if let Some(cur) = current {
@@ -1520,7 +1530,10 @@ fn auto_pool_clones(hosts: &[RmngClone]) -> Vec<RmngClone> {
     hosts
         .iter()
         .filter(|h| {
-            h.managed && h.claude_group.is_none() && h.claude_selection.as_deref() == Some(AUTO)
+            h.managed
+            && h.claude_group.is_none()
+            && h.group.is_none()
+            && h.claude_selection.as_deref() == Some(AUTO)
         })
         .cloned()
         .collect()
@@ -1535,12 +1548,20 @@ pub async fn rotate_once(app: &App) {
     // Named groups.
     let mut by_group: HashMap<String, Vec<RmngClone>> = HashMap::new();
     for h in &hosts {
-        if let (Some(g), true) = (&h.claude_group, h.managed) {
-            by_group.entry(g.clone()).or_default().push(h.clone());
+        // A group-bound clone with an `auto` selection rotates in its live group even
+        // when its sticky still names an older one (group changed under it) or is empty
+        // (bound but never resolved). Otherwise the sticky rules (legacy ungrouped rows).
+        let gname = if h.group.is_some() && h.claude_selection.as_deref() == Some(AUTO) {
+            h.group.as_deref()
+        } else {
+            h.claude_group.as_deref()
+        };
+        if let (Some(g), true) = (gname, h.managed) {
+            by_group.entry(g.to_string()).or_default().push(h.clone());
         }
     }
     for (gname, clones) in by_group {
-        let Some(group) = cfg.clone_groups.iter().find(|g| g.name == gname) else {
+        let Some(group) = cfg.groups.iter().find(|g| g.name == gname) else {
             continue; // group deleted → leave its clones on their current account
         };
         rotate_pool(app, &gname, &group.accounts, &clones).await;
@@ -1706,7 +1727,7 @@ pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Res
     }
 
     let mut cfg = app.config();
-    let joined = swap_pool_member(&mut cfg.clone_groups, old_email, new_email);
+    let joined = swap_pool_member(&mut cfg.groups, old_email, new_email);
     crate::config::save(&cfg).context("saving the replacement's pool membership")?;
     *app.cfg.write().unwrap() = cfg;
 
@@ -2432,7 +2453,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(crate::state::StateStore::load(dir.join("state.json")).unwrap());
         let cfg = wire::AppConfig {
-            clone_groups: vec![CloneGroup {
+            groups: vec![CloneGroup {
                 name: "team".into(),
                 accounts: members.iter().map(|s| s.to_string()).collect(),
             }],
@@ -2452,7 +2473,7 @@ mod tests {
         // Repeated: a non-sticky pick would randomize across {a@x, b@x} and flake.
         let app = app_with_group(&["a@x", "b@x"]);
         for _ in 0..25 {
-            match resolve_assignment(&app, Some("group:team"), Some("b@x")) {
+            match resolve_assignment(&app, Some("group:team"), Some("b@x"), None) {
                 Some(Assignment::Group { name, initial }) => {
                     assert_eq!(name, "team");
                     assert_eq!(initial, "b@x", "must keep the current member on group swap");
@@ -2467,7 +2488,7 @@ mod tests {
         // A current account not in the group (or no incumbent) → a real group member.
         let app = app_with_group(&["a@x", "b@x"]);
         for current in [Some("z@outside"), None] {
-            match resolve_assignment(&app, Some("group:team"), current) {
+            match resolve_assignment(&app, Some("group:team"), current, None) {
                 Some(Assignment::Group { initial, .. }) => {
                     assert!(
                         matches!(initial.as_str(), "a@x" | "b@x"),
