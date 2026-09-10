@@ -110,12 +110,12 @@ remains post-boot needs a live container:
    `WAIT_READY_TIMEOUT`. Alive-but-unregistered reports ready with an explicit
    warning (check it in the UI); an exited container fails with its log tail.
 
-## 4. Convergence triggers (the 30 s loop is SSH-only)
+## 4. Convergence triggers (no polling loop)
 
-The loop (`clone_reconcile::run`, every 30 s) runs ONE step: SSH ready (dirs + keys +
-host keys, version-stamped). Everything else converges via explicit triggers, all
-funnelling into the same full-chain function (`sync_clone_contents` — SSH, env,
-parity, three MCP merges, probe, payload; stamped and idempotent throughout):
+There is no reconciler loop. `clone_reconcile::run` does one full boot pass and exits.
+Everything converges via explicit triggers, all funnelling into the same full-chain
+function (`sync_clone_contents` — SSH, env, parity, three MCP merges, probe, payload;
+stamped and idempotent throughout):
 
 - Create: the single pre-boot tar (list 2) stamps everything — no trigger needed.
 - Server boot: one full pass over running clones (`sync_all_running`, reason `boot`),
@@ -135,11 +135,11 @@ Removed, no replacement:
    produces those states anymore (commit freezes inside its op window; rebase rests
    its own containers).
 
-What the loop still does, entry by entry:
+What used to poll, entry by entry (deleted with the loop):
 
-1. SSH ready: dirs + host keys + `authorized_keys`, version-stamped
-   (`SSH_STAMP_VERSION`). Key changes also push on save; pre-boot covers fresh
-   clones; this is the repair path (rotation, corruption).
+1. SSH ready: covered above — pre-boot tar, save fan-out (`apply_now` + full pass),
+   boot pass, post-op sync. The `ssh.rs` supervisor loop additionally pushes key
+   content on its own cadence.
 
 Convergence notes:
 
