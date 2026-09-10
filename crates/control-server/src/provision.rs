@@ -511,19 +511,29 @@ async fn clone_container_after_create(
         Err(e) => tracing::warn!("clone {hostname}: ssh material skipped: {e}"),
     }
 
-    // Initial contents of the merge-owned files (modes match what each loop merge sets,
-    // so a matching stamp means the loop never rewrites them). See the `*_initial`
-    // renderers for the merge-on-empty equivalence.
+    // Initial contents of the merge-owned files, rendered by the merges themselves on
+    // an empty base (modes match what each loop merge sets, so a matching stamp means
+    // the loop never rewrites them). One code path for create and converge.
     let linear_key = crate::clone_reconcile::env_value(env, "LINEAR_API_KEY");
     for (path, data, mode) in [
         (
             format!("home/{CLONE_USER}/.claude.json"),
-            crate::clone_reconcile::claude_mcp_initial(headless).into_bytes(),
+            crate::clone_reconcile::merge_claude_mcp(&serde_json::json!({}), headless)
+                .with_context(|| format!("clone {hostname}: rendering initial ~/.claude.json"))?
+                .to_string()
+                .into_bytes(),
             0o600,
         ),
         (
             format!("home/{CLONE_USER}/.cursor/mcp.json"),
-            crate::clone_reconcile::cursor_mcp_initial(headless, &linear_key).into_bytes(),
+            crate::clone_reconcile::merge_cursor_mcp(
+                &serde_json::json!({}),
+                headless,
+                &linear_key,
+            )
+            .with_context(|| format!("clone {hostname}: rendering initial ~/.cursor/mcp.json"))?
+            .to_string()
+            .into_bytes(),
             0o600,
         ),
         (

@@ -87,50 +87,44 @@ pub(crate) fn codex_mcp_toml(headless: bool) -> String {
 }
 
 /// Merge the managed MCP set into a `~/.claude.json` body: set each active server,
-/// delete each inactive one (so a headed→headless flip removes `desktop`). Pure-Rust port
-/// of the old jq program — same shapes (linear's bearer stays the literal
-/// `${LINEAR_API_KEY}`, which Claude Code expands from the session env at runtime), same
-/// headless rule. A non-object base is a hard error, matching the old jq merge, which
-/// failed on those; a null/missing `mcpServers` seeds empty.
-pub(crate) fn merge_claude_mcp(
+/// skip each inactive one. Set-only by design — headless is immutable per clone, so a
+/// headless clone never grows `desktop` in the first place and there is nothing to
+/// delete. Same shapes (linear's bearer stays the literal `${LINEAR_API_KEY}`, which
+/// Claude Code expands from the session env at runtime). A non-object base is a hard
+/// error; a null/missing `mcpServers` seeds empty.
+/// Set one top-level key on a JSON object body, keeping everything else. The shared
+/// shape behind all four agent-file merges (Claude/Cursor MCP sets, both hook
+/// registrations): per-file code builds the value, this plants it. A non-object base is
+/// a hard error naming the file.
+fn set_json_key(
     base: &serde_json::Value,
-    headless: bool,
+    path: &str,
+    key: &str,
+    value: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     let mut root = base
         .as_object()
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("~/.claude.json is not a JSON object"))?;
-    let mut servers = root
+        .ok_or_else(|| anyhow::anyhow!("{path} is not a JSON object"))?;
+    root.insert(key.to_string(), value);
+    Ok(serde_json::Value::Object(root))
+}
+
+pub(crate) fn merge_claude_mcp(
+    base: &serde_json::Value,
+    headless: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let mut servers = base
         .get("mcpServers")
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
     for m in managed_mcp() {
+        // Inactive servers are skipped, never deleted: nothing writes them, so a
+        // headless file simply never contains `desktop`.
         if headless && m.headless_only {
-            servers.remove(m.name);
-        } else {
-            let mut obj = serde_json::json!({ "type": "http", "url": m.url });
-            if let Some(env) = m.bearer_env {
-                obj["headers"] =
-                    serde_json::json!({ "Authorization": format!("Bearer ${{{env}}}") });
-            }
-            servers.insert(m.name.to_string(), obj);
+            continue;
         }
-    }
-    root.insert(
-        "mcpServers".to_string(),
-        serde_json::Value::Object(servers),
-    );
-    Ok(serde_json::Value::Object(root))
-}
-
-/// Initial `~/.claude.json` for a fresh clone: what [`merge_claude_mcp`] produces on an
-/// empty base. The template bakes no such file, so the create path renders
-/// this directly into the pre-boot tar instead of exec-merging after start. Same managed
-/// set, same shapes, same headless rule — one source ([`managed_mcp`]) drives both.
-pub(crate) fn claude_mcp_initial(headless: bool) -> String {
-    let mut servers = serde_json::Map::new();
-    for m in active_mcp(headless) {
         let mut obj = serde_json::json!({ "type": "http", "url": m.url });
         if let Some(env) = m.bearer_env {
             obj["headers"] =
@@ -138,15 +132,14 @@ pub(crate) fn claude_mcp_initial(headless: bool) -> String {
         }
         servers.insert(m.name.to_string(), obj);
     }
-    serde_json::json!({ "mcpServers": servers }).to_string()
+    set_json_key(
+        base,
+        "~/.claude.json",
+        "mcpServers",
+        serde_json::Value::Object(servers),
+    )
 }
 
-/// Initial `~/.cursor/mcp.json`: what [`merge_cursor_mcp`] produces on an empty base.
-/// Same builder, same drop rules.
-pub(crate) fn cursor_mcp_initial(headless: bool, linear_key: &str) -> String {
-    let (want, _drop) = cursor_mcp_sets(headless, linear_key);
-    serde_json::json!({ "mcpServers": want }).to_string()
-}
 /// `{name,url,bearerEnv?,alwaysLoad?}`. The agent-wrapper maps this to the Claude Agent SDK's
 /// `mcpServers` (resolving `bearerEnv` from `process.env`, skipping a server whose bearer env is
 /// empty). Headless-filtered here so the wrapper needs no headless logic of its own.
@@ -171,28 +164,24 @@ fn mcp_descriptor_json(headless: bool) -> String {
         .expect("static managed MCP set serializes")
 }
 
-/// The `mcpServers` object Cursor should hold, and the names it must not.
+/// The `mcpServers` entries Cursor should hold.
 ///
 /// Cursor recognizes `command`/`args`/`env`/`url`/`headers`/`auth` per server and derives the
 /// transport itself (a `url` server becomes `streamableHttp`), so no `type` is written. It does
 /// **not** expand environment references anywhere in this file, which is why the bearer is
 /// resolved here instead of being left as `${LINEAR_API_KEY}` the way Claude Code takes it. A
-/// server the clone cannot authenticate is dropped rather than written headerless: Cursor shows
-/// a broken server as "Needs attention" until someone clears it.
-fn cursor_mcp_sets(headless: bool, linear_key: &str) -> (serde_json::Value, Vec<String>) {
+/// server the clone cannot authenticate is skipped rather than written headerless: Cursor shows
+/// a broken server as "Needs attention" until someone clears it. Set-only like the other
+/// merges — skipped servers are never written, never deleted.
+fn cursor_mcp_want(headless: bool, linear_key: &str) -> serde_json::Value {
     let mut want = serde_json::Map::new();
-    let mut drop = Vec::new();
     for m in managed_mcp() {
         let bearer = match m.bearer_env {
-            Some(_) if linear_key.is_empty() => {
-                drop.push(m.name.to_string());
-                continue;
-            }
+            Some(_) if linear_key.is_empty() => continue,
             Some(_) => Some(format!("Bearer {linear_key}")),
             None => None,
         };
         if headless && m.headless_only {
-            drop.push(m.name.to_string());
             continue;
         }
         let mut server = serde_json::json!({ "url": m.url });
@@ -201,26 +190,19 @@ fn cursor_mcp_sets(headless: bool, linear_key: &str) -> (serde_json::Value, Vec<
         }
         want.insert(m.name.to_string(), server);
     }
-    (serde_json::Value::Object(want), drop)
+    serde_json::Value::Object(want)
 }
 
-/// Merge the managed MCP set into a `~/.cursor/mcp.json` body: add/refresh each wanted
-/// server under `.mcpServers`, delete each dropped one (headless-only `desktop` on a
-/// headless clone, or a server whose bearer key is absent). Pure-Rust port of the old jq
-/// merge (`.mcpServers = (((.mcpServers // {}) + want) | delpaths(...))`): other top-level
-/// keys and the operator's own servers survive. A non-object base is a hard error,
-/// matching the old merge.
+/// Merge the managed MCP set into a `~/.cursor/mcp.json` body: set each wanted server
+/// under `.mcpServers`, skip the rest. Other top-level keys and the operator's own
+/// servers survive. A non-object base is a hard error.
 pub(crate) fn merge_cursor_mcp(
     base: &serde_json::Value,
     headless: bool,
     linear_key: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let (want, drop) = cursor_mcp_sets(headless, linear_key);
-    let mut root = base
-        .as_object()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("~/.cursor/mcp.json is not a JSON object"))?;
-    let mut servers = match root.get("mcpServers") {
+    let want = cursor_mcp_want(headless, linear_key);
+    let mut servers = match base.get("mcpServers") {
         None | Some(serde_json::Value::Null) => serde_json::Map::new(),
         Some(serde_json::Value::Object(map)) => map.clone(),
         Some(_) => {
@@ -232,14 +214,12 @@ pub(crate) fn merge_cursor_mcp(
     for (name, server) in want.as_object().cloned().unwrap_or_default() {
         servers.insert(name, server);
     }
-    for name in &drop {
-        servers.remove(name);
-    }
-    root.insert(
-        "mcpServers".to_string(),
+    set_json_key(
+        base,
+        "~/.cursor/mcp.json",
+        "mcpServers",
         serde_json::Value::Object(servers),
-    );
-    Ok(serde_json::Value::Object(root))
+    )
 }
 
 fn cursor_mcp_stamp_path() -> &'static str {
@@ -252,9 +232,13 @@ fn cursor_mcp_stamp_path() -> &'static str {
 /// rotated Linear key, and any future change to the managed set all re-apply on the next
 /// pass. Only the hash is stored — the key itself never lands in a stamp file.
 fn cursor_mcp_desired(headless: bool, linear_key: &str) -> String {
+    // `expect`: merging onto `{}` cannot fail (only a non-object base errors).
+    let canonical = merge_cursor_mcp(&serde_json::json!({}), headless, linear_key)
+        .expect("empty object takes the Cursor MCP merge")
+        .to_string();
     desired_payload_hash(&[TarEntry {
         path: "cursor-mcp".into(),
-        data: cursor_mcp_initial(headless, linear_key).into_bytes(),
+        data: canonical.into_bytes(),
         mode: 0,
         uid: 0,
         gid: 0,
@@ -424,95 +408,127 @@ pub(crate) fn claude_model_env_var() -> wire::EnvVar {
 /// with no warning. `~/.claude.json` already got the careful treatment (a jq merge, because it
 /// is state-bearing); this is the same courtesy for the file Codex owns.
 ///
-/// TOML has no jq, so the merge is a table-aware awk pass: it copies every line through, drops
-/// exactly the `[mcp_servers.<managed>]` tables (from the header to the next table header or
-/// EOF), and appends the freshly rendered ones. Nothing outside those tables is read or
-/// rewritten — including a user's own `[mcp_servers.foo]`, which is not in the managed set and
-/// so is copied verbatim.
-///
-/// Dropping-then-appending (rather than editing in place) is what makes a headed→headless flip
-/// work: `desktop` is simply not in the appended set, and its old table was already removed.
-/// TOML tables RMNG used to write into `~/.codex/config.toml` and no longer does, plus the bare
-/// top-level keys that went with them.
-///
-/// The same trap as a merge that only replaces what it currently emits: it never removes
-/// what it USED to emit. The group-proxy era pointed Codex at the
-/// `/cc/v1` router with `model_provider = "rmng"` + a `[model_providers.rmng]` block; that route
-/// now 404s, and an explicit `model_provider` beats the `~/.codex/auth.json` the server writes —
-/// so leaving them behind means Codex is authenticated and still broken, on every clone, forever.
-/// Verified against a real production clone: all six lines survived a merge that lacked this.
-///
-/// `model_reasoning_effort` is deliberately NOT here. It is a plain preference with no dead
-/// endpoint behind it, and stripping it would be RMNG deleting an operator's setting rather than
-/// cleaning up its own wiring.
-const RETIRED_CODEX_TABLES: &[&str] = &["model_providers.rmng"];
-const RETIRED_CODEX_KEYS: &[&str] = &["model_provider", "model"];
-
-/// Merge the managed MCP tables into a `~/.codex/config.toml` body, preserving everything
-/// else. Pure-Rust port of the old table-aware awk pass: copy every line through, drop
-/// exactly the owned `[mcp_servers.<managed>]` tables (from the header to the next header
-/// of any kind) plus the retired tables/keys, strip trailing blanks, and append the freshly
-/// rendered tables. A user's own `[mcp_servers.foo]` passes through verbatim, and — the
-/// load-bearing half — a headed→headless flip drops `desktop` because it is simply not in
-/// the appended set.
+/// Managed tables RMNG used to write here and no longer does (the group-proxy era's
+/// `[model_providers.rmng]` + bare `model_provider`/`model` keys) pass through like any
+/// other operator content now: the merge is set-only and there are no stale clones to
+/// heal. Note the trade this accepts: a `model_provider` key beats the `~/.codex/auth.json`
+/// the server writes, so a clone that still carries the old wiring stays broken until its
+/// owner clears those lines. `model_reasoning_effort` was never touched and still isn't —
+/// a plain preference, not wiring.
+/// Merge the managed MCP tables into a `~/.codex/config.toml` body: for each managed
+/// table, replace its block in place when present, append it when missing. Every other
+/// line passes through verbatim except the blank run before a table header, which is
+/// normalized to exactly one (so replacement and appends share one layout, and a
+/// converged file merges to itself). Set-only by design like the other merges: tables
+/// no longer emitted
+/// (headless `desktop`) and tables from older servers are left alone, never deleted.
+/// Replacing in place (rather than drop-then-append) keeps the merge idempotent without
+/// any deletion: a converged file merges to itself byte-for-byte.
 pub(crate) fn merge_codex_config(current: &str, headless: bool) -> String {
-    let mut owned: std::collections::HashSet<String> = managed_mcp()
-        .iter()
-        .map(|m| format!("mcp_servers.{}", m.name))
-        .collect();
-    for t in RETIRED_CODEX_TABLES {
-        owned.insert((*t).to_string());
+    // Desired table name → block lines (no trailing blank; separators are added below).
+    let mut want: Vec<(String, Vec<String>)> = Vec::new();
+    for (name, lines) in split_toml_tables(&codex_mcp_toml(headless)) {
+        if let Some(n) = name {
+            want.push((n, lines.into_iter().map(str::to_string).collect()));
+        }
     }
-    // Full dotted table paths this pass owns (`mcp_servers.desktop`, …).
-    let mut kept: Vec<&str> = Vec::new();
-    let mut intable = false;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    // True once a managed block was the last thing emitted: the file then ends with
+    // exactly one blank line (the `codex_mcp_toml` shape). Passthrough lines clear it.
+    let mut ends_managed = false;
+    // Every table header — replaced or passed through — is preceded by exactly one
+    // blank line (unless at start of file). All other lines pass through verbatim.
+    let emit_header_separator = |out: &mut Vec<String>| {
+        while out.last().is_some_and(|l| l.trim().is_empty()) {
+            out.pop();
+        }
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+    };
     let mut skip = false;
     for line in current.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('[') {
-            intable = true;
-            // Exact `^\[<name>\]$` on the RAW line, mirroring the old awk: a padded
-            // header still flips `intable` but is not recognised as owned.
-            skip = line.starts_with('[')
-                && line.ends_with(']')
-                && owned.contains(&line[1..line.len() - 1]);
-        }
-        if !intable && is_retired_codex_key(line) {
+        if let Some(name) = toml_table_header(line) {
+            match want.iter().find(|(n, _)| *n == name) {
+                Some((_, block)) => {
+                    emit_header_separator(&mut out);
+                    out.extend(block.iter().cloned());
+                    seen.insert(name);
+                    skip = true;
+                    ends_managed = true;
+                }
+                None => {
+                    emit_header_separator(&mut out);
+                    skip = false;
+                    out.push(line.to_string());
+                    ends_managed = false;
+                }
+            }
             continue;
         }
         if !skip {
-            kept.push(line);
+            out.push(line.to_string());
+            ends_managed = false;
         }
     }
-    while kept.last().is_some_and(|l| l.trim().is_empty()) {
-        kept.pop();
+    let missing: Vec<&Vec<String>> = want
+        .iter()
+        .filter(|(n, _)| !seen.contains(n))
+        .map(|(_, b)| b)
+        .collect();
+    if !missing.is_empty() {
+        for (i, block) in missing.iter().enumerate() {
+            if i > 0 || !out.iter().all(|l| l.trim().is_empty()) {
+                emit_header_separator(&mut out);
+            } else {
+                out.clear();
+            }
+            out.extend(block.iter().cloned());
+        }
+        ends_managed = true;
     }
-    let desired = codex_mcp_toml(headless);
-    if kept.is_empty() {
-        return desired;
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
     }
-    let mut out = kept.join("\n");
-    out.push('\n');
-    out.push('\n');
-    out.push_str(&desired);
-    out
+    if ends_managed && !out.is_empty() {
+        out.push(String::new());
+    }
+    let mut text = out.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text
 }
 
-/// Bare top-level `key = …` lines RMNG used to write into `~/.codex/config.toml` and now
-/// retires. Only before the first table header — inside a table the same name can
-/// legitimately be a user key (e.g. `[profiles.x] model = "..."`).
-fn is_retired_codex_key(line: &str) -> bool {
-    let rest = line.trim_start();
-    RETIRED_CODEX_KEYS.iter().any(|key| {
-        rest.strip_prefix(key).is_some_and(|after| {
-            after.trim_start().starts_with('=')
-                && !after
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c == '_' || c.is_alphanumeric())
-        })
-    })
+/// Split TOML text into `(table name or None for the preface, lines)` chunks. Line-based
+/// like the old awk pass: a `[table]` header starts a chunk, everything else accumulates.
+fn split_toml_tables(text: &str) -> Vec<(Option<String>, Vec<&str>)> {
+    let mut chunks = vec![];
+    let mut name: Option<String> = None;
+    let mut lines: Vec<&str> = vec![];
+    for line in text.lines() {
+        if let Some(header) = toml_table_header(line) {
+            chunks.push((name.take(), std::mem::take(&mut lines)));
+            name = Some(header);
+        }
+        lines.push(line);
+    }
+    chunks.push((name, lines));
+    chunks
 }
+
+/// A TOML `[table]` header's dotted name, if the line is one. Inner whitespace is trimmed
+/// (TOML allows `[ table ]`); anything else passes through as non-header.
+fn toml_table_header(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
+        Some(t[1..t.len() - 1].trim().to_string())
+    } else {
+        None
+    }
+}
+
 
 const RMNG_CLI_SKILL_MD: &str = r#"---
 name: rmng-cli
@@ -902,12 +918,7 @@ pub(crate) fn cursor_hooks_initial() -> String {
 pub(crate) fn merge_claude_hooks(
     base: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut root = base
-        .as_object()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("~/.claude/settings.json is not a JSON object"))?;
-    root.insert("hooks".to_string(), claude_hooks_object());
-    Ok(serde_json::Value::Object(root))
+    set_json_key(base, "~/.claude/settings.json", "hooks", claude_hooks_object())
 }
 
 /// Merge the probe registration into a `~/.cursor/hooks.json` body (`.version = 1` plus
@@ -915,13 +926,13 @@ pub(crate) fn merge_claude_hooks(
 pub(crate) fn merge_cursor_hooks(
     base: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut root = base
-        .as_object()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("~/.cursor/hooks.json is not a JSON object"))?;
-    root.insert("version".to_string(), serde_json::json!(1));
-    root.insert("hooks".to_string(), cursor_hooks_object());
-    Ok(serde_json::Value::Object(root))
+    let with_version = set_json_key(base, "~/.cursor/hooks.json", "version", serde_json::json!(1))?;
+    set_json_key(
+        &with_version,
+        "~/.cursor/hooks.json",
+        "hooks",
+        cursor_hooks_object(),
+    )
 }
 
 fn claude_hook_stamp_path() -> &'static str {
@@ -1126,9 +1137,13 @@ fn claude_mcp_stamp_path() -> &'static str {
 /// convergence trigger. (A `v1 headless=…` tag used to live here; it never re-pushed on
 /// code changes.)
 fn claude_mcp_desired(headless: bool) -> String {
+    // `expect`: merging onto `{}` cannot fail (only a non-object base errors).
+    let canonical = merge_claude_mcp(&serde_json::json!({}), headless)
+        .expect("empty object takes the Claude MCP merge")
+        .to_string();
     desired_payload_hash(&[TarEntry {
         path: "claude-mcp".into(),
-        data: claude_mcp_initial(headless).into_bytes(),
+        data: canonical.into_bytes(),
         mode: 0,
         uid: 0,
         gid: 0,
@@ -2256,13 +2271,14 @@ mod tests {
         // Idempotent: a converged clone must not churn the file every pass.
         assert_eq!(run(false), body, "second identical pass rewrote the file");
 
-        // A headed→headless flip REMOVES `desktop` (no daemon there) and keeps everything else.
+        // Headless never renders `desktop`, but it no longer deletes one either: the merge
+        // is set-only, and headless is immutable per clone so a headless file never holds
+        // the table in the first place.
         let hl = run(true);
         assert!(
-            !hl.contains("[mcp_servers.desktop]"),
-            "headless kept a dead endpoint:\n{hl}"
+            hl.contains("[mcp_servers.desktop]"),
+            "set-only merge must leave existing tables alone:\n{hl}"
         );
-        assert!(!hl.contains("127.0.0.1:9004"));
         assert!(hl.contains("[mcp_servers.linear]"));
         assert!(
             hl.contains("[mcp_servers.my_own]"),
@@ -2270,7 +2286,16 @@ mod tests {
         );
         assert!(hl.contains("model_reasoning_effort = \"high\""));
 
-        // The group-proxy era's dead wiring must be REMOVED, not merely left alone. A merge that
+        // ...while a headless file that never had it stays without it.
+        std::fs::write(&cfg, "# fresh\n").unwrap();
+        let hl_fresh = run(true);
+        assert!(!hl_fresh.contains("[mcp_servers.desktop]"));
+        assert!(hl_fresh.contains("[mcp_servers.linear]"));
+
+        // Tables from older servers pass through untouched now: the merge is set-only and
+        // there are no stale clones to heal. (If one ever surfaces, its dead wiring is the
+        // operator's to clear — the merge will not touch it either way.)
+        // The group-proxy era's dead wiring passes through like anything else. A merge that
         // only replaces what it currently emits never removes what it used to — the same trap
         // a retired-keys list once solved. `model_provider = "rmng"` beats the `~/.codex/auth.json`
         // the server writes, and its `base_url` is a route that now 404s, so leaving these behind
@@ -2296,33 +2321,20 @@ mod tests {
         )
         .unwrap();
         let cleaned = run(false);
-        assert!(
-            !cleaned.contains("model_providers.rmng"),
-            "dead provider table survived:\n{cleaned}"
-        );
-        assert!(
-            !cleaned.contains("rmng-control:9000"),
-            "dead base_url survived:\n{cleaned}"
-        );
-        assert!(
-            !cleaned.contains("RMNG_PROXY_KEY"),
-            "dead env_key survived:\n{cleaned}"
-        );
-        assert!(
-            !cleaned.contains("model_provider = "),
-            "the bare model_provider key still overrides auth.json:\n{cleaned}"
-        );
-        // ...but a plain preference RMNG never owned is NOT ours to delete.
-        assert!(
-            cleaned.contains("model_reasoning_effort = \"high\""),
-            "{cleaned}"
-        );
-        // ...and a `model` key INSIDE a user's own table is theirs, not the retired top-level one.
-        assert!(cleaned.contains("[profiles.fast]"), "{cleaned}");
-        assert!(
-            cleaned.contains("model = \"gpt-5.5\""),
-            "a user's in-table model was stripped:\n{cleaned}"
-        );
+        // Pass-through: old tables and keys survive the merge byte-for-byte.
+        for kept in [
+            "[model_providers.rmng]",
+            "base_url = \"http://rmng-control:9000/cc/v1\"",
+            "model_provider = \"rmng\"",
+            "model = \"gpt-5.6-terra\"",
+            "model_reasoning_effort = \"high\"",
+            "[profiles.fast]",
+            "model = \"gpt-5.5\"",
+        ] {
+            assert!(cleaned.contains(kept), "merge dropped {kept:?}:\n{cleaned}");
+        }
+        // ...and the managed tables are still refreshed in place.
+        assert_eq!(cleaned.matches("[mcp_servers.desktop]").count(), 1);
 
         // A clone with no config.toml at all gets a valid one rather than an error.
         std::fs::remove_file(&cfg).unwrap();
@@ -2426,7 +2438,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_mcp_merge_sets_desktop_headed_and_deletes_it_headless() {
+    fn claude_mcp_merge_sets_desktop_headed_and_skips_it_headless() {
         let base = serde_json::json!({"projects": {"/x": {}}, "mcpServers": {}});
         let headed = merge_claude_mcp(&base, false).unwrap();
         assert_eq!(headed["mcpServers"]["linear"]["url"], "https://mcp.linear.app/mcp");
@@ -2437,10 +2449,13 @@ mod tests {
         // Operator state in the file survives the merge.
         assert_eq!(headed["projects"], serde_json::json!({"/x": {}}));
 
-        // A headed→headless flip deletes desktop and keeps linear.
-        let headless = merge_claude_mcp(&headed, true).unwrap();
+        // Headless skips desktop without touching it: nothing writes it, so a headless
+        // file simply never contains it — and a hand-added one is left alone, not deleted.
+        let headless = merge_claude_mcp(&serde_json::json!({}), true).unwrap();
         assert!(headless["mcpServers"].get("desktop").is_none());
         assert!(headless["mcpServers"].get("linear").is_some());
+        let untouched = merge_claude_mcp(&headed, true).unwrap();
+        assert_eq!(untouched["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
 
         // ${LINEAR_API_KEY} must be stored literally so Claude Code expands it from the session
         // env at runtime.
@@ -2449,7 +2464,7 @@ mod tests {
             "Bearer ${LINEAR_API_KEY}"
         );
 
-        // A non-object base is a hard error, as the old jq merge failed on those.
+        // A non-object base is a hard error.
         assert!(merge_claude_mcp(&serde_json::json!([1, 2]), false).is_err());
 
         // The stamp value tracks the headless bit so the reconciler re-applies on a state change.
@@ -2459,7 +2474,7 @@ mod tests {
     #[test]
     fn agent_configs_omit_desktop_mcp_when_headless() {
         // Headless clones have no desktop (the clone-daemon on :9004 is deleted), so the shared
-        // `desktop` MCP must disappear from every generated agent config while `linear` stays.
+        // `desktop` MCP is never rendered into any generated agent config while `linear` stays.
         let codex = codex_mcp_toml(true);
         assert!(!codex.contains("[mcp_servers.desktop]"));
         assert!(!codex.contains("127.0.0.1:9004"));
@@ -2516,27 +2531,12 @@ mod tests {
         assert!(TEMPLATE_PHASE_30.contains("/.agents/skills/rmng-cli"));
     }
 
-    /// The pre-boot initial files must equal what each loop merge produces on an empty
-    /// base — the create path renders these instead of exec-merging, and the template
-    /// bakes none of the targets, so on a fresh clone the base is always empty.
+    /// The create path renders merge-owned files by running the merges on an empty base
+    /// (single code path for create and converge — no separate initial renderers). The
+    /// template bakes none of the targets, so on a fresh clone the base is always empty.
     #[test]
-    fn preboot_initials_match_the_merges_on_empty_base() {
-        // ~/.claude.json: the loop merge on `{}` must equal the pre-boot initial.
-        for headless in [false, true] {
-            let merged = merge_claude_mcp(&serde_json::json!({}), headless).unwrap();
-            let initial: serde_json::Value =
-                serde_json::from_str(&claude_mcp_initial(headless)).unwrap();
-            assert_eq!(merged, initial, "headless={headless}");
-        }
-        // ~/.cursor/mcp.json and ~/.codex/config.toml: same equivalence.
-        for headless in [false, true] {
-            let merged = merge_cursor_mcp(&serde_json::json!({}), headless, "lin_key").unwrap();
-            let initial: serde_json::Value =
-                serde_json::from_str(&cursor_mcp_initial(headless, "lin_key")).unwrap();
-            assert_eq!(merged, initial, "headless={headless}");
-            assert_eq!(merge_codex_config("", headless), codex_mcp_toml(headless));
-        }
-        // Spot-check the headed shapes the equivalence above pins in full.
+    fn preboot_files_are_the_merges_on_empty_base() {
+        // ~/.claude.json: headed gets both servers, headless skips desktop.
         let v = merge_claude_mcp(&serde_json::json!({}), false).unwrap();
         assert_eq!(v["mcpServers"]["linear"]["url"], "https://mcp.linear.app/mcp");
         assert_eq!(
@@ -2547,18 +2547,17 @@ mod tests {
             v["mcpServers"]["desktop"]["url"],
             "http://127.0.0.1:9004"
         );
-        let v: serde_json::Value = serde_json::from_str(&claude_mcp_initial(true)).unwrap();
+        let v = merge_claude_mcp(&serde_json::json!({}), true).unwrap();
         assert!(v["mcpServers"].get("desktop").is_none());
         assert!(v["mcpServers"].get("linear").is_some());
-        // ~/.cursor/mcp.json: merge computes `.mcpServers = (({} // {}) + want)`.
-        let (want, _) = cursor_mcp_sets(false, "lin_key");
-        let v: serde_json::Value =
-            serde_json::from_str(&cursor_mcp_initial(false, "lin_key")).unwrap();
-        assert_eq!(v["mcpServers"], want);
-        // ~/.codex/config.toml: merge appends the managed tables to nothing.
+        // ~/.cursor/mcp.json: merge sets exactly the wanted servers.
+        let v = merge_cursor_mcp(&serde_json::json!({}), false, "lin_key").unwrap();
+        assert_eq!(v["mcpServers"], cursor_mcp_want(false, "lin_key"));
+        // ~/.codex/config.toml: merge renders the managed tables onto nothing.
         let toml = codex_mcp_toml(false);
         assert!(toml.contains("[mcp_servers.desktop]") && toml.contains("[mcp_servers.linear]"));
         assert!(!codex_mcp_toml(true).contains("desktop"));
+        assert_eq!(merge_codex_config("", false), toml);
         // Hook registrations: whole-`.hooks` assignment on `{}` (+ version for Cursor).
         let v: serde_json::Value = serde_json::from_str(&claude_settings_initial()).unwrap();
         assert_eq!(v["hooks"].as_object().unwrap().len(), HOOK_EVENTS.len());
@@ -3192,10 +3191,11 @@ mod hook_tests {
     }
 
     #[test]
-    fn a_headless_clone_loses_the_desktop_server_and_a_keyless_one_loses_linear() {
+    fn a_headless_clone_skips_desktop_and_a_keyless_one_skips_linear() {
         let dir = tmpdir("cursordrop");
         let path = dir.join("mcp.json");
 
+        // Headless never renders desktop (no daemon there); linear stays.
         let headless: serde_json::Value =
             serde_json::from_str(&run_cursor_mcp(&path, true, "lin_api_key_xyz")).unwrap();
         assert!(
@@ -3204,10 +3204,12 @@ mod hook_tests {
         );
         assert!(headless["mcpServers"]["linear"].is_object());
 
-        // Flipping to headed on the same file brings desktop back and drops linear, since a
-        // headerless linear would sit in Cursor's "Needs attention" list forever.
+        // Keyless never renders linear (a headerless one would sit in Cursor's
+        // "Needs attention" list forever) — but like every set-only merge it leaves an
+        // existing entry alone rather than deleting it.
+        let keyless_path = dir.join("keyless.json");
         let keyless: serde_json::Value =
-            serde_json::from_str(&run_cursor_mcp(&path, false, "")).unwrap();
+            serde_json::from_str(&run_cursor_mcp(&keyless_path, false, "")).unwrap();
         assert!(keyless["mcpServers"]["desktop"].is_object());
         assert!(
             keyless["mcpServers"]["linear"].is_null(),
