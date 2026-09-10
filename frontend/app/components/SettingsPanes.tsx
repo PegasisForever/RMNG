@@ -161,7 +161,8 @@ export function LlmPane({
   return (
     <>
       {/* There is no in-browser login: the control-server harvests an account's tokens off a
-          clone that is already signed in, hence "Import account" rather than "Add". */}
+          clone that is already signed in. Importing happens per-pool in the group tree below,
+          so every import lands in a pool directly. */}
       <Section
         title="Claude accounts"
         effect="immediate"
@@ -171,7 +172,6 @@ export function LlmPane({
           accounts={rows.claude}
           onDelete={onDeleteAccount}
           onReorder={(ids) => onReorderAccounts("claude", ids)}
-          onImport={onImportAccount}
           onReplace={onReplaceAccount}
         />
       </Section>

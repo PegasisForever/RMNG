@@ -66,7 +66,6 @@ export interface MobileUsageSectionProps {
   onRefresh: () => void | Promise<void>;
   /** Import an account from a clone that is already signed in. The container owns the dialog
    *  this opens. */
-  onImportAccount: () => void | Promise<void>;
   /** Sign in to an account that takes over from a dead one (the "sign in again" badge). */
   onReplaceAccount: (account: ClaudeUsage) => void;
 }
@@ -80,7 +79,6 @@ export function MobileUsageSection({
   usageOpen,
   onUsageOpenChange,
   onRefresh,
-  onImportAccount,
   onReplaceAccount,
 }: MobileUsageSectionProps) {
   const peak = peakUsage(accounts);
@@ -115,7 +113,6 @@ export function MobileUsageSection({
             locale={locale}
             now={now}
             onRefresh={onRefresh}
-            onImport={onImportAccount}
             onReplace={onReplaceAccount}
           />
         </div>

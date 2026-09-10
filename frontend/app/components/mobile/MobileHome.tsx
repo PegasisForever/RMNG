@@ -42,7 +42,6 @@ export interface MobileHomeProps {
   onRefresh: () => void | Promise<void>;
   /** Import an account from a clone that is already signed in. Opening that dialog is
    *  navigation, so this reports the tap and the container mounts the dialog. */
-  onImportAccount: () => void | Promise<void>;
   onReplaceAccount: (account: ClaudeUsage) => void;
   /** The board's columns (`ControlState.boardColumns`), which become the section headers.
    *  Empty falls back to the same defaults the desktop board uses. */
@@ -67,7 +66,6 @@ export function MobileHome({
   usageOpen,
   onUsageOpenChange,
   onRefresh,
-  onImportAccount,
   onReplaceAccount,
   columns,
   clones,
@@ -114,7 +112,6 @@ export function MobileHome({
           usageOpen={usageOpen}
           onUsageOpenChange={onUsageOpenChange}
           onRefresh={onRefresh}
-          onImportAccount={onImportAccount}
           onReplaceAccount={onReplaceAccount}
         />
 

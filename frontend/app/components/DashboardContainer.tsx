@@ -781,7 +781,6 @@ export function DashboardContainer({
           activeLayout: state.activeLayout ?? "",
           onActivateLayout: (name) => run(activateLayout(name)),
           onOpenSettings: () => setSettingsOpen(true),
-          onImportAccount: (provider, group) => openImport(null, { provider, group }),
           onReplaceAccount: (account) => openImport(account),
           onRefresh: () => {
             void Promise.all([refreshClaudeUsage(), refreshCodexUsage()]);

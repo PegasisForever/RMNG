@@ -60,8 +60,18 @@ test("a configured pool with no accounts still renders", () => {
   expect(out[0]).toEqual({ name: "empty", provider: "claude", accounts: [] });
 });
 
-test("the incoming order is kept inside each pool", () => {
-  const out = groupAccounts([sam, alex], groups);
+test("member order follows the pool, not the incoming rows", () => {
+  // The pool lists sam before alex; the rows arrive reversed. The settings tree owns the
+  // order, so the usage column matches it rather than the cosmetic account order.
+  const out = groupAccounts([sam, alex], [
+    { name: "pooled", accounts: ["alex@example.com", "sam@example.com"] },
+  ]);
 
-  expect(out[0].accounts.map((a) => a.email)).toEqual(["sam@example.com", "alex@example.com"]);
+  expect(out[0].accounts.map((a) => a.email)).toEqual(["alex@example.com", "sam@example.com"]);
+});
+
+test("a pool member with no imported row draws nothing", () => {
+  const out = groupAccounts([alex], [{ name: "pooled", accounts: ["alex@example.com", "stale@x.com"] }]);
+
+  expect(out[0].accounts.map((a) => a.email)).toEqual(["alex@example.com"]);
 });

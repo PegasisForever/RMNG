@@ -4,7 +4,7 @@
 // utilization you'd be at if you spent the quota uniformly across the window
 // (elapsed fraction of [resetsAt - windowLength, resetsAt]); fill past the marker
 // = burning faster than uniform.
-import { Plus, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.svg";
@@ -105,13 +105,22 @@ export function groupAccounts(
   groups: CloneGroup[],
 ): AccountSection[] {
   const out: AccountSection[] = [];
+  const byEmail = new Map(ordered.map((a) => [a.email, a]));
   const claimed = new Set<string>();
   for (const group of groups) {
-    const emails = new Set(group.accounts);
     // One section per pool holding BOTH providers' members: a pool is one binding now,
-    // so its Claude and Codex members belong on screen together.
-    const accounts = ordered.filter((a) => emails.has(a.email));
-    accounts.forEach((a) => claimed.add(a.id));
+    // so its Claude and Codex members belong on screen together. Member order is the
+    // pool's own order — the same array the settings tree drags around — not the
+    // cosmetic account order. A member with no imported row (stale draft email) draws
+    // nothing rather than an empty row.
+    const accounts: ClaudeUsage[] = [];
+    for (const email of group.accounts) {
+      const row = byEmail.get(email);
+      if (row) {
+        accounts.push(row);
+        claimed.add(row.id);
+      }
+    }
     out.push({ name: group.name, provider: "claude", accounts });
   }
   for (const provider of ["claude", "codex"] as const) {
@@ -212,7 +221,6 @@ export function ClaudeAccountsPanel({
   locale,
   now,
   onRefresh,
-  onImport,
   onReplace,
 }: {
   accounts: ClaudeUsage[];
@@ -232,9 +240,10 @@ export function ClaudeAccountsPanel({
    *  would draw a different picture every time a story was opened. */
   now: number | null;
   onRefresh: () => void | Promise<void>;
-  onImport: () => void | Promise<void>;
   /** Sign in to an account that takes over from this dead one. Reached from the "sign in
-   *  again" badge, which only draws on a row the server has marked unassignable. */
+   *  again" badge, which only draws on a row the server has marked unassignable. Adding
+   *  accounts lives in Settings (each pool has its own import buttons) — this column
+   *  deliberately offers no add entry point. */
   onReplace: (account: ClaudeUsage) => void;
 }) {
   const rows = orderedWithinBuckets(
@@ -265,36 +274,22 @@ export function ClaudeAccountsPanel({
           Usage{accounts.length ? ` (${accounts.length})` : ""}
         </h2>
         {accounts.length > 0 ? (
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              onClick={() => onImport()}
-              disabled={busy}
-              title="Import a Claude account from a clone"
-              className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-            >
-              <Plus className="size-4" />
-            </button>
-            <button
-              type="button"
-              onClick={wrap(onRefresh)}
-              disabled={busy}
-              className="rounded px-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-            >
-              {busy ? "…" : <RefreshCw className="size-4" />}
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={wrap(onRefresh)}
+            disabled={busy}
+            title="Refresh usage now"
+            className="rounded px-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+          >
+            {busy ? "…" : <RefreshCw className="size-4" />}
+          </button>
         ) : null}
       </div>
 
       {accounts.length === 0 ? (
-        <button
-          type="button"
-          onClick={() => onImport()}
-          className="mt-0.5 w-full rounded border border-dashed border-slate-300 px-2 py-1 text-[10px] text-slate-400 hover:bg-white dark:border-slate-600 dark:text-slate-500 dark:hover:bg-slate-800"
-        >
-          Import Claude account
-        </button>
+        <p className="mt-0.5 rounded border border-dashed border-slate-300 px-2 py-1 text-[10px] text-slate-400 dark:border-slate-600 dark:text-slate-500">
+          No accounts — import one in Settings → LLM.
+        </p>
       ) : sections.length === 0 ? (
         <div className="mt-0.5 divide-y divide-slate-200/70 dark:divide-slate-700/70">
           {rows.map((a) => (

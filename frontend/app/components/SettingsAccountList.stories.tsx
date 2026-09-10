@@ -39,14 +39,11 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** The Claude list: every imported account, draggable by its grip, each with a delete the
- *  container confirms. The import button belongs to this list because Claude is the section
- *  that offers it. */
+ *  container confirms. Importing lives in the group tree below — every import lands in a
+ *  pool directly — so this list offers none. */
 export const Claude: Story = {
   args: {
     accounts: rows("claude"),
-    // Importing opens a modal on top of the panel, which is navigation, so the story jumps to
-    // that modal's own story.
-    onImport: makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn"),
   },
 };
 
@@ -57,11 +54,11 @@ export const Codex: Story = {
 };
 
 /** Nothing imported. The empty state points at where an account comes from, because there is
- *  no browser login: the control-server harvests the token off a clone. */
+ *  no browser login: the control-server harvests the token off a clone, picked up from a
+ *  pool's import button in the group tree below. */
 export const Empty: Story = {
   args: {
     accounts: [],
-    onImport: makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn"),
   },
 };
 

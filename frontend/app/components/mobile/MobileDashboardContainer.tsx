@@ -277,10 +277,6 @@ export function MobileDashboardContainer({
         usageOpen={usageOpen}
         onUsageOpenChange={setUsageOpen}
         onRefresh={() => run(Promise.all([refreshClaudeUsage(), refreshCodexUsage()]))}
-        onImportAccount={() => {
-          setReplacing(null);
-          setImportOpen(true);
-        }}
         onReplaceAccount={(account) => {
           setReplacing(account);
           setImportOpen(true);

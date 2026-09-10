@@ -1,10 +1,11 @@
 // Imported accounts as a drag-reorderable, removable list. Each row is one email plus a grip
 // and a trash button. One component, rendered once per provider, because the two sections are
-// the same list; only the Claude one carries the import button, which is why that is a
-// callback rather than a fixture of the markup.
+// the same list. Importing lives in the group tree (every import lands in a pool directly);
+// this list keeps reorder, delete, and sign-in-again.
 //
-// The order is a purely cosmetic client-side preference (localStorage) — the pool is
-// unordered as far as the server is concerned, so it is NEVER sent with the config patch.
+// This list's own order is a purely cosmetic client-side preference (localStorage) — the
+// authoritative member order lives in each pool's `accounts` array, edited in the group
+// tree below, so this order is NEVER sent with the config patch.
 // The rail's usage panel reads the same store, so a reorder here shows up there live. The
 // store itself belongs to the container: this list is handed rows already in order and
 // reports the new one.
@@ -29,7 +30,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, Plus, Trash2 } from "lucide-react";
+import { GripVertical, Trash2 } from "lucide-react";
 
 import type { ClaudeUsage } from "~/lib/types";
 
@@ -114,7 +115,6 @@ export function SettingsAccountList({
   onDelete,
   onReplace,
   onReorder,
-  onImport,
 }: {
   /** This provider's rows, already in the operator's saved order. */
   accounts: ClaudeUsage[];
@@ -122,10 +122,6 @@ export function SettingsAccountList({
   /** Sign in to an account that takes over from a dead one, from its "sign in again" badge. */
   onReplace: (account: ClaudeUsage) => void;
   onReorder: (orderedIds: string[]) => void;
-  /** Import an account from a clone that is already signed in. Only the Claude section
-   *  offers it: importing is provider-picked inside the same modal, so a second entry point
-   *  under Codex would open the same dialog. */
-  onImport?: () => void;
 }) {
   const sensors = useReorderSensors();
   const ids = accounts.map((a) => a.id);
@@ -161,17 +157,5 @@ export function SettingsAccountList({
       </DndContext>
     );
 
-  if (!onImport) return list;
-  return (
-    <div className="space-y-2">
-      {list}
-      <button
-        type="button"
-        onClick={onImport}
-        className="inline-flex items-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-      >
-        <Plus className="size-3.5" /> Import account
-      </button>
-    </div>
-  );
+  return list;
 }

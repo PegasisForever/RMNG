@@ -29,7 +29,6 @@ const meta = {
     // countdown is reproducible. The container reads a ticking clock here.
     now: accountsNow,
     onRefresh: fn(),
-    onImport: fn(),
     onReplace: fn(),
   },
   render: (args) => (

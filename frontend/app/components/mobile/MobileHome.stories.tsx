@@ -47,9 +47,8 @@ const meta = {
     onUsageOpenChange: fn(),
     onRefresh: fn(),
     // Both of these leave this screen, so they jump to what they open rather than doing it
-    // here: tapping a row is the phone's whole navigation, and the import dialog is mounted
-    // by the container beside this page, never inside it.
-    onImportAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn"),
+    // here: tapping a row is the phone's whole navigation, and the sign-in-again dialog is
+    // mounted by the container beside this page, never inside it.
     onReplaceAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "Replacing"),
     onSelectClone: makeStoryLink("Mobile/Pages/MobileClone", "Chat"),
     error: null,
