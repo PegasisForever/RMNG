@@ -21,8 +21,8 @@
 //! empty refresh token, so its Claude Code can never rotate the pair this server owns. It
 //! gets the account's identity with it ([`identity_json`]), because Claude Code names its
 //! account to Anthropic on every request and a token swap alone leaves it naming the
-//! previous one. Those writes go over `docker exec`
-//! ([`crate::provision::run_clone_op`]), addressing the clone by container name.
+//! previous one. Those writes go through the daemon (tar upload), addressing the clone
+//! by container name.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,8 +30,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 use wire::{ClaudeSpend, ClaudeUsage, ClaudeUsageWindow, CloneGroup, RmngClone};
 
@@ -1816,6 +1814,102 @@ fn identity_json(acct: &StoredClaudeAccount) -> Option<String> {
     Some(body.to_string())
 }
 
+/// Outcome of merging an account identity into a clone's `~/.claude.json` body.
+/// Pure Rust port of the old guest-side python merge: that file belongs to Claude Code
+/// (project history lives in it), so only the three identity keys are touched and a
+/// file that does not parse is left alone — losing history to repair identity is the
+/// worse trade.
+enum IdentityMerge {
+    /// Already names this account: no upload.
+    Current,
+    /// Merged body to upload.
+    Updated(String),
+    /// Left untouched, with the reason (warn, do not fail the push).
+    Skipped(String),
+}
+
+fn merge_claude_identity(
+    current: Option<&[u8]>,
+    patch: &serde_json::Value,
+) -> IdentityMerge {
+    let mut cur = serde_json::Map::new();
+    if let Some(bytes) = current {
+        let raw = String::from_utf8_lossy(bytes);
+        if !raw.trim().is_empty() {
+            match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(serde_json::Value::Object(map)) => cur = map,
+                _ => {
+                    return IdentityMerge::Skipped(
+                        "~/.claude.json is not a JSON object".to_string(),
+                    );
+                }
+            }
+        }
+    }
+    let Some(want) = patch.get("oauthAccount").and_then(|v| v.as_object()) else {
+        return IdentityMerge::Skipped("identity patch has no oauthAccount".to_string());
+    };
+    let same_account = cur
+        .get("oauthAccount")
+        .and_then(|v| v.as_object())
+        .and_then(|have| have.get("accountUuid"))
+        == want.get("accountUuid");
+    let block = if same_account {
+        // The same account: billing, seat and rate-limit siblings still describe it.
+        let mut block = cur
+            .get("oauthAccount")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let before = block.clone();
+        for (k, v) in want {
+            block.insert(k.clone(), v.clone());
+        }
+        if block != before {
+            // Something owned moved: the rest of the block profiles the old state.
+            // Claude Code refills it on the next account lookup.
+            block.remove("profileFetchedAt");
+        }
+        block
+    } else {
+        // A different account: nothing the old block said carries over.
+        want.clone()
+    };
+    // `want` is only cloned above; no borrow survives into the inserts below.
+    cur.insert(
+        "userID".to_string(),
+        patch
+            .get("userID")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    cur.insert(
+        "machineID".to_string(),
+        patch
+            .get("machineID")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    cur.insert(
+        "oauthAccount".to_string(),
+        serde_json::Value::Object(block),
+    );
+    let merged = serde_json::Value::Object(cur);
+    let before = match current {
+        Some(bytes) => serde_json::from_slice::<serde_json::Value>(bytes).ok(),
+        None => None,
+    };
+    if before.as_ref() == Some(&merged) {
+        IdentityMerge::Current
+    } else {
+        IdentityMerge::Updated(merged.to_string())
+    }
+}
+
+/// Guest uid/gid for `home/rmng/**` tar uploads (mirrors provision/reconcile).
+const CLONE_UID: u64 = 1000;
+const CLONE_GID: u64 = 1000;
+
 /// What was last delivered to a clone, as one comparable string: the token AND the identity
 /// that went with it. A rebind can hand a clone a different account whose token happens to
 /// be pushed already, and comparing tokens alone would call that clone current while it
@@ -1828,9 +1922,10 @@ fn push_key(acct: &StoredClaudeAccount) -> String {
     )
 }
 
-/// Install `acct`'s access token AND its identity into clone `host_id` over `docker exec`
-/// (via [`crate::provision::run_clone_op`], fish-proof). Hot-swaps a running clone with
-/// **no** agent-wrapper restart, because Claude Code re-reads both files at request time.
+/// Install `acct`'s access token AND its identity into clone `host_id` — direct file
+/// writes through the daemon (tar upload + daemon-side read), no guest shell. Hot-swaps
+/// a running clone with **no** agent-wrapper restart, because Claude Code re-reads both
+/// files at request time.
 /// Best-effort; errors are returned to log. Low-level: callers that target an assigned host
 /// should go through [`push_account_to_clone`] / [`push_stale_tokens`] so the push is recorded.
 ///
@@ -1842,40 +1937,62 @@ pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredClaudeAcco
     if !token.starts_with("sk-ant-") {
         bail!("refusing to apply a non-`sk-ant-` token");
     }
-    let b64 = B64.encode(credentials_json(token).as_bytes());
-    // "-" rather than an empty argument: the guest reads positional arguments, and an empty
-    // one is easy to lose to a shell along the way.
-    let id_b64 = identity_json(acct)
-        .map(|j| B64.encode(j.as_bytes()))
-        .unwrap_or_else(|| "-".to_string());
-    let out = crate::provision::run_clone_op(app, host_id, "apply", &[&b64, &id_b64]).await?;
-    // A distinctive marker, matched against stdout and stderr merged. The old check was for
-    // "OK", which any line containing TOKEN, BROKEN or LOOKUP satisfies.
-    if !out.contains("RMNG_APPLY_OK") {
-        bail!("token apply produced unexpected output: {}", out.trim());
-    }
+    // The credentials file is server-owned wholesale: overwrite, never merge.
+    app.docker
+        .upload_tar(
+            host_id,
+            vec![crate::docker::TarEntry {
+                path: "home/rmng/.claude/.credentials.json".to_string(),
+                data: credentials_json(token).into_bytes(),
+                mode: 0o600,
+                uid: CLONE_UID,
+                gid: CLONE_GID,
+            }],
+        )
+        .await
+        .with_context(|| format!("{host_id}: uploading Claude credentials"))?;
     // The identity is a separate outcome from the token. A clone that took the token and
-    // refused the identity still works, so it is a warning rather than a failed push.
-    if let Some(line) = out.lines().find(|l| l.contains("RMNG_IDENTITY_FAILED")) {
-        tracing::warn!(
-            "{host_id} kept {}'s token but not its identity: {}",
-            acct.email,
-            line.trim()
-        );
+    // refused the identity still works, so this is a warning rather than a failed push.
+    if let Some(patch_str) = identity_json(acct) {
+        let patch: serde_json::Value = serde_json::from_str(&patch_str)
+            .with_context(|| format!("{host_id}: identity patch is not JSON"))?;
+        let current = app
+            .docker
+            .read_clone_file(host_id, "/home/rmng/.claude.json")
+            .await
+            .with_context(|| format!("{host_id}: reading ~/.claude.json"))?;
+        match merge_claude_identity(current.as_deref(), &patch) {
+            IdentityMerge::Current => {}
+            IdentityMerge::Updated(body) => {
+                app.docker
+                    .upload_tar(
+                        host_id,
+                        vec![crate::docker::TarEntry {
+                            path: "home/rmng/.claude.json".to_string(),
+                            data: body.into_bytes(),
+                            mode: 0o600,
+                            uid: CLONE_UID,
+                            gid: CLONE_GID,
+                        }],
+                    )
+                    .await
+                    .with_context(|| format!("{host_id}: uploading ~/.claude.json identity"))?;
+            }
+            IdentityMerge::Skipped(reason) => {
+                tracing::warn!("{host_id} kept {}'s token but not its identity: {}", acct.email, reason);
+            }
+        }
     }
     Ok(())
 }
 
-/// Remove clone `host_id`'s `~/.claude/.credentials.json` over `docker exec`, leaving it
+/// Remove clone `host_id`'s `~/.claude/.credentials.json`, leaving it
 /// with no Claude token. Used when a clone's account is set to "none" (unassigned) —
 /// callers should also [`ClaudeStore::forget_pushed`] the host.
 pub async fn clear_clone_token(app: &App, host_id: &str) -> Result<()> {
-    let out = crate::provision::run_clone_op(app, host_id, "clear", &[]).await?;
-    if out.contains("CLEARED") {
-        Ok(())
-    } else {
-        bail!("token clear produced unexpected output: {}", out.trim());
-    }
+    app.docker
+        .remove_clone_file(host_id, "/home/rmng/.claude/.credentials.json")
+        .await
 }
 
 /// Refresh-if-needed and install `email`'s access token into clone `host_id` (== its
@@ -2499,7 +2616,98 @@ mod tests {
         );
     }
 
-    /// The reverse migration recovers accounts with no organization. Naming an empty one
+    #[test]
+    fn identity_merge_seeds_a_missing_file() {
+        let acct = stored("a@x");
+        let patch: serde_json::Value =
+            serde_json::from_str(&identity_json(&acct).unwrap()).unwrap();
+        match merge_claude_identity(None, &patch) {
+            IdentityMerge::Updated(body) => {
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(v["oauthAccount"]["emailAddress"], "a@x");
+                assert_eq!(v["userID"], patch["userID"]);
+            }
+            other => panic!("expected Updated, got {}", merge_name(&other)),
+        }
+    }
+
+    #[test]
+    fn identity_merge_keeps_siblings_for_the_same_account() {
+        let acct = stored("a@x");
+        let patch: serde_json::Value =
+            serde_json::from_str(&identity_json(&acct).unwrap()).unwrap();
+        let current = serde_json::json!({
+            "userID": "old-user", "machineID": "old-machine",
+            "oauthAccount": { "accountUuid": "uuid-of-a@x", "emailAddress": "a@x",
+                               "rateLimitTier": "max20", "profileFetchedAt": 123 },
+            "projects": {"/x": {}}
+        });
+        match merge_claude_identity(Some(current.to_string().as_bytes()), &patch) {
+            IdentityMerge::Updated(body) => {
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                // Same account: the sibling survives, identity refreshes, history untouched.
+                assert_eq!(v["oauthAccount"]["rateLimitTier"], "max20");
+                assert_eq!(v["userID"], patch["userID"]);
+                assert_eq!(v["projects"], serde_json::json!({"/x": {}}));
+            }
+            other => panic!("expected Updated, got {}", merge_name(&other)),
+        }
+    }
+
+    #[test]
+    fn identity_merge_replaces_the_block_for_a_different_account() {
+        let acct = stored("a@x");
+        let patch: serde_json::Value =
+            serde_json::from_str(&identity_json(&acct).unwrap()).unwrap();
+        let current = serde_json::json!({
+            "oauthAccount": { "accountUuid": "other", "emailAddress": "b@y",
+                               "rateLimitTier": "max20" }
+        });
+        match merge_claude_identity(Some(current.to_string().as_bytes()), &patch) {
+            IdentityMerge::Updated(body) => {
+                let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(v["oauthAccount"]["accountUuid"], "uuid-of-a@x");
+                assert!(v["oauthAccount"].get("rateLimitTier").is_none());
+            }
+            other => panic!("expected Updated, got {}", merge_name(&other)),
+        }
+    }
+
+    #[test]
+    fn identity_merge_leaves_unparseable_files_alone() {
+        let acct = stored("a@x");
+        let patch: serde_json::Value =
+            serde_json::from_str(&identity_json(&acct).unwrap()).unwrap();
+        match merge_claude_identity(Some(b"{broken".as_slice()), &patch) {
+            IdentityMerge::Skipped(_) => {}
+            other => panic!("expected Skipped, got {}", merge_name(&other)),
+        }
+    }
+
+    #[test]
+    fn identity_merge_reports_current_when_nothing_changes() {
+        let acct = stored("a@x");
+        let patch: serde_json::Value =
+            serde_json::from_str(&identity_json(&acct).unwrap()).unwrap();
+        let mut current = serde_json::Map::new();
+        current.insert("userID".into(), patch["userID"].clone());
+        current.insert("machineID".into(), patch["machineID"].clone());
+        current.insert("oauthAccount".into(), patch["oauthAccount"].clone());
+        let raw = serde_json::Value::Object(current).to_string();
+        match merge_claude_identity(Some(raw.as_bytes()), &patch) {
+            IdentityMerge::Current => {}
+            other => panic!("expected Current, got {}", merge_name(&other)),
+        }
+    }
+
+    fn merge_name(m: &IdentityMerge) -> &'static str {
+        match m {
+            IdentityMerge::Current => "Current",
+            IdentityMerge::Updated(_) => "Updated",
+            IdentityMerge::Skipped(_) => "Skipped",
+        }
+    }
+
     /// would write that emptiness over whatever the clone already had, so those two keys are
     /// left out instead and the clone keeps its own.
     #[test]

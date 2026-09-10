@@ -8,8 +8,9 @@
 //! guest script's own stdout lines are line-buffered into the operation log).
 //!
 //! Caller-facing division of responsibility (as with `orchestrate.rs`): `jobs.rs` owns the
-//! `Operation` record + the progress→op-log plumbing and calls the flows here; `claude.rs`
-//! drives credential ops via [`run_clone_op`]. These functions address a clone by its
+//! `Operation` record + the progress→op-log plumbing and calls the flows here; credential
+//! pushes go straight through the daemon (tar upload / file read), with no guest scripting.
+//! These functions address a clone by its
 //! container *name*, which equals the clone id (`RmngClone.managed` rows) — no container id is
 //! stored anywhere.
 //!
@@ -31,8 +32,6 @@ use crate::docker::{CLONE_USER, CreateSpec, TarEntry};
 /// at template build).
 /// tar entries under `home/rmng/**` carry this verbatim so the daemon extracts them owned
 /// by the clone user (gotcha #2).
-/// The guest script `claude.rs` runs inside a clone for its credential ops.
-const IMPORT_SCRIPT: &str = include_str!("../scripts/claude-import.sh");
 
 const CLONE_UID: u64 = 1000;
 const CLONE_GID: u64 = 1000;
@@ -1372,19 +1371,6 @@ fn migrate_pct(step: &str) -> Option<f64> {
         "done" => 100.0,
         _ => return None,
     })
-}
-
-// --- claude-import backend ------------------------------------------------------------
-
-/// Run one [`claude-import.sh`] op (`status`|`read`|`clear`|`apply`) inside clone `container`
-/// via `docker exec bash -s`, returning its raw stdout+stderr. `extra` are extra positional
-/// args (e.g. the base64 credentials for `apply`). This is `claude.rs`'s backend.
-///
-/// Script args: `<user> <op> [b64]`. `status` never fails (stderr merged in the script);
-/// the others surface a non-zero exit as an error. `codex.rs` calls the generalized
-/// `clone_ops::run_clone_op` directly with its own script.
-pub async fn run_clone_op(app: &App, container: &str, op: &str, extra: &[&str]) -> Result<String> {
-    crate::clone_ops::run_clone_op(app, container, IMPORT_SCRIPT, op, extra).await
 }
 
 // --- op-log pct helpers (exposed for jobs.rs step tables) -----------------------------

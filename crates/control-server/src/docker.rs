@@ -2152,6 +2152,63 @@ impl DockerCtl {
         Ok(buf)
     }
 
+    /// Read one regular file out of a container through the daemon — no exec, no guest
+    /// shell, works on a stopped container. `None` when the path does not exist (an
+    /// explicit absence branch, not a swallowed error: every other failure still errors).
+    /// Callers pass absolute guest paths (e.g. `/home/rmng/.codex/auth.json`).
+    pub async fn read_clone_file(
+        &self,
+        container: &str,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let tar = match self.download_home_tar(container, path).await {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(BollardError::DockerResponseServerError {
+                    status_code: 404,
+                    ..
+                }) = e.downcast_ref::<BollardError>()
+                {
+                    return Ok(None);
+                }
+                return Err(e).with_context(|| format!("reading {path} from {container}"));
+            }
+        };
+        let mut archive = tar::Archive::new(tar.as_slice());
+        for entry in archive
+            .entries()
+            .with_context(|| format!("listing {path} tar from {container}"))?
+        {
+            let mut entry =
+                entry.with_context(|| format!("reading {path} tar entry from {container}"))?;
+            if entry.header().entry_type().is_file() {
+                let mut buf = Vec::new();
+                use std::io::Read;
+                entry
+                    .read_to_end(&mut buf)
+                    .with_context(|| format!("extracting {path} from {container}"))?;
+                return Ok(Some(buf));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Delete one guest path (`rm -f` semantics: missing is fine). The last exec-based
+    /// mutation left after the credential/MCP merges moved to tar upload; kept because
+    /// the daemon's upload API cannot delete. `path` is always a server-side constant,
+    /// never guest-influenced, so no quoting surface.
+    pub async fn remove_clone_file(&self, container: &str, path: &str) -> Result<()> {
+        let script = format!("rm -f -- {path}\n");
+        let code = self
+            .exec_script(container, &script, &[], &[], |_, _| {})
+            .await
+            .with_context(|| format!("removing {path} from {container}"))?;
+        if code != 0 {
+            anyhow::bail!("removing {path} from {container}: exit {code}");
+        }
+        Ok(())
+    }
+
     /// The next chunk from an exec's output stream, or an error once it is clear none is
     /// coming.
     ///

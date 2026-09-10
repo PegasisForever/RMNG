@@ -4,16 +4,12 @@
 //! needs the identical logic, so they live here (moved verbatim — no behavior change).
 //! Two are new for Codex: a hand-rolled JWT claim decoder (`jwt_claims` / `jwt_exp_ms`;
 //! the Codex OAuth response carries no `expires_in`, so expiry is read from the
-//! access-token JWT `exp`) and the generalized `run_clone_op` (parameterized by guest
-//! script, so each provider runs its own import script).
+//! access-token JWT `exp`).
 
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
-
 use crate::app::App;
-use crate::docker::CLONE_USER;
 
 /// Says a poll is running, and says so again once it stops however it stops.
 ///
@@ -184,37 +180,6 @@ fn usability_changes(
         }
     }
     out
-}
-
-/// Run one import-script op (`status`|`read`|`clear`|`apply`) inside clone `container`
-/// via `docker exec bash -s`, returning its raw stdout+stderr. `script` is the guest
-/// script body (`include_str!`); `extra` are extra positional args (e.g. the base64
-/// credentials for `apply`). Script args: `<user> <op> [extra…]`. Generalized from the
-/// original claude-only `provision::run_clone_op` so each provider passes its own script.
-pub(crate) async fn run_clone_op(
-    app: &App,
-    container: &str,
-    script: &str,
-    op: &str,
-    extra: &[&str],
-) -> Result<String> {
-    let mut args: Vec<String> = vec![CLONE_USER.to_string(), op.to_string()];
-    args.extend(extra.iter().map(|s| s.to_string()));
-
-    let mut out = String::new();
-    let code = app
-        .docker
-        .exec_script(container, script, &[], &args, |_stream, line| {
-            out.push_str(line);
-            out.push('\n');
-        })
-        .await?;
-
-    if code == 0 {
-        Ok(out)
-    } else {
-        bail!("clone op '{op}' failed in {container} (exit {code}): {}", out.trim());
-    }
 }
 
 /// Decode a JWT's payload claims (the middle `.`-delimited segment, base64url, no

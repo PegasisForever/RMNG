@@ -13,13 +13,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 use wire::{ClaudeUsage, ClaudeUsageWindow, CloneGroup, RmngClone};
 
 use crate::app::App;
-use crate::clone_ops::{now_ms, rand_u64, run_clone_op, shuffle, snippet};
+use crate::clone_ops::{now_ms, rand_u64, shuffle, snippet};
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONSUME_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
@@ -45,7 +43,26 @@ const ROTATE_SECS: u64 = 600;
 /// resetting (spec: "more than 24h from the next 7d reset").
 const RESET_MIN_HEADROOM_SECS: i64 = 24 * 3600;
 
-const IMPORT_SCRIPT: &str = include_str!("../scripts/codex-import.sh");
+/// Guest uid/gid for `home/rmng/**` tar uploads (mirrors provision/reconcile).
+const CLONE_UID: u64 = 1000;
+const CLONE_GID: u64 = 1000;
+
+/// Merge the `openai-codex` provider entry into a pi `auth.json` body, preserving the
+/// operator's other providers. A missing, corrupt, or non-object current file seeds
+/// from the fragment alone — same rule the old guest-side jq merge used.
+fn merge_pi_auth(
+    current: Option<&[u8]>,
+    fragment: &serde_json::Value,
+) -> serde_json::Value {
+    let mut cur = current
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    if let Some(entry) = fragment.get("openai-codex") {
+        cur.insert("openai-codex".to_string(), entry.clone());
+    }
+    serde_json::Value::Object(cur)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -472,38 +489,101 @@ fn pi_auth_json(acct: &StoredCodexAccount) -> String {
     )
 }
 
-/// Install `acct`'s tokens into clone `host_id`'s `~/.codex/auth.json` and `~/.pi/agent/auth.json`.
+/// Install `acct`'s tokens into clone `host_id`'s `~/.codex/auth.json` and merge them into
+/// `~/.pi/agent/auth.json` — direct file writes through the daemon, no guest shell.
 /// Sanity-checks the access token is a JWT (`eyJ…`). Best-effort hot-swap; codex and pi both
 /// re-read their auth file per call.
 pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredCodexAccount) -> Result<()> {
     if !acct.access_token.starts_with("eyJ") {
         bail!("refusing to apply a non-JWT codex access token");
     }
-    let b64 = B64.encode(auth_json(acct).as_bytes());
-    let pi_b64 = B64.encode(pi_auth_json(acct).as_bytes());
-    let out = run_clone_op(app, host_id, IMPORT_SCRIPT, "apply", &[&b64, &pi_b64]).await?;
-    // A distinctive marker rather than "OK", which is a substring of ordinary words.
-    if out.contains("RMNG_APPLY_OK") {
-        Ok(())
-    } else {
-        bail!(
-            "codex token apply produced unexpected output: {}",
-            out.trim()
-        );
+    // `~/.codex/auth.json` is server-owned wholesale: overwrite, never merge.
+    app.docker
+        .upload_tar(
+            host_id,
+            vec![crate::docker::TarEntry {
+                path: "home/rmng/.codex/auth.json".to_string(),
+                data: auth_json(acct).into_bytes(),
+                mode: 0o600,
+                uid: CLONE_UID,
+                gid: CLONE_GID,
+            }],
+        )
+        .await
+        .with_context(|| format!("{host_id}: uploading Codex auth"))?;
+    // pi's file belongs to the operator (their other providers live in it): merge only
+    // the `openai-codex` key, never overwrite. Upload only on change.
+    let fragment: serde_json::Value = serde_json::from_str(&pi_auth_json(acct))
+        .with_context(|| format!("{host_id}: pi auth fragment is not JSON"))?;
+    let current = app
+        .docker
+        .read_clone_file(host_id, "/home/rmng/.pi/agent/auth.json")
+        .await
+        .with_context(|| format!("{host_id}: reading pi auth"))?;
+    let merged = merge_pi_auth(current.as_deref(), &fragment);
+    let current_value = current
+        .as_deref()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
+    if current_value.as_ref() != Some(&merged) {
+        app.docker
+            .upload_tar(
+                host_id,
+                vec![crate::docker::TarEntry {
+                    path: "home/rmng/.pi/agent/auth.json".to_string(),
+                    data: merged.to_string().into_bytes(),
+                    mode: 0o600,
+                    uid: CLONE_UID,
+                    gid: CLONE_GID,
+                }],
+            )
+            .await
+            .with_context(|| format!("{host_id}: uploading pi auth"))?;
     }
+    Ok(())
 }
 
-/// Remove clone `host_id`'s `~/.codex/auth.json`, leaving it with no Codex token.
+/// Remove clone `host_id`'s `~/.codex/auth.json`, leaving it with no Codex token, and
+/// drop only the `openai-codex` key from its pi auth file — the operator's other
+/// providers stay. Removes the pi file itself when no keys remain.
 pub async fn clear_clone_token(app: &App, host_id: &str) -> Result<()> {
-    let out = run_clone_op(app, host_id, IMPORT_SCRIPT, "clear", &[]).await?;
-    if out.contains("CLEARED") {
-        Ok(())
-    } else {
-        bail!(
-            "codex token clear produced unexpected output: {}",
-            out.trim()
-        );
+    app.docker
+        .remove_clone_file(host_id, "/home/rmng/.codex/auth.json")
+        .await?;
+    if let Some(bytes) = app
+        .docker
+        .read_clone_file(host_id, "/home/rmng/.pi/agent/auth.json")
+        .await
+        .with_context(|| format!("{host_id}: reading pi auth for clear"))?
+    {
+        if let Ok(serde_json::Value::Object(mut map)) =
+            serde_json::from_slice::<serde_json::Value>(&bytes)
+        {
+            if map.remove("openai-codex").is_some() {
+                if map.is_empty() {
+                    app.docker
+                        .remove_clone_file(host_id, "/home/rmng/.pi/agent/auth.json")
+                        .await?;
+                } else {
+                    app.docker
+                        .upload_tar(
+                            host_id,
+                            vec![crate::docker::TarEntry {
+                                path: "home/rmng/.pi/agent/auth.json".to_string(),
+                                data: serde_json::Value::Object(map).to_string().into_bytes(),
+                                mode: 0o600,
+                                uid: CLONE_UID,
+                                gid: CLONE_GID,
+                            }],
+                        )
+                        .await
+                        .with_context(|| format!("{host_id}: uploading cleared pi auth"))?;
+                }
+            }
+        }
+        // A missing, corrupt, or non-object pi file is none of ours to repair: the codex
+        // file above is already gone, which is what de-authenticates the clone.
     }
+    Ok(())
 }
 
 /// Refresh-if-needed and install `email`'s tokens into clone `host_id`, recording the
@@ -1756,6 +1836,8 @@ pub async fn run_poller(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
 
     /// Parity with `claude::jittered_lead_never_drops_below_the_floor`: the offset only
     /// ever adds lead, and it is derived from the email so a batch of accounts imported
@@ -1892,6 +1974,31 @@ mod tests {
         assert_eq!(c["refresh"], "");
         // Year 2100. A real expiry would make pi attempt a refresh that can only fail.
         assert_eq!(c["expires"], 4102444800000i64);
+    }
+
+    /// Merging the pushed fragment must never drop the operator's other providers —
+    /// the live bug this replaces (guest-side overwrite wiped them).
+    #[test]
+    fn pi_auth_merge_keeps_other_providers() {
+        let fragment: serde_json::Value =
+            serde_json::from_str(&pi_auth_json(&sample_account())).unwrap();
+        let current = serde_json::json!({
+            "anthropic": {"type": "oauth", "access": "KEEP"},
+            "openai-codex": {"type": "oauth", "access": "OLD"}
+        });
+        let merged = merge_pi_auth(Some(current.to_string().as_bytes()), &fragment);
+        assert_eq!(merged["anthropic"]["access"], "KEEP");
+        assert_eq!(merged["openai-codex"]["access"], "eyJaccess");
+    }
+
+    #[test]
+    fn pi_auth_merge_seeds_missing_or_corrupt_files() {
+        let fragment: serde_json::Value =
+            serde_json::from_str(&pi_auth_json(&sample_account())).unwrap();
+        let seeded = merge_pi_auth(None, &fragment);
+        assert_eq!(seeded["openai-codex"]["access"], "eyJaccess");
+        let corrupt = merge_pi_auth(Some(b"{broken".as_slice()), &fragment);
+        assert_eq!(corrupt, seeded);
     }
 
     /// Both files carry the same access token, so a clone can never run codex under one
