@@ -3,30 +3,76 @@
 // already have their own stories, so a pane has no state and no variants of its own beyond
 // what the panel hands it, and `SettingsPanelView`'s per-category stories are what show them.
 //
-// A pane takes the whole panel prop bag rather than a hand-picked slice. Seven prop interfaces
-// restating the same forty fields would be the only other way to say it, and every one of them
-// would have to be updated in step with the panel's.
+// Each pane declares only the fields it renders. `SettingsPanelView` assembles each pane's
+// props from the panel's, so adding a field used by one pane touches that pane's interface
+// and one assembly branch — not all five panes.
 
 import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
 import { Field, Section, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
 import { SettingsLayoutPresets } from "~/components/SettingsLayoutPresets";
-import type { SettingsPanelViewProps } from "~/components/SettingsPanelView";
+import type { BoardColumn } from "~/lib/board";
 import { SettingsPresetList } from "~/components/SettingsPresetList";
 import { SettingsServerSection } from "~/components/SettingsServerSection";
 import { SettingsSshSection } from "~/components/SettingsSshSection";
 import { SettingsStuckSection } from "~/components/SettingsStuckSection";
-import type { ClaudeUsage } from "~/lib/types";
+import type { ClaudeUsage, Operation } from "~/lib/types";
 import type { SettingsDraft } from "~/lib/settingsDraft";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
+import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
-/** What every pane takes: the panel's own props, narrowed to the loaded case (a pane only
- *  renders once the config is in), plus the two account lists in the operator's order. */
-export type SettingsPaneProps = SettingsPanelViewProps & {
+/** Write one field of the settings form back. Same shape as the panel's writer; kept here so each pane seam declares its own use. */
+export type OnDraftChange = <K extends keyof SettingsDraft>(
+  key: K,
+  value: SettingsDraft[K],
+) => void;
+
+/** The form slice every pane needs: the loaded draft plus its single writer. A pane only renders once the config is in, so the draft is non-null here. */
+export interface PaneDraftProps {
   draft: SettingsDraft;
+  onDraftChange: OnDraftChange;
+}
+
+/** Board: the dashboard's swim lanes, plus their handlers. */
+export interface BoardPaneProps extends PaneDraftProps {
+  boardColumns?: BoardColumn[];
+  boardColumnCounts?: Record<string, number>;
+  onAddBoardColumn?: (title: string) => void;
+  onRenameBoardColumn?: (columnId: string, title: string) => void;
+  onSetBoardColumnArchive?: (columnId: string, archive: boolean) => void;
+  onDeleteBoardColumn?: (columnId: string) => void;
+  onReorderBoardColumns?: (columnIds: string[]) => void;
+}
+
+/** Layout: only the form. */
+export type LayoutPaneProps = PaneDraftProps;
+
+/** Presets: the form plus the account list the preset pickers read. */
+export interface PresetsPaneProps extends PaneDraftProps {
+  accounts: ClaudeUsage[];
+}
+
+/** LLM: the form, the ordered account rows, the import entry point, and the judge test. */
+export interface LlmPaneProps extends PaneDraftProps {
   rows: { claude: ClaudeUsage[]; codex: ClaudeUsage[] };
-};
+  onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
+  onTestJudge: () => void;
+  judgeTestMessage: string | null;
+}
+
+/** Server: the form, the control-server's own version and update state, and the Docker probe. */
+export interface ServerPaneProps extends PaneDraftProps {
+  serverStatus: UpdateStatus | null;
+  serverMessage: string | null;
+  updateOperation: Operation | null;
+  updateDisabled: boolean;
+  onCheckUpdate: () => void;
+  onUpdateServer: () => void;
+  onRestartServer: () => void;
+  testMessage: string | null;
+  onTestDocker: () => void;
+}
 
 /** Board: the dashboard's swim lanes. Applies the moment it is saved. */
 export function BoardPane({
@@ -39,7 +85,7 @@ export function BoardPane({
   onSetBoardColumnArchive,
   onDeleteBoardColumn,
   onReorderBoardColumns,
-}: SettingsPaneProps) {
+}: BoardPaneProps) {
   return (
     <>
       {/* Board columns. Clones move between them by drag on the board itself; the columns
@@ -70,7 +116,7 @@ export function BoardPane({
 
 /** Layout: the named monitor arrangements the viewer switches between. Applies the moment
  *  it is saved. */
-export function LayoutPane({ draft, onDraftChange }: SettingsPaneProps) {
+export function LayoutPane({ draft, onDraftChange }: LayoutPaneProps) {
   return (
     <>
       <Section
@@ -93,7 +139,7 @@ export function PresetsPane({
   draft,
   onDraftChange,
   accounts,
-}: SettingsPaneProps) {
+}: PresetsPaneProps) {
   return (
     <>
       {/* Layer a: the shared operating memory EVERY agent reads as its native global rules
@@ -159,7 +205,7 @@ export function LlmPane({
   onImportAccount,
   onTestJudge,
   judgeTestMessage,
-}: SettingsPaneProps) {
+}: LlmPaneProps) {
   return (
     <>
       {/* One pool list for both providers: members may mix Claude and Codex accounts.
@@ -230,7 +276,7 @@ export function ServerPane({
   onRestartServer,
   testMessage,
   onTestDocker,
-}: SettingsPaneProps) {
+}: ServerPaneProps) {
   // Whether the ports-and-directories block is expanded. Ephemeral: it is not part of the
   // form, nothing outside this pane reads it, and it resets every time the pane is left.
 

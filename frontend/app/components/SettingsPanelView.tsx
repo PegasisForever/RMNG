@@ -22,7 +22,6 @@ import {
   LlmPane,
   PresetsPane,
   ServerPane,
-  type SettingsPaneProps,
 } from "~/components/SettingsPanes";
 import type { AcctOrder } from "~/lib/accountOrder";
 import type { BoardColumn } from "~/lib/board";
@@ -106,34 +105,41 @@ export interface SettingsPanelViewProps {
   onReorderBoardColumns?: (columnIds: string[]) => void;
 }
 
-/** The pane each category draws. Keyed rather than switched, so adding a category is a line
- *  here and a line in `SETTINGS_CATEGORIES`. */
-const PANES: Record<
-  SettingsCategory,
-  React.ComponentType<SettingsPaneProps>
-> = {
-  board: BoardPane,
-  layout: LayoutPane,
-  presets: PresetsPane,
-  llm: LlmPane,
-  server: ServerPane,
-};
+/** Per-category panes render in `renderPane` below, which assembles each pane's narrow props. */
 
 export function SettingsPanelView(props: SettingsPanelViewProps) {
   const {
     draft,
+    onDraftChange,
     category,
     onCategoryChange,
     accounts,
     accountOrder,
+    onImportAccount,
     error,
     restartRequired,
     saving,
     saved,
     onSave,
     onClose,
+    serverStatus,
+    serverMessage,
+    updateOperation,
+    updateDisabled,
+    onCheckUpdate,
+    onUpdateServer,
     onRestartServer,
+    testMessage,
+    onTestDocker,
+    judgeTestMessage,
+    onTestJudge,
     boardColumns,
+    boardColumnCounts,
+    onAddBoardColumn,
+    onRenameBoardColumn,
+    onSetBoardColumnArchive,
+    onDeleteBoardColumn,
+    onReorderBoardColumns,
   } = props;
 
   // Escape closes. Stacked: the import modal opens ON TOP of this panel (z-60 over z-50),
@@ -147,7 +153,63 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
     (c) => c.id !== "board" || !!boardColumns,
   );
   const active = categories.find((c) => c.id === category) ?? categories[0];
-  const Pane = PANES[active.id];
+
+  // Each pane declares only the fields it renders; this switch assembles each pane's props from the panel's. Adding a field used by one pane touches the container, one branch here, and that pane — not all five panes. Adding a category is a branch here and a line in `SETTINGS_CATEGORIES`.
+  function renderPane(loaded: SettingsDraft) {
+    switch (active.id) {
+      case "board":
+        return (
+          <BoardPane
+            draft={loaded}
+            onDraftChange={onDraftChange}
+            boardColumns={boardColumns}
+            boardColumnCounts={boardColumnCounts}
+            onAddBoardColumn={onAddBoardColumn}
+            onRenameBoardColumn={onRenameBoardColumn}
+            onSetBoardColumnArchive={onSetBoardColumnArchive}
+            onDeleteBoardColumn={onDeleteBoardColumn}
+            onReorderBoardColumns={onReorderBoardColumns}
+          />
+        );
+      case "layout":
+        return <LayoutPane draft={loaded} onDraftChange={onDraftChange} />;
+      case "presets":
+        return (
+          <PresetsPane
+            draft={loaded}
+            onDraftChange={onDraftChange}
+            accounts={accounts}
+          />
+        );
+      case "llm":
+        return (
+          <LlmPane
+            draft={loaded}
+            onDraftChange={onDraftChange}
+            rows={orderedAccounts(accounts, accountOrder)}
+            onImportAccount={onImportAccount}
+            onTestJudge={onTestJudge}
+            judgeTestMessage={judgeTestMessage}
+          />
+        );
+      case "server":
+        return (
+          <ServerPane
+            draft={loaded}
+            onDraftChange={onDraftChange}
+            serverStatus={serverStatus}
+            serverMessage={serverMessage}
+            updateOperation={updateOperation}
+            updateDisabled={updateDisabled}
+            onCheckUpdate={onCheckUpdate}
+            onUpdateServer={onUpdateServer}
+            onRestartServer={onRestartServer}
+            testMessage={testMessage}
+            onTestDocker={onTestDocker}
+          />
+        );
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
@@ -193,18 +255,14 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
                 </div>
               ) : null}
 
-            {/* One pane scrolls, not the whole panel, so the rail stays put while a long
+              {/* One pane scrolls, not the whole panel, so the rail stays put while a long
                 section (the two prompts, the preset list) runs past the bottom edge. The
                 first section drops its rule: it would sit right under the rail's top border
                 and read as a doubled line. */}
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5 [&>section:first-child]:border-t-0 [&>section:first-child]:pt-0">
-              <Pane
-                {...props}
-                draft={draft}
-                rows={orderedAccounts(accounts, accountOrder)}
-              />
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5 [&>section:first-child]:border-t-0 [&>section:first-child]:pt-0">
+                {renderPane(draft)}
+              </div>
             </div>
-          </div>
           </div>
         ) : (
           <p className="flex-1 py-8 text-center text-sm text-slate-400 dark:text-slate-500">
