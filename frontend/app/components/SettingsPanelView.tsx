@@ -10,7 +10,6 @@
 //
 // This file owns the panel's frame: the header, the two banners, the rail, and the footer.
 // Which sections make up a category is `SettingsPanes`, and the rail's list is `SettingsNav`.
-import { X } from "lucide-react";
 
 import {
   SETTINGS_CATEGORIES,
@@ -154,52 +153,45 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
       {/* Backdrop is inert — clicking it must not close the panel, only the ✕/Cancel
           buttons and Escape (handled above) do. */}
       <div className="flex max-h-[90vh] h-[42rem] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl">
-        {/* Header and banners sit outside the pane, so the rail starts under them and a save
-            error stays on screen whichever category it came from. */}
-        <div className="flex items-center justify-between px-5 pt-4 pb-2">
-          <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-            Settings
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded p-1 text-slate-400 dark:text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-600 dark:hover:text-slate-300"
-            aria-label="Close"
-          >
-            <X className="size-4" />
-          </button>
-        </div>
-
-        {error ? (
-          <div className="mx-5 mb-2 rounded border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-400">
-            {error}
-          </div>
-        ) : null}
-
-        {restartRequired ? (
-          <div className="mx-5 mb-2 flex items-center gap-3 rounded border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-400">
-            <span>
-              Changed port/socket/video settings need a restart to apply.
-            </span>
-            <button
-              type="button"
-              onClick={onRestartServer}
-              className="rounded border border-amber-400 dark:border-amber-700 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
-            >
-              Restart control-server
-            </button>
-          </div>
-        ) : null}
-
         {draft ? (
-          // Rail beside pane on a desktop-width panel, rail above pane on a phone, where a
-          // 11rem column would leave the fields too narrow to type in.
-          <div className="flex min-h-0 flex-1 flex-col border-t border-slate-100 dark:border-slate-800 sm:flex-row">
-            <SettingsNav
-              categories={categories}
-              active={active.id}
-              onSelect={onCategoryChange}
-            />
+          // No title bar: the heading lives atop the left column over the rail, and the
+          // footer Close (plus Escape) is the way out. Rail beside pane on a
+          // desktop-width panel, rail above pane on a phone, where a 11rem column would
+          // leave the fields too narrow to type in.
+          <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+            <div className="shrink-0 border-b border-slate-100 dark:border-slate-800 sm:w-44 sm:border-b-0 sm:border-r">
+              <h2 className="px-4 pt-4 pb-1 text-base font-semibold text-slate-900 dark:text-slate-100">
+                Settings
+              </h2>
+              <SettingsNav
+                categories={categories}
+                active={active.id}
+                onSelect={onCategoryChange}
+              />
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col">
+              {/* Banners sit atop the pane column, so a save error stays on screen
+                  whichever category it came from. */}
+              {error ? (
+                <div className="mx-5 mt-4 rounded border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-400">
+                  {error}
+                </div>
+              ) : null}
+              {restartRequired ? (
+                <div className="mx-5 mt-4 flex items-center gap-3 rounded border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-400">
+                  <span>
+                    Changed port/socket/video settings need a restart to apply.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={onRestartServer}
+                    className="rounded border border-amber-400 dark:border-amber-700 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                  >
+                    Restart control-server
+                  </button>
+                </div>
+              ) : null}
+
             {/* One pane scrolls, not the whole panel, so the rail stays put while a long
                 section (the two prompts, the preset list) runs past the bottom edge. The
                 first section drops its rule: it would sit right under the rail's top border
@@ -211,6 +203,7 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
                 rows={orderedAccounts(accounts, accountOrder)}
               />
             </div>
+          </div>
           </div>
         ) : (
           <p className="flex-1 py-8 text-center text-sm text-slate-400 dark:text-slate-500">
