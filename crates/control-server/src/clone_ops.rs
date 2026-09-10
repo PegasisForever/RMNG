@@ -161,6 +161,20 @@ pub(crate) fn split_group_binding(
 /// zero groups is removed (the group tree's rule) — the existing per-provider delete path
 /// settles clones onto surviving accounts, and refuses (Err) when a clone pins the account,
 /// which fails the save with that reason instead of stranding the pin.
+/// Reject a binding to a pool that does not exist. Without this a typo'd group would
+/// resolve to nothing and the clone would sit tokenless with no error anywhere — the
+/// rotator skips unknown groups silently by design (it cannot tell a deleted pool from a
+/// config that failed to load).
+pub(crate) fn validate_group(app: &App, group: Option<&str>) -> anyhow::Result<()> {
+    if let Some(name) = group {
+        anyhow::ensure!(
+            app.config().groups.iter().any(|g| g.name == name),
+            "unknown account pool {name:?}"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn sweep_ungrouped_accounts(app: &App) -> anyhow::Result<()> {
     use std::collections::HashSet;
     let claimed: HashSet<String> = app

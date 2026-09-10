@@ -42,13 +42,13 @@ claudeAccountEmail: string | null,
  */
 claudeGroup: string | null, 
 /**
- * The operator's Claude *selection* verbatim: `"auto"`, `"none"`, or an account
- * email. Distinguishes an auto-managed clone (server picks the best account and may
- * hot-swap it) from one pinned to a fixed account or opted out of a token entirely —
- * `claude_account_email` alone can't tell these apart. Group binding moved to the
- * shared [`RmngClone::group`]: with a group set, an `"auto"` selection resolves
- * inside it. `None` on clones created before this field / when no Claude account is
- * configured.
+ * The operator's Claude *selection*: `"auto"` or an account email (a pin — any
+ * imported account, even outside the clone's group). Distinguishes an auto-managed
+ * clone (server picks the best account in scope and may hot-swap it) from one pinned
+ * to a fixed account — `claude_account_email` alone can't tell these apart. Group
+ * binding moved to the shared [`RmngClone::group`]: with a group set, an `"auto"`
+ * selection resolves inside it, otherwise fleet-wide. Legacy `"none"`/`"group:<name>"`
+ * values migrate to `"auto"` (+ `group`) on load.
  */
 claudeSelection: string | null, 
 /**
@@ -63,9 +63,8 @@ codexAccountEmail: string | null,
  */
 codexGroup: string | null, 
 /**
- * The operator's Codex *selection* verbatim: `"auto"`, `"none"`, or an account
- * email — the Codex twin of `claude_selection`. Group binding is shared (see
- * [`RmngClone::group`]).
+ * The operator's Codex *selection*: `"auto"` or an account email (a pin) — the
+ * Codex twin of `claude_selection`. Group binding is shared (see [`RmngClone::group`]).
  */
 codexSelection: string | null, 
 /**

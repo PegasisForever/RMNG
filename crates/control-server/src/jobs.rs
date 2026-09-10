@@ -54,8 +54,8 @@ pub struct CloneSpec {
     pub source_image: String,
     pub new_hostname: String,
     pub linear: Option<LinearMeta>,
-    /// Requested Claude account: an email, `"auto"`, `"none"`, `"group:<name>"`, or `None`
-    /// (= auto).
+    /// Requested Claude account: an email (pin), `"auto"`, legacy `"group:<name>"`
+    /// (binds the pool), or `None` (= auto).
     pub claude_account: Option<String>,
     /// Requested Codex account, same forms. Independent of `claude_account` — a clone can
     /// hold both.
@@ -343,6 +343,16 @@ pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
             "new hostname must be a DNS label (lowercase letters, digits, hyphens)".into(),
         ));
     }
+    // Fail fast on a pool that does not exist (the rotator would otherwise leave the
+    // clone tokenless with no error anywhere).
+    let (pre_group, _, _) = crate::clone_ops::split_group_binding(
+        spec.claude_account.clone(),
+        spec.codex_account.clone(),
+        None,
+        None,
+    );
+    crate::clone_ops::validate_group(app, pre_group.as_deref())
+        .map_err(|e| JobError(e.to_string()))?;
     let st = app.store.get();
     if st.hosts.iter().any(|h| h.id == spec.new_hostname) {
         return Err(JobError(format!(
@@ -477,8 +487,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     // resolved account are COLLECTED into locals here and baked into the Host at the terminal
     // add below (there is no host in `s.hosts` yet); the token itself is installed into the
     // clone's ~/.claude/.credentials.json now (the server refreshes + re-pushes it thereafter).
-    // A group-bound clone records its group; the rotator re-balances it. "none" installs no
-    // token AND strips any credentials the image carried, so the clone boots provably tokenless.
+    // A group-bound clone records its group; the rotator re-balances it. A side that
+    // resolves to nothing (pending auto) strips any credentials the image carried.
     // One group for both sides: legacy `group:<name>` picks in either account field bind
     // the clone once (see `split_group_binding`); both `auto` sides then resolve inside it.
     let (bound_group, claude_req, codex_req) = crate::clone_ops::split_group_binding(
@@ -497,38 +507,30 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         bound_group.as_deref(),
     ) {
         let selection = crate::claude::normalize_selection(claude_req.as_deref());
-        let (group, account, pending_auto) = match assignment {
-            crate::claude::Assignment::Group { name, initial } => {
-                (Some(name), Some(initial), false)
-            }
-            crate::claude::Assignment::Account(a) => (None, Some(a), false),
-            crate::claude::Assignment::AutoPending => (None, None, true),
-            crate::claude::Assignment::None => (None, None, false),
+        let (group, account) = match assignment {
+            crate::claude::Assignment::Group { name, initial } => (Some(name), Some(initial)),
+            crate::claude::Assignment::Account(a) => (None, Some(a)),
+            crate::claude::Assignment::AutoPending => (None, None),
         };
         claude_selection = Some(selection);
         claude_account_email = account.clone();
         claude_group = group.clone();
         match account {
-            None if pending_auto => {
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push("account: auto (pending imported account)".into())
-                });
-            }
             None => {
-                // Explicit "none": strip any credentials the image carried so the clone
-                // boots tokenless, instead of trusting the template to be clean. Idempotent
-                // (`rm -f`), so a clean image just reports "cleared". Best-effort like the
-                // assign arm — a failure is logged, not fatal to the clone create.
+                // Pending: no account can take this side yet. Strip any credentials the
+                // image carried so the clone boots tokenless instead of running on
+                // unknown ones. Idempotent (`rm -f`); best-effort like the assign arm —
+                // a failure is logged, not fatal to the clone create.
                 match crate::claude::clear_clone_token(&app, &spec.new_hostname).await {
                     Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push("account: none (credentials cleared)".into())
+                        op.log.push("account: auto (pending imported account)".into())
                     }),
                     Err(e) => {
                         tracing::warn!("clear_clone_token({}) failed: {e}", spec.new_hostname);
                         patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("account: none — failed to clear credentials: {e}"))
+                            op.log.push(format!(
+                                "account: auto (pending) — failed to clear credentials: {e}"
+                            ))
                         });
                     }
                 }
@@ -568,28 +570,20 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         bound_group.as_deref(),
     ) {
         let selection = crate::codex::normalize_selection(codex_req.as_deref());
-        let (group, account, pending_auto) = match assignment {
-            crate::codex::Assignment::Group { name, initial } => (Some(name), Some(initial), false),
-            crate::codex::Assignment::Account(a) => (None, Some(a), false),
-            crate::codex::Assignment::AutoPending => (None, None, true),
-            crate::codex::Assignment::None => (None, None, false),
+        let (group, account) = match assignment {
+            crate::codex::Assignment::Group { name, initial } => (Some(name), Some(initial)),
+            crate::codex::Assignment::Account(a) => (None, Some(a)),
+            crate::codex::Assignment::AutoPending => (None, None),
         };
         codex_selection = Some(selection);
         codex_account_email = account.clone();
         codex_group = group.clone();
         match account {
-            None if pending_auto => {
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push("codex account: auto (pending imported account)".into())
-                });
-            }
             None => {
-                // Explicit "none": strip any codex auth the image carried (see the Claude block).
+                // Pending: no account can take this side yet (see the Claude block).
                 match crate::codex::clear_clone_token(&app, &spec.new_hostname).await {
                     Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log
-                            .push("codex account: none (credentials cleared)".into())
+                        op.log.push("codex account: auto (pending imported account)".into())
                     }),
                     Err(e) => {
                         tracing::warn!(
@@ -598,7 +592,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
                         );
                         patch_op(&app, &op_id, |op| {
                             op.log.push(format!(
-                                "codex account: none — failed to clear credentials: {e}"
+                                "codex account: auto (pending) — failed to clear credentials: {e}"
                             ))
                         });
                     }
@@ -1039,6 +1033,15 @@ pub fn start_fork(app: &App, spec: ForkSpec) -> Result<Operation, JobError> {
             "'{source_id}' is not a gen-2 clone (no base tag)"
         )));
     }
+    // Fail fast on a pool that does not exist (see the create path).
+    let (pre_group, _, _) = crate::clone_ops::split_group_binding(
+        spec.claude_account.clone(),
+        spec.codex_account.clone(),
+        src.group.clone(),
+        spec.group.clone(),
+    );
+    crate::clone_ops::validate_group(app, pre_group.as_deref())
+        .map_err(|e| JobError(e.to_string()))?;
     if !is_dns_label(new_id) {
         return Err(JobError(
             "new hostname must be a DNS label (lowercase letters, digits, hyphens)".into(),
@@ -1134,34 +1137,30 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
             src.claude_account_email.as_deref(),
             bound_group.as_deref(),
         ) {
-            let (group, account, pending_auto) = match assignment {
+            let (group, account) = match assignment {
                 crate::claude::Assignment::Group { name, initial } => {
-                    (Some(name), Some(initial), false)
+                    (Some(name), Some(initial))
                 }
-                crate::claude::Assignment::Account(a) => (None, Some(a), false),
-                crate::claude::Assignment::AutoPending => (None, None, true),
-                crate::claude::Assignment::None => (None, None, false),
+                crate::claude::Assignment::Account(a) => (None, Some(a)),
+                crate::claude::Assignment::AutoPending => (None, None),
             };
             claude_selection = Some(selection);
             claude_account_email = account.clone();
             claude_group = group.clone();
             match account {
-                None if pending_auto => patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push("account: auto (pending imported account)".into())
-                }),
                 None => match crate::claude::clear_clone_token(&app, &new_id).await {
                     Ok(()) => {
                         app.claude.forget_pushed(&new_id);
                         patch_op(&app, &op_id, |op| {
-                            op.log.push("account: none (credentials cleared)".into())
+                            op.log.push("account: auto (pending imported account)".into())
                         })
                     }
                     Err(e) => {
                         tracing::warn!("fork {new_id}: clear_clone_token failed: {e}");
                         patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("account: none — failed to clear credentials: {e}"))
+                            op.log.push(format!(
+                                "account: auto (pending) — failed to clear credentials: {e}"
+                            ))
                         });
                     }
                 },
@@ -1208,35 +1207,29 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
             src.codex_account_email.as_deref(),
             bound_group.as_deref(),
         ) {
-            let (group, account, pending_auto) = match assignment {
+            let (group, account) = match assignment {
                 crate::codex::Assignment::Group { name, initial } => {
-                    (Some(name), Some(initial), false)
+                    (Some(name), Some(initial))
                 }
-                crate::codex::Assignment::Account(a) => (None, Some(a), false),
-                crate::codex::Assignment::AutoPending => (None, None, true),
-                crate::codex::Assignment::None => (None, None, false),
+                crate::codex::Assignment::Account(a) => (None, Some(a)),
+                crate::codex::Assignment::AutoPending => (None, None),
             };
             codex_selection = Some(selection);
             codex_account_email = account.clone();
             codex_group = group.clone();
             match account {
-                None if pending_auto => patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push("codex account: auto (pending imported account)".into())
-                }),
                 None => match crate::codex::clear_clone_token(&app, &new_id).await {
                     Ok(()) => {
                         app.codex.forget_pushed(&new_id);
                         patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push("codex account: none (credentials cleared)".into())
+                            op.log.push("codex account: auto (pending imported account)".into())
                         })
                     }
                     Err(e) => {
                         tracing::warn!("fork {new_id}: codex clear failed: {e}");
                         patch_op(&app, &op_id, |op| {
                             op.log.push(format!(
-                                "codex account: none — failed to clear credentials: {e}"
+                                "codex account: auto (pending) — failed to clear credentials: {e}"
                             ))
                         });
                     }
@@ -2064,8 +2057,8 @@ mod tests {
 
     #[test]
     fn clonespec_default_requests_no_account() {
-        // `Default` leaves both selections absent, which the account layer reads as "auto" —
-        // NOT as "none". A clone created with no explicit account still gets one.
+        // `Default` leaves both selections absent, which the account layer reads as "auto".
+        // A clone created with no explicit account still gets one (when accounts exist).
         let spec = CloneSpec {
             new_hostname: "x".into(),
             ..Default::default()

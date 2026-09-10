@@ -736,9 +736,11 @@ wholesale):
     "displayName": "…",      // the only name field; plain forks send just this
     "label": "…"
   },
-  "claudeAccount": "a@b.com", // account selection override: email, "auto",
-                                // "none", or "group:<pool>"
+  "claudeAccount": "a@b.com", // account selection override: email (pin) or "auto";
+                                // legacy "group:<pool>" rebinds the pool
   "codexAccount": "a@b.com",  // the Codex twin, same forms
+  "group": "team",          // pool binding override: name binds, null unbinds to
+                                // any-group scope, omitted inherits the source
   "firstMessage": "do X",     // first agent message; omitted ⇒ none sent
   "agentInstructions": "...",
   "claudeInstructions": "..."
@@ -1007,14 +1009,14 @@ up. The server re-pushes a fresh token to every clone on the account whenever a 
 their credential file per request, so every push is a **hot swap** — no restart, no interrupted
 turn.
 
-A clone's binding is six optional fields on its `Clone` row, three per provider and fully
-independent (one clone can run both, one, or neither):
-
-| Field | Holds |
-| --- | --- |
-| `claudeSelection` / `codexSelection` | the operator's intent **verbatim**: an email, `auto`, `none`, or `group:<pool>` |
-| `claudeAccountEmail` / `codexAccountEmail` | the account currently resolved from that selection — whose token is installed right now |
-| `claudeGroup` / `codexGroup` | the pool the clone is being balanced within, when the selection is `group:<pool>` |
+A clone's binding is its pool plus two optional pins: `group` names one configured pool
+(or is absent for any-group scope — the clone draws from every pool), and each side resolves
+in scope when `auto`, or stays fixed when pinned to an email (any imported account, even
+outside the pool). The row keeps, per provider, the verbatim selection (`claudeSelection` /
+`codexSelection`: `auto` or an email), the currently resolved account
+(`claudeAccountEmail` / `codexAccountEmail` — whose token is installed right now), and the
+sticky pool each side's pick came from (`claudeGroup` / `codexGroup`). A side with no pin
+and no provider members in scope runs with no token — there is no explicit tokenless state.
 
 The selection is kept apart from the resolved account because the two answer different questions:
 `claudeAccountEmail` alone can't distinguish an auto-managed clone (the server may hot-swap it) from
@@ -1051,14 +1053,14 @@ sets differ only in which store and credential file they touch.
 | `POST /api/login/begin` | `{provider}` | `{url}` | Mint a PKCE verifier and return the provider's authorize URL. Nothing is stored against an account yet, and the sign-in expires after 15 minutes if its callback never comes back |
 | `POST /api/login/complete` | `{provider, pasted, group}` | `{ok, email}` | Redeem the pasted callback, store the account, and add it to `group` (empty for none). Kicks an immediate usage poll |
 | `POST /api/{claude,codex}/refresh` | — | `{ok, rateLimited, rotated}` | Force one usage poll now, then a rotation pass. `rateLimited` is true if any account hit a 429 |
-| `POST /api/{claude,codex}/swap` | `{host, account}` | `{ok, account, group, selection}` | Change a clone's selection. `account` is the verbatim selection; the reply echoes the resolved account + pool + normalized selection |
+| `POST /api/{claude,codex}/swap` | `{host, account, group?}` | `{ok, account, group, selection}` | Change a clone's selection. `account` is `auto` or an email pin; `group` binds (name), unbinds (null), or keeps (absent) the pool; the reply echoes the resolved account + pool + normalized selection |
 | `POST /api/{claude,codex}/delete` | `{account}` | `{ok, moved}` | Remove an imported account by email. `moved` is the ids of clones reassigned off it |
 | `POST /api/{claude,codex}/rotate` | — | `{ok}` | Run one pool-rotation pass immediately (it otherwise runs every 10 min). Ops/testing |
 
-**Swap** resolves the selection and acts immediately: `none` deletes the clone's credential file
-(leaving it tokenless), a pool picks a member — stickily, keeping the incumbent account when it is
-already an eligible member of the target pool — and an email or `auto` resolves a single account,
-whose token is pushed before the row is updated. `400` for an unknown or unmanaged host, or when
+**Swap** resolves the selection and acts immediately: a pool (or the `group` field) picks a
+member — stickily, keeping the incumbent account when it is already an eligible member of the
+target pool — and an email pin or `auto` resolves a single account, whose token is pushed before
+the row is updated. `400` for an unknown or unmanaged host, an unknown pool, or when
 the provider has no imported accounts at all; `502` when the push to the clone fails.
 
 **Delete** refuses with `400` while any clone is **pinned** to that account (the message lists

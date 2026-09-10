@@ -2359,7 +2359,8 @@ async fn refresh_response(
 #[derive(Deserialize)]
 struct SwapReq {
     host: String,
-    /// Account email, `auto`, `none`, or `group:<name>`.
+    /// Account email (a pin — any imported account, even outside the clone's pool),
+    /// `auto` (rotate in scope), or legacy `group:<name>` (rebinds the pool).
     account: String,
     /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent keeps.
     /// A `group:<name>` account implies the bind.
@@ -2367,9 +2368,10 @@ struct SwapReq {
     group: Option<Option<String>>,
 }
 
-/// `POST /api/claude/swap` — change a clone's Claude account/group. `account` is an
-/// email, `auto`, `group:<name>`, or `none`. Binding to a group enrolls the clone in
-/// rotation; `none` removes the clone's credentials so it runs with no token.
+/// `POST /api/claude/swap` — change a clone's Claude account/pool. `account` is an
+/// email (pin), `auto` (rotate in the clone's pool, or fleet-wide when unbound), or legacy
+/// `group:<name>` (rebinds the pool). Binding to a pool enrolls the clone in rotation; a
+/// side with no pin and no provider members in scope runs with no token.
 async fn claude_swap(
     State(app): State<App>,
     Json(req): Json<SwapReq>,
@@ -2401,6 +2403,8 @@ async fn claude_swap(
         host.group.clone(),
         req.group.clone(),
     );
+    crate::clone_ops::validate_group(&app, bound_group.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let assignment = crate::claude::resolve_assignment(
         &app,
         claude_req.as_deref(),
@@ -2417,13 +2421,6 @@ async fn claude_swap(
     })?;
     let selection = crate::claude::normalize_selection(claude_req.as_deref());
     let (group, email) = match assignment {
-        crate::claude::Assignment::None => {
-            crate::claude::clear_clone_token(&app, &host.id)
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-            app.claude.forget_pushed(&host.id);
-            (None, None)
-        }
         crate::claude::Assignment::Group { name, initial } => {
             crate::claude::push_account_to_clone(&app, &host.id, &initial)
                 .await
@@ -2496,7 +2493,7 @@ async fn codex_refresh(State(app): State<App>) -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct CodexSwapReq {
     host: String,
-    /// Account email, `auto`, `none`, or `group:<name>`.
+    /// Account email (a pin), `auto` (rotate in scope), or legacy `group:<name>`.
     account: String,
     /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent keeps.
     /// A `group:<name>` account implies the bind.
@@ -2533,6 +2530,8 @@ async fn codex_swap(
         host.group.clone(),
         req.group.clone(),
     );
+    crate::clone_ops::validate_group(&app, bound_group.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let assignment = crate::codex::resolve_assignment(
         &app,
         codex_req.as_deref(),
@@ -2549,13 +2548,6 @@ async fn codex_swap(
     })?;
     let selection = crate::codex::normalize_selection(codex_req.as_deref());
     let (group, email) = match assignment {
-        crate::codex::Assignment::None => {
-            crate::codex::clear_clone_token(&app, &host.id)
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-            app.codex.forget_pushed(&host.id);
-            (None, None)
-        }
         crate::codex::Assignment::Group { name, initial } => {
             crate::codex::push_account_to_clone(&app, &host.id, &initial)
                 .await
@@ -2879,6 +2871,22 @@ mod tests {
         assert_eq!(mixed.codex_selection.as_deref(), Some("auto"));
         assert_eq!(mixed.codex_group, None);
         assert_eq!(mixed.claude_selection.as_deref(), Some("me@x.com"));
+    }
+
+    #[test]
+    fn binding_to_an_unknown_pool_is_rejected() {
+        let app = test_app();
+        *app.cfg.write().unwrap() = wire::AppConfig {
+            groups: vec![wire::CloneGroup {
+                name: "team".into(),
+                accounts: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        assert!(crate::clone_ops::validate_group(&app, Some("team")).is_ok());
+        assert!(crate::clone_ops::validate_group(&app, None).is_ok());
+        let err = crate::clone_ops::validate_group(&app, Some("typo")).unwrap_err();
+        assert!(err.to_string().contains("typo"), "err: {err}");
     }
 
     #[tokio::test]

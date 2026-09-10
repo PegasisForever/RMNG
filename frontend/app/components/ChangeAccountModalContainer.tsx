@@ -17,22 +17,21 @@ export function currentGroup(clone: Clone): string | null {
   return clone.group ?? clone.claudeGroup ?? clone.codexGroup ?? null;
 }
 
-/** Current side selection ("auto", "none", or an email). A legacy `group:<name>`
- *  selection reads as "auto" — the group half of that binding now lives in
- *  {@link currentGroup}. A legacy clone with no account is effectively tokenless, so
- *  showing "none" lets choosing "auto" submit the swap that enrolls it in rotation. */
+/** Current side selection ("auto" or an email). A legacy `group:<name>` selection reads
+ *  as "auto" — the group half of that binding now lives in {@link currentGroup} — and so
+ *  does a legacy `"none"` (no tokenless state anymore; the side resolves in scope). */
 export function currentValue(clone: Clone): string {
   const sel = clone.claudeSelection ??
     (clone.claudeGroup ? `group:${clone.claudeGroup}` : undefined);
-  if (!sel) return clone.claudeAccountEmail ?? "none";
-  return sel.startsWith("group:") ? "auto" : sel;
+  if (!sel) return clone.claudeAccountEmail ?? "auto";
+  return sel.startsWith("group:") || sel === "none" ? "auto" : sel;
 }
 
 export function currentCodexValue(clone: Clone): string {
   const sel = clone.codexSelection ??
     (clone.codexGroup ? `group:${clone.codexGroup}` : undefined);
-  if (!sel) return clone.codexAccountEmail ?? "none";
-  return sel.startsWith("group:") ? "auto" : sel;
+  if (!sel) return clone.codexAccountEmail ?? "auto";
+  return sel.startsWith("group:") || sel === "none" ? "auto" : sel;
 }
 
 export function ChangeAccountModalContainer({

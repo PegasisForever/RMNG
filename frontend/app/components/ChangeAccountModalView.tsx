@@ -39,7 +39,7 @@ export function ChangeAccountModalView({
   codexAccounts: ClaudeUsage[];
   /** The bound pool name, or null for no pool. */
   groupValue: string | null;
-  /** "auto", "none", or an email. */
+  /** "auto" (rotate in scope) or an email (pin). */
   claudeValue: string;
   codexValue: string;
   /** A swap is in flight. */
@@ -69,7 +69,7 @@ export function ChangeAccountModalView({
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
           Pick a pool (both sides draw from it), then per side an account: auto rotates
-          inside the pool, a single account pins it, “none” removes this clone’s token.
+          inside the pool, a single account pins it — even one outside the pool.
         </p>
 
         <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
@@ -79,7 +79,7 @@ export function ChangeAccountModalView({
             onChange={(e) => onGroupChange(e.target.value || null)}
             className={select}
           >
-            <option value="">None (no pool)</option>
+            <option value="">Any group (all pools)</option>
             {groups.map((g) => (
               <option key={g.name} value={g.name}>
                 {g.name} ({g.accounts.length})

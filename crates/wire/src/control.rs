@@ -194,13 +194,13 @@ pub struct RmngClone {
     /// set, `claude_account_email` holds the current pick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_group: Option<String>,
-    /// The operator's Claude *selection* verbatim: `"auto"`, `"none"`, or an account
-    /// email. Distinguishes an auto-managed clone (server picks the best account and may
-    /// hot-swap it) from one pinned to a fixed account or opted out of a token entirely —
-    /// `claude_account_email` alone can't tell these apart. Group binding moved to the
-    /// shared [`RmngClone::group`]: with a group set, an `"auto"` selection resolves
-    /// inside it. `None` on clones created before this field / when no Claude account is
-    /// configured.
+    /// The operator's Claude *selection*: `"auto"` or an account email (a pin — any
+    /// imported account, even outside the clone's group). Distinguishes an auto-managed
+    /// clone (server picks the best account in scope and may hot-swap it) from one pinned
+    /// to a fixed account — `claude_account_email` alone can't tell these apart. Group
+    /// binding moved to the shared [`RmngClone::group`]: with a group set, an `"auto"`
+    /// selection resolves inside it, otherwise fleet-wide. Legacy `"none"`/`"group:<name>"`
+    /// values migrate to `"auto"` (+ `group`) on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_selection: Option<String>,
     /// Email of the imported Codex (ChatGPT) account whose token is written into this
@@ -212,9 +212,8 @@ pub struct RmngClone {
     /// `None` when bound to a single fixed Codex account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_group: Option<String>,
-    /// The operator's Codex *selection* verbatim: `"auto"`, `"none"`, or an account
-    /// email — the Codex twin of `claude_selection`. Group binding is shared (see
-    /// [`RmngClone::group`]).
+    /// The operator's Codex *selection*: `"auto"` or an account email (a pin) — the
+    /// Codex twin of `claude_selection`. Group binding is shared (see [`RmngClone::group`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_selection: Option<String>,
     /// Name of the single account pool this clone draws BOTH providers' accounts from

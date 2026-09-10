@@ -30,7 +30,7 @@ const meta = {
     ...makeAccountLists(),
     groupValue: null,
     claudeValue: "alex@example.com",
-    codexValue: "none",
+    codexValue: "auto",
     busy: false,
     onGroupChange: fn(),
     onClaudeValueChange: fn(),
@@ -56,7 +56,7 @@ export const BoundToPool: Story = {
 /** No Codex accounts and no Codex pools configured. The second picker disappears and the
  *  heading narrows to the one provider this rig actually has. */
 export const ClaudeOnly: Story = {
-  args: { ...makeAccountLists(), codexAccounts: [], groups: [], codexValue: "none" },
+  args: { ...makeAccountLists(), codexAccounts: [], groups: [], codexValue: "auto" },
 };
 
 /** A clone holding both providers at once, which is what the sub-clone helpers usually look

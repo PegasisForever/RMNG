@@ -894,14 +894,14 @@ async fn poll_inner(app: &App) -> Result<bool> {
 // --- scoring + assignment (clone-accounts.server.ts) ----------------------
 
 const AUTO: &str = "auto";
-/// Selection sentinel: install no token at all (leave the clone tokenless).
-const NONE: &str = "none";
 
-/// Canonicalize a raw account-selection string into its stored form: `"auto"`,
-/// `"none"`, `"group:<name>"`, or an account email. Missing/blank → `"auto"`.
+/// Canonicalize a raw account-selection string into its stored form: `"auto"` or an
+/// account email. Missing/blank → `"auto"`; a legacy `"none"` (retired: there is no
+/// explicit tokenless state anymore — a side without a pin and without provider members
+/// in scope simply gets no token) also reads as `"auto"`.
 pub fn normalize_selection(requested: Option<&str>) -> String {
     let want = requested.unwrap_or("").trim();
-    if want.is_empty() {
+    if want.is_empty() || want.eq_ignore_ascii_case("none") {
         AUTO.to_string()
     } else {
         want.to_string()
@@ -997,17 +997,16 @@ pub fn resolve_clone_account(app: &App, requested: Option<&str>) -> Option<Strin
 
 /// What a clone is bound to (accounts by email). `Group` carries the initial pick to
 /// apply right away; `AutoPending` records explicit auto intent before an imported
-/// account exists; `None` means the operator explicitly opted out of a token.
+/// account exists.
 pub enum Assignment {
     Account(String),
     Group { name: String, initial: String },
     AutoPending,
-    None,
 }
 
-/// Resolve a selection string to an [`Assignment`]: `none` → no token, an email /
-/// `auto` → a single account, or — when the selection is `auto`/blank and the clone is
-/// group-bound — a group (with an initial account picked from it). A legacy `group:<name>`
+/// Resolve a selection string to an [`Assignment`]: an email / `auto` → a single
+/// account, or — when the selection is `auto`/blank and the clone is group-bound — a group
+/// (with an initial account picked from it). A legacy `group:<name>`
 /// selection still binds that group (transport compat with old clients); new writers
 /// store `auto` + the clone-level `group` instead. Explicit `auto` without imported
 /// accounts is kept as pending auto; outer `None` means no usable concrete assignment
@@ -1024,9 +1023,7 @@ pub fn resolve_assignment(
     group: Option<&str>,
 ) -> Option<Assignment> {
     let want = requested.unwrap_or("").trim();
-    if want.eq_ignore_ascii_case(NONE) {
-        return Some(Assignment::None);
-    }
+    // A legacy `"none"` falls through to the auto path (no tokenless state anymore).
     // Legacy `group:<name>` selection, or an auto selection on a group-bound clone.
     let group_name = want
         .strip_prefix("group:")
@@ -2464,6 +2461,16 @@ mod tests {
             app.claude.update_account(&stored(m)).unwrap();
         }
         app
+    }
+
+    #[test]
+    fn legacy_none_normalizes_to_auto() {
+        // No tokenless state anymore: "none" reads as auto (lossy — the side resolves
+        // in scope and may now get a token).
+        assert_eq!(normalize_selection(Some("none")), "auto");
+        assert_eq!(normalize_selection(Some("NONE")), "auto");
+        assert_eq!(normalize_selection(None), "auto");
+        assert_eq!(normalize_selection(Some("me@x.com")), "me@x.com");
     }
 
     #[test]

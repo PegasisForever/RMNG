@@ -13,14 +13,16 @@ const clone = (overrides: Partial<Clone> = {}): Clone => ({
   ...overrides,
 });
 
-test("tokenless legacy Claude clone is not treated as already auto", () => {
+test("a legacy clone with no selection seeds as auto (no tokenless state)", () => {
   const h = clone();
 
-  expect(currentValue(h)).toBe("none");
+  expect(currentValue(h)).toBe("auto");
+  expect(currentCodexValue(h)).toBe("auto");
 });
 
-test("tokenless legacy Codex clone is not treated as already auto", () => {
-  const h = clone();
+test("legacy group:/none selections seed as auto, keeping the group", () => {
+  const h = clone({ group: "team", claudeSelection: "group:team", codexSelection: "none" });
 
-  expect(currentCodexValue(h)).toBe("none");
+  expect(currentValue(h)).toBe("auto");
+  expect(currentCodexValue(h)).toBe("auto");
 });

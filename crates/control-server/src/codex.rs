@@ -921,11 +921,12 @@ fn prune_marks(marks: &mut Vec<wire::CodexResetMark>, now_secs: i64) {
 // --- scoring + assignment (mirrors claude.rs) -----------------------------
 
 const AUTO: &str = "auto";
-const NONE: &str = "none";
 
+/// Canonicalize a raw account-selection string — the Codex twin of the Claude rule:
+/// `"auto"` or an account email; blank and legacy `"none"` both read as `"auto"`.
 pub fn normalize_selection(requested: Option<&str>) -> String {
     let want = requested.unwrap_or("").trim();
-    if want.is_empty() {
+    if want.is_empty() || want.eq_ignore_ascii_case("none") {
         AUTO.to_string()
     } else {
         want.to_string()
@@ -1015,7 +1016,6 @@ pub enum Assignment {
     Account(String),
     Group { name: String, initial: String },
     AutoPending,
-    None,
 }
 
 /// `current` is the clone's account now (for a swap); resolving a group makes the pick
@@ -1028,9 +1028,7 @@ pub fn resolve_assignment(
     group: Option<&str>,
 ) -> Option<Assignment> {
     let want = requested.unwrap_or("").trim();
-    if want.eq_ignore_ascii_case(NONE) {
-        return Some(Assignment::None);
-    }
+    // A legacy `"none"` falls through to the auto path (no tokenless state anymore).
     // Legacy `group:<name>` selection, or an auto selection on a group-bound clone —
     // the Codex twin of the Claude rule.
     let group_name = want

@@ -71,13 +71,14 @@ export function makeCloneOffline(overrides: Partial<Clone> = {}): Clone {
   });
 }
 
-/** A managed scratch box deliberately left tokenless (no account installed). */
+/** A managed scratch box with no account: `auto` in an empty scope resolves to nothing,
+ *  so no token is installed (there is no explicit tokenless state anymore). */
 export function makeCloneNoToken(overrides: Partial<Clone> = {}): Clone {
   return makeClone({
     id: "scratch-box",
     host: "10.99.0.20",
     managed: true,
-    claudeSelection: "none",
+    claudeSelection: "auto",
     monitorState: "idle",
     ...overrides,
   });

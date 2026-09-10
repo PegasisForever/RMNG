@@ -244,9 +244,9 @@ export const completeLogin = (
 /** Force an immediate Claude usage poll (refresh tokens + fetch 5h/7d). */
 export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
 
-/** Change a clone's Claude account + pool binding. `account` is "auto", "none", or an
- *  email; `group` binds the whole clone (null unbinds, undefined keeps). `account` in
- *  the reply is null when set to "none". */
+/** Change a clone's Claude account + pool binding. `account` is "auto" (rotate in
+ *  scope) or an email (pin, even outside the pool); `group` binds the whole clone
+ *  (null unbinds to any-group scope, undefined keeps). */
 export const swapClaudeAccount = (clone: string, account: string, group?: string | null) =>
  postJson("/api/claude/swap", { host: clone, account, group }) as Promise<{
   ok: boolean;

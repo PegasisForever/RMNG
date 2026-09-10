@@ -208,6 +208,14 @@ fn migrate_clone_groups(mut state: ControlState) -> ControlState {
             // A side pinned to an email keeps its pin; the group feeds its `auto` side(s).
             h.group = Some(g);
         }
+        // Retired `"none"` (no explicit tokenless state anymore): the side rejoins `auto`
+        // and resolves in scope. Lossy by design — a side whose scope holds provider
+        // accounts gets a token where it previously had none.
+        for sel in [&mut h.claude_selection, &mut h.codex_selection] {
+            if sel.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("none")) {
+                *sel = Some("auto".to_string());
+            }
+        }
     }
     state
 }
@@ -296,6 +304,22 @@ mod tests {
         assert_eq!(pinned.group.as_deref(), Some("team"));
         assert_eq!(pinned.claude_selection.as_deref(), Some("me@x.com"));
         assert_eq!(pinned.codex_selection.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn load_migrates_legacy_none_selections_to_auto() {
+        let mut state = ControlState::default();
+        state.hosts = vec![wire::RmngClone {
+            id: "tokenless".into(),
+            claude_selection: Some("none".into()),
+            codex_selection: Some("NONE".into()),
+            ..Default::default()
+        }];
+        let out = migrate_clone_groups(state);
+        let h = &out.hosts[0];
+        assert_eq!(h.claude_selection.as_deref(), Some("auto"));
+        assert_eq!(h.codex_selection.as_deref(), Some("auto"));
+        assert_eq!(h.group, None);
     }
 
     /// The one thing that makes a downgrade during an outage survivable.

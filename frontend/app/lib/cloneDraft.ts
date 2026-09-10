@@ -46,7 +46,8 @@ export interface CloneDraft {
   claudeAccount: string;
   codexAccount: string;
   /** Pool OVERRIDE, same shape as the account overrides: "" follows the source (omit),
-   *  "none" unbinds (send null), a name binds. Groups are offered but never required. */
+   *  "none" unbinds to any-group scope (send null), a name binds. Groups are offered but
+   *  never required. */
   group: string;
   /** No-ticket tab: the hand-picked preset. The ticket tabs never pick one by hand. */
   plainPreset: string;

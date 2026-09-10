@@ -1,8 +1,9 @@
 // One side's account picker, shared by the clone modal and the per-clone change control.
 // Value is one of: "auto" (rotate — inside the clone's group when bound, fleet-wide
-// otherwise), "none" (install no token), or an account email (pinned, group or not).
-// Group binding moved to its own single picker: a clone binds at most one pool, which
-// feeds both sides.
+// otherwise), or an account email (a pin — any imported account, even outside the
+// clone's pool). There is no tokenless option: a side with no pin and no provider
+// members in scope simply gets no token. Group binding moved to its own single picker:
+// a clone binds at most one pool, which feeds both sides.
 import type { ClaudeUsage } from "~/lib/types";
 
 /** "me@pegasis.site — 5h 12% · 7d 40%" (usage suffix only when known). */
@@ -40,7 +41,6 @@ export function AccountGroupSelect({
     <select value={value} onChange={(e) => onChange(e.target.value)} className={className}>
       {blankLabel ? <option value="">{blankLabel}</option> : null}
       <option value="auto">Auto (all accounts)</option>
-      <option value="none">None (no token)</option>
       {groups && groups.length > 0 ? (
         <optgroup label="Groups">
           {groups.map((g) => (

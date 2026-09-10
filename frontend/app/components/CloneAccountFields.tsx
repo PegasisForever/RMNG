@@ -52,7 +52,7 @@ export function CloneAccountFields({
           <option value="">
             {sourceGroup ? `Source default (group:${sourceGroup})` : "Source default / auto"}
           </option>
-          <option value="none">None (no pool)</option>
+          <option value="none">Any group (all pools)</option>
           {groups.map((g) => (
             <option key={g.name} value={g.name}>
               {g.name} ({g.accounts.length})
