@@ -8,10 +8,12 @@
 #   codex-import.sh <user> clear|apply [b64] [pi_b64]
 #     clear  — delete both auth files, then print CLEARED
 #     apply  — write ~/.codex/auth.json from base64 arg $3 (the full JSON: real access +
-#              id token + account_id, refresh_token empty, last_refresh now), and
-#              ~/.pi/agent/auth.json from base64 arg $4 (the same access token in pi's own
-#              provider-keyed shape), then print OK. Does NOT restart anything — codex, pi,
-#              and the agent-wrapper all re-read their auth file per invocation.
+#              id token + account_id, refresh_token empty, last_refresh now), and MERGE
+#              base64 arg $4 (just the openai-codex fragment in pi's provider-keyed shape)
+#              into ~/.pi/agent/auth.json, preserving the operator's other providers.
+#              Overwriting that file wholesale wiped them (seen live). Then print OK.
+#              Does NOT restart anything — codex, pi, and the agent-wrapper all re-read
+#              their auth file per invocation.
 #
 # The second file exists so a `pi` the operator installs starts logged in. pi reads only its
 # own auth.json and never looks at ~/.codex. The agent-wrapper does not read it either; it
@@ -28,6 +30,6 @@ case "$OP" in
   # Both files land before the marker prints, so a caller that sees RMNG_APPLY_OK knows the
   # pair is in sync. pi's dir is created here too: the template only carries it on images
   # built after the pi swap, and the reconciler's prepare step may not have run yet.
-  apply)  B64="$3"; PI_B64="${4:-}"; inct "set -e; umask 077; mkdir -p \"\$HOME/.codex\"; printf %s '$B64' | base64 -d > \"\$HOME/.codex/auth.json.tmp\"; chmod 600 \"\$HOME/.codex/auth.json.tmp\"; mv -f \"\$HOME/.codex/auth.json.tmp\" \"\$HOME/.codex/auth.json\"; if [ -n '$PI_B64' ]; then mkdir -p \"\$HOME/.pi/agent\"; printf %s '$PI_B64' | base64 -d > \"\$HOME/.pi/agent/auth.json.tmp\"; chmod 600 \"\$HOME/.pi/agent/auth.json.tmp\"; mv -f \"\$HOME/.pi/agent/auth.json.tmp\" \"\$HOME/.pi/agent/auth.json\"; fi; echo RMNG_APPLY_OK" ;;
+  apply)  B64="$3"; PI_B64="${4:-}"; inct "set -e; umask 077; mkdir -p \"\$HOME/.codex\"; printf %s '$B64' | base64 -d > \"\$HOME/.codex/auth.json.tmp\"; chmod 600 \"\$HOME/.codex/auth.json.tmp\"; mv -f \"\$HOME/.codex/auth.json.tmp\" \"\$HOME/.codex/auth.json\"; if [ -n '$PI_B64' ]; then mkdir -p \"\$HOME/.pi/agent\"; printf %s '$PI_B64' | base64 -d > \"\$HOME/.pi/agent/.openai-codex.new\"; chmod 600 \"\$HOME/.pi/agent/.openai-codex.new\"; if jq -e . \"\$HOME/.pi/agent/auth.json\" >/dev/null 2>&1; then jq -s '.[0] * .[1]' \"\$HOME/.pi/agent/auth.json\" \"\$HOME/.pi/agent/.openai-codex.new\" > \"\$HOME/.pi/agent/auth.json.tmp\"; else cat \"\$HOME/.pi/agent/.openai-codex.new\" > \"\$HOME/.pi/agent/auth.json.tmp\"; fi; chmod 600 \"\$HOME/.pi/agent/auth.json.tmp\"; mv -f \"\$HOME/.pi/agent/auth.json.tmp\" \"\$HOME/.pi/agent/auth.json\"; rm -f \"\$HOME/.pi/agent/.openai-codex.new\"; fi; echo RMNG_APPLY_OK" ;;
   *)      echo "unknown op: $OP" >&2; exit 2 ;;
 esac
