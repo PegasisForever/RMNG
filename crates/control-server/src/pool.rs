@@ -51,6 +51,10 @@ pub(crate) trait PoolProvider {
     fn forget(app: &App, host_id: &str);
     /// Install this side's token into a clone.
     async fn push(app: &App, host_id: &str, email: &str) -> anyhow::Result<()>;
+    /// Strip this side's credentials from a clone (pending-auto boots tokenless).
+    async fn clear(app: &App, host_id: &str) -> anyhow::Result<()>;
+    /// "account" vs "codex account" in op-log lines.
+    const OP_LABEL: &'static str;
     /// Whether these windows leave no usable headroom.
     fn exhausted(five_pct: f64, seven_pct: f64) -> bool;
     /// (headroom score, eligible) for an account whith these windows.
@@ -138,6 +142,10 @@ impl PoolProvider for ClaudePool {
     async fn push(app: &App, host_id: &str, email: &str) -> anyhow::Result<()> {
         crate::claude::push_account_to_clone(app, host_id, email).await
     }
+    async fn clear(app: &App, host_id: &str) -> anyhow::Result<()> {
+        crate::claude::clear_clone_token(app, host_id).await
+    }
+    const OP_LABEL: &'static str = "account";
     fn exhausted(five_pct: f64, seven_pct: f64) -> bool {
         (100.0 - five_pct) < SESSION_HEADROOM_PCT || seven_pct >= SEVEN_DAY_CAP_PCT
     }
@@ -201,6 +209,10 @@ impl PoolProvider for CodexPool {
     async fn push(app: &App, host_id: &str, email: &str) -> anyhow::Result<()> {
         crate::codex::push_account_to_clone(app, host_id, email).await
     }
+    async fn clear(app: &App, host_id: &str) -> anyhow::Result<()> {
+        crate::codex::clear_clone_token(app, host_id).await
+    }
+    const OP_LABEL: &'static str = "codex account";
     fn exhausted(_five_pct: f64, seven_pct: f64) -> bool {
         seven_pct >= SEVEN_DAY_CAP_PCT
     }
@@ -850,6 +862,105 @@ pub(crate) async fn rotate_once<P: PoolProvider>(app: &App) {
     if !auto.is_empty() {
         rotate_pool::<P>(app, "auto", &P::usable_emails(app), &auto).await;
     }
+}
+
+/// What binding one side of a clone ended up with: the stored selection plus the
+/// account installed right now (if any) and the pool it came from (if any).
+pub(crate) struct SideBinding {
+    pub selection: String,
+    pub group: Option<String>,
+    pub email: Option<String>,
+}
+
+/// How delivery failures behave: create/fork log them into the op and still bind (the
+/// clone exists either way), while a swap fails the request — the operator is watching.
+pub(crate) enum AssignStrictness {
+    BestEffort,
+    Strict,
+}
+
+fn op_log(app: &App, op_id: Option<&str>, line: String) {
+    if let Some(op_id) = op_id {
+        crate::jobs::patch_op(app, op_id, |op| {
+            op.log.push(line);
+        });
+    }
+}
+
+/// Bind one side of a clone: normalize the request, resolve it, deliver the token, and
+/// assemble the binding. Outer `None` means resolution found nothing (no accounts in
+/// scope and no explicit auto intent) — the caller leaves its locals alone.
+///
+/// Pending auto (explicit auto, nothing imported yet) strips image-carried credentials
+/// so the clone boots tokenless — except under `Strict`, where a swap leaves the
+/// incumbent alone and just reports the empty binding.
+pub(crate) async fn assign_clone_side<P: PoolProvider>(
+    app: &App,
+    op_id: Option<&str>,
+    host_id: &str,
+    requested: Option<&str>,
+    current: Option<&str>,
+    group: Option<&str>,
+    strict: AssignStrictness,
+) -> anyhow::Result<Option<SideBinding>> {
+    let assignment = resolve_assignment::<P>(app, requested, current, group);
+    let selection = normalize_selection(requested);
+    let Some(assignment) = assignment else {
+        return Ok(None);
+    };
+    let label = P::OP_LABEL;
+    let Some((group, email)) = (match assignment {
+        Assignment::AutoPending => None,
+        Assignment::Account(email) => Some((None, email)),
+        Assignment::Group { name, initial } => Some((Some(name), initial)),
+    }) else {
+        if matches!(strict, AssignStrictness::BestEffort) {
+            // No account can take this side yet. Strip any credentials the image
+            // carried so the clone boots tokenless instead of running on unknown
+            // ones. Idempotent (`rm -f`); best-effort like the assign arm — a
+            // failure is logged, not fatal.
+            match P::clear(app, host_id).await {
+                Ok(()) => op_log(
+                    app,
+                    op_id,
+                    format!("{label}: auto (pending imported account)"),
+                ),
+                Err(e) => {
+                    tracing::warn!("clear_clone_token({host_id}) failed: {e:#}");
+                    op_log(
+                        app,
+                        op_id,
+                        format!("{label}: auto (pending) — failed to clear credentials: {e:#}"),
+                    );
+                }
+            }
+            P::forget(app, host_id);
+        }
+        return Ok(Some(SideBinding {
+            selection,
+            group: None,
+            email: None,
+        }));
+    };
+    let what = match &group {
+        Some(g) => format!("{email} (group {g})"),
+        None => email.clone(),
+    };
+    match P::push(app, host_id, &email).await {
+        Ok(()) => op_log(app, op_id, format!("{label}: assigned {what}")),
+        Err(e) => {
+            if matches!(strict, AssignStrictness::Strict) {
+                return Err(e);
+            }
+            tracing::warn!("push_account_to_clone({host_id}) failed: {e:#}");
+            op_log(app, op_id, format!("{label}: failed to assign {what}: {e:#}"));
+        }
+    }
+    Ok(Some(SideBinding {
+        selection,
+        group,
+        email: Some(email),
+    }))
 }
 
 /// Move both of a clone's bindings for this side from `old` to `new`, fleet-wide, in one

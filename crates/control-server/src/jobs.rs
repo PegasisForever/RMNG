@@ -134,7 +134,9 @@ fn make_op(kind: OperationKind, target: &str, source: Option<&str>) -> Operation
     }
 }
 
-fn patch_op(app: &App, op_id: &str, f: impl FnOnce(&mut Operation)) {
+/// Append to an operation's progress log. Shared with [`crate::pool`], which logs
+/// assignment delivery into the create/fork op it runs under.
+pub(crate) fn patch_op(app: &App, op_id: &str, f: impl FnOnce(&mut Operation)) {
     app.store.mutate(|s| {
         if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
             f(op);
@@ -499,131 +501,62 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
     let mut claude_selection: Option<String> = None;
     let mut claude_account_email: Option<String> = None;
     let mut claude_group: Option<String> = None;
-    if let Some(assignment) = crate::pool::resolve_assignment::<crate::pool::ClaudePool>(
+    match crate::pool::assign_clone_side::<crate::pool::ClaudePool>(
         &app,
+        Some(&op_id),
+        &spec.new_hostname,
         claude_req.as_deref(),
         None,
         bound_group.as_deref(),
-    ) {
-        let selection = crate::pool::normalize_selection(claude_req.as_deref());
-        let (group, account) = match assignment {
-            crate::pool::Assignment::Group { name, initial } => (Some(name), Some(initial)),
-            crate::pool::Assignment::Account(a) => (None, Some(a)),
-            crate::pool::Assignment::AutoPending => (None, None),
-        };
-        claude_selection = Some(selection);
-        claude_account_email = account.clone();
-        claude_group = group.clone();
-        match account {
-            None => {
-                // Pending: no account can take this side yet. Strip any credentials the
-                // image carried so the clone boots tokenless instead of running on
-                // unknown ones. Idempotent (`rm -f`); best-effort like the assign arm —
-                // a failure is logged, not fatal to the clone create.
-                match crate::claude::clear_clone_token(&app, &spec.new_hostname).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log
-                            .push("account: auto (pending imported account)".into())
-                    }),
-                    Err(e) => {
-                        tracing::warn!("clear_clone_token({}) failed: {e}", spec.new_hostname);
-                        patch_op(&app, &op_id, |op| {
-                            op.log.push(format!(
-                                "account: auto (pending) — failed to clear credentials: {e}"
-                            ))
-                        });
-                    }
-                }
-                app.claude.forget_pushed(&spec.new_hostname);
-            }
-            Some(email) => {
-                let label = match &group {
-                    Some(g) => format!("{email} (group {g})"),
-                    None => email.clone(),
-                };
-                match crate::claude::push_account_to_clone(&app, &spec.new_hostname, &email).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push(format!("account: assigned {label}"))
-                    }),
-                    Err(e) => {
-                        tracing::warn!("push_account_to_clone({}) failed: {e}", spec.new_hostname);
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("account: failed to assign {label}: {e}"))
-                        });
-                    }
-                }
-            }
+        crate::pool::AssignStrictness::BestEffort,
+    )
+    .await
+    {
+        Ok(Some(b)) => {
+            claude_selection = Some(b.selection);
+            claude_account_email = b.email;
+            claude_group = b.group;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // BestEffort never fails; a future error path must not slip by silently.
+            tracing::warn!("unexpected assignment failure: {e:#}");
+            patch_op(&app, &op_id, |op| {
+                op.log.push(format!("account: assignment failed: {e:#}"));
+            });
         }
     }
 
-    // Assign a Codex account/group (or explicitly none), independently of Claude — a clone
-    // can hold both. Same shape as the Claude block above; collected into locals + baked into
-    // the Host at the terminal add below.
+    // Assign a Codex account/group, independently of Claude — a clone can hold both.
+    // Collected into locals + baked into the Host at the terminal add below.
     let mut codex_selection: Option<String> = None;
     let mut codex_account_email: Option<String> = None;
     let mut codex_group: Option<String> = None;
-    if let Some(assignment) = crate::pool::resolve_assignment::<crate::pool::CodexPool>(
+    match crate::pool::assign_clone_side::<crate::pool::CodexPool>(
         &app,
+        Some(&op_id),
+        &spec.new_hostname,
         codex_req.as_deref(),
         None,
         bound_group.as_deref(),
-    ) {
-        let selection = crate::pool::normalize_selection(codex_req.as_deref());
-        let (group, account) = match assignment {
-            crate::pool::Assignment::Group { name, initial } => (Some(name), Some(initial)),
-            crate::pool::Assignment::Account(a) => (None, Some(a)),
-            crate::pool::Assignment::AutoPending => (None, None),
-        };
-        codex_selection = Some(selection);
-        codex_account_email = account.clone();
-        codex_group = group.clone();
-        match account {
-            None => {
-                // Pending: no account can take this side yet (see the Claude block).
-                match crate::codex::clear_clone_token(&app, &spec.new_hostname).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log
-                            .push("codex account: auto (pending imported account)".into())
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "codex clear_clone_token({}) failed: {e}",
-                            spec.new_hostname
-                        );
-                        patch_op(&app, &op_id, |op| {
-                            op.log.push(format!(
-                                "codex account: auto (pending) — failed to clear credentials: {e}"
-                            ))
-                        });
-                    }
-                }
-                app.codex.forget_pushed(&spec.new_hostname);
-            }
-            Some(email) => {
-                let label = match &group {
-                    Some(g) => format!("{email} (group {g})"),
-                    None => email.clone(),
-                };
-                match crate::codex::push_account_to_clone(&app, &spec.new_hostname, &email).await {
-                    Ok(()) => patch_op(&app, &op_id, |op| {
-                        op.log.push(format!("codex account: assigned {label}"))
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            "codex push_account_to_clone({}) failed: {e}",
-                            spec.new_hostname
-                        );
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push(format!("codex account: failed to assign {label}: {e}"))
-                        });
-                    }
-                }
-            }
+        crate::pool::AssignStrictness::BestEffort,
+    )
+    .await
+    {
+        Ok(Some(b)) => {
+            codex_selection = Some(b.selection);
+            codex_account_email = b.email;
+            codex_group = b.group;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // BestEffort never fails; a future error path must not slip by silently.
+            tracing::warn!("unexpected assignment failure: {e:#}");
+            patch_op(&app, &op_id, |op| {
+                op.log.push(format!("codex account: assignment failed: {e:#}"));
+            });
         }
     }
-
     // Everything a clone needs that lives OUTSIDE its container. Each of the three has a
     // reconcile loop that would apply it 10 to 15 s after the clone lands in `s.hosts`, and
     // those loops read `s.hosts`, so the wait would start only once the op says ready. That is
@@ -1137,56 +1070,32 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     let mut claude_account_email = src.claude_account_email.clone();
     let mut claude_group = src.claude_group.clone();
     if spec.claude_account.is_some() || group_changed {
-        let selection = crate::pool::normalize_selection(claude_req.as_deref());
-        if let Some(assignment) = crate::pool::resolve_assignment::<crate::pool::ClaudePool>(
+        match crate::pool::assign_clone_side::<crate::pool::ClaudePool>(
             &app,
+            Some(&op_id),
+            &new_id,
             claude_req.as_deref(),
             src.claude_account_email.as_deref(),
             bound_group.as_deref(),
-        ) {
-            let (group, account) = match assignment {
-                crate::pool::Assignment::Group { name, initial } => (Some(name), Some(initial)),
-                crate::pool::Assignment::Account(a) => (None, Some(a)),
-                crate::pool::Assignment::AutoPending => (None, None),
-            };
-            claude_selection = Some(selection);
-            claude_account_email = account.clone();
-            claude_group = group.clone();
-            match account {
-                None => match crate::claude::clear_clone_token(&app, &new_id).await {
-                    Ok(()) => {
-                        app.claude.forget_pushed(&new_id);
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push("account: auto (pending imported account)".into())
-                        })
-                    }
-                    Err(e) => {
-                        tracing::warn!("fork {new_id}: clear_clone_token failed: {e}");
-                        patch_op(&app, &op_id, |op| {
-                            op.log.push(format!(
-                                "account: auto (pending) — failed to clear credentials: {e}"
-                            ))
-                        });
-                    }
-                },
-                Some(email) => {
-                    match crate::claude::push_account_to_clone(&app, &new_id, &email).await {
-                        Ok(()) => patch_op(&app, &op_id, |op| {
-                            op.log.push(format!("account: assigned {email}"))
-                        }),
-                        Err(e) => {
-                            tracing::warn!("fork {new_id}: Claude assign failed: {e}");
-                            patch_op(&app, &op_id, |op| {
-                                op.log
-                                    .push(format!("account: failed to assign {email}: {e}"))
-                            });
-                        }
-                    }
-                }
+            crate::pool::AssignStrictness::BestEffort,
+        )
+        .await
+        {
+            Ok(Some(b)) => {
+                claude_selection = Some(b.selection);
+                claude_account_email = b.email;
+                claude_group = b.group;
+            }
+            // No resolution: keep the inherited locals above.
+            Ok(None) => {}
+            Err(e) => {
+                // BestEffort never fails; a future error path must not slip by silently.
+                tracing::warn!("unexpected assignment failure: {e:#}");
+                patch_op(&app, &op_id, |op| {
+                    op.log.push(format!("account: assignment failed: {e:#}"));
+                });
             }
         }
-        // resolve_assignment returning None keeps the inherited locals above.
     } else if let Some(email) = src.claude_account_email.clone() {
         match crate::claude::push_account_to_clone(&app, &new_id, &email).await {
             Ok(()) => patch_op(&app, &op_id, |op| {
@@ -1206,53 +1115,30 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
     let mut codex_account_email = src.codex_account_email.clone();
     let mut codex_group = src.codex_group.clone();
     if spec.codex_account.is_some() || group_changed {
-        let selection = crate::pool::normalize_selection(codex_req.as_deref());
-        if let Some(assignment) = crate::pool::resolve_assignment::<crate::pool::CodexPool>(
+        match crate::pool::assign_clone_side::<crate::pool::CodexPool>(
             &app,
+            Some(&op_id),
+            &new_id,
             codex_req.as_deref(),
             src.codex_account_email.as_deref(),
             bound_group.as_deref(),
-        ) {
-            let (group, account) = match assignment {
-                crate::pool::Assignment::Group { name, initial } => (Some(name), Some(initial)),
-                crate::pool::Assignment::Account(a) => (None, Some(a)),
-                crate::pool::Assignment::AutoPending => (None, None),
-            };
-            codex_selection = Some(selection);
-            codex_account_email = account.clone();
-            codex_group = group.clone();
-            match account {
-                None => match crate::codex::clear_clone_token(&app, &new_id).await {
-                    Ok(()) => {
-                        app.codex.forget_pushed(&new_id);
-                        patch_op(&app, &op_id, |op| {
-                            op.log
-                                .push("codex account: auto (pending imported account)".into())
-                        })
-                    }
-                    Err(e) => {
-                        tracing::warn!("fork {new_id}: codex clear failed: {e}");
-                        patch_op(&app, &op_id, |op| {
-                            op.log.push(format!(
-                                "codex account: auto (pending) — failed to clear credentials: {e}"
-                            ))
-                        });
-                    }
-                },
-                Some(email) => {
-                    match crate::codex::push_account_to_clone(&app, &new_id, &email).await {
-                        Ok(()) => patch_op(&app, &op_id, |op| {
-                            op.log.push(format!("codex account: assigned {email}"))
-                        }),
-                        Err(e) => {
-                            tracing::warn!("fork {new_id}: Codex assign failed: {e}");
-                            patch_op(&app, &op_id, |op| {
-                                op.log
-                                    .push(format!("codex account: failed to assign {email}: {e}"))
-                            });
-                        }
-                    }
-                }
+            crate::pool::AssignStrictness::BestEffort,
+        )
+        .await
+        {
+            Ok(Some(b)) => {
+                codex_selection = Some(b.selection);
+                codex_account_email = b.email;
+                codex_group = b.group;
+            }
+            // No resolution: keep the inherited locals above.
+            Ok(None) => {}
+            Err(e) => {
+                // BestEffort never fails; a future error path must not slip by silently.
+                tracing::warn!("unexpected assignment failure: {e:#}");
+                patch_op(&app, &op_id, |op| {
+                    op.log.push(format!("codex account: assignment failed: {e:#}"));
+                });
             }
         }
     } else if let Some(email) = src.codex_account_email.clone() {

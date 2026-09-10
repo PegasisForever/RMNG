@@ -2400,12 +2400,17 @@ async fn claude_swap(
     );
     crate::clone_ops::validate_group(&app, bound_group.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let assignment = crate::pool::resolve_assignment::<crate::pool::ClaudePool>(
+    let binding = crate::pool::assign_clone_side::<crate::pool::ClaudePool>(
         &app,
+        None,
+        &host.id,
         claude_req.as_deref(),
         host.claude_account_email.as_deref(),
         bound_group.as_deref(),
+        crate::pool::AssignStrictness::Strict,
     )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
     .ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -2414,22 +2419,7 @@ async fn claude_swap(
                 .into(),
         )
     })?;
-    let selection = crate::pool::normalize_selection(claude_req.as_deref());
-    let (group, email) = match assignment {
-        crate::pool::Assignment::Group { name, initial } => {
-            crate::claude::push_account_to_clone(&app, &host.id, &initial)
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-            (Some(name), Some(initial))
-        }
-        crate::pool::Assignment::Account(a) => {
-            crate::claude::push_account_to_clone(&app, &host.id, &a)
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-            (None, Some(a))
-        }
-        crate::pool::Assignment::AutoPending => (None, None),
-    };
+    let (group, email, selection) = (binding.group, binding.email, binding.selection);
     let (id, email_set, group_set, sel_set) = (
         host.id.clone(),
         email.clone(),
@@ -2527,12 +2517,17 @@ async fn codex_swap(
     );
     crate::clone_ops::validate_group(&app, bound_group.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let assignment = crate::pool::resolve_assignment::<crate::pool::CodexPool>(
+    let binding = crate::pool::assign_clone_side::<crate::pool::CodexPool>(
         &app,
+        None,
+        &host.id,
         codex_req.as_deref(),
         host.codex_account_email.as_deref(),
         bound_group.as_deref(),
+        crate::pool::AssignStrictness::Strict,
     )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
     .ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -2541,22 +2536,7 @@ async fn codex_swap(
                 .into(),
         )
     })?;
-    let selection = crate::pool::normalize_selection(codex_req.as_deref());
-    let (group, email) = match assignment {
-        crate::pool::Assignment::Group { name, initial } => {
-            crate::codex::push_account_to_clone(&app, &host.id, &initial)
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-            (Some(name), Some(initial))
-        }
-        crate::pool::Assignment::Account(a) => {
-            crate::codex::push_account_to_clone(&app, &host.id, &a)
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-            (None, Some(a))
-        }
-        crate::pool::Assignment::AutoPending => (None, None),
-    };
+    let (group, email, selection) = (binding.group, binding.email, binding.selection);
     let (id, email_set, group_set, sel_set) = (
         host.id.clone(),
         email.clone(),
